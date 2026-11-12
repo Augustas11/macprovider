@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.90
+**Version:** 0.1.91
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.90",
+  "version": "0.1.91",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,21 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.48` | `e246b8fd6ed35c6b1ab969c927222c06f759ec82` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.49` | `3ac5b028e6c8f54e09836e6a4486bc354794089c` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.48` is `3.32.3-macprovider.47`
+The mlx-swift-lm row `3.32.3-macprovider.49` is `3.32.3-macprovider.48`
+(`e246b8fd6`) plus one tests-only commit (#2307): the GLM-5-Next row-invariance
+test checks every row count up to the provider's per-forward decode bound (the
+core `qmv` limit for the device and shape minus one, the same value as
+`ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward`), and two GLM-5-Next
+tests use a tolerance derived from TF32 rounding error over the reduction length
+on GPUs that run float32 matmuls in TF32. No library code changes; the Swift,
+core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.48` is `3.32.3-macprovider.47`
 (`bfc88b9c8f745a13f3cce145101f13dc3dc95e8c`) plus the campaign #2111 DeepSeek V4
 commits; the DeepSeek-only hyper-connection options default off, so other
 families keep `.47` arithmetic. `3.32.3-macprovider.47` is `3.32.3-macprovider.44`
@@ -754,7 +763,8 @@ four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
 remain required on the designated Studio.
 
-The mlx-swift-lm row is `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`): tag
+The mlx-swift-lm row is `3.32.3-macprovider.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`), `.48` plus one
+tests-only GLM-5-Next commit (#2307). `.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`) is tag
 `3.32.3-macprovider.47` plus the campaign #2111 DeepSeek V4 commits (reference
 arithmetic `.10.16.7`, embedded DSpark drafter, shared MXFP8 multi-row projection
 tiles, last-position-only serving prefill logits, and decode selection and
@@ -2539,6 +2549,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.91 (2026-11-12, Related: #2307)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`), which is
+  `3.32.3-macprovider.48` plus one tests-only commit: GLM-5-Next row invariance up
+  to the provider's per-forward decode bound and TF32-derived test tolerances.
+  No library code changes; the Swift, core and C rows are unchanged.
 - **0.1.90 (2026-11-12, Related: #2111)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`), which is
   `3.32.3-macprovider.47` plus the DeepSeek V4 campaign commits: reference norm,

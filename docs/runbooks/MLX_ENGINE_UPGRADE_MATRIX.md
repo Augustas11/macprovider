@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.48` | `e246b8fd6ed35c6b1ab969c927222c06f759ec82` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.49` | `3ac5b028e6c8f54e09836e6a4486bc354794089c` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,7 +47,10 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-12 (#2111) the LM row is `3.32.3-macprovider.48` (`e246b8f`): `.47`
+As of 2026-11-12 (#2307) the LM row is `3.32.3-macprovider.49` (`3ac5b02`): `.48`
+plus one tests-only commit (GLM-5-Next row invariance up to the provider's
+per-forward decode bound and TF32-derived test tolerances, no library code
+changes). `.48` (`e246b8f`, #2111) is `.47`
 plus the DeepSeek V4 campaign commits (reference arithmetic, DSpark drafter, shared
 MXFP8 multi-row tiles, last-position serving prefill logits, row-invariant decode
 selection and attention kernels). Other families keep `.47` arithmetic. `.47`

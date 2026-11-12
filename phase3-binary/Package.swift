@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.49 (#2307) is .48 plus one tests-only commit:
+        // the GLM-5-Next row-invariance test checks row counts up to the
+        // provider's per-forward decode bound (core qmv limit minus 1, see
+        // ContinuousBatchDecodeRouteBound), and two GLM-5-Next tests use a
+        // tolerance derived from TF32 error on GPUs that run float32 matmuls
+        // in TF32. No library code changes.
         // Tag 3.32.3-macprovider.48 (#2111) is .47 plus the DeepSeek V4
         // campaign commits: DeepSeek's reference norm, rotary, hyper-connection,
         // router and indexer arithmetic, the DSpark drafter, shared MXFP8
@@ -124,7 +130,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e246b8fd6ed35c6b1ab969c927222c06f759ec82"
+            revision: "3ac5b028e6c8f54e09836e6a4486bc354794089c"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
