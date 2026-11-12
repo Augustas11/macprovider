@@ -276,6 +276,38 @@ final class IncrementalOutputFilterTests: XCTestCase {
         }
         XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween("\u{1100}", "\u{1161}"))
         XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween("\r", "\n"))
+        // Any scalar beside ASCII: a break `breaksBetween` admits holds in
+        // contexts that read further back or ahead (GB9b, GB9c, GB11,
+        // GB12–GB13), over planes 0–1 and the Extend scalars of plane 14.
+        let contexts = [("", ""), ("\u{0600}", ""), ("\u{1F1FA}", ""), ("\u{0915}\u{094D}", ""), ("\u{1F600}\u{200D}", ""),
+                        ("\u{0301}", ""), ("", "\u{0301}"), ("", "\u{200D}"), ("", "\u{1F1F8}"), ("", "\u{0915}"), ("", "a")]
+        var flags = 0
+        for value in Array(UInt32(0x80)...0x1FFFF) + Array(UInt32(0xE0000)...0xE01EF) {
+            guard let scalar = Unicode.Scalar(value) else { continue }
+            var view = String.UnicodeScalarView()
+            view.append(scalar)
+            let middle = String(view)
+            for ascii: Unicode.Scalar in ["a", "<"] {
+                let asciiText = String(Character(ascii))
+                if ModelRuntime.IncrementalStreamFilter.breaksBetween(ascii, scalar) {
+                    if (0x1F1E6...0x1F1FF).contains(value) { flags += 1 }
+                    for (before, after) in contexts
+                    where (before + asciiText).count + (middle + after).count != (before + asciiText + middle + after).count {
+                        return XCTFail("U+\(String(value, radix: 16, uppercase: true)) joins \(asciiText.debugDescription) before it")
+                    }
+                }
+                if ModelRuntime.IncrementalStreamFilter.breaksBetween(scalar, ascii) {
+                    for (before, after) in contexts
+                    where (before + middle).count + (asciiText + after).count != (before + middle + asciiText + after).count {
+                        return XCTFail("U+\(String(value, radix: 16, uppercase: true)) joins \(asciiText.debugDescription) after it")
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(flags, 26 * 2)
+        XCTAssertTrue(ModelRuntime.IncrementalStreamFilter.breaksBetween("<", "\u{0600}"))
+        XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween("\u{0600}", "<"))
+        XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween(">", "\u{0301}"))
     }
 
     /// U+113D1 (Unicode 16 Prepend) joins the stop token's `<` into one
@@ -451,6 +483,36 @@ final class IncrementalOutputFilterTests: XCTestCase {
         let long = perStep(bodyBytes: 400_000)
         XCTAssertLessThan(long, 512)
         XCTAssertLessThan(long, short * 1.25 + 16)
+    }
+
+    /// Answers with no grapheme-safe cut and no `<` (skin-toned emoji,
+    /// unbroken Hangul, flags, ZWJ chains) through the tool stop text: the
+    /// cut search decodes a bounded window per step and skips the marker
+    /// search, and the result is the whole answer.
+    func testToolStopTextWorkPerStepIsBoundedWithoutCuts() {
+        for unit in ["👍🏽", "가나다라", "🇺🇸", "👨‍👩‍👧‍👦\u{200D}"] {
+            for grammar in [ToolCallGrammar.glm, .qwen] {
+                func perStep(answerBytes: Int) -> Double {
+                    let observer = NativeToolCallStreamEmitter(modelID: "m", grammar: grammar, allowedFunctionNames: ["get"])
+                    var stopText = IncrementalToolStopText(observer: observer)
+                    let head = "thinking</think>"
+                    var text = head
+                    var steps = 0
+                    while text.utf8.count < answerBytes {
+                        text += unit
+                        steps += 1
+                        let observed = stopText.observedText(text, reasoningOpen: true)
+                        if steps % 997 == 0 { XCTAssertEqual(observed, String(text.dropFirst(head.count))) }
+                    }
+                    XCTAssertEqual(stopText.restartCount, 0)
+                    return Double(stopText.scannedUTF8) / Double(steps)
+                }
+                let short = perStep(answerBytes: 16_000)
+                let long = perStep(answerBytes: 64_000)
+                XCTAssertLessThan(long, 1_024, "\(unit) \(grammar)")
+                XCTAssertLessThan(long, short * 1.25 + 16, "\(unit) \(grammar)")
+            }
+        }
     }
 
     /// Marker-free text full of `<` (indented HTML, XML) commits: work per

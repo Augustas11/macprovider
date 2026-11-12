@@ -519,14 +519,32 @@ extension ModelRuntime {
 
         /// True when a grapheme break falls between `before` and `after`
         /// whatever surrounds them. Beyond two `breaksAround` scalars (not
-        /// CR LF): Hangul next to ASCII, since GB6–GB8 join Hangul only to
-        /// Hangul, so Korean prose commits at its spaces and punctuation.
+        /// CR LF): a scalar after ASCII that does not join it (Extend, ZWJ,
+        /// SpacingMark), and a scalar before ASCII that does not join it
+        /// (Prepend). The rules that read further context (GB9c, GB11,
+        /// GB12–GB13) join only scalars that are not ASCII, and an ASCII
+        /// scalar is neither Prepend, Extend nor SpacingMark, so Korean
+        /// prose, flags or Prepend runs break at their ASCII neighbours.
         static func breaksBetween(_ before: Unicode.Scalar, _ after: Unicode.Scalar) -> Bool {
             if before == "\r", after == "\n" { return false }
             if breaksAround(before), breaksAround(after) { return true }
-            if before.isASCII, isHangul(after) { return breaksBesideASCII(after) }
-            if after.isASCII, isHangul(before) { return breaksBesideASCII(before) }
+            if before.isASCII {
+                switch after.properties.generalCategory {
+                case .nonspacingMark, .spacingMark, .enclosingMark: return false
+                default: return after != "\u{200D}" && pairsWithASCII(after, asciiFirst: true)
+                }
+            }
+            if after.isASCII { return pairsWithASCII(before, asciiFirst: false) }
             return false
+        }
+
+        /// Whether `scalar` and an ASCII letter stay two Characters, in the
+        /// given order, under the runtime's grapheme breaking.
+        private static func pairsWithASCII(_ scalar: Unicode.Scalar, asciiFirst: Bool) -> Bool {
+            var view = String.UnicodeScalarView()
+            view.append(scalar)
+            let alone = String(view)
+            return (asciiFirst ? "a" + alone : alone + "a").count == 2
         }
 
         private static func isHangul(_ scalar: Unicode.Scalar) -> Bool {
@@ -581,6 +599,21 @@ enum IncrementalEmitterText {
     /// strings no other text matches canonically, see the tests): a marker
     /// could still complete across `end`. Any other `<` (HTML, XML, a
     /// comparison) cannot.
+    /// Whether `text` holds a `<` before `end` (a byte search).
+    static func containsLessThan(_ text: Substring, before end: String.Index) -> Bool {
+        let count = text.utf8.distance(from: text.utf8.startIndex, to: end)
+        return text.utf8.withContiguousStorageIfAvailable { memchr($0.baseAddress, Int32(UInt8(ascii: "<")), count) != nil }
+            ?? text.utf8[..<end].contains(UInt8(ascii: "<"))
+    }
+
+    /// Whether `text` holds a `<` at or after UTF-8 offset `offset`.
+    static func containsLessThan(_ text: String, fromUTF8 offset: Int) -> Bool {
+        let start = max(0, min(offset, text.utf8.count))
+        return text.utf8.withContiguousStorageIfAvailable {
+            memchr($0.baseAddress.map { $0 + start }, Int32(UInt8(ascii: "<")), $0.count - start) != nil
+        } ?? text.utf8.dropFirst(start).contains(UInt8(ascii: "<"))
+    }
+
     static func endsInsideMarker(_ scalars: [Unicode.Scalar], before end: Int, window: Int, markers: [[Unicode.Scalar]]) -> Bool {
         var start = end - 1
         while start >= max(0, end - window) {
@@ -667,6 +700,13 @@ struct IncrementalFirstMatch {
             }
             found = nil
             scanned = cached.lower
+        }
+        // An occurrence holds the needle's leading `<` at or after `scanned`:
+        // without one there, the grapheme-safe start (a walk back over a run
+        // with no safe break) and the search are skipped.
+        if needle.unicodeScalars.first == "<", !IncrementalEmitterText.containsLessThan(text, fromUTF8: scanned) {
+            scanned = max(scanned, text.utf8.count - needle.utf8.count - IncrementalEmitterText.margin)
+            return nil
         }
         let start = IncrementalEmitterText.breakIndex(text, atOrBefore: scanned, floor: text.startIndex)
         if let range = text.range(of: needle, range: start..<text.endIndex) {
@@ -818,12 +858,15 @@ struct IncrementalStrayTagRemoval {
         }
         let tail = String(text[IncrementalEmitterText.index(text, utf8Offset: cut)..<callStart])
         maxUncommittedUTF8 = max(maxUncommittedUTF8, tail.utf8.count)
-        let processed = ReasoningOutput.removingTags(tail)
+        // Every tag starts with `<` (see the tests): without one the tail
+        // has no tag and no partial tag.
+        let tailHasLessThan = IncrementalEmitterText.containsLessThan(tail, fromUTF8: 0)
+        let processed = tailHasLessThan ? ReasoningOutput.removingTags(tail) : tail
         var head = committed + processed
         if callRange == nil {
             // A held tail starts with `<`, which the committed text's last
             // Characters never hold, so it lies in the processed tail.
-            let held = ReasoningOutput.partialTagLength(processed)
+            let held = tailHasLessThan ? ReasoningOutput.partialTagLength(processed) : 0
             if held > 0 { head = String(head.dropLast(held)) }
             commitIfPossible(tail)
         }
@@ -831,9 +874,19 @@ struct IncrementalStrayTagRemoval {
     }
 
     private mutating func commitIfPossible(_ tail: String) {
-        let scalars = Array(tail.unicodeScalars)
         let hold = IncrementalEmitterText.margin
-        guard scalars.count >= 2 * hold else { return }
+        // The cuts tried and the tag window before them lie in the last
+        // `hold + 64 + tagFreeTail` scalars; only those are decoded.
+        // `scalars` holds the tail's scalars from `windowStart` on.
+        let unicodeScalars = tail.unicodeScalars
+        var windowStart = unicodeScalars.endIndex
+        var taken = 0
+        while windowStart > unicodeScalars.startIndex, taken < hold + 64 + Self.tagFreeTail + 1 {
+            unicodeScalars.formIndex(before: &windowStart)
+            taken += 1
+        }
+        let scalars = Array(unicodeScalars[windowStart...])
+        guard windowStart > unicodeScalars.startIndex || scalars.count >= 2 * hold else { return }
         var index = scalars.count - hold
         var attempts = 0
         while index > 0, attempts < 64 {
@@ -843,10 +896,8 @@ struct IncrementalStrayTagRemoval {
             else { continue }
             // One whole-segment pass per call: a cut that fails here waits
             // for the next call.
-            var view = String.UnicodeScalarView()
-            view.append(contentsOf: scalars[..<index])
-            let segment = String(view)
-            let processed = ReasoningOutput.removingTags(segment)
+            let segment = String(Substring(unicodeScalars[..<unicodeScalars.index(windowStart, offsetBy: index)]))
+            let processed = IncrementalEmitterText.containsLessThan(segment, fromUTF8: 0) ? ReasoningOutput.removingTags(segment) : segment
             // After removals the committed result's end may not hold the
             // start of a tag either.
             let joined = Array((String(committed.suffix(Self.tagFreeTail)) + processed).suffix(Self.tagFreeTail).unicodeScalars)
@@ -901,6 +952,8 @@ struct IncrementalToolStopText {
 struct IncrementalToolText {
     private let markers: [String]
     private let markerScalars: [[Unicode.Scalar]]
+    /// Every marker starts with `<`, so text without that scalar holds none.
+    private let markersStartWithLessThan: Bool
     private let bracesMatter: Bool
     private let qwenBareCalls: Bool
     private var previous = ""
@@ -914,7 +967,8 @@ struct IncrementalToolText {
     /// negative marker search, not repeated while they stay as they are).
     private var markerFreeThrough = 0
     private(set) var restartCount = 0
-    /// UTF-8 bytes the cut search read, summed over calls (test hook).
+    /// UTF-8 bytes the cut search decoded or searched for markers, summed
+    /// over calls (test hook; byte copies and `<` byte scans not counted).
     private(set) var scannedUTF8 = 0
     /// The longest uncommitted text seen, in UTF-8 bytes.
     private(set) var maxUncommittedUTF8 = 0
@@ -924,6 +978,7 @@ struct IncrementalToolText {
     init(markers: [String], bracesMatter: Bool, qwenBareCalls: Bool) {
         self.markers = markers
         markerScalars = markers.map { Array($0.unicodeScalars) }
+        markersStartWithLessThan = markerScalars.allSatisfy { $0.first == "<" }
         self.bracesMatter = bracesMatter
         self.qwenBareCalls = qwenBareCalls
     }
@@ -953,7 +1008,7 @@ struct IncrementalToolText {
         let reducedStart = cut > 0 ? text.unicodeScalars.index(before: cutIndex) : cutIndex
         let result = (text[..<reducedStart], String(text[reducedStart...]))
         if frozenThrough == nil {
-            commitIfPossible(String(text[cutIndex...]))
+            commitIfPossible(text[cutIndex...])
         }
         return result
     }
@@ -973,27 +1028,53 @@ struct IncrementalToolText {
         let known = markerFreeThrough - cut
         let longest = markers.map(\.utf8.count).max() ?? 0
         let from = IncrementalEmitterText.breakIndex(head, atOrBefore: known - 2 * longest - 16, floor: head.startIndex)
-        let searched = String(head[from...])
+        let searched = head[from...]
         scannedUTF8 += searched.utf8.count
-        if containsMarker(searched) { return true }
+        let mayHoldMarker = !markersStartWithLessThan || searched.unicodeScalars.contains("<")
+        if mayHoldMarker, containsMarker(String(searched)) { return true }
         markerFreeThrough = max(markerFreeThrough, cut + head.utf8.count)
         return false
     }
 
-    private mutating func commitIfPossible(_ tail: String) {
+    private mutating func commitIfPossible(_ tail: Substring) {
         let hold = IncrementalEmitterText.margin
-        if cut == 0 {
+        // A first scalar that is not whitespace, `{` or `<` starts a first
+        // Character that is neither blank nor the start of a bare call
+        // (`Character.isWhitespace` reads the first scalar), so the
+        // Character-wise lead check, O(n) on a text that is one long
+        // grapheme, is skipped.
+        if cut == 0, let first = tail.unicodeScalars.first,
+           first.properties.isWhitespace || first == "{" || first == "<" {
             // On Qwen rows the whole text's lead decides the bare-call hold.
             let lead = tail.drop(while: { $0.isWhitespace })
             if lead.isEmpty { return }
-            if qwenBareCalls, NativeToolCallStreamEmitter.mayOpenQwenBareCalls(tail) {
+            if qwenBareCalls, NativeToolCallStreamEmitter.mayOpenQwenBareCalls(String(tail)) {
                 frozenThrough = tail.utf8.distance(from: tail.utf8.startIndex, to: lead.startIndex) + 1
                 return
             }
         }
-        let scalars = Array(tail.unicodeScalars)
-        scannedUTF8 += tail.utf8.count
-        guard scalars.count >= 2 * hold else { return }
+        // The cuts tried and the marker window before them lie in the last
+        // `hold + 64 + markerFreeTail` scalars; only those are decoded
+        // (Llama 3 reads the whole text for its first `{`). `scalars` holds
+        // the tail's scalars from `windowStart` on.
+        let unicodeScalars = tail.unicodeScalars
+        var windowStart = unicodeScalars.endIndex
+        if bracesMatter {
+            windowStart = unicodeScalars.startIndex
+        } else {
+            var taken = 0
+            while windowStart > unicodeScalars.startIndex, taken < hold + 64 + Self.markerFreeTail + 1 {
+                unicodeScalars.formIndex(before: &windowStart)
+                taken += 1
+            }
+        }
+        let scalars = Array(unicodeScalars[windowStart...])
+        scannedUTF8 += tail.utf8.distance(from: windowStart, to: tail.endIndex)
+        guard windowStart > unicodeScalars.startIndex || scalars.count >= 2 * hold else { return }
+        /// The tail's text before window scalar `index`.
+        func prefix(through index: Int) -> String {
+            String(Substring(unicodeScalars[..<unicodeScalars.index(windowStart, offsetBy: index)]))
+        }
         // Llama 3: no cut past the first `{`.
         let brace = bracesMatter ? scalars.firstIndex(of: "{") : nil
         var index = min(scalars.count - hold, brace ?? scalars.count)
@@ -1008,9 +1089,7 @@ struct IncrementalToolText {
             else { continue }
             // One marker search per call: a marker in the segment holds
             // every later cut too.
-            var view = String.UnicodeScalarView()
-            view.append(contentsOf: scalars[..<index])
-            let segment = String(view)
+            let segment = prefix(through: index)
             guard !headContainsMarker(segment) else {
                 frozenThrough = cut + segment.utf8.count
                 return
@@ -1021,11 +1100,12 @@ struct IncrementalToolText {
         // A marker before every cut tried here holds every later cut too
         // (later cuts lie further on), as in a tool-call body whose `<` are
         // too dense for any cut to reach the marker search.
+        // Without a `<` before it the head holds no marker (a run of
+        // Characters with no grapheme-safe cut, such as skin-toned emoji).
         let firstTried = min(scalars.count - hold, brace ?? scalars.count) - 64
-        if firstTried > 0 {
-            var view = String.UnicodeScalarView()
-            view.append(contentsOf: scalars[..<firstTried])
-            let head = String(view)
+        let headEnd = firstTried > 0 ? unicodeScalars.index(windowStart, offsetBy: firstTried) : tail.startIndex
+        if firstTried > 0, !markersStartWithLessThan || IncrementalEmitterText.containsLessThan(tail, before: headEnd) {
+            let head = String(Substring(unicodeScalars[..<headEnd]))
             if headContainsMarker(head) {
                 frozenThrough = cut + head.utf8.count
                 return
@@ -1034,9 +1114,7 @@ struct IncrementalToolText {
         // The search window sits below the first `{`, where growth does not
         // move it: it fails the same way until the text changes.
         if let brace, brace <= scalars.count - hold {
-            var view = String.UnicodeScalarView()
-            view.append(contentsOf: scalars[...brace])
-            frozenThrough = cut + String(view).utf8.count
+            frozenThrough = cut + prefix(through: brace + 1).utf8.count
         }
     }
 }
