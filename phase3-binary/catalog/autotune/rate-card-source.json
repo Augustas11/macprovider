@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-11-11T18:40:00Z",
+  "generated_at": "2026-11-12T00:50:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
@@ -57,6 +57,11 @@
       "prompt_rate_per_mtok": 13500
     },
     "nemotron-3-nano-30b-a3b": {
+      "completion_rate_per_mtok": 160000,
+      "prompt_cache_hit_rate_per_mtok": 20000,
+      "prompt_rate_per_mtok": 80000
+    },
+    "nemotron-3.5-lightning-30b-a3b": {
       "completion_rate_per_mtok": 160000,
       "prompt_cache_hit_rate_per_mtok": 20000,
       "prompt_rate_per_mtok": 80000
