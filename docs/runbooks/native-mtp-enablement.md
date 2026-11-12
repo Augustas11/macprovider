@@ -63,11 +63,13 @@ scripts/ops/catalog-activate.sh next
 scripts/ops/catalog-activate.sh next --run
 ```
 
-The signed binary/policy pair transaction, the binding-bundle activation
-context and the provider `cached_turns` config step existed only for CLIs that
-predate #2282 and were removed from `catalog-activate.sh` (#2302). The gateway
-proof is still a real attributed buyer request with unchanged accounting and
-settlement.
+The signed binary/policy pair transaction and the binding-bundle activation
+context existed only for CLIs that predate #2282 and were removed from
+`catalog-activate.sh` (#2302). The provider `cached_turns` config step stays
+while a provider runs CLI 1.8.283 or older; it reports done for a provider whose
+`/v1/status` `binary_version` is above 1.8.283, because those CLIs default
+`continuous_batching_cached_turns` on. The gateway proof is still a real
+attributed buyer request with unchanged accounting and settlement.
 
 ## Order
 

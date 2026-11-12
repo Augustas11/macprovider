@@ -313,12 +313,6 @@ class RetainedSignedSourceTests(unittest.TestCase):
                     m._validate_candidate_source(Path("repo"), self.commit, inputs)
                 run.assert_not_called()
 
-    def test_same_source_preserves_existing_identity_phase(self):
-        self.inputs["phase"] = "identity_only_greedy"
-        with mock.patch.object(m, "_run") as run:
-            m._validate_candidate_source(Path("repo"), self.source, self.inputs)
-        run.assert_not_called()
-
     def test_decode_digest_and_runtime_come_from_signed_source_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory) / "publication"
@@ -453,9 +447,9 @@ class FullyQualifiedPredecessorTests(unittest.TestCase):
         with self.assertRaisesRegex(m.BindingBundleError, "differs from committed release"):
             self.prepare()
 
-    def test_nonnull_receipt_without_parent_cannot_use_fresh_path(self):
+    def test_nonnull_parent_receipt_is_refused(self):
         self.inputs["parent_receipt_sha256"] = "a" * 64
-        with self.assertRaisesRegex(m.BindingBundleError, "receipt requires verified parent"):
+        with self.assertRaisesRegex(m.BindingBundleError, "parent binding bundle is not supported"):
             self.prepare()
 
     def test_null_receipt_rejects_orphan_parent_or_dangling_symlink(self):
@@ -465,30 +459,6 @@ class FullyQualifiedPredecessorTests(unittest.TestCase):
             self.prepare()
         parent.rmdir(); parent.symlink_to(self.bundle / "missing-parent")
         with self.assertRaisesRegex(m.BindingBundleError, "orphan parent"):
-            self.prepare()
-
-    def test_exact_greedy_parent_route_is_preserved(self):
-        parent_path = self.bundle / "parent"; parent_path.mkdir()
-        (parent_path / "inputs.json").write_bytes(m.canonical(self.inputs))
-        ledger = parent_path / "ledger.json"; ledger.write_bytes(b"verified parent ledger\n")
-        self.inputs["parent_receipt_sha256"] = "a" * 64
-        parent = mock.Mock(phase="identity_only_greedy", receipt_sha256="a" * 64,
-                           release_dir=self.bundle / "previous", ledger_path=ledger)
-        with mock.patch.object(m, "verify_bundle", return_value=parent) as verify:
-            self.prepare()
-        verify.assert_called_once_with(parent_path, repo=Path("."), commit=self.commit, recipe_path=m.RECIPE_PATH)
-        self.assertEqual((self.cat / "release-ledger.json").read_bytes(), b"verified parent ledger\n")
-
-    def test_parent_route_still_requires_exact_signed_candidate_identity(self):
-        parent_path = self.bundle / "parent"; parent_path.mkdir()
-        different = copy.deepcopy(self.inputs)
-        different["identity"]["reproducible_build_sha256"] = "0" * 64
-        (parent_path / "inputs.json").write_bytes(m.canonical(different))
-        self.inputs["parent_receipt_sha256"] = "a" * 64
-        parent = mock.Mock(phase="identity_only_greedy", receipt_sha256="a" * 64,
-                           release_dir=self.bundle / "previous")
-        with mock.patch.object(m, "verify_bundle", return_value=parent), \
-             self.assertRaisesRegex(m.BindingBundleError, "retain exact signed CLI identity"):
             self.prepare()
 
     def test_fresh_path_without_numerical_qualification_stops_before_generation(self):

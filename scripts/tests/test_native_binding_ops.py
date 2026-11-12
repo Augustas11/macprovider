@@ -7,8 +7,6 @@ import os
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
-from types import SimpleNamespace
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -55,20 +53,6 @@ if os.environ.get('ARG_LOG'):
  open(os.environ['ARG_LOG'],'w').write(json.dumps(sys.argv[1:]))
 print(json.dumps(dict(lane='catalog-content',ok=True,commit_block_sha256='block',pricing_diff_sha256='diff')))
 ''')
-        (self.tools / 'native_mtp_binding_bundle.py').write_text('''import json,os,pathlib,sys
-args=sys.argv; b=pathlib.Path(args[args.index('--bundle')+1]);
-if os.environ.get('REJECT_PROOF'):raise SystemExit(1)
-if os.environ.get('VERIFY_ARGS'):open(os.environ['VERIFY_ARGS'],'w').write(json.dumps(args[1:]))
-if os.environ.get('MUTATE_ORIGINAL'):pathlib.Path(os.environ['MUTATE_ORIGINAL']).write_text('changed-after-freeze')
-print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/release-ledger.json'),phase='identity_only_greedy',receipt_sha256='a'*64,release_input_path=str(b/'derived/native-mtp-admission-release.json'),serving_journey=os.environ.get('SERVING_JOURNEY','signed export required'))))
-''')
-        self.bundle = self.root / 'caller-bundle'
-        (self.bundle / 'release').mkdir(parents=True)
-        (self.bundle / 'derived').mkdir()
-        (self.bundle / 'release/release.json').write_text('{"feeds":{}}')
-        (self.bundle / 'release/demand-rank.json').write_text('derived-demand')
-        (self.bundle / 'derived/release-ledger.json').write_text('derived-ledger')
-        (self.bundle / 'derived/native-mtp-admission-release.json').write_text('{}')
 
     def shell(self, code, env=None):
         return subprocess.run(['bash', '-c', code], env=dict(os.environ, **(env or {})),
@@ -141,38 +125,6 @@ release_dirname() { echo test-release; }
                 self.assertNotIn('', args)
                 self.assertNotIn('--native-binding-bundle', args)
                 self.assertEqual(args[:7], ['content-gate', '--release', 'release', '--live', 'live', '--commit', 'abc'])
-
-    def test_catalog_revalidates_waiver_after_full_bundle_verification(self):
-        from scripts.tests.test_catalog_compare_live import cr
-        (self.bundle / 'proof').mkdir()
-        (self.bundle / 'proof/journey-waiver.json').write_text('{}')
-        inputs = {'phase': 'expanded_glm_sampled'}
-        proof = object()
-        module = SimpleNamespace(
-            read_json=mock.Mock(return_value=inputs),
-            verify_bundle=mock.Mock(return_value=proof),
-            validate_journey_waiver=mock.Mock(return_value='waived (operator, 2026-10-29)'),
-            require=lambda condition, reason: None if condition else (_ for _ in ()).throw(ValueError(reason)),
-        )
-        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module):
-            self.assertIs(cr._verify_native_binding_bundle(
-                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE), proof)
-        module.verify_bundle.assert_called_once_with(
-            self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
-        module.validate_journey_waiver.assert_called_once_with(
-            self.bundle, inputs, self.bundle / 'release/native-mtp-admission.json')
-        module.validate_journey_waiver.return_value = 'signed export required'
-        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
-             self.assertRaisesRegex(ValueError, 'exact operator journey waiver'):
-            cr._verify_native_binding_bundle(
-                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
-        module.validate_journey_waiver.reset_mock()
-        module.verify_bundle.side_effect = ValueError('signature mismatch')
-        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
-             self.assertRaisesRegex(ValueError, 'signature mismatch'):
-            cr._verify_native_binding_bundle(
-                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
-        module.validate_journey_waiver.assert_not_called()
 
     def release_match_preflight(self, bound='true', verdict='ok', exit_code=0, run=False):
         tools = self.root / 'matcher-repo/scripts'

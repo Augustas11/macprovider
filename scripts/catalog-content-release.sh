@@ -479,7 +479,7 @@ PY
 # ---------------------------------------------------------------------------
 # Preflight.
 # ---------------------------------------------------------------------------
-TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/lib/coordinator-config-guard.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt scripts/native_mtp_binding_bundle.py scripts/native_mtp_signed_serving_proof.py ops/recipes/native-mtp-glm53-binding.v1.json ops/pearl-updater/catalog-canary-proof.py phase4-coordinator/dist/coordinator-pricing-recover"
+TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/lib/coordinator-config-guard.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt ops/pearl-updater/catalog-canary-proof.py phase4-coordinator/dist/coordinator-pricing-recover"
 
 pf_commit() {
   case "$COMMIT" in
