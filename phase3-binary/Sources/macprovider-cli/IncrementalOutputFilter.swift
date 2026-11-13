@@ -1039,6 +1039,10 @@ struct IncrementalToolText {
     private let markersStartWithLessThan: Bool
     private let bracesMatter: Bool
     private let qwenBareCalls: Bool
+    /// MiniMax: the namespace token `]<]minimax[>[` starts one scalar before
+    /// its marker, so no cut follows a `]` (the reduced text would start with
+    /// the whole token and stream no prose).
+    private let holdsAfterBracket: Bool
     private var previous = ""
     private var cut = 0
     /// No cut is possible while the text's first `frozenThrough` bytes stay
@@ -1064,6 +1068,7 @@ struct IncrementalToolText {
         markersStartWithLessThan = markerScalars.allSatisfy { $0.first == "<" }
         self.bracesMatter = bracesMatter
         self.qwenBareCalls = qwenBareCalls
+        holdsAfterBracket = markers.contains(ToolCallParser.miniMaxMarker)
     }
 
     /// `kept + reduced` is `text`; the streamer gets `reduced`.
@@ -1165,7 +1170,7 @@ struct IncrementalToolText {
         while index > 0, attempts < 64 {
             defer { index -= 1; attempts += 1 }
             let last = scalars[index - 1]
-            guard !last.properties.isWhitespace, last != "<", last != "{",
+            guard !last.properties.isWhitespace, last != "<", last != "{", !(holdsAfterBracket && last == "]"),
                   ModelRuntime.IncrementalStreamFilter.breaksAround(last),
                   ModelRuntime.IncrementalStreamFilter.breaksBetween(last, scalars[index]),
                   !IncrementalEmitterText.endsInsideMarker(scalars, before: index, window: Self.markerFreeTail, markers: markerScalars)

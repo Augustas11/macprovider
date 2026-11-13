@@ -305,6 +305,33 @@ final class MiniMaxOutputTests: XCTestCase {
         XCTAssertEqual(ToolCallParser.miniMaxStreamableProse("  "), "")
     }
 
+    func testLongProseBeforeABareInvokeStreamsOnce() throws {
+        // Past the incremental cut's hold, the namespace's leading `]` must
+        // not be committed apart from the rest of the token.
+        let prose = "I will now look at the hosts file to see which names resolve locally, then report back to you."
+        XCTAssertGreaterThan(prose.count, 70)
+        let request = try makeRequest(tools: true)
+        for output in [prose + Self.readHosts, prose + "]" + Self.readHosts, prose + " " + Self.wrapper(Self.readHosts)] {
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                mode: .complete(finishReason: "stop"), defaultCompletionTokens: 9, toolCallPrefill: nil)
+            for chunk in [1, 2, 3, 7] {
+                for reference in [false, true] {
+                    let streamed = try stream(output, request: request, chunk: chunk, reference: reference)
+                    XCTAssertFalse(streamed.sawMarkup, "chunk \(chunk) reference \(reference)")
+                    XCTAssertEqual(streamed.content, parsed.content, "chunk \(chunk) reference \(reference)")
+                }
+            }
+        }
+        // Every prose length puts the namespace token at every cut offset.
+        let letters = String(repeating: "abcdefghij", count: 21)
+        for length in 64...200 {
+            let output = String(letters.prefix(length)) + Self.readHosts
+            let streamed = try stream(output, request: request, chunk: 1, reference: false)
+            XCTAssertEqual(streamed.content, String(letters.prefix(length)) + "/etc/hosts\n", "prose \(length)")
+        }
+    }
+
     func testThinkThenToolCallsNonStreamingAndStreaming() throws {
         let reasoning = "The user wants two files. I can call read_file twice."
         let output = "<mm:think>" + reasoning + "</mm:think>\n" + Self.wrapper(Self.readHosts, Self.readPasswd)
