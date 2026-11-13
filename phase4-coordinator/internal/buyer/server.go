@@ -8513,8 +8513,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
-				if (req.multiTurnToolHistory && !providerToolGrammarEligible(p)) || !providerServesModelOutput(p) {
+				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -8562,8 +8565,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
-				if (req.multiTurnToolHistory && !providerToolGrammarEligible(p)) || !providerServesModelOutput(p) {
+				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -8626,7 +8632,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		served := anyProviderModelCandidate(providers, req.Model, poolModelClass)
 		providers = eligible
 		if served && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
-			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+			return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 		}
 	}
 	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only

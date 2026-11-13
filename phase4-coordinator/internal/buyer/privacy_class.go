@@ -251,6 +251,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
 	incapable := false
+	outputGated := false
 	if scope != nil {
 		closest = relayblind.PrivacyRejectPoolNoEligibleMember
 	}
@@ -300,6 +301,11 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 				incapable = true
 				break
 			}
+			// #2189: a provider that cannot split the model's output.
+			if !providerServesModelOutput(provider) {
+				outputGated = true
+				break
+			}
 			providers = append(providers, provider)
 			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
 			break
@@ -307,6 +313,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	}
 	if order := s.orderRelayBlindCandidates(accountID, providers); len(order) > 0 {
 		return selections[order[0]], "", ""
+	}
+	if outputGated {
+		return privacySelection{}, modelOutputProviderUnavailableCode, relayblind.PrivacyRejectCapabilityUnsupported
 	}
 	if incapable {
 		return privacySelection{}, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported
@@ -396,6 +405,10 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance, request.EndpointFamily)
 	if code == relayBlindCapabilityRefusalCode {
 		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
+		return
+	}
+	if code == modelOutputProviderUnavailableCode {
+		s.writePrivacyRouteErrorMessage(w, r, phase, code, reason, modelOutputProviderUnavailableMessage)
 		return
 	}
 	if code != "" {

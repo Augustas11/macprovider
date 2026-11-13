@@ -2,11 +2,15 @@ package buyer
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 )
 
 // #2189: MiniMax M3.1-Flash has a tool grammar, so tools are advertised and
@@ -101,7 +105,7 @@ func TestMiniMaxPlainChatNeedsTheDeclaringProvider(t *testing.T) {
 	pinned := http.Header{}
 	pinned.Set("X-MacProvider-Provider", "old")
 	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid", plain, pinned, nil, "2024-01-01", &forwardState{}); routeErr == nil ||
-		routeErr.code != "tool_grammar_provider_unavailable" {
+		routeErr.code != "tool_grammar_provider_unavailable" || routeErr.message != modelOutputProviderUnavailableMessage {
 		t.Fatalf("pin to the old MiniMax provider: %+v", routeErr)
 	}
 
@@ -109,8 +113,16 @@ func TestMiniMaxPlainChatNeedsTheDeclaringProvider(t *testing.T) {
 	s, registry, _ = poolIsolationServer(t)
 	registry.Register(&oldMiniMax, nil)
 	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid", plain, http.Header{}, nil, "2024-01-01", &forwardState{}); routeErr == nil ||
-		routeErr.code != "tool_grammar_provider_unavailable" {
+		routeErr.code != "tool_grammar_provider_unavailable" || routeErr.status != http.StatusServiceUnavailable ||
+		routeErr.message != modelOutputProviderUnavailableMessage {
 		t.Fatalf("old-only MiniMax: %+v", routeErr)
+	}
+	// A tool request keeps the tool-grammar wording.
+	tools := plain
+	tools.multiTurnToolHistory, tools.declaresTools = true, true
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid", tools, http.Header{}, nil, "2024-01-01", &forwardState{}); routeErr == nil ||
+		routeErr.code != "tool_grammar_provider_unavailable" || routeErr.message == modelOutputProviderUnavailableMessage {
+		t.Fatalf("old-only MiniMax tool request: %+v", routeErr)
 	}
 
 	// Another family's plain chat still reaches a provider without the
@@ -120,5 +132,38 @@ func TestMiniMaxPlainChatNeedsTheDeclaringProvider(t *testing.T) {
 	glm := chatRequest{Model: otherOld.ModelID, raw: []byte(`{"model":"` + otherOld.ModelID + `","messages":[{"role":"user","content":"hi"}]}`)}
 	if p, routeErr := s.selectProviderExcluding(context.Background(), "rid", glm, http.Header{}, nil, "2024-01-01", &forwardState{}); routeErr != nil || p.ProviderID != "glm" {
 		t.Fatalf("GLM plain chat: provider %q err %+v", p.ProviderID, routeErr)
+	}
+}
+
+// #2189: relay-blind and privacy-class reservations apply the same MiniMax
+// output gate: a provider that does not declare the family is never bound,
+// and with no other provider the reservation gets the retryable 503.
+func TestMiniMaxEncryptedReservationsNeedTheDeclaringProvider(t *testing.T) {
+	const model = "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, model: model})
+	raw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: model, MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+	reserve := func(privacy bool) *httptest.ResponseRecorder {
+		if privacy {
+			return h.privacyRequest(t, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "", nil)
+		}
+		return relayBlindRequest(t, h.server, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "")
+	}
+	for _, privacy := range []bool{false, true} {
+		response := reserve(privacy)
+		body := response.Body.String()
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"tool_grammar_provider_unavailable"`) ||
+			!strings.Contains(body, `"retryable":true`) || !strings.Contains(body, modelOutputProviderUnavailableMessage) {
+			t.Fatalf("privacy=%v undeclared provider status=%d body=%s, want the retryable 503", privacy, response.Code, body)
+		}
+	}
+	if count := countRelayBlindReservations(t, h.server); count != 0 {
+		t.Fatalf("refused reservations created %d rows", count)
+	}
+
+	h.provider.ToolSelectionCapabilities = []pool.ToolSelectionCapability{{ModelID: model, Runtime: engineClassNative, Validation: "schema-holdback-v1", Modes: []string{"auto", "none", "required", "named"}}}
+	for _, privacy := range []bool{false, true} {
+		if response := reserve(privacy); response.Code != http.StatusOK {
+			t.Fatalf("privacy=%v declaring provider status=%d body=%s", privacy, response.Code, response.Body.String())
+		}
 	}
 }

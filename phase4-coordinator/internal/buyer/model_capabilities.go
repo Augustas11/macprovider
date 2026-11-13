@@ -119,8 +119,31 @@ func toolGrammarEligibleProviders(providers []pool.Provider) []pool.Provider {
 	return eligible
 }
 
+const (
+	modelOutputProviderUnavailableCode = "tool_grammar_provider_unavailable"
+	// modelOutputProviderUnavailableMessage is the plain-request wording of
+	// the code: no tools are involved, the provider must split the model's
+	// reasoning (#2189).
+	modelOutputProviderUnavailableMessage = "No provider serving this model supports its output format yet"
+)
+
 func toolGrammarProviderUnavailableRouteError() *routeError {
-	return &routeError{status: http.StatusServiceUnavailable, code: "tool_grammar_provider_unavailable", message: "No provider serving this model parses its tool-call grammar yet"}
+	return &routeError{status: http.StatusServiceUnavailable, code: modelOutputProviderUnavailableCode, message: "No provider serving this model parses its tool-call grammar yet"}
+}
+
+// modelOutputProviderUnavailableRouteError is the same retryable 503 for a
+// request without tools (SPEC-002, SPEC-018 §3.12).
+func modelOutputProviderUnavailableRouteError() *routeError {
+	return &routeError{status: http.StatusServiceUnavailable, code: modelOutputProviderUnavailableCode, message: modelOutputProviderUnavailableMessage}
+}
+
+// modelOutputRouteError is the providerServesModelOutput refusal: the
+// tool-grammar wording for a tool request, the output-format wording else.
+func modelOutputRouteError(tools bool) *routeError {
+	if tools {
+		return toolGrammarProviderUnavailableRouteError()
+	}
+	return modelOutputProviderUnavailableRouteError()
 }
 
 func providerServesToolGrammars(p pool.Provider) bool {

@@ -276,13 +276,15 @@ var relayBlindErrors = map[string]relayBlindErrorShape{
 	"relay_blind_ciphertext_invalid":        {http.StatusBadRequest, false, "none"},
 	"relay_blind_committed_failed":          {http.StatusInternalServerError, false, "do_not_resubmit"},
 	"relay_blind_provider_unsupported":      {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
-	"unsupported_sampling_penalty":          {http.StatusBadRequest, false, "none"},
-	relayBlindCapabilityRefusalCode:         {http.StatusBadRequest, false, "none"},
-	privacyClassDisabled:                    {http.StatusServiceUnavailable, false, "none"},
-	privacyClassUnavailable:                 {http.StatusServiceUnavailable, false, "none"},
-	privacyClassDowngrade:                   {http.StatusBadRequest, false, "none"},
-	privacyClassStale:                       {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
-	privacyClassUnconfirmed:                 {http.StatusInternalServerError, false, "do_not_resubmit"},
+	// #2189: every serving provider of the model predates its output split.
+	"tool_grammar_provider_unavailable": {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
+	"unsupported_sampling_penalty":      {http.StatusBadRequest, false, "none"},
+	relayBlindCapabilityRefusalCode:     {http.StatusBadRequest, false, "none"},
+	privacyClassDisabled:                {http.StatusServiceUnavailable, false, "none"},
+	privacyClassUnavailable:             {http.StatusServiceUnavailable, false, "none"},
+	privacyClassDowngrade:               {http.StatusBadRequest, false, "none"},
+	privacyClassStale:                   {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
+	privacyClassUnconfirmed:             {http.StatusInternalServerError, false, "do_not_resubmit"},
 }
 
 // SPEC-041-R004 capability gate: a declared json_schema_non_strict request
@@ -496,6 +498,10 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	provider, key, found, refused, ownershipErr := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind, request.Requires)
 	if ownershipErr != nil && ownershipErr.ownershipLookupFailed {
 		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
+		return
+	}
+	if ownershipErr != nil {
+		writeRelayBlindError(w, ownershipErr.code, ownershipErr.message)
 		return
 	}
 	if refused {
@@ -715,7 +721,9 @@ func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
 // was found, whether the SPEC-041-R004 capability gate refused the
 // request (an otherwise eligible provider serves the model and none supports
 // a capability in requires), and the buyer-ownership refusal when the
-// ownership lookup could not answer.
+// ownership lookup could not answer. When the only otherwise eligible
+// providers cannot split the model's output (providerServesModelOutput), the
+// error is the retryable tool_grammar_provider_unavailable.
 func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool, *routeError) {
 	owned, ownershipErr := s.buyerOwnedProviders(ctx)
 	if ownershipErr != nil {
@@ -724,6 +732,7 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model 
 	var providers []pool.Provider
 	var keys []relayblind.KeyRecord
 	incapable := false
+	outputGated := false
 	for _, provider := range s.pool.Snapshot() {
 		if owned[provider.ProviderID] {
 			continue
@@ -749,11 +758,18 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model 
 				incapable = true
 				continue
 			}
+			if !providerServesModelOutput(provider) {
+				outputGated = true
+				continue
+			}
 			providers = append(providers, provider)
 			keys = append(keys, records[0])
 		}
 	}
 	order := s.orderRelayBlindCandidates(accountID, providers)
+	if len(order) == 0 && outputGated {
+		return pool.Provider{}, relayblind.KeyRecord{}, false, false, modelOutputProviderUnavailableRouteError()
+	}
 	if len(order) == 0 {
 		return pool.Provider{}, relayblind.KeyRecord{}, false, incapable, nil
 	}
