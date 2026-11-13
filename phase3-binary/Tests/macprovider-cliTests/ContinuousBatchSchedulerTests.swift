@@ -7487,6 +7487,72 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// #2345, msb03 on GLM-5.3-Flash through the harness: prompts in the
+    /// 512/1,024/1,536/2,048 proportion arrive together, longest first, with
+    /// the serve path's per-turn budget of four chunks and a serial-cohort
+    /// prefill backend (a group past the forward token cap runs each row in
+    /// its own forward and returns after the last). The shortest prompt
+    /// leads, and its first token is sampled by a prefill call of its own,
+    /// before any longer prompt's chunk runs. Each turn keeps the same chunks
+    /// in the same row order, so decode windows and makespan are unchanged
+    /// (SPEC-038 FR-CB2).
+    func testMixedPromptsOnASerialCohortBackendSampleTheShortestFirstTokenAlone() async throws {
+        for ragged in [false, true] {
+            let ids = ["d", "c", "b", "a"]
+            let lengths = ["d": 8, "c": 6, "b": 4, "a": 2]
+            let backend = ScriptedBackend(
+                scripts: Dictionary(uniqueKeysWithValues: ids.map { ($0, Array(repeating: 5, count: 16)) }),
+                prefillForwardTokenCap: 1
+            )
+            let scheduler = try await makeScheduler(
+                descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+                maxActiveRows: 4,
+                maxPromptChunkTokens: 2,
+                maxDecodeStepsWhilePrefilling: 2,
+                maxPrefillRowsPerIteration: 4,
+                maxPrefillTokensPerIteration: 8,
+                allowsRaggedPrefillOffsets: ragged,
+                backend: backend,
+                allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            )
+            let installed = await scheduler.installLabBatchComposition(ids)
+            XCTAssertTrue(installed)
+            let tasks = ids.map { id in
+                Task {
+                    try await scheduler.submit(.init(
+                        id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!), maxOutputTokens: 16
+                    ))
+                }
+            }
+            for task in tasks { _ = try await task.value }
+
+            // Before #2345 the first call was ["a", "b", "c", "d"]: on a
+            // serial-cohort backend the 2-token row's first token waited for
+            // all four forwards (3.84x serial TTFT on the Studio).
+            let calls = await backend.prefillOrder()
+            XCTAssertEqual(
+                calls,
+                [["a"], ["b", "c", "d"], ["b"], ["c", "d"], ["c"], ["d"], ["d"]],
+                "ragged=\(ragged)"
+            )
+            // Turns (prefill runs between decode windows) hold the same
+            // chunks as one group per turn would.
+            var turns: [[String]] = []
+            var current: [String] = []
+            for event in await backend.events() {
+                let parts = event.split(separator: ":")
+                if parts.first == "prefill" {
+                    current.append(String(parts[1]))
+                } else if parts.first == "decode", !current.isEmpty {
+                    turns.append(current)
+                    current = []
+                }
+            }
+            if !current.isEmpty { turns.append(current) }
+            XCTAssertEqual(turns, [["a", "b", "c", "d"], ["b", "c", "d"], ["c", "d"], ["d"]], "ragged=\(ragged)")
+        }
+    }
+
     /// Equal prompts arriving together still prefill as one cohort per turn,
     /// so their first tokens and decode windows line up.
     func testEqualPromptsArrivingTogetherStillPrefillAsOneCohort() async throws {
@@ -10692,6 +10758,9 @@ private actor NativeVerifyOnlyBackend: ContinuousBatchSchedulerBackend {
 
 private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private nonisolated let finishRecorder = RequestFinishRecorder()
+    /// Acts as a serial-cohort prefill backend (`glm5_next`): a group whose
+    /// flattened tokens pass this cap runs each row in its own forward.
+    nonisolated let prefillForwardTokenCap: Int?
     private let scripts: [String: [Int]]
     private let prefillTokens: [String: Int]
     private let prefillGate: AsyncGate?
@@ -10787,8 +10856,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         recurrentCheckpointBackend: Bool = false,
         snapshotGate: AsyncGate? = nil,
         materializeGate: AsyncGate? = nil,
-        promptSnapshotBackend: Bool = false
+        promptSnapshotBackend: Bool = false,
+        prefillForwardTokenCap: Int? = nil
     ) {
+        self.prefillForwardTokenCap = prefillForwardTokenCap
         self.promptSnapshotBackend = promptSnapshotBackend
         self.materializeGate = materializeGate
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
