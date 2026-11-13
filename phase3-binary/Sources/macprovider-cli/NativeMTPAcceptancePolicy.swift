@@ -66,7 +66,9 @@ struct NativeMTPAcceptancePolicy: Sendable {
         let quantization = try string(object, "quantization")
         let cacheMode = try string(object, "cache_mode")
         guard hwModel == "Mac15,14" else { throw invalid("hw_model") }
-        guard quantization == "4bit" else { throw invalid("quantization") }
+        // The target's global MLX affine width; `validate` binds it to the
+        // fixture family (8bit only for gemma4_mtp_v1, SPEC-048 0.1.94).
+        guard ["4bit", "8bit"].contains(quantization) else { throw invalid("quantization") }
         guard cacheMode == "paged_kv_mixed" else { throw invalid("cache_mode") }
         guard let number = object["ram_gb"] as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID(),
@@ -89,7 +91,8 @@ struct NativeMTPAcceptancePolicy: Sendable {
 
     func validate(
         corpus: NativeMTPAcceptanceCorpus, environment: NativeMTPBenchEnvironment,
-        targetSHA256: String, mtpSHA256: String, tokenizerSHA256: String
+        targetSHA256: String, mtpSHA256: String, tokenizerSHA256: String,
+        quantization observedQuantization: String
     ) throws {
         let expected: [(String, AnyHashable, AnyHashable)] = [
             ("model_id", modelID, corpus.modelID),
@@ -103,6 +106,7 @@ struct NativeMTPAcceptancePolicy: Sendable {
             ("provider_commit", providerCommit, environment.providerCommit),
             ("mlx_fork_revision", mlxForkRevision, NativeMTPHardwareE2ERunner.upstreamRevision),
             ("corpus_sha256", corpusSHA256, corpus.digestSHA256),
+            ("quantization", quantization, observedQuantization),
         ]
         for (field, frozen, observed) in expected where frozen != observed {
             throw Self.invalid("\(field) mismatch")

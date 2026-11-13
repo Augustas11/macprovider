@@ -6114,7 +6114,13 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testAttachGateAdmitsGptOssMixedClassAndRefusesOtherMixedClasses",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMeasuredTopologyRequiresTheExactGptOssLayerLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testFamilyKVQuantDefaultReachesOnlyTheSerialPath",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMixedLayoutPagedGatherMatchesSerialCachesAcrossTheWindow"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMixedLayoutPagedGatherMatchesSerialCachesAcrossTheWindow",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testGemma412BMixedClassRequiresExactIdentityAndLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testAttachGateAdmitsTheGemma4MixedClassOnlyForTheExactIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testMeasuredTopologyRequiresTheExactGemma4LayerLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testAttachProofPromptPassesTheSlidingWindow",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testTinyGemma4ConfigYieldsTheAdmittedTopology",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testBatchedRowsMatchEachRowAloneAndTheSerialCaches"
       ],
       "journeys": [],
       "evidence": [
@@ -11818,6 +11824,11 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testHuggingFaceLayoutRejectsPerExpertOverridesThatDisagree",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsACheckpointWithoutTheMTPLayer",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testLoaderKeyMappingMatchesThePinnedGLM5NextSanitizer",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGemma4ObservationTests.swift:testEmbeddedObservationAcceptsAnEightBitTargetAndABF16Assistant",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGemma4ObservationTests.swift:testEmbeddedObservationRejectsConfigIdentityDrift",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGemma4ObservationTests.swift:testEmbeddedObservationRejectsTensorsOutsideTheAdmittedLayout",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testGemma4EmbeddedAssistantObservationMustMatchSignedCapability",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeMapsGemma4MLXAffineToAnEightBitTargetAndBF16Assistant",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testDeepseekDSparkMixedMXObservationAndManifest",

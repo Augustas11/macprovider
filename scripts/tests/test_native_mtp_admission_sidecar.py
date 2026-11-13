@@ -435,6 +435,16 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
         with self.assertRaisesRegex(SidecarError, "at most 4 native active rows"):
             build([self.qwen, wide], release_input())
 
+    def test_gemma4_implementation_ceiling_is_one_native_row(self):
+        gemma = copy.deepcopy(self.glm)
+        gemma["entry"]["mtp_family_adapter"] = "gemma4_mtp_v1"
+        body = json.loads(build([self.qwen, gemma], release_input()))
+        self.assertEqual(body["entries"][1]["mtp_family_adapter"], "gemma4_mtp_v1")
+        self.assertEqual(body["entries"][1]["max_native_active_rows"], 1)
+        gemma["entry"]["max_native_active_rows"] = 2
+        with self.assertRaisesRegex(SidecarError, "at most 1 native active row"):
+            build([self.qwen, gemma], release_input())
+
     def test_duplicate_or_empty_tuple_lists_fail_closed(self):
         with self.assertRaisesRegex(SidecarError, "sorted by the SPEC-023 sort key"):
             build([self.qwen, copy.deepcopy(self.qwen)], release_input())
