@@ -87,3 +87,6 @@ test/e2e/thermal-soak/*.ndjson
 
 # Local audit artifacts (reports/diffs; keep out of PRs)
 scratchpad/615-audit/
+
+# SwiftPM state a language server creates when started at the repo root
+/.build/
