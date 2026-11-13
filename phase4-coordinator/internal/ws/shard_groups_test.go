@@ -361,25 +361,25 @@ func TestShardGroupAttestationOnTerminalFrame(t *testing.T) {
 		return out
 	}
 	end := h.server.applyShardGroupAttestation("head", "s-head", InferenceResponseEnd{RequestID: "req-1", Status: "complete", Receipt: receipt, GroupAttestation: attestation(a)})
-	if end.Receipt != receipt || end.GroupAttestation != nil {
-		t.Fatalf("verified attestation dropped the receipt: %+v", end)
+	if end.Receipt != receipt || end.GroupAttestation != nil || !end.ShardGroupAttestationVerified {
+		t.Fatalf("verified attestation dropped the receipt or its verified mark: %+v", end)
 	}
 	stored, ok, err := h.store.Attestation(context.Background(), "req-1", 0, "head")
 	if err != nil || !ok || !stored.Verified {
 		t.Fatalf("stored verdict %+v %v %v", stored, ok, err)
 	}
 	broken := h.server.applyShardGroupAttestation("head", "s-head", InferenceResponseEnd{RequestID: "req-2", Status: "complete", Receipt: receipt, GroupAttestation: attestation(shardWSDigest("forged"))})
-	if broken.Receipt != "" {
-		t.Fatal("broken chain kept the receipt")
+	if broken.Receipt != "" || broken.ShardGroupAttestationVerified {
+		t.Fatal("broken chain kept the receipt or the verified mark")
 	}
 	missing := h.server.applyShardGroupAttestation("head", "s-head", InferenceResponseEnd{RequestID: "req-3", Status: "complete", Receipt: receipt})
-	if missing.Receipt != "" {
+	if missing.Receipt != "" || missing.ShardGroupAttestationVerified {
 		t.Fatal("receipt without attestation kept")
 	}
 	// A session that is not a head is untouched.
 	plain := h.server.applyShardGroupAttestation("tail", "s-tail", InferenceResponseEnd{RequestID: "req-4", Status: "complete", Receipt: receipt})
-	if plain.Receipt != receipt {
-		t.Fatal("non-head receipt dropped")
+	if plain.Receipt != receipt || plain.ShardGroupAttestationVerified {
+		t.Fatal("non-head receipt dropped or marked as a verified group")
 	}
 }
 

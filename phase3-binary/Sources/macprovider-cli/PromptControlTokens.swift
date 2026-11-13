@@ -1106,7 +1106,8 @@ extension CompletionResult {
             reasoningContent: ControlTextShield.strip(reasoningContent),
             reasoningTokens: reasoningTokens,
             stopSequence: stopSequence,
-            timeline: timeline
+            timeline: timeline,
+            servedPath: servedPath
         )
         result.ttftMilliseconds = ttftMilliseconds
         return result

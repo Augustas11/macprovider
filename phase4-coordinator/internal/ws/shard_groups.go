@@ -384,6 +384,7 @@ func (s *Server) applyShardGroupAttestation(providerID, assignedID string, end I
 			Msg("shard group attestation failed; receipt dropped")
 		end.Receipt = ""
 	}
+	end.ShardGroupAttestationVerified = end.Receipt != "" && verdict.Verified()
 	end.GroupAttestation = nil
 	return end
 }

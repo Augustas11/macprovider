@@ -1,6 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.32 (2026-11-13, provider heartbeat decode telemetry fields documented)
+**Version:** 1.6.33 (2026-11-13, served-path label from the provider that served the request)
+
+**Change log v1.6.33 (2026-11-13, Related: #2341):** `SPEC-002-R007` adds the
+served-path label. A provider's `status: "complete"` `inference_response_end`
+may carry `served_path` (SPEC-001 §6.6): a closed serving path (`serial`,
+`continuous_batching`, `native_mtp`, `shard_group`) and the mean active rows
+over the request's decode steps, 1..256. The coordinator decodes it strictly,
+checks it for consistency with the provider's own R006 profile and
+shard-group advertisement as recorded at dispatch (it is self-reported and
+unverified), and writes `X-MacProvider-Internal-Served-Path` to the gateway
+only, by the same header-or-trailer rule as
+`X-MacProvider-Timing-Provider-Decode-Ms`. Unlike the route trace it
+describes the provider that served after a failover. It is a label:
+`SPEC-002-R005` lists everything it never enters. The SPEC-015 v0.4 receipt
+tuple and buyer-visible usage are unchanged.
 
 **Change log v1.6.32 (2026-11-13, Related: #2319):** The provider heartbeat
 example lists the SPEC-001 v1.9.55 observability fields
@@ -5686,6 +5700,12 @@ A provider can still shape its own TTFT, for example by emitting an early
 content token; that moves time from TTFT into decode, which the interactive
 score weighs equally, it cannot change the prefill rate, and the bounds in SPEC-002-R006 limit what any score can win.
 
+The served-path label of SPEC-002-R007 is self-reported and unverified. It
+labels a gateway telemetry sample only and MUST NOT enter this measured
+store, routing (a score, a phase, an ordering or eligibility decision),
+`/poolz`, the explorer, `request_log`, billing, settlement, rewards,
+sanctions, canaries or admission.
+
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior (not a service-throughput prior) worth 2 samples and capped at 1.25 times the measured decode
 average, so a self-report never outranks measurements, and as the routed
@@ -5878,6 +5898,94 @@ response the coordinator writes after that selection, including its error
 responses. Relay-blind
 and privacy-class responses MUST NOT carry it. The gateway forwards it under
 SPEC-006-R020.
+
+**Served-path label.** The route trace names the first selection. The served
+path names the provider attempt that completed the request, and how that
+provider says it ran it. A **plaintext route** here is one that is not
+relay-blind and not privacy-class; Tier-2 sessions are included.
+
+*Provider report.* A provider's `inference_response_end` with `status:
+"complete"` MAY carry `served_path` (SPEC-001 §6.6), an object with exactly two
+members: `path`, one of `serial`, `continuous_batching`, `native_mtp` or
+`shard_group`, and `rows`, an integer 1..256. It is a top-level frame member,
+never part of `usage`, never part of any receipt or of the SPEC-015 v0.4
+receipt tuple. On a Tier-2 session it travels inside the sealed end payload
+like every other member.
+
+*Validation.* The coordinator reads `served_path` only from the terminal
+frame of a plaintext-route attempt that ends `complete`; it ignores it on
+any other status and on a buyer cancel. The object is decoded strictly: a
+member outside the two, a missing member, a wrong JSON type, a `path` outside
+the enum, a `rows` outside 1..256, a duplicate member, a member name that
+differs from `path` or `rows` in any byte (case included), or an encoding
+longer than 128 bytes makes the report **invalid**. A malformed `served_path`
+value never fails the request; a frame that is not valid JSON is rejected as
+before. The report is then checked for consistency with the provider's
+own SPEC-001-R006 profile and shard-group advertisement as recorded at
+dispatch (the pool snapshot that attempt was dispatched to). Those are
+self-reports too, so the check catches contradictions, not lies: the label is
+self-reported and unverified.
+
+- `shard_group` is valid only for a SPEC-051 shard group head
+  (`shard_group_head_v1`) whose SPEC-051-R019 group attestation on this
+  frame verified and was stored, and a shard group head may report only
+  `shard_group`;
+- otherwise the provider must have a valid SPEC-001-R006 engine profile;
+  without one the report is invalid;
+- `native_mtp` requires `engine_family` `native_mtp` with
+  `native_mtp_active` true;
+- `continuous_batching` requires `engine_family` `continuous_batching` or
+  `native_mtp`;
+- `serial` requires `rows` 1, and is valid for every engine family;
+- `continuous_batching` and `native_mtp` require `rows` at most
+  `cb_granted_slots`, or at most 1 when it is 0 or 1.
+
+An invalid or inconsistent report yields the value `unknown` and increments
+`macprovider_served_path_rejected_total{reason}` (`decode`, `shard_group`,
+`profile`, `engine`, `rows`) on the coordinator's `/metrics/streaming`
+exposition; the counter carries no provider identity or row count, and no log
+line carries the value.
+
+*Response value.* The coordinator writes `X-MacProvider-Internal-Served-Path`
+with exactly this grammar and member order:
+
+`v=1; path=<serial|continuous_batching|native_mtp|shard_group|unknown>; rows=<1..256|unknown>`
+
+`rows` is `unknown` exactly when `path` is `unknown`, and is written in
+decimal without leading zeros. The value is written only once the
+coordinator accepts the attempt as its successful response: after its own
+post-end checks (the Tier-2 output guard, tool-selection validation, the
+tool-call final-close check and settlement stream validation) and after the
+pool-cancel boundary. An error response, and an attempt the coordinator
+rejects, cancels or re-dispatches, carry no value, so after a failover the
+value is that of the provider that served. It is a response header or an
+HTTP trailer by the same rule as
+`X-MacProvider-Timing-Provider-Decode-Ms`: a header while the response is not
+yet committed, a trailer once it is. It is written only when the request
+carries the gateway's internal service bearer, as for negotiated settlement
+trailers, so a client that calls the coordinator directly never receives it,
+and only when the provider reported `served_path`. A provider that did not
+report one, the HTTP-forwarding path, error and cancel terminals, and
+relay-blind and privacy-class responses carry no value. It never enters the
+route trace, `request_log`, the response body, usage or a receipt. The row
+count tells how many requests shared the provider, so the value is internal
+to the coordinator-gateway hop: the gateway strips it before the buyer
+(SPEC-006-R028) and stores it only in its operator-only demand rows.
+
+*Compatibility.* A coordinator that predates this label decodes
+`inference_response_end` without rejecting unknown members, plaintext and
+Tier-2 alike, so it ignores `served_path`. A provider that predates it sends
+none and gets no value. A gateway that predates it removes every
+`X-MacProvider-*` response header and never forwards coordinator trailers, so
+the value reaches no buyer through it.
+
+*Known gaps.* Values are absent until providers on a CLI that sends
+`served_path` are serving. A streamed response's trailer reaches the gateway
+only when the gateway reads the stream to its end, which it does when the
+coordinator declared settlement-finality trailers and the attempt has a
+route snapshot (SPEC-006-R028). A profile
+change between dispatch and completion can turn a genuine report into
+`unknown`.
 
 
 ## SPEC-002-R008 — Buyer ownership exclusion

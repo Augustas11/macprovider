@@ -522,7 +522,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             settlementDisposition: isSettlementReceiptEligible && summary.attestation.verdict == "ok" ? .eligibleOwner : .notEligible,
             shardGroupEvidence: ShardGroupCompletionEvidence(attestation: summary.attestation, tokenSteps: summary.tokenSteps),
             reasoningContent: prepared.reasoningOpen ? reasoning : nil,
-            reasoningTokens: prepared.reasoningOpen ? output.reasoningTokens : 0)
+            reasoningTokens: prepared.reasoningOpen ? output.reasoningTokens : 0,
+            servedPath: .shardGroup)
     }
 
     /// How long a completion waits for the coordinator to accept the epoch a spare

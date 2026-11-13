@@ -326,6 +326,8 @@ func (d *demandTelemetryState) snapshot(now time.Time, status int) (storage.Dema
 		ProviderReportedFirstTokenMs:  d.providerTiming.firstTokenMS,
 		ProviderReportedFirstAnswerMs: d.providerTiming.firstAnswerMS,
 		ProviderReportedDecodeMs:      d.providerTiming.decodeMS,
+		ServedPath:                    d.serving.servedPath,
+		ServedRows:                    d.serving.servedRows,
 		CreatedAt:                     now.UTC(),
 	}, true
 }

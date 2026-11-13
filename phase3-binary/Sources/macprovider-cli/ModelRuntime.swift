@@ -9036,7 +9036,8 @@ maxTokens: 1,
                     ? parsed.stopSequence
                     : matchedRequestStop(in: decode(generatedTokens), stopTokenFilter: stopTokenFilter,
                                          requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
-                                         hasToolCalls: !parsed.toolCalls.isEmpty)
+                                         hasToolCalls: !parsed.toolCalls.isEmpty),
+                servedPath: result.settlementDisposition == .nonSettlingReplay ? nil : result.servedPath
             ),
             filteredText: filtered.text,
             parsed: parsed,
@@ -10458,6 +10459,7 @@ maxTokens: boundedMaxTokens,
         var completion = marked.strippingControlTextMarks()
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.nonStreamed)
+        completion.servedPath = Self.servedPathOrSerial(completion)
         return (completion, snapshot)
     }
 
@@ -11324,7 +11326,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         var completion = marked.strippingControlTextMarks()
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.streamed)
+        completion.servedPath = Self.servedPathOrSerial(completion)
         return completion
+    }
+
+    /// Issue #2341: a batched row brings its own served path; every other MLX
+    /// completion ran serially. A replayed result reports none.
+    static func servedPathOrSerial(_ completion: CompletionResult) -> ServedPath? {
+        if completion.settlementDisposition == .nonSettlingReplay { return nil }
+        return completion.servedPath ?? .serial
     }
 
     private func streamMarked(
@@ -11416,11 +11426,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let batchedCompletion = try await Self.withStructuredStreamingIdleTimeout(
             idleState: batchedIdleState,
             onIdleTimeout: { () throws -> CompletionResult? in
-                try Self.synthesizeIdleTimeoutResultOrThrow(
+                var synthetic = try Self.synthesizeIdleTimeoutResultOrThrow(
                     accumulator: structuredAccumulator,
                     request: request,
                     modelHash: snapshot.modelHash
                 )
+                // Issue #2341: the batched row's counters are not read on an
+                // idle timeout; it still ran batched, not serial.
+                synthetic.servedPath = ServedPath(path: .continuousBatching, rows: 1)
+                return synthetic
             }
         ) { idleCancellation in
             try await self.attachedContinuousBatchStreamingCompletion(
@@ -16353,7 +16367,8 @@ maxTokens: maxTokens,
             reasoningContent: completion.reasoningContent,
             reasoningTokens: completion.reasoningTokens,
             stopSequence: completion.stopSequence,
-            timeline: completion.timeline
+            timeline: completion.timeline,
+            servedPath: completion.servedPath
         )
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
@@ -17595,6 +17610,9 @@ struct CompletionResult: Sendable {
     /// The request's instants (SPEC-015 §3 receipt `ttft_ms`, SPEC-001 usage
     /// timing). Set by the runtime entry and the transport that served it.
     var timeline: RequestTimeline?
+    /// Issue #2341: the path that served this request, for the relay end
+    /// frame. Nil on a replayed result and on every non-MLX, non-shard runtime.
+    var servedPath: ServedPath?
 
     init(
         content: String,
@@ -17619,9 +17637,11 @@ struct CompletionResult: Sendable {
         reasoningContent: String? = nil,
         reasoningTokens: Int = 0,
         stopSequence: String? = nil,
-        timeline: RequestTimeline? = nil
+        timeline: RequestTimeline? = nil,
+        servedPath: ServedPath? = nil
     ) {
         self.timeline = timeline
+        self.servedPath = servedPath
         self.nativeMTPProposedTokens = max(0, nativeMTPProposedTokens)
         self.nativeMTPAcceptedTokens = max(0, min(nativeMTPAcceptedTokens, nativeMTPProposedTokens))
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
@@ -17674,7 +17694,8 @@ struct CompletionResult: Sendable {
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
             stopSequence: stopSequence,
-            timeline: timeline
+            timeline: timeline,
+            servedPath: servedPath
         )
     }
 
@@ -17702,7 +17723,8 @@ struct CompletionResult: Sendable {
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
             stopSequence: stopSequence,
-            timeline: timeline
+            timeline: timeline,
+            servedPath: servedPath
         )
     }
 
@@ -17730,7 +17752,8 @@ struct CompletionResult: Sendable {
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
             stopSequence: stopSequence,
-            timeline: timeline
+            timeline: timeline,
+            servedPath: servedPath
         )
     }
 
@@ -17764,7 +17787,8 @@ struct CompletionResult: Sendable {
             nativeMTPProposedTokens: nativeMTPProposedTokens,
             nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             stopSequence: stopSequence,
-            timeline: timeline
+            timeline: timeline,
+            servedPath: servedPath
         )
     }
 }

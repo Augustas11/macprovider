@@ -356,6 +356,8 @@ type servingTelemetrySnapshot struct {
 	outputTPSMilliTokens *int64
 	streamingMode        string
 	servingEngine        string
+	servedPath           string
+	servedRows           *int64
 }
 
 func (t *gatewayPhaseTiming) observeStreamDelta(choices []streamingChoiceFrame, at time.Time) {
@@ -371,7 +373,7 @@ func (t *gatewayPhaseTiming) servingSnapshot() servingTelemetrySnapshot {
 	if t == nil {
 		return servingTelemetrySnapshot{servingEngine: "unknown"}
 	}
-	out := servingTelemetrySnapshot{streamingMode: t.streamingMode, servingEngine: t.servingEngine}
+	out := servingTelemetrySnapshot{streamingMode: t.streamingMode, servingEngine: t.servingEngine, servedPath: t.servedPath, servedRows: t.servedRows}
 	if out.servingEngine == "" {
 		out.servingEngine = "unknown"
 	}

@@ -7,6 +7,6 @@
 enum DecodePathIdentity {
     static let domain = "macprovider.decode-path-digest.v1"
     /// Kept as one literal so the signed binary carries a findable marker.
-    static let embeddedMarker = "macprovider.decode-path-digest.v1:fa0169a4ba0a84067ee019bd946fd0783adf6c640611132a737016ee548e53af"
+    static let embeddedMarker = "macprovider.decode-path-digest.v1:616d31f9d6493090549887dd72fd2ba2401a50f01aa2b42d4bf911250df791f3"
     static var digest: String { String(embeddedMarker.dropFirst(domain.count + 1)) }
 }

@@ -863,6 +863,9 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// `selfCheckCohortDecodeTokens` (SPEC-038 FR-CB10 v0.3.21 decode-only
     /// gain). Timing, not identity: not compared by `==`.
     var selfCheckCohortDecodeSeconds: Double? = nil
+    /// Issue #2341: the row's served path and mean active rows. Load-dependent,
+    /// not compared by `==`; nil on a replayed result.
+    var servedPath: ServedPath? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -886,7 +889,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
             nativeMTPCounters: nativeMTPCounters,
             selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
-            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds,
+            servedPath: servedPath
         )
     }
 
@@ -910,7 +914,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialConversationCache: serialConversationCache,
             nativeMTPCounters: nativeMTPCounters,
             selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
-            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds,
+            servedPath: servedPath
         )
     }
 
@@ -2453,6 +2458,11 @@ actor ContinuousBatchScheduler {
         /// open one began.
         var selfCheckCohortDecodeNanoseconds: UInt64 = 0
         var selfCheckCohortRunStartedAt: UInt64?
+        /// Issue #2341: the scheduler's served-path counters when the row
+        /// joined decode, and its decode steps that proposed native-MTP drafts.
+        var servedPathDecodeStepsAtJoin: UInt64?
+        var servedPathActiveRowSumAtJoin: UInt64 = 0
+        var servedPathNativeMTPSteps: UInt64 = 0
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -2553,6 +2563,10 @@ actor ContinuousBatchScheduler {
     /// Bumped whenever a row applies a token or reaches a terminal result:
     /// the pump's no-progress guard compares it across passes.
     private var rowProgressEvents = 0
+    /// Issue #2341: decode steps run, and the sum over them of active rows
+    /// (prefilling plus decoding). Rows snapshot both at join and finish.
+    private var servedPathDecodeSteps: UInt64 = 0
+    private var servedPathActiveRowSum: UInt64 = 0
     /// Consecutive pump passes that ran a decode step yet applied no token
     /// and finished no row.
     private var decodePassesWithoutProgress = 0
@@ -5040,6 +5054,7 @@ actor ContinuousBatchScheduler {
                     active.nativeMTPCounters,
                     roundCounters
                 )
+                if proposalCount > 0 { active.servedPathNativeMTPSteps &+= 1 }
                 active.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
                     acceptedProposalPrefixCount: roundCounters.acceptedTokens,
                     proposalCount: UInt64(clamping: proposalCount),
@@ -5275,6 +5290,8 @@ actor ContinuousBatchScheduler {
         #endif
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
+        servedPathDecodeSteps &+= 1
+        servedPathActiveRowSum &+= UInt64(activeDecode.count + activePrompt.count)
         noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
@@ -6689,6 +6706,9 @@ actor ContinuousBatchScheduler {
             if let snapshot = row.promptSnapshot {
                 row.request.promptSnapshotHandoff?.publish(snapshot)
             }
+            var row = row
+            row.servedPathDecodeStepsAtJoin = servedPathDecodeSteps
+            row.servedPathActiveRowSumAtJoin = servedPathActiveRowSum
             activeDecode[row.request.id] = row
             CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)
@@ -6790,6 +6810,18 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    /// Issue #2341: read once when the row finishes, from the counters it
+    /// snapshotted at join. A row that never joined decode ran no decode step.
+    private func servedPath(of row: Row) -> ServedPath {
+        let joinSteps = row.servedPathDecodeStepsAtJoin ?? servedPathDecodeSteps
+        let joinSum = row.servedPathDecodeStepsAtJoin == nil ? servedPathActiveRowSum : row.servedPathActiveRowSumAtJoin
+        return ServedPath.continuousBatching(
+            decodeSteps: servedPathDecodeSteps &- joinSteps,
+            nativeMTPSteps: row.servedPathNativeMTPSteps,
+            activeRowSum: servedPathActiveRowSum &- joinSum
+        )
+    }
+
     private func finish(
         _ row: Row,
         status: ContinuousBatchSchedulerTerminalStatus,
@@ -6822,7 +6854,8 @@ actor ContinuousBatchScheduler {
             serialConversationCache: isSuccessful ? serialConversationCache : nil,
             nativeMTPCounters: row.nativeMTPCounters,
             selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
-            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row),
+            servedPath: servedPath(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -6858,7 +6891,8 @@ actor ContinuousBatchScheduler {
                 : nil,
             nativeMTPCounters: row.nativeMTPCounters,
             selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
-            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row),
+            servedPath: servedPath(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -7001,9 +7035,13 @@ actor ContinuousBatchScheduler {
         backend.finish(requestID: requestID)
         endRequestRetirement(requestID)
         terminalResultOrder.append(requestID)
-        terminalResults[requestID] = result.withSettlementDisposition(
+        var storedTerminal = result.withSettlementDisposition(
             result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible
         )
+        // Issue #2341: a replay reports no served path; only the row's own
+        // (first) waiter does.
+        storedTerminal.servedPath = nil
+        terminalResults[requestID] = storedTerminal
         let settlementOwnerID = result.settlementDisposition == .eligibleOwner
             ? waiters.first(where: { deliveryOutcomes?[$0.id] != false })?.id
             : nil
@@ -7029,6 +7067,7 @@ actor ContinuousBatchScheduler {
                     ? .eligibleOwner
                     : (result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible)
                 var waiterResult = result.withSettlementDisposition(disposition)
+                if waiter.id != waiters.first?.id { waiterResult.servedPath = nil }
                 if disposition == .eligibleOwner, let retainedCache = waiterResult.retainedCache {
                     deliveredRetainedOwners[waiter.id] = DeliveredRetainedOwner(
                         retained: retainedCache.retainedSequence,
