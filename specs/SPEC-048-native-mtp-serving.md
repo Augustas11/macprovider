@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.92
+**Version:** 0.1.93
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.92",
+  "version": "0.1.93",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -595,6 +595,24 @@ The mlx-swift-lm row `3.32.3-macprovider.56` is `3.32.3-macprovider.49`
 commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound) (#2305): attention and indexer prefill tiles are evaluated one ahead
 (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no
 routing change; the Swift, core and C rows are unchanged.
+
+Row invariance is required of every process that can batch decode rows: a
+continuous-batching row, a CB self-check, a native-MTP round or a shard-group
+head. A `serve` process that can never batch for its whole lifetime by
+configuration uses upstream's small-row route instead (#2335): the provider
+sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`, read once by the core, before any
+model loads, only when continuous batching is set `off` explicitly by YAML,
+environment or CLI, `native_mtp_mode` is `off`, no draft model is configured,
+the process holds no shard-group role and is not an autotune child (SPEC-038
+FR-CB9). Every other state keeps the row-invariant default, including a
+process whose CB is only awaiting its self-check or a canary. Such a process
+refuses to build the continuous-batch scheduler, so no batched row, self-check
+or native-MTP round can run in it; the lab commands that batch
+(`msb-throughput`, `native-mtp-bench`, `native-mtp-hardware-e2e`,
+`relay-blind-fixture`) exit 2 on a serial-only process. Disk KV and prompt
+snapshots written on one route are a clean miss on the other (SPEC-037
+FR-KVP4 item 10). The route is printed as `event=small_m_route` at startup and
+as `continuous_batching.small_m_route` in local `/v1/status`.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.49` is `3.32.3-macprovider.48`
 (`e246b8fd6`) plus one tests-only commit (#2307): the GLM-5-Next row-invariance
@@ -2557,6 +2575,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.93 (2026-11-13, Related: #2335)** — R003: row invariance is required
+  of every process that can batch decode rows; a `serve` process with
+  continuous batching explicitly `off`, native MTP `off`, no draft model, no
+  shard-group role and not an autotune child sets
+  `MLX_METAL_SMALL_M_ROW_INVARIANT=0` and takes upstream's small-row route. It
+  builds no batch scheduler, batching lab commands refuse it, and disk KV and
+  prompt snapshots do not cross routes. No pin, admission or policy change.
 - **0.1.92 (2026-11-13, Related: #2305)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.56` (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`), which is
   `3.32.3-macprovider.49` plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and

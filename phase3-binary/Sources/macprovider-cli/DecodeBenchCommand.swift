@@ -96,6 +96,12 @@ struct DecodeBenchCommand: AsyncParsableCommand {
     )
     var bandwidthGBps: Double?
 
+    @Option(
+        name: .customLong("small-m-route"),
+        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route) or serial-only (upstream per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0)."
+    )
+    var smallMRoute: String = "row-invariant"
+
     func run() async throws {
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
@@ -110,6 +116,18 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
+
+        guard let route = decodeBenchSmallMRoute(smallMRoute) else {
+            FileHandle.standardError.write(Data(
+                "decode-bench: --small-m-route must be row-invariant or serial-only\n".utf8
+            ))
+            throw ExitCode(2)
+        }
+        // Before the model loads: the MLX core reads the route once per process.
+        let appliedRoute = SmallMRoute.apply(route)
+        FileHandle.standardError.write(Data(SmallMRoute.event(
+            SmallMRoute.Decision(route: appliedRoute, reason: "decode_bench_option")
+        ).utf8))
 
         let env = ProcessInfo.processInfo.environment
         // bf16 cast is NOT in T2-01 scope — WeightCast lands separately.
@@ -202,7 +220,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             bf16WeightsEnvFlag: bf16Enabled,
             compiledDecodeEnvFlag: compiledEnabled,
             timestamp: ISO8601DateFormatter().string(from: Date()),
-            sparsity: sparsityReport
+            sparsity: sparsityReport,
+            smallMRoute: appliedRoute.rawValue
         )
 
         let encoder = JSONEncoder()
@@ -217,7 +236,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             "decode-bench: model=\(modelTag) pin=\(pin) " +
             "prefill_tps_p50=\(decodeBenchFormatTPS(p50Prefill)) " +
             "decode_tps_p50=\(decodeBenchFormatTPS(p50Decode)) " +
-            "bf16=\(bf16Enabled) compiled=\(compiledEnabled) runs=\(runs)\n"
+            "bf16=\(bf16Enabled) compiled=\(compiledEnabled) runs=\(runs) " +
+            "small_m_route=\(appliedRoute.rawValue)\n"
         ).utf8))
 
         guard !stdoutOnly else { return }
@@ -436,6 +456,15 @@ func decodeBenchMLXPinTag() -> String {
     "mlxlm-" + String(KVBuildIdentity.mlxSwiftLMRevision.prefix(12))
 }
 
+/// `decode-bench --small-m-route` value, or nil when it names no route.
+func decodeBenchSmallMRoute(_ value: String) -> SmallMRoute? {
+    switch value {
+    case "row-invariant": return .rowInvariant
+    case "serial-only": return .serialOnly
+    default: return nil
+    }
+}
+
 /// Nearest-rank percentile for small `runs` budgets (3–5).
 /// For `runs == 3`, p50 is the middle element after sort.
 func decodeBenchPercentileTPS(_ values: [Double], p: Double) -> Double {
@@ -600,6 +629,8 @@ struct BenchReport: Codable, Sendable {
     /// T2-02: optional sparsity diagnostics from DecodeBandwidthModel.
     /// Present when `--report-sparsity` is set; null otherwise.
     let sparsity: SparsityReport?
+    /// SPEC-038 FR-CB9: the MLX small-row route the run took.
+    let smallMRoute: String
 }
 
 /// Sparsity diagnostics emitted when `decode-bench --report-sparsity` is set.

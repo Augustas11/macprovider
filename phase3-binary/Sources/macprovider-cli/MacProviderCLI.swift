@@ -2784,6 +2784,23 @@ struct ServeCommand: AsyncParsableCommand {
         let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
         let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
             && resolved.continuousBatching == .off
+        // SPEC-038 FR-CB9 (#2335): before any model load, so the MLX core
+        // reads the small-row route this process keeps for its whole life.
+        let smallMRoute = SmallMRoute.decide(
+            continuousBatching: resolved.continuousBatching,
+            continuousBatchingExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
+            nativeMTPMode: resolved.nativeMTPMode,
+            draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+            shardGroupRole: shardHeadConfig != nil || shardMemberConfig != nil,
+            autotuneCandidate: autotuneCandidate
+        )
+        let appliedSmallMRoute = SmallMRoute.apply(smallMRoute.route)
+        FileHandle.standardError.write(Data(SmallMRoute.event(
+            SmallMRoute.Decision(
+                route: appliedSmallMRoute,
+                reason: appliedSmallMRoute == smallMRoute.route ? smallMRoute.reason : "already_applied"
+            )
+        ).utf8))
         // SPEC-038 v0.3.15 / SPEC-039 FR-PKV14: the paged engine attaches by
         // default so every catalog model the engine can batch is self-checked;
         // an explicit paged_kv setting or the CB emergency off still rules.

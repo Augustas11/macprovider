@@ -369,7 +369,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
             kvQuantPolicy: identity.kvQuantPolicy,
-            decodePath: KVBuildIdentity.decodePathOrdinary,
+            decodePath: SmallMRoute.processRoute.kvDecodePath,
             liveHighWatermark: 0)          // overridden inside read()
     }
 
@@ -611,7 +611,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
             kvQuantPolicy: identity.kvQuantPolicy,
-            decodePath: KVBuildIdentity.decodePathOrdinary,
+            decodePath: SmallMRoute.processRoute.kvDecodePath,
             keyEpoch: capturedEpoch)        // CRITICAL-2: captured at commit, not at persist
         // M-B: derive creation/eligibility from the EXACT hot-commit instant passed
         // in — NOT a wall-clock read taken after the deep copy above, which would

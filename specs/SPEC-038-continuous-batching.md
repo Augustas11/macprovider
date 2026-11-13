@@ -1,11 +1,21 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.48
+Version: v0.3.49
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.49 (2026-11-13, serial-only small-row route, Related: #2335):**
+FR-CB9 states that a row must compute the same bits alone and inside a batch
+in every process that can batch, and names the one configuration that can
+never batch: continuous batching set `off` explicitly, native MTP `off`, no
+draft model, no shard-group role, not an autotune child. Such a `serve`
+process takes upstream's small-row quantized route
+(`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler, refuses batching
+lab commands and keeps disk KV on a separate decode-path class. Every other
+state, including a self-check still pending, keeps the row-invariant route.
+
 **Change log v0.3.48 (2026-11-12, DeepSeek V4 encoder identity and campaign gate, Related: #2111):**
 The timed queue-wait deadline restarts while a request with a free slot
 waits only on another row's prefill (FR-CB1), so long DeepSeek V4 prompts
@@ -1645,6 +1655,32 @@ existing `AsyncSemaphore` serial path MUST be retained as (a) the flag-off
 default, (b) a preflight-guarded fallback for unsupported models, and (c) a
 safe mode after scheduler failure. Enabling the flag MUST NOT be a precondition
 for correct serving.
+
+**Small-row route (v0.3.49, #2335).** Every process that can batch decode
+rows (a CB row, the FR-CB10 self-check, a SPEC-048 native-MTP round, a
+shard-group head) MUST run the MLX core's row-invariant small-row route, so a
+row computes the same bits alone and inside a batch. A `serve` process that
+can never batch for its whole lifetime by configuration MAY take upstream's
+small-row route (`qmv` per row below the `qmm` limit), which is faster for one
+row: the provider sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0` before any model
+loads exactly when continuous batching is set `off` by YAML, environment or
+CLI (the emergency override, which neither the signed policy, a self-check nor
+a warm swap can lift), `native_mtp_mode` is `off`, no draft model is
+configured, the process holds no shard-group role and it is not an autotune
+child. An implicit `off`, `canary`, `on`, or a self-check still pending keeps
+the row-invariant route. In a serial-only process:
+
+- the scheduler factory MUST return no scheduler and the scheduler
+  initialiser MUST refuse to construct one, so no batched row, self-check or
+  native-MTP round can start; `msb-throughput`, `native-mtp-bench`,
+  `native-mtp-hardware-e2e` and `relay-blind-fixture` MUST exit 2;
+- SPEC-037 disk KV and prompt snapshots carry the route in their decode-path
+  class (SPEC-037 v0.2.5), so an entry written on one route misses on the
+  other;
+- startup prints `event=small_m_route mode=serial_only reason=...` and local
+  `/v1/status` reports `continuous_batching.small_m_route`.
+
+A missed case costs single-row speed, never exactness.
 
 Scheduler-failure fallback MUST NOT stitch batched and serial output for one
 request. It MAY apply (a) to subsequent requests, or (b) to an individual
