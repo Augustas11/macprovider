@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,17 +62,88 @@ func TestDemandServingTelemetryColumnsMigrateOldTableIdempotently(t *testing.T) 
 	}
 }
 
-func TestDemandServingTelemetryRejectsUnknownLabels(t *testing.T) {
+// A label value outside the stored vocabulary is stored as unknown/empty, so
+// a value a validator learns to accept later can never fail the INSERT.
+func TestDemandServingTelemetryMapsUnknownLabels(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
-	event := storage.DemandEvent{RequestID: "req_bad", BuyerHash: "b", TrafficClass: "paid", RequestedModel: "llama",
-		TerminalResult: "success", ServingEngine: "shard_group", CreatedAt: fixedTime()}
-	if err := store.InsertDemandEvent(ctx, event); err == nil {
-		t.Fatal("serving_engine outside the closed vocabulary was stored")
+	event := storage.DemandEvent{RequestID: "req_future", BuyerHash: "b", TrafficClass: "paid", RequestedModel: "llama",
+		TerminalResult: "success", ServingEngine: "shard_group", StreamingMode: "buffered_future", CreatedAt: fixedTime()}
+	if err := store.InsertDemandEvent(ctx, event); err != nil {
+		t.Fatalf("InsertDemandEvent: %v", err)
 	}
-	event.ServingEngine, event.StreamingMode = "", "buffered_whatever"
-	if err := store.InsertDemandEvent(ctx, event); err == nil {
-		t.Fatal("streaming_mode outside the closed vocabulary was stored")
+	var engine, mode string
+	if err := store.db.QueryRowContext(ctx, `SELECT serving_engine, streaming_mode FROM demand_events WHERE request_id = 'req_future'`).Scan(&engine, &mode); err != nil {
+		t.Fatal(err)
+	}
+	if engine != "unknown" || mode != "" {
+		t.Fatalf("stored %q/%q, want unknown/empty", engine, mode)
+	}
+}
+
+// The column CHECKs accept exactly the exported vocabularies.
+func TestDemandServingTelemetryChecksMatchVocabularies(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	seq := 0
+	insert := func(engine, mode string) error {
+		seq++
+		_, err := store.db.ExecContext(ctx, `
+			INSERT INTO demand_events(request_id, buyer_hash, traffic_class, requested_model, stream, structured_output,
+				tools_requested, terminal_result, eligible_provider_exists, substituted, created_at, serving_engine, streaming_mode)
+			VALUES(?, 'b', 'paid', 'llama', 1, 0, 0, 'success', 1, 0, ?, ?, ?)`, "req_check_"+strconv.Itoa(seq), encodeTime(fixedTime()), engine, mode)
+		return err
+	}
+	for _, engine := range storage.DemandServingEngines {
+		if err := insert(engine, ""); err != nil {
+			t.Fatalf("engine %q rejected: %v", engine, err)
+		}
+	}
+	for _, mode := range storage.DemandStreamingModes {
+		if err := insert("unknown", mode); err != nil {
+			t.Fatalf("mode %q rejected: %v", mode, err)
+		}
+	}
+	if insert("shard_group", "") == nil || insert("unknown", "buffered_future") == nil {
+		t.Fatal("CHECK accepted a value outside the vocabulary")
+	}
+}
+
+// A database where an earlier migration added only some R028 columns (a
+// partial failure) finishes on the next Open.
+func TestDemandServingTelemetryMigrationResumesAfterPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	raw, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, demandEventsDDL); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range demandEventsServingTelemetryColumns[:3] {
+		if _, err := raw.ExecContext(ctx, "ALTER TABLE demand_events ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The concurrent-Open path relies on SQLite's duplicate-column message.
+	_, dupErr := raw.ExecContext(ctx, "ALTER TABLE demand_events ADD COLUMN "+demandEventsServingTelemetryColumns[0].name+" INTEGER")
+	if dupErr == nil || !strings.Contains(dupErr.Error(), "duplicate column name: "+demandEventsServingTelemetryColumns[0].name) {
+		t.Fatalf("duplicate ALTER error = %v", dupErr)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open after partial migration: %v", err)
+	}
+	defer store.Close()
+	for _, column := range demandEventsServingTelemetryColumns {
+		var n int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('demand_events') WHERE name = ?`, column.name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("column %s count=%d err=%v", column.name, n, err)
+		}
 	}
 }
 
@@ -139,6 +211,33 @@ func TestDemandLatencyPercentilesNearestRankAndSmallSamples(t *testing.T) {
 		}
 		if cell.FirstReasoningMs.Samples != 0 || cell.OutputTPSMilliTokens.Samples != 0 {
 			t.Fatalf("absent quantities counted: %+v", cell)
+		}
+	}
+}
+
+// Mutation boundaries: p50 needs exactly 5 samples, p95 exactly 20.
+func TestDemandLatencyPercentileSampleBoundaries(t *testing.T) {
+	ctx := context.Background()
+	base := fixedTime()
+	for _, tc := range []struct {
+		n               int
+		wantP50, want95 bool
+	}{{4, false, false}, {5, true, false}, {19, true, false}, {20, true, true}} {
+		store := newTestStore(t)
+		for i := 1; i <= tc.n; i++ {
+			v := int64(i)
+			if err := store.InsertDemandEvent(ctx, storage.DemandEvent{RequestID: "req_" + strconv.Itoa(i), BuyerHash: "b", TrafficClass: "paid",
+				RequestedModel: "llama", TerminalResult: "success", ServingEngine: "general_mlx", GatewayFirstAnswerMs: &v, CreatedAt: base}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cells, err := store.DemandLatencyPercentiles(ctx, base.Add(-time.Hour), base.Add(time.Hour))
+		if err != nil || len(cells) != 1 {
+			t.Fatalf("n=%d cells=%+v err=%v", tc.n, cells, err)
+		}
+		q := cells[0].FirstAnswerMs
+		if (q.P50 != nil) != tc.wantP50 || (q.P95 != nil) != tc.want95 {
+			t.Fatalf("n=%d p50=%v p95=%v, want present %v/%v", tc.n, q.P50, q.P95, tc.wantP50, tc.want95)
 		}
 	}
 }

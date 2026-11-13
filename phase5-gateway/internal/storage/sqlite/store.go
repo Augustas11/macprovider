@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -402,6 +403,12 @@ func (s *Store) ensureDemandEventsServingTelemetryColumns(ctx context.Context) e
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, "ALTER TABLE demand_events ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+			// A second gateway migrating the same database at cold start can
+			// add the column between our probe and this ALTER; that column is
+			// the one we wanted.
+			if strings.Contains(err.Error(), "duplicate column name: "+column.name) {
+				continue
+			}
 			return fmt.Errorf("add demand_events.%s: %w", column.name, err)
 		}
 	}
@@ -3760,9 +3767,13 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 	if !validDemandFailureReason(event.FailureReason) {
 		return fmt.Errorf("demand failure_reason is not recognized")
 	}
-	servingEngine := event.ServingEngine
-	if servingEngine == "" {
-		servingEngine = "unknown"
+	servingEngine := "unknown"
+	if slices.Contains(storage.DemandServingEngines, event.ServingEngine) {
+		servingEngine = event.ServingEngine
+	}
+	streamingMode := ""
+	if slices.Contains(storage.DemandStreamingModes, event.StreamingMode) {
+		streamingMode = event.StreamingMode
 	}
 	for _, v := range []*int64{event.GatewayFirstReasoningMs, event.GatewayFirstAnswerMs, event.GatewayOutputTPSMilliTokens} {
 		if v != nil && *v < 0 {
@@ -3789,7 +3800,7 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 		event.QueueLatencyMs, event.TimeToFirstTokenMs, event.ProviderPrefillMs, event.ProviderDecodeMs,
 		event.OutputTPSMilliTokens, event.TotalLatencyMs, encodeTime(event.CreatedAt),
 		nullableInt64(event.GatewayFirstReasoningMs), nullableInt64(event.GatewayFirstAnswerMs), nullableInt64(event.GatewayOutputTPSMilliTokens),
-		event.StreamingMode, servingEngine,
+		streamingMode, servingEngine,
 		nullableInt64(event.ProviderReportedQueueMs), nullableInt64(event.ProviderReportedFirstTokenMs),
 		nullableInt64(event.ProviderReportedFirstAnswerMs), nullableInt64(event.ProviderReportedDecodeMs))
 	return err
@@ -3913,7 +3924,7 @@ func (s *Store) DemandSummary(ctx context.Context, query storage.DemandSummaryQu
 		if err := rows.Scan(&row.RequestedModel, &row.TrafficClass,
 			&row.RequestedRequests, &row.ServedRequests, &row.UnmetRequests, &row.CapacityConstrainedRequests,
 			&row.SubstitutedRequests, &row.RequestedTokens, &row.ServedTokens, &row.ReasoningTokens,
-			&row.AvgQueueLatencyMs, &row.AvgTimeToFirstTokenMs, &row.AvgTotalLatencyMs, &row.AvgOutputTPSMilliTokens, &row.DistinctBuyers,
+			&row.AvgQueueLatencyMs, &row.LegacyAvgTimeToFirstTokenMs, &row.AvgTotalLatencyMs, &row.LegacyAvgOutputTPSMilliTokens, &row.DistinctBuyers,
 			&row.RepeatBuyers); err != nil {
 			return nil, err
 		}
