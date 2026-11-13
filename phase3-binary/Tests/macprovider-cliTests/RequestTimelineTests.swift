@@ -126,6 +126,54 @@ final class RequestTimelineTests: XCTestCase {
         XCTAssertNotNil(timeline.snapshot().firstAnswer)
     }
 
+    func testNoChunkEmittedMarksNothingAndTheWrappedSinkPassesChunksThrough() {
+        let timeline = RequestTimeline()
+        let delivered = LockedChunks()
+        // A sink built for a token the stream filter holds back emits nothing.
+        _ = timeline.noting { delivered.append($0) }
+        XCTAssertNil(timeline.snapshot().firstVisible)
+
+        let sink = timeline.noting { delivered.append($0) }
+        sink(.progress)
+        XCTAssertNil(timeline.snapshot().firstVisible)
+        sink(.content("hello"))
+        XCTAssertEqual(delivered.count, 2)
+        XCTAssertNotNil(timeline.snapshot().firstAnswer)
+    }
+
+    func testReplayWaiterCountsItsFirstReplayedDelivery() {
+        // Rule change from the removed ContinuousBatchFirstTokenClock: a waiter
+        // that attaches to a row in flight now counts its first replayed
+        // delivery as its first token, with no prefill of its own.
+        let timeline = RequestTimeline()
+        let snapshot = ContinuousBatchSchedulerSnapshot(modelID: "m", modelSHA256: "h", weightsGeneration: 0)
+        ModelRuntime.noteContinuousBatchTokenEvent(
+            ContinuousBatchSchedulerTokenEvent(requestID: "r", tokenIndex: 2, token: 9, replayTokens: [7, 8, 9], snapshot: snapshot),
+            on: timeline
+        )
+        timeline.noteEmitted(.content("caught-up"))
+        let marks = timeline.snapshot()
+        XCTAssertTrue(marks.replayed)
+        XCTAssertNotNil(marks.firstToken)
+        XCTAssertNil(marks.prefillWallMs)
+        XCTAssertNotNil(marks.firstAnswer)
+        XCTAssertEqual(timeline.receiptTTFTMilliseconds(.streamed, now: .now + .seconds(60)), marks.firstAnswerMs)
+    }
+
+    func testNonStreamingReceiptIsFullLatencyWhileFirstTokenStaysEarlier() {
+        // Bench tools read `firstTokenMs`; receipts read the full latency.
+        let base = ContinuousClock.now
+        let timeline = RequestTimeline(admitted: base)
+        timeline.markStarted(at: base + .milliseconds(4))
+        timeline.markFirstToken(at: base + .milliseconds(30))
+        timeline.markEnded(at: base + .milliseconds(250))
+        let full = timeline.receiptTTFTMilliseconds(.nonStreamed, now: base + .milliseconds(260))
+        let firstToken = try? XCTUnwrap(timeline.snapshot().firstTokenMs)
+        XCTAssertEqual(full, 260)
+        XCTAssertEqual(firstToken, 30)
+        XCTAssertLessThan(firstToken ?? .max, full)
+    }
+
     func testNonStreamingResponseMarksAnswerAndReasoningTogether() {
         let timeline = RequestTimeline()
         timeline.noteResponseComplete(CompletionResult(
@@ -183,5 +231,22 @@ final class RequestTimelineTests: XCTestCase {
         for key in ["macprovider_queue_ms", "macprovider_first_token_ms", "macprovider_first_answer_ms", "macprovider_decode_ms"] {
             XCTAssertTrue(untimed[key] is NSNull, key)
         }
+    }
+}
+
+private final class LockedChunks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var chunks: [StreamChunk] = []
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunks.count
+    }
+
+    func append(_ chunk: StreamChunk) {
+        lock.lock()
+        chunks.append(chunk)
+        lock.unlock()
     }
 }

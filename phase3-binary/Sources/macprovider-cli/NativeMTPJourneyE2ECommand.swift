@@ -2070,8 +2070,8 @@ final class NativeMTPJourneyRunner {
                 "ordinary_output_tokens_per_s": ordinaryRun.seconds[turn] > 0 ? Double(ordinaryTokens) / ordinaryRun.seconds[turn] : 0,
                 "native_cached_prompt_tokens": (0 ..< rows).map { nativeRun.results[$0][turn].cachedPromptTokens },
                 "native_prompt_tokens": (0 ..< rows).map { nativeRun.results[$0][turn].promptTokens },
-                "native_ttft_ms": (0 ..< rows).map { nativeRun.results[$0][turn].ttftMilliseconds ?? -1 },
-                "ordinary_ttft_ms": (0 ..< rows).map { ordinaryRun.results[$0][turn].ttftMilliseconds ?? -1 },
+                "native_ttft_ms": (0 ..< rows).map { nativeRun.results[$0][turn].timeline?.snapshot().firstTokenMs ?? -1 },
+                "ordinary_ttft_ms": (0 ..< rows).map { ordinaryRun.results[$0][turn].timeline?.snapshot().firstTokenMs ?? -1 },
             ])
         }
         step.details["turns"] = turnDetails

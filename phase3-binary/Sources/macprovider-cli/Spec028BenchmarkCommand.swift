@@ -219,7 +219,9 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
             completionTokens: completion.completionTokens,
             elapsedSeconds: elapsed,
             tokensPerSecond: Double(completion.completionTokens) / elapsed,
-            ttftMilliseconds: completion.ttftMilliseconds,
+            // Time to first sampled token on the runtime's request timeline,
+            // not the SPEC-015 receipt value (full latency when non-streaming).
+            ttftMilliseconds: completion.timeline?.snapshot().firstTokenMs,
             draftedTokens: completion.specDecodeDraftedTokens,
             acceptedTokens: completion.specDecodeAcceptedTokens,
             streamedChunks: chunkCounter.value,
