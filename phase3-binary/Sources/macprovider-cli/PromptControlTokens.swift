@@ -1103,7 +1103,8 @@ extension CompletionResult {
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: ControlTextShield.strip(reasoningContent),
             reasoningTokens: reasoningTokens,
-            stopSequence: stopSequence
+            stopSequence: stopSequence,
+            timeline: timeline
         )
         result.ttftMilliseconds = ttftMilliseconds
         return result

@@ -326,8 +326,13 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     // MARK: Generation
 
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         // SPEC-018 §3.14: control-text marks never leave the runtime.
-        try await generate(request, handle: nil, shouldCancel: shouldCancel, onChunk: nil).strippingControlTextMarks()
+        var completion = try await generate(request, handle: nil, timeline: timeline, shouldCancel: shouldCancel, onChunk: nil)
+            .strippingControlTextMarks()
+        completion.timeline = timeline
+        completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.nonStreamed)
+        return completion
     }
 
     func stream(
@@ -336,9 +341,14 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        try await generate(request, handle: handle, shouldCancel: shouldCancel) { chunk in
-            onChunk(chunk.strippingControlTextMarks())
+        let timeline = RequestTimeline.current ?? RequestTimeline()
+        let emit = timeline.noting(onChunk)
+        var completion = try await generate(request, handle: handle, timeline: timeline, shouldCancel: shouldCancel) { chunk in
+            emit(chunk.strippingControlTextMarks())
         }.strippingControlTextMarks()
+        completion.timeline = timeline
+        completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.streamed)
+        return completion
     }
 
     struct PreparedRequest: Sendable {
@@ -408,6 +418,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     private func generate(
         _ request: ChatCompletionRequest,
         handle: RequestHandle?,
+        timeline: RequestTimeline,
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: (@Sendable (StreamChunk) -> Void)?
     ) async throws -> CompletionResult {
@@ -425,6 +436,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         // to the engine's own (the coordinator then rejects the attestation, not the stream).
         let receiptRequestID = request.requestID.flatMap { ShardMemberSigner.isCanonicalString($0) ? $0 : nil }
         let started = Date()
+        // The head node's clock: the chain takes the request now.
+        timeline.markStarted()
         let submission: (id: UInt64, events: AsyncThrowingStream<ShardGenerationEvent, Error>)
         do {
             submission = try engine.stream(ShardGenerationRequest(
@@ -463,18 +476,18 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             }
         }
         var completionTokens = 0
-        var firstTokenAt: Date?
         var summary: ShardGenerationSummary?
         do {
             for try await event in submission.events {
                 switch event {
                 case .token(let token, _):
                     guard !output.stopped else { continue }
-                    if firstTokenAt == nil { firstTokenAt = Date() }
+                    timeline.markFirstToken()
                     completionTokens += 1
                     deliver(output.append(token))
                     if output.stopped { engine.cancel(requestID) }
                 case .finished(let finished):
+                    timeline.markEnded()
                     summary = finished
                 }
             }
@@ -504,7 +517,6 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             finishReason: finishReason,
             promptTokens: prepared.promptTokens.count,
             completionTokens: completionTokens,
-            ttftMilliseconds: firstTokenAt.map { Int64($0.timeIntervalSince(started) * 1000) },
             generationMilliseconds: Int64(finishedAt.timeIntervalSince(started) * 1000),
             modelHashObserved: identity.modelHash,
             settlementDisposition: isSettlementReceiptEligible && summary.attestation.verdict == "ok" ? .eligibleOwner : .notEligible,
@@ -542,7 +554,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
                 "messages": [["role": "user", "content": Self.startupThroughputPrompt]],
             ]))
             let started = Date()
-            let result = try await generate(request, handle: nil, shouldCancel: { false }, onChunk: nil)
+            let result = try await generate(request, handle: nil, timeline: RequestTimeline(), shouldCancel: { false }, onChunk: nil)
             let elapsed = Date().timeIntervalSince(started)
             guard elapsed > 0, result.completionTokens > 0 else { return 0 }
             let rate = Double(result.completionTokens) / elapsed

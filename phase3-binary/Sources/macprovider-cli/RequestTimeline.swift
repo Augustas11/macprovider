@@ -13,7 +13,7 @@ final class RequestTimeline: @unchecked Sendable {
     /// The timeline of the request the current task serves. The transport
     /// binds it at provider admission; a runtime entry that finds none (a
     /// bench or a direct runtime call) starts its own.
-    @TaskLocal static var current: RequestTimeline?
+    @TaskLocal static var current: RequestTimeline? = nil
 
     enum Mark: UInt8, CaseIterable {
         /// Left the queue: prefill or cache restore begins.

@@ -176,6 +176,53 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(metrics.diagnostics.contains(.stickyCacheUnsupported))
     }
 
+    func testRequestTimelineRecorderLeavesTokensAndSchedulingUnchanged() async throws {
+        func run(recording timeline: RequestTimeline?) async throws -> (ContinuousBatchSchedulerResult, prefill: Int, decode: Int) {
+            let backend = ScriptedBackend(scripts: ["timed": [101, 102, 103]])
+            let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+            let request = ContinuousBatchSchedulerRequest(
+                id: "timed",
+                conversationKey: "",
+                promptTokens: [1, 2, 3],
+                maxOutputTokens: 3,
+                temperature: 0.0,
+                topP: 1.0
+            )
+            let result: ContinuousBatchSchedulerResult
+            if let timeline {
+                result = try await scheduler.submit(
+                    request,
+                    tokenSink: { ModelRuntime.noteContinuousBatchTokenEvent($0, on: timeline) },
+                    onStarted: { timeline.markStarted() }
+                )
+                ModelRuntime.noteContinuousBatchRowReturned(result, on: timeline)
+            } else {
+                result = try await scheduler.submit(request)
+            }
+            return (result, await backend.prefillCallCount(), await backend.decodeCallCount())
+        }
+
+        let plain = try await run(recording: nil)
+        let timeline = RequestTimeline()
+        let recorded = try await run(recording: timeline)
+
+        XCTAssertEqual(recorded.0.outputTokens, [101, 102, 103])
+        XCTAssertEqual(recorded.0.outputTokens, plain.0.outputTokens)
+        XCTAssertEqual(recorded.0.generatedTokens, plain.0.generatedTokens)
+        XCTAssertEqual(recorded.0.terminalStatus, plain.0.terminalStatus)
+        XCTAssertEqual(recorded.prefill, plain.prefill)
+        XCTAssertEqual(recorded.decode, plain.decode)
+        let marks = timeline.snapshot()
+        let started = try XCTUnwrap(marks.started)
+        let firstToken = try XCTUnwrap(marks.firstToken)
+        let ended = try XCTUnwrap(marks.ended)
+        XCTAssertLessThanOrEqual(marks.admitted, started)
+        XCTAssertLessThanOrEqual(started, firstToken)
+        XCTAssertLessThanOrEqual(firstToken, ended)
+        XCTAssertFalse(marks.replayed)
+        XCTAssertNotNil(marks.prefillWallMs)
+    }
+
     func testConversationKeyWithoutReusableStateBatchesAsFreshRequest() async throws {
         let backend = ScriptedBackend(scripts: ["keyed": [7]])
         let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
