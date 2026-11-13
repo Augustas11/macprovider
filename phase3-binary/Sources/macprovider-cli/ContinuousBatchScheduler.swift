@@ -1909,6 +1909,7 @@ final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     private let bufferLimit: Int
     private let timeoutNanoseconds: UInt64
     private let sink: ContinuousBatchSchedulerTokenSink
+    private let onStarted: (@Sendable () -> Void)?
     private let capacity: ContinuousBatchTokenDeliveryCapacity
     private var queue: [ContinuousBatchSchedulerTokenEvent] = []
     private var drainCompletion: (@Sendable (Bool) -> Void)?
@@ -1927,12 +1928,20 @@ final class ContinuousBatchTokenDelivery: @unchecked Sendable {
         bufferLimit: Int,
         timeoutNanoseconds: UInt64,
         capacity: ContinuousBatchTokenDeliveryCapacity,
-        sink: @escaping ContinuousBatchSchedulerTokenSink
+        sink: @escaping ContinuousBatchSchedulerTokenSink,
+        onStarted: (@Sendable () -> Void)? = nil
     ) {
         self.bufferLimit = max(1, bufferLimit)
         self.timeoutNanoseconds = timeoutNanoseconds
         self.capacity = capacity
         self.sink = sink
+        self.onStarted = onStarted
+    }
+
+    /// The waiter's request left the queue: its cache restore or prefill
+    /// begins. Observation only; it never affects admission or delivery.
+    func markStarted() {
+        onStarted?()
     }
 
     /// Non-blocking offer. The scheduler fails only this waiter when its
@@ -2659,7 +2668,8 @@ actor ContinuousBatchScheduler {
     func submit(
         _ request: ContinuousBatchSchedulerRequest,
         admissionWaitPolicy: ContinuousBatchAdmissionWaitPolicy = .configuredTimeout,
-        tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in }
+        tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in },
+        onStarted: (@Sendable () -> Void)? = nil
     ) async throws -> ContinuousBatchSchedulerResult {
         do {
             try Task.checkCancellation()
@@ -2779,7 +2789,8 @@ actor ContinuousBatchScheduler {
             bufferLimit: configuration.tokenDeliveryBufferLimit,
             timeoutNanoseconds: configuration.tokenDeliveryTimeoutNanoseconds,
             capacity: tokenDeliveryCapacity,
-            sink: tokenSink
+            sink: tokenSink,
+            onStarted: onStarted
         )
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -5974,6 +5985,9 @@ actor ContinuousBatchScheduler {
             }
 
             admittingRequests[request.id] = request
+            for waiter in requestWaiters[request.id] ?? [] {
+                waiter.delivery.markStarted()
+            }
             var admissionHandle: PagedKVBlockTableHandle?
             do {
                 let reservation = try initialReservation(for: request)

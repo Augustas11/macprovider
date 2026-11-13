@@ -1099,11 +1099,14 @@ extension CompletionResult {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: ControlTextShield.strip(reasoningContent),
             reasoningTokens: reasoningTokens,
-            stopSequence: stopSequence
+            stopSequence: stopSequence,
+            timeline: timeline
         )
         result.ttftMilliseconds = ttftMilliseconds
         return result

@@ -1,6 +1,25 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.53 (2026-11-10, local Messages `thinking: disabled` maps to `reasoning_effort: none`)
+**Version:** 1.9.55 (2026-11-13, heartbeat decode rate and native-MTP acceptance; relay usage timing)
+
+**Change log v1.9.55 (2026-11-13, Related: #2319):** The capacity heartbeat
+(§6.5.1) gains `decode_tps_since_last`,
+`native_mtp_proposed_tokens_since_last` and
+`native_mtp_accepted_tokens_since_last`. Each is aggregated once per completed
+buyer request from its request timeline and native-MTP row counters; nothing
+is added to the decode loops. `throughput_tps_since_last` and the
+`spec_decode_*` fields are unchanged. The relay usage object now carries the
+four request-timeline timing fields with the meaning the direct HTTP usage
+object gives them; billing fields and `completion_tokens` are unchanged, and
+the relay still carries no `macprovider_generation_ms`.
+
+**Change log v1.9.54 (2026-11-13):** The provider's direct HTTP
+`/v1/chat/completions` usage object (§6.3) documents its vendor timing fields.
+Four new fields, `macprovider_queue_ms`, `macprovider_first_token_ms`,
+`macprovider_first_answer_ms` and `macprovider_decode_ms`, come from one
+per-request monotonic timeline and mean the same on every serving path.
+`macprovider_generation_ms` is unchanged; its per-path meaning is now written
+down. Billing fields, `completion_tokens` and the relay usage are unchanged.
 
 **Change log v1.9.53 (2026-11-10, Related: #2269):** The local Messages
 translation maps `thinking: disabled` to `reasoning_effort` `none` (was `low`),
@@ -2942,6 +2961,32 @@ failure short-circuits:
 `finish_reason` is `"stop"` (natural end or stop token hit) or `"length"`
 (max_tokens reached).
 
+The provider's usage object (non-streaming body and streaming usage chunk)
+also carries additive vendor fields. They do not change billing or OpenAI
+compatibility. Each timing field is an integer in milliseconds, or JSON
+`null` when the instant was not reached.
+
+| Field | Meaning |
+|---|---|
+| `macprovider_queue_ms` | Provider admission to leaving the queue (prefill or cache restore begins; for continuous batching, the scheduler admits the row). |
+| `macprovider_first_token_ms` | Provider admission to the first sampled token of any channel. A continuous-batching waiter that attached to a row already in flight counts its first replayed delivery. |
+| `macprovider_first_answer_ms` | Provider admission to the first content or tool-call delta emitted to the buyer after output filtering. A non-streaming response emits it when the whole body is ready. |
+| `macprovider_decode_ms` | First sampled token to the last sampled token. |
+| `macprovider_generation_ms` | Wall time the autotune throughput probe divides decoded tokens by. Its window differs by path: serial streaming measures the first decoded token of any channel to the generate result; continuous batching, native MTP and a shard group measure the whole runtime call, queue and prefill included; serial non-streaming and the draft-model speculative stream report `null`. A tool-choice stream that holds output reports what its non-streaming run reports. |
+
+The four timeline fields have the same meaning on serial, continuous-batching,
+native-MTP and shard-group paths; a shard group uses the head node's clock.
+The usage object carries no row counts, serving-path name or MTP counters.
+
+The usage object the provider sends through the coordinator relay (the
+response body or final streaming usage chunk, and the `inference_response_end`
+frame) carries the same four timeline fields with the same meaning, also when
+the usage is unattested and its token counts are omitted. It does not carry
+`macprovider_generation_ms` or `macprovider_generated_completion_tokens`,
+which serve the autotune probe on the direct endpoint only. Billing reads only
+the token-count keys; the privacy-class response builds its own closed usage
+object and carries none of these fields.
+
 #### Error responses
 
 | Status | Condition | Error code |
@@ -3332,7 +3377,10 @@ field behaves exactly as it does today.
   "throughput_tps_estimate": 19.8,
   "requests_served_since_last": 12,
   "avg_latency_ms_since_last": 450.0,
-  "throughput_tps_since_last": 18.5
+  "throughput_tps_since_last": 18.5,
+  "decode_tps_since_last": 24.7,
+  "native_mtp_proposed_tokens_since_last": 0,
+  "native_mtp_accepted_tokens_since_last": 0
 }
 ```
 
@@ -3340,6 +3388,23 @@ Static fields (`model_id`, `model_params_b`, `ram_gb`, `max_context_tokens`,
 `max_concurrency`) are repeated in every heartbeat so the coordinator can
 re-establish state after a coordinator restart without requiring a new
 handshake.
+
+The window fields cover buyer requests completed since the previous
+heartbeat; local (SPEC-001-R011) requests are excluded.
+
+| Field | JSON type | Meaning |
+|---|---|---|
+| `throughput_tps_since_last` | number or null | Buyer-visible completion tokens over the summed admission-to-finish wall time of the window's requests. Queue and prefill are in the denominator, and concurrent rows each add their own wall time. Unchanged; the coordinator drift check reads it. |
+| `decode_tps_since_last` | number or null | Per-row decode rate: the sum over completed requests of generated tokens after the first (all channels, so a gpt-oss analysis channel counts) over the sum of their first-sampled-token to last-sampled-token time. Requests with fewer than two generated tokens, no decode interval, or a continuous-batching replay waiter are left out. `null` when no request qualifies. |
+| `native_mtp_proposed_tokens_since_last` | integer | Native-MTP draft tokens proposed (accepted plus rejected) by the window's continuous-batching rows. 0 when native MTP did not run. |
+| `native_mtp_accepted_tokens_since_last` | integer | Native-MTP draft tokens the target accepted, out of those proposed. |
+
+The three fields after `throughput_tps_since_last` are observability only.
+The coordinator decodes the heartbeat into a key map and reads named fields
+only, so a coordinator that predates them ignores them. They are computed from
+each request's timeline and row counters when the request completes; nothing
+is recorded per token for them. `spec_decode_acceptance_rate` keeps covering
+draft-model speculative decoding only.
 
 #### 6.5.2. `needs_claim` coordinator status signal (NEW in v1.5)
 

@@ -200,39 +200,6 @@ final class StructuredStreamingContentAccumulator: @unchecked Sendable {
     }
 }
 
-/// When a streaming batched row emitted its first buyer-visible chunk. The
-/// serial path reports TTFT from its own generate loop; without this a
-/// streaming batched receipt fell back to the whole request duration.
-/// Non-streaming receipts keep full generation latency (SPEC-015).
-final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var firstTokenAt: Date?
-
-    func mark(_ now: Date = Date()) {
-        lock.lock()
-        defer { lock.unlock() }
-        if firstTokenAt == nil { firstTokenAt = now }
-    }
-
-    /// Wraps the buyer chunk sink so the first chunk actually emitted (after
-    /// stop, UTF-8 and tool filtering) marks the clock. Chunks emitted while
-    /// replaying another waiter's tokens (`replay`) never mark it.
-    func markingFirstChunk<Chunk>(replay: Bool, _ onChunk: @escaping (Chunk) -> Void) -> (Chunk) -> Void {
-        { chunk in
-            // A progress signal carries no buyer-visible output.
-            if !replay, (chunk as? StreamChunk)?.isProgress != true { self.mark() }
-            onChunk(chunk)
-        }
-    }
-
-    func ttftMilliseconds(since startedAt: Date) -> Int64? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let firstTokenAt else { return nil }
-        return max(0, Int64(firstTokenAt.timeIntervalSince(startedAt) * 1000))
-    }
-}
-
 final class StructuredStreamingIdleState: @unchecked Sendable {
     let enabled: Bool
     private let lock = NSLock()
@@ -8929,6 +8896,23 @@ maxTokens: 1,
         }
     }
 
+    /// A batched row's token event on its request timeline: the first event
+    /// is the row's first sampled token, or, for a waiter that attached to a
+    /// row already in flight, its first replayed delivery.
+    static func noteContinuousBatchTokenEvent(_ event: ContinuousBatchSchedulerTokenEvent, on timeline: RequestTimeline) {
+        if event.replayTokens != nil { timeline.markReplayAttach() }
+        timeline.markFirstToken()
+    }
+
+    /// The scheduler returned the row's result: its last token is sampled. A
+    /// terminal replay (a duplicate of a finished request) received no token
+    /// events, so its first delivery is this return.
+    static func noteContinuousBatchRowReturned(_ result: ContinuousBatchSchedulerResult, on timeline: RequestTimeline) {
+        if result.settlementDisposition == .nonSettlingReplay { timeline.markReplayAttach() }
+        if !result.generatedTokens.isEmpty { timeline.markFirstToken() }
+        timeline.markEnded()
+    }
+
     /// SPEC-038 AC-6c: the one post-generation finalize for a batched row,
     /// streaming and non-streaming. It applies the serial path's response
     /// byte cap, output filters, `parseGeneratedOutput` (tool calls,
@@ -8943,7 +8927,6 @@ maxTokens: 1,
         decode: ([Int]) -> String,
         stopTokenFilter: StopTokenFilter,
         generationMilliseconds: Int64,
-        ttftMilliseconds: Int64? = nil,
         modelHash: String?,
         toolCallPrefill: String?
     ) throws -> ContinuousBatchFinalizedRow {
@@ -9025,6 +9008,9 @@ maxTokens: 1,
             cachedPromptTokens: result.cachedPromptTokens,
             decode: decode
         )
+        // A replay waiter shares the original row's counters; only the
+        // original reports them, so a heartbeat window counts each row once.
+        let mtpCounters = result.settlementDisposition == .nonSettlingReplay ? nil : result.nativeMTPCounters
         return ContinuousBatchFinalizedRow(
             completion: CompletionResult(
                 content: parsed.content,
@@ -9034,11 +9020,14 @@ maxTokens: 1,
                 kvCacheBytesReused: kvCacheBytesReused,
                 completionTokens: parsed.completionTokens,
                 generatedCompletionTokens: parsed.generatedCompletionTokens,
-                ttftMilliseconds: ttftMilliseconds,
                 generationMilliseconds: generationMilliseconds,
                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                 modelHashObserved: validObservedModelHash(modelHash),
                 settlementDisposition: result.settlementDisposition,
+                nativeMTPProposedTokens: mtpCounters.map {
+                    Int(clamping: NativeMTPDepthAdaptationState.saturatingAdd($0.acceptedTokens, $0.rejectedTokens))
+                } ?? 0,
+                nativeMTPAcceptedTokens: mtpCounters.map { Int(clamping: $0.acceptedTokens) } ?? 0,
                 reasoningContent: parsed.reasoningContent,
                 reasoningTokens: parsed.reasoningTokens,
                 // The scheduler removes stop tokens from outputTokens; the
@@ -9323,6 +9312,7 @@ maxTokens: 1,
         let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=complete")
         let (prepared, detokenizer) = try await Self.prepareContinuousBatchRequest(
             request,
@@ -9459,9 +9449,15 @@ maxTokens: 1,
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=complete")
             // Non-streaming receipts report full generation latency as TTFT
-            // (SPEC-015): the buyer sees nothing before the whole body.
+            // (SPEC-015): the buyer sees nothing before the whole body. The
+            // sink only records the row's first sampled token.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded)
+                try await scheduler.submit(
+                    submission.schedulerRequest,
+                    admissionWaitPolicy: .callerBounded,
+                    tokenSink: { event in Self.noteContinuousBatchTokenEvent(event, on: timeline) },
+                    onStarted: { timeline.markStarted() }
+                )
             }
         } catch {
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
@@ -9483,6 +9479,7 @@ maxTokens: 1,
             throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
+        Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -9501,7 +9498,6 @@ maxTokens: 1,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
-                    ttftMilliseconds: nil,
                     modelHash: snapshot.modelHash,
                     toolCallPrefill: prepared.toolCallPrefill
                 )
@@ -10028,7 +10024,7 @@ maxTokens: 1,
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
-        let firstTokenClock = ContinuousBatchFirstTokenClock()
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=stream")
             // The SPEC-019 structured idle timeout ends the row as it ends the
@@ -10038,6 +10034,7 @@ maxTokens: 1,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
+                    Self.noteContinuousBatchTokenEvent(event, on: timeline)
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -10046,19 +10043,20 @@ maxTokens: 1,
                         return
                     }
                     // Receipt TTFT is the first buyer-visible chunk this row
-                    // emits, after stop/UTF-8/tool filtering. A duplicate or
-                    // replay waiter's catch-up events never define it.
+                    // emits, after stop/UTF-8/tool filtering; `stream` records
+                    // it on the request timeline. A replay waiter's first
+                    // replayed chunk is its first delivery.
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],
                         stopTokenFilter: stopTokenFilter,
                         requestStops: requestStops,
                         structuredAccumulator: structuredAccumulator,
                         idleState: idleState,
-                        onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
+                        onChunk: onChunk
                     ) {
                         Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                     }
-                })
+                }, onStarted: { timeline.markStarted() })
             }
         } catch {
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
@@ -10079,6 +10077,7 @@ maxTokens: 1,
             // streaming and non-streaming paths cannot drift.
             throw error
         }
+        Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             if let error = streamState.error() {
                 throw error
@@ -10103,7 +10102,6 @@ maxTokens: 1,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
-                    ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
                     modelHash: snapshot.modelHash,
                     toolCallPrefill: prepared.toolCallPrefill
                 )
@@ -10127,19 +10125,15 @@ maxTokens: 1,
             // remainder as the final text renders it, so the buyer's bytes
             // equal the receipt's.
             // The final flush can carry the first buyer-visible chunk when
-            // filtering held all earlier output back, so it marks the clock
-            // too and receipt TTFT is read only after it.
-            var validated = try Self.finishContinuousBatchStream(
+            // filtering held all earlier output back; `stream` records it.
+            let validated = try Self.finishContinuousBatchStream(
                 finalized,
                 state: streamState,
                 request: request,
                 structuredAccumulator: structuredAccumulator,
                 idleState: idleState,
-                onChunk: firstTokenClock.markingFirstChunk(replay: false, onChunk)
+                onChunk: onChunk
             )
-            if validated.ttftMilliseconds == nil {
-                validated.ttftMilliseconds = firstTokenClock.ttftMilliseconds(since: completionStartedAt)
-            }
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             // The turn now commits or aborts its own entry; a later failure
@@ -10383,7 +10377,7 @@ maxTokens: 1,
         let prefillStepSize = prefillStepSize
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let firstToken = FirstTokenRecorder()
+        let timeline = RequestTimeline(admittedAt: startedAt)
         let cancellation = WarmupCancellationRecorder()
         let result: BlockingGenerateResult = try await inferenceGate.withPermit {
             if Task.isCancelled || shouldCancel() {
@@ -10413,7 +10407,7 @@ maxTokens: boundedMaxTokens,
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
                         if !tokens.isEmpty {
-                            firstToken.recordIfMissing()
+                            timeline.markFirstToken()
                             ModelLivenessTracker.shared.recordProgress()
                         }
                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
@@ -10431,7 +10425,7 @@ maxTokens: boundedMaxTokens,
         let elapsed = Date().timeIntervalSince(startedAt) * 1000.0
         return InternalWarmupResult(
             tokensGenerated: result.generationTokenCount,
-            firstTokenElapsedMS: Double(firstToken.elapsedMilliseconds(since: startedAt) ?? Int64(elapsed)),
+            firstTokenElapsedMS: Double(timeline.snapshot().firstTokenMs ?? Int64(elapsed)),
             totalElapsedMS: elapsed
         )
     }
@@ -10456,9 +10450,15 @@ maxTokens: boundedMaxTokens,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let timeline = RequestTimeline.current ?? RequestTimeline()
+        let (marked, snapshot) = try await RequestTimeline.$current.withValue(timeline) {
+            try await completeWithServedSnapshotMarked(request, with: handle, shouldCancel: shouldCancel)
+        }
         // SPEC-018 §3.14: control-text marks never leave the runtime.
-        let (completion, snapshot) = try await completeWithServedSnapshotMarked(request, with: handle, shouldCancel: shouldCancel)
-        return (completion.strippingControlTextMarks(), snapshot)
+        var completion = marked.strippingControlTextMarks()
+        completion.timeline = timeline
+        completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.nonStreamed)
+        return (completion, snapshot)
     }
 
     private func completeWithServedSnapshotMarked(
@@ -10473,6 +10473,7 @@ maxTokens: boundedMaxTokens,
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
         let completionStartedAt = Date()
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
         // Non-streaming execution is a direct entry path with no preceding
@@ -10611,6 +10612,7 @@ maxTokens: boundedMaxTokens,
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
+                    timeline.markStarted()
                     try drainCancelled.check()
                     try Task.checkCancellation()
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
@@ -10654,7 +10656,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         topK: request.topK,
                         repetitionPenalty: Float(request.repetitionPenalty)
                     )
-                    let firstToken = FirstTokenRecorder()
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
                     if Self.speculativeRoute(
                         for: request,
@@ -10682,7 +10683,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 request: request,
                                 stopTokenFilter: stopTokenFilter,
                                 promptTokenCount: promptTokenIds.count,
-                                completionStartedAt: completionStartedAt,
+                                timeline: timeline,
                                 modelHash: snapshot.modelHash,
                                 specDecodeGeneration: snapshot.specDecodeGeneration,
                                 shouldCancel: shouldCancel,
@@ -10870,7 +10871,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     let disposition: GenerateDisposition = {
                                         if !tokens.isEmpty {
-                                            firstToken.recordIfMissing()
+                                            timeline.markFirstToken()
                                             ModelLivenessTracker.shared.recordProgress()
                                         }
                                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
@@ -10934,6 +10935,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     return disposition
                                 })
                             }
+                            timeline.markEnded()
                             Self.logIncrementalOutputFallbacks(
                                 path: "serial",
                                 decodeFallbacks: requestStopObserver.incrementalFallbacks.decode
@@ -11037,7 +11039,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             kvCacheBytesReused: kvCacheBytesReused,
                             completionTokens: parsed.completionTokens,
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
-                            ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner,
@@ -11131,7 +11132,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         request: ChatCompletionRequest,
         stopTokenFilter: StopTokenFilter,
         promptTokenCount: Int,
-        completionStartedAt: Date,
+        timeline: RequestTimeline,
         modelHash: String?,
         specDecodeGeneration: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
@@ -11146,6 +11147,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             targetContext: targetContext,
             draft: draft,
             numDraftTokens: numDraftTokens,
+            timeline: timeline,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled,
             prefillScope: prefillScope,
@@ -11187,7 +11189,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             finishReason: finishReason,
             promptTokens: promptTokenCount,
             completionTokens: generated.generationTokenCount,
-            ttftMilliseconds: generated.firstToken.elapsedMilliseconds(since: completionStartedAt),
             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
             modelHashObserved: validObservedModelHash(modelHash),
             settlementDisposition: .eligibleOwner,
@@ -11214,7 +11215,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let generationTokenCount: Int
         let draftedTokens: Int
         let acceptedTokens: Int
-        let firstToken: FirstTokenRecorder
     }
 
     private static func collectSpeculativeText(
@@ -11224,6 +11224,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         targetContext: ModelContext,
         draft: ModelContainer,
         numDraftTokens: Int,
+        timeline: RequestTimeline,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
         prefillScope: PrefillCancelScope,
@@ -11255,7 +11256,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     var stopStringFilter = GenerationConfigStopStringFilter(
                         stopStrings: targetContext.configuration.effectiveStopStrings
                     )
-                    let firstToken = FirstTokenRecorder()
                     while let token = iterator.next() {
                         try drainCancelled.check()
                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
@@ -11265,7 +11265,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             iterator.discardGeneratedToken()
                             break
                         }
-                        firstToken.recordIfMissing()
+                        timeline.markFirstToken()
                         ModelLivenessTracker.shared.recordProgress()
                         tokenIDs.append(token)
                         detokenizer.append(token: token)
@@ -11279,6 +11279,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                         }
                     }
+                    timeline.markEnded()
                     if let text = stopStringFilter.finish() {
                         output += text
                     }
@@ -11288,8 +11289,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         output: output,
                         generationTokenCount: tokenIDs.count,
                         draftedTokens: telemetry?.draftTokenCount ?? 0,
-                        acceptedTokens: telemetry?.acceptedDraftTokenCount ?? 0,
-                        firstToken: firstToken
+                        acceptedTokens: telemetry?.acceptedDraftTokenCount ?? 0
                     )
                 }
             }
@@ -11313,10 +11313,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         // SPEC-018 §3.14: control-text marks never leave the runtime.
-        try await streamMarked(request, with: handle, shouldCancel: shouldCancel) { chunk in
-            onChunk(chunk.strippingControlTextMarks())
-        }.strippingControlTextMarks()
+        let emit = timeline.noting(onChunk)
+        let marked = try await RequestTimeline.$current.withValue(timeline) {
+            try await streamMarked(request, with: handle, shouldCancel: shouldCancel) { chunk in
+                emit(chunk.strippingControlTextMarks())
+            }
+        }
+        var completion = marked.strippingControlTextMarks()
+        completion.timeline = timeline
+        completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.streamed)
+        return completion
     }
 
     private func streamMarked(
@@ -11331,8 +11339,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // Serial and CB share this boundary: no JSON content reaches the buyer
         // until syntax/schema validation succeeds, including length/stop exits.
         let held = StructuredStreamingContentAccumulator(enabled: true)
-        let startedAt = Date()
-        let firstChunk = ContinuousBatchFirstTokenClock()
         let heldProgress = HeldOutputProgress()
         var completion = try await streamPrepared(request, with: handle, shouldCancel: shouldCancel) { chunk in
             switch chunk {
@@ -11344,7 +11350,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 onChunk(chunk)
             case .reasoning, .toolCallDelta:
                 heldProgress.visibleOutput()
-                firstChunk.mark()
                 onChunk(chunk)
             }
         }
@@ -11353,8 +11358,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         try handle.drainCancelled.check()
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
-        if !held.content.isEmpty { firstChunk.mark(); onChunk(.content(held.content)) }
-        completion.ttftMilliseconds = firstChunk.ttftMilliseconds(since: startedAt)
+        // The buyer's first answer byte is this release; `stream` records it.
+        if !held.content.isEmpty { onChunk(.content(held.content)) }
         return completion
     }
 
@@ -11387,6 +11392,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
+        let timeline = RequestTimeline.current ?? RequestTimeline()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
         let continuousBatchingCapability = try applyContinuousBatchingPolicy(
@@ -11577,6 +11583,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
+                    timeline.markStarted()
                     try drainCancelled.check()
                     try Task.checkCancellation()
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
@@ -11628,10 +11635,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     // honest decode rate even for reasoning models whose
                     // analysis channel is silent in the SSE stream. Fires on
                     // the first decoded token of ANY channel (reasoning or
-                    // final) inside the generate closure below; the duration
-                    // to the generate result is reported as
-                    // `macprovider_generation_ms`.
-                    let decodeTimer = FirstTokenRecorder()
+                    // final) inside the generate closure below (the
+                    // timeline's first token); the duration to the generate
+                    // result is reported as `macprovider_generation_ms`.
                     // SPEC-037 FR-KVP2.5: speculative-decode routing is
                     // determined BEFORE any conversation-cache begin(). A
                     // speculative-routed request acquires no lease, triggers no
@@ -11665,18 +11671,16 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             targetContext: context,
                             draft: draftContainer,
                             numDraftTokens: numDraftTokens,
+                            timeline: timeline,
                             shouldCancel: shouldCancel,
                             drainCancelled: drainCancelled,
                             prefillScope: prefillScope,
                             blockingInferenceExecutor: blockingInferenceExecutor
                         )
-                        // Warm-decode wall-time for the speculative path.
-                        // collectSpeculativeText owns its own decode loop and
-                        // does not fire `decodeTimer`, so this resolves to nil
-                        // here; the field is passed for construction-site parity
-                        // with the non-speculative path.
-                        let decodeEndedAt = Date()
-                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
+                        // The speculative stream has never reported a
+                        // warm-decode window: `macprovider_generation_ms` stays
+                        // null here, as before.
+                        let generationMS: Int64? = nil
                         try drainCancelled.check()
                         try Task.checkCancellation()
 
@@ -11914,10 +11918,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     // An empty first callback would otherwise start
                                     // the clock during prefill and inflate the
                                     // measured decode window. Mirrors the
-                                    // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
+                                    // `if !tokens.isEmpty { timeline.markFirstToken() }`
                                     // guards elsewhere in this file.
                                     if !tokens.isEmpty {
-                                        decodeTimer.recordIfMissing()
+                                        timeline.markFirstToken()
                                         ModelLivenessTracker.shared.recordProgress()
                                     }
                                     if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
@@ -12008,7 +12012,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // client as `macprovider_generation_ms` so the autotune
                         // probe can divide total decoded tokens by this window
                         // even when the reasoning channel is silent in SSE.
-                        let decodeEndedAt = Date()
+                        let decodeEndedAt = ContinuousClock.now
+                        timeline.markEnded(at: decodeEndedAt)
                         Self.logIncrementalOutputFallbacks(
                             path: "serial_stream",
                             decodeFallbacks: streamDecoder.fallbackCount,
@@ -12018,7 +12023,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 streamFilter.maxUncommittedUTF8, labFilter.maxUncommittedUTF8,
                                 textEmitter.incrementalMaxUncommittedUTF8)
                         )
-                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
+                        let generationMS = timeline.millisecondsSinceFirstToken(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
                         if let labSerialHookError {
@@ -16343,9 +16348,12 @@ maxTokens: maxTokens,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
             specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
             specDecodeGeneration: completion.specDecodeGeneration,
+            nativeMTPProposedTokens: completion.nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: completion.nativeMTPAcceptedTokens,
             reasoningContent: completion.reasoningContent,
             reasoningTokens: completion.reasoningTokens,
-            stopSequence: completion.stopSequence
+            stopSequence: completion.stopSequence,
+            timeline: completion.timeline
         )
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
@@ -17567,6 +17575,11 @@ struct CompletionResult: Sendable {
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
+    /// Native-MTP draft tokens proposed and accepted for this request: the
+    /// batched row's scheduler counters, read once at finalize. 0 on every
+    /// other path and on a replay waiter (the original row reports them).
+    let nativeMTPProposedTokens: Int
+    let nativeMTPAcceptedTokens: Int
     /// #1690 E2E-F3: set on every loopback stream result, nil otherwise.
     /// Maps each content UTF-8 byte length at an upstream chunk boundary to
     /// the completion tokens generated through it, as the upstream attested
@@ -17579,6 +17592,9 @@ struct CompletionResult: Sendable {
     /// completion tokens it used (a subset of `completionTokens`).
     let reasoningContent: String?
     let reasoningTokens: Int
+    /// The request's instants (SPEC-015 §3 receipt `ttft_ms`, SPEC-001 usage
+    /// timing). Set by the runtime entry and the transport that served it.
+    var timeline: RequestTimeline?
 
     init(
         content: String,
@@ -17596,12 +17612,18 @@ struct CompletionResult: Sendable {
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil,
+        nativeMTPProposedTokens: Int = 0,
+        nativeMTPAcceptedTokens: Int = 0,
         loopbackPrefixCompletionTokens: [Int: Int]? = nil,
         shardGroupEvidence: ShardGroupCompletionEvidence? = nil,
         reasoningContent: String? = nil,
         reasoningTokens: Int = 0,
-        stopSequence: String? = nil
+        stopSequence: String? = nil,
+        timeline: RequestTimeline? = nil
     ) {
+        self.timeline = timeline
+        self.nativeMTPProposedTokens = max(0, nativeMTPProposedTokens)
+        self.nativeMTPAcceptedTokens = max(0, min(nativeMTPAcceptedTokens, nativeMTPProposedTokens))
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.shardGroupEvidence = shardGroupEvidence
         self.reasoningContent = reasoningContent
@@ -17645,11 +17667,14 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
-            stopSequence: stopSequence
+            stopSequence: stopSequence,
+            timeline: timeline
         )
     }
 
@@ -17670,11 +17695,14 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
             shardGroupEvidence: content == self.content ? shardGroupEvidence : nil,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
-            stopSequence: stopSequence
+            stopSequence: stopSequence,
+            timeline: timeline
         )
     }
 
@@ -17695,11 +17723,14 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens,
-            stopSequence: stopSequence
+            stopSequence: stopSequence,
+            timeline: timeline
         )
     }
 
@@ -17730,36 +17761,11 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            stopSequence: stopSequence
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
+            stopSequence: stopSequence,
+            timeline: timeline
         )
-    }
-}
-
-private final class FirstTokenRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var timestamp: Date?
-
-    func recordIfMissing(now: Date = Date()) {
-        lock.lock()
-        if timestamp == nil {
-            timestamp = now
-        }
-        lock.unlock()
-    }
-
-    func elapsedMilliseconds(since start: Date) -> Int64? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let timestamp else {
-            return nil
-        }
-        return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
-    }
-
-    func durationMilliseconds(until end: Date) -> Int64? {
-        lock.lock(); defer { lock.unlock() }
-        guard let timestamp else { return nil }
-        return max(0, Int64(end.timeIntervalSince(timestamp) * 1000))
     }
 }
 

@@ -1196,6 +1196,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let idlePrewarmer = idlePrewarmer
             let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
                 var startedAt = requestAcceptedAt
+                var timeline = RequestTimeline(admittedAt: requestAcceptedAt)
                 var providerRequestStarted = false
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
                 // the pre-snapshot for warm-swap validation, then
@@ -1227,6 +1228,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             return
                         }
                         startedAt = admittedAt
+                        timeline = RequestTimeline(admittedAt: admittedAt)
                         providerRequestStarted = true
                         try Task.checkCancellation()
                         handle = try await modelRuntime.acquireLocalRequestHandle(request)
@@ -1248,6 +1250,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             return
                         }
                         startedAt = admittedAt
+                        timeline = RequestTimeline(admittedAt: admittedAt)
                         providerRequestStarted = true
                     }
                     defer {
@@ -1256,8 +1259,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     CBTrace.log(auditRequestID, "http_provider_admitted")
                     await idlePrewarmer?.cancelInflightPrewarm()
                     CBTrace.log(auditRequestID, "http_runtime_call")
-                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true })
+                    let requestTimeline = timeline
+                    var (completion, servedSnapshot) = try await RequestTimeline.$current.withValue(requestTimeline) {
+                        try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true })
+                    }
                     CBTrace.log(auditRequestID, "http_runtime_returned")
+                    requestTimeline.noteResponseComplete(completion)
+                    completion.timeline = requestTimeline
                     guard !disconnect.isDisconnected else {
                         // The buyer left while generation ran: a buyer
                         // disconnect, not a completion. No usage, receipt,
@@ -1284,7 +1292,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         completion: completion
                     )
                     let response = Self.chatCompletionResponse(request: request, completion: completion, includeStopSequence: messages)
-                    let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    let ttftMs = requestTimeline.receiptTTFTMilliseconds(.nonStreamed)
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     // SPEC-015 §M.2.2 — bind the receipt's
                     // `model_hash` to the runtime-served snapshot
@@ -1378,7 +1386,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: apiErr,
-                            startedAt: startedAt,
+                            timeline: timeline,
                             modelHashSource: fallbackHashSource,
                             runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                         )
@@ -1417,7 +1425,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: apiError,
-                            startedAt: startedAt,
+                            timeline: timeline,
                             modelHashSource: fallbackHashSource,
                             runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                         )
@@ -1477,7 +1485,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         receiptBuilder: receiptBuilder,
                         request: request,
                         error: parseError,
-                        startedAt: requestAcceptedAt,
+                        timeline: RequestTimeline(admittedAt: requestAcceptedAt),
                         modelHashSource: .warmSwapDisabled,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                     )
@@ -1609,6 +1617,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let logRequestID = Self.logRequestID(requestID, localLease: localLease)
         let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
             var startedAt = Date()
+            var timeline = RequestTimeline(admittedAt: startedAt)
             var providerRequestStarted = false
             var sseStarted = false
             // SPEC-038 AC-25 (`:621`): the before/after boundary is the first
@@ -1626,6 +1635,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         return
                     }
                     startedAt = admittedAt
+                    timeline = RequestTimeline(admittedAt: admittedAt)
                     providerRequestStarted = true
                     try Task.checkCancellation()
                     handle = try await modelRuntime.acquireLocalRequestHandle(request)
@@ -1643,6 +1653,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         return
                     }
                     startedAt = admittedAt
+                    timeline = RequestTimeline(admittedAt: admittedAt)
                     providerRequestStarted = true
                 }
                 defer {
@@ -1670,51 +1681,56 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 let streamedToolArgs = StreamedToolCallArgs()
                 // A buyer that disconnects mid-stream cancels generation
                 // (the runtime stops; a loopback runtime cancels upstream).
-                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true }) { chunk in
-                    // SPEC-001-R015: progress is a relay-only signal; the
-                    // direct HTTP stream's bytes are unchanged.
-                    if chunk.isProgress { return }
-                    emittedBuyerToken.set()
-                    switch chunk {
-                    case .content(let text):
-                        writer.writeSSEJSON(
-                            Self.chatCompletionChunk(
-                                id: id,
-                                created: created,
-                                model: request.model,
-                                delta: ["content": text],
-                                finishReason: NSNull()
+                let requestTimeline = timeline
+                var completion = try await RequestTimeline.$current.withValue(requestTimeline) {
+                    try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true }) { chunk in
+                        // SPEC-001-R015: progress is a relay-only signal; the
+                        // direct HTTP stream's bytes are unchanged.
+                        if chunk.isProgress { return }
+                        requestTimeline.noteEmitted(chunk)
+                        emittedBuyerToken.set()
+                        switch chunk {
+                        case .content(let text):
+                            writer.writeSSEJSON(
+                                Self.chatCompletionChunk(
+                                    id: id,
+                                    created: created,
+                                    model: request.model,
+                                    delta: ["content": text],
+                                    finishReason: NSNull()
+                                )
                             )
-                        )
-                    case .reasoning(let text):
-                        writer.writeSSEJSON(
-                            Self.chatCompletionChunk(
-                                id: id,
-                                created: created,
-                                model: request.model,
-                                delta: ["reasoning_content": text],
-                                finishReason: NSNull()
+                        case .reasoning(let text):
+                            writer.writeSSEJSON(
+                                Self.chatCompletionChunk(
+                                    id: id,
+                                    created: created,
+                                    model: request.model,
+                                    delta: ["reasoning_content": text],
+                                    finishReason: NSNull()
+                                )
                             )
-                        )
-                    case .toolCallDelta(let toolDelta):
-                        if toolCallOpenEmitted.setIfUnset() {
-                            let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
-                            writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
+                        case .toolCallDelta(let toolDelta):
+                            if toolCallOpenEmitted.setIfUnset() {
+                                let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
+                                writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
+                            }
+                            streamedToolArgs.note(toolDelta)
+                            writer.writeSSEJSON(
+                                Self.chatCompletionChunk(
+                                    id: id,
+                                    created: created,
+                                    model: request.model,
+                                    delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
+                                    finishReason: NSNull()
+                                )
+                            )
+                        case .progress:
+                            break
                         }
-                        streamedToolArgs.note(toolDelta)
-                        writer.writeSSEJSON(
-                            Self.chatCompletionChunk(
-                                id: id,
-                                created: created,
-                                model: request.model,
-                                delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
-                                finishReason: NSNull()
-                            )
-                        )
-                    case .progress:
-                        break
                     }
                 }
+                completion.timeline = requestTimeline
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
                 // The buyer left after generation finished: the relay's
                 // cancelled-after-completion case. The tokens were generated,
@@ -1779,7 +1795,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         snapshot: handle.snapshot,
                         settlementMetadata: settlementMetadata
                     )
-                    let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    let ttftMs = requestTimeline.receiptTTFTMilliseconds(.streamed)
                     let receipt = try Self.receiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
@@ -2395,11 +2411,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder?,
         request: ChatCompletionRequest,
         error: APIError,
-        startedAt: Date,
+        timeline: RequestTimeline,
         modelHashSource: ReceiptModelHashSource,
         runtimeSettlementEligible: Bool
     ) throws -> String? {
-        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt, modelHashSource: modelHashSource, runtimeSettlementEligible: runtimeSettlementEligible) {
+        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, timeline: timeline, modelHashSource: modelHashSource, runtimeSettlementEligible: runtimeSettlementEligible) {
         case .issued(let header, _, _):
             return header
         case .omitted, .notReceiptEligible:
@@ -2412,7 +2428,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder?,
         request: ChatCompletionRequest,
         error: APIError,
-        startedAt: Date,
+        timeline: RequestTimeline,
         modelHashSource: ReceiptModelHashSource,
         runtimeSettlementEligible: Bool
     ) throws -> ErrorReceiptHeaderResult {
@@ -2428,7 +2444,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             return .notReceiptEligible
         }
-        let ttftMs = elapsedMilliseconds(since: startedAt)
+        // SPEC-015 §7.6: request accepted to the error emitted.
+        let ttftMs = timeline.receiptTTFTMilliseconds(.nullUsageError)
         let unixTs = Int64(Date().timeIntervalSince1970)
         // SPEC-015 §M.2 / §7.6 — error receipts inherit the same
         // request-start `modelHashSource` a successful receipt would
@@ -2457,10 +2474,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         case .omitted(let reason):
             return .omitted(reason)
         }
-    }
-
-    static func elapsedMilliseconds(since start: Date, now: Date = Date()) -> Int64 {
-        max(0, Int64(now.timeIntervalSince(start) * 1000))
     }
 
     static func receiptConstructionError() -> APIError {
@@ -2585,15 +2598,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // throughput probe measure honest decode rate. Origin:
             // CompletionResult.generatedCompletionTokens (= generationTokenCount).
             "macprovider_generated_completion_tokens": completion.generatedCompletionTokens,
-            // Provider-measured warm-decode wall-time (ms) from the first
-            // decoded token of ANY channel to the generate result. The autotune
-            // throughput probe divides total decoded tokens by this window to
-            // measure honest decode rate for reasoning models whose analysis
-            // channel is silent in the SSE stream (no deltas, no client-visible
-            // timing). Additive vendor extension; does not affect billing or
-            // OpenAI-compat. NSNull when the serve path did not record timing.
+            // Provider-measured wall-time (ms) the autotune throughput probe
+            // divides total decoded tokens by. Its window differs by serving
+            // path (SPEC-001): serial streaming measures from the first decoded
+            // token of ANY channel to the generate result; continuous batching,
+            // native MTP and a shard group measure the whole runtime call,
+            // prefill and queue included; serial non-streaming and the
+            // speculative (draft model) stream record none (NSNull). Additive
+            // vendor extension; does not affect billing or OpenAI-compat.
             "macprovider_generation_ms": completion.generationMilliseconds ?? NSNull(),
         ]
+        // Request timing from the one request timeline, the same meaning on
+        // every serving path (SPEC-001): admitted to left the queue, to the
+        // first sampled token, to the first answer byte, and first sampled
+        // token to last. NSNull when the instant was not reached.
+        let timeline = completion.timeline?.snapshot()
+        usage["macprovider_queue_ms"] = timeline?.queueMs ?? NSNull()
+        usage["macprovider_first_token_ms"] = timeline?.firstTokenMs ?? NSNull()
+        usage["macprovider_first_answer_ms"] = timeline?.firstAnswerMs ?? NSNull()
+        usage["macprovider_decode_ms"] = timeline?.decodeMs ?? NSNull()
         if completion.reasoningContent != nil {
             usage["completion_tokens_details"] = ["reasoning_tokens": completion.reasoningTokens]
         }

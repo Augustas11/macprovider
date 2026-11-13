@@ -5597,7 +5597,7 @@ final class CoordinatorClientTests: XCTestCase {
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
         let helloJSON = Self.jsonString(helloWithoutCapabilities)
         let expectedHeartbeat = """
-        {"avg_latency_ms_since_last":null,"conversation_cache":{"models":[],"process_id":"\(ConversationCacheCountersSnapshot.processID)"},"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
+        {"avg_latency_ms_since_last":null,"conversation_cache":{"models":[],"process_id":"\(ConversationCacheCountersSnapshot.processID)"},"decode_tps_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"native_mtp_accepted_tokens_since_last":0,"native_mtp_proposed_tokens_since_last":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
         """
         let expectedHello = """
         {"attestation":null,"binary_version":"\(CoordinatorClient.binaryVersion)","hostname":"\(Host.current().localizedName ?? "unknown")","max_concurrency":1,"max_context_tokens":20000,"model_hash":"\(String(repeating: "a", count: 64))","model_id":"model-a","model_params_b":0,"provider_id":"provider-test","ram_gb":\(capacity.ramGB),"throughput_tps_estimate":0,"tier":1,"type":"hello","version":1}

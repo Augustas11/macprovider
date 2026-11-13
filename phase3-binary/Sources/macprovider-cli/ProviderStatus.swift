@@ -471,6 +471,14 @@ struct ProviderSnapshot: Sendable {
     var restartCount7d: Int? = nil
     /// Start of the since-last window that requestsServedSinceLast covers.
     var windowStartedAt: Date? = nil
+    /// Per-row decode rate over the window: generated tokens after the first,
+    /// over the rows' own first-token-to-last-token time (SPEC-001). Nil when
+    /// no completed request in the window decoded two or more tokens.
+    var decodeTPSSinceLast: Double? = nil
+    /// Native-MTP draft tokens proposed and accepted by the window's
+    /// completed requests.
+    var nativeMTPProposedTokensSinceLast = 0
+    var nativeMTPAcceptedTokensSinceLast = 0
     /// SPEC-001-R011: local (non-network) use, kept out of every field above.
     var localUsage = LocalUsageSnapshot()
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
@@ -618,6 +626,10 @@ actor ProviderStatus {
     private var windowLatencyMS = 0.0
     private var windowCompletionTokens = 0
     private var windowGenerationSeconds = 0.0
+    private var windowDecodeTokens = 0
+    private var windowDecodeMilliseconds: Int64 = 0
+    private var windowNativeMTPProposedTokens = 0
+    private var windowNativeMTPAcceptedTokens = 0
     private var coordinatorConnected = false
     private var lastConfirmedCoordinatorBuyerServingTrue = false
     private var lastConfirmedCoordinatorBuyerServingAssignedID: String?
@@ -894,6 +906,12 @@ actor ProviderStatus {
                 specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
                 specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
             }
+            if let sample = Self.decodeSample(completion) {
+                windowDecodeTokens += sample.tokens
+                windowDecodeMilliseconds += sample.milliseconds
+            }
+            windowNativeMTPProposedTokens += completion.nativeMTPProposedTokens
+            windowNativeMTPAcceptedTokens += completion.nativeMTPAcceptedTokens
             recordTokenUsage(
                 promptTokens: completion.promptTokens,
                 completionTokens: completion.completionTokens
@@ -901,6 +919,22 @@ actor ProviderStatus {
         }
         await refreshAvailabilityState()
         persistStats()
+    }
+
+    /// One request's share of the window decode rate, read from its timeline
+    /// once at completion: generated tokens after the first (all channels,
+    /// not the buyer-visible `completionTokens`) over first-token-to-last-
+    /// token time. Nil without a decode interval, with fewer than two
+    /// tokens, or for a replay waiter, whose tokens the original row counts.
+    static func decodeSample(_ completion: CompletionResult) -> (tokens: Int, milliseconds: Int64)? {
+        guard completion.generatedCompletionTokens >= 2,
+              let timeline = completion.timeline?.snapshot(), !timeline.replayed,
+              let decodeMs = timeline.decodeMs, decodeMs > 0 else { return nil }
+        return (completion.generatedCompletionTokens - 1, decodeMs)
+    }
+
+    static func decodeTokensPerSecond(tokens: Int, milliseconds: Int64) -> Double? {
+        milliseconds > 0 ? Double(tokens) * 1000.0 / Double(milliseconds) : nil
     }
 
     /// Routes a request's end to the buyer or the SPEC-001-R011 local books.
@@ -1176,6 +1210,9 @@ actor ProviderStatus {
             transitionReason: transitionReason,
             restartCount7d: Self.restarts(recentRestartsAt, within: Self.recentRestartWindow, of: Date()).count,
             windowStartedAt: windowStartedAt,
+            decodeTPSSinceLast: Self.decodeTokensPerSecond(tokens: windowDecodeTokens, milliseconds: windowDecodeMilliseconds),
+            nativeMTPProposedTokensSinceLast: windowNativeMTPProposedTokens,
+            nativeMTPAcceptedTokensSinceLast: windowNativeMTPAcceptedTokens,
             cbSelfCheckAdmissionHold: cbAdmissionHold
         )
         snapshot.localUsage = currentLocalUsage()
@@ -1185,6 +1222,10 @@ actor ProviderStatus {
             windowLatencyMS = 0
             windowCompletionTokens = 0
             windowGenerationSeconds = 0
+            windowDecodeTokens = 0
+            windowDecodeMilliseconds = 0
+            windowNativeMTPProposedTokens = 0
+            windowNativeMTPAcceptedTokens = 0
             specDecodeWindowDraftedTokens = 0
             specDecodeWindowAcceptedTokens = 0
         }
