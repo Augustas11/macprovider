@@ -440,7 +440,10 @@ actor InferenceRelay {
                 builder: builder
             )
         }
-        let state = RelayRequestState(relayBlindSettlement: settlementAttempt)
+        let state = RelayRequestState(
+            relayBlindSettlement: settlementAttempt,
+            timeline: RequestTimeline(admittedAt: startedAt)
+        )
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
         // Stop counting this request against admission before its end frame
@@ -936,7 +939,6 @@ actor InferenceRelay {
                 receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
                 receiptProviderID: receiptProviderID,
                 settlementMetadata: settlementMetadata,
-                startedAt: startedAt,
                 warmSwapEnabled: warmSwapEnabled,
                 relayBlindEvidence: relayBlindEvidence,
                 relayBlindRuntime: relayBlindRuntime,
@@ -1105,7 +1107,6 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
-        startedAt: Date,
         warmSwapEnabled: Bool,
         relayBlindEvidence: RelayBlindValidationEvidence?,
         relayBlindRuntime: RelayBlindProviderRuntime?,
@@ -1118,16 +1119,18 @@ actor InferenceRelay {
         // to the snapshot the runtime ACTUALLY used to drive
         // generation, not to a separately-sampled `currentSnapshot()`
         // which can drift across an actor interleaving / warm-swap.
-        let (completion, servedSnapshot): (CompletionResult, RuntimeSnapshot)
-        if let preparedHandle {
-            (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(
-                request, with: preparedHandle, shouldCancel: { state.isCancelled }
-            )
-        } else {
-            (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(
+        let timeline = state.timeline
+        var (completion, servedSnapshot): (CompletionResult, RuntimeSnapshot) = try await RequestTimeline.$current.withValue(timeline) {
+            if let preparedHandle {
+                return try await modelRuntime.completeWithServedSnapshot(
+                    request, with: preparedHandle, shouldCancel: { state.isCancelled }
+                )
+            }
+            return try await modelRuntime.completeWithServedSnapshot(
                 request, shouldCancel: { state.isCancelled }
             )
         }
+        completion.timeline = timeline
         let modelHashSource = RouterHandler.resolveModelHashSource(
             warmSwapEnabled: warmSwapEnabled,
             snapshot: servedSnapshot,
@@ -1151,6 +1154,7 @@ actor InferenceRelay {
                     sendFrame: sendFrame
                 )
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                let cancelTTFTMs = timeline.receiptTTFTMilliseconds(.buyerCancel)
                 // A cancelled non-streaming request delivered no output. The
                 // buyer_cancel receipt binds the empty delivered prefix with
                 // zero billable usage (SPEC-015 §N.5/§N.7), never the
@@ -1160,7 +1164,7 @@ actor InferenceRelay {
                     providerID: receiptProviderID,
                     request: request,
                     completion: completion,
-                    ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt),
+                    ttftMs: cancelTTFTMs,
                     unixTsSeconds: unixTsSeconds,
                     requestID: requestID,
                     modelHashSource: modelHashSource,
@@ -1192,7 +1196,7 @@ actor InferenceRelay {
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
                 let issued = receiptHeader.map { _ in
-                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: 0, ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt), unixTs: unixTsSeconds)
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: 0, ttftMs: cancelTTFTMs, unixTs: unixTsSeconds)
                 }
                 attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
@@ -1202,6 +1206,7 @@ actor InferenceRelay {
         guard !state.terminalSent else {
             return completion
         }
+        timeline.noteResponseComplete(completion)
         let ordinary = try jsonString(chatCompletionResponse(request: request, completion: completion))
         let response: String
         if let privacySealer {
@@ -1230,7 +1235,7 @@ actor InferenceRelay {
         }
         let seq = state.nextSeq()
         try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, state: state, tier2Session: tier2Session, sendFrame: sendFrame)
-        let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+        let ttftMs = timeline.receiptTTFTMilliseconds(.nonStreamed)
         let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
         let receiptHeader = Self.buildReceiptHeader(
             receiptBuilder: receiptBuilder,
@@ -1495,10 +1500,6 @@ actor InferenceRelay {
         }
     }
 
-    private static func elapsedMilliseconds(since start: Date, now: Date = Date()) -> Int64 {
-        max(0, Int64(now.timeIntervalSince(start) * 1000))
-    }
-
     private static func addSettlementTerminalMetadata(
         _ frame: inout [String: Any],
         settlementMetadata: SettlementReceiptMetadata?
@@ -1645,18 +1646,23 @@ actor InferenceRelay {
             // then emit one combined SSE frame. Tool-call deltas flush any pending
             // content immediately and are never batched. The batcher serializes
             // the @Sendable callback's state and its enqueue order.
-            let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
-                if chunk.isProgress {
-                    if sendsProgress {
-                        Self.sendProgress(requestID: requestID, state: state, sendFrame: sendFrame)
+            let timeline = state.timeline
+            var completion = try await RequestTimeline.$current.withValue(timeline) {
+                try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
+                    if chunk.isProgress {
+                        if sendsProgress {
+                            Self.sendProgress(requestID: requestID, state: state, sendFrame: sendFrame)
+                        }
+                        return
                     }
-                    return
+                    if case .toolCallDelta(let toolDelta) = chunk {
+                        streamedToolArgs.note(toolDelta)
+                    }
+                    timeline.noteEmitted(chunk)
+                    batcher.accept(chunk)
                 }
-                if case .toolCallDelta(let toolDelta) = chunk {
-                    streamedToolArgs.note(toolDelta)
-                }
-                batcher.accept(chunk)
             }
+            completion.timeline = timeline
 
             // Flush remaining batched content only if no tool call opened.
             // Post-open leftovers (</tool_call>, chatter) must not go on the wire.
@@ -1695,6 +1701,7 @@ actor InferenceRelay {
                         sendFrame: sendFrame
                     )
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                    let cancelTTFTMs = timeline.receiptTTFTMilliseconds(.buyerCancel)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: handle.snapshot,
@@ -1705,7 +1712,7 @@ actor InferenceRelay {
                         providerID: receiptProviderID,
                         request: request,
                         completion: cancelled,
-                        ttftMs: cancelled.ttftMilliseconds ?? 0,
+                        ttftMs: cancelTTFTMs,
                         unixTsSeconds: Int64(Date().timeIntervalSince1970),
                         requestID: requestID,
                         modelHashSource: modelHashSource,
@@ -1737,7 +1744,7 @@ actor InferenceRelay {
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
                     let issued = receiptHeader.map { _ in
-                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: cancelled.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
+                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: cancelTTFTMs, unixTs: Int64(Date().timeIntervalSince1970))
                     }
                     attachRelayBlindSettlementReceipt(&endFrame, state: state)
                     try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
@@ -1799,12 +1806,13 @@ actor InferenceRelay {
                     settlementMetadata: settlementMetadata
                 )
                 let deliveredOutput = batcher.deliveredCompleteOutput(sent: chunksSent, completion: completion) ?? .unknown
+                let ttftMs = timeline.receiptTTFTMilliseconds(.streamed)
                 let receiptHeader = Self.buildReceiptHeader(
                     receiptBuilder: receiptBuilder,
                     providerID: receiptProviderID,
                     request: request,
                     completion: completion,
-                    ttftMs: completion.ttftMilliseconds ?? 0,
+                    ttftMs: ttftMs,
                     unixTsSeconds: Int64(Date().timeIntervalSince1970),
                     requestID: requestID,
                     modelHashSource: modelHashSource,
@@ -1827,7 +1835,7 @@ actor InferenceRelay {
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
                 let issued = receiptHeader.map { _ in
-                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: completion.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: Int64(Date().timeIntervalSince1970))
                 }
                 attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
@@ -2513,6 +2521,8 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
 
 private final class RelayRequestState: @unchecked Sendable {
     let relayBlindSettlement: RelayBlindSettlementAttempt?
+    /// The request's instants from provider admission (SPEC-015 §3).
+    let timeline: RequestTimeline
     private let lock = NSLock()
     private var buffer: BlockingChunkBuffer?
     private var terminal = false
@@ -2521,8 +2531,9 @@ private final class RelayRequestState: @unchecked Sendable {
     private var cancelDeliveredOutputBytes: Int64?
     private var currentUsage: [String: Any]?
 
-    init(relayBlindSettlement: RelayBlindSettlementAttempt? = nil) {
+    init(relayBlindSettlement: RelayBlindSettlementAttempt? = nil, timeline: RequestTimeline = RequestTimeline()) {
         self.relayBlindSettlement = relayBlindSettlement
+        self.timeline = timeline
     }
 
     var terminalSent: Bool {
@@ -2591,6 +2602,7 @@ private final class RelayRequestState: @unchecked Sendable {
     }
 
     func cancel(deliveredOutputBytes: Int64? = nil) {
+        timeline.markCancelReceived()
         lock.lock()
         if !cancelled {
             cancelDeliveredOutputBytes = deliveredOutputBytes

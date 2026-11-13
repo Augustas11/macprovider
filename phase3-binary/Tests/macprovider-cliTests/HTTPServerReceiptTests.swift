@@ -64,7 +64,9 @@ final class HTTPServerReceiptTests: XCTestCase {
 
         XCTAssertEqual(response.status, .ok, response.body)
         XCTAssertEqual(parsed.tuple["tokens_out"] as? Int, 2)
-        XCTAssertEqual(parsed.tuple["ttft_ms"] as? Int, 7)
+        // SPEC-015 §3: a non-streaming ttft_ms is the full generation latency
+        // on the provider's request timeline, not the runtime's first token.
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(parsed.tuple["ttft_ms"] as? Int), 0)
         XCTAssertTrue(response.body.contains(#""content":"answer""#), response.body)
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
@@ -695,7 +697,9 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(event["request_id"] as? String, "req-issued")
         XCTAssertEqual(event["model_id"] as? String, "fixture-model")
         XCTAssertEqual(event["tokens_out"] as? Int, 2)
-        XCTAssertEqual(event["ttft_ms"] as? Int, 7)
+        // Non-streaming: full generation latency (SPEC-015 §3), never the
+        // runtime's first-token value.
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(event["ttft_ms"] as? Int), 0)
         XCTAssertNotNil(event["unix_ts"] as? Int)
         XCTAssertEqual(Set(event.keys), Set(["event", "provider_id", "request_id", "model_id", "tokens_out", "ttft_ms", "unix_ts"]))
         for forbidden in ["provider_pubkey", "prompt_hash", "output_hash", "signature", "receipt"] {
@@ -932,7 +936,7 @@ final class HTTPServerReceiptTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
             request: request,
             error: error,
-            startedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            timeline: RequestTimeline(admittedAt: Date(timeIntervalSince1970: 1_800_000_000)),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         ))
@@ -970,7 +974,7 @@ final class HTTPServerReceiptTests: XCTestCase {
             )),
             request: request,
             error: error,
-            startedAt: Date(),
+            timeline: RequestTimeline(),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         )

@@ -112,7 +112,7 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 499, message: "cancelled", type: "server_error", code: "buyer_cancelled"),
-            startedAt: Date(),
+            timeline: RequestTimeline(),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         )
@@ -126,7 +126,7 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 503, message: "loading", type: "server_error", code: "provider_loading"),
-            startedAt: Date(),
+            timeline: RequestTimeline(),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         )
@@ -145,7 +145,7 @@ final class ReceiptAuditTests: XCTestCase {
                 maxOutputTokens: 1,
                 contextTokens: 8
             ).asAPIError()!,
-            startedAt: Date(),
+            timeline: RequestTimeline(),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         )
@@ -160,7 +160,7 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 503, message: "drain", type: "server_error", code: "swap_drain_timeout"),
-            startedAt: Date(),
+            timeline: RequestTimeline(),
             modelHashSource: .warmSwapDisabled,
             runtimeSettlementEligible: true
         )
