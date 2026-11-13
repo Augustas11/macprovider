@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only
+        // prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and indexer prefill tiles are evaluated one
+        // ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
         // Tag 3.32.3-macprovider.49 (#2307) is .48 plus one tests-only commit:
         // the GLM-5-Next row-invariance test checks row counts up to the
         // provider's per-forward decode bound (core qmv limit minus 1, see
@@ -130,7 +133,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "3ac5b028e6c8f54e09836e6a4486bc354794089c"
+            revision: "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
