@@ -1,23 +1,23 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.50
+Version: v0.3.51
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.50 (2026-11-14, small-row route from resolved state, Related: #2335):**
+**Change log v0.3.51 (2026-11-14, small-row route from resolved state, Related: #2335):**
 FR-CB9 decides the serial small-row route from resolved state instead of
 explicit configuration only. Native MTP `auto` counts as inactive when the
 admission set the loader reads (the baked feed on an ordinary install) has no
 verified entry for the loaded model and artifact digest; an unreadable or
-unverifiable set keeps the invariant route. A a decided one-row self-check verdict on the key
+unverifiable set keeps the invariant route. A decided one-row self-check verdict on the key
 the startup identity resolved to counts as batching unable to activate, so an
 ordinary install whose self-check found no net gain takes the serial route from
 its next start. Re-checks wait for a start on the invariant route. Warm-swap
 targets keep the invariant route.
 
-**Change log v0.3.49 (2026-11-13, serial-only small-row route, Related: #2335):**
+**Change log v0.3.50 (2026-11-13, serial-only small-row route, Related: #2335):**
 FR-CB9 states that a row must compute the same bits alone and inside a batch
 in every process that can batch, and names the one configuration that can
 never batch: continuous batching set `off` explicitly, native MTP `off`, no
@@ -27,6 +27,21 @@ process takes the MLX fork's pre-window small-row quantized route (per-row
 (`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler, refuses batching
 lab commands and keeps disk KV on a separate decode-path class. Every other
 state, including a self-check still pending, keeps the row-invariant route.
+
+**Change log v0.3.49 (2026-11-14, FR-CB2 serial-cohort backends run the head's forward first, Related: #2345):**
+FR-CB2 prefill packing: on a backend whose prefill group runs each row in its
+own forward and returns after the last one (its flattened-token cap is below
+the group's tokens; `glm5_next` pagedMLA, 8 tokens), the head and the peers
+with as many prompt tokens left as the head prefill first, and the other
+peers selected for the turn prefill right after them in the same turn.
+Grouping there gains no speed, so a peer in the head's group only delayed the
+head's first token. With the serve path's 2048-token turn budget and 512-token
+chunks (the msb-throughput harness since #2309), msb03 on GLM-5.3-Flash put all
+four rows' first chunks in the head's group, and the 512-token row's first
+token waited four forwards (3.84x serial). Each turn holds the same chunks in
+the same row order, with the same decode windows, so chunk partitions, kernel
+routes, tokens and makespan are unchanged. A backend that shares the forward
+keeps the group whole.
 
 **Change log v0.3.48 (2026-11-12, DeepSeek V4 encoder identity and campaign gate, Related: #2111):**
 The timed queue-wait deadline restarts while a request with a free slot
@@ -1092,7 +1107,10 @@ original-shaped chunk in that same turn while the cumulative prefill work
 stays within the per-iteration budget, never the idle cohort allowance, and
 MUST NOT when a request waits for admission with a free slot; a peer that cannot finish with the head MUST join the
 head's forward only within the budget left after `min(head tokens left,
-budget)`. A row ending on a SPEC-024-R005 resume or snapshot
+budget)`. (v0.3.49) On a backend that runs a group past its flattened-token cap
+as one forward per row, such a peer MUST prefill after the forwards of the
+head and the rows finishing with it, in the same turn, with its chunk
+unchanged. A row ending on a SPEC-024-R005 resume or snapshot
 boundary MAY run its next original-shaped chunk in that same turn; forwards
 stay separate and there is no intervening decode window or peer prefill. The
 next chunk MUST NOT be shrunk, merged or repartitioned to fit a remaining turn
@@ -1668,7 +1686,7 @@ default, (b) a preflight-guarded fallback for unsupported models, and (c) a
 safe mode after scheduler failure. Enabling the flag MUST NOT be a precondition
 for correct serving.
 
-**Small-row route (v0.3.49, resolved state v0.3.50, #2335).** Every process
+**Small-row route (v0.3.50, resolved state v0.3.51, #2335).** Every process
 that can batch decode rows (a CB row, the FR-CB10 self-check, a SPEC-048
 native-MTP round, a shard-group head) MUST run the MLX core's row-invariant
 small-row route, so a row computes the same bits alone and inside a batch. A
