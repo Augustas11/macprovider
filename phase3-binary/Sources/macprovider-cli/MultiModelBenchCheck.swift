@@ -16,17 +16,28 @@ import MacProviderCore
 /// pre-pass that serves once, alone, every prompt index the solo phases did
 /// not reach, `contended` (both models), and an optional `soak`.
 ///
-/// Rates use a measurement interval that skips the first `rampSeconds` of a
-/// phase and ends at its deadline; in `contended` and `soak` it is further
-/// cut to the time during which at least one lane of each model is decoding
-/// (between a request's first and last chunk). Tokens are placed on chunk
-/// arrival times in order: exact when chunks equal completion tokens,
-/// proportional otherwise (recorded per model and phase).
+/// Each runtime is constructed the way `serve` builds one: paged KV on with
+/// the family defaults, the continuous-batching mode explicitly configured
+/// (`--cb-x`, as `serve --continuous-batching` does) and max batch = rows.
+/// A model asked for rows > 1 whose runtime reports a serialized engine, or
+/// whose scheduler never batched two rows, is a `CHECK error`, never a GOAL.
+/// Native MTP is not offered: the production load admits it only through a
+/// signed admission sidecar, and this harness has no lab path around that.
+///
+/// One interval rule for every measured phase: tokens arriving between ramp
+/// end (`rampSeconds`) and the phase deadline, over that wall time. In
+/// `contended` and `soak` both models must have a request in flight for at
+/// least `minimumOverlap` of the interval, else `CHECK error not_overlapped`.
+/// Tokens are placed on chunk arrival times in order: exact when chunks
+/// equal completion tokens, proportional otherwise (recorded per phase).
 ///
 /// stdout ends with `GATE pass|fail ...` then `GOAL share=...`. Exit codes:
 /// 0 pass, 2 gate fail, 3 hang, 1 when the check cannot run.
 enum MultiModelCheck {
     static let rampSeconds: Double = 10
+    static let minimumOverlap = 0.95
+    /// Upper bound on waiting for serve's CB self-check decision at load.
+    static let selfCheckBoundSeconds: Double = 1800
     static let promptsPerModel = 8
     static let schema = "macprovider.multi-model-bench.check.v1"
 
@@ -54,6 +65,8 @@ extension MultiModelBenchCommand {
             modelB: modelB,
             rowsA: rowsA,
             rowsB: rowsB,
+            continuousBatchingA: cbA,
+            continuousBatchingB: cbB,
             maxTokensA: maxTokensA,
             maxTokensB: maxTokensB,
             promptTokensTarget: promptTokens,
@@ -145,19 +158,22 @@ struct MultiModelCheckRunner: Sendable {
         // A runtime's first request can take far longer than the ramp
         // (observed 34 s to first token on a cold second runtime), so each
         // model serves one unmeasured request alone before solo-a.
-        let warmup = try await runSequential(.warmup, MultiModelBenchSlot.allCases.map { ($0, 0) }, lanes: lanes)
+        _ = try await runSequential(.warmup, MultiModelBenchSlot.allCases.map { ($0, 0) }, lanes: lanes)
         let soloA = try await runPhase(.soloA, seconds: config.phaseSeconds, lanes: lanes)
         let soloB = try await runPhase(.soloB, seconds: config.phaseSeconds, lanes: lanes)
         var references: [MultiModelBenchSlot: [Int: MultiModelCheckRequestRecord]] = [.a: [:], .b: [:]]
-        for record in soloA.requests + soloB.requests + warmup.requests {
+        // References come from the solo phases and the pre-pass, which both
+        // run the model's own row count; the warmup (one row) never does.
+        for record in soloA.requests + soloB.requests {
             let slot = MultiModelBenchSlot(rawValue: record.model)!
             if references[slot]![record.promptIndex] == nil { references[slot]![record.promptIndex] = record }
         }
-        let missing = MultiModelBenchSlot.allCases.flatMap { slot in
-            (0..<config.promptsPerModel).filter { references[slot]![$0] == nil }.map { (slot, $0) }
+        var missing: [MultiModelBenchSlot: [Int]] = [:]
+        for slot in MultiModelBenchSlot.allCases {
+            missing[slot] = (0..<config.promptsPerModel).filter { references[slot]![$0] == nil }
         }
-        let referencePass = try await runSequential(.reference, missing, lanes: lanes)
-        for record in referencePass.requests {
+        let referencePass = try await runReferencePass(missing, lanes: lanes)
+        for record in referencePass.requests where !record.filler {
             references[MultiModelBenchSlot(rawValue: record.model)!]![record.promptIndex] = record
         }
         box.update { report in
@@ -177,7 +193,7 @@ struct MultiModelCheckRunner: Sendable {
             let snapshot = await runtimes[slot]!.currentSnapshot()
             box.update { report in
                 guard let index = report.runtimes.firstIndex(where: { $0.model == slot.rawValue }) else { return }
-                report.runtimes[index].recordEnd(snapshot.nativeMTPStatus)
+                report.runtimes[index].recordEnd(snapshot)
             }
         }
 
@@ -199,8 +215,12 @@ struct MultiModelCheckRunner: Sendable {
 
     /// A value that names a local path must exist as a directory; anything
     /// else is treated as a model id and left to the runtime.
+    static func isLocalPath(_ value: String) -> Bool {
+        value.hasPrefix("/") || value.hasPrefix(".") || value.hasPrefix("~")
+    }
+
     static func requireModelDirectory(slot: MultiModelBenchSlot, value: String) throws {
-        guard value.hasPrefix("/") || value.hasPrefix(".") || value.hasPrefix("~") else { return }
+        guard isLocalPath(value) else { return }
         let path = (value as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
@@ -212,15 +232,48 @@ struct MultiModelCheckRunner: Sendable {
         let modelID = slot == .a ? config.modelA : config.modelB
         MultiModelBenchCommand.log("load start model=\(slot.rawValue) id=\(modelID)")
         let started = Date()
+        let rows = rows(slot)
+        let mode = ContinuousBatchingMode(rawValue: slot == .a ? config.continuousBatchingA : config.continuousBatchingB) ?? .on
+        // As serve: paged KV attaches by default with the family block size,
+        // sized to the advertised context (MacProviderCLI.swift serve path).
+        let pagedKV = PagedKVConfig(enabled: true)
+            .withFamilyDefaults(modelFamily: ModelRuntime.localModelFamily(modelID) ?? "")
+            .sizedToCover(contextTokens: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).maxContextTokens)
+        // Serve passes the catalog-verified snapshot-manifest hash; paged KV
+        // (and so CB) attaches only with an artifact identity. A local
+        // snapshot gets the same canonical hash the catalog records.
+        let artifactSHA256: String?
+        if Self.isLocalPath(modelID) {
+            do {
+                artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(
+                    directory: URL(fileURLWithPath: (modelID as NSString).expandingTildeInPath))
+            } catch {
+                throw MultiModelCheckFailure(reason: "artifact_hash_failed model=\(slot.rawValue) detail=\(String(describing: error).replacingOccurrences(of: "\n", with: " "))")
+            }
+        } else {
+            artifactSHA256 = nil
+        }
         let runtime: ModelRuntime
         do {
-            runtime = try await ModelRuntime(modelID: modelID)
+            runtime = try await ModelRuntime(
+                modelID: modelID,
+                familyKVQuantDefault: true,
+                pagedKVConfig: pagedKV,
+                maxBatch: rows,
+                continuousBatchingMode: mode,
+                continuousBatchingCachedTurns: true,
+                // Serve's coverage for every non-autotune runtime.
+                continuousBatchingAcceptanceCoverage: .defaultOn(revocations: []),
+                continuousBatchingModeExplicitlyConfigured: true,
+                verifiedModelArtifactSHA256: artifactSHA256
+            )
         } catch {
             throw MultiModelCheckFailure(reason: "load_failed model=\(slot.rawValue) detail=\(String(describing: error).replacingOccurrences(of: "\n", with: " "))")
         }
         guard await runtime.isLoaded else {
             throw MultiModelCheckFailure(reason: "load_failed model=\(slot.rawValue) detail=not_loaded")
         }
+        let selfCheck = try await runSelfCheck(slot: slot, runtime: runtime, modelID: modelID, rows: rows, mode: mode, artifactSHA256: artifactSHA256)
         let load = MultiModelBenchLoad(
             model: slot.rawValue,
             modelID: modelID,
@@ -236,16 +289,81 @@ struct MultiModelCheckRunner: Sendable {
         )
         let state = MultiModelCheckRuntimeState(
             slot: slot,
+            requestedMode: mode,
+            rows: rows,
             snapshot: await runtime.currentSnapshot(),
-            servedSlots: await runtime.servedSlotLimitForTest()
+            servedSlots: await runtime.servedSlotLimitForTest(),
+            selfCheck: selfCheck
         )
         box.update { report in
             report.loads.append(load)
             report.runtimes.append(state)
+            report.modelArtifactSha256[slot.rawValue] = artifactSHA256
         }
         box.write()
-        MultiModelBenchCommand.log("load done model=\(slot.rawValue) seconds=\(String(format: "%.1f", load.loadSeconds)) engine=\(state.engine) served_slots=\(state.servedSlots) native_mtp=\(state.nativeMTPModeAtLoad) memory_limit=\(load.mlxMemoryLimitBytes)")
+        MultiModelBenchCommand.log("load done model=\(slot.rawValue) seconds=\(String(format: "%.1f", load.loadSeconds)) engine=\(state.engine) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_active=\(state.continuousBatchingActive) paged_kv=\(state.pagedKvDecision ?? "nil") served_slots=\(state.servedSlots) native_mtp=\(state.nativeMTPModeAtLoad) memory_limit=\(load.mlxMemoryLimitBytes)")
+        if rows > 1, state.engine != "continuous_batching" || state.servedSlots < rows {
+            throw MultiModelCheckFailure(reason: "engine_mismatch model=\(slot.rawValue) rows=\(rows) engine=\(state.engine) served_slots=\(state.servedSlots) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_unsupported=\(state.continuousBatchingUnsupportedReason ?? "nil") paged_kv=\(state.pagedKvDecision ?? "nil")")
+        }
         return runtime
+    }
+
+    /// Serve's default-on path: under default-on coverage the runtime serves
+    /// serially until this Mac's CB self-check decides. Runs serve's own
+    /// `ContinuousBatchingSelfCheckDriver` against a private ProviderStatus and
+    /// a private, empty decision store (no prior grant carries over), and
+    /// waits for its decision. Nil when CB is off or nothing can be checked.
+    private func runSelfCheck(
+        slot: MultiModelBenchSlot,
+        runtime: ModelRuntime,
+        modelID: String,
+        rows: Int,
+        mode: ContinuousBatchingMode,
+        artifactSHA256: String?
+    ) async throws -> MultiModelCheckSelfCheck? {
+        guard mode != .off, await runtime.continuousBatchingSelfCheckTarget() != nil else { return nil }
+        let status = ProviderStatus(
+            modelID: modelID,
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: rows),
+            modelHash: artifactSHA256
+        )
+        await runtime.setProviderStatus(status)
+        let storeURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("macprovider-multi-model-check-\(nonce)-\(slot.rawValue)")
+            .appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName)
+        try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let driver = ContinuousBatchingSelfCheckDriver(
+            runtime: runtime,
+            providerStatus: status,
+            store: ContinuousBatchingSelfCheckStore(url: storeURL),
+            ownerPinnedSlots: nil,
+            idleSeconds: 1,
+            pollSeconds: 0.5,
+            log: { MultiModelBenchCommand.log("cb_self_check model=\(slot.rawValue) \($0)") }
+        )
+        MultiModelBenchCommand.log("cb_self_check start model=\(slot.rawValue) max_rows=\(rows)")
+        let started = Date()
+        let task = Task { await driver.run() }
+        var state = await runtime.continuousBatchingSelfCheckState()
+        while state == .pending, Date().timeIntervalSince(started) < MultiModelCheck.selfCheckBoundSeconds {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            state = await runtime.continuousBatchingSelfCheckState()
+        }
+        task.cancel()
+        await task.value
+        let seconds = Date().timeIntervalSince(started)
+        guard state != .pending else {
+            throw MultiModelCheckFailure(reason: "self_check_timeout model=\(slot.rawValue) seconds=\(Int(seconds))")
+        }
+        let outcome: String
+        switch state {
+        case .granted(let slots): outcome = "granted slots=\(slots)"
+        case .refused(let reason): outcome = "refused reason=\(reason)"
+        case .pending: outcome = "pending"
+        }
+        MultiModelBenchCommand.log("cb_self_check done model=\(slot.rawValue) \(outcome) seconds=\(Int(seconds))")
+        return MultiModelCheckSelfCheck(outcome: outcome, seconds: seconds, storePath: storeURL.path)
     }
 
     // MARK: Phases
@@ -280,18 +398,22 @@ struct MultiModelCheckRunner: Sendable {
         records.sort { ($0.startSeconds, $0.model, $0.lane) < ($1.startSeconds, $1.model, $1.lane) }
         var result = finishPhase(phase, seconds: seconds, records: records, started: started)
         let window = (MultiModelCheck.rampSeconds, seconds)
-        var segments = [window]
-        if phase.slots.count == 2 {
-            for slot in phase.slots {
-                segments = MultiModelCheckIntervals.intersect(segments, MultiModelCheckIntervals.union(records.filter { $0.model == slot.rawValue }.compactMap(\.decodeSpan)))
-            }
-        }
-        let intervalSeconds = segments.reduce(0) { $0 + ($1.1 - $1.0) }
-        result.measurementSegments = segments.map { [$0.0, $0.1] }
+        let intervalSeconds = window.1 - window.0
+        result.measurementSegments = [[window.0, window.1]]
         result.measurementIntervalSeconds = intervalSeconds
+        if phase.slots.count == 2 {
+            var overlap = [window]
+            for slot in phase.slots {
+                overlap = MultiModelCheckIntervals.intersect(overlap, MultiModelCheckIntervals.union(records.filter { $0.model == slot.rawValue }.map(\.inFlightSpan)))
+            }
+            result.overlapFraction = overlap.reduce(0) { $0 + ($1.1 - $1.0) } / intervalSeconds
+        }
         for slot in phase.slots {
             let modelRecords = records.filter { $0.model == slot.rawValue }
-            let stats = MultiModelCheckModelPhaseStats(rows: rowCounts[slot]!, records: modelRecords, segments: segments, intervalSeconds: intervalSeconds)
+            var stats = MultiModelCheckModelPhaseStats(rows: rowCounts[slot]!, records: modelRecords, segments: [window], intervalSeconds: intervalSeconds)
+            let scheduler = await lanes.runtimes[slot]!.currentSnapshot().continuousBatching?.scheduler
+            stats.schedulerMaxObservedBatchDepth = scheduler?.maxObservedBatchDepth
+            stats.schedulerSharedForwardCalls = scheduler?.sharedForwardCalls
             if slot == .a { result.a = stats } else { result.b = stats }
         }
         let snapshot = result
@@ -299,7 +421,7 @@ struct MultiModelCheckRunner: Sendable {
         box.write()
         for slot in phase.slots {
             guard let stats = slot == .a ? result.a : result.b else { continue }
-            MultiModelBenchCommand.log("  \(phase.rawValue) model=\(slot.rawValue) rows=\(stats.rows) completed=\(stats.requestsCompleted) tokens_in_interval=\(stats.tokensInInterval) decode_tps=\(stats.decodeTokensPerSecond.map { String(format: "%.2f", $0) } ?? "n/a") ttft_ms_median=\(stats.ttftMsMedian.map { String(format: "%.0f", $0) } ?? "n/a") interval_s=\(String(format: "%.1f", intervalSeconds))")
+            MultiModelBenchCommand.log("  \(phase.rawValue) model=\(slot.rawValue) rows=\(stats.rows) batch_depth_max=\(stats.schedulerMaxObservedBatchDepth.map(String.init) ?? "n/a") completed=\(stats.requestsCompleted) tokens_in_interval=\(stats.tokensInInterval) decode_tps=\(stats.decodeTokensPerSecond.map { String(format: "%.2f", $0) } ?? "n/a") ttft_ms_median=\(stats.ttftMsMedian.map { String(format: "%.0f", $0) } ?? "n/a") interval_s=\(String(format: "%.1f", intervalSeconds))")
             guard stats.requestsCompleted > 0 else {
                 throw MultiModelCheckFailure(reason: "no_completed_requests phase=\(phase.rawValue) model=\(slot.rawValue)")
             }
@@ -307,12 +429,81 @@ struct MultiModelCheckRunner: Sendable {
         guard intervalSeconds > 0 else {
             throw MultiModelCheckFailure(reason: "empty_measurement_interval phase=\(phase.rawValue)")
         }
+        if let overlap = result.overlapFraction {
+            MultiModelBenchCommand.log("  \(phase.rawValue) overlap_fraction=\(String(format: "%.3f", overlap))")
+            guard overlap >= MultiModelCheck.minimumOverlap else {
+                throw MultiModelCheckFailure(reason: "not_overlapped phase=\(phase.rawValue) overlap_fraction=\(String(format: "%.3f", overlap)) required=\(MultiModelCheck.minimumOverlap)")
+            }
+        }
+        // A rows > 1 model whose scheduler never put two rows in one forward
+        // ran serialized, whatever the load-time snapshot said.
+        for slot in phase.slots where rowCounts[slot]! > 1 {
+            let depth = (slot == .a ? result.a : result.b)?.schedulerMaxObservedBatchDepth ?? 0
+            guard depth >= 2 else {
+                throw MultiModelCheckFailure(reason: "engine_mismatch phase=\(phase.rawValue) model=\(slot.rawValue) rows=\(rowCounts[slot]!) scheduler_max_observed_batch_depth=\(depth)")
+            }
+        }
         return result
     }
 
-    /// Serves each (model, prompt index) once, alone, one after another: the
-    /// warmup, and the reference pre-pass that gives every index served under
-    /// contention a solo reference.
+    /// Serves each missing prompt index once per model, that model alone, on
+    /// the model's own row count: `rows` lanes take indices from a shared
+    /// queue, and a lane with no index left serves filler requests (excluded
+    /// from references) while real ones are still decoding, so the batch the
+    /// reference decoded in has the same row count as the solo phase.
+    private func runReferencePass(_ missing: [MultiModelBenchSlot: [Int]], lanes: MultiModelCheckLanes) async throws -> MultiModelCheckPhaseResult {
+        let started = beginPhase(.reference, seconds: 0)
+        var records: [MultiModelCheckRequestRecord] = []
+        do {
+            for slot in MultiModelBenchSlot.allCases {
+                guard let indices = missing[slot], !indices.isEmpty else { continue }
+                let queue = MultiModelCheckReferenceQueue(indices)
+                let count = rows(slot)
+                let modelRecords = try await withThrowingTaskGroup(of: [MultiModelCheckRequestRecord].self) { group in
+                    for lane in 0..<count {
+                        group.addTask {
+                            var laneRecords: [MultiModelCheckRequestRecord] = []
+                            var sequence = 0
+                            while true {
+                                let promptIndex: Int
+                                let filler: Bool
+                                if let next = await queue.take() {
+                                    promptIndex = next
+                                    filler = false
+                                } else if await queue.realInFlight > 0 {
+                                    promptIndex = (lane + sequence) % lanes.promptCount
+                                    filler = true
+                                } else {
+                                    break
+                                }
+                                var record = try await lanes.serve(phase: .reference, slot: slot, lane: lane, sequence: sequence, promptIndex: promptIndex, phaseStart: started)
+                                if filler { record.filler = true } else { await queue.finished() }
+                                laneRecords.append(record)
+                                sequence += 1
+                            }
+                            return laneRecords
+                        }
+                    }
+                    var all: [MultiModelCheckRequestRecord] = []
+                    for try await laneRecords in group { all.append(contentsOf: laneRecords) }
+                    return all
+                }
+                records.append(contentsOf: modelRecords)
+            }
+        } catch {
+            endPhase(.reference, failedWith: error)
+            throw error
+        }
+        lanes.attachOutputs(&records)
+        let result = finishPhase(.reference, seconds: 0, records: records, started: started)
+        box.update { $0.phases[$0.phases.count - 1] = result }
+        box.write()
+        MultiModelBenchCommand.log("  reference served=\(records.filter { !$0.filler }.count) filler=\(records.filter(\.filler).count)")
+        return result
+    }
+
+    /// Serves each (model, prompt index) once, alone, one after another (the
+    /// unmeasured warmup).
     private func runSequential(_ phase: MultiModelCheckPhase, _ items: [(MultiModelBenchSlot, Int)], lanes: MultiModelCheckLanes) async throws -> MultiModelCheckPhaseResult {
         let started = beginPhase(phase, seconds: 0)
         var records: [MultiModelCheckRequestRecord] = []
@@ -583,6 +774,27 @@ struct MultiModelCheckLanes: Sendable {
     }
 }
 
+/// Prompt indices still to serve in a reference pre-pass, and how many
+/// real (non-filler) requests are still decoding.
+actor MultiModelCheckReferenceQueue {
+    private var pending: [Int]
+    private(set) var realInFlight = 0
+
+    init(_ indices: [Int]) {
+        pending = indices
+    }
+
+    func take() -> Int? {
+        guard !pending.isEmpty else { return nil }
+        realInFlight += 1
+        return pending.removeFirst()
+    }
+
+    func finished() {
+        realInFlight -= 1
+    }
+}
+
 /// Monotonic chunk arrival times for one request.
 final class MultiModelCheckChunkLog: @unchecked Sendable {
     private let lock = NSLock()
@@ -719,6 +931,8 @@ struct MultiModelCheckReport: Encodable, Sendable {
     let processEnvironment: MultiModelBenchProcessEnvironment
     var loads: [MultiModelBenchLoad] = []
     var runtimes: [MultiModelCheckRuntimeState] = []
+    /// Canonical snapshot-manifest hash passed as the verified artifact identity.
+    var modelArtifactSha256: [String: String] = [:]
     var phases: [MultiModelCheckPhaseResult] = []
     var references: [MultiModelCheckReference] = []
     var outputComparison: [MultiModelCheckOutputComparison] = []
@@ -776,6 +990,9 @@ struct MultiModelCheckConfig: Encodable, Sendable {
     let modelB: String
     let rowsA: Int
     let rowsB: Int
+    /// Explicitly configured continuous-batching mode per model (`--cb-x`).
+    let continuousBatchingA: String
+    let continuousBatchingB: String
     let maxTokensA: Int
     let maxTokensB: Int
     let promptTokensTarget: Int
@@ -791,10 +1008,8 @@ struct MultiModelCheckConfig: Encodable, Sendable {
     let tokenCapturePath: String
 }
 
-/// What the runtime actually does with concurrent requests, as constructed
-/// here: `ModelRuntime(modelID:)` defaults (max_batch 1, continuous batching
-/// mode off, native MTP mode off, no signed CB policy or MTP sidecar). The
-/// harness reports this; it does not change it.
+/// What the runtime actually does with concurrent requests, as reported by
+/// its own snapshot after the serve-shaped construction in `load`.
 struct MultiModelCheckRuntimeState: Encodable, Sendable {
     let model: String
     let constructedWith: String
@@ -817,11 +1032,17 @@ struct MultiModelCheckRuntimeState: Encodable, Sendable {
     var nativeMTPForwardsAtEnd: UInt64?
     /// True only when the runtime ran MTP forwards during the check.
     var nativeMTPActive: Bool?
+    var continuousBatchingActiveAtEnd: Bool?
+    var schedulerMaxObservedBatchDepthAtEnd: Int?
+    var schedulerSharedForwardCallsAtEnd: Int?
+    /// Serve's CB self-check run at load; nil when CB is off or uncheckable.
+    let selfCheck: MultiModelCheckSelfCheck?
 
-    init(slot: MultiModelBenchSlot, snapshot: RuntimeSnapshot, servedSlots: Int) {
+    init(slot: MultiModelBenchSlot, requestedMode: ContinuousBatchingMode, rows: Int, snapshot: RuntimeSnapshot, servedSlots: Int, selfCheck: MultiModelCheckSelfCheck?) {
+        self.selfCheck = selfCheck
         let cb = snapshot.continuousBatching
         model = slot.rawValue
-        constructedWith = "ModelRuntime(modelID:) defaults: max_batch=1 continuous_batching_mode=off native_mtp_mode=off, no signed CB policy, no native MTP admission sidecar"
+        constructedWith = "serve shape: paged_kv=on (family defaults) max_batch=\(rows) continuous_batching_mode=\(requestedMode.rawValue) explicitly_configured=true cached_turns=true verified_artifact_sha256=canonical snapshot-manifest hash, default-on CB coverage decided by serve's self-check driver, native_mtp_mode=off (no signed admission sidecar), no signed CB policy"
         engine = cb?.active == true ? "continuous_batching" : "serial_inference_gate"
         self.servedSlots = servedSlots
         continuousBatchingMode = cb?.mode.rawValue
@@ -837,11 +1058,21 @@ struct MultiModelCheckRuntimeState: Encodable, Sendable {
         nativeMTPReasonAtLoad = snapshot.nativeMTPStatus.lastReason.rawValue
     }
 
-    mutating func recordEnd(_ status: NativeMTPStatusSnapshot) {
+    mutating func recordEnd(_ snapshot: RuntimeSnapshot) {
+        let status = snapshot.nativeMTPStatus
+        continuousBatchingActiveAtEnd = snapshot.continuousBatching?.active
+        schedulerMaxObservedBatchDepthAtEnd = snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth
+        schedulerSharedForwardCallsAtEnd = snapshot.continuousBatching?.scheduler?.sharedForwardCalls
         nativeMTPModeAtEnd = status.mode.rawValue
         nativeMTPForwardsAtEnd = status.mtpForwards
         nativeMTPActive = status.mtpForwards > 0
     }
+}
+
+struct MultiModelCheckSelfCheck: Encodable, Sendable {
+    let outcome: String
+    let seconds: Double
+    let storePath: String
 }
 
 struct MultiModelCheckRequestRecord: Encodable, Sendable {
@@ -861,17 +1092,16 @@ struct MultiModelCheckRequestRecord: Encodable, Sendable {
     var outputSha256: String
     var outputTokenIDs: [Int]?
     var outputText: String
+    /// Reference pre-pass only: served to keep the row count, not a reference.
+    var filler = false
 
     enum CodingKeys: String, CodingKey {
         case model, lane, promptIndex, requestID, startSeconds, endSeconds, chunkOffsetsSeconds
-        case promptTokens, completionTokens, finishReason, ttftMilliseconds, outputKind, outputSha256
+        case promptTokens, completionTokens, finishReason, ttftMilliseconds, outputKind, outputSha256, filler
     }
 
-    /// First to last chunk: the time this request is actively decoding.
-    var decodeSpan: (Double, Double)? {
-        guard let first = chunkOffsetsSeconds.first, let last = chunkOffsetsSeconds.last else { return nil }
-        return (first, last)
-    }
+    /// Submission to completion: the time this request is in flight.
+    var inFlightSpan: (Double, Double) { (startSeconds, endSeconds) }
 
     /// Arrival time of each completion token: chunk `j * chunks / tokens`.
     var tokenArrivals: [Double] {
@@ -891,6 +1121,9 @@ struct MultiModelCheckModelPhaseStats: Encodable, Sendable {
     let ttftMsP95: Double?
     /// `exact` when every request's chunk count equals its completion tokens.
     let tokenChunkMapping: String
+    /// Cumulative CB scheduler counters at phase end (nil when no scheduler).
+    var schedulerMaxObservedBatchDepth: Int?
+    var schedulerSharedForwardCalls: Int?
 
     init(rows: Int, records: [MultiModelCheckRequestRecord], segments: [(Double, Double)], intervalSeconds: Double) {
         self.rows = rows
@@ -915,6 +1148,8 @@ struct MultiModelCheckPhaseResult: Encodable, Sendable {
     var physFootprintMaxBytes: UInt64?
     var measurementIntervalSeconds: Double?
     var measurementSegments: [[Double]] = []
+    /// Contended/soak: share of the interval with a request of each model in flight.
+    var overlapFraction: Double?
     var a: MultiModelCheckModelPhaseStats?
     var b: MultiModelCheckModelPhaseStats?
     var requests: [MultiModelCheckRequestRecord] = []

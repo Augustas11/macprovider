@@ -87,12 +87,21 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("soak-seconds"), help: "--check: contended soak after the contended phase; 0 skips it. Default 0.")
     var soakSeconds: Double = 0
 
+    @Option(name: .customLong("cb-a"), help: "--check: continuous-batching mode for model A, explicitly configured as `serve --continuous-batching` does: off, canary or on. Default on.")
+    var cbA: String = ContinuousBatchingMode.on.rawValue
+
+    @Option(name: .customLong("cb-b"), help: "--check: continuous-batching mode for model B (off, canary, on). Default on.")
+    var cbB: String = ContinuousBatchingMode.on.rawValue
+
     mutating func validate() throws {
         if check {
             guard rowsA > 0, rowsB > 0 else { throw ValidationError("--rows-a and --rows-b must be > 0") }
             guard maxTokensA > 0, maxTokensB > 0 else { throw ValidationError("--max-tokens-a and --max-tokens-b must be > 0") }
             guard phaseSeconds > MultiModelCheck.rampSeconds else {
                 throw ValidationError("--phase-seconds must exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
+            }
+            for (flag, value) in [("--cb-a", cbA), ("--cb-b", cbB)] where ContinuousBatchingMode(rawValue: value) == nil {
+                throw ValidationError("\(flag) must be off, canary or on")
             }
             guard soakSeconds == 0 || soakSeconds > MultiModelCheck.rampSeconds else {
                 throw ValidationError("--soak-seconds must be 0 or exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
@@ -592,6 +601,7 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
     private var report: MultiModelBenchReport?
     private var activePhase: String?
     private var lastChunkAt = Date()
+    private var warnedForChunkAt: Date?
     private var phaseFootprintMax: UInt64 = 0
     private var stopped = false
     private var thread: Thread?
@@ -663,6 +673,12 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
             }
             if activePhase != nil, let footprint { phaseFootprintMax = max(phaseFootprintMax, footprint) }
             let idle = Date().timeIntervalSince(lastChunkAt)
+            // Half-way warning, once per stall, so an operator or script can
+            // `sample` the process before the watchdog exits it.
+            if let phase = activePhase, idle >= watchdogSeconds / 2, idle < watchdogSeconds, warnedForChunkAt != lastChunkAt {
+                warnedForChunkAt = lastChunkAt
+                FileHandle.standardError.write(Data("multi-model-bench: WATCHDOG warn phase=\(phase) seconds_since_last_chunk=\(Int(idle)) pid=\(getpid())\n".utf8))
+            }
             guard let phase = activePhase, idle >= watchdogSeconds else {
                 lock.unlock()
                 continue
