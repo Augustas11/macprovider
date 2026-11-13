@@ -17,6 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.59 (#2327) on 3.32.3-macprovider.58:
+        // Qwen2-VL post-vision decode uses fused non-traditional RoPE when
+        // the three M-RoPE axes share one rope delta; per-row deltas and
+        // traditional RoPE stay on the position-id path.
         // Tag 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
         // v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row
         // of a qualifying affine weight takes affine_qmv_mma1, a single-row
@@ -151,7 +155,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e"
+            revision: "7ee1b3f73d719726c86b39da11a715be5d1c197e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
