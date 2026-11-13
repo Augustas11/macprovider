@@ -115,6 +115,18 @@ while sessions regenerated evidence instead of deploying. Each is binding.
       of them fixes to earlier tooling PRs (#2090–#2094, #2097, #2101–#2105),
       produced no new live capability. #2081 was closed as a "handoff" with
       nothing released, and #2082 sat merged but not live.
+14. **Merged or closed work leaves nothing behind.** When a PR merges or its
+    issue closes, delete everything that work left on the machines it used,
+    the same day: worktrees, local branches, lab folders, build directories,
+    model copies and loose PR-body files. This covers leftovers from other
+    sessions too.
+    - Keep only: open work, the private `macprovider-internal` repo, and main
+      clones that host worktrees.
+    - A checkout with uncommitted or unpushed work is not deleted. Check
+      GitHub for the merge state first; if the work is not there, report the
+      checkout to the operator.
+    - Why: on 2026-11-12 a development Mac ran out of disk because merged
+      campaigns had left worktrees, builds and model copies behind.
 
 ## Project Overview
 
