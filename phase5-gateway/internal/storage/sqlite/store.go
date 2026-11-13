@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -186,6 +187,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureDemandEventsPrivacyBuckets(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureDemandEventsServingTelemetryColumns(ctx); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, walletSessionDDL); err != nil {
 		return err
 	}
@@ -354,6 +358,46 @@ func (s *Store) ensureDemandEventsObservationColumns(ctx context.Context) error 
 		return err
 	}
 	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE demand_events ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+			return fmt.Errorf("add demand_events.%s: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+// ensureDemandEventsServingTelemetryColumns adds the nullable SPEC-006-R028
+// columns. Existing rows read NULL; nothing is updated, so the append-only
+// trigger is not involved. Rollback-safe: an older binary inserts by column
+// name and never reads them, so the schema version is unchanged.
+func (s *Store) ensureDemandEventsServingTelemetryColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(demand_events)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range demandEventsServingTelemetryColumns {
 		if existing[column.name] {
 			continue
 		}
@@ -3716,6 +3760,15 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 	if !validDemandFailureReason(event.FailureReason) {
 		return fmt.Errorf("demand failure_reason is not recognized")
 	}
+	servingEngine := event.ServingEngine
+	if servingEngine == "" {
+		servingEngine = "unknown"
+	}
+	for _, v := range []*int64{event.GatewayFirstReasoningMs, event.GatewayFirstAnswerMs, event.GatewayOutputTPSMilliTokens} {
+		if v != nil && *v < 0 {
+			return fmt.Errorf("demand serving telemetry must be non-negative")
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO demand_events(
 			request_id, buyer_hash, traffic_class, requested_model, routed_model, provider_id,
@@ -3724,16 +3777,29 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 			prompt_tokens, cached_prompt_tokens, completion_tokens, reasoning_tokens, total_tokens,
 			terminal_result, failure_reason, eligible_provider_exists, substituted,
 			queue_latency_ms, time_to_first_token_ms, provider_prefill_ms, provider_decode_ms,
-			output_tps_millitokens, total_latency_ms, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			output_tps_millitokens, total_latency_ms, created_at,
+			gw_first_reasoning_ms, gw_first_answer_ms, gw_output_tps_millitokens, streaming_mode, serving_engine,
+			provider_reported_queue_ms, provider_reported_first_token_ms, provider_reported_first_answer_ms, provider_reported_decode_ms)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, event.BuyerHash, event.TrafficClass, event.RequestedModel, event.RoutedModel, event.ProviderID,
 		event.PoolID, event.EngineClass, boolInt(event.Stream), boolInt(event.StructuredOutput), boolInt(event.ToolsRequested), event.MaxOutputTokens,
 		event.RequestedPromptTokens, event.RequestedOutputTokens, event.RequestedTotalTokens,
 		event.PromptTokens, event.CachedPromptTokens, event.CompletionTokens, event.ReasoningTokens, event.TotalTokens,
 		event.TerminalResult, event.FailureReason, boolInt(event.EligibleProviderExists), boolInt(event.Substituted),
 		event.QueueLatencyMs, event.TimeToFirstTokenMs, event.ProviderPrefillMs, event.ProviderDecodeMs,
-		event.OutputTPSMilliTokens, event.TotalLatencyMs, encodeTime(event.CreatedAt))
+		event.OutputTPSMilliTokens, event.TotalLatencyMs, encodeTime(event.CreatedAt),
+		nullableInt64(event.GatewayFirstReasoningMs), nullableInt64(event.GatewayFirstAnswerMs), nullableInt64(event.GatewayOutputTPSMilliTokens),
+		event.StreamingMode, servingEngine,
+		nullableInt64(event.ProviderReportedQueueMs), nullableInt64(event.ProviderReportedFirstTokenMs),
+		nullableInt64(event.ProviderReportedFirstAnswerMs), nullableInt64(event.ProviderReportedDecodeMs))
 	return err
+}
+
+func nullableInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func (s *Store) PruneDemandEvents(ctx context.Context, before time.Time) (int64, error) {
@@ -3854,6 +3920,92 @@ func (s *Store) DemandSummary(ctx context.Context, query storage.DemandSummaryQu
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// demandLatencyQuantityColumns are the SPEC-006-R028 quantities, in the
+// order DemandLatencyPercentiles fills a cell. Fixed names, never input.
+var demandLatencyQuantityColumns = []string{"gw_first_reasoning_ms", "gw_first_answer_ms", "gw_output_tps_millitokens"}
+
+// DemandLatencyPercentiles returns nearest-rank p50 and p95 per (requested
+// model, serving engine) over successful rows in [since, until). The
+// unknown_model_id and invalid_model_id buckets are excluded: they pool
+// different models. P50 needs 5 samples and P95 needs 20.
+func (s *Store) DemandLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandLatencyCell, error) {
+	type cellKey struct{ model, engine string }
+	cells := map[cellKey]*storage.DemandLatencyCell{}
+	var order []cellKey
+	for i, column := range demandLatencyQuantityColumns {
+		rows, err := s.db.QueryContext(ctx, `
+			WITH ranked AS (
+				SELECT requested_model, serving_engine, `+column+` AS v,
+					ROW_NUMBER() OVER (PARTITION BY requested_model, serving_engine ORDER BY `+column+`) AS rn,
+					COUNT(*) OVER (PARTITION BY requested_model, serving_engine) AS n
+				FROM demand_events
+				WHERE created_at >= ? AND created_at < ?
+					AND terminal_result = 'success'
+					AND requested_model NOT IN ('unknown_model_id', 'invalid_model_id')
+					AND `+column+` IS NOT NULL
+			)
+			SELECT requested_model, serving_engine, MAX(n),
+				MAX(CASE WHEN rn = (50 * n + 99) / 100 THEN v END),
+				MAX(CASE WHEN rn = (95 * n + 99) / 100 THEN v END)
+			FROM ranked
+			GROUP BY requested_model, serving_engine
+			ORDER BY requested_model, serving_engine`, encodeTime(since.UTC()), encodeTime(until.UTC()))
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var key cellKey
+			var n int64
+			var p50, p95 sql.NullInt64
+			if err := rows.Scan(&key.model, &key.engine, &n, &p50, &p95); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			cell := cells[key]
+			if cell == nil {
+				cell = &storage.DemandLatencyCell{RequestedModel: key.model, ServingEngine: key.engine}
+				cells[key] = cell
+				order = append(order, key)
+			}
+			quantity := storage.DemandLatencyQuantity{Samples: n}
+			if n >= 5 && p50.Valid {
+				v := p50.Int64
+				quantity.P50 = &v
+			}
+			if n >= 20 && p95.Valid {
+				v := p95.Int64
+				quantity.P95 = &v
+			}
+			switch i {
+			case 0:
+				cell.FirstReasoningMs = quantity
+			case 1:
+				cell.FirstAnswerMs = quantity
+			case 2:
+				cell.OutputTPSMilliTokens = quantity
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(order, func(a, b int) bool {
+		if order[a].model != order[b].model {
+			return order[a].model < order[b].model
+		}
+		return order[a].engine < order[b].engine
+	})
+	out := make([]storage.DemandLatencyCell, 0, len(order))
+	for _, key := range order {
+		out = append(out, *cells[key])
+	}
+	return out, nil
 }
 
 func (s *Store) DemandRouteSummary(ctx context.Context, query storage.DemandSummaryQuery) ([]storage.DemandRouteSummaryRow, error) {

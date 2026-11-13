@@ -304,6 +304,24 @@ CREATE INDEX IF NOT EXISTS idx_demand_model_created ON demand_events(requested_m
 CREATE INDEX IF NOT EXISTS idx_demand_buyer_model_created ON demand_events(buyer_hash, requested_model, created_at);
 ` + demandEventsUpdateTriggerDDL
 
+// demandEventsServingTelemetryColumns are the SPEC-006-R028 columns.
+// ensureDemandEventsServingTelemetryColumns adds them to fresh and existing
+// tables alike, so both have one shape. NULL means absent, never zero.
+var demandEventsServingTelemetryColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"gw_first_reasoning_ms", "INTEGER CHECK (gw_first_reasoning_ms IS NULL OR gw_first_reasoning_ms >= 0)"},
+	{"gw_first_answer_ms", "INTEGER CHECK (gw_first_answer_ms IS NULL OR gw_first_answer_ms >= 0)"},
+	{"gw_output_tps_millitokens", "INTEGER CHECK (gw_output_tps_millitokens IS NULL OR gw_output_tps_millitokens >= 0)"},
+	{"streaming_mode", "TEXT NOT NULL DEFAULT '' CHECK (streaming_mode IN ('', 'incremental', 'buffered_kill_switch', 'buffered_provider_downgrade', 'buffered_tool_selection'))"},
+	{"serving_engine", "TEXT NOT NULL DEFAULT 'unknown' CHECK (serving_engine IN ('general_mlx', 'continuous_batching', 'native_mtp', 'unknown'))"},
+	{"provider_reported_queue_ms", "INTEGER CHECK (provider_reported_queue_ms IS NULL OR provider_reported_queue_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_first_token_ms", "INTEGER CHECK (provider_reported_first_token_ms IS NULL OR provider_reported_first_token_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_first_answer_ms", "INTEGER CHECK (provider_reported_first_answer_ms IS NULL OR provider_reported_first_answer_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_decode_ms", "INTEGER CHECK (provider_reported_decode_ms IS NULL OR provider_reported_decode_ms BETWEEN 0 AND 3600000)"},
+}
+
 const demandEventsUpdateTriggerDDL = `
 
 CREATE TRIGGER IF NOT EXISTS demand_events_no_update BEFORE UPDATE ON demand_events

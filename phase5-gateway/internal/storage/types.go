@@ -163,7 +163,35 @@ type DemandEvent struct {
 	ProviderDecodeMs       int64
 	OutputTPSMilliTokens   int64
 	TotalLatencyMs         int64
-	CreatedAt              time.Time
+	// SPEC-006-R028 gateway serving telemetry. nil is stored as NULL.
+	GatewayFirstReasoningMs       *int64
+	GatewayFirstAnswerMs          *int64
+	GatewayOutputTPSMilliTokens   *int64
+	StreamingMode                 string
+	ServingEngine                 string
+	ProviderReportedQueueMs       *int64
+	ProviderReportedFirstTokenMs  *int64
+	ProviderReportedFirstAnswerMs *int64
+	ProviderReportedDecodeMs      *int64
+	CreatedAt                     time.Time
+}
+
+// DemandLatencyQuantity is one SPEC-006-R028 quantity's nearest-rank
+// percentiles over the non-absent values of a cell. P50 is nil below 5
+// samples and P95 below 20.
+type DemandLatencyQuantity struct {
+	Samples int64
+	P50     *int64
+	P95     *int64
+}
+
+// DemandLatencyCell is one (requested model, serving engine) cell.
+type DemandLatencyCell struct {
+	RequestedModel       string
+	ServingEngine        string
+	FirstReasoningMs     DemandLatencyQuantity
+	FirstAnswerMs        DemandLatencyQuantity
+	OutputTPSMilliTokens DemandLatencyQuantity
 }
 
 type DemandSummaryQuery struct {
