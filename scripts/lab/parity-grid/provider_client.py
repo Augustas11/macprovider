@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Streaming OpenAI-compatible client for the parity grid (stdlib only).
+
+usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours.jsonl
+                          [--grid grid.json] [--trials 3] [--rows 1,4]
+                          [--max-context N] [--no-stream-options] [--label provider]
+
+Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
+http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
+A cell with N rows sends N requests at once (one thread each), row r using
+prompt row r, so concurrent rows never share a prompt prefix.
+
+Per trial it writes one "row" line per request and one "aggregate" line.
+decode_tps = (completion_tokens - 1) / (t_last - t_first), where t_first and
+t_last are the arrival times of the first and last content chunks and
+completion_tokens comes from the server's usage frame.
+"""
+import argparse
+import hashlib
+import http.client
+import json
+import os
+import statistics
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import prompts  # noqa: E402
+
+
+def iter_sse_data(lines):
+    """Yield the payload of each `data:` field from an iterable of SSE byte/str lines.
+
+    Stops after `[DONE]`. Comment lines (":") and other fields are ignored.
+    """
+    for raw in lines:
+        line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        line = line.rstrip("\r\n")
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip(" ")
+        if payload == "[DONE]":
+            return
+        yield payload
+
+
+def consume_stream(lines, clock=time.perf_counter):
+    """Fold a chat.completion.chunk SSE stream into one result dict."""
+    text = []
+    reasoning_chars = 0
+    t_first = t_last = None
+    chunks = 0
+    finish = None
+    usage = None
+    error = None
+    for payload in iter_sse_data(lines):
+        now = clock()
+        try:
+            obj = json.loads(payload)
+        except ValueError:
+            error = f"bad SSE json: {payload[:120]}"
+            continue
+        if "error" in obj:
+            error = obj["error"]
+            continue
+        if obj.get("usage"):
+            usage = obj["usage"]
+        for choice in obj.get("choices") or []:
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if delta.get("reasoning_content"):
+                reasoning_chars += len(delta["reasoning_content"])
+            if piece:
+                if t_first is None:
+                    t_first = now
+                t_last = now
+                chunks += 1
+                text.append(piece)
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+    return {
+        "text": "".join(text),
+        "t_first": t_first,
+        "t_last": t_last,
+        "chunks": chunks,
+        "finish": finish,
+        "usage": usage,
+        "reasoning_chars": reasoning_chars,
+        "error": error,
+    }
+
+
+def completion_tokens_of(usage):
+    if not usage:
+        return None
+    return usage.get("completion_tokens")
+
+
+def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1"):
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": True,
+    }
+    if stream_options:
+        body["stream_options"] = {"include_usage": True}
+    t0 = time.perf_counter()
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
+                     headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            detail = resp.read(2000).decode("utf-8", "replace")
+            return {"error": f"http {resp.status}: {detail}", "t0": t0, "t_end": time.perf_counter()}
+        result = consume_stream(iter(resp.readline, b""))
+    except (OSError, http.client.HTTPException) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "t0": t0, "t_end": time.perf_counter()}
+    finally:
+        conn.close()
+    result["t0"] = t0
+    result["t_end"] = time.perf_counter()
+    return result
+
+
+def row_record(res, base):
+    """Turn a run_request result into a JSONL row record."""
+    usage = res.get("usage") or {}
+    ct = completion_tokens_of(usage)
+    t_first, t_last, t0 = res.get("t_first"), res.get("t_last"), res["t0"]
+    span = (t_last - t_first) if t_first is not None and t_last is not None else 0.0
+    text = res.get("text", "")
+    error = res.get("error")
+    if error is None and not usage:
+        error = "no usage frame (server may not honor stream_options)"
+    return {
+        **base,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": ct,
+        "generated_completion_tokens": usage.get("macprovider_generated_completion_tokens"),
+        "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
+        "provider_generation_ms": usage.get("macprovider_generation_ms"),
+        "decode_tps": round((ct - 1) / span, 3) if ct and ct > 1 and span > 0 else None,
+        "ttft_s": round(t_first - t0, 4) if t_first is not None else None,
+        "total_s": round(res["t_end"] - t0, 4),
+        "chunks": res.get("chunks"),
+        "finish": res.get("finish"),
+        "reasoning_chars": res.get("reasoning_chars", 0),
+        "usage": usage or None,
+        "error": error,
+        "text": text,
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "_t_first": t_first,
+        "_t_last": t_last,
+    }
+
+
+def aggregate_record(records, base):
+    """Aggregate tok/s across concurrent rows: sum(ct - 1) / (max t_last - min t_first)."""
+    ok = [r for r in records if r["error"] is None and r["_t_first"] is not None and r["completion_tokens"]]
+    per_row = [r["decode_tps"] for r in records]
+    agg = None
+    if len(ok) == len(records) and ok:
+        span = max(r["_t_last"] for r in ok) - min(r["_t_first"] for r in ok)
+        tokens = sum(r["completion_tokens"] - 1 for r in ok)
+        agg = round(tokens / span, 3) if span > 0 else None
+    valid = [x for x in per_row if x is not None]
+    return {
+        **base,
+        "kind": "aggregate",
+        "aggregate_tps": agg,
+        "per_row_tps": per_row,
+        "per_row_min_tps": min(valid) if valid else None,
+        "per_row_median_tps": round(statistics.median(valid), 3) if valid else None,
+        "completion_tokens_sum": sum(r["completion_tokens"] or 0 for r in records),
+        "errors": [r["error"] for r in records if r["error"]],
+    }
+
+
+def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label):
+    results = [None] * rows
+    barrier = threading.Barrier(rows)
+
+    def worker(r):
+        messages = prompts.build_messages(ctx, r)
+        barrier.wait()
+        results[r] = run_request(port, model, messages, max_tokens, stream_options)
+
+    threads = [threading.Thread(target=worker, args=(r,)) for r in range(rows)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    base = {
+        "side": "provider",
+        "label": label,
+        "model": model_name,
+        "cell": prompts.cell_key(model_name, ctx, max_tokens, rows),
+        "ctx_target": ctx,
+        "max_tokens": max_tokens,
+        "rows": rows,
+        "trial": trial,
+    }
+    records = [row_record(res, {**base, "kind": "row", "row": r}) for r, res in enumerate(results)]
+    agg = aggregate_record(records, base)
+    for rec in records:
+        rec.pop("_t_first")
+        rec.pop("_t_last")
+    return records, agg
+
+
+def main(argv=None):
+    here = os.path.dirname(os.path.abspath(__file__))
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--model", required=True, help="value sent as the request `model` field")
+    ap.add_argument("--model-name", required=True, help="grid model name; must match the reference")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--grid", default=os.path.join(here, "grid.json"))
+    ap.add_argument("--trials", type=int)
+    ap.add_argument("--rows", help="comma list overriding grid rows, e.g. 1,4")
+    ap.add_argument("--max-context", type=int)
+    ap.add_argument("--no-stream-options", action="store_true")
+    ap.add_argument("--label", default="provider")
+    args = ap.parse_args(argv)
+
+    grid = prompts.load_grid(args.grid)
+    if args.rows:
+        grid["rows"] = [int(x) for x in args.rows.split(",")]
+    trials = args.trials or grid.get("trials", 3)
+    stream_options = not args.no_stream_options
+
+    warm = run_request(args.port, args.model, prompts.build_messages(200, 9999),
+                       grid.get("warmup_tokens", 32), stream_options)
+    if warm.get("error"):
+        print(f"warmup failed: {warm['error']}", file=sys.stderr)
+        return 2
+
+    failures = 0
+    with open(args.out, "a") as out:
+        for ctx, max_tokens, rows in prompts.expand_cells(grid, args.max_context):
+            for trial in range(trials):
+                records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
+                                        rows, trial, stream_options, args.label)
+                for rec in records + [agg]:
+                    out.write(json.dumps(rec) + "\n")
+                out.flush()
+                failures += len(agg["errors"])
+                print(f"ours ctx={ctx} out={max_tokens} rows={rows} trial={trial} "
+                      f"agg={agg['aggregate_tps']} per_row={agg['per_row_tps']} errors={agg['errors']}",
+                      file=sys.stderr)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

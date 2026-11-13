@@ -1,0 +1,131 @@
+# Parity grid: our runtime vs stock mlx-lm
+
+Campaign goal: no grid cell where our provider decodes slower than stock Python
+mlx-lm by more than measured noise, with identical greedy output.
+
+Grid (`grid.json`): model x output length (128, 512, 2048, 4096) x context
+(short ~200, ~4k, ~16k tokens) x rows (1 and N concurrent; default N = 4).
+A context is skipped when `ctx + output` exceeds the model's
+`max_position_embeddings` (or `--max-context`). Model name and path are
+always given on the command line; `grid.json` holds placeholders only.
+
+## Files
+
+| file | runs under | what it does |
+|---|---|---|
+| `prompts.py` | both sides | deterministic chat messages per (context, prompt row); cell keys; grid expansion |
+| `reference_mlxlm.py` | python with `mlx_lm` | `mlx_lm.load` + `stream_generate`, greedy (`temp=0`), chat template from the tokenizer |
+| `provider_client.py` | stdlib python | streaming `/v1/chat/completions` client, N concurrent rows by threads |
+| `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
+| `run-grid.sh` | bash | one lab window for one model: reference, provider, client, compare |
+
+## Running a window
+
+Nothing may listen on 8080: the wrapper refuses to start otherwise, and it
+refuses a busy `--port`. It starts `macprovider-cli serve --no-join
+--autotune-candidate` on a loopback port, waits for `/v1/status`
+`model_loaded: true`, runs the client, then stops only the serve PID it started.
+
+```bash
+scripts/lab/parity-grid/run-grid.sh \
+  --model-path "$MODEL_DIR" --model-name llama31-8b-4bit \
+  --bin-dir "$BUILD_DIR" --out-dir "$OUT" \
+  --python "$MLX_VENV/bin/python" \
+  --cb off                      # off | on | canary | auto (auto = flag omitted)
+  # --rows 1,4 --trials 3 --port 18340 --floor 0.03
+  # --serve-env "MACPROVIDER_X=1 OTHER=2"
+  # --skip-reference           (reuse $OUT/reference.jsonl)
+  # --text-fallback-reason "..."
+```
+
+Outputs in `$OUT`: `reference.jsonl`, `provider.jsonl`, `summary.md`,
+`summary.json`, and `serve/` (config, serve logs, `/v1/status`, binary sha256).
+Exit code is compare's: 0 all cells pass, 1 a cell fails, 2 unusable input.
+JSONL files are appended to, so use a fresh `--out-dir` per window.
+
+The pieces also run alone:
+
+```bash
+python reference_mlxlm.py --model-path DIR --model-name NAME --out ref.jsonl
+python3 provider_client.py --port 18340 --model DIR --model-name NAME --out ours.jsonl
+python3 compare.py --ref ref.jsonl --ours ours.jsonl --json summary.json
+```
+
+## Prompts
+
+`prompts.build_messages(ctx_tokens, row)` returns one user message of
+`ctx_tokens * 4` characters (`CHARS_PER_TOKEN = 4.0`, a rough English-prose
+estimate; no tokenizer on the client side). The message starts with a row tag,
+so concurrent rows differ right after the chat-template preamble and do not
+share a prefix-cache entry. Filler text is derived from SHA-256, so it is the
+same on every machine and Python version. The message asks for a 6000-word
+story without stopping, so 4096 tokens are normally reached before EOS.
+Every result line records the real `prompt_tokens`.
+
+## Measurements
+
+Both sides write one JSON line per row per trial with `cell`, `prompt_tokens`,
+`completion_tokens`, `decode_tps`, `ttft_s`, `text`, `sha256` and `finish`
+(`length` = max tokens, `stop` = EOS).
+
+- `decode_tps = (completion_tokens - 1) / (t_last - t_first)`, where t_first
+  and t_last are the times of the first and last token (reference) or the
+  first and last content chunk (provider).
+- Provider `completion_tokens` is the server's `usage.completion_tokens`;
+  `macprovider_generated_completion_tokens`, `cached_prompt_tokens` and
+  `macprovider_generation_ms` are recorded alongside. The client sends
+  `stream_options: {"include_usage": true}` (`--no-stream-options` drops it);
+  a stream without a usage frame is recorded as an error.
+- Reference `completion_tokens` excludes the EOS token (mlx-lm counts it in
+  `generation_tokens`, recorded as `mlxlm_generation_tokens`).
+- The provider also writes one `aggregate` line per trial:
+  `aggregate_tps = sum(completion_tokens - 1) / (max t_last - min t_first)`
+  across the concurrent rows, plus per-row tok/s.
+- Warm-up: both sides decode a short request on prompt row 9999 first.
+
+The reference runs prompt row 0 for every cell (`--trials` times) and, for a
+cell with N rows, prompt rows 1..N-1 single-row (`--extra-row-trials`, default
+1) so every concurrent row has its own single-row reference text.
+
+## Checks (compare.py)
+
+Noise rule, per cell, with 3 trials per side by default:
+
+```
+noise(xs) = (max(xs) - min(xs)) / median(xs)            # one side's trials
+band      = max(floor, noise(ours), noise(ref))         # floor = --floor, default 0.03
+FAIL ratio when median(ours) < median(ref) * (1 - band)
+```
+
+A band above 0.10 is reported as a "noisy cell" note: rerun that cell.
+
+- **score**: `ratio = median(ours) / median(ref)` output tok/s. Multi-row cells
+  score aggregate tok/s against the single-row reference (stock mlx-lm serving
+  requests one at a time). Per-row tok/s ratios are reported, not gated.
+- **gate 1, bytes**: every row's text must equal the single-row reference text
+  for the same prompt. A mismatch fails the cell and reports the first
+  differing UTF-8 byte offset. When byte identity cannot hold for a known
+  reason (e.g. batched kernels reorder float sums), the caller passes
+  `--text-fallback-reason "..."`: the mismatch and reason are recorded as a
+  note and gate 2 decides.
+- **gate 2, tokens**: every row's `completion_tokens` must equal the
+  reference's. Fewer tokens (and more) fail.
+- **prompt**: `prompt_tokens` must equal the reference's; otherwise the two
+  sides did not see the same prompt and the cell fails.
+- **slope**: per (model, context, rows), for consecutive output lengths a < b:
+  `FAIL when ours(b)/ours(a) < ref(b)/ref(a) * (1 - band)`, band taken over
+  both cells and both sides. Ours may fall with length only as much as stock
+  mlx-lm does. A past bug decoded 83 / 58 / 38 tok/s at 128 / 512 / 1024
+  tokens against a flat reference; that shape fails here.
+- A cell missing on either side fails.
+
+## Tests
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_parity_grid
+```
+
+The unit tests cover compare.py on synthetic JSONL, the prompt builder, and the
+client's SSE parsing against an in-process fake server. `reference_mlxlm.py`
+and `run-grid.sh` need a model and a provider build and are only exercised in
+a lab window.
