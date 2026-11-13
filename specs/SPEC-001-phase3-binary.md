@@ -3799,15 +3799,19 @@ else, for example `"served_path":{"path":"continuous_batching","rows":3}`:
 - `rows`, a JSON integer 1..256. For `continuous_batching` and `native_mtp`,
   the mean number of active scheduler rows (prefilling plus decoding, this row
   included) over the request's own decode steps, rounded to the nearest
-  integer and clamped to 1..256. Self-check cohort rows that share a
-  scheduler step with the request count as active rows. A lockstep window
-  that decodes several tokens in one step counts as one step in the mean. A
-  request that finishes with zero decode steps reports `continuous_batching`
-  with `rows` 1. For `serial` it is 1. A shard group head reports `rows` 1:
-  it has no row counters.
+  integer (a half rounds up) and clamped to 1..256. Self-check cohort rows
+  that share a scheduler step with the request count as active rows. A
+  lockstep window that decodes several tokens in one step counts as one step
+  in the mean. A request that finishes with zero decode steps reports
+  `continuous_batching` with `rows` 1. A batched structured-output request
+  that ends on the SPEC-019 idle timeout reports `continuous_batching` with
+  `rows` 1: its row counters are not read. For `serial` it is 1. A shard
+  group head reports `rows` 1: it has no row counters.
 
 A result replayed from a finished row (`non_settling_replay`) carries no
-`served_path`. Tier-2 sessions that are not privacy-class report it like any
+`served_path`. When several waiters share one scheduler row (the same request
+ID), only the row's first waiter carries it; every other waiter's result
+carries none. Tier-2 sessions that are not privacy-class report it like any
 other plaintext dispatch. The provider MUST NOT send `served_path` on any other status,
 on a relay-blind or privacy-class dispatch, or for a request served by an
 external loopback runtime (SPEC-046-R002 `runtime_source`), which cannot

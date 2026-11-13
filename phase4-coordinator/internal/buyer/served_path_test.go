@@ -67,6 +67,10 @@ func TestServedPathValueValidation(t *testing.T) {
 		{"mtp", mtp, servedPathEnd(`{"path":"native_mtp","rows":8}`), "v=1; path=native_mtp; rows=8", ""},
 		{"cb on mtp", mtp, servedPathEnd(`{"path":"continuous_batching","rows":2}`), "v=1; path=continuous_batching; rows=2", ""},
 		{"shard verified", head, verified, "v=1; path=shard_group; rows=1", ""},
+		// The provider encoder's bytes (ServedPathTests.testEndFrameShape);
+		// the end frame does not sort keys, so both member orders arrive.
+		{"provider encoder bytes", mtp, servedPathEnd(`{"path":"native_mtp","rows":3}`), "v=1; path=native_mtp; rows=3", ""},
+		{"provider encoder bytes reordered", mtp, servedPathEnd(`{"rows":3,"path":"native_mtp"}`), "v=1; path=native_mtp; rows=3", ""},
 		{"unknown member", cb, servedPathEnd(`{"path":"serial","rows":1,"provider_id":"x"}`), unknown, "decode"},
 		{"missing rows", cb, servedPathEnd(`{"path":"serial"}`), unknown, "decode"},
 		{"missing path", cb, servedPathEnd(`{"rows":1}`), unknown, "decode"},

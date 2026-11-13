@@ -13848,7 +13848,13 @@
         "phase4-coordinator/internal/ws/shard_groups.go:applyShardGroupAttestation",
         "phase4-coordinator/internal/buyer/served_path.go:decodeServedPath",
         "phase4-coordinator/internal/buyer/served_path.go:servedPathFor",
-        "phase4-coordinator/internal/buyer/served_path.go:acceptServedPath"
+        "phase4-coordinator/internal/buyer/served_path.go:acceptServedPath",
+        "phase3-binary/Sources/macprovider-cli/ServedPath.swift:struct ServedPath",
+        "phase3-binary/Sources/macprovider-cli/ServedPath.swift:static func continuousBatching",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func servedPath(of row: Row)",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func servedPathOrSerial",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:static func attachServedPath",
+        "phase3-binary/Sources/macprovider-cli/ShardGroupRuntime.swift:private func generate("
       ],
       "tests": [
         "phase4-coordinator/internal/routing/phase_test.go:TestRouteTraceHeaderGrammar",
@@ -13865,7 +13871,14 @@
         "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupAttestationOnTerminalFrame",
         "test/integration/served_path_integration_test.go:TestServedPathLabelReachesDemandRowNotBuyer",
         "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathOnlyOnAcceptedSuccess",
-        "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathNeverOnRelayBlindResponse"
+        "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathNeverOnRelayBlindResponse",
+        "phase3-binary/Tests/macprovider-cliTests/ServedPathTests.swift:func testPathDecisionTable",
+        "phase3-binary/Tests/macprovider-cliTests/ServedPathTests.swift:func testRowMeanRoundsToNearestAndClamps",
+        "phase3-binary/Tests/macprovider-cliTests/ServedPathTests.swift:func testEndFrameShape",
+        "phase3-binary/Tests/macprovider-cliTests/ServedPathTests.swift:func testCompletionCopyHelpersPreserveServedPath",
+        "phase3-binary/Tests/macprovider-cliTests/ServedPathTests.swift:func testSchedulerResultCopiesServedPathAndEqualityIgnoresIt",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testServedPathRowAloneZeroStepAndReplay",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testServedPathRowMeanCountsJoinedRowsAndLeavesSchedulingUnchanged"
       ],
       "journeys": [],
       "evidence": [],
