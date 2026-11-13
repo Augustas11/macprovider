@@ -8513,7 +8513,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
-				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
+				if (req.multiTurnToolHistory && !providerToolGrammarEligible(p)) || !providerServesModelOutput(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
@@ -8562,7 +8562,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
-				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
+				if (req.multiTurnToolHistory && !providerToolGrammarEligible(p)) || !providerServesModelOutput(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
@@ -8617,6 +8617,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		before := len(providers)
 		providers = toolGrammarEligibleProviders(providers)
 		if before > 0 && len(providers) == 0 {
+			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+		}
+	}
+	// #2189: every MiniMax M3 request, plain chat included, reaches only
+	// native providers that split its reasoning (providerServesModelOutput).
+	if eligible := modelOutputEligibleProviders(providers); len(eligible) < len(providers) {
+		served := anyProviderModelCandidate(providers, req.Model, poolModelClass)
+		providers = eligible
+		if served && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
 			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 		}
 	}
@@ -10029,6 +10038,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if state != nil && state.multiTurnToolHistory && !providerToolGrammarEligible(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if !providerServesModelOutput(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.

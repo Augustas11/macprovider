@@ -86,6 +86,29 @@ func providerToolGrammarEligible(p pool.Provider) bool {
 	return providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) == "" || providerParsesToolGrammar(p)
 }
 
+// providerServesModelOutput reports whether a provider can serve any request
+// for its loaded model, tools or not. A native MiniMax M3 provider must split
+// the model's <mm:think> reasoning off content (#2189); only a CLI that
+// declares the MiniMax family for its exact loaded model does, which is the
+// providerParsesToolGrammar predicate (a declaration, not a binary version).
+// Other families and external runtimes are unaffected.
+func providerServesModelOutput(p pool.Provider) bool {
+	if providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) != toolGrammarMiniMax {
+		return true
+	}
+	return providerParsesToolGrammar(p)
+}
+
+func modelOutputEligibleProviders(providers []pool.Provider) []pool.Provider {
+	eligible := make([]pool.Provider, 0, len(providers))
+	for _, p := range providers {
+		if providerServesModelOutput(p) {
+			eligible = append(eligible, p)
+		}
+	}
+	return eligible
+}
+
 func toolGrammarEligibleProviders(providers []pool.Provider) []pool.Provider {
 	eligible := make([]pool.Provider, 0, len(providers))
 	for _, p := range providers {
