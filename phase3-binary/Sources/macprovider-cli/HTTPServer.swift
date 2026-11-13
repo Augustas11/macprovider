@@ -2919,7 +2919,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static func continuousBatchingStatusFields(
         _ snapshot: RuntimeContinuousBatchingSnapshot?,
         admissionHold: ContinuousBatchingAdmissionHoldStatus? = nil,
-        smallMRoute: SmallMRoute = SmallMRoute.processRoute
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute,
+        smallMRouteReason: String = SmallMRoute.processReason
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
         let policy = snapshot?.policy
@@ -2927,6 +2928,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
             // SPEC-038 FR-CB9: the MLX small-row route this process runs.
             "small_m_route": smallMRoute.rawValue,
+            "small_m_route_reason": smallMRouteReason,
             "active": snapshot?.active ?? false,
             "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
             "paged_kv_decision": jsonNullable(snapshot?.pagedKVDecision),

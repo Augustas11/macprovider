@@ -124,7 +124,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         // Before the model loads: the MLX core reads the route once per process.
-        let appliedRoute = SmallMRoute.apply(route)
+        let appliedRoute = SmallMRoute.apply(route, reason: "decode_bench_option")
         FileHandle.standardError.write(Data(SmallMRoute.event(
             SmallMRoute.Decision(route: appliedRoute, reason: "decode_bench_option")
         ).utf8))

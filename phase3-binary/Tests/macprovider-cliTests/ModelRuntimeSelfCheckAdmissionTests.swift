@@ -241,7 +241,33 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in }
     }
 
-    private func makeRuntime(backend: SelfCheckRetirementBackend, warmSwapEnabled: Bool = false) -> ModelRuntime {
+    /// SPEC-038 FR-CB9: a serial-only process exposes no self-check target
+    /// and refuses a self-check batch before any row reaches the scheduler.
+    func testSerialOnlyRuntimeRefusesALaterSelfCheck() async throws {
+        let invariant = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .rowInvariant)
+        let invariantTarget = await invariant.continuousBatchingSelfCheckTarget(includeDecided: true)
+        XCTAssertNotNil(invariantTarget)
+
+        let backend = SelfCheckRetirementBackend()
+        let runtime = makeRuntime(backend: backend, smallMRoute: .serialOnly)
+        let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true)
+        XCTAssertNil(target)
+        do {
+            _ = try await runtime.runContinuousBatchingSelfCheckBatch(
+                prompts: [[31], [32]], maxOutputTokens: 2, idPrefix: "serial-only")
+            XCTFail("a serial-only runtime must refuse a self-check batch")
+        } catch ContinuousBatchSchedulerError.requestFailed(let reason) {
+            XCTAssertTrue(reason.hasPrefix("small_m_route_serial_only: cb_self_check"), reason)
+        }
+        let prefilled = await backend.prefillRowCount
+        XCTAssertEqual(prefilled, 0)
+    }
+
+    private func makeRuntime(
+        backend: SelfCheckRetirementBackend,
+        warmSwapEnabled: Bool = false,
+        smallMRoute: SmallMRoute = .rowInvariant
+    ) -> ModelRuntime {
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
         let proof = PagedKVHardwareSizingProof(
@@ -263,6 +289,7 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
             maxBatch: 3, continuousBatchingMode: .on,
             continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: warmSwapEnabled,
+            smallMRoute: smallMRoute,
             pagedKVObservedRuntimeIdentity: identity,
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",

@@ -2250,6 +2250,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Lowercased ids of the model the configured value's provenance record
     /// names; only a switch back to one of them serves `recommendation_apply`.
     private let switchContextProvenanceModelIDs: Set<String>
+    /// SPEC-038 FR-CB9: the MLX small-row route this runtime's process runs.
+    /// On `serialOnly` no self-check target, self-check batch or native-MTP
+    /// drafter exists here, so no row can be batched.
+    let smallMRoute: SmallMRoute
     /// The configured `max_context_override` serve started with; a switch that
     /// serves exactly it serves the config value, not a recomputed one.
     private let configuredMaxContextTokens: Int?
@@ -4055,7 +4059,8 @@ maxTokens: 1,
         authorizedSwitchModelIDs: [String] = [],
         switchMaxContextByTarget: [String: Int] = [:],
         switchMaxBatchByTarget: [String: Int] = [:],
-        switchContextProvenanceModelIDs: Set<String> = []
+        switchContextProvenanceModelIDs: Set<String> = [],
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) async throws {
         if let mlxCacheLimitMB, !Self.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
             throw ModelRuntimeLoadError(
@@ -4181,6 +4186,7 @@ maxTokens: 1,
         self.switchMaxContextByTarget = switchMaxContextByTarget
         self.switchMaxBatchByTarget = switchMaxBatchByTarget
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.smallMRoute = smallMRoute
         self.configuredMaxContextTokens = maxContextTokensOverride
         // #2016: a catalog-bound provider serves the vision model under its
         // rate-card key; the catalog model id selects the profile only with the
@@ -4270,6 +4276,7 @@ maxTokens: 1,
                     resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
                     targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
                     selfTestRunner: self.nativeMTPSelfTestRunner,
+                    route: self.smallMRoute,
                     rejectionObserver: rejectionRecorder.record
                 )
                 candidateNativeMTPDisabledReason = rejectionRecorder.statusReason ?? .tupleNotAdmitted
@@ -4556,6 +4563,7 @@ maxTokens: 1,
         switchMaxContextByTarget: [String: Int] = [:],
         switchMaxBatchByTarget: [String: Int] = [:],
         switchContextProvenanceModelIDs: Set<String> = [],
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute,
         pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil,
         pagedKVHardwareSizingProof: PagedKVHardwareSizingProof? = nil,
         pagedKVRuntimeCacheClass: String = ModelRuntime.pagedKVUnavailableCacheClass,
@@ -4645,6 +4653,7 @@ maxTokens: 1,
         self.switchMaxContextByTarget = switchMaxContextByTarget
         self.switchMaxBatchByTarget = switchMaxBatchByTarget
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.smallMRoute = smallMRoute
         self.configuredMaxContextTokens = maxContextTokensOverride
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -5899,7 +5908,8 @@ maxTokens: 1,
                 revokedTupleSHA256: configuredNativeMTPRevokedTupleSHA256,
                 resolvedArtifactAuthority: configuredNativeMTPResolvedArtifactAuthority,
                 targetGeneration: UInt64(max(1, currentSpecDecodeGeneration + 1)),
-                selfTestRunner: nativeMTPSelfTestRunner
+                selfTestRunner: nativeMTPSelfTestRunner,
+                route: smallMRoute
               ), load.admissionCapability.tupleSHA256 == expectedTuple else {
             throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration admission failed")
         }
@@ -6498,6 +6508,7 @@ maxTokens: 1,
     /// revocation names this model on this runtime revision.
     func continuousBatchingSelfCheckTarget(includeDecided: Bool = false) -> ContinuousBatchingSelfCheckTarget? {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
+              smallMRoute == .rowInvariant,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
               let scheduler = continuousBatchScheduler,
@@ -6787,6 +6798,9 @@ maxTokens: 1,
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         try Task.checkCancellation()
         guard expectedGeneration == selfCheckGeneration else { throw CancellationError() }
+        if let refusal = SmallMRoute.batchingRefusal(route: smallMRoute, entry: "cb_self_check") {
+            throw ContinuousBatchSchedulerError.requestFailed(refusal)
+        }
         guard prompts.count <= maxBatch else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_row_cap_exceeded")
         }
@@ -13154,6 +13168,15 @@ maxTokens: maxTokens,
         )
     }
 
+    /// Why native MTP may not load in this process, or nil. A serial-only
+    /// process (SPEC-038 FR-CB9) refuses it even if an admission set appears
+    /// after startup, because its rounds batch target rows.
+    nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
+        guard mode == .auto else { return "mode_not_auto" }
+        guard route == .rowInvariant else { return "small_m_route_serial_only" }
+        return nil
+    }
+
     private static func loadNativeMTPDrafterIfAdmitted(
         mode: NativeMTPMode,
         targetModelID: String,
@@ -13172,14 +13195,15 @@ maxTokens: maxTokens,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?,
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner,
+        route: SmallMRoute = SmallMRoute.processRoute,
         rejectionObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> NativeMTPRuntimeLoadResult? {
         func reject(reasonCode: String, artifactRole: String) -> NativeMTPRuntimeLoadResult? {
             rejectionObserver(reasonCode)
             return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole)
         }
-        guard mode == .auto else {
-            return reject(reasonCode: "mode_not_auto", artifactRole: "runtime")
+        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
+            return reject(reasonCode: reasonCode, artifactRole: "runtime")
         }
         guard let targetModelRevision else {
             return reject(reasonCode: "target_revision_missing", artifactRole: "target")

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.95
+**Version:** 0.1.96
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.95",
+  "version": "0.1.96",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -617,21 +617,27 @@ routing change; the Swift, core and C rows are unchanged.
 
 Row invariance is required of every process that can batch decode rows: a
 continuous-batching row, a CB self-check, a native-MTP round or a shard-group
-head. A `serve` process that can never batch for its whole lifetime by
-configuration uses the fork's pre-window small-row route (per-row `qmv` below the `qmm` limit) instead (#2335): the provider
-sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`, read once by the core, before any
-model loads, only when continuous batching is set `off` explicitly by YAML,
-environment or CLI, `native_mtp_mode` is `off`, no draft model is configured,
-the process holds no shard-group role and is not an autotune child (SPEC-038
-FR-CB9). Every other state keeps the row-invariant default, including a
-process whose CB is only awaiting its self-check or a canary. Such a process
-refuses to build the continuous-batch scheduler, so no batched row, self-check
-or native-MTP round can run in it; the lab commands that batch
+head. A `serve` process that cannot batch for its whole lifetime uses the
+fork's pre-window small-row route (per-row `qmv` below the `qmm` limit)
+instead (#2335): the provider sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`, read
+once by the core, before any model loads, only when, from resolved state,
+native MTP is inactive (mode `off`, or `auto` with no admission set for the
+model), continuous batching cannot activate (set `off` explicitly, or a
+decided one-row self-check verdict on the current key with no re-check
+scheduled), no draft model is configured, the process holds no shard-group
+role or other warm-swap target and is not an autotune child (SPEC-038 FR-CB9).
+A verdict measured on the invariant route stays valid on the serial route,
+whose serial baseline is faster. Every other state keeps the row-invariant
+default, including a process whose CB is awaiting its self-check or a canary.
+Such a process builds no continuous-batch scheduler, runs no self-check and
+refuses the native-MTP drafter load, so no batched row, self-check or
+native-MTP round can run in it; the lab commands that batch
 (`msb-throughput`, `native-mtp-bench`, `native-mtp-hardware-e2e`,
 `relay-blind-fixture`) exit 2 on a serial-only process. Disk KV and prompt
 snapshots written on one route are a clean miss on the other (SPEC-037
-FR-KVP4 item 10). The route is printed as `event=small_m_route` at startup and
-as `continuous_batching.small_m_route` in local `/v1/status`.
+FR-KVP4 item 10). The route and every condition are printed as
+`event=small_m_route` at startup, and local `/v1/status` reports
+`continuous_batching.small_m_route` and `small_m_route_reason`.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.49` is `3.32.3-macprovider.48`
 (`e246b8fd6`) plus one tests-only commit (#2307): the GLM-5-Next row-invariance
@@ -2599,6 +2605,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.96 (2026-11-14, Related: #2335)** — R003: the serial small-row route
+  is decided from resolved state. Native MTP `auto` with no admission set for
+  the model is inactive, and a decided one-row self-check verdict on the
+  current key makes batching unable to activate, so an ordinary install whose
+  self-check found no net gain takes the serial route from its next start. A
+  serial-only process refuses the native-MTP drafter load and runs no
+  self-check. No pin, admission or policy change.
 - **0.1.95 (2026-11-14, Related: #2335)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.58` (`a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e`) on
   `3.32.3-macprovider.56`: MLX core v0.32.4-macprovider.14 (via mlx-swift
