@@ -1102,10 +1102,13 @@ the generated text up to the first `</think>` is reasoning:
   coordinator routes every MiniMax M3 request, plain chat included, only to a
   native provider that declares the family for its exact loaded model, on
   plaintext, relay-blind and privacy-class routes alike (SPEC-002 v1.6.33).
-  With none it fails 503 `tool_grammar_provider_unavailable` with the
-  retry and settlement semantics of a tool request (SPEC-006 §17.9); a
-  request without tools gets the message "No provider serving this model
-  supports its output format yet".
+  On a plaintext route with none it fails 503
+  `tool_grammar_provider_unavailable` with the retry and settlement
+  semantics of a tool request (SPEC-006 §17.9); a request without tools gets
+  the message "No provider serving this model supports its output format
+  yet". Encrypted reservations use their closed inventories: relay-blind gets
+  the retryable `relay_blind_provider_unsupported` (SPEC-041-R007) and
+  privacy-class gets `privacy_class_unavailable` (SPEC-049-R013).
 - The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
   `finish_reason` as before; `reasoning_content` is not part of it in this
   version.

@@ -136,8 +136,10 @@ func TestMiniMaxPlainChatNeedsTheDeclaringProvider(t *testing.T) {
 }
 
 // #2189: relay-blind and privacy-class reservations apply the same MiniMax
-// output gate: a provider that does not declare the family is never bound,
-// and with no other provider the reservation gets the retryable 503.
+// output gate: a provider that does not declare the family is never bound.
+// The refusal uses the closed inventories: the retryable SPEC-041-R007
+// relay_blind_provider_unsupported, and the SPEC-049-R013 pre-consume
+// privacy_class_unavailable, which names no per-provider cause.
 func TestMiniMaxEncryptedReservationsNeedTheDeclaringProvider(t *testing.T) {
 	const model = "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, model: model})
@@ -148,13 +150,15 @@ func TestMiniMaxEncryptedReservationsNeedTheDeclaringProvider(t *testing.T) {
 		}
 		return relayBlindRequest(t, h.server, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "")
 	}
-	for _, privacy := range []bool{false, true} {
-		response := reserve(privacy)
-		body := response.Body.String()
-		if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"tool_grammar_provider_unavailable"`) ||
-			!strings.Contains(body, `"retryable":true`) || !strings.Contains(body, modelOutputProviderUnavailableMessage) {
-			t.Fatalf("privacy=%v undeclared provider status=%d body=%s, want the retryable 503", privacy, response.Code, body)
-		}
+	relay := reserve(false)
+	if body := relay.Body.String(); relay.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"relay_blind_provider_unsupported"`) ||
+		!strings.Contains(body, `"retryable":true`) {
+		t.Fatalf("relay-blind undeclared provider status=%d body=%s, want the retryable relay_blind_provider_unsupported", relay.Code, body)
+	}
+	private := reserve(true)
+	if body := private.Body.String(); private.Code == http.StatusOK || !strings.Contains(body, `"code":"privacy_class_unavailable"`) ||
+		strings.Contains(body, "tool_grammar") || strings.Contains(body, "output format") {
+		t.Fatalf("privacy undeclared provider status=%d body=%s, want privacy_class_unavailable with no cause", private.Code, body)
 	}
 	if count := countRelayBlindReservations(t, h.server); count != 0 {
 		t.Fatalf("refused reservations created %d rows", count)

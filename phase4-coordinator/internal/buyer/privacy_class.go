@@ -315,7 +315,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 		return selections[order[0]], "", ""
 	}
 	if outputGated {
-		return privacySelection{}, modelOutputProviderUnavailableCode, relayblind.PrivacyRejectCapabilityUnsupported
+		// SPEC-049-R013/R019: a pre-consume failure is privacy_class_unavailable;
+		// the cause stays in the R030 reason only.
+		return privacySelection{}, privacyClassUnavailable, relayblind.PrivacyRejectCapabilityUnsupported
 	}
 	if incapable {
 		return privacySelection{}, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported
@@ -405,10 +407,6 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance, request.EndpointFamily)
 	if code == relayBlindCapabilityRefusalCode {
 		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
-		return
-	}
-	if code == modelOutputProviderUnavailableCode {
-		s.writePrivacyRouteErrorMessage(w, r, phase, code, reason, modelOutputProviderUnavailableMessage)
 		return
 	}
 	if code != "" {
