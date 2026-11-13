@@ -74,7 +74,7 @@ func TestPhaseOrderPrefersMeasuredFitPerPhase(t *testing.T) {
 		if tc.phase == PhaseLongInput {
 			candidates[0], candidates[1] = candidates[1], candidates[0]
 		}
-		d := PhaseOrder(candidates, "m", tc.phase, s, perfNow, 0.99, 0)
+		d := PhaseOrder(candidates, tc.phase, s, perfNow, 0.99, 0)
 		if d.Basis != BasisMeasured || candidates[0].ProviderID != tc.want {
 			t.Fatalf("%s: basis=%s order=%v", tc.phase, d.Basis, ids(candidates))
 		}
@@ -84,7 +84,7 @@ func TestPhaseOrderPrefersMeasuredFitPerPhase(t *testing.T) {
 	warmEndToEnd(s2, "one-slot", 100)
 	warmEndToEnd(s2, "four-slots", 60)
 	candidates := []pool.Provider{phaseProvider("one-slot", 1, 1), phaseProvider("four-slots", 4, 4)}
-	d := PhaseOrder(candidates, "m", PhaseThroughput, s2, perfNow, 0.99, 0)
+	d := PhaseOrder(candidates, PhaseThroughput, s2, perfNow, 0.99, 0)
 	if d.Basis != BasisMeasured || candidates[0].ProviderID != "four-slots" {
 		t.Fatalf("throughput: basis=%s order=%v", d.Basis, ids(candidates))
 	}
@@ -93,24 +93,24 @@ func TestPhaseOrderPrefersMeasuredFitPerPhase(t *testing.T) {
 func TestPhaseOrderFallsBackWithoutEvidence(t *testing.T) {
 	s := NewPerfStore()
 	candidates := []pool.Provider{phaseProvider("a", 1, 1), phaseProvider("b", 1, 1)}
-	d := PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, 0, 0)
+	d := PhaseOrder(candidates, PhaseInteractive, s, perfNow, 0, 0)
 	if d.Basis != BasisFallback || ids(candidates)[0] != "a" || ids(candidates)[1] != "b" {
 		t.Fatalf("no evidence: basis=%s order=%v", d.Basis, ids(candidates))
 	}
 	// One fresh candidate cannot be compared: objective order is kept.
 	warm(s, "b", 10, 1000, 100)
-	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, 0.99, 0)
+	d = PhaseOrder(candidates, PhaseInteractive, s, perfNow, 0.99, 0)
 	if d.Basis != BasisFallback || ids(candidates)[0] != "a" {
 		t.Fatalf("single fresh: basis=%s order=%v", d.Basis, ids(candidates))
 	}
 	// Stale evidence is treated as missing.
 	warm(s, "a", 500, 1000, 10)
-	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow.Add(PerfFreshMaxAge+time.Minute), 0.99, 0)
+	d = PhaseOrder(candidates, PhaseInteractive, s, perfNow.Add(PerfFreshMaxAge+time.Minute), 0.99, 0)
 	if d.Basis != BasisFallback || d.Fresh != 0 || ids(candidates)[0] != "a" {
 		t.Fatalf("stale: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
 	// A nil store always falls back.
-	if d := PhaseOrder(candidates, "m", PhaseInteractive, nil, perfNow, 0, 0); d.Basis != BasisFallback {
+	if d := PhaseOrder(candidates, PhaseInteractive, nil, perfNow, 0, 0); d.Basis != BasisFallback {
 		t.Fatalf("nil store basis=%s", d.Basis)
 	}
 }
@@ -120,12 +120,12 @@ func TestPhaseOrderExploresUnmeasuredProviders(t *testing.T) {
 	warm(s, "a", 10, 1000, 100)
 	warm(s, "b", 20, 1000, 100)
 	candidates := []pool.Provider{phaseProvider("a", 1, 1), phaseProvider("b", 1, 1), phaseProvider("new", 1, 1)}
-	d := PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, PhaseExplorationShare-0.01, 0)
+	d := PhaseOrder(candidates, PhaseInteractive, s, perfNow, PhaseExplorationShare-0.01, 0)
 	if d.Basis != BasisExplore || candidates[0].ProviderID != "new" {
 		t.Fatalf("explore: basis=%s order=%v", d.Basis, ids(candidates))
 	}
 	candidates = []pool.Provider{phaseProvider("new", 1, 1), phaseProvider("b", 1, 1), phaseProvider("a", 1, 1)}
-	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, PhaseExplorationShare, 0)
+	d = PhaseOrder(candidates, PhaseInteractive, s, perfNow, PhaseExplorationShare, 0)
 	if d.Basis != BasisMeasured || candidates[2].ProviderID != "new" || candidates[0].ProviderID != "a" {
 		t.Fatalf("no explore: basis=%s order=%v", d.Basis, ids(candidates))
 	}
@@ -133,7 +133,7 @@ func TestPhaseOrderExploresUnmeasuredProviders(t *testing.T) {
 	explored := 0
 	for i := 0; i < 1000; i++ {
 		c := []pool.Provider{phaseProvider("a", 1, 1), phaseProvider("new", 1, 1)}
-		if PhaseOrder(c, "m", PhaseInteractive, s, perfNow, float64(i)/1000, 0).Basis == BasisExplore {
+		if PhaseOrder(c, PhaseInteractive, s, perfNow, float64(i)/1000, 0).Basis == BasisExplore {
 			explored++
 		}
 	}
@@ -150,7 +150,7 @@ func TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy(t *testing.T) 
 	picked := map[string]int{}
 	for i := 0; i < 10; i++ {
 		c := []pool.Provider{phaseProvider("a", 2, 2), phaseProvider("b", 2, 2), phaseProvider("slow", 2, 2)}
-		PhaseOrder(c, "m", PhaseInteractive, s, perfNow, 0.99, float64(i)/10)
+		PhaseOrder(c, PhaseInteractive, s, perfNow, 0.99, float64(i)/10)
 		picked[c[0].ProviderID]++
 		if len(c) != 3 {
 			t.Fatal("candidates added or removed")
@@ -162,7 +162,7 @@ func TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy(t *testing.T) 
 	// The fastest provider with one of four slots free loses to a near peer
 	// that is idle: the load term keeps one fast Mac from taking everything.
 	c := []pool.Provider{phaseProvider("a", 1, 4), phaseProvider("b", 4, 4)}
-	PhaseOrder(c, "m", PhaseInteractive, s, perfNow, 0.99, 0)
+	PhaseOrder(c, PhaseInteractive, s, perfNow, 0.99, 0)
 	if c[0].ProviderID != "b" {
 		t.Fatalf("load term: order=%v", ids(c))
 	}
@@ -217,7 +217,7 @@ func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
 	warmEndToEnd(s, "slow", 20)
 	warmEndToEnd(s, "fast", 80)
 	candidates := []pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}
-	d := PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
+	d := PhaseOrder(candidates, PhaseThroughput, s, perfNow, 0.99, 0)
 	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
 		t.Fatalf("throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
@@ -225,14 +225,14 @@ func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
 	// streamed-only provider stays unmeasured for the throughput phase.
 	warm(s, "streamed", 50, 1000, 400)
 	candidates = []pool.Provider{phaseProvider("streamed", 1, 1), phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}
-	d = PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
+	d = PhaseOrder(candidates, PhaseThroughput, s, perfNow, 0.99, 0)
 	if d.Basis != BasisMeasured || d.Fresh != 2 || ids(candidates)[0] != "fast" || ids(candidates)[2] != "streamed" {
 		t.Fatalf("mixed throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
 	// Interactive: service-only records are unmeasured, not fast. With one
 	// TTFT-fresh candidate the objective order is kept.
 	candidates = []pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1), phaseProvider("streamed", 1, 1)}
-	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, 0.99, 0)
+	d = PhaseOrder(candidates, PhaseInteractive, s, perfNow, 0.99, 0)
 	if d.Basis != BasisFallback || d.Fresh != 1 || ids(candidates)[0] != "slow" {
 		t.Fatalf("interactive: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
@@ -240,7 +240,7 @@ func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
 		t.Fatal("a service-only record was scored for interactive")
 	}
 	// Long input needs prefill or TTFT evidence.
-	d = PhaseOrder([]pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}, "m", PhaseLongInput, s, perfNow, 0.99, 0)
+	d = PhaseOrder([]pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}, PhaseLongInput, s, perfNow, 0.99, 0)
 	if d.Basis != BasisFallback || d.Fresh != 0 {
 		t.Fatalf("long input: basis=%s fresh=%d", d.Basis, d.Fresh)
 	}

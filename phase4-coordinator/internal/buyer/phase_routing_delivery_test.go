@@ -26,7 +26,7 @@ func TestWSStreamingJSONConversionHasNoFirstToken(t *testing.T) {
 	}()
 	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
 	state := &forwardState{}
-	state.phaseTiming.markProviderDispatchStart(time.Now(), "session-a")
+	state.phaseTiming.markProviderDispatchStart(time.Now(), pool.Provider{AssignedID: "session-a"})
 	w := httptest.NewRecorder()
 	(&Server{}).forwardWSStreaming(w, httptest.NewRequest("POST", "/v1/chat/completions", nil), requestID, pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}, relay, state, 0)
 	if !strings.Contains(w.Body.String(), "xxxx") {
@@ -43,26 +43,26 @@ func TestHeldPerformanceNeedsDelivery(t *testing.T) {
 	s, _ := phaseTestServer(t)
 	record := func(model string) *forwardState {
 		state := &forwardState{estimatedTokens: 300, routingEstimatedTokens: 300}
-		state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-fast")
+		state.phaseTiming.markProviderDispatchStart(phaseTestNow, pool.Provider{AssignedID: "s-fast", ProviderID: "fast", ModelID: "model-a"})
 		state.phaseTiming.markProviderDispatchDone(phaseTestNow)
 		state.phaseTiming.markProviderDone(phaseTestNow.Add(4 * time.Second))
 		holdPerformance(state)
 		rec := &billingRecorder{server: s, state: state, model: model}
 		output := settlementOutputForContent(strings.Repeat("x", 800), nil, nil, "normal_done")
 		_ = rec.recordRow("s-fast", "fast", "", http.StatusOK, nil, nil, nil, "", "", 0, nil, "none", output)
-		if _, ok := s.perf.Lookup("fast", model); ok {
+		if _, ok := s.perf.Lookup("fast", "model-a"); ok {
 			t.Fatalf("%s: a held observation entered the store before the write", model)
 		}
 		return state
 	}
 	failed := record("undelivered")
 	s.releasePerformance(failed, false)
-	if _, ok := s.perf.Lookup("fast", "undelivered"); ok || failed.perfHold || failed.pendingPerf != nil {
+	if _, ok := s.perf.Lookup("fast", "model-a"); ok || failed.perfHold || failed.pendingPerf != nil {
 		t.Fatal("an undelivered body was observed")
 	}
 	delivered := record("delivered")
 	s.releasePerformance(delivered, true)
-	if e, ok := s.perf.Lookup("fast", "delivered"); !ok || e.ServiceTPS != 50 || delivered.perfHold {
+	if e, ok := s.perf.Lookup("fast", "model-a"); !ok || e.ServiceTPS != 50 || delivered.perfHold {
 		t.Fatalf("delivered body: %+v ok=%v", e, ok)
 	}
 }
@@ -91,7 +91,7 @@ func TestWSNonStreamingLegacyObservesOnlyDeliveredBody(t *testing.T) {
 		}()
 		relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
 		state := &forwardState{estimatedTokens: 300, routingEstimatedTokens: 300}
-		state.phaseTiming.markProviderDispatchStart(phaseTestNow.Add(-4*time.Second), "s-fast")
+		state.phaseTiming.markProviderDispatchStart(phaseTestNow.Add(-4*time.Second), pool.Provider{AssignedID: "s-fast", ProviderID: "fast", ModelID: "model-a"})
 		rec := &billingRecorder{server: s, state: state, model: "model-a"}
 		logSuccess := func(a requestLogAttempt) error {
 			return rec.recordRow("s-fast", "fast", "", http.StatusOK, nil, nil, nil, "", "", 0, nil, "none", a.SettlementOutput)

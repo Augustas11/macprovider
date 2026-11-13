@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 const (
@@ -29,6 +30,10 @@ type requestPhaseTiming struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	// providerID and providerModelID come from the provider snapshot the
+	// attempt was dispatched to; SPEC-002-R005 keys its record by them.
+	providerID      string
+	providerModelID string
 	// providerFirstToken is the first delivered chunk that carries generated
 	// content or a tool call (SPEC-002-R005). A role-only opening chunk is a
 	// first byte but not a first token.
@@ -47,7 +52,7 @@ func (t *requestPhaseTiming) markCoordRoutingDone(at time.Time) {
 	t.coordRoutingDone = at
 }
 
-func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAssignedID string) {
+func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, provider pool.Provider) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.providerDispatchStart = at
@@ -55,7 +60,9 @@ func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAss
 	t.providerFirstByte = time.Time{}
 	t.providerDone = time.Time{}
 	t.providerFirstToken = time.Time{}
-	t.providerAssignedID = providerAssignedID
+	t.providerAssignedID = provider.AssignedID
+	t.providerID = provider.ProviderID
+	t.providerModelID = provider.ModelID
 }
 
 func (t *requestPhaseTiming) markProviderFirstToken(at time.Time) {
@@ -99,6 +106,8 @@ func (t *requestPhaseTiming) snapshot() requestPhaseTimingSnapshot {
 		providerFirstByte:     t.providerFirstByte,
 		providerDone:          t.providerDone,
 		providerAssignedID:    t.providerAssignedID,
+		providerID:            t.providerID,
+		providerModelID:       t.providerModelID,
 		providerFirstToken:    t.providerFirstToken,
 	}
 }
@@ -111,6 +120,8 @@ type requestPhaseTimingSnapshot struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	providerID            string
+	providerModelID       string
 	providerFirstToken    time.Time
 }
 

@@ -82,3 +82,24 @@ func minMaxNorm(values []float64, idx int) float64 {
 	}
 	return (values[idx] - minV) / (maxV - minV)
 }
+
+// balancedNonThroughput is the params, context and slot-share part of the
+// FR-SR-8 balanced score for each candidate, normalized across candidates.
+// BalancedScores keeps its own summation so its scores stay bit-identical.
+func balancedNonThroughput(candidates []pool.Provider) []float64 {
+	params := make([]float64, len(candidates))
+	ctx := make([]float64, len(candidates))
+	slots := make([]float64, len(candidates))
+	for i, p := range candidates {
+		params[i] = p.ModelParamsB
+		ctx[i] = float64(p.MaxContextTokens)
+		if p.SlotsTotal > 0 {
+			slots[i] = float64(p.SlotsFree) / float64(p.SlotsTotal)
+		}
+	}
+	rest := make([]float64, len(candidates))
+	for i := range candidates {
+		rest[i] = 0.3*minMaxNorm(params, i) + 0.2*minMaxNorm(ctx, i) + 0.1*minMaxNorm(slots, i)
+	}
+	return rest
+}

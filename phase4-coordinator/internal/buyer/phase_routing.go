@@ -27,6 +27,16 @@ type RouteSelectionMetrics interface {
 	IncRouteSelection(phase, basis string)
 }
 
+// WithPerfStore shares one SPEC-002-R005 store with the provider server's
+// /poolz and the explorer. nil keeps the server's own store.
+func WithPerfStore(store *routing.PerfStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.perf = store
+		}
+	}
+}
+
 // WithRouteSelectionMetrics wires the route_trace counter.
 func WithRouteSelectionMetrics(m RouteSelectionMetrics) Option {
 	return func(s *Server) {
@@ -61,7 +71,7 @@ func (s *Server) applyPhaseOrder(requestID string, req chatRequest, estimatedTok
 	rng := mrand.New(mrand.NewSource(seedForRequestWithKey(requestID, dailyKey)))
 	_ = rng.Float64()
 	exploreDraw, bandDraw := rng.Float64(), rng.Float64()
-	d := routing.PhaseOrder(candidates, req.Model, phase, s.perf, s.now(), exploreDraw, bandDraw)
+	d := routing.PhaseOrder(candidates, phase, s.perf, s.now(), exploreDraw, bandDraw)
 	return routeDecision{phase: d.Phase, basis: d.Basis, scope: "ranked", inputTokens: estimatedTokens, candidates: d.Candidates, fresh: d.Fresh, scores: d.Scores, evidence: d.Evidence}
 }
 
@@ -92,7 +102,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 	}
 	evidence, ok := d.evidence[provider.SortKey()]
 	if !ok {
-		evidence, ok = s.perf.Lookup(provider.ProviderID, req.Model)
+		evidence, ok = s.perf.Lookup(provider.ProviderID, provider.ModelID)
 	}
 	now := s.now()
 	fresh := ok && evidence.FreshFor(d.phase, now)
@@ -197,6 +207,11 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if service == nil {
 		return
 	}
+	// SPEC-002-R005: the record is keyed by the provider snapshot the attempt
+	// was dispatched to, so its served model, not the requested string.
+	if timing.providerID != "" {
+		providerID = timing.providerID
+	}
 	if providerID == "" && s.pool != nil {
 		for _, p := range s.pool.Snapshot() {
 			if p.AssignedID == providerAssignedID {
@@ -211,7 +226,7 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	}
 	obs := routing.PerfObservation{
 		ProviderID:       providerID,
-		Model:            b.model,
+		Model:            timing.providerModelID,
 		PromptTokens:     prompt,
 		RequestTokens:    int64(b.state.routingEstimatedTokens),
 		CompletionTokens: generated,

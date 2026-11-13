@@ -30,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -86,6 +87,9 @@ type Server struct {
 	// so a rejected reload keeps advertising the previous release.
 	recommendedBinaryVersion  atomic.Value // string
 	minProviderThroughputBits atomic.Uint64
+	// perf is the buyer router's SPEC-002-R005 store, shared so /poolz
+	// applies the floor to the same routed throughput. nil reads estimates.
+	perf *routing.PerfStore
 
 	// bindingRetries counts in-flight model-admission binding refresh retry
 	// goroutines, and bindingRetryWake (nil in production, so a retry always
@@ -594,6 +598,12 @@ type idlePrewarmRecord struct {
 }
 
 type Option func(*Server)
+
+// WithPerfStore shares the buyer router's SPEC-002-R005 measured-performance
+// store with /poolz.
+func WithPerfStore(store *routing.PerfStore) Option {
+	return func(s *Server) { s.perf = store }
+}
 
 func WithFleetCache(store *fleetcache.Store) Option {
 	return func(s *Server) { s.fleetCache = store }
@@ -1662,7 +1672,11 @@ func (s *Server) SetMinProviderThroughputTPS(floor float64) (changed bool) {
 
 func (s *Server) providerMeetsDispatchThroughputFloor(p pool.Provider) bool {
 	floor := math.Float64frombits(s.minProviderThroughputBits.Load())
-	return floor <= 0 || p.ThroughputTPSEstimate >= floor
+	if floor <= 0 {
+		return true
+	}
+	routed, _ := routing.RoutedThroughput(p, s.perf, s.now())
+	return routed >= floor
 }
 
 // publicRoutingEligible is the /poolz.routing_eligible predicate: request-
@@ -7755,7 +7769,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		// Issue #764 — additive per-binary_version TTFT/TPS + capacity
 		// breakdown. New key only; the six fields above keep their shapes.
 		ByBinaryVersion map[string]poolzVersionSegment `json:"by_binary_version"`
-	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers)}
+	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers, s.perf, s.now())}
 	cfg := s.tier2Config()
 	for _, p := range providers {
 		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
@@ -7791,6 +7805,8 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		CanaryFailCount   int                     `json:"canary_fail_count"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
+		// SPEC-002 FR-O2 v1.6.31 measured-throughput fields.
+		routing.ThroughputView
 	}
 	now := s.now()
 	poolz := make([]poolzProvider, 0, len(providers))
@@ -7815,6 +7831,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,
+			ThroughputView:    routing.ProviderThroughput(provider, s.perf, now),
 		})
 	}
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotation. The three

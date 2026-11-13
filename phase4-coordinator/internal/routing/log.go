@@ -88,6 +88,12 @@ type CandidateLogEntry struct {
 	SlotsTotal    int     `json:"slots_total"`
 	ThroughputTPS float64 `json:"throughput_tps"`
 	Metric        float64 `json:"metric"`
+	// SPEC-004 §7 v0.3.7: the SPEC-002-R005 throughput source and both
+	// values. RoutedThroughputTPS equals ThroughputTPSEstimate when the
+	// source is "reported".
+	ThroughputSource      string  `json:"throughput_source"`
+	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
+	RoutedThroughputTPS   float64 `json:"routed_throughput_tps"`
 }
 
 // LogRoutingDecision emits one zerolog Info row with the SPEC-004
@@ -211,6 +217,10 @@ func LogRoutingDecision(log zerolog.Logger, d Decision) {
 // so the log row is a STRICT SUPERSET of the pre-Phase-D shape.
 func ProviderToCandidateLogEntry(p pool.Provider, objectiveMetric float64, weights Weights) CandidateLogEntry {
 	eff := EffectiveThroughput(p, weights)
+	source, routed := ThroughputSourceReported, p.ThroughputTPSEstimate
+	if v, ok := weights.Measured[p.SortKey()]; ok {
+		source, routed = ThroughputSourceMeasured, v
+	}
 	return CandidateLogEntry{
 		ProviderID:          p.ProviderID,
 		AssignedID:          p.AssignedID,
@@ -226,5 +236,9 @@ func ProviderToCandidateLogEntry(p pool.Provider, objectiveMetric float64, weigh
 		SlotsTotal:    p.SlotsTotal,
 		ThroughputTPS: eff,
 		Metric:        objectiveMetric,
+
+		ThroughputSource:      source,
+		ThroughputTPSEstimate: finiteOrZero(p.ThroughputTPSEstimate),
+		RoutedThroughputTPS:   finiteOrZero(routed),
 	}
 }

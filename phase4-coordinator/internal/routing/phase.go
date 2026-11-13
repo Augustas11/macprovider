@@ -65,19 +65,16 @@ type PhaseDecision struct {
 
 // PhaseOrder reorders the objective-sorted candidates by phase without adding
 // or removing any. exploreDraw and bandDraw are per-request draws in [0,1).
-func PhaseOrder(candidates []pool.Provider, model string, phase Phase, store *PerfStore, now time.Time, exploreDraw, bandDraw float64) PhaseDecision {
+// Records are looked up by each candidate's provider and served model.
+func PhaseOrder(candidates []pool.Provider, phase Phase, store *PerfStore, now time.Time, exploreDraw, bandDraw float64) PhaseDecision {
 	decision := PhaseDecision{Phase: phase, Basis: BasisFallback, Candidates: len(candidates), Scores: map[string]float64{}, Evidence: map[string]PerfEvidence{}}
 	if len(candidates) == 0 || store == nil {
 		return decision
 	}
-	ids := make([]string, len(candidates))
-	for i, p := range candidates {
-		ids[i] = p.ProviderID
-	}
-	records := store.LookupMany(model, ids)
+	records := store.LookupCandidates(candidates)
 	var fresh, unmeasured []pool.Provider
 	for _, p := range candidates {
-		if e, ok := records[p.ProviderID]; ok && e.FreshFor(phase, now) {
+		if e, ok := records[p.SortKey()]; ok && e.FreshFor(phase, now) {
 			fresh = append(fresh, p)
 			decision.Evidence[p.SortKey()] = e
 			continue
