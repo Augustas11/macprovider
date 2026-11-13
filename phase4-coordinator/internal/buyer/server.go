@@ -3629,7 +3629,6 @@ func (s *Server) forwardHTTPSequence(
 			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			providerhttp.SetCoordinatorOrigin(upReq.Header)
-			beginServedPathAttempt(w.Header(), state)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			if doErr == nil && resp != nil {
@@ -4203,7 +4202,6 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	var relay *providerws.RelayStream
 	var err error
-	beginServedPathAttempt(w.Header(), state)
 	if state != nil {
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}
@@ -4336,7 +4334,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				chunks = nil
 			}
 		case end := <-relay.Done:
-			s.noteServedPath(r, state, provider, end)
+			servedPath := s.servedPathFor(r, provider, end)
 			for chunks != nil {
 				select {
 				case chunk, ok := <-chunks:
@@ -4457,6 +4455,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
 			}
+			acceptServedPath(w.Header(), servedPath, false)
 			if recordBeforeWrite {
 				w.WriteHeader(http.StatusOK)
 				if state == nil || state.toolSelection == nil {
@@ -4855,7 +4854,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				return result, progressAttempt("", faultFlag)
 			}
 		case end := <-relay.Done:
-			s.noteServedPath(r, state, provider, end)
+			servedPath := s.servedPathFor(r, provider, end)
 			for chunks != nil {
 				select {
 				case chunk, ok := <-chunks:
@@ -4909,6 +4908,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			markProviderDone()
 			if !committed && s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
+			}
+			if end.Status == "complete" && toolFinal.finalCloseOK() {
+				acceptServedPath(w.Header(), servedPath, committed)
 			}
 			commit()
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
@@ -5128,7 +5130,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
-			s.noteServedPath(r, state, provider, end)
+			servedPath := s.servedPathFor(r, provider, end)
 			// The relay can queue its end while response chunks are still buffered.
 			// Drain the already-published tail before deciding a guaranteed outcome.
 			if state != nil && state.toolSelection != nil {
@@ -5221,6 +5223,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
 			}
+			acceptServedPath(w.Header(), servedPath, true)
 			w.WriteHeader(http.StatusOK)
 			acct.render(out)
 			// The write and the record of the bytes it accepted are one step
@@ -5386,7 +5389,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			writePhaseTimingTrailers(w.Header(), state, now)
 		}
 	}
-	beginServedPathAttempt(w.Header(), state)
 	if state != nil {
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}

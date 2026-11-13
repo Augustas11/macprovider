@@ -3,10 +3,10 @@ package buyer
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -80,6 +81,13 @@ func TestServedPathValueValidation(t *testing.T) {
 		{"case", cb, servedPathEnd(`{"path":"Serial","rows":1}`), unknown, "decode"},
 		{"array", cb, servedPathEnd(`["serial",1]`), unknown, "decode"},
 		{"string", cb, servedPathEnd(`"serial"`), unknown, "decode"},
+		{"duplicate rows", cb, servedPathEnd(`{"path":"serial","rows":1,"rows":3}`), unknown, "decode"},
+		{"duplicate path", cb, servedPathEnd(`{"path":"serial","path":"serial","rows":1}`), unknown, "decode"},
+		{"key case", cb, servedPathEnd(`{"PATH":"serial","Rows":1}`), unknown, "decode"},
+		{"null path", cb, servedPathEnd(`{"path":null,"rows":1}`), unknown, "decode"},
+		{"null rows", cb, servedPathEnd(`{"path":"serial","rows":null}`), unknown, "decode"},
+		{"exponent rows", cb, servedPathEnd(`{"path":"serial","rows":1e0}`), unknown, "decode"},
+		{"unclosed", cb, servedPathEnd(`{"path":"serial","rows":1`), unknown, "decode"},
 		{"trailing value", cb, servedPathEnd(`{"path":"serial","rows":1}{}`), unknown, "decode"},
 		{"oversize", cb, servedPathEnd(`{"path":"serial","rows":1` + strings.Repeat(" ", 120) + `}`), unknown, "decode"},
 		{"shard not head", cb, servedPathEnd(`{"path":"shard_group","rows":1}`), unknown, "shard_group"},
@@ -253,20 +261,10 @@ func TestServedPathHeaderAndTrailerFollowTimingRule(t *testing.T) {
 	})
 	t.Run("buffered stream trailer", func(t *testing.T) {
 		s, _ := servedPathServer(t, true, map[string]servedPathScript{"p2": {"complete", report}})
-		state := &forwardState{}
-		done := make(chan providerws.InferenceResponseEnd, 1)
-		end := servedPathEnd(report)
-		end.RequestID = "req-b"
-		done <- end
-		chunks := make(chan providerws.InferenceResponseChunk, 1)
-		chunks <- providerws.InferenceResponseChunk{RequestID: "req-b", Data: `data: {"id":"c","choices":[{"index":0,"delta":{"content":"Hello world, this is a reply"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"}
-		close(chunks)
-		relay := &providerws.RelayStream{RequestID: "req-b", Chunks: chunks, Done: done, Errors: make(chan error, 1)}
-		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		r.Header.Set("Authorization", "Bearer gw-token")
+		relay := servedPathRelay("req-b", `data: {"id":"c","choices":[{"index":0,"delta":{"content":"Hello world, this is a reply"},"finish_reason":"stop"}]}`+"\n\ndata: [DONE]\n\n", report, "complete")
 		w := httptest.NewRecorder()
 		provider := pool.Provider{ProviderID: "p2", AssignedID: "s2", EngineProfile: servedPathProfile("continuous_batching", 4)}
-		s.forwardWSStreamingBuffered(w, r, "req-b", provider, relay, streamingModeBufferedKillSwitch, "", state, 1)
+		s.forwardWSStreamingBuffered(w, servedPathGatewayRequest(), "req-b", provider, relay, streamingModeBufferedKillSwitch, "", &forwardState{}, 1)
 		if got := w.Result().Trailer.Get(servedPathHeader); got != want {
 			t.Fatalf("buffered trailer = %q, want %q", got, want)
 		}
@@ -289,49 +287,127 @@ func TestServedPathRequiresGatewayBearer(t *testing.T) {
 }
 
 // After a failover the value describes the provider that served, never the
-// first selection; a provider that reports nothing yields no value.
+// first selection, on both forwarders: a report on attempt 1 never survives
+// into attempt 2's response, whether attempt 2 reports or not.
 func TestServedPathDescribesFailoverProvider(t *testing.T) {
 	for _, stream := range []bool{false, true} {
-		s, calls := servedPathServer(t, stream, map[string]servedPathScript{
-			"p1": {"error_queue_full", `{"path":"serial","rows":1}`},
-			"p2": {"complete", `{"path":"continuous_batching","rows":2}`},
-		})
-		s.maxRetries = 1
-		resp := postServedPathChat(s, stream, true, "")
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("stream=%v status = %d", stream, resp.StatusCode)
+		for _, second := range []string{`{"path":"continuous_batching","rows":2}`, ""} {
+			s, calls := servedPathServer(t, stream, map[string]servedPathScript{
+				"p1": {"error_queue_full", `{"path":"serial","rows":1}`},
+				"p2": {"complete", second},
+			})
+			s.maxRetries = 1
+			resp := postServedPathChat(s, stream, true, "")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("stream=%v status = %d", stream, resp.StatusCode)
+			}
+			if len(*calls) != 2 || (*calls)[0] != "p1" || (*calls)[1] != "p2" {
+				t.Fatalf("stream=%v calls = %v, want p2 to serve", stream, *calls)
+			}
+			header, trailer := servedPathValues(resp)
+			want := ""
+			if second != "" {
+				want = "v=1; path=continuous_batching; rows=2"
+			}
+			if header+trailer != want {
+				t.Fatalf("stream=%v second=%q header %q trailer %q, want %q", stream, second, header, trailer, want)
+			}
 		}
-		header, trailer := servedPathValues(resp)
-		got := header + trailer
-		if len(*calls) != 2 || (*calls)[0] != "p1" || (*calls)[1] != "p2" {
-			t.Fatalf("stream=%v calls = %v, want p2 to serve", stream, *calls)
-		}
-		if got != "v=1; path=continuous_batching; rows=2" {
-			t.Fatalf("stream=%v calls %v value %q, want the serving provider's", stream, *calls, got)
-		}
-	}
-	s, _ := servedPathServer(t, false, map[string]servedPathScript{"p2": {"complete", ""}})
-	if header, trailer := servedPathValues(postServedPathChat(s, false, true, "p2")); header != "" || trailer != "" {
-		t.Fatalf("no report gave header %q trailer %q", header, trailer)
 	}
 }
 
-func TestBeginServedPathAttemptDropsEarlierValue(t *testing.T) {
-	h := http.Header{}
-	h.Set(servedPathHeader, "v=1; path=serial; rows=1")
-	state := &forwardState{servedPath: "v=1; path=serial; rows=1"}
-	beginServedPathAttempt(h, state)
-	if h.Get(servedPathHeader) != "" || state.servedPath != "" {
-		t.Fatalf("header %q state %q survived the next dispatch", h.Get(servedPathHeader), state.servedPath)
+// servedPathTrailerDeclared reports whether a recorder's header map holds
+// the served-path trailer key, which net/http would send at handler exit.
+func servedPathTrailerDeclared(h http.Header) bool {
+	return h.Get(servedPathHeader) != "" || h.Get(http.TrailerPrefix+servedPathHeader) != ""
+}
+
+func servedPathRelay(requestID, data, report, status string) *providerws.RelayStream {
+	done := make(chan providerws.InferenceResponseEnd, 1)
+	end := servedPathEnd(report)
+	end.RequestID, end.Status, end.ChunksSent = requestID, status, 1
+	end.Usage = json.RawMessage(`{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}`)
+	// The end frame follows the chunk's receipt, as on a provider socket, so
+	// no forwarder can see the end before the body.
+	chunks := make(chan providerws.InferenceResponseChunk)
+	go func() {
+		chunks <- providerws.InferenceResponseChunk{RequestID: requestID, Data: data}
+		close(chunks)
+		done <- end
+	}()
+	return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
+}
+
+func servedPathGatewayRequest() *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer gw-token")
+	return r
+}
+
+const servedPathOpenToolCall = `data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{"}}]},"finish_reason":null}]}` + "\n\ndata: [DONE]\n\n"
+
+// The value rides only a response the coordinator accepted as its success:
+// a non-complete end, a complete end the coordinator then rejects, and an
+// error response never carry it.
+func TestServedPathOnlyOnAcceptedSuccess(t *testing.T) {
+	report := `{"path":"continuous_batching","rows":3}`
+	provider := pool.Provider{ProviderID: "p2", AssignedID: "s2", EngineProfile: servedPathProfile("continuous_batching", 4)}
+	for _, stream := range []bool{false, true} {
+		s, _ := servedPathServer(t, stream, map[string]servedPathScript{"p2": {"error_internal", report}})
+		resp := postServedPathChat(s, stream, true, "p2")
+		if header, trailer := servedPathValues(resp); header != "" || trailer != "" {
+			t.Fatalf("stream=%v non-complete end (status %d) carried header %q trailer %q", stream, resp.StatusCode, header, trailer)
+		}
 	}
+	s, _ := servedPathServer(t, false, nil)
+	t.Run("non-streamed tool selection failure", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		state := &forwardState{toolSelection: &toolSelectionPolicy{mode: "required"}}
+		result, _ := s.forwardWSNonStreaming(w, servedPathGatewayRequest(), "req-t", provider, servedPathRelay("req-t", servedPathCompletion, report, "complete"), nil, nil, state, 1)
+		if result != wsForwardFailed || w.Code != http.StatusBadGateway {
+			t.Fatalf("result %v status %d, want a failed 502", result, w.Code)
+		}
+		if servedPathTrailerDeclared(w.Header()) || w.Result().Trailer.Get(servedPathHeader) != "" {
+			t.Fatalf("502 carries the label: %v", w.Header())
+		}
+	})
+	t.Run("buffered final close failure", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		result, _ := s.forwardWSStreamingBuffered(w, servedPathGatewayRequest(), "req-f", provider, servedPathRelay("req-f", servedPathOpenToolCall, report, "complete"), streamingModeBufferedKillSwitch, "", &forwardState{}, 1)
+		if result != wsForwardFailed {
+			t.Fatalf("result %v, want failed", result)
+		}
+		if servedPathTrailerDeclared(w.Header()) {
+			t.Fatalf("failed buffered attempt left the label: %v", w.Header())
+		}
+	})
+	t.Run("incremental final close failure", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		s.forwardWSStreaming(w, servedPathGatewayRequest(), "req-i", provider, servedPathRelay("req-i", servedPathOpenToolCall, report, "complete"), &forwardState{}, 1)
+		if !strings.Contains(w.Body.String(), "tool_call_final_close_failed") {
+			t.Fatalf("expected the final-close SSE error, body %s", w.Body.String())
+		}
+		if servedPathTrailerDeclared(w.Header()) || w.Result().Trailer.Get(servedPathHeader) != "" {
+			t.Fatalf("SSE error response carries the label: %v", w.Header())
+		}
+	})
 }
 
 // SPEC-002-R005: the label never enters routing or the request log. The
 // same attempt with and without a report leaves identical performance
-// records and an identical request-log attempt.
+// records, an identical request-log attempt and an identical forward state,
+// the input to the performance store and the request log, on the
+// non-streamed, incremental and buffered forwarders.
 func TestServedPathLeavesRoutingAndRequestLogUnchanged(t *testing.T) {
-	run := func(report string) (routing.PerfEvidence, bool, requestLogAttempt, wsForwardResult) {
-		s, _ := servedPathServer(t, false, map[string]servedPathScript{"p1": {"complete", report}})
+	type outcome struct {
+		evidence routing.PerfEvidence
+		found    bool
+		result   wsForwardResult
+		attempt  requestLogAttempt
+		state    *forwardState
+	}
+	run := func(report string, stream, buffered bool) outcome {
+		s, _ := servedPathServer(t, stream, map[string]servedPathScript{"p1": {"complete", report}})
 		reqLog, err := requestlog.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 		if err != nil {
 			t.Fatalf("requestlog.OpenStore: %v", err)
@@ -340,67 +416,105 @@ func TestServedPathLeavesRoutingAndRequestLogUnchanged(t *testing.T) {
 		s.reqLog = reqLog
 		var tick time.Duration
 		s.now = func() time.Time { tick += 10 * time.Millisecond; return phaseTestNow.Add(tick) }
-		if resp := postServedPathChat(s, false, true, ""); resp.StatusCode != http.StatusOK {
+		if resp := postServedPathChat(s, stream, true, ""); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d", resp.StatusCode)
 		}
-		evidence, found := s.perf.Lookup("p1", "model-a")
-
-		done := make(chan providerws.InferenceResponseEnd, 1)
-		end := servedPathEnd(report)
-		end.RequestID, end.ChunksSent = "req-n", 1
-		end.Usage = json.RawMessage(`{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}`)
-		done <- end
-		chunks := make(chan providerws.InferenceResponseChunk, 1)
-		chunks <- providerws.InferenceResponseChunk{RequestID: "req-n", Data: servedPathCompletion}
-		close(chunks)
-		relay := &providerws.RelayStream{RequestID: "req-n", Chunks: chunks, Done: done, Errors: make(chan error, 1)}
-		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		r.Header.Set("Authorization", "Bearer gw-token")
-		provider := pool.Provider{ProviderID: "p1", AssignedID: "s1", EngineProfile: servedPathProfile("general_mlx", 0)}
-		result, attempt := s.forwardWSNonStreaming(httptest.NewRecorder(), r, "req-n", provider, relay, nil, nil, &forwardState{}, 1)
-		return evidence, found, attempt, result
-	}
-	e1, f1, a1, r1 := run("")
-	e2, f2, a2, r2 := run(`{"path":"serial","rows":1}`)
-	if !f1 || !reflect.DeepEqual(e1, e2) || f1 != f2 {
-		t.Fatalf("performance record changed: without %+v (%v), with %+v (%v)", e1, f1, e2, f2)
-	}
-	// The terminal timestamp is the wall clock of each run, not an input.
-	for _, a := range []*requestLogAttempt{&a1, &a2} {
-		if a.SettlementOutput != nil {
-			a.SettlementOutput.TerminalStateTSUnixMS = 0
+		var o outcome
+		o.evidence, o.found = s.perf.Lookup("p1", "model-a")
+		data := servedPathCompletion
+		if stream {
+			data = `data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello world, this is a reply"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
 		}
+		provider := pool.Provider{ProviderID: "p1", AssignedID: "s1", EngineProfile: servedPathProfile("general_mlx", 0)}
+		o.state = &forwardState{queueWait: 7 * time.Millisecond, estimatedTokens: 12, provider: provider}
+		relay := servedPathRelay("req-n", data, report, "complete")
+		switch {
+		case buffered:
+			o.result, o.attempt = s.forwardWSStreamingBuffered(httptest.NewRecorder(), servedPathGatewayRequest(), "req-n", provider, relay, streamingModeBufferedKillSwitch, "", o.state, 1)
+		case stream:
+			o.result, o.attempt = s.forwardWSStreaming(httptest.NewRecorder(), servedPathGatewayRequest(), "req-n", provider, relay, o.state, 1)
+		default:
+			o.result, o.attempt = s.forwardWSNonStreaming(httptest.NewRecorder(), servedPathGatewayRequest(), "req-n", provider, relay, nil, nil, o.state, 1)
+		}
+		// The terminal timestamp is the wall clock of each run, not an input.
+		if o.attempt.SettlementOutput != nil {
+			o.attempt.SettlementOutput.TerminalStateTSUnixMS = 0
+		}
+		return o
 	}
-	if !reflect.DeepEqual(a1, a2) || r1 != r2 {
-		t.Fatalf("request-log attempt changed:\nwithout %+v\nwith    %+v", a1, a2)
+	for _, tc := range []struct {
+		name             string
+		stream, buffered bool
+	}{{"non-streamed", false, false}, {"incremental", true, false}, {"buffered", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := run("", tc.stream, tc.buffered)
+			b := run(`{"path":"serial","rows":1}`, tc.stream, tc.buffered)
+			if !a.found || a.found != b.found || !reflect.DeepEqual(a.evidence, b.evidence) {
+				t.Fatalf("performance record changed: without %+v (%v), with %+v (%v)", a.evidence, a.found, b.evidence, b.found)
+			}
+			if a.result != b.result || !reflect.DeepEqual(a.attempt, b.attempt) {
+				t.Fatalf("request-log attempt changed:\nwithout %v %+v\nwith    %v %+v", a.result, a.attempt, b.result, b.attempt)
+			}
+			if !reflect.DeepEqual(a.state, b.state) {
+				t.Fatalf("forward state changed:\nwithout %+v\nwith    %+v", a.state, b.state)
+			}
+		})
 	}
 }
 
-// Relay-blind and privacy-class responses never carry the label: their
-// forwarders do not read a served-path report or write the phase-timing
-// header and trailer that carry it.
-func TestServedPathNeverOnRelayBlindOrPrivacyForwarders(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checked := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") || !(strings.HasPrefix(name, "relay_blind") || strings.HasPrefix(name, "privacy")) {
-			continue
-		}
-		raw, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, forbidden := range []string{"noteServedPath", "servedPathHeader", "writePhaseTimingHeaders", "writePhaseTimingTrailers", ".servedPath"} {
-			if bytes.Contains(raw, []byte(forbidden)) {
-				t.Fatalf("%s references %s", name, forbidden)
+// Relay-blind responses never carry the label: an end frame with a report
+// on the relay-blind path emits nothing to the gateway.
+func TestServedPathNeverOnRelayBlindResponse(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
+			now := time.Unix(1_800_100_000, 0).UTC()
+			server, _, providerPrivate, closeStore, provider := relayBlindTestServerWithProvider(t, now, func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+				chunks := make(chan providerws.InferenceResponseChunk, 1)
+				done := make(chan providerws.InferenceResponseEnd, 1)
+				validations := make(chan providerws.RelayBlindValidation, 1)
+				terminal := relayBlindValidationForContext(relayContext, "terminal", 11)
+				validations <- relayBlindValidationForContext(relayContext, "validated", 11)
+				if stream {
+					chunks <- providerws.InferenceResponseChunk{RequestID: requestID, Data: "data: {\"choices\":[]}\n\n"}
+				} else {
+					chunks <- providerws.InferenceResponseChunk{RequestID: requestID, Data: "{\"choices\":[]}"}
+				}
+				close(chunks)
+				done <- providerws.InferenceResponseEnd{RequestID: requestID, Status: "complete", Usage: json.RawMessage(`{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}`), RelayBlindValidation: &terminal, ServedPath: json.RawMessage(`{"path":"serial","rows":1}`)}
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1), Validations: validations}, nil
+			})
+			defer closeStore()
+			server.pool.SetEngineProfile(provider.ProviderID, servedPathProfile("continuous_batching", 4))
+			reservationRaw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", Stream: stream, MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+			response := relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", reservationRaw, "")
+			reservation, err := relayblind.ParseReservationResponse(response.Body.Bytes())
+			if err != nil {
+				t.Fatalf("reservation status=%d err=%v", response.Code, err)
 			}
-		}
-		checked++
-	}
-	if checked == 0 {
-		t.Fatal("no relay-blind or privacy forwarder file found")
+			envelope, err := reservation.NewEnvelope("external-request-sp", now, bytes.Repeat([]byte{0x33}, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			buyerPrivate, err := ecdh.X25519().GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if envelope, err = envelope.Encrypt([]byte(`{"model":"model-a","messages":[{"role":"user","content":"secret"}]}`), providerPrivate.PublicKey().Bytes(), buyerPrivate.Bytes()); err != nil {
+				t.Fatal(err)
+			}
+			envelopeRaw, _ := json.Marshal(envelope)
+			response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/consume", envelopeRaw, "")
+			consume, err := relayblind.ParseConsumeResponse(response.Body.Bytes())
+			if err != nil {
+				t.Fatalf("consume status=%d err=%v", response.Code, err)
+			}
+			response = relayBlindRequestWithConversationKey(t, server, http.MethodPost, "/v1/chat/completions", envelopeRaw, consume.ExecutionAuthorization)
+			if response.Code != http.StatusOK {
+				t.Fatalf("chat status=%d body=%s", response.Code, response.Body.String())
+			}
+			if servedPathTrailerDeclared(response.Header()) || response.Result().Trailer.Get(servedPathHeader) != "" {
+				t.Fatalf("relay-blind response carries the label: %v", response.Header())
+			}
+		})
 	}
 }

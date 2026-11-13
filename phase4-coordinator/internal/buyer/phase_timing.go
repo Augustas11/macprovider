@@ -372,9 +372,6 @@ func writePhaseTimingHeaders(h http.Header, state *forwardState, now time.Time) 
 	h.Set(phaseTimingProviderPrefillHeader, strconv.FormatInt(durationMillisBetween(snap.providerDispatchDone, snap.providerFirstByte), 10))
 	h.Set(phaseTimingProviderDecodeHeader, strconv.FormatInt(durationMillisBetween(snap.providerFirstByte, snap.providerDone), 10))
 	h.Set(phaseTimingCoordinatorTotalHeader, strconv.FormatInt(durationMillisBetween(snap.requestStart, now), 10))
-	if state.servedPath != "" {
-		h.Set(servedPathHeader, state.servedPath)
-	}
 }
 
 func writePhaseTimingTrailers(h http.Header, state *forwardState, now time.Time) {
@@ -384,9 +381,6 @@ func writePhaseTimingTrailers(h http.Header, state *forwardState, now time.Time)
 	snap := state.phaseTiming.snapshot()
 	h.Set(http.TrailerPrefix+phaseTimingProviderDecodeHeader, strconv.FormatInt(durationMillisBetween(snap.providerFirstByte, snap.providerDone), 10))
 	h.Set(http.TrailerPrefix+phaseTimingCoordinatorTotalHeader, strconv.FormatInt(durationMillisBetween(snap.requestStart, now), 10))
-	if state.servedPath != "" {
-		h.Set(http.TrailerPrefix+servedPathHeader, state.servedPath)
-	}
 }
 
 func durationMillisBetween(start, end time.Time) int64 {

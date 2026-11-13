@@ -119,11 +119,6 @@ type forwardState struct {
 	// selection so the slot-queue poll re-applies it. "" means none.
 	engineClass string
 
-	// servedPath is the SPEC-002-R007 served-path value of the attempt that
-	// completed, or "". Only the phase-timing header and trailer writers
-	// read it; it is never a routing, billing or request_log input.
-	servedPath string
-
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the
 	// request_log.routing_ms column reflects the latest routing
