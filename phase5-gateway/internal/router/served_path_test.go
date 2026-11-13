@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
 )
@@ -219,5 +220,94 @@ func TestAdminDemandLatencyServedPathCellsKeepCells(t *testing.T) {
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"cells":[]`) || !strings.Contains(resp.Body.String(), `"served_path_cells":[]`) {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// Over a real HTTP transport the coordinator writes the value with
+// http.TrailerPrefix without declaring it, so net/http fills resp.Trailer
+// only at EOF, assigning the map when no trailer was declared at all. The
+// value is stored whenever the gateway reads the body to EOF: a
+// non-streamed body, and a stream drained because the coordinator declared
+// settlement-finality trailers. A stream with no declaration stops at its
+// terminal event; when the terminating chunk arrives later it stores NULL.
+func TestServedPathUndeclaredTrailerOverRealTransport(t *testing.T) {
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), `"stream":true`) {
+			if strings.Contains(string(raw), "declared") {
+				w.Header().Set("Trailer", settlementOutcomeHeader)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set(streamingModeResponseHeader, "incremental")
+			w.WriteHeader(http.StatusOK)
+			for _, frame := range []string{
+				`data: {"id":"c1","model":"llama","choices":[{"index":0,"delta":{"role":"assistant","content":"The answer is here."}}]}` + "\n\n",
+				`data: {"id":"c1","model":"llama","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}` + "\n\n",
+				"data: [DONE]\n\n",
+			} {
+				_, _ = io.WriteString(w, frame)
+				w.(http.Flusher).Flush()
+			}
+			// The terminating chunk and trailers arrive after the gateway has
+			// read the terminal event.
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","model":"llama","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+			// Flushing commits a chunked body, so the trailer is sent.
+			w.(http.Flusher).Flush()
+		}
+		w.Header().Set(http.TrailerPrefix+servedPathResponseHeader, "v=1; path=native_mtp; rows=2")
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = coordinator.URL
+	}, WithHTTPClient(coordinator.Client()))
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, tc := range []struct {
+		name, body string
+		wantPath   string
+	}{
+		{"non_streamed", `{"model":"llama","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, "native_mtp"},
+		{"streamed_not_drained", `{"model":"llama","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, ""},
+		{"streamed_drained", `{"model":"llama","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"declared"}]}`, "native_mtp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := "acct_served_real_" + tc.name
+			resp := postChat(t, h, createAccountAndKey(t, store, cfg, account), tc.body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status %d body %s", resp.Code, resp.Body.String())
+			}
+			result := resp.Result()
+			if result.Header.Get(servedPathResponseHeader) != "" || result.Trailer.Get(servedPathResponseHeader) != "" {
+				t.Fatal("buyer response carries the label")
+			}
+			var path sql.NullString
+			var rows sql.NullInt64
+			if err := db.QueryRow(`SELECT served_path, served_rows FROM demand_events WHERE buyer_hash = ? ORDER BY event_id DESC LIMIT 1`,
+				demandBuyerHash("test-key-hash-secret", account)).Scan(&path, &rows); err != nil {
+				t.Fatalf("demand row: %v", err)
+			}
+			if path.String != tc.wantPath || path.Valid != (tc.wantPath != "") || (tc.wantPath != "" && rows.Int64 != 2) {
+				t.Fatalf("stored %v %v, want %q", path, rows, tc.wantPath)
+			}
+		})
+	}
+}
+
+// A relay-blind response never stores a served path, whether the value
+// arrives as a header or a trailer.
+func TestServedPathSuppressedOnRelayBlind(t *testing.T) {
+	timing := newGatewayPhaseTiming(fixedNow())
+	timing.observeCoordinatorResponse(servedPathHeaderValue("v=1; path=serial; rows=1"), fixedNow())
+	timing.suppressServedPath()
+	timing.observeCoordinatorTrailers(servedPathHeaderValue("v=1; path=native_mtp; rows=4"))
+	if snap := timing.servingSnapshot(); snap.servedPath != "" || snap.servedRows != nil {
+		t.Fatalf("relay-blind timing kept %q %v", snap.servedPath, snap.servedRows)
 	}
 }

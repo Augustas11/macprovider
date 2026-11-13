@@ -159,6 +159,9 @@ func TestDemandServedPathLatencyPercentiles(t *testing.T) {
 	for _, rows := range []int64{5, 8, 9, 16, 17, 256} {
 		insert("native_mtp", rows, 7)
 	}
+	for _, rows := range []int64{2, 4} {
+		insert("shard_group", rows, 8) // both edges of band 2-4
+	}
 	insert("unknown", 0, 9)
 	insert("", 0, 11) // no served path: not in served_path_cells
 	cells, err := store.DemandServedPathLatencyPercentiles(ctx, base.Add(-time.Hour), base.Add(time.Hour))
@@ -169,7 +172,7 @@ func TestDemandServedPathLatencyPercentiles(t *testing.T) {
 	for _, c := range cells {
 		got = append(got, c.RequestedModel+"/"+c.ServedPath+"/"+c.ServedRowsBand+"="+strconv.FormatInt(c.FirstAnswerMs.Samples, 10))
 	}
-	want := "llama/continuous_batching/1=2,llama/continuous_batching/2-4=3,llama/native_mtp/17+=2,llama/native_mtp/5-8=2,llama/native_mtp/9-16=2,llama/unknown/unknown=1"
+	want := "llama/continuous_batching/1=2,llama/continuous_batching/2-4=3,llama/native_mtp/17+=2,llama/native_mtp/5-8=2,llama/native_mtp/9-16=2,llama/shard_group/2-4=2,llama/unknown/unknown=1"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("cells = %s\nwant    %s", strings.Join(got, ","), want)
 	}
@@ -177,7 +180,7 @@ func TestDemandServedPathLatencyPercentiles(t *testing.T) {
 		t.Fatalf("3 samples gave a percentile: %+v", c.FirstAnswerMs)
 	}
 	engineCells, err := store.DemandLatencyPercentiles(ctx, base.Add(-time.Hour), base.Add(time.Hour))
-	if err != nil || len(engineCells) != 1 || engineCells[0].ServingEngine != "continuous_batching" || engineCells[0].FirstAnswerMs.Samples != 13 {
+	if err != nil || len(engineCells) != 1 || engineCells[0].ServingEngine != "continuous_batching" || engineCells[0].FirstAnswerMs.Samples != 15 {
 		t.Fatalf("serving-engine cells = %+v (%v)", engineCells, err)
 	}
 	// Five samples give a p50 (nearest rank 3 of 5).

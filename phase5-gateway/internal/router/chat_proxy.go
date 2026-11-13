@@ -892,9 +892,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
-	// A trailer is published only once the body was read to EOF; this runs
-	// after that on every path that reads it (SPEC-006-R028 served path).
-	defer timing.observeCoordinatorTrailers(resp.Trailer)
+	// A trailer is published only once the body was read to EOF, and
+	// net/http assigns resp.Trailer then when none was declared up front, so
+	// the closure reads the field after that on every path that reads it
+	// (SPEC-006-R028 served path).
+	defer func() { timing.observeCoordinatorTrailers(resp.Trailer) }()
 	s.noteAllowanceResponse(r, &subject, resp.Header)
 	if priorProviderDispatch {
 		if resp.Header == nil {
@@ -1369,7 +1371,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	if timing != nil {
-		defer timing.observeCoordinatorTrailers(resp.Trailer)
+		defer func() { timing.observeCoordinatorTrailers(resp.Trailer) }()
 	}
 	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
 		copyCleanHeaders(w.Header(), resp.Header)

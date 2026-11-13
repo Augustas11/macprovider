@@ -36,6 +36,9 @@ type gatewayPhaseTiming struct {
 	// header or trailer. Never logged, never forwarded.
 	servedPath string
 	servedRows *int64
+	// servedPathSuppressed is set on relay-blind responses, which never
+	// carry a served-path label.
+	servedPathSuppressed bool
 }
 
 func newGatewayPhaseTiming(start time.Time) *gatewayPhaseTiming {

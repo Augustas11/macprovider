@@ -52,7 +52,7 @@ func parseServedPath(value string) (string, *int64, bool) {
 // observeServedPath keeps the last valid value; a header or trailer that
 // fails the grammar changes nothing.
 func (t *gatewayPhaseTiming) observeServedPath(h http.Header) {
-	if t == nil {
+	if t == nil || t.servedPathSuppressed {
 		return
 	}
 	for _, value := range h.Values(servedPathResponseHeader) {
@@ -61,4 +61,14 @@ func (t *gatewayPhaseTiming) observeServedPath(h http.Header) {
 			return
 		}
 	}
+}
+
+// suppressServedPath drops any value and ignores every later header or
+// trailer: relay-blind and privacy-class responses never store one.
+func (t *gatewayPhaseTiming) suppressServedPath() {
+	if t == nil {
+		return
+	}
+	t.servedPathSuppressed = true
+	t.servedPath, t.servedRows = "", nil
 }

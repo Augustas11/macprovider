@@ -516,6 +516,8 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	resp.Header.Del(privacyPostureVerifiedAtHeader)
 	resp.Header.Del(relayblind.PrivacyRejectReasonHeader)
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	// A relay-blind response never carries a served-path label (SPEC-006-R028).
+	timing.suppressServedPath()
 	if env.Stream {
 		s.forwardStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, "", false, true, deadlines, false, window, timing)
 	} else {
