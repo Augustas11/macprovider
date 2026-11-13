@@ -132,7 +132,7 @@ Record all evidence in an append-only bundle named by date, provider id, package
 version, hardware tuple, and model tuple. The bundle must contain sanitized logs
 only.
 
-Aggregate tok/s from `msb-throughput`, `msb03` and `native-mtp-bench` use different windows and are not comparable; see `docs/runbooks/model-family-performance-intake.md`.
+Aggregate tok/s from `msb-throughput`, `msb03` and `native-mtp-bench` use different windows, prompts and request paths and are not comparable; see `docs/runbooks/model-family-performance-intake.md`.
 
 | Gate | Required proof |
 | --- | --- |
