@@ -42,6 +42,22 @@ final class CatalogReleaseManifestTests: XCTestCase {
         XCTAssertNil(CatalogReleaseManifest.verified(manifestData: extra, signatureData: extraSignature, trustedPublicKeys: keyring(signer)))
     }
 
+    /// `bytes` takes only an integer spelling, matching Go's strconv.ParseInt.
+    func testManifestRejectsNonIntegerBytesSpellings() throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let (manifest, _) = try signedManifest(signer: signer)
+        let text = String(decoding: manifest, as: UTF8.self)
+        let integer = #""bytes":\#(demand.count),"#
+        XCTAssertTrue(text.contains(integer))
+        for spelling in ["\(demand.count).0", "\(Double(demand.count) / 10)e1", "1e3"] {
+            let respelled = Data(text.replacingOccurrences(of: integer, with: #""bytes":\#(spelling),"#).utf8)
+            XCTAssertNotEqual(respelled, manifest)
+            XCTAssertNil(CatalogReleaseManifest.verified(
+                manifestData: respelled, signatureData: sidecar(for: respelled, signer: signer), trustedPublicKeys: keyring(signer)
+            ), spelling)
+        }
+    }
+
     func testBoundFeedSkipsItsSidecar() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let (manifest, signature) = try signedManifest(signer: signer)
@@ -50,8 +66,8 @@ final class CatalogReleaseManifestTests: XCTestCase {
             "/v1/catalog-release.sig": signature,
         ])
         let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-        let first = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
-        let second = await inputs.authenticatedSigner(name: "autotune-candidates", body: candidates, baseURL: baseURL)
+        let first = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
+        let second = await inputs.authenticatedSigner(name: "autotune-candidates", body: candidates, baseURL: baseURL)?.signerKeyID
         XCTAssertEqual(first, keyID)
         XCTAssertEqual(second, keyID)
         XCTAssertFalse(recorder.paths.contains { $0.hasSuffix(".json.sig") || $0 == "/v1/demand-rank.sig" })
@@ -59,19 +75,63 @@ final class CatalogReleaseManifestTests: XCTestCase {
         XCTAssertEqual(recorder.paths.filter { $0 == "/v1/catalog-release" }.count, 1, "one manifest fetch per load")
     }
 
-    func testBoundDigestMismatchIsAnIntegrityFailureEvenWithAValidSidecar() async throws {
+    /// §3.8 rule 4: a body the manifest binds to other bytes is refetched
+    /// once past the local cache. Bytes that still mismatch fall back to their
+    /// per-feed sidecar, which must verify those exact bytes.
+    func testBoundDigestMismatchFallsBackToTheSidecarOfTheRefetchedBytes() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let (manifest, signature) = try signedManifest(signer: signer)
         let other = Data(#"{"demand":"other"}"#.utf8)
         let recorder = FetchRecorder(routes: [
             "/v1/catalog-release": manifest,
             "/v1/catalog-release.sig": signature,
+        ])
+        let fresh = FetchRecorder(routes: [
+            "/v1/demand-rank": other,
             "/v1/demand-rank.sig": sidecar(for: other, signer: signer),
         ])
-        let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: other, baseURL: baseURL)
-        XCTAssertNil(signerKeyID)
+        var inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
+        inputs.fetchIgnoringCache = fresh.fetch
+        let result = await inputs.authenticatedSigner(name: "demand-rank", body: other, baseURL: baseURL)
+        XCTAssertEqual(result?.signerKeyID, keyID)
+        XCTAssertEqual(result?.body, other)
+        XCTAssertEqual(fresh.paths, ["/v1/demand-rank", "/v1/demand-rank.sig"], "refetch and sidecar both bypass the cache")
+    }
+
+    func testCachedOldBodyMeetsFreshManifestAndTheRefetchMatches() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let (manifest, signature) = try signedManifest(signer: signer)
+        let cachedOld = Data(#"{"demand":"release-a-cached"}"#.utf8)
+        let recorder = FetchRecorder(routes: [
+            "/v1/catalog-release": manifest,
+            "/v1/catalog-release.sig": signature,
+        ])
+        let fresh = FetchRecorder(routes: ["/v1/demand-rank": demand])
+        var inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
+        inputs.fetchIgnoringCache = fresh.fetch
+        let result = await inputs.authenticatedSigner(name: "demand-rank", body: cachedOld, baseURL: baseURL)
+        XCTAssertEqual(result?.signerKeyID, keyID)
+        XCTAssertEqual(result?.body, demand, "the caller uses the refetched, manifest-bound bytes")
+        XCTAssertEqual(fresh.paths, ["/v1/demand-rank"])
         XCTAssertFalse(recorder.paths.contains("/v1/demand-rank.sig"))
+    }
+
+    func testBoundDigestMismatchWithAnInvalidSidecarFails() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let (manifest, signature) = try signedManifest(signer: signer)
+        let other = Data(#"{"demand":"other"}"#.utf8)
+        let recorder = FetchRecorder(routes: [
+            "/v1/catalog-release": manifest,
+            "/v1/catalog-release.sig": signature,
+        ])
+        let fresh = FetchRecorder(routes: [
+            "/v1/demand-rank": other,
+            "/v1/demand-rank.sig": sidecar(for: Data("not these bytes".utf8), signer: signer),
+        ])
+        var inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
+        inputs.fetchIgnoringCache = fresh.fetch
+        let result = await inputs.authenticatedSigner(name: "demand-rank", body: other, baseURL: baseURL)
+        XCTAssertNil(result)
     }
 
     func testAbsentOrUnverifiedManifestFallsBackToPerFeedSidecar() async throws {
@@ -84,14 +144,14 @@ final class CatalogReleaseManifestTests: XCTestCase {
         ] {
             let recorder = FetchRecorder(routes: routes)
             let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-            let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+            let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
             XCTAssertEqual(signerKeyID, keyID)
             XCTAssertTrue(recorder.paths.contains("/v1/demand-rank.sig"))
         }
         // Without the manifest, a bad per-feed signature still fails.
         let recorder = FetchRecorder(routes: ["/v1/demand-rank.sig": forged])
         let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
         XCTAssertNil(signerKeyID)
     }
 
@@ -111,7 +171,7 @@ final class CatalogReleaseManifestTests: XCTestCase {
             "/v1/demand-rank.sig": sidecar(for: demand, signer: signer),
         ])
         let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
         XCTAssertEqual(signerKeyID, keyID)
         XCTAssertTrue(recorder.paths.contains("/v1/demand-rank.sig"), "an oversized manifest leaves feeds on their sidecars")
     }
@@ -129,7 +189,7 @@ final class CatalogReleaseManifestTests: XCTestCase {
                 let payload = url.path.hasSuffix(".sig") ? sig : body
                 return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: payload, redirected: false)
             }
-            let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+            let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
             XCTAssertEqual(signerKeyID, expected)
             XCTAssertFalse(recorder.paths.contains("/v1/catalog-release"), "the streaming fetch carries the manifest")
         }
@@ -143,6 +203,10 @@ final class CatalogReleaseManifestTests: XCTestCase {
         inputs.fetch = { _ in throw URLError(.notConnectedToInternet) }
         XCTAssertNil(inputs.releaseManifestFetch)
         XCTAssertNil(AutotuneStaticInputs(fetch: { _ in Data() }).releaseManifestFetch)
+        // The cache-bypassing refetch follows the same rule.
+        XCTAssertNil(inputs.fetchIgnoringCache)
+        XCTAssertNotNil(AutotuneStaticInputs().fetchIgnoringCache)
+        XCTAssertNil(AutotuneStaticInputs(fetch: { _ in Data() }).fetchIgnoringCache)
     }
 
     func testCachedManifestIsRefetchedOnceAfterARelease() async throws {
@@ -155,10 +219,10 @@ final class CatalogReleaseManifestTests: XCTestCase {
             "/v1/catalog-release.sig": oldSignature,
         ])
         let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
-        let cachedFirst = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+        let cachedFirst = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)?.signerKeyID
         XCTAssertEqual(cachedFirst, keyID)
         recorder.set(["/v1/catalog-release": newManifest, "/v1/catalog-release.sig": newSignature])
-        let afterRollover = await inputs.authenticatedSigner(name: "demand-rank", body: newDemand, baseURL: baseURL)
+        let afterRollover = await inputs.authenticatedSigner(name: "demand-rank", body: newDemand, baseURL: baseURL)?.signerKeyID
         XCTAssertEqual(afterRollover, keyID)
         XCTAssertEqual(recorder.paths.filter { $0 == "/v1/catalog-release" }.count, 2)
     }

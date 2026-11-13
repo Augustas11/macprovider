@@ -504,8 +504,10 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
     }
 
     /// SPEC-023 §3.8: a verified release manifest that binds the policy bytes
-    /// authenticates them without the per-feed sidecar; a manifest that binds
-    /// other bytes is an integrity failure even when a valid sidecar exists.
+    /// authenticates them without the per-feed sidecar. A mismatch refetches
+    /// the policy once past the local cache (rule 4); bytes that still do not
+    /// match are verified by their per-feed sidecar, and only a failed
+    /// sidecar is an integrity failure (CB stays on across a rollover).
     func testLoaderUsesVerifiedReleaseManifestInsteadOfSidecar() async throws {
         let fixture = try makeFixture()
         let baseURL = URL(string: "https://example.invalid")!
@@ -527,29 +529,53 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
             let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
             return (data, signatureData(payload: data, signer: fixture.signer, keyID: fixture.keyID))
         }
-        for (boundPolicy, expected) in [(fixture.policyData, ContinuousBatchingPolicyLoadStatus.liveVerified),
-                                        (Data("other policy bytes".utf8), .integrityFailureFallback)] {
-            let (manifestData, manifestSignature) = try manifest(binding: boundPolicy)
-            let inputs = AutotuneStaticInputs(
-                fetch: { url in
-                    switch url.path {
-                    case "/v1/continuous-batching-policy": return fixture.policyData
-                    case "/v1/catalog-release": return manifestData
-                    case "/v1/catalog-release.sig": return manifestSignature
-                    case "/v1/continuous-batching-policy.sig":
-                        // Valid, but must not rescue a manifest mismatch nor be needed.
-                        if expected == .liveVerified { throw URLError(.fileDoesNotExist) }
-                        return fixture.signatureData
-                    default: throw URLError(.fileDoesNotExist)
-                    }
-                },
+        let stale = Data("stale cached policy bytes".utf8)
+        let forged = signatureData(payload: Data("not the policy".utf8), signer: fixture.signer, keyID: fixture.keyID)
+        struct Case {
+            let bound: Data
+            let cachedPolicy: Data
+            let refetchedPolicy: Data
+            let sidecar: Data?
+            let expected: ContinuousBatchingPolicyLoadStatus
+        }
+        let cases = [
+            // Bound bytes: authenticated by digest, no sidecar.
+            Case(bound: fixture.policyData, cachedPolicy: fixture.policyData, refetchedPolicy: fixture.policyData,
+                 sidecar: nil, expected: .liveVerified),
+            // A cached old body meets a fresh manifest; the refetch matches.
+            Case(bound: fixture.policyData, cachedPolicy: stale, refetchedPolicy: fixture.policyData,
+                 sidecar: nil, expected: .liveVerified),
+            // Still mismatching, but the per-feed sidecar is valid.
+            Case(bound: Data("other policy bytes".utf8), cachedPolicy: fixture.policyData,
+                 refetchedPolicy: fixture.policyData, sidecar: fixture.signatureData, expected: .liveVerified),
+            // Still mismatching and the sidecar does not verify.
+            Case(bound: Data("other policy bytes".utf8), cachedPolicy: fixture.policyData,
+                 refetchedPolicy: fixture.policyData, sidecar: forged, expected: .integrityFailureFallback),
+        ]
+        for testCase in cases {
+            let (manifestData, manifestSignature) = try manifest(binding: testCase.bound)
+            func serve(_ url: URL, policy: Data) throws -> Data {
+                switch url.path {
+                case "/v1/continuous-batching-policy": return policy
+                case "/v1/catalog-release": return manifestData
+                case "/v1/catalog-release.sig": return manifestSignature
+                case "/v1/continuous-batching-policy.sig":
+                    guard let sidecar = testCase.sidecar else { throw URLError(.fileDoesNotExist) }
+                    return sidecar
+                default: throw URLError(.fileDoesNotExist)
+                }
+            }
+            var inputs = AutotuneStaticInputs(
+                fetch: { url in try serve(url, policy: testCase.cachedPolicy) },
                 trustedPublicKeys: fixture.trustedKeyring.publicKeysByKeyID,
                 now: { fixture.now }
             )
+            inputs.fetchIgnoringCache = { url in try serve(url, policy: testCase.refetchedPolicy) }
             let result = await inputs.loadContinuousBatchingPolicy(candidateCatalog: fixture.catalog, baseURL: baseURL)
-            XCTAssertEqual(result.status, expected)
-            if expected == .liveVerified {
+            XCTAssertEqual(result.status, testCase.expected)
+            if testCase.expected == .liveVerified {
                 XCTAssertEqual(result.signerKeyID, fixture.keyID)
+                XCTAssertEqual(result.policySHA256, AutotuneStaticInputs.candidateCatalogSHA256(bytes: fixture.policyData))
                 XCTAssertTrue(result.selection.acceptanceCoverage.covers(fixture.requestedTuple))
             }
         }

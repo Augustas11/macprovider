@@ -116,7 +116,8 @@ struct CatalogReleaseManifest: Equatable {
                   Set(entry.keys) == Set(["bytes", "sha256", "signer_key_id", "version"]),
                   let bytesNumber = entry["bytes"] as? NSNumber,
                   CFGetTypeID(bytesNumber) != CFBooleanGetTypeID(),
-                  let bytes = Int(exactly: bytesNumber.doubleValue), bytes > 0,
+                  isIntegerSpelling(bytesNumber),
+                  let bytes = Int(exactly: bytesNumber.int64Value), bytes > 0,
                   let sha256 = entry["sha256"] as? String, isLowerHex64(sha256),
                   let signer = entry["signer_key_id"] as? String, !signer.isEmpty,
                   let version = entry["version"] as? String, !version.isEmpty
@@ -132,6 +133,14 @@ struct CatalogReleaseManifest: Equatable {
         }
         guard feeds["autotune-candidates.json"] != nil else { return nil }
         return CatalogReleaseManifest(releaseID: releaseID, signerKeyID: signerKeyID, feeds: feeds)
+    }
+
+    /// JSONSerialization keeps `1000` as an integer but `1.0` and `1e3` as
+    /// doubles (and a value past Int64 as unsigned); only a signed integer
+    /// spelling is accepted, as Go's
+    /// `strconv.ParseInt` does on the coordinator side.
+    private static func isIntegerSpelling(_ number: NSNumber) -> Bool {
+        ["q", "l", "i", "s"].contains(String(cString: number.objCType))
     }
 
     private static func isLowerHex64(_ value: String) -> Bool {
@@ -182,8 +191,9 @@ extension AutotuneStaticInputs {
     /// SPEC-023 §3.8 verdict for one fetched feed body.
     enum ReleaseManifestCheck: Equatable {
         case authenticated(signerKeyID: String)
-        /// A verified manifest binds this feed to other bytes: an integrity
-        /// failure for the feed, exactly as a bad per-feed signature.
+        /// A verified manifest binds this feed to other bytes. The caller
+        /// refetches once past the local cache, then falls back to the
+        /// per-feed sidecar (§3.8 rule 4); see `resolveReleaseManifest`.
         case mismatch
         /// No verified manifest binds the feed: verify its per-feed sidecar.
         case unavailable
@@ -253,5 +263,52 @@ extension AutotuneStaticInputs {
         case .unbound:
             return .unavailable
         }
+    }
+
+    /// The outcome of §3.8 rule 4 for one fetched feed body.
+    struct ReleaseManifestResolution: Equatable {
+        /// The manifest signer when the manifest binds `body`; nil means the
+        /// caller verifies `body` with its per-feed sidecar.
+        let manifestSignerKeyID: String?
+        /// The bytes to use: the fetched body, or its refetch after a mismatch.
+        let body: Data
+        /// True when `body` came from the cache-bypassing refetch, so the
+        /// sidecar must be fetched the same way to match it.
+        let refetched: Bool
+    }
+
+    /// SPEC-023 §3.8 rule 4. Feed bodies may come from the local HTTP cache
+    /// while the manifest is always fresh, so after a catalog rollover a
+    /// cached body of the previous release can meet the new manifest. A
+    /// mismatch is therefore not final: the body is refetched once past the
+    /// cache and checked again; if it still does not match, those exact bytes
+    /// are verified by their per-feed sidecar, which is still a valid trust
+    /// root (§3.8.5). Only a failed sidecar makes the feed an integrity
+    /// failure.
+    func resolveReleaseManifest(routeName: String, body: Data, baseURL: URL) async -> ReleaseManifestResolution {
+        switch await checkReleaseManifest(routeName: routeName, body: body, baseURL: baseURL) {
+        case .authenticated(let signerKeyID):
+            return ReleaseManifestResolution(manifestSignerKeyID: signerKeyID, body: body, refetched: false)
+        case .unavailable:
+            return ReleaseManifestResolution(manifestSignerKeyID: nil, body: body, refetched: false)
+        case .mismatch:
+            break
+        }
+        let feedURL = Self.staticFeedURL(baseURL: baseURL, name: routeName)
+        guard let fresh = try? await (fetchIgnoringCache ?? fetch)(feedURL) else {
+            return ReleaseManifestResolution(manifestSignerKeyID: nil, body: body, refetched: false)
+        }
+        if case .authenticated(let signerKeyID) = await checkReleaseManifest(routeName: routeName, body: fresh, baseURL: baseURL) {
+            return ReleaseManifestResolution(manifestSignerKeyID: signerKeyID, body: fresh, refetched: true)
+        }
+        return ReleaseManifestResolution(manifestSignerKeyID: nil, body: fresh, refetched: true)
+    }
+
+    /// Fetches a per-feed sidecar, past the local cache when its body was.
+    func fetchSidecar(_ url: URL, ignoringCache: Bool) async throws -> Data {
+        if ignoringCache, let fetchIgnoringCache {
+            return try await fetchIgnoringCache(url)
+        }
+        return try await fetch(url)
     }
 }

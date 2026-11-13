@@ -13,7 +13,9 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   Ed25519 signature over its `release.json`, which binds every feed digest.
   The coordinator verifies it against the feeds it serves and publishes it
   at `/v1/catalog-release` (+ `.sig`). A CLI that implements this revision
-  authenticates a bound feed by its digest and skips that feed's sidecar.
+  authenticates a bound feed by its digest and skips that feed's sidecar;
+  a digest mismatch refetches the body past the local cache once, then
+  falls back to the per-feed sidecar of those bytes.
   Per-feed sidecars keep shipping until CLIs that predate the manifest have
   left the fleet; removing them is a later revision.
 - **v0.22.41 (2026-11-11, Related: #2111)** — R024 admits the
@@ -2419,12 +2421,14 @@ Every refusal, override, recovery, and rollback MUST leave an audit record
 naming the release ids, the effective-diff digest, and the reason. Nothing in
 this requirement lets the lane sign, re-sign, or edit a feed on the host.
 
-### 3.8 Signed release manifest (SPEC-023-R028, v0.22.41)
+### 3.8 Signed release manifest (SPEC-023-R028, v0.22.42)
 
 **SPEC-023-R028:** Every catalog release MUST carry one signature over its
 `release.json`. A consumer that implements this revision MUST authenticate
 a feed that the verified manifest binds by the feed's digest. It MUST fall
-back to the per-feed sidecar only when no verified manifest binds that feed.
+back to the per-feed sidecar when no verified manifest binds that feed, or
+when the feed body still differs from the bound digest after one
+cache-bypassing refetch (rule 4).
 
 1. **Artifact.** `release.json.sig` is a detached sidecar in exactly the
    §3.5 rule 2 shape. It holds an Ed25519 signature over the exact bytes of
@@ -2479,10 +2483,21 @@ back to the per-feed sidecar only when no verified manifest binds that feed.
    - When the verified manifest binds a feed body with equal `sha256` and
      `bytes`, the body is authenticated. Its signer is the entry's
      `signer_key_id`, and its per-feed sidecar is not fetched.
-   - When the manifest binds the feed to other bytes, the feed fails exactly
-     as a per-feed signature failure does: same warning class, same
-     fallback. Before deciding, the consumer refetches a cached manifest
-     once, because the release may have rolled over between fetches.
+   - When the manifest binds the feed to other bytes, the consumer first
+     refetches a cached manifest once, because the release may have rolled
+     over between fetches. Feeds are served cacheable (`max-age`) while the
+     manifest is `no-cache`, so after a rollover a locally cached body of
+     the previous release can meet the new manifest. If the body still
+     differs, the consumer refetches the feed body once, bypassing its
+     local HTTP cache, and checks it against the manifest again. A match
+     authenticates the refetched body, and the consumer uses those bytes.
+   - If the refetched body still differs (or the refetch fails), the
+     consumer verifies those exact bytes by their per-feed sidecar, which
+     stays a valid trust root (rule 5). It fetches that sidecar past the
+     local cache too when the body was refetched. Only when the sidecar
+     also fails does the feed fail exactly as a per-feed signature failure
+     does: same warning class, same fallback. A manifest mismatch alone
+     never turns CB off.
    - When the manifest or its sidecar is missing, malformed or unverified,
      or does not bind the feed, the consumer verifies that feed by its
      per-feed sidecar as §3.5, §3.7 and §12.6 define.
@@ -2515,10 +2530,13 @@ static feed bound to another signer; another release; an unknown or missing
 key; a non-integer `bytes`; and a sidecar without a manifest. At startup it
 drops a rejected manifest, serves every feed and answers 404 on both
 routes; the dry-load and SIGHUP reload still reject it. The CLI authenticates a bound feed from a
-verified manifest without fetching its sidecar. It treats a bound digest
-mismatch as an integrity failure. It falls back to the per-feed sidecar
-when the manifest is absent or unverified, and refetches a stale cached
-manifest once.
+verified manifest without fetching its sidecar. On a bound digest mismatch
+it refetches the feed body once past its local cache and accepts a
+refetched body the manifest binds; a body that still mismatches is accepted
+only through a valid per-feed sidecar over those exact bytes and is an
+integrity failure otherwise. It falls back to the per-feed sidecar when the
+manifest is absent or unverified, and refetches a stale cached manifest
+once. The manifest parser accepts `bytes` only in integer spelling.
 
 ## 4. Formula (updated v0.12.0)
 

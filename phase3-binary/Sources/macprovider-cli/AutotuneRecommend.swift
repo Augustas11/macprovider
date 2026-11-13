@@ -1938,9 +1938,17 @@ struct AutotuneStaticInputs {
     static let transitionDemandRankSHA256 = "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2"
 
     var fetch: (URL) async throws -> Data {
-        // A replaced feed fetch carries the release manifest too.
-        didSet { releaseManifestFetch = nil }
+        // A replaced feed fetch carries the release manifest and the
+        // cache-bypassing refetch too.
+        didSet {
+            releaseManifestFetch = nil
+            fetchIgnoringCache = nil
+        }
     }
+    /// SPEC-023 §3.8 rule 4: the feed fetch that skips the local HTTP cache,
+    /// used once when a cached feed body meets a fresher release manifest.
+    /// Set only with the default `fetch`; nil routes the refetch through `fetch`.
+    var fetchIgnoringCache: ((URL) async throws -> Data)?
     /// SPEC-023 §3.8: the streaming, size-capped, cache-bypassing fetch for
     /// `/v1/catalog-release` (+ `.sig`). Set only with the default `fetch`;
     /// nil routes the manifest through `fetch`.
@@ -1961,8 +1969,16 @@ struct AutotuneStaticInputs {
         if let fetch {
             self.fetch = fetch
             self.releaseManifestFetch = nil
+            self.fetchIgnoringCache = nil
         } else {
             self.fetch = { url in try await AutotuneStaticInputs.fetchHonoringRateLimit(url) }
+            self.fetchIgnoringCache = { url in
+                try await AutotuneStaticInputs.fetchHonoringRateLimit(url, load: { url in
+                    var request = URLRequest(url: url)
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    return try await URLSession.shared.data(for: request)
+                })
+            }
             self.releaseManifestFetch = { url, maxBytes in
                 try await NativeMTPAdmissionFeed.defaultFetch(url: url, maxBytes: maxBytes)
             }
@@ -2068,7 +2084,7 @@ struct AutotuneStaticInputs {
         baseURL: URL
     ) async -> AutotuneStaticSelection<QualifiedArtifactFeed?> {
         let feedURL = Self.staticFeedURL(baseURL: baseURL, name: "catalog-artifacts")
-        let feedBytes: Data
+        var feedBytes: Data
         do {
             feedBytes = try await fetch(feedURL)
         } catch {
@@ -2081,7 +2097,7 @@ struct AutotuneStaticInputs {
             )
         }
 
-        guard let signerKeyID = await authenticatedSigner(name: "catalog-artifacts", body: feedBytes, baseURL: baseURL)
+        guard case let (signerKeyID, authenticatedBytes)? = await authenticatedSigner(name: "catalog-artifacts", body: feedBytes, baseURL: baseURL)
         else {
             return AutotuneStaticSelection(
                 value: nil,
@@ -2091,6 +2107,7 @@ struct AutotuneStaticInputs {
                 signerKeyID: nil
             )
         }
+        feedBytes = authenticatedBytes
 
         let feed: ArtifactFeed
         do {
@@ -2165,7 +2182,7 @@ struct AutotuneStaticInputs {
     ) async -> AutotuneStaticSelection<T> {
         let bakedValue = (try? decode(bakedBytes))!
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
-        let jsonBytes: Data
+        var jsonBytes: Data
         do {
             let jsonURL = Self.staticFeedURL(baseURL: StaticFeedOrigin.base, name: name)
             jsonBytes = try await fetch(jsonURL)
@@ -2179,7 +2196,7 @@ struct AutotuneStaticInputs {
             )
         }
 
-        guard let signerKeyID = await authenticatedSigner(name: name, body: jsonBytes, baseURL: StaticFeedOrigin.base)
+        guard case let (signerKeyID, authenticatedBytes)? = await authenticatedSigner(name: name, body: jsonBytes, baseURL: StaticFeedOrigin.base)
         else {
             return AutotuneStaticSelection(
                 value: bakedValue,
@@ -2189,6 +2206,7 @@ struct AutotuneStaticInputs {
                 signerKeyID: Self.bakedCatalogSignerKeyID
             )
         }
+        jsonBytes = authenticatedBytes
         // §3.5 order: signature, then SCHEMA (an invalid document is an integrity
         // failure), then policy / timestamp validity (update-required). Checking policy on
         // loosely extracted text first would misclassify a schema-invalid feed.
@@ -2231,26 +2249,25 @@ struct AutotuneStaticInputs {
         return AutotuneStaticSelection(value: value, selectedBytes: jsonBytes, warnings: warnings, usedFallback: false, signerKeyID: signerKeyID)
     }
 
-    /// The signer that authenticates a fetched feed body, or nil when it is
-    /// not authenticated. A verified release manifest (SPEC-023 §3.8) that
-    /// binds the feed decides by digest; otherwise the per-feed sidecar is
-    /// fetched and verified (§3.5 steps 2-4).
-    func authenticatedSigner(name: String, body: Data, baseURL: URL) async -> String? {
-        switch await checkReleaseManifest(routeName: name, body: body, baseURL: baseURL) {
-        case .authenticated(let signerKeyID):
-            return signerKeyID
-        case .mismatch:
-            return nil
-        case .unavailable:
-            break
+    /// The signer and the exact bytes it authenticates, or nil when the feed
+    /// is not authenticated. A verified release manifest (SPEC-023 §3.8)
+    /// that binds the feed decides by digest; a body it binds to other bytes
+    /// is refetched once past the local HTTP cache (§3.8 rule 4), and the
+    /// returned bytes may be that refetched body. Otherwise the per-feed
+    /// sidecar is fetched and verified (§3.5 steps 2-4).
+    func authenticatedSigner(name: String, body: Data, baseURL: URL) async -> (signerKeyID: String, body: Data)? {
+        let resolved = await resolveReleaseManifest(routeName: name, body: body, baseURL: baseURL)
+        if let signerKeyID = resolved.manifestSignerKeyID {
+            return (signerKeyID, resolved.body)
         }
-        guard let sigBytes = try? await fetch(Self.staticFeedURL(baseURL: baseURL, name: "\(name).sig")),
+        let sidecarURL = Self.staticFeedURL(baseURL: baseURL, name: "\(name).sig")
+        guard let sigBytes = try? await fetchSidecar(sidecarURL, ignoringCache: resolved.refetched),
               let sidecar = parsedSidecar(sigBytes),
-              signatureIsValid(jsonBytes: body, sidecarBytes: sigBytes, sidecar: sidecar)
+              signatureIsValid(jsonBytes: resolved.body, sidecarBytes: sigBytes, sidecar: sidecar)
         else {
             return nil
         }
-        return sidecar.keyID
+        return (sidecar.keyID, resolved.body)
     }
 
     private struct SignatureSidecar {

@@ -666,9 +666,9 @@ extension AutotuneStaticInputs {
             publicKeysByKeyID: trustedPublicKeys,
             requiredKeyID: catalog.signerKeyID ?? Self.keyID
         )
-        let policyData: Data
+        let fetchedPolicyData: Data
         do {
-            policyData = try await fetch(policyURL)
+            fetchedPolicyData = try await fetch(policyURL)
         } catch {
             return ContinuousBatchingPolicyLoadResult(
                 selection: .emptyOff,
@@ -678,25 +678,19 @@ extension AutotuneStaticInputs {
             )
         }
         // SPEC-023 §3.8: a verified release manifest that binds these bytes
-        // authenticates them; the per-feed sidecar is the fallback.
-        var manifestSignerKeyID: String?
-        switch await checkReleaseManifest(routeName: "continuous-batching-policy", body: policyData, baseURL: baseURL) {
-        case .authenticated(let signerKeyID):
-            manifestSignerKeyID = signerKeyID
-        case .mismatch:
-            return ContinuousBatchingPolicyLoadResult(
-                selection: .emptyOff,
-                status: .integrityFailureFallback,
-                policySHA256: Self.candidateCatalogSHA256(bytes: policyData),
-                signerKeyID: nil
-            )
-        case .unavailable:
-            manifestSignerKeyID = nil
-        }
+        // authenticates them. A mismatch refetches once past the local cache
+        // (rule 4); otherwise the per-feed sidecar verifies the exact bytes.
+        let resolved = await resolveReleaseManifest(
+            routeName: "continuous-batching-policy",
+            body: fetchedPolicyData,
+            baseURL: baseURL
+        )
+        let policyData = resolved.body
+        let manifestSignerKeyID = resolved.manifestSignerKeyID
         var signatureData = Data()
         if manifestSignerKeyID == nil {
             do {
-                signatureData = try await fetch(signatureURL)
+                signatureData = try await fetchSidecar(signatureURL, ignoringCache: resolved.refetched)
             } catch {
                 return ContinuousBatchingPolicyLoadResult(
                     selection: .emptyOff,
