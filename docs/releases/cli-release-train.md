@@ -138,6 +138,12 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Next CLI release — net changes vs 1.8.287 (tracked 2026-11-13)
+
+| Item | Provider-side change | Status |
+|---|---|---|
+| [#2334](https://github.com/Augustas11/macprovider/pull/2334) signed catalog release manifest (Related: #2302) | A catalog release can ship `release.json.sig`, one Ed25519 signature over `release.json`, which binds every feed's sha256 and byte count (SPEC-023 §3.8, R028, v0.22.42). The coordinator verifies it against the feeds it serves and publishes it at `/v1/catalog-release` (+ `.sig`). The CLI authenticates each bound feed by digest; on a mismatch it refetches past the HTTP cache, then falls back to the feed's own sidecar, so per-feed sidecars keep working for older CLIs. Ops: the pre-#2282 signed-pair, binding-bundle and `signed-pair-plan.py` paths are removed; the `cached_turns` step stays for providers at or below 1.8.283 | Merged 2026-11-13 (`d3b136de1`). Live steps, any order (without a signature the CLI uses the sidecars): (1) the next catalog content release ships `release.json.sig` through `scripts/ops/catalog-activate.sh status` then `next --run`; (2) the coordinator runtime serving `/v1/catalog-release` plus its nginx routes ride the next Pearl runtime train through `scripts/ops/pearl-runtime.sh status` then `next --run`; (3) the CLI half rides the next CLI cut through `scripts/ops/cli-release.sh status` then `next --run`. Live = a provider on that CLI verifying a feed through the signed manifest |
+
 ## CLI release — 1.8.287 (published 2026-11-13; tracked from 2026-11-10)
 
 `v1.8.287` was published on 2026-11-13 from `1ef699064`. The steps after publication (recommendation bump, live rollout verification, mirror) are read from `scripts/ops/cli-release.sh status`.
