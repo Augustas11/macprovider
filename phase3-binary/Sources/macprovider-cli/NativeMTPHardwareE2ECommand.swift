@@ -213,6 +213,7 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     var proposalDepth: Int = 1
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "native-mtp-hardware-e2e")
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data(

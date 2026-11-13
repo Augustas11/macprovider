@@ -1671,7 +1671,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.quantization.perLayerExceptions, ["target/model.layers.0.mlp.gate"])
     }
 
-    /// SPEC-048-R002 (0.1.94): for `gemma4_mtp_v1` the release `mlx_affine`
+    /// SPEC-048-R002 (0.1.98): for `gemma4_mtp_v1` the release `mlx_affine`
     /// kind names an 8-bit target and a bfloat16 assistant; every other
     /// adapter keeps the 4-bit pair.
     func testReleaseEnvelopeMapsGemma4MLXAffineToAnEightBitTargetAndBF16Assistant() throws {

@@ -301,7 +301,7 @@ def validate_entry(entry: object, path: str) -> dict:
     # Implementation ceiling; signed policy stays at its independently qualified bound.
     if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and bound > 4:
         fail(f"{path}.max_native_active_rows", "glm5_next_mtp_v1 supports at most 4 native active rows")
-    # SPEC-048 0.1.93: the Gemma 4 assistant runs one native row.
+    # SPEC-048 0.1.97: the Gemma 4 assistant runs one native row.
     if entry["mtp_family_adapter"] == "gemma4_mtp_v1" and bound > 1:
         fail(f"{path}.max_native_active_rows", "gemma4_mtp_v1 supports at most 1 native active row")
     if bound > slots:

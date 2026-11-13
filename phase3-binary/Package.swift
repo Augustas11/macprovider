@@ -17,6 +17,32 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.60 (#2328) on 3.32.3-macprovider.58: the
+        // Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision decode
+        // uses fused non-traditional RoPE when the three M-RoPE axes share
+        // one rope delta) and the Gemma 4 commits b2a45b0 (packed assistant
+        // drafter, embedded assistant loader, target hidden-state and
+        // shared-K/V emission) and e198b9b (Gemma 4 layers attend through a
+        // cache that owns attention, so batched rows attend only over their
+        // own keys), which the provider's gemma4_mtp_v1 adapter needs.
+        // Tag 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
+        // v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row
+        // of a qualifying affine weight takes affine_qmv_mma1, a single-row
+        // kernel with qmv_mma's exact reduction order, and rows 2-16 take
+        // qmv_mma; a row is bit-identical alone and in a batch because the two
+        // kernels are bit-identical (checked on M5 and M3 Ultra GPUs; not on
+        // M1, M2 or M4). The switch point is a speed choice (M3 Ultra, Llama
+        // 3.1 8B 4-bit, aggregate tok/s: 1 row 93 on qmv_mma1 against 75 on
+        // qmv_mma, 2 rows 120 against 146). MLX_METAL_SMALL_M_ROW_INVARIANT,
+        // read once per process with atoi, keeps that window by default; a
+        // value that parses to 0 skips it for the fork's pre-window small-row
+        // routing (per-row qmv below the qmm limit), which the provider sets
+        // only for a serial-only serve process (SPEC-038 FR-CB9). Measured on
+        // the M3 Ultra, Llama 3.1 8B 4-bit, one row over HTTP against stock
+        // mlx-lm in the same window: serial-only route 0.93 to 0.97x,
+        // row-invariant route 0.81 to 0.84x, main 0.65 to 0.71x. Core
+        // `pytest python/tests/test_quantized.py -k small_m`: 5 passed at
+        // 0f26baba on the M3 Ultra. Not measured on M1.
         // Tag 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only
         // prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and indexer prefill tiles are evaluated one
         // ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
@@ -117,8 +143,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.18, MLX
-        // core v0.32.4-macprovider.10 (26ac61533) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.22, MLX
+        // core v0.32.4-macprovider.14 (0f26baba0) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -133,7 +159,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
+            revision: "a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

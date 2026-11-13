@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R002 (0.1.94) `gemma4_mtp_v1` embedded checkpoint: an MLX affine
+/// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` embedded checkpoint: an MLX affine
 /// 8-bit target with bfloat16 scales in the target shards, and the
 /// unquantized bfloat16 assistant in `model-mtp.safetensors`.
 final class NativeMTPGemma4ObservationTests: XCTestCase {

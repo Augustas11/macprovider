@@ -54,7 +54,7 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
         case .unquantized(let dtype):
             return dtype
         case .mlxAffine4(let bits, _):
-            // 8 is the `gemma4_mtp_v1` target width (SPEC-048-R002 0.1.94).
+            // 8 is the `gemma4_mtp_v1` target width (SPEC-048-R002 0.1.98).
             return bits == 8 ? "mlx_affine_8bit" : "mlx_affine_4bit"
         case .mlxMXFP8:
             return "mlx_mxfp8"
@@ -290,7 +290,7 @@ enum NativeMTPArtifactObserver {
     static let gemma4AssistantWeightFileName = "model-mtp.safetensors"
     private static let gemma4AssistantTensorPrefix = "language_model.mtp."
 
-    /// SPEC-048-R002 (0.1.94) `gemma4_mtp_v1` / `checkpoint_mtp`: one target
+    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` / `checkpoint_mtp`: one target
     /// directory holds an MLX affine 8-bit target and the unquantized
     /// bfloat16 assistant in `model-mtp.safetensors`. The two are observed
     /// separately (they do not share a format), and the pair is embedded.
@@ -379,7 +379,7 @@ enum NativeMTPArtifactObserver {
         return count
     }
 
-    /// SPEC-048-R002 (0.1.94) `gemma4_mtp_v1` representation: an MLX affine
+    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` representation: an MLX affine
     /// 8-bit target with bfloat16 scales and no exceptions, and the
     /// unquantized bfloat16 assistant. The manifest's `target` object is the
     /// affine form and its `mtp` object the `base` form.
@@ -1266,7 +1266,7 @@ enum NativeMTPArtifactObserver {
         /// `text_config.hidden_size` for a quantized router gate.
         case glm5Next(hiddenLayers: Int, hiddenSize: Int)
         case deepseekV4(hiddenLayers: Int)
-        /// SPEC-048-R002 (0.1.94) `gemma4_mtp_v1` target shards.
+        /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` target shards.
         case gemma4
     }
 

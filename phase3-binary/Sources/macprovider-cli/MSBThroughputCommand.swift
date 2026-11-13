@@ -183,6 +183,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "msb-throughput")
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
             FileHandle.standardError.write(Data(
@@ -2688,6 +2689,8 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
     init(inner: any ContinuousBatchSchedulerBackend) {
         self.inner = inner
     }
+
+    var prefillForwardTokenCap: Int? { inner.prefillForwardTokenCap }
 
     struct Snapshot {
         let windowNanoseconds: UInt64

@@ -1647,6 +1647,11 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     func finish(requestID: String)
     /// Returns only after in-flight calls have stopped accessing row bindings.
     func cancelInFlight() async
+    /// Flattened prompt tokens (rows x chunk) one shared prefill forward may
+    /// carry, or nil for no bound. A prefill group past it runs each row in
+    /// its own forward, back to back, and returns after the last one
+    /// (`glm5_next` pagedMLA: 8 tokens, so every grouped row prefills alone).
+    var prefillForwardTokenCap: Int? { get }
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws
     func recordLabNativeMTPStateDigest(phase: NativeMTPStateDigestPhase, requestIDs: [String]) async throws
@@ -1661,6 +1666,8 @@ protocol ContinuousBatchRetainedCacheBridge: Sendable {
 }
 
 extension ContinuousBatchSchedulerBackend {
+    var prefillForwardTokenCap: Int? { nil }
+
     func proposeNativeMTPPackedRound(
         rows: [ContinuousBatchNativeMTPProposalInput]
     ) async throws -> [String: [Int]]? {
@@ -2655,6 +2662,11 @@ actor ContinuousBatchScheduler {
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) {
+        // SPEC-038 FR-CB9: the one place every batching path passes through.
+        // Serve and the lab commands refuse earlier with a clean error; this
+        // stops any other caller from batching rows on the serial-only route.
+        let refusal = SmallMRoute.batchingRefusal(route: SmallMRoute.processRoute, entry: "ContinuousBatchScheduler")
+        precondition(refusal == nil, refusal ?? "")
         self.configuration = configuration
         self.tokenDeliveryCapacity = ContinuousBatchTokenDeliveryCapacity(
             limit: configuration.tokenDeliveryTaskLimit
@@ -6209,19 +6221,24 @@ actor ContinuousBatchScheduler {
         // turn by one original group (at most one extra iteration budget);
         // then yield. Never shrink a chunk to fit: that would change the GLM
         // cold/warm kernel route (SPEC-024-R005).
-        var group = selected
         var remainingTokens = turnBudget
         // Continuation off a boundary spends only the per-iteration budget,
         // never the idle cohort allowance, so an idle turn still yields to a
         // new short prompt after one budget's worth of work.
         var continuationTokens = min(turnBudget, configuration.maxPrefillTokensPerIteration)
         var turnRows = selected.map { $0.row.request.id }
+        // On a serial-cohort backend the head's forward comes first (#2345):
+        // peers that cannot finish with the head run after it, in this turn,
+        // with their tokens held back from the head's continuation.
+        var (group, deferredPeers) = splitSerialCohort(selected)
+        continuationTokens -= Self.prefillTokens(deferredPeers)
+        var groupWasDeferred = false
         while !group.isEmpty {
-            let consumed = group.reduce(0) { $0 + $1.end - $1.row.prefillCursor }
+            let consumed = Self.prefillTokens(group)
             let progressed = await runPrefillGroup(group)
             madeProgress = madeProgress || progressed
             remainingTokens -= consumed
-            continuationTokens -= consumed
+            if !groupWasDeferred { continuationTokens -= consumed }
             guard progressed, remainingTokens >= 0, !draining,
                   configuration.referencePrefillStepSize == nil,
                   !backendCancellationPending, !cleanupFailedClosed else { break }
@@ -6269,10 +6286,25 @@ actor ContinuousBatchScheduler {
                     ? selectRaggedPrefillGroup(order: order, tokenBudget: continuationTokens)
                     : selectEqualOffsetPrefillGroup(order: order, tokenBudget: continuationTokens)
                 if next.first?.row.request.id == headID,
-                   next.reduce(0, { $0 + $1.end - $1.row.prefillCursor }) <= continuationTokens {
-                    continuation = next
+                   Self.prefillTokens(next) <= continuationTokens {
+                    let (lead, peers) = splitSerialCohort(next)
+                    continuation = lead
+                    deferredPeers += peers
+                    continuationTokens -= Self.prefillTokens(peers)
                     turnRows += next.map { $0.row.request.id }.filter { !turnRows.contains($0) }
                 }
+            }
+            groupWasDeferred = false
+            if continuation.isEmpty, !deferredPeers.isEmpty {
+                // The head's prompt has had its share of the turn: the peers
+                // held back from its forwards prefill now, unchanged chunks.
+                continuation = deferredPeers.compactMap { item in
+                    guard let row = activePrompt[item.row.request.id],
+                          row.prefillCursor == item.row.prefillCursor else { return nil }
+                    return (row, item.end)
+                }
+                deferredPeers = []
+                groupWasDeferred = true
             }
             group = continuation
         }
@@ -6283,6 +6315,29 @@ actor ContinuousBatchScheduler {
             promptOrder.append(id)
         }
         return madeProgress
+    }
+
+    private static func prefillTokens(_ group: [(row: Row, end: Int)]) -> Int {
+        group.reduce(0) { $0 + $1.end - $1.row.prefillCursor }
+    }
+
+    /// SPEC-038 FR-CB2 (v0.3.49, #2345): on a backend whose prefill group
+    /// runs each row in its own forward and returns after the last
+    /// (`prefillForwardTokenCap`), a shared group gains no speed, and a peer
+    /// in the head's group only delays the head's first token. Split such a
+    /// group into the head with the rows that finish with it (the cohort),
+    /// and the other peers, which run after the head's forwards in the same
+    /// turn. Every row keeps its chunk, so tokens are unchanged; a backend
+    /// that shares the forward keeps the group whole.
+    private func splitSerialCohort(
+        _ group: [(row: Row, end: Int)]
+    ) -> (lead: [(row: Row, end: Int)], peers: [(row: Row, end: Int)]) {
+        guard group.count > 1, let head = group.first?.row,
+              let cap = backend.prefillForwardTokenCap, Self.prefillTokens(group) > cap
+        else { return (group, []) }
+        let headLeft = head.request.promptTokens.count - head.prefillCursor
+        let finishesWithHead = { (row: Row) in row.request.promptTokens.count - row.prefillCursor == headLeft }
+        return (group.filter { finishesWithHead($0.row) }, group.filter { !finishesWithHead($0.row) })
     }
 
     private func runPrefillGroup(_ selected: [(row: Row, end: Int)]) async -> Bool {

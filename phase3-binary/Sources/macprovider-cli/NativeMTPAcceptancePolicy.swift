@@ -67,7 +67,7 @@ struct NativeMTPAcceptancePolicy: Sendable {
         let cacheMode = try string(object, "cache_mode")
         guard hwModel == "Mac15,14" else { throw invalid("hw_model") }
         // The target's global MLX affine width; `validate` binds it to the
-        // fixture family (8bit only for gemma4_mtp_v1, SPEC-048 0.1.94).
+        // fixture family (8bit only for gemma4_mtp_v1, SPEC-048 0.1.98).
         guard ["4bit", "8bit"].contains(quantization) else { throw invalid("quantization") }
         guard cacheMode == "paged_kv_mixed" else { throw invalid("cache_mode") }
         guard let number = object["ram_gb"] as? NSNumber,

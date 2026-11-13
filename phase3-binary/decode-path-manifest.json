@@ -29,7 +29,8 @@
     "Sources/macprovider-cli/PagedMLACache.swift",
     "Sources/macprovider-cli/PagedMiniMaxM3Cache.swift",
     "Sources/macprovider-cli/ReasoningOutput.swift",
-    "Sources/macprovider-cli/ServeDecodePath.swift"
+    "Sources/macprovider-cli/ServeDecodePath.swift",
+    "Sources/macprovider-cli/SmallMRoute.swift"
   ],
   "dependencies": [
     "mlx-swift",

@@ -241,7 +241,137 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in }
     }
 
-    private func makeRuntime(backend: SelfCheckRetirementBackend, warmSwapEnabled: Bool = false) -> ModelRuntime {
+    /// SPEC-038 FR-CB9: a serial-only process exposes no self-check target
+    /// and refuses a self-check batch before any row reaches the scheduler.
+    func testSerialOnlyRuntimeRefusesALaterSelfCheck() async throws {
+        let invariant = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .rowInvariant)
+        let invariantTarget = await invariant.continuousBatchingSelfCheckTarget(includeDecided: true)
+        XCTAssertNotNil(invariantTarget)
+
+        let backend = SelfCheckRetirementBackend()
+        let runtime = makeRuntime(backend: backend, smallMRoute: .serialOnly)
+        let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true)
+        XCTAssertNil(target)
+        do {
+            _ = try await runtime.runContinuousBatchingSelfCheckBatch(
+                prompts: [[31], [32]], maxOutputTokens: 2, idPrefix: "serial-only")
+            XCTFail("a serial-only runtime must refuse a self-check batch")
+        } catch ContinuousBatchSchedulerError.requestFailed(let reason) {
+            XCTAssertTrue(reason.hasPrefix("small_m_route_serial_only: cb_self_check"), reason)
+        }
+        let prefilled = await backend.prefillRowCount
+        XCTAssertEqual(prefilled, 0)
+    }
+
+    /// SPEC-038 FR-CB9: a signed positive entry and a stored one-row verdict
+    /// never turn batching on in a serial-only process. It serves serially,
+    /// as a refused self-check does on the invariant route: effective mode
+    /// off (no strict-startup error, no per-request canary serial routing)
+    /// and a refused self-check in status, never pending.
+    func testSerialOnlyRuntimeServesSeriallyUnderASignedPositiveEntry() async throws {
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 2)
+        for rollout in [ContinuousBatchingMode.on, .canary] {
+            let invariant = makeRuntime(backend: SelfCheckRetirementBackend(), policyRollout: rollout)
+            let invariantMode = await invariant.continuousBatchingCapabilityForTest().mode
+            XCTAssertEqual(invariantMode, rollout, "control: the entry applies while the self-check is pending")
+            let ignored = await invariant.applySerialOnlySelfCheck(stored: noGain, key: nil, servedSlots: 1)
+            XCTAssertNil(ignored)
+            let invariantState = await invariant.continuousBatchingSelfCheckState()
+            XCTAssertEqual(invariantState, .pending, "a row-invariant runtime ignores the serial-only state")
+
+            let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, policyRollout: rollout)
+            let key = await invariant.continuousBatchingSelfCheckTarget()?.key
+            let served = await runtime.applySerialOnlySelfCheck(stored: noGain, key: key, servedSlots: 1)
+            XCTAssertEqual(served, 1)
+            let capability = await runtime.continuousBatchingCapabilityForTest()
+            XCTAssertEqual(capability.mode, .off, "\(rollout)")
+            XCTAssertTrue(capability.shouldUseSerialPath)
+            XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+            XCTAssertNil(ContinuousBatchingPolicy.serialRouteTelemetryLine(capability))
+            let state = await runtime.continuousBatchingSelfCheckState()
+            XCTAssertEqual(state, .refused(reason: "no_net_gain"))
+            let snapshot = await runtime.currentSnapshot().continuousBatching
+            XCTAssertEqual(snapshot?.mode, .off)
+            XCTAssertEqual(snapshot?.active, false)
+            XCTAssertEqual(snapshot?.selfCheck?.decision, "no_net_gain")
+            XCTAssertEqual(snapshot?.selfCheck?.servedSlots, 1)
+            XCTAssertEqual(snapshot?.selfCheck?.verifiedSlots, 2)
+            XCTAssertEqual(snapshot?.selfCheck?.modelSHA256, key?.modelSHA256)
+            XCTAssertEqual(snapshot?.policy.decisionReason, "self_check_refused_no_net_gain")
+
+            // Batching off by configuration: no stored decision to report.
+            let configured = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, policyRollout: rollout)
+            await configured.applySerialOnlySelfCheck(stored: nil, key: nil, servedSlots: 1)
+            let configuredState = await configured.continuousBatchingSelfCheckState()
+            XCTAssertEqual(configuredState, .refused(reason: "small_m_route_serial_only"))
+            let configuredMode = await configured.continuousBatchingCapabilityForTest().mode
+            XCTAssertEqual(configuredMode, .off)
+        }
+    }
+
+    /// An owner pin of 4 serves what the invariant route serves, and status
+    /// reports exactly the count served: 1 under a stored divergence at two
+    /// rows (verified 1), the full pin with batching off by configuration.
+    func testSerialOnlyRuntimeServesAndReportsTheOwnerPinnedCount() async throws {
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        let cases: [(ContinuousBatchingSelfCheckDecision?, Int)] = [(divergence, 1), (nil, 4)]
+        for (decision, expected) in cases {
+            let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, maxBatch: 4)
+            let slots = SmallMRoute.serialOnlyServedSlots(stored: decision, ownerPinned: 4, servedNow: 4)
+            let served = await runtime.applySerialOnlySelfCheck(stored: decision, key: nil, servedSlots: slots)
+            XCTAssertEqual(served, expected)
+            let gate = await runtime.servedSlotLimitForTest()
+            XCTAssertEqual(gate, expected)
+            let report = await runtime.currentSnapshot().continuousBatching?.selfCheck
+            XCTAssertEqual(report?.servedSlots, expected)
+            XCTAssertEqual(report?.decision, decision?.reason ?? "small_m_route_serial_only")
+        }
+    }
+
+    /// A swap re-plans the gate to the owner pin and re-resolves it from a
+    /// self-check target, which a serial-only process has none of: its
+    /// startup count and refused report must survive, so served, advertised
+    /// and reported counts stay equal.
+    func testSerialOnlyRuntimeKeepsItsServedCountAcrossASwap() async throws {
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        let cases: [(ContinuousBatchingSelfCheckDecision?, Int)] = [(divergence, 1), (nil, 4)]
+        for (decision, expected) in cases {
+            let runtime = makeRuntime(
+                backend: SelfCheckRetirementBackend(), warmSwapEnabled: true, smallMRoute: .serialOnly, maxBatch: 4
+            )
+            let providerStatus = ProviderStatus(
+                modelID: "mlx-community/Qwen-Test",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 1024, maxConcurrencyOverride: 4),
+                modelHash: String(repeating: "a", count: 64)
+            )
+            await runtime.setProviderStatus(providerStatus)
+            await runtime.configureServedSlots(managed: true, ownerPinned: 4)
+            let slots = SmallMRoute.serialOnlyServedSlots(stored: decision, ownerPinned: 4, servedNow: 4)
+            _ = await runtime.applySerialOnlySelfCheck(stored: decision, key: nil, servedSlots: slots)
+
+            try await runtime.beginSwap(targetModelID: "mlx-community/Qwen-Replacement").value
+
+            let gate = await runtime.servedSlotLimitForTest()
+            XCTAssertEqual(gate, expected)
+            let advertised = await providerStatus.snapshot().capacity.maxConcurrency
+            XCTAssertEqual(advertised, expected)
+            let snapshot = await runtime.currentSnapshot().continuousBatching
+            XCTAssertEqual(snapshot?.selfCheck?.servedSlots, expected)
+            XCTAssertEqual(snapshot?.selfCheck?.decision, decision?.reason ?? "small_m_route_serial_only")
+            XCTAssertEqual(snapshot?.mode, .off)
+            let state = await runtime.continuousBatchingSelfCheckState()
+            XCTAssertEqual(state, .refused(reason: decision?.reason ?? "small_m_route_serial_only"))
+        }
+    }
+
+    private func makeRuntime(
+        backend: SelfCheckRetirementBackend,
+        warmSwapEnabled: Bool = false,
+        smallMRoute: SmallMRoute = .rowInvariant,
+        policyRollout: ContinuousBatchingMode? = nil,
+        maxBatch: Int = 3
+    ) -> ModelRuntime {
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
         let proof = PagedKVHardwareSizingProof(
@@ -257,12 +387,38 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
             kernelIdentifier: proof.kernelIdentifier, parityLabel: proof.parityLabel,
             moeDispatchProven: false, poolEpoch: proof.poolEpoch,
             source: .runtimeMeasurement)
+        let policy = policyRollout.map { rollout in
+            ContinuousBatchingPolicyLoadResult(
+                selection: ContinuousBatchingPolicySelection(
+                    releaseID: "r", policyVersion: "v", generatedAt: .distantPast, expiresAt: .distantFuture,
+                    candidateCatalogSHA256: "", signerKeyID: "k", source: "coordinator",
+                    entries: [ContinuousBatchingPolicyEntry(
+                        tupleSHA256: String(repeating: "c", count: 64),
+                        modelKey: modelID,
+                        rollout: rollout,
+                        tuple: ContinuousBatchingAcceptedTuple(
+                            modelID: modelID, modelSHA256: modelSHA, cacheClass: "", kvDType: .fp16,
+                            requiresMoE: false, hardwareClass: "", metallibSHA256: "", kernelIdentifier: ""
+                        ),
+                        provenance: ContinuousBatchingPolicyProvenance(
+                            source: "", status: "", evidenceID: "", packageManifestSHA256: "",
+                            studioCampaignSHA256: "", providerCLIVersion: "", liveExecutableCDHash: ""
+                        )
+                    )]
+                ),
+                status: .liveVerified, policySHA256: "p", signerKeyID: "k"
+            )
+        } ?? ContinuousBatchingPolicyLoadResult(
+            selection: .emptyOff, status: .absentFallback, policySHA256: nil, signerKeyID: nil
+        )
         return ModelRuntime(
             modelID: modelID, modelHash: modelSHA,
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
-            maxBatch: 3, continuousBatchingMode: .on,
+            maxBatch: maxBatch, continuousBatchingMode: .on,
+            continuousBatchingPolicyLoadResult: policy,
             continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: warmSwapEnabled,
+            smallMRoute: smallMRoute,
             pagedKVObservedRuntimeIdentity: identity,
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",

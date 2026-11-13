@@ -249,7 +249,7 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     # Match the implemented tuple families without widening the existing
     # affine GLM/Qwen depth-one contract. DSpark's mixed-MX tuple supports
     # depths 1...5; all numerical thresholds remain frozen below. The affine
-    # width is 4bit, or 8bit for gemma4_mtp_v1 (SPEC-048 0.1.94); the bench
+    # width is 4bit, or 8bit for gemma4_mtp_v1 (SPEC-048 0.1.98); the bench
     # binds it to the fixture family.
     quantization = policy.get("quantization")
     if quantization not in ADMITTED_QUANTIZATIONS + ("mlx_mxfp4_mxfp8",):

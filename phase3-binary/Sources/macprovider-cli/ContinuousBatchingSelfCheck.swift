@@ -1219,6 +1219,9 @@ actor ContinuousBatchingSelfCheckDriver {
     private let idleSeconds: Double
     private let pollSeconds: Double
     private let log: @Sendable (String) -> Void
+    /// SPEC-038 FR-CB9: records the startup model's applied decision so the
+    /// next start can take the serial small-row route.
+    private let verdictRecorder: SmallMRouteVerdictRecorder?
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): a check due this long without an
     /// idle window runs under an admission hold.
     private let admissionHoldAfterSeconds: Double
@@ -1258,6 +1261,7 @@ actor ContinuousBatchingSelfCheckDriver {
         admissionHoldCheckSeconds: Double = ContinuousBatchingSelfCheck.admissionHoldCheckSeconds,
         lifecycleLease: @escaping @Sendable () -> String? = { nil },
         admissionHoldJitter: Double = Double.random(in: 0...ContinuousBatchingSelfCheck.admissionHoldJitterSeconds),
+        verdictRecorder: SmallMRouteVerdictRecorder? = nil,
         log: @escaping @Sendable (String) -> Void
     ) {
         self.runtime = runtime
@@ -1272,6 +1276,7 @@ actor ContinuousBatchingSelfCheckDriver {
         self.admissionHoldCheckSeconds = max(1, admissionHoldCheckSeconds)
         self.lifecycleLease = lifecycleLease
         self.admissionHoldJitter = max(0, admissionHoldJitter)
+        self.verdictRecorder = verdictRecorder
         self.log = log
     }
 
@@ -1969,6 +1974,7 @@ actor ContinuousBatchingSelfCheckDriver {
             return
         }
         log("event=cb_self_check action=applied source=\(source) reason=\(decision.reason) slots=\(slots) verified_k=\(decision.verifiedSlots) model_sha256=\(target.key.modelSHA256)")
+        verdictRecorder?.applied(key: target.key, decision: decision)
     }
 }
 

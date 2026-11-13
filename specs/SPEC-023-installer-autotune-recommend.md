@@ -14,7 +14,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   to the runtime as `mlx_affine_8bit` (target) and `bf16` (MTP), with empty
   exception arrays and a representation manifest whose `mtp` object is the
   base form. Every other adapter keeps global width 4 for both artifacts.
-  Lockstep with SPEC-048 0.1.94.
+  Lockstep with SPEC-048 0.1.98.
 - **v0.22.42 (2026-11-13, Related: #2302)** — Adds §3.8 and registers
   `SPEC-023-R028`: each catalog release ships `release.json.sig`, one
   Ed25519 signature over its `release.json`, which binds every feed digest.

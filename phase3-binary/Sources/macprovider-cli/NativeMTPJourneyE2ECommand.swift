@@ -90,6 +90,7 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     var cachedPrefixTurns: Int = 0
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "native-mtp-journey-e2e")
         guard cachedPrefixTurns >= 0 else {
             throw ValidationError("cached prefix turns cannot be negative")
         }

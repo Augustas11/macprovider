@@ -13,7 +13,7 @@
   ],
   "maximum_prompt_tokens": 4096,
   "memory_safety_margin_bytes": 8589934592,
-  "mlx_fork_revision": "e198b9b084506c2484d0a708e125c68ad3f89e07",
+  "mlx_fork_revision": "a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b",
   "model_id": "google/gemma-4-12b-it",
   "mtp_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "os_build": "26A434",

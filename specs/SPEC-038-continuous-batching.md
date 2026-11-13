@@ -1,11 +1,55 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.48
+Version: v0.3.51
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.51 (2026-11-14, small-row route from resolved state, Related: #2335):**
+FR-CB9 decides the serial small-row route from resolved state instead of
+explicit configuration only. Native MTP `auto` counts as inactive when the
+admission set the loader reads (the baked feed on an ordinary install) has no
+verified entry for the loaded model and artifact digest; an unreadable or
+unverifiable set keeps the invariant route. A decided one-row self-check verdict on the key
+the startup identity resolved to counts as batching unable to activate, so an
+ordinary install whose self-check found no net gain takes the serial route from
+its next start. Re-checks wait for a start on the invariant route. Warm-swap
+targets keep the invariant route. Only a one-row reason that settles the key
+counts (`no_net_gain`, a row divergence, a crash, a configured single row); a
+reason that re-runs on ladder-bound growth keeps the invariant route, and a
+serial-only process serves with continuous batching off and reports its
+stored one-row decision as a refused self-check whatever the signed policy
+says. The route follows the core's C `atoi` parse of the variable, and every
+other command that runs MLX compute pins the invariant route, removing an
+inherited value.
+
+**Change log v0.3.50 (2026-11-13, serial-only small-row route, Related: #2335):**
+FR-CB9 states that a row must compute the same bits alone and inside a batch
+in every process that can batch, and names the one configuration that can
+never batch: continuous batching set `off` explicitly, native MTP `off`, no
+draft model, no shard-group role, not an autotune child. Such a `serve`
+process takes the MLX fork's pre-window small-row quantized route (per-row
+`qmv` below the `qmm` limit)
+(`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler and keeps disk KV
+on a separate decode-path class; every other command runs the invariant route. Every other
+state, including a self-check still pending, keeps the row-invariant route.
+
+**Change log v0.3.49 (2026-11-14, FR-CB2 serial-cohort backends run the head's forward first, Related: #2345):**
+FR-CB2 prefill packing: on a backend whose prefill group runs each row in its
+own forward and returns after the last one (its flattened-token cap is below
+the group's tokens; `glm5_next` pagedMLA, 8 tokens), the head and the peers
+with as many prompt tokens left as the head prefill first, and the other
+peers selected for the turn prefill right after them in the same turn.
+Grouping there gains no speed, so a peer in the head's group only delayed the
+head's first token. With the serve path's 2048-token turn budget and 512-token
+chunks (the msb-throughput harness since #2309), msb03 on GLM-5.3-Flash put all
+four rows' first chunks in the head's group, and the 512-token row's first
+token waited four forwards (3.84x serial). Each turn holds the same chunks in
+the same row order, with the same decode windows, so chunk partitions, kernel
+routes, tokens and makespan are unchanged. A backend that shares the forward
+keeps the group whole.
+
 **Change log v0.3.48 (2026-11-12, DeepSeek V4 encoder identity and campaign gate, Related: #2111):**
 The timed queue-wait deadline restarts while a request with a free slot
 waits only on another row's prefill (FR-CB1), so long DeepSeek V4 prompts
@@ -1070,7 +1114,10 @@ original-shaped chunk in that same turn while the cumulative prefill work
 stays within the per-iteration budget, never the idle cohort allowance, and
 MUST NOT when a request waits for admission with a free slot; a peer that cannot finish with the head MUST join the
 head's forward only within the budget left after `min(head tokens left,
-budget)`. A row ending on a SPEC-024-R005 resume or snapshot
+budget)`. (v0.3.49) On a backend that runs a group past its flattened-token cap
+as one forward per row, such a peer MUST prefill after the forwards of the
+head and the rows finishing with it, in the same turn, with its chunk
+unchanged. A row ending on a SPEC-024-R005 resume or snapshot
 boundary MAY run its next original-shaped chunk in that same turn; forwards
 stay separate and there is no intervening decode window or peer prefill. The
 next chunk MUST NOT be shrunk, merged or repartitioned to fit a remaining turn
@@ -1645,6 +1692,96 @@ existing `AsyncSemaphore` serial path MUST be retained as (a) the flag-off
 default, (b) a preflight-guarded fallback for unsupported models, and (c) a
 safe mode after scheduler failure. Enabling the flag MUST NOT be a precondition
 for correct serving.
+
+**Small-row route (v0.3.50, resolved state v0.3.51, #2335).** Every process
+that can batch decode rows (a CB row, the FR-CB10 self-check, a SPEC-048
+native-MTP round, a shard-group head) MUST run the MLX core's row-invariant
+small-row route, so a row computes the same bits alone and inside a batch. A
+`serve` process that cannot batch for its whole lifetime MAY take the MLX
+fork's pre-window small-row route (`qmv` per row below the `qmm` limit), which
+is faster for one row. The provider decides once, from resolved state before
+any model loads, and sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0` only when all of
+these hold:
+
+1. native MTP is inactive for the whole process: `native_mtp_mode` is `off`,
+   or `auto` and the admission set the startup loader reads (the
+   feed-resolved sidecar, else `native-mtp-admission.json` beside or in the
+   model directory) has a valid signature and no entry whose `model_key` and
+   `artifact_hash` equal the loaded model id and verified artifact digest,
+   the loader's broadest match (a same-architecture variant has its own
+   signed entry, SPEC-048-R013). No set, or no verified artifact digest,
+   also counts as inactive; a set that cannot be read, parsed or verified
+   does not. The baked static feed every ordinary install fetches names only
+   its admitted models, so any other model qualifies. Only startup activates
+   native MTP (a creative-hold restore reloads only the tuple startup
+   activated), and a serial-only process refuses the drafter load even if a
+   feed refresh adds an entry later;
+2. continuous batching cannot activate: it is set `off` explicitly by YAML,
+   environment or CLI (the emergency override, which no signed policy,
+   self-check or warm swap lifts), or the FR-CB10 store holds a decided
+   verdict serving one row that settles the key (`no_net_gain`, a row
+   divergence or leak, a crash, or `single_row` for a configured single row)
+   on the self-check key this startup identity resolved to, with no
+   unfinished step and no re-measurement scheduled. A one-row decision that
+   re-runs when the ladder bound grows (`serial_baseline_unavailable`,
+   `probe_shape_unmet_at_<k>`, `probe_shape_unavailable`) keeps the
+   invariant route, the only one on which the self-check can run. The startup
+   identity covers the inputs the key and the ladder bound derive from: model
+   bytes, CLI version, decode-path digest, MLX pins, OS build, chip and memory,
+   signed CB policy, rows, owner pin, queue limit, context, `kv_bits`, prefill
+   chunk, cached turns, paged-KV setting and native-MTP mode;
+3. no draft model, no shard-group role, no other warm-swap target (it would
+   be served without its own self-check), and not an autotune child (a child
+   measures candidate configurations that may batch for the incumbent, which
+   serves on the invariant route).
+
+A provider with no verdict for its startup identity starts on the invariant
+route, runs its self-check as before, records the self-check key it applied,
+and logs `event=small_m_route action=verdict_recorded ... next_start=serial_only`
+when the verdict serves one row; its next start takes the serial route. A
+verdict measured on the invariant route stays valid on the serial route: it
+says batching gives no net gain against the invariant serial baseline, and the
+serial route's baseline is faster, so the verdict only gets more true. A
+serial-only process never measures, so no serial-route number is ever compared
+with a batched one. In a serial-only process:
+
+- the scheduler factory MUST return no scheduler and the scheduler
+  initialiser MUST refuse to construct one; the self-check driver does not
+  start (`event=cb_self_check action=deferred reason=small_m_route_serial_only
+  next=restart`), the runtime exposes no self-check target and refuses a
+  self-check batch, and the native-MTP drafter load is refused, so no batched
+  row, self-check or native-MTP round can start;
+- the effective continuous-batching mode MUST be `off` whatever the signed
+  policy entry for the model says, so the process serves serially as a
+  refused self-check does (no strict-mode error, no per-request canary
+  serial routing), and `continuous_batching.self_check` reports the stored
+  one-row decision as refused (`small_m_route_serial_only` when batching is
+  off by configuration), never `pending`. It serves, and reports, the count
+  the invariant route serves for the same Mac: the FR-CB10 served count for
+  the stored decision (owner pin capped by the verified count), or the
+  planned count (the owner pin, else one) with batching off by
+  configuration;
+- SPEC-037 disk KV and prompt snapshots carry the route in their decode-path
+  class (SPEC-037 v0.2.5), so an entry written on one route misses on the
+  other;
+- startup prints `event=small_m_route mode=... reason=...` with the value of
+  every condition above, and local `/v1/status` reports
+  `continuous_batching.small_m_route` and `small_m_route_reason`.
+
+The MLX core reads the variable once with C `atoi` semantics: unset, or a
+value that parses to non-zero, keeps the invariant route; any value that
+parses to 0 (`0`, `""`, `false`, `00`, `-0`, ` 0`, `0x1`) takes the serial
+route, and the provider labels its route by the same parse. Every other
+command that runs MLX compute (`self-test`, `msb-throughput`,
+`msb-compute-score`, `hardware-check` and `performance-check` (and their
+legacy `spec028-canary` and `spec028-benchmark` names), `shard-bench`,
+`glm-parity`, `dsv4-parity`, `native-mtp-bench`, `native-mtp-hardware-e2e`,
+`native-mtp-journey-e2e`, `native-mtp-request-shape-replay`, the
+`native-mtp-qualify bench` and `replay`, `relay-blind-fixture`) MUST
+pin the invariant route before MLX starts, removing an inherited value;
+`decode-bench` applies its own `--small-m-route` option.
+
+A missed case costs single-row speed, never exactness.
 
 Scheduler-failure fallback MUST NOT stitch batched and serial output for one
 request. It MAY apply (a) to subsequent requests, or (b) to an individual
