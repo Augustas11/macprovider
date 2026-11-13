@@ -1,7 +1,14 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.17 (2026-10-15, immutable inline image binding; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.18 (2026-11-13, `ttft_ms` timeline wording and buyer-cancel rule; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.18 (2026-11-13):** §9 measured `ttft_ms` from "provider
+begins inference" to the first output token, which disagreed with §3. It now
+matches §3: from request accepted, and for a non-streaming response the full
+generation latency. §3 adds the `buyer_cancel` rule: to the first
+buyer-visible output byte when output was delivered, otherwise to the cancel
+received. The locked receipt tuple and verification are unchanged.
 
 **Change log v0.4.17 (2026-10-15, Related: #2016):** §4.3.1 clarifies that
 SPEC-006-R022 native images consume the immutable bytes bound by ordered data
@@ -1180,7 +1187,7 @@ following seven fields and no others:
 | `prompt_hash` | string | Lowercase hex sha256 of the JCS-canonical encoding of the canonical prompt object defined in §4. 64 lowercase hex characters, no `sha256:` prefix. |
 | `output_hash` | string | Lowercase hex sha256 of the JCS-canonical encoding of the canonical output object defined in §5. 64 lowercase hex characters, no `sha256:` prefix. |
 | `provider_pubkey` | string | Base64 (standard, padded, no URL-safe substitution) of the provider's 32-byte ed25519 public key. Exactly 44 ASCII characters. |
-| `ttft_ms` | int64 | Time-to-first-token in milliseconds, measured at the provider from request-accepted to first-output-byte-emitted. Non-negative. For non-streaming responses, this is the full generation latency. |
+| `ttft_ms` | int64 | Time-to-first-token in milliseconds, measured at the provider from request-accepted to first-output-byte-emitted. Non-negative. For non-streaming responses, this is the full generation latency. For a `buyer_cancel` receipt it is measured to the first buyer-visible output byte when output was delivered, otherwise to the cancel received. |
 | `tokens_out` | int64 | Provider-reported output token count, the same `int64` value SPEC-005 §4 names `effective_completion_tokens`. Non-negative. See §7.6 for null-usage and error cases. |
 | `unix_ts` | int64 | Provider's response-completion timestamp, Unix seconds UTC. Non-negative. Provider clock; see §15 Q4 for cross-check semantics. |
 
@@ -1982,9 +1989,11 @@ For a non-streaming response:
 
 ```
 t0: provider receives request from coordinator
-t1: provider begins inference (load model, accept prompt)
-t2: first output token emitted             → ttft_ms = (t2 - t1) / ms
+t1: provider accepts the request (admission)
+t2: first output token sampled (not yet buyer-visible)
 t3: last output token emitted, finish_reason set, tokens_out known
+                                           → ttft_ms = (t3 - t1) / ms (§3:
+                                             the full generation latency)
 t4: provider canonicalizes prompt object → prompt_hash
 t5: provider canonicalizes output object → output_hash
 t6: provider builds tuple T with unix_ts = floor(t3 / second)

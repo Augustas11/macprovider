@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.53 (2026-11-10, local Messages `thinking: disabled` maps to `reasoning_effort: none`)
+**Version:** 1.9.54 (2026-11-13, request timeline usage fields on the provider HTTP endpoint)
+
+**Change log v1.9.54 (2026-11-13):** The provider's direct HTTP
+`/v1/chat/completions` usage object (§6.3) documents its vendor timing fields.
+Four new fields, `macprovider_queue_ms`, `macprovider_first_token_ms`,
+`macprovider_first_answer_ms` and `macprovider_decode_ms`, come from one
+per-request monotonic timeline and mean the same on every serving path.
+`macprovider_generation_ms` is unchanged; its per-path meaning is now written
+down. Billing fields, `completion_tokens` and the relay usage are unchanged.
 
 **Change log v1.9.53 (2026-11-10, Related: #2269):** The local Messages
 translation maps `thinking: disabled` to `reasoning_effort` `none` (was `low`),
@@ -2941,6 +2949,23 @@ failure short-circuits:
 `id` is a unique identifier per request (format: `chatcmpl-{uuid-hex}`).
 `finish_reason` is `"stop"` (natural end or stop token hit) or `"length"`
 (max_tokens reached).
+
+The provider's usage object (non-streaming body and streaming usage chunk)
+also carries additive vendor fields. They do not change billing or OpenAI
+compatibility. Each timing field is an integer in milliseconds, or JSON
+`null` when the instant was not reached.
+
+| Field | Meaning |
+|---|---|
+| `macprovider_queue_ms` | Provider admission to leaving the queue (prefill or cache restore begins; for continuous batching, the scheduler admits the row). |
+| `macprovider_first_token_ms` | Provider admission to the first sampled token of any channel. A continuous-batching waiter that attached to a row already in flight counts its first replayed delivery. |
+| `macprovider_first_answer_ms` | Provider admission to the first content or tool-call delta emitted to the buyer after output filtering. A non-streaming response emits it when the whole body is ready. |
+| `macprovider_decode_ms` | First sampled token to the last sampled token. |
+| `macprovider_generation_ms` | Wall time the autotune throughput probe divides decoded tokens by. Its window differs by path: serial streaming measures the first decoded token of any channel to the generate result; continuous batching, native MTP and a shard group measure the whole runtime call, queue and prefill included; serial non-streaming and the draft-model speculative stream report `null`. A tool-choice stream that holds output reports what its non-streaming run reports. |
+
+The four timeline fields have the same meaning on serial, continuous-batching,
+native-MTP and shard-group paths; a shard group uses the head node's clock.
+The usage object carries no row counts, serving-path name or MTP counters.
 
 #### Error responses
 
