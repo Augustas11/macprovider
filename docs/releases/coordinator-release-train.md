@@ -22,6 +22,27 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Serving-path label on the internal gateway hop (SPEC-002-R007, SPEC-006-R028) — pending runtime inclusion (2026-11-14)
+
+Related: #2341. PR #2342 merged as `423f49ded`. A provider may report
+`served_path` (path and mean active rows) on its end frame; the coordinator
+validates it and passes it to the gateway as
+`X-MacProvider-Internal-Served-Path`, header or trailer, only for a
+completed request that is neither relay-blind nor privacy-class and that
+carries the gateway's internal bearer. The gateway stores `served_path` and
+`served_rows` on the demand row and `/admin/demand-latency` gains
+`served_path_cells`. The value is self-reported and is a label only.
+
+Audit: four lanes, gate met.
+
+Live step: the same Pearl runtime release as the two entries below, through
+`scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source
+changes, so the buyer-hold path applies: "up to about 25 minutes"). Labels
+stay NULL until providers run a CLI that carries the provider side (next
+CLI cut, see `cli-release-train.md`). After both: one streamed request
+through the gateway, then `/admin/demand-latency?window=24h` shows a
+`served_path_cells` entry for its model.
+
 ## Measured decode reorder and routed-throughput floor (SPEC-002-R005) — pending runtime inclusion (2026-11-13)
 
 Related: #2321. PR #2339 merged as `ba2732c4c`. The objective sort still
