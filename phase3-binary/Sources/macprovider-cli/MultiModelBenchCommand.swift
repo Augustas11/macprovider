@@ -93,6 +93,15 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("cb-b"), help: "--check: continuous-batching mode for model B (off, canary, on). Default on.")
     var cbB: String = ContinuousBatchingMode.on.rawValue
 
+    @Option(name: .customLong("model-id-a"), help: "--check: catalog serving id for model A (e.g. zai-org/glm-5.3-flash), bound as serve binds it; --model-a stays the load path. Default: --model-a.")
+    var modelIDA: String?
+
+    @Option(name: .customLong("model-id-b"), help: "--check: catalog serving id for model B (e.g. qwen/qwen3.8-27b). Default: --model-b.")
+    var modelIDB: String?
+
+    @Option(name: .customLong("config"), help: "--check: provider config.yaml (a lab copy), resolved by serve's ConfigLoader; its paged_kv, queue, prefill, cache-limit, context, cached-turns and native_mtp_mode settings build both runtimes. CB mode stays --cb-x.")
+    var configPath: String?
+
     mutating func validate() throws {
         if check {
             guard rowsA > 0, rowsB > 0 else { throw ValidationError("--rows-a and --rows-b must be > 0") }

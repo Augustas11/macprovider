@@ -18,7 +18,10 @@ import MacProviderCore
 ///
 /// Each runtime is constructed the way `serve` builds one: paged KV on with
 /// the family defaults, the continuous-batching mode explicitly configured
-/// (`--cb-x`, as `serve --continuous-batching` does) and max batch = rows.
+/// (`--cb-x`, as `serve --continuous-batching` does) and max batch = rows,
+/// bound to the catalog serving id (`--model-id-x`) and loaded from the
+/// snapshot (`--model-x`). Mixed-cache models (GLM-5.3-Flash, Qwen3.6/3.8)
+/// attach paged KV, and so batch, only under their exact serving id.
 /// A model asked for rows > 1 whose runtime reports a serialized engine, or
 /// whose scheduler never batched two rows, is a `CHECK error`, never a GOAL.
 /// Native MTP is not offered: the production load admits it only through a
@@ -63,6 +66,8 @@ extension MultiModelBenchCommand {
         let config = MultiModelCheckConfig(
             modelA: modelA,
             modelB: modelB,
+            modelIDA: modelIDA ?? modelA,
+            modelIDB: modelIDB ?? modelB,
             rowsA: rowsA,
             rowsB: rowsB,
             continuousBatchingA: cbA,
@@ -100,8 +105,9 @@ extension MultiModelBenchCommand {
         }
         monitor.start()
         defer { monitor.stop() }
-        let runner = MultiModelCheckRunner(config: config, basePrompt: basePrompt, nonce: nonce, box: box, monitor: monitor)
         do {
+            let serve = try MultiModelCheckServeSettings.resolve(configPath: configPath)
+            let runner = MultiModelCheckRunner(config: config, serve: serve, basePrompt: basePrompt, nonce: nonce, box: box, monitor: monitor)
             try await runner.run()
         } catch let failure as MultiModelCheckFailure {
             box.update { $0.error = failure.reason }
@@ -128,6 +134,7 @@ struct MultiModelCheckFailure: Error {
 
 struct MultiModelCheckRunner: Sendable {
     let config: MultiModelCheckConfig
+    let serve: MultiModelCheckServeSettings
     let basePrompt: String
     let nonce: String
     let box: MultiModelCheckReportBox
@@ -143,7 +150,7 @@ struct MultiModelCheckRunner: Sendable {
         }
         var requests: [MultiModelBenchSlot: [ChatCompletionRequest]] = [:]
         for slot in MultiModelBenchSlot.allCases {
-            let modelID = slot == .a ? config.modelA : config.modelB
+            let modelID = slot == .a ? config.modelIDA : config.modelIDB
             let maxTokens = slot == .a ? config.maxTokensA : config.maxTokensB
             requests[slot] = try (0..<config.promptsPerModel).map { index in
                 try MultiModelBenchCommand.request(
@@ -229,24 +236,31 @@ struct MultiModelCheckRunner: Sendable {
     }
 
     private func load(_ slot: MultiModelBenchSlot) async throws -> ModelRuntime {
-        let modelID = slot == .a ? config.modelA : config.modelB
-        MultiModelBenchCommand.log("load start model=\(slot.rawValue) id=\(modelID)")
+        let loadValue = slot == .a ? config.modelA : config.modelB
+        // As serve: the runtime is bound to the catalog serving id and loads
+        // from the snapshot path. The SPEC-039 FR-PKV12 mixed-layout allowlist
+        // (ModelRuntime.pagedKVModelCapabilities) keys on that serving id, so
+        // a path-bound GLM-5.3-Flash or Qwen3.8 runtime falls back with
+        // `paged_fallback_cache_class` and never batches.
+        let modelID = slot == .a ? config.modelIDA : config.modelIDB
+        let modelLoadPath: String? = modelID == loadValue ? nil : loadValue
+        MultiModelBenchCommand.log("load start model=\(slot.rawValue) id=\(modelID) load_path=\(modelLoadPath ?? "nil")")
         let started = Date()
         let rows = rows(slot)
         let mode = ContinuousBatchingMode(rawValue: slot == .a ? config.continuousBatchingA : config.continuousBatchingB) ?? .on
         // As serve: paged KV attaches by default with the family block size,
         // sized to the advertised context (MacProviderCLI.swift serve path).
-        let pagedKV = PagedKVConfig(enabled: true)
-            .withFamilyDefaults(modelFamily: ModelRuntime.localModelFamily(modelID) ?? "")
-            .sizedToCover(contextTokens: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).maxContextTokens)
+        let pagedKV = serve.pagedKV
+            .withFamilyDefaults(modelFamily: ModelRuntime.localModelFamily(loadValue) ?? "")
+            .sizedToCover(contextTokens: ProviderCapacity(maxContextOverride: serve.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens)
         // Serve passes the catalog-verified snapshot-manifest hash; paged KV
         // (and so CB) attaches only with an artifact identity. A local
         // snapshot gets the same canonical hash the catalog records.
         let artifactSHA256: String?
-        if Self.isLocalPath(modelID) {
+        if Self.isLocalPath(loadValue) {
             do {
                 artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(
-                    directory: URL(fileURLWithPath: (modelID as NSString).expandingTildeInPath))
+                    directory: URL(fileURLWithPath: (loadValue as NSString).expandingTildeInPath))
             } catch {
                 throw MultiModelCheckFailure(reason: "artifact_hash_failed model=\(slot.rawValue) detail=\(String(describing: error).replacingOccurrences(of: "\n", with: " "))")
             }
@@ -257,14 +271,24 @@ struct MultiModelCheckRunner: Sendable {
         do {
             runtime = try await ModelRuntime(
                 modelID: modelID,
+                modelLoadPath: modelLoadPath,
+                mlxCacheLimitMB: serve.mlxCacheLimitMB,
+                maxContextTokensOverride: serve.maxContextOverride,
+                kvBitsOverride: serve.kvBitsOverride,
                 familyKVQuantDefault: true,
                 pagedKVConfig: pagedKV,
+                prefillStepSize: serve.prefillStepSize,
+                prefillStepSizeExplicitlyConfigured: serve.prefillStepSizeExplicitlyConfigured,
                 maxBatch: rows,
                 continuousBatchingMode: mode,
-                continuousBatchingCachedTurns: true,
+                continuousBatchQueueLimit: serve.continuousBatchQueueLimit,
+                continuousBatchQueueWaitTimeoutMS: serve.continuousBatchQueueWaitTimeoutMS,
+                continuousBatchPrefillTokensPerIteration: serve.continuousBatchPrefillTokensPerIteration,
+                continuousBatchingCachedTurns: serve.continuousBatchingCachedTurns,
                 // Serve's coverage for every non-autotune runtime.
                 continuousBatchingAcceptanceCoverage: .defaultOn(revocations: []),
                 continuousBatchingModeExplicitlyConfigured: true,
+                nativeMTPMode: serve.nativeMTPMode,
                 verifiedModelArtifactSHA256: artifactSHA256
             )
         } catch {
@@ -277,7 +301,7 @@ struct MultiModelCheckRunner: Sendable {
         let load = MultiModelBenchLoad(
             model: slot.rawValue,
             modelID: modelID,
-            modelFamily: ModelRuntime.localModelFamily(modelID),
+            modelFamily: ModelRuntime.localModelFamily(loadValue),
             loadSeconds: Date().timeIntervalSince(started),
             mlxActiveBytes: Memory.activeMemory,
             mlxPeakBytes: Memory.peakMemory,
@@ -985,9 +1009,63 @@ struct MultiModelCheckInFlightState: Encodable, Sendable {
     let secondsSinceLastChunk: Double?
 }
 
+/// The serve tunables both runtimes are built with. Without `--config`:
+/// serve's defaults. With it: the file resolved by serve's own
+/// `ConfigLoader` (YAML, then environment), applied as serve applies it.
+/// `continuous_batching_accepted_tuples` is not read: serve ignores manual
+/// tuples outside `--no-join` (MacProviderCLI.swift, `continuous_batching_
+/// manual_tuple action=ignored`); under default-on coverage CB admission is
+/// the on-device self-check's decision, and accepted tuples only carry the
+/// signed AC-26 cached-turn grant.
+struct MultiModelCheckServeSettings: Sendable {
+    var configPath: String?
+    var pagedKV = PagedKVConfig(enabled: true)
+    var maxContextOverride: Int?
+    var kvBitsOverride: Int?
+    var mlxCacheLimitMB: Int?
+    var prefillStepSize = 512
+    var prefillStepSizeExplicitlyConfigured = false
+    var continuousBatchQueueLimit: Int?
+    var continuousBatchQueueWaitTimeoutMS: Int?
+    var continuousBatchPrefillTokensPerIteration: Int?
+    var continuousBatchingCachedTurns = true
+    var nativeMTPMode: NativeMTPMode = .off
+
+    static func resolve(configPath: String?) throws -> MultiModelCheckServeSettings {
+        var settings = MultiModelCheckServeSettings()
+        if let configPath {
+            let resolved = try ConfigLoader.load(cli: CLIOverrides(configPath: configPath), resolveCredentials: false)
+            settings.configPath = resolved.configPath
+            settings.pagedKV = resolved.pagedKV
+            // As serve: paged KV attaches by default unless paged_kv.enabled
+            // is set explicitly (SPEC-039 FR-PKV14).
+            if !resolved.pagedKVEnabledExplicitlyConfigured, resolved.pagedKV.errors.isEmpty {
+                settings.pagedKV.enabled = true
+            }
+            settings.maxContextOverride = resolved.maxContextOverride
+            settings.kvBitsOverride = resolved.kvBitsOverride
+            settings.mlxCacheLimitMB = resolved.mlxCacheLimitMB
+            settings.prefillStepSize = resolved.prefillStepSize
+            settings.prefillStepSizeExplicitlyConfigured = resolved.prefillStepSizeExplicitlyConfigured
+            settings.continuousBatchQueueLimit = resolved.continuousBatchQueueLimit
+            settings.continuousBatchQueueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS
+            settings.continuousBatchPrefillTokensPerIteration = resolved.continuousBatchPrefillTokensPerIteration
+            settings.continuousBatchingCachedTurns = resolved.continuousBatchingCachedTurns
+            settings.nativeMTPMode = resolved.nativeMTPMode
+        }
+        MultiModelBenchCommand.log("serve_settings config=\(settings.configPath ?? "nil") paged_kv_enabled=\(settings.pagedKV.enabled) paged_kv_errors=\(settings.pagedKV.errors.count) block_size=\(settings.pagedKV.blockSizeTokens) max_physical_blocks=\(settings.pagedKV.maxPhysicalBlocks) max_context=\(settings.maxContextOverride.map(String.init) ?? "nil") kv_bits=\(settings.kvBitsOverride.map(String.init) ?? "nil") mlx_cache_limit_mb=\(settings.mlxCacheLimitMB.map(String.init) ?? "nil") prefill_step=\(settings.prefillStepSize) queue_limit=\(settings.continuousBatchQueueLimit.map(String.init) ?? "nil") cached_turns=\(settings.continuousBatchingCachedTurns) native_mtp_mode=\(settings.nativeMTPMode.rawValue)")
+        return settings
+    }
+}
+
 struct MultiModelCheckConfig: Encodable, Sendable {
+    /// Load path (or id) per model.
     let modelA: String
     let modelB: String
+    /// Serving identity bound into the runtime and sent as `request.model`,
+    /// as serve binds the catalog id (`--model-id-x`, default the load value).
+    let modelIDA: String
+    let modelIDB: String
     let rowsA: Int
     let rowsB: Int
     /// Explicitly configured continuous-batching mode per model (`--cb-x`).
