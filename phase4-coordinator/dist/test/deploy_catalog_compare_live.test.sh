@@ -317,6 +317,7 @@ run_deploy_slice() {
     log() { echo "$*"; }
     SSH=fake_ssh
     CATALOG_RELEASE_FILES="$RELEASE_FILES"
+    CATALOG_ENVELOPE_FILES="$RELEASE_FILES"
     AUTOTUNE_RELEASE_ID="$INCOMING_ID"
     AUTOTUNE_RELEASE_DIR_NAME="$INCOMING_DIR"
     CATALOG_REGRESSION_OVERRIDE_B64="$1"
@@ -595,6 +596,17 @@ else
   fail "pristine committed live release failed the real verify-directory"
 fi
 VERIFY_MODE=stub
+
+# SPEC-023 §3.8: an equivalent live envelope that carries release.json.sig
+# hands it to the live snapshot; one without it snapshots cleanly (above).
+reset
+live_release renewed-live
+restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
+printf '{"alg":"ed25519","key_id":"test","signature":"x"}' > "$ROOT/autotune/releases/renewed-live/release.json.sig"
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "equivalent deploy over a signed live envelope must proceed"; }
+grep -q '^VERDICT=equivalent$' "$TMP/out" || { cat "$TMP/out" >&2; fail "signed live renewal must still be equivalent"; }
+cmp -s "$TMP/pinned/live-catalog/release.json.sig" "$ROOT/autotune/releases/renewed-live/release.json.sig" ||
+  fail "the live snapshot must carry the live release.json.sig"
 
 # --- Artifact-bound (thirteen-file) release set ------------------------------
 BOUND=1

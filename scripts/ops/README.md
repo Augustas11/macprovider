@@ -343,27 +343,6 @@ scratch cleanup are confirmed. A completed offline journey or merged catalog
 change does not replace the attributed paid request and positive MTP-forward
 delta required for live acceptance.
 
-### Signed native pair plan
-
-Generate `CATALOG_SIGNED_PAIR_PLAN` instead of editing a copy by hand.
-`lib/signed-pair-plan.py build --template <previous plan> --model-key <key>
---previous-window-sha256 <sha> [--local-tarball <target tarball>] --out <plan>`
-derives the target release id, every feed digest, the CB policy and tuple
-digests and the model hash from `phase3-binary/dist/static`, takes the Studio,
-receipt-reader and prior identity from the template, and writes a fresh
-transaction ID, a deadline inside the arm window and mode 0600. A new binary
-version must supply its own identity (`--local-tarball` plus flags); it never
-inherits the template's. Run `lib/signed-pair-plan.py check --plan <plan>
---expect-model-key <goal model> --existing-release-ids <Pearl releases/ listing>`
-right before `next --run`: it names every failed check (feed and CB tuple
-digests, admission, projection and CB policy coverage, model key, existing
-release directory, deadline, file mode) and runs the root, intent, transport
-and Studio validators the transaction uses. The arm window is 30 to 60
-minutes ahead, so with the default `--deadline-seconds 3300` a plan stays
-usable for 25 minutes after `build`. While the Studio waits for readiness it
-prints the failing check with observed and expected values, and `readiness
-deadline exceeded` names the last one.
-
 ## Local configuration (untracked)
 
 No host, address, user name or key path is committed. Put the targets in

@@ -208,6 +208,8 @@ SIGNED_FEED_ROUTES=(
   /v1/autotune-candidates.sig
   /v1/catalog-artifacts
   /v1/catalog-artifacts.sig
+  /v1/catalog-release
+  /v1/catalog-release.sig
 )
 
 extract_exact_location_body() {

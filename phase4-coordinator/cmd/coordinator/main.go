@@ -203,7 +203,7 @@ func runCoordinator() (exitCode int) {
 		os.Exit(1)
 	}
 	reloadStartupOnlyBaseline.Store(&reloadBaseline)
-	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
+	autotuneFeeds, err := loadBootAutotuneFeeds(cfg.AutotuneFeeds, zerolog.New(os.Stdout).With().Timestamp().Logger())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
 		os.Exit(1)
@@ -2065,6 +2065,17 @@ func nativeMTPCanaryBootOption(cfg config.AutotuneFeedsConfig, feeds buyer.Autot
 		previous = append(previous, providerws.NativeMTPCanaryServedBank{ReleaseID: f.ReleaseID, BankJSON: f.SelftestBankJSON, BankSig: f.SelftestBankSig})
 	}
 	return providerws.WithNativeMTPCanaryServedBanks(current, previous)
+}
+
+// loadBootAutotuneFeeds loads the feeds at coordinator boot. A rejected
+// signed release manifest (SPEC-023 §3.8) is logged and treated as absent so
+// the coordinator still boots and serves the per-feed sidecars; every other
+// feed error stays fatal. The release dry-load and the SIGHUP reload use
+// loadAutotuneCatalogForReload, which rejects a bad manifest.
+func loadBootAutotuneFeeds(cfg config.AutotuneFeedsConfig, logger zerolog.Logger) (buyer.AutotuneFeeds, error) {
+	return buyer.LoadAutotuneFeeds(cfg, buyer.DropRejectedReleaseManifest(func(rejected *buyer.ReleaseManifestError) {
+		logger.Error().Err(rejected).Msg("signed release manifest rejected at boot; /v1/catalog-release answers 404 and CLIs use per-feed sidecars; every SIGHUP reload of this release stays rejected until the release manifest is fixed")
+	}))
 }
 
 func loadAutotuneCatalogForReload(cfg config.AutotuneFeedsConfig) (buyer.AutotuneFeeds, *autotune.Catalog, []*autotune.Catalog, error) {

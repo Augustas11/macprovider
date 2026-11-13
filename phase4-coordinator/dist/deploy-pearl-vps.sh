@@ -735,6 +735,10 @@ STATIC_CB_POLICY_SIG="$STATIC_FEEDS_DIR/continuous-batching-policy.json.sig"
 STATIC_ARTIFACTS_JSON="$STATIC_FEEDS_DIR/autotune-artifacts.json"
 STATIC_ARTIFACTS_SIG="$STATIC_FEEDS_DIR/autotune-artifacts.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$PINNED_AUTOTUNE_DIR/release.json"
+# SPEC-023 §3.8: optional manifest signature. It rides the envelope when the
+# tag carries it but stays out of the envelope content hash, so signing a
+# release never renames its directory.
+AUTOTUNE_RELEASE_MANIFEST_SIG="$PINNED_AUTOTUNE_DIR/release.json.sig"
 AUTOTUNE_TRUSTED_KEYS="$PINNED_AUTOTUNE_DIR/trusted-keys.json"
 AUTOTUNE_TIER2_JSON="$PINNED_AUTOTUNE_DIR/tier2-catalog.json"
 AUTOTUNE_RELEASE_VERIFY="$PINNED_SCRIPTS_DIR/catalog-release.py"
@@ -3580,6 +3584,9 @@ if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
     _append_deploy_input_digest "$STATIC_FEEDS_DIR/$_native_file" "$_native_file"
   done
 fi
+if [ -f "$AUTOTUNE_RELEASE_MANIFEST_SIG" ]; then
+  _append_deploy_input_digest "$AUTOTUNE_RELEASE_MANIFEST_SIG" "release.json.sig"
+fi
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   _append_deploy_input_digest "$TMP_CATALOG_PINNED" "tier2-catalog.json"
   _append_deploy_input_digest "$TMP_CATALOG_PUBKEY" "tier2-catalog.pub"
@@ -3653,6 +3660,12 @@ if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
   done
 fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
+AUTOTUNE_MANIFEST_SIG_INSTALL_LINE=""
+if [ -f "$AUTOTUNE_RELEASE_MANIFEST_SIG" ]; then
+  $SCP "$AUTOTUNE_RELEASE_MANIFEST_SIG" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json.sig"
+  AUTOTUNE_MANIFEST_SIG_INSTALL_LINE="
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json.sig \$_autotune_stage/release.json.sig"
+fi
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_RELEASE_LEDGER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release-ledger.json"
 $SCP "$AUTOTUNE_TIER2_CONTENT_INDEX" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-content-index.json"
@@ -3688,6 +3701,12 @@ fi
 if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
   CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES $NATIVE_MTP_FILES"
 fi
+# The envelope files without the optional manifest signature: what the live
+# snapshot below always copies (it adds release.json.sig when live has one).
+CATALOG_ENVELOPE_FILES="$CATALOG_RELEASE_FILES"
+if [ -f "$AUTOTUNE_RELEASE_MANIFEST_SIG" ]; then
+  CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES release.json.sig"
+fi
 if ! $SSH "set -e
   _preflight=$DEPLOY_TMP/catalog-preflight
   rm -rf \$_preflight
@@ -3695,6 +3714,11 @@ if ! $SSH "set -e
   for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/\$_f; done
   _rc=0
   python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_preflight --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub || _rc=\$?
+  # An envelope of this name already on Pearl must hold this release; refuse
+  # here, before the binaries, config or release staging change anything.
+  if [ \$_rc -eq 0 ] && [ -e /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME ]; then
+    python3 -I $DEPLOY_TMP/scripts/catalog-release.py same-envelope --staged \$_preflight --existing /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME || _rc=\$?
+  fi
   if [ \$_rc -eq 0 ] && [ '$AUTOTUNE_NATIVE_MTP_BOUND' = bound ]; then
     _native_preflight=\$(mktemp -d -t macprovider-native-mtp-preflight.XXXXXXXX)
     trap 'rm -rf \"\$_preflight\" \"\$_native_preflight\"' EXIT
@@ -3713,7 +3737,7 @@ if ! $SSH "set -e
   rm -rf \$_preflight
   [ -z \"\${_native_preflight:-}\" ] || rm -rf \$_native_preflight
   exit \$_rc"; then
-  echo "aborting deploy: staged catalog release failed remote verify-directory/native-MTP revocation preflight on the VPS (before config backup or release staging)" >&2
+  echo "aborting deploy: staged catalog release failed remote verify-directory/native-MTP revocation preflight on the VPS (before config backup or release staging; includes the existing-envelope check)" >&2
   exit 1
 fi
 
@@ -4008,14 +4032,17 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/continuous-batching-policy.json \$_autotune_stage/continuous-batching-policy.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/continuous-batching-policy.json.sig \$_autotune_stage/continuous-batching-policy.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json$AUTOTUNE_MANIFEST_SIG_INSTALL_LINE
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
   python3 $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_autotune_stage --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub
   sync
   if [ -e \$_autotune_release ]; then
-    if ! diff -qr \$_autotune_stage \$_autotune_release >/dev/null; then
+    if ! python3 -I $DEPLOY_TMP/scripts/catalog-release.py same-envelope --staged \$_autotune_stage --existing \$_autotune_release; then
       echo 'catalog release envelope $AUTOTUNE_RELEASE_DIR_NAME already exists with different bytes' >&2
       exit 1
+    fi
+    if [ -e \$_autotune_stage/release.json.sig ] && [ ! -e \$_autotune_release/release.json.sig ]; then
+      echo 'catalog release $AUTOTUNE_RELEASE_ID: the existing envelope has no release.json.sig and stays immutable, so the signed manifest stays unserved (/v1/catalog-release answers 404) for this release id; the first signed manifest goes live with the next content release' >&2
     fi
     rm -rf \$_autotune_stage
   else
@@ -4467,7 +4494,8 @@ if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   CATALOG_LIVE_SNAPSHOT="$PINNED_DEPLOY_INPUT_DIR/live-catalog"
   mkdir -m 0700 "$CATALOG_LIVE_SNAPSHOT"
   # shellcheck disable=SC2086 # fixed release file names
-  $SSH "tar -C /opt/macprovider/autotune/$CATALOG_LIVE_TARGET -cf - $CATALOG_RELEASE_FILES" | tar -xf - -C "$CATALOG_LIVE_SNAPSHOT" ||
+  # The live envelope carries release.json.sig only when it was staged with one.
+  $SSH "cd /opt/macprovider/autotune/$CATALOG_LIVE_TARGET && _sig='' && { [ ! -f release.json.sig ] || _sig=release.json.sig; } && tar -cf - $CATALOG_ENVELOPE_FILES \$_sig" | tar -xf - -C "$CATALOG_LIVE_SNAPSHOT" ||
     { echo "aborting deploy: could not snapshot the live catalog release" >&2; exit 1; }
   STATIC_DEMAND_JSON="$CATALOG_LIVE_SNAPSHOT/demand-rank.json"
   STATIC_DEMAND_SIG="$CATALOG_LIVE_SNAPSHOT/demand-rank.json.sig"

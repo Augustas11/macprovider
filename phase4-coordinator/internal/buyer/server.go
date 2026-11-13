@@ -1030,6 +1030,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/catalog-artifacts", s.handleCatalogArtifacts)
 	r.Get("/v1/catalog-artifacts.sig", s.handleCatalogArtifactsSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
+	r.Get("/v1/catalog-release", s.handleCatalogRelease)
+	r.Get("/v1/catalog-release.sig", s.handleCatalogReleaseSig)
 	r.Get("/v1/native-mtp-admission", s.handleNativeMTPAdmission)
 	r.Get("/v1/native-mtp-admission.sig", s.handleNativeMTPAdmissionSig)
 	r.Get("/v1/native-mtp-artifact-manifest", s.handleNativeMTPArtifactManifest)

@@ -75,6 +75,11 @@ SWIFT_GENERATED = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "Auto
 GO_REJECTED_RELEASES_GENERATED = ROOT / "phase4-coordinator" / "internal" / "autotune" / "rejected_release_ids.generated.go"
 KEYS_PATH = CATALOG_DIR / "trusted-keys.json"
 MANIFEST_PATH = CATALOG_DIR / "release.json"
+# SPEC-023 §3.8 (R028): one detached signature over the exact release.json
+# bytes. Per-feed sidecars keep shipping beside it until CLIs that predate the
+# manifest have left the fleet.
+MANIFEST_SIGNATURE_NAME = "release.json.sig"
+MANIFEST_SIGNATURE_PATH = CATALOG_DIR / MANIFEST_SIGNATURE_NAME
 LEDGER_PATH = CATALOG_DIR / "release-ledger.json"
 TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
@@ -673,6 +678,43 @@ def parse_sidecar(data: bytes, label: str) -> tuple[str, bytes]:
     if len(signature) != 64:
         fail(f"{label}: Ed25519 signature must be 64 bytes")
     return value["key_id"], signature
+
+
+def verify_release_manifest_signature(
+    manifest_bytes: bytes, sidecar_bytes: bytes, keys: dict[str, bytes], label: str = MANIFEST_SIGNATURE_NAME,
+) -> str:
+    """SPEC-023 §3.8: authenticate release.json by its detached signature.
+
+    The signer is the release's static-feed key: every bound feed except the
+    Tier-2 catalog (signed by its own Tier-2 key) must name the same
+    `signer_key_id` as the sidecar, so one signature stands for every feed
+    digest the manifest binds. Returns the signing key ID.
+    """
+    manifest_obj = strict_json(manifest_bytes, "release.json")
+    key_id, signature = parse_sidecar(sidecar_bytes, label)
+    public_key = keys.get(key_id)
+    if public_key is None:
+        fail(f"{label}: unknown or retired key_id {key_id}")
+    feeds = manifest_obj.get("feeds")
+    if not isinstance(feeds, dict) or "autotune-candidates.json" not in feeds:
+        fail(f"{label}: release.json binds no candidate catalog")
+    for name, entry in sorted(feeds.items()):
+        if name == TIER2_CATALOG_FEED_NAME:
+            continue
+        signer = entry.get("signer_key_id") if isinstance(entry, dict) else None
+        if signer != key_id:
+            fail(f"{label}: signed by {key_id!r} but release.json binds {name} to signer {signer!r}")
+    verify_ed25519(public_key, signature, manifest_bytes, label)
+    return key_id
+
+
+def verify_release_manifest_sidecar(manifest_path: pathlib.Path, keys: dict[str, bytes]) -> str | None:
+    """Verify `<dir>/release.json.sig` when present; None for a release cut
+    before SPEC-023 §3.8, which carries only the per-feed sidecars."""
+    sidecar_path = manifest_path.with_name(MANIFEST_SIGNATURE_NAME)
+    if not sidecar_path.exists():
+        return None
+    return verify_release_manifest_signature(manifest_path.read_bytes(), sidecar_path.read_bytes(), keys)
 
 
 def root_trusted_executable(candidate: str) -> bool:
@@ -5806,6 +5848,10 @@ def generate(
         (STATIC_DIR / NATIVE_MTP_MANIFEST_NAME).write_bytes(native_mtp_manifest)
         (STATIC_DIR / NATIVE_MTP_BANK_NAME).write_bytes(native_mtp_bank)
     SWIFT_GENERATED.write_text(swift_text)
+    # A manifest signature covers exact bytes: a regenerated release.json that
+    # differs drops the stale signature until the signing step re-signs it.
+    if MANIFEST_SIGNATURE_PATH.exists() and (not MANIFEST_PATH.exists() or MANIFEST_PATH.read_bytes() != manifest_bytes):
+        MANIFEST_SIGNATURE_PATH.unlink()
     MANIFEST_PATH.write_bytes(manifest_bytes)
     LEDGER_PATH.write_bytes(next_ledger)
     TIER2_BINDING_PATH.write_bytes(binding_bytes)
@@ -6116,6 +6162,14 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    manifest_signer = verify_release_manifest_sidecar(MANIFEST_PATH, keys)
+    if manifest_signer is None:
+        print(
+            f"verify: NOTICE: release {candidate_obj['version']} carries no {MANIFEST_SIGNATURE_NAME} "
+            "(cut before SPEC-023 §3.8); its feeds are authenticated by their per-feed sidecars only"
+        )
+    else:
+        print(f"verified release manifest signature key_id={manifest_signer}")
     print(
         f"verified catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)} "
@@ -6201,6 +6255,9 @@ def verify_directory(
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    manifest_signer = verify_release_manifest_sidecar(directory / "release.json", keys)
+    if manifest_signer is not None:
+        print(f"verified release manifest signature key_id={manifest_signer}")
     binding_path = directory / "tier2-identity-binding.json"
     if binding_path.exists():
         validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
@@ -6669,6 +6726,47 @@ def cmd_compare_live(
     return COMPARE_LIVE_EXIT_REGRESSION if result["verdict"] == "regression" else 0
 
 
+def cmd_same_envelope(staged: pathlib.Path, existing: pathlib.Path) -> None:
+    """Deploy guard: is the existing immutable release envelope the staged one?
+
+    The envelope directory name hashes every file except release.json.sig
+    (SPEC-023 §3.8), so one name can hold the same release with or without the
+    manifest signature. Every other file must match byte for byte and the
+    file sets must agree. A signature present on both sides must be identical;
+    a signature present on one side only must verify over that side's
+    release.json, which is then byte-identical to the other side's.
+    """
+    def regular_files(directory: pathlib.Path) -> dict[str, pathlib.Path]:
+        if directory.is_symlink() or not directory.is_dir():
+            fail(f"same-envelope: {directory} is not a directory")
+        files: dict[str, pathlib.Path] = {}
+        for child in directory.iterdir():
+            if child.is_symlink() or not child.is_file():
+                fail(f"same-envelope: {child} is not a regular file")
+            files[child.name] = child
+        return files
+
+    staged_files, existing_files = regular_files(staged), regular_files(existing)
+    sig = MANIFEST_SIGNATURE_NAME
+    staged_names, existing_names = set(staged_files) - {sig}, set(existing_files) - {sig}
+    if staged_names != existing_names:
+        fail(
+            "same-envelope: file sets differ "
+            f"(staged only: {sorted(staged_names - existing_names)}, existing only: {sorted(existing_names - staged_names)})"
+        )
+    for name in sorted(staged_names):
+        if staged_files[name].read_bytes() != existing_files[name].read_bytes():
+            fail(f"same-envelope: {name} differs")
+    if sig in staged_files and sig in existing_files:
+        if staged_files[sig].read_bytes() != existing_files[sig].read_bytes():
+            fail(f"same-envelope: {sig} differs")
+    elif sig in staged_files or sig in existing_files:
+        side, directory = ("staged", staged) if sig in staged_files else ("existing", existing)
+        key_id = verify_release_manifest_sidecar(directory / "release.json", keyring(directory / "trusted-keys.json"))
+        print(f"same-envelope: only the {side} envelope carries {sig} (key_id={key_id}); it verifies over the identical release.json")
+    print(f"same-envelope: {existing} holds the staged release")
+
+
 # #1688 C3: serving closure, deny-by-default. A recommendable candidate row that
 # also carries a rate-card row is something buyers can be routed to and billed
 # for, so its served model MUST be pinned by Tier-2 to the same hash unless it
@@ -6853,7 +6951,7 @@ _CONTENT_GATE_STATIC_FILES = tuple(
     for name in ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, ARTIFACT_FEED_NAME)
     for suffix in ("", ".sig")
 )
-_CONTENT_GATE_CATALOG_FILES = ("release.json", "trusted-keys.json", TIER2_CATALOG_FEED_NAME)
+_CONTENT_GATE_CATALOG_FILES = ("release.json", "release.json.sig", "trusted-keys.json", TIER2_CATALOG_FEED_NAME)
 
 
 def _content_gate_committed_path(name: str) -> str:
@@ -6892,46 +6990,15 @@ def _validate_native_mtp_release_closure(directory: pathlib.Path, native_mtp_pre
         fail(f"native MTP release file closure: {exc}")
 
 
-def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
-    module = _native_mtp_binding_module()
-    verified = module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
-    if (bundle / "proof/journey-waiver.json").exists():
-        # The serving export is the only waived proof. Reopen its exact
-        # release/sidecar binding after the complete inventory verification.
-        module.require(module.validate_journey_waiver(
-            bundle, module.read_json(bundle / "inputs.json"),
-            bundle / "release/native-mtp-admission.json") == "waived (operator, 2026-10-29)",
-            "binding requires the exact operator journey waiver")
-    return verified
-
-
-def _content_gate_commit_proof(
-    release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT, *,
-    native_binding_bundle: pathlib.Path | None = None,
-    native_binding_recipe: str | None = None,
-) -> tuple[list[str], object | None]:
+def content_gate_commit_reasons(release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT) -> list[str]:
     if not HEX40.fullmatch(commit):
-        return [f"--commit must be a full 40-hex commit sha, got {commit!r}"], None
+        return [f"--commit must be a full 40-hex commit sha, got {commit!r}"]
     ancestor = subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, "origin/main"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
     )
     if ancestor.returncode != 0:
-        return [f"commit {commit} is not an ancestor of origin/main"], None
-    if (native_binding_bundle is None) != (native_binding_recipe is None):
-        return ["native binding bundle and committed recipe must be supplied together"], None
-    if native_binding_bundle is not None:
-        try:
-            verified = _verify_native_binding_bundle(
-                native_binding_bundle, repo=repo, commit=commit, recipe_path=native_binding_recipe,
-            )
-            if verified.release_dir.resolve() != release.resolve() or verified.source_commit != commit:
-                raise ValueError("verified native binding bundle does not match release and commit")
-            if verified.phase not in ("identity_only_greedy", "expanded_glm_sampled"):
-                raise ValueError("unknown native binding recipe phase")
-            return [], verified
-        except (ValueError, OSError) as exc:
-            return [f"native binding bundle: {exc}"], None
+        return [f"commit {commit} is not an ancestor of origin/main"]
     reasons = []
     for name in _CONTENT_GATE_STATIC_FILES + _CONTENT_GATE_CATALOG_FILES:
         local = release / name
@@ -6940,20 +7007,8 @@ def _content_gate_commit_proof(
             continue
         if not local.exists() or committed is None or local.read_bytes() != committed:
             reasons.append(f"{name} bytes differ from {_content_gate_committed_path(name)} at {commit}")
-    return reasons, None
-
-
-
-def content_gate_commit_reasons(
-    release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT, *,
-    native_binding_bundle: pathlib.Path | None = None,
-    native_binding_recipe: str | None = None,
-) -> list[str]:
-    reasons, _verified = _content_gate_commit_proof(
-        release, commit, repo, native_binding_bundle=native_binding_bundle,
-        native_binding_recipe=native_binding_recipe,
-    )
     return reasons
+
 
 def _content_gate_invariants(directory: pathlib.Path) -> dict:
     """Fields a catalog-content release may never change (they need a provider-app release)."""
@@ -7434,13 +7489,7 @@ def content_gate(
     pricing_diff: bytes | None = None,
     pricing_diff_sha256: str | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
-    native_binding_bundle: pathlib.Path | None = None,
-    native_binding_recipe: str | None = None,
 ) -> dict:
-    if (native_binding_bundle is None) != (native_binding_recipe is None):
-        raise ValueError("native binding bundle and committed recipe must be supplied together")
-    if native_binding_bundle is not None and commit is None:
-        raise ValueError("native binding bundle requires --commit")
     now = now or datetime.now(timezone.utc)
     by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
     try:
@@ -7468,6 +7517,12 @@ def content_gate(
     keyring_changed = (release / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes()
     if keyring_changed:
         by_lane["full-provider-app"].append("trusted-keys.json bytes changed vs live")
+    # SPEC-023 §3.8: once the live release carries a signed manifest, a
+    # successor without one would silently drop that authentication.
+    if (live / MANIFEST_SIGNATURE_NAME).exists() and not (release / MANIFEST_SIGNATURE_NAME).exists():
+        by_lane["invalid-release"].append(
+            f"live release carries {MANIFEST_SIGNATURE_NAME}; the candidate has none"
+        )
 
     rate_card_changed = _rate_card_rows_content(release) != _rate_card_rows_content(live)
 
@@ -7483,18 +7538,12 @@ def content_gate(
     committed_ledger: tempfile._TemporaryFileWrapper | None = None
     ack_missing = False
     if commit is not None:
-        commit_reasons, verified_bundle = _content_gate_commit_proof(
-            release, commit, repo, native_binding_bundle=native_binding_bundle,
-            native_binding_recipe=native_binding_recipe,
-        )
+        commit_reasons = content_gate_commit_reasons(release, commit, repo)
         by_lane["unverified-commit"].extend(commit_reasons)
         if not commit_reasons:
             # The reviewed commit, not the operator's working tree, decides the
             # predecessor ledger and the serving exclusions (#1688).
-            ledger_bytes = (
-                _git_show(repo, commit, str(LEDGER_PATH.relative_to(ROOT)))
-                if verified_bundle is None else verified_bundle.ledger_path.read_bytes()
-            )
+            ledger_bytes = _git_show(repo, commit, str(LEDGER_PATH.relative_to(ROOT)))
             exclusions_data = _git_show(repo, commit, str(NOT_BUYER_SERVING_PATH.relative_to(ROOT)))
             if ledger_bytes is None or exclusions_data is None:
                 by_lane["unverified-commit"].append(
@@ -7572,8 +7621,6 @@ def cmd_content_gate(
     pricing_diff_path: pathlib.Path | None = None,
     pricing_diff_sha256: str | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
-    native_binding_bundle: pathlib.Path | None = None,
-    native_binding_recipe: str | None = None,
 ) -> int:
     if (pricing_diff_path is None) != (pricing_diff_sha256 is None):
         fail("content-gate: --pricing-diff and --pricing-diff-sha256 go together")
@@ -7590,7 +7637,6 @@ def cmd_content_gate(
             ack_data=None if ack_path is None else ack_path.read_bytes(),
             pricing_diff=None if pricing_diff_path is None else pricing_diff_path.read_bytes(),
             pricing_diff_sha256=pricing_diff_sha256, tier2_coordinator_config=tier2_coordinator_config,
-            native_binding_bundle=native_binding_bundle, native_binding_recipe=native_binding_recipe,
         )
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         fail(f"content-gate: malformed release input: {exc!r}")
@@ -7867,6 +7913,15 @@ def main() -> int:
         type=pathlib.Path,
         help="tier2-content-index output: proves a Tier-2 freshness re-sign of any ledger row from git history",
     )
+    same_envelope_parser = sub.add_parser(
+        "same-envelope",
+        help=(
+            "deploy guard: exit 0 when --existing holds the --staged release envelope byte for byte, "
+            "allowing release.json.sig on one side only when it verifies over the identical release.json"
+        ),
+    )
+    same_envelope_parser.add_argument("--staged", type=pathlib.Path, required=True)
+    same_envelope_parser.add_argument("--existing", type=pathlib.Path, required=True)
     t2_index_parser = sub.add_parser(
         "tier2-content-index",
         help=(
@@ -7976,10 +8031,6 @@ def main() -> int:
         help="release-ledger.json (default: RELEASE/release-ledger.json, else the repository ledger)",
     )
     gate_parser.add_argument("--commit", help="full sha the release was cut from; must be an ancestor of origin/main")
-    gate_parser.add_argument("--native-binding-bundle", type=pathlib.Path,
-                             help="deterministic signed bundle verified against a committed native binding recipe")
-    gate_parser.add_argument("--native-binding-recipe",
-                             help="reviewed recipe path in --commit (requires --native-binding-bundle)")
     gate_parser.add_argument("--now", help="RFC3339 evaluation time (default: now, UTC)")
     gate_parser.add_argument(
         "--tier2-content-index",
@@ -8096,6 +8147,8 @@ def main() -> int:
             cmd_pricing_only_check(args.incoming, args.live)
         elif args.command == "compare-live":
             return cmd_compare_live(args.incoming, args.live, args.ledger, args.tier2_content_index)
+        elif args.command == "same-envelope":
+            cmd_same_envelope(args.staged, args.existing)
         elif args.command == "tier2-content-index":
             cmd_tier2_content_index(args.repo, args.rev, args.ledger)
         elif args.command == "emit-coordinator-rate-card":
@@ -8116,7 +8169,6 @@ def main() -> int:
             return cmd_content_gate(
                 args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index,
                 args.acknowledged_moves, args.pricing_diff, args.pricing_diff_sha256, args.tier2_coordinator_config,
-                args.native_binding_bundle, args.native_binding_recipe,
             )
         elif args.command == "splice-coordinator-rate-card":
             cmd_splice_coordinator_rate_card(args.live_config, args.block, args.output)

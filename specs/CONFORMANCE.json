@@ -13419,6 +13419,36 @@
       }
     },
     {
+      "requirement_id": "SPEC-023-R028",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def verify_release_manifest_signature",
+        "scripts/resign-autotune-static.sh:sign_one \"$manifest_json\" \"$manifest_sig\"",
+        "scripts/catalog-content-release.sh:pf_assemble",
+        "phase4-coordinator/internal/buyer/release_manifest_feed.go:func loadReleaseManifest",
+        "phase3-binary/Sources/macprovider-cli/CatalogReleaseManifest.swift:struct CatalogReleaseManifest",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func authenticatedSigner",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:static func verifyAuthenticated"
+      ],
+      "tests": [
+        "scripts/test-catalog-release.sh:PASS: release manifest signature is verified against the static-feed signer",
+        "scripts/tests/test_native_binding_ops.py::ReleaseManifestSignatureAssemblyTests",
+        "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestServedWhenSignedAndBindingServedFeeds",
+        "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestFailsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/CatalogReleaseManifestTests.swift:final class CatalogReleaseManifestTests",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift::testLoaderUsesVerifiedReleaseManifestInsteadOfSidecar"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2302",
+        "rationale": "SPEC-023 v0.22.42 adds the signed release manifest: release.json.sig produced by the signing step, verified by the generator, the coordinator (served at /v1/catalog-release) and the CLI, with per-feed sidecars kept as the fallback. Pending until a catalog release signed with release.json.sig is live and a CLI carrying the consumer is promoted; removing the per-feed sidecars is a later revision."
+      }
+    },
+    {
       "requirement_id": "SPEC-042-R015",
       "spec_id": "SPEC-042",
       "state": "pending",

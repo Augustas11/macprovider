@@ -281,8 +281,8 @@ grep -qx resume_request "$T/state/frames" || die "healthy swap never resumed the
 [ ! -d "$HOME/.macprovider-canary-swap.lock" ] || die "canary-host lock not released"
 grep -q '"kernel_check": "passed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "no canary_swap record"
 
-# 2a. record-installed: the verified bytes already serve (installed by a signed
-#     native pair); the marker is recorded with no restart. The old version is refused.
+# 2a. record-installed: the verified bytes already serve; the marker is recorded
+#     with no restart. The old version is refused.
 rm -f "$T/ops-state/cli-release-$CAND/canary_swap.json"; : >"$T/state/runner"
 run_rc 0 "record-installed adopts the serving candidate" "$SWAP" record-installed --version "$CAND"
 grep -q '"installed_by": "record-installed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "record-installed wrote no canary_swap record"

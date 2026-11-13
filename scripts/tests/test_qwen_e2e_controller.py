@@ -57,7 +57,6 @@ trace() {{ printf '%s\\n' "$*" >> "$TRACE"; }}
 fact() {{ :; }}
 log() {{ :; }}
 refuse() {{ trace "refused:$*"; exit 3; }}
-native_binding_context() {{ :; }}
 require_abs() {{ case "$2" in /*) ;; *) exit 91 ;; esac; }}
 require_studio_ssh() {{ :; }}
 read_studio_status() {{ trace forbidden_status; return 92; }}
@@ -856,7 +855,7 @@ printf '%s\n' "$NEXT_ID" "$NEXT_KIND" "$NEXT_CMD"
         self.assertEqual(result.stdout.splitlines(), [
             "qwen_restore", "blocked", "scripts/ops/qwen-opencode-e2e.sh status"])
 
-    def test_catalog_recovery_precedes_native_binding_verification(self):
+    def test_catalog_recovery_precedes_catalog_reads(self):
         result, _ = self.run_shell(
             ["gather"],
             '''
@@ -866,7 +865,6 @@ mkdir -p "$REPO_ROOT/$AUTOTUNE"
 printf '%s\n' '{"release_id":"release","feeds":{}}' > "$REPO_ROOT/$AUTOTUNE/release.json"
 origin_main_sha() { printf '%040d\n' 0; }; git() { printf '%040d\n' 0; }
 live_lock_purpose() { printf '%s\n' catalog-activate:qwen_restore; }
-native_binding_context() { return 1; }
 qwen_journal_probe() { cat "$FIXTURE"; }
 qwen_intent_probe() { printf '%s\n' '{"status":"absent"}'; }
 qwen_scratch_probe() { printf '%s\n' '{"scratch_absent":true}'; }

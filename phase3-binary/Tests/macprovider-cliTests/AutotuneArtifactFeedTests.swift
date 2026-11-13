@@ -149,6 +149,8 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: keyID)
         let inputs = AutotuneStaticInputs(
             fetch: { url in
+                // SPEC-023 §3.8: no release manifest here, so the per-feed sidecar decides.
+                if url.path.hasPrefix("/v1/catalog-release") { throw URLError(.fileDoesNotExist) }
                 XCTAssertTrue(url.path.hasPrefix("/v1/catalog-artifacts"))
                 return url.path.hasSuffix(".sig") ? sidecar : fixture.feedBytes
             },

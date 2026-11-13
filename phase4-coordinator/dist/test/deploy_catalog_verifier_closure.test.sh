@@ -104,7 +104,10 @@ grep -qF 'for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/
 
 # Preflight and staging must see the same release file set.
 release_files="$(sed -n 's/^CATALOG_RELEASE_FILES="\([^$"]*\)"$/\1/p' "$DEPLOY")"
-bound_files="$(sed -n 's/^  CATALOG_RELEASE_FILES="\$CATALOG_RELEASE_FILES \([^$"]*\)"$/\1/p' "$DEPLOY")"
+bound_files="$(sed -n 's/^  CATALOG_RELEASE_FILES="\$CATALOG_RELEASE_FILES \([^$"]*\)"$/\1/p' "$DEPLOY" | grep -vx 'release.json.sig' || true)"
+# SPEC-023 §3.8: release.json.sig joins the set whenever the tag carries it.
+grep -qxF '  CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES release.json.sig"' "$DEPLOY" \
+  || fail "a tag that carries release.json.sig must add it to CATALOG_RELEASE_FILES"
 # SPEC-023 §12.5: the native-MTP set is staged by name from NATIVE_MTP_FILES.
 native_files="$(sed -n 's/^NATIVE_MTP_FILES="\([^"]*\)"$/\1/p' "$DEPLOY")"
 [ "$native_files" = "native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig" ] \
@@ -115,7 +118,7 @@ grep -qF '  install -o root -g macprovider -m 0640 $DEPLOY_TMP/$_native_file \$_
   || fail "a native-MTP-bound release must stage every NATIVE_MTP_FILES member"
 [ -n "$release_files" ] && [ "$bound_files" = "autotune-artifacts.json autotune-artifacts.json.sig" ] \
   || fail "could not parse CATALOG_RELEASE_FILES (base and artifact-bound)"
-listed="$(printf '%s\n' $release_files $bound_files | sort)"
+listed="$(printf '%s\n' $release_files $bound_files release.json.sig | sort)"
 staged="$(grep -oE 'install -o root -g macprovider -m 0640 \$DEPLOY_TMP/[A-Za-z0-9._-]+ \\\$_autotune_stage/[A-Za-z0-9._-]+' "$DEPLOY" \
   | awk '{ src=$8; dst=$9; sub(/^\$DEPLOY_TMP\//, "", src); sub(/^\\\$_autotune_stage\//, "", dst); if (src != dst) { print "MISMATCH " src " " dst } else { print src } }' | sort || true)"
 [ "$listed" = "$staged" ] || fail "CATALOG_RELEASE_FILES differs from the files staged into \$_autotune_stage:

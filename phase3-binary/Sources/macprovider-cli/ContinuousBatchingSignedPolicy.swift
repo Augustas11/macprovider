@@ -183,6 +183,36 @@ enum ContinuousBatchingSignedPolicy {
             signatureData: signatureData,
             trustedKeyring: trustedKeyring
         )
+        return try verifyAuthenticated(
+            policyData: policyData,
+            signerKeyID: signatureKeyID,
+            catalog: catalog,
+            trustedKeyring: trustedKeyring,
+            now: now,
+            source: source
+        )
+    }
+
+    /// Validates policy bytes whose signer is already authenticated: by the
+    /// per-feed sidecar (`verify`) or by a verified release manifest that
+    /// binds these exact bytes (SPEC-023 §3.8). Every non-signature check is
+    /// the same on both paths.
+    static func verifyAuthenticated(
+        policyData: Data,
+        signerKeyID signatureKeyID: String,
+        catalog: AutotuneStaticSelection<CandidateCatalog>,
+        trustedKeyring: TrustedKeyring = TrustedKeyring(),
+        now: Date = Date(),
+        source: String = "coordinator"
+    ) throws -> ContinuousBatchingPolicySelection {
+        guard policyData.count <= maxPolicyBytes else {
+            throw ContinuousBatchingSignedPolicyError.invalidValue("$.bytes")
+        }
+        guard signatureKeyID == trustedKeyring.requiredKeyID,
+              trustedKeyring.publicKeysByKeyID[signatureKeyID] != nil else {
+            throw ContinuousBatchingSignedPolicyError.signatureInvalid("unexpected_key_id")
+        }
+        try AutotuneStrictJSON.rejectDuplicateKeys(policyData)
         guard let root = try JSONSerialization.jsonObject(with: policyData) as? [String: Any] else {
             throw ContinuousBatchingSignedPolicyError.wrongType("$")
         }
@@ -632,9 +662,13 @@ extension AutotuneStaticInputs {
         }
         let policyURL = Self.staticFeedURL(baseURL: baseURL, name: "continuous-batching-policy")
         let signatureURL = Self.staticFeedURL(baseURL: baseURL, name: "continuous-batching-policy.sig")
-        let policyData: Data
+        let keyring = ContinuousBatchingSignedPolicy.TrustedKeyring(
+            publicKeysByKeyID: trustedPublicKeys,
+            requiredKeyID: catalog.signerKeyID ?? Self.keyID
+        )
+        let fetchedPolicyData: Data
         do {
-            policyData = try await fetch(policyURL)
+            fetchedPolicyData = try await fetch(policyURL)
         } catch {
             return ContinuousBatchingPolicyLoadResult(
                 selection: .emptyOff,
@@ -643,29 +677,50 @@ extension AutotuneStaticInputs {
                 signerKeyID: nil
             )
         }
-        let signatureData: Data
-        do {
-            signatureData = try await fetch(signatureURL)
-        } catch {
-            return ContinuousBatchingPolicyLoadResult(
-                selection: .emptyOff,
-                status: .integrityFailureFallback,
-                policySHA256: Self.candidateCatalogSHA256(bytes: policyData),
-                signerKeyID: nil
-            )
+        // SPEC-023 §3.8: a verified release manifest that binds these bytes
+        // authenticates them. A mismatch refetches once past the local cache
+        // (rule 4); otherwise the per-feed sidecar verifies the exact bytes.
+        let resolved = await resolveReleaseManifest(
+            routeName: "continuous-batching-policy",
+            body: fetchedPolicyData,
+            baseURL: baseURL
+        )
+        let policyData = resolved.body
+        let manifestSignerKeyID = resolved.manifestSignerKeyID
+        var signatureData = Data()
+        if manifestSignerKeyID == nil {
+            do {
+                signatureData = try await fetchSidecar(signatureURL, ignoringCache: resolved.refetched)
+            } catch {
+                return ContinuousBatchingPolicyLoadResult(
+                    selection: .emptyOff,
+                    status: .integrityFailureFallback,
+                    policySHA256: Self.candidateCatalogSHA256(bytes: policyData),
+                    signerKeyID: nil
+                )
+            }
         }
         do {
-            let selection = try ContinuousBatchingSignedPolicy.verify(
-                policyData: policyData,
-                signatureData: signatureData,
-                catalog: catalog,
-                trustedKeyring: ContinuousBatchingSignedPolicy.TrustedKeyring(
-                    publicKeysByKeyID: trustedPublicKeys,
-                    requiredKeyID: catalog.signerKeyID ?? Self.keyID
-                ),
-                now: now(),
-                source: "coordinator"
-            )
+            let selection: ContinuousBatchingPolicySelection
+            if let manifestSignerKeyID {
+                selection = try ContinuousBatchingSignedPolicy.verifyAuthenticated(
+                    policyData: policyData,
+                    signerKeyID: manifestSignerKeyID,
+                    catalog: catalog,
+                    trustedKeyring: keyring,
+                    now: now(),
+                    source: "coordinator"
+                )
+            } else {
+                selection = try ContinuousBatchingSignedPolicy.verify(
+                    policyData: policyData,
+                    signatureData: signatureData,
+                    catalog: catalog,
+                    trustedKeyring: keyring,
+                    now: now(),
+                    source: "coordinator"
+                )
+            }
             return ContinuousBatchingPolicyLoadResult(
                 selection: selection,
                 status: .liveVerified,
