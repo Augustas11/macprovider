@@ -1,6 +1,6 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.7 (2026-11-13, objectives rank on routed throughput)
+**Version:** 0.3.7 (2026-11-13, measured reorder of decode-fresh candidates)
 **Extends:** SPEC-002 v1.6.2 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
@@ -13,14 +13,15 @@ model ID routing, and no sticky affinity.
 
 ### v0.3.7 (2026-11-13)
 
-- **FR-SR-8 / FR-SR-16 routed throughput (Related: #2321, SPEC-002 v1.6.31).**
-  `fast`, the `accurate` tie-break, the `balanced` throughput component and
-  every epsilon cohort compare SPEC-002-R005 routed throughput (measured decode
-  with the heartbeat estimate as a capped prior when the decode signal is
-  fresh, the estimate otherwise) times the tier weight, instead of
-  `throughput_tps_estimate`. With no fresh decode evidence, ordering is
-  unchanged. §7 `candidate_set` entries name the throughput source and the
-  measured decode values.
+- **FR-SR-8 / FR-SR-16 measured reorder (Related: #2321, SPEC-002 v1.6.31).**
+  The objectives still sort on `throughput_tps_estimate`. Afterwards only the
+  decode-fresh candidates (SPEC-002-R005) are reordered by routed throughput
+  among the positions they already hold, within equal non-throughput objective
+  keys; for `balanced` by the FR-SR-8 score with its throughput term
+  normalized over the decode-fresh candidates. Epsilon cohorts compare routed
+  values only between two decode-fresh candidates. With zero or one
+  decode-fresh candidate, ordering and cohorts are unchanged. §7
+  `candidate_set` entries name the throughput source and both values.
 
 ### v0.3.6 (2026-10-06)
 
@@ -457,7 +458,7 @@ Each class MUST define:
 Objective semantics:
 
 - `fast`: choose the highest effective throughput
-  (`routed_throughput * tier_weight`), then fewer `slots_free`, then
+  (`throughput_tps_estimate * tier_weight`), then fewer `slots_free`, then
   SPEC-002 deterministic or SPEC-004 randomized tiebreak.
 - `accurate`: choose highest `model_params_b`, then effective throughput, then
   tiebreak.
@@ -465,7 +466,7 @@ Objective semantics:
   set:
 
   ```
-  score(p) = 0.4 * norm(routed_throughput)
+  score(p) = 0.4 * norm(throughput_tps_estimate)
            + 0.3 * norm(model_params_b)
            + 0.2 * norm(max_context_tokens)
            + 0.1 * norm(slots_free / max(1, slots_total))
@@ -477,12 +478,18 @@ Objective semantics:
   MUST log the component values and final score. The weights are normative in
   v0.2 and may be made operator-tunable only in a future minor revision.
 
-`routed_throughput` (v0.3.7) is SPEC-002-R005 routed throughput: the measured
-decode average blended with `throughput_tps_estimate` as its capped prior when
-the candidate's decode signal is fresh, else `throughput_tps_estimate`. Every
-effective-throughput comparison in this SPEC, including the FR-SR-16 epsilon
-cohorts, uses it. A request computes it once per candidate, and the sort, the
-cohort checks, sticky judgement and the §7 log read that one value.
+Measured reorder (v0.3.7). After this sort, SPEC-002-R005 reorders only the
+decode-fresh candidates among the positions they already hold, within blocks
+of equal non-throughput keys (default mode: `slots_free`; `accurate`:
+`model_params_b`; `fast` and `balanced`: the whole list): by routed
+throughput times the tier weight, and for `balanced` by the score above with
+`norm(throughput_tps_estimate)` replaced by the routed throughput normalized
+over the decode-fresh candidates only (the other three terms are normalized
+over all candidates as above). Unmeasured candidates keep their positions; a
+fresh and an unmeasured candidate are compared on their estimates. With zero
+or one decode-fresh candidate the order is exactly the sort above. The
+FR-SR-16 cohorts compare routed values (for `balanced`, the measured scores)
+only when both candidates are decode-fresh.
 
 **FR-SR-9. Model-class no-provider behavior.**
 If a class exists but no eligible provider remains after SPEC-002 filters,
@@ -809,10 +816,10 @@ Required fields where applicable:
   admission warm-up is observe-only (SPEC-002 v1.6.0) and is not a filter
   reason; a wake-from-sleep `warm_up` degraded provider surfaces as `not_ready`.
 - `candidate_set` for randomized decisions and SHOULD for class decisions;
-  each entry's effective throughput is the routed one, and (v0.3.7) each entry
-  carries `throughput_source` (`measured` or `reported`),
-  `throughput_tps_estimate`, `measured_decode_tps` (or `null`) and
-  `decode_samples`
+  (v0.3.7) each entry carries `throughput_source` (`measured` for a
+  decode-fresh candidate, else `reported`), `throughput_tps_estimate` and
+  `routed_throughput_tps` (SPEC-002-R005); `effective_throughput` stays the
+  estimate times the tier weight
 - `tiebreak_mode`: `deterministic` or `random_epsilon`
 - `tiebreak_epsilon`
 - `random_seed` or `random_draw`, when randomized
