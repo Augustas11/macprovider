@@ -207,6 +207,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "shard-bench")
         let directory = try ModelRuntime.localModelDirectory(for: model)
         if plan {
             try runPlan(directory: directory)

@@ -2250,6 +2250,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Lowercased ids of the model the configured value's provenance record
     /// names; only a switch back to one of them serves `recommendation_apply`.
     private let switchContextProvenanceModelIDs: Set<String>
+    /// SPEC-038 FR-CB9: the MLX small-row route this runtime's process runs.
+    /// On `serialOnly` no self-check target, self-check batch or native-MTP
+    /// drafter exists here, so no row can be batched.
+    let smallMRoute: SmallMRoute
     /// The configured `max_context_override` serve started with; a switch that
     /// serves exactly it serves the config value, not a recomputed one.
     private let configuredMaxContextTokens: Int?
@@ -2384,6 +2388,13 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    /// SPEC-038 FR-CB9: the refused decision a serial-only process reports
+    /// for its whole life (it never runs a self-check) and the count it
+    /// serves, kept across swaps: no self-check target exists there to
+    /// re-resolve the count after a swap.
+    private var serialOnlySelfCheck: (
+        decision: ContinuousBatchingSelfCheckDecision?, key: ContinuousBatchingSelfCheckKey?, servedSlots: Int
+    )?
     /// SPEC-038 AC-26 leg (a) inside the FR-CB10 self-check (v0.3.41): nil
     /// until it runs for the loaded tuple (a signed `cached_turns_accepted`
     /// grant then applies provisionally), true when keyed cached turns
@@ -4055,7 +4066,8 @@ maxTokens: 1,
         authorizedSwitchModelIDs: [String] = [],
         switchMaxContextByTarget: [String: Int] = [:],
         switchMaxBatchByTarget: [String: Int] = [:],
-        switchContextProvenanceModelIDs: Set<String> = []
+        switchContextProvenanceModelIDs: Set<String> = [],
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) async throws {
         if let mlxCacheLimitMB, !Self.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
             throw ModelRuntimeLoadError(
@@ -4181,6 +4193,7 @@ maxTokens: 1,
         self.switchMaxContextByTarget = switchMaxContextByTarget
         self.switchMaxBatchByTarget = switchMaxBatchByTarget
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.smallMRoute = smallMRoute
         self.configuredMaxContextTokens = maxContextTokensOverride
         // #2016: a catalog-bound provider serves the vision model under its
         // rate-card key; the catalog model id selects the profile only with the
@@ -4270,6 +4283,7 @@ maxTokens: 1,
                     resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
                     targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
                     selfTestRunner: self.nativeMTPSelfTestRunner,
+                    route: self.smallMRoute,
                     rejectionObserver: rejectionRecorder.record
                 )
                 candidateNativeMTPDisabledReason = rejectionRecorder.statusReason ?? .tupleNotAdmitted
@@ -4556,6 +4570,7 @@ maxTokens: 1,
         switchMaxContextByTarget: [String: Int] = [:],
         switchMaxBatchByTarget: [String: Int] = [:],
         switchContextProvenanceModelIDs: Set<String> = [],
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute,
         pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil,
         pagedKVHardwareSizingProof: PagedKVHardwareSizingProof? = nil,
         pagedKVRuntimeCacheClass: String = ModelRuntime.pagedKVUnavailableCacheClass,
@@ -4645,6 +4660,7 @@ maxTokens: 1,
         self.switchMaxContextByTarget = switchMaxContextByTarget
         self.switchMaxBatchByTarget = switchMaxBatchByTarget
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.smallMRoute = smallMRoute
         self.configuredMaxContextTokens = maxContextTokensOverride
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -5899,7 +5915,8 @@ maxTokens: 1,
                 revokedTupleSHA256: configuredNativeMTPRevokedTupleSHA256,
                 resolvedArtifactAuthority: configuredNativeMTPResolvedArtifactAuthority,
                 targetGeneration: UInt64(max(1, currentSpecDecodeGeneration + 1)),
-                selfTestRunner: nativeMTPSelfTestRunner
+                selfTestRunner: nativeMTPSelfTestRunner,
+                route: smallMRoute
               ), load.admissionCapability.tupleSHA256 == expectedTuple else {
             throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration admission failed")
         }
@@ -6498,6 +6515,7 @@ maxTokens: 1,
     /// revocation names this model on this runtime revision.
     func continuousBatchingSelfCheckTarget(includeDecided: Bool = false) -> ContinuousBatchingSelfCheckTarget? {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
+              smallMRoute == .rowInvariant,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
               let scheduler = continuousBatchScheduler,
@@ -6663,6 +6681,41 @@ maxTokens: 1,
         continuousBatchingSelfCheckReport = report
     }
 
+    /// SPEC-038 FR-CB9: a serial-only process never runs or applies a
+    /// self-check, so it reports the stored one-row decision that put it on
+    /// the serial route as refused (`small_m_route_serial_only` when batching
+    /// is off by configuration), as a refused check reads on the invariant
+    /// route. Kept across swaps. Serves `servedSlots`
+    /// (`SmallMRoute.serialOnlyServedSlots`) and reports the count it serves.
+    /// Returns that count; nil (and no change) on the row-invariant route.
+    @discardableResult
+    func applySerialOnlySelfCheck(
+        stored decision: ContinuousBatchingSelfCheckDecision?,
+        key: ContinuousBatchingSelfCheckKey?,
+        servedSlots: Int
+    ) async -> Int? {
+        guard smallMRoute == .serialOnly else { return nil }
+        let served = min(max(1, servedSlots), maxBatch)
+        serialOnlySelfCheck = (decision, key, served)
+        applySerialOnlySelfCheckState(servedSlots: served)
+        await applyServedSlots(served)
+        return served
+    }
+
+    /// Sets the refused state and its report for the stored serial-only
+    /// decision, reporting `servedSlots`, the count the gate serves.
+    private func applySerialOnlySelfCheckState(servedSlots: Int) {
+        guard let serialOnly = serialOnlySelfCheck else { return }
+        let reason = serialOnly.decision?.reason ?? "small_m_route_serial_only"
+        continuousBatchingSelfCheck = .refused(reason: reason)
+        continuousBatchingSelfCheckReport = ContinuousBatchingSelfCheckReport(
+            decision: reason,
+            servedSlots: servedSlots,
+            verifiedSlots: serialOnly.decision?.verifiedSlots ?? 1,
+            key: serialOnly.key
+        )
+    }
+
     func continuousBatchingSelfCheckState() -> ContinuousBatchingSelfCheckState {
         continuousBatchingSelfCheck
     }
@@ -6787,6 +6840,9 @@ maxTokens: 1,
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         try Task.checkCancellation()
         guard expectedGeneration == selfCheckGeneration else { throw CancellationError() }
+        if let refusal = SmallMRoute.batchingRefusal(route: smallMRoute, entry: "cb_self_check") {
+            throw ContinuousBatchSchedulerError.requestFailed(refusal)
+        }
         guard prompts.count <= maxBatch else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_row_cap_exceeded")
         }
@@ -6932,6 +6988,9 @@ maxTokens: 1,
         requestedTuple: ContinuousBatchingRequestedTuple? = nil
     ) -> ContinuousBatchingMode {
         if continuousBatchingEmergencyOffOverride { return .off }
+        // SPEC-038 FR-CB9: a serial-only process can never batch, so it
+        // serves serially like a refused self-check, whatever the policy says.
+        if smallMRoute == .serialOnly { return .off }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
         if let tuple, continuousBatchingAcceptanceCoverage.isRevoked(tuple) { return .off }
         // SPEC-038 v0.3.15: a signed positive entry for this model artifact is
@@ -7551,9 +7610,14 @@ maxTokens: 1,
         )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
-        let swapServedSlots: Int? = servedSlotsManaged
+        // A serial-only process keeps its startup count and refused state:
+        // it has no self-check target to re-resolve them (SPEC-038 FR-CB9).
+        let swapServedSlots: Int? = serialOnlySelfCheck.map { min($0.servedSlots, maxBatch) } ?? (servedSlotsManaged
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
-            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) }
+            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) })
+        if let swapServedSlots, serialOnlySelfCheck != nil {
+            applySerialOnlySelfCheckState(servedSlots: swapServedSlots)
+        }
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
@@ -13154,6 +13218,15 @@ maxTokens: maxTokens,
         )
     }
 
+    /// Why native MTP may not load in this process, or nil. A serial-only
+    /// process (SPEC-038 FR-CB9) refuses it even if an admission set appears
+    /// after startup, because its rounds batch target rows.
+    nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
+        guard mode == .auto else { return "mode_not_auto" }
+        guard route == .rowInvariant else { return "small_m_route_serial_only" }
+        return nil
+    }
+
     private static func loadNativeMTPDrafterIfAdmitted(
         mode: NativeMTPMode,
         targetModelID: String,
@@ -13172,14 +13245,15 @@ maxTokens: maxTokens,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?,
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner,
+        route: SmallMRoute = SmallMRoute.processRoute,
         rejectionObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> NativeMTPRuntimeLoadResult? {
         func reject(reasonCode: String, artifactRole: String) -> NativeMTPRuntimeLoadResult? {
             rejectionObserver(reasonCode)
             return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole)
         }
-        guard mode == .auto else {
-            return reject(reasonCode: "mode_not_auto", artifactRole: "runtime")
+        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
+            return reject(reasonCode: reasonCode, artifactRole: "runtime")
         }
         guard let targetModelRevision else {
             return reject(reasonCode: "target_revision_missing", artifactRole: "target")

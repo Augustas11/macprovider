@@ -50,6 +50,7 @@ struct MSBComputeScoreCommand: AsyncParsableCommand {
     var concurrentLoad: Int = 0
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "msb-compute-score")
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"], !modelID.isEmpty else {
             fail("--model is required", code: 2)
         }

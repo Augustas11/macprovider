@@ -51,6 +51,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
     var privacyFixtureCompletion: String?
 
     mutating func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "relay-blind-fixture")
         guard ProcessInfo.processInfo.environment["MACPROVIDER_ALLOW_TEST_FIXTURES"] == "1" else {
             throw ValidationError("relay-blind fixture requires MACPROVIDER_ALLOW_TEST_FIXTURES=1")
         }

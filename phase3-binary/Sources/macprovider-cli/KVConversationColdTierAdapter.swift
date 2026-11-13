@@ -15,14 +15,14 @@ enum KVBuildIdentity {
     /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
     /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
     /// prior ciphertext hard-misses (accepted — this tier is an optimization).
-    static let mlxSwiftLMRevision = "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
+    static let mlxSwiftLMRevision = "a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e"
     /// The mlx-swift release the pinned revision is based on. Package.resolved
     /// carries no version for a fork revision pin; when it does carry one,
     /// `KVBuildIdentityDriftTests` requires this to equal it.
     static let mlxSwiftVersion = "0.32.3"
     /// The REAL pinned mlx-swift git revision (HIGH-8). Same bump-on-change rule;
     /// `KVBuildIdentityDriftTests` checks it against Package.resolved.
-    static let mlxSwiftRevision = "8f0ac45bc7483b59b1776a8405fa13944e559e06"
+    static let mlxSwiftRevision = "0f93fa380369a1abd1e17757a465cf42a72d8f69"
     /// The envelope `mlx_version` string (FR-KVP4(a)6). It carries the exact
     /// mlx-swift revision as well as the version, so a revision-only pin change
     /// (e.g. a fork moving its MLX core submodule) still hard-misses prior
@@ -369,7 +369,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
             kvQuantPolicy: identity.kvQuantPolicy,
-            decodePath: KVBuildIdentity.decodePathOrdinary,
+            decodePath: SmallMRoute.processRoute.kvDecodePath,
             liveHighWatermark: 0)          // overridden inside read()
     }
 
@@ -611,7 +611,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
             kvQuantPolicy: identity.kvQuantPolicy,
-            decodePath: KVBuildIdentity.decodePathOrdinary,
+            decodePath: SmallMRoute.processRoute.kvDecodePath,
             keyEpoch: capturedEpoch)        // CRITICAL-2: captured at commit, not at persist
         // M-B: derive creation/eligibility from the EXACT hot-commit instant passed
         // in — NOT a wall-clock read taken after the deep copy above, which would

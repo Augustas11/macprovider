@@ -217,6 +217,12 @@ extension ModelRuntime {
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
+        // SPEC-038 FR-CB9: a serial-only process runs no scheduler, so no
+        // batched row, CB self-check or native-MTP round can start in it.
+        if let refusal = SmallMRoute.batchingRefusal(route: SmallMRoute.processRoute, entry: "continuous_batch_scheduler") {
+            FileHandle.standardError.write(Data("event=small_m_route action=scheduler_refused detail=\"\(refusal)\"\n".utf8))
+            return nil
+        }
         guard case .attached(let descriptor) = decision,
               let tuple,
               let backend,
