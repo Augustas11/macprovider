@@ -25,8 +25,10 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   the GLM v0.3.12/v0.3.13 hardening. The family fallback wins over the
   template format the runtime infers for it (`json`). Coordinator capability
   metadata and routing require the exact loaded-model declaration, as for
-  `lfm2`. §3.12 adds the MiniMax adaptive split: a `<mm:think>…</mm:think>`
-  block that opens the reply is reasoning. Other families are unchanged.
+  `lfm2`. §3.12 adds the MiniMax adaptive split: text inside
+  `<mm:think>…</mm:think>` blocks is reasoning wherever they occur, and stop
+  strings run after the first `</mm:think>` when the reply leads with a tag.
+  Other families are unchanged.
 - **v0.3.17 (2026-11-11, Related: #2111):** Rebases the DeepSeek-V4 runtime
   reference (campaign #2151, first drafted as v0.3.12 on 2026-10-28) onto
   v0.3.16. DeepSeek's documented reasoning controls and encoder apply to
@@ -1070,15 +1072,24 @@ the generated text up to the first `</think>` is reasoning:
   could still become one. Text from the first `<tool_call>` on is parsed as
   in §3.1, so call arguments stay byte-exact.
 - **v0.3.18:** the `minimax` grammar's template leaves no block open and
-  thinks adaptively. When the reply opens (after whitespace) with
-  `<mm:think>`, the text up to the first `</mm:think>` is reasoning, split
-  and streamed as above, and reasoning tokens run through the token
-  completing `</mm:think>`; an unclosed block is all reasoning. A reply that
-  opens with `</mm:think>` carries no reasoning and its answer follows the
-  tag; a reply with neither tag is all answer and carries no
-  `reasoning_content`. A stream releases nothing while the reply's start
-  could still become either tag. Stop strings run over the whole output as on
-  rows without an open `<think>`.
+  thinks adaptively. As the template reads an assistant turn, text between
+  `<mm:think>` and `</mm:think>` is reasoning wherever a block occurs, and
+  the text outside the blocks is the answer; tools, JSON mode and `content`
+  see only the answer, so a call inside a block is not a call. A
+  `</mm:think>` outside a block and a `<mm:think>` inside one are dropped;
+  whitespace that starts the answer or follows a close tag is dropped from
+  it. An unclosed block runs to the end of the output. Reasoning tokens run
+  from the token that starts the first block through the one completing the
+  last block's `</mm:think>` (to the end when it never closed). A reply with
+  no block carries no `reasoning_content`. A stream holds back a tail that
+  could still become a tag, so reasoning and answer only grow. When the
+  reply leads (after whitespace) with `<mm:think>` or `</mm:think>`, or its
+  start could still become either, stop strings apply only to the text after
+  the first `</mm:think>`, as for an open `<think>` above: a stop string in
+  that reasoning neither ends generation nor truncates it, continuous-batching
+  rows carry no request stop-token sequences, and the canonical stop observer
+  ends them. A reply that leads with answer text has stop strings applied to
+  the whole output.
 - The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
   `finish_reason` as before; `reasoning_content` is not part of it in this
   version.

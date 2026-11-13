@@ -91,16 +91,17 @@ enum ReasoningOutput {
         }) ?? 0
     }
 
-    /// Applies `filter` (stop strings, hold-back) to the post-think text only;
-    /// the reasoning keeps just the model stop-token stripping. Returns the
-    /// raw shape `reasoning</think>answer` so the caller can split it later.
+    /// Applies `filter` (stop strings, hold-back) to the post-think text only
+    /// (`StopScope`); the reasoning keeps just the model stop-token
+    /// stripping. Returns the raw shape `reasoning</think>answer` so the
+    /// caller can split it later.
     static func filtering(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
-        reasoningOpen: Bool,
+        reasoningOpen: StopScope,
         filter: (String) -> (text: String, hitStop: Bool)
     ) -> (text: String, hitStop: Bool) {
-        guard reasoningOpen else { return filter(text) }
+        guard let closeTag = reasoningOpen.closeTag(for: text) else { return filter(text) }
         guard let close = text.range(of: closeTag) else {
             return (stopTokenFilter.stripping(from: text, joiner: ControlTextShield.markString), false)
         }
@@ -118,13 +119,17 @@ enum ReasoningOutput {
     }
 
     /// MiniMax M3 adaptive reasoning (#2189). The prompt leaves no block
-    /// open: the model starts its reply with `<mm:think>…</mm:think>` when it
-    /// reasons and with `</mm:think>` (or nothing) when it does not, as the
-    /// template renders history and `MiniMaxAI/MiniMax-M3.1-Flash`'s
-    /// reasoning parser reads it. Only a block that opens the reply (after
-    /// whitespace) is reasoning; everything else is answer. Request stops
-    /// and stop tokens run over the whole output as on other rows without an
-    /// open `<think>`, before this split.
+    /// open: the model writes `<mm:think>…</mm:think>` when it reasons,
+    /// usually to open its reply, and `</mm:think>` (or nothing) when it does
+    /// not. As the `MiniMaxAI/MiniMax-M3.1-Flash` template reads an assistant
+    /// turn, the text between the tags is reasoning wherever a block occurs
+    /// and the text outside them is the answer; tools, JSON mode and content
+    /// see only the answer. A `</mm:think>` outside a block and a
+    /// `<mm:think>` inside one are dropped. Whitespace that starts the
+    /// answer or follows a close tag is dropped from it. Request stops run
+    /// over the text after the first `</mm:think>` when the reply leads with
+    /// a tag (`StopScope.afterMiniMaxThink`), as on rows whose prompt leaves
+    /// `<think>` open; over the whole output when it leads with answer text.
     enum MiniMax {
         static let openTag = "<mm:think>"
         static let closeTag = "</mm:think>"
@@ -136,7 +141,7 @@ enum ReasoningOutput {
             case thinking(String.Index)
             /// `</mm:think>` with nothing before it: the answer follows.
             case noThinking(String.Index)
-            /// No tag: the whole text is answer.
+            /// Answer text first.
             case answer
         }
 
@@ -148,60 +153,152 @@ enum ReasoningOutput {
             return .answer
         }
 
-        /// Splits complete (final) output. A block that never closed (for
-        /// example `finish_reason` length) is all reasoning.
-        static func split(_ text: String) -> Split {
-            switch lead(text) {
-            case .thinking(let start):
-                guard let close = text.range(of: closeTag, range: start..<text.endIndex) else {
-                    return Split(reasoning: String(text[start...]), answer: "", closed: false)
+        /// The split of a scanned prefix: text between tags goes to
+        /// `append`, each tag to `apply`.
+        struct Scan {
+            private(set) var inside = false
+            private(set) var opened = false
+            private(set) var reasoning = ""
+            private(set) var answer = ""
+            private var dropsWhitespace = true
+
+            mutating func append<S: StringProtocol>(_ text: S) {
+                if inside {
+                    reasoning += text
+                    return
                 }
-                return Split(reasoning: String(text[start..<close.lowerBound]),
-                             answer: String(text[close.upperBound...].drop(while: \.isWhitespace)), closed: true)
-            case .noThinking(let start):
-                return Split(reasoning: "", answer: String(text[start...].drop(while: \.isWhitespace)), closed: true)
-            case .undecided, .answer:
-                return Split(reasoning: "", answer: text, closed: true)
+                var rest = Substring(text)
+                if dropsWhitespace {
+                    rest = rest.drop(while: \.isWhitespace)
+                    if rest.isEmpty { return }
+                    dropsWhitespace = false
+                }
+                answer += rest
             }
+
+            mutating func apply(tag: String) {
+                if tag == openTag {
+                    if !inside { opened = true }
+                    inside = true
+                } else {
+                    inside = false
+                    dropsWhitespace = true
+                }
+            }
+
+            var split: Split { Split(reasoning: reasoning, answer: answer, closed: !inside) }
         }
 
-        /// Splits a streaming prefix: nothing is released while the lead is
-        /// undecided, and open reasoning holds back a suffix that could
-        /// still become `</mm:think>`. Incremental twin:
+        /// The first tag in `text`.
+        static func nextTag(in text: Substring) -> (range: Range<String.Index>, tag: String)? {
+            let open = text.range(of: openTag)
+            let close = text.range(of: closeTag)
+            if let open, close.map({ open.lowerBound < $0.lowerBound }) ?? true { return (open, openTag) }
+            return close.map { ($0, closeTag) }
+        }
+
+        /// `text` without a suffix that could still become a tag.
+        static func withoutPartialTags(_ text: Substring) -> Substring {
+            let held = (1..<closeTag.count).last(where: { length in
+                let tail = String(text.suffix(length))
+                return tail.count == length && (openTag.hasPrefix(tail) || closeTag.hasPrefix(tail))
+            }) ?? 0
+            return text.dropLast(held)
+        }
+
+        static func scan(_ text: String, streaming: Bool) -> Scan {
+            var scan = Scan()
+            var rest = text[...]
+            while let next = nextTag(in: rest) {
+                scan.append(rest[..<next.range.lowerBound])
+                scan.apply(tag: next.tag)
+                rest = rest[next.range.upperBound...]
+            }
+            scan.append(streaming ? withoutPartialTags(rest) : rest)
+            return scan
+        }
+
+        /// Splits complete (final) output. A block that never closed (for
+        /// example `finish_reason` length) runs to the end.
+        static func split(_ text: String) -> Split {
+            scan(text, streaming: false).split
+        }
+
+        /// Splits a streaming prefix: a suffix that could still become a tag
+        /// is held, so reasoning and answer only grow. Incremental twin:
         /// `IncrementalMiniMaxReasoningSplit`.
         static func splitStreamingPrefix(_ text: String) -> Split {
-            switch lead(text) {
-            case .undecided:
-                return Split(reasoning: "", answer: "", closed: false)
-            case .thinking(let start):
-                let split = split(text)
-                guard !split.closed else { return split }
-                return Split(reasoning: withoutPartialTag(String(text[start...]), tag: closeTag), answer: "", closed: false)
-            case .noThinking, .answer:
-                return split(text)
-            }
+            scan(text, streaming: true).split
         }
 
         /// True when the final output opened a reasoning block.
         static func reasoned(_ text: String) -> Bool {
-            if case .thinking = lead(text) { return true }
-            return false
+            scan(text, streaming: false).opened
         }
 
-        /// Tokens up to and including the one that completes `</mm:think>`
-        /// when the reply reasoned; all of them when the block never closed;
-        /// none without a block.
+        /// The tokens from the one that starts the first block's text through
+        /// the one that completes the last block's `</mm:think>` (to the end
+        /// when that block never closed); none without a block. Prefix
+        /// decode lengths are monotone, so each bound is a binary search.
         static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String) -> Int {
-            guard !tokenIDs.isEmpty, reasoned(decode(tokenIDs)) else { return 0 }
-            // The block opens the reply, so the first `</mm:think>` closes it.
-            return ReasoningOutput.reasoningTokenCount(tokenIDs: tokenIDs, decode: decode, closeTag: closeTag)
+            guard !tokenIDs.isEmpty else { return 0 }
+            let text = decode(tokenIDs)
+            var scan = Scan()
+            var rest = text[...]
+            var firstOpen: Int?
+            var lastClose: Int?
+            while let next = nextTag(in: rest) {
+                scan.append(rest[..<next.range.lowerBound])
+                let wasInside = scan.inside
+                scan.apply(tag: next.tag)
+                if scan.inside, !wasInside, firstOpen == nil {
+                    firstOpen = text.utf8.distance(from: text.startIndex, to: next.range.lowerBound)
+                }
+                if wasInside, !scan.inside { lastClose = text.utf8.distance(from: text.startIndex, to: next.range.upperBound) }
+                rest = rest[next.range.upperBound...]
+            }
+            guard let firstOpen else { return 0 }
+            /// The fewest tokens whose decode is longer than `bytes` UTF-8 bytes.
+            func tokens(past bytes: Int) -> Int {
+                var low = 1
+                var high = tokenIDs.count
+                while low < high {
+                    let mid = (low + high) / 2
+                    if decode(Array(tokenIDs.prefix(mid))).utf8.count > bytes { high = mid } else { low = mid + 1 }
+                }
+                return low
+            }
+            let end = scan.inside ? tokenIDs.count : lastClose.map { tokens(past: $0 - 1) } ?? tokenIDs.count
+            let before = tokens(past: firstOpen) - 1
+            return max(0, end - before)
         }
     }
 
-    /// `text` without a suffix that could still become `tag`.
-    static func withoutPartialTag(_ text: String, tag: String) -> String {
-        let held = (1..<tag.count).last(where: { text.hasSuffix(String(tag.prefix($0))) }) ?? 0
-        return String(text.dropLast(held))
+    /// Which output text request stops run over (SPEC-018 §3.12). A Bool
+    /// literal reads as `reasoningOpen`.
+    enum StopScope: Equatable, ExpressibleByBooleanLiteral {
+        /// The whole output.
+        case whole
+        /// The prompt left `<think>` open: the text after the first `</think>`.
+        case afterThink
+        /// MiniMax (#2189): the text after the first `</mm:think>` unless the
+        /// reply leads with answer text (`MiniMax.lead`), then the whole
+        /// output. An undecided lead is still reasoning.
+        case afterMiniMaxThink
+
+        init(booleanLiteral value: Bool) { self.init(value) }
+
+        init(_ reasoningOpen: Bool) { self = reasoningOpen ? .afterThink : .whole }
+
+        /// The tag that ends the stop-free reasoning region of `text`, or nil
+        /// when stops run over all of it.
+        func closeTag(for text: String) -> String? {
+            switch self {
+            case .whole: return nil
+            case .afterThink: return ReasoningOutput.closeTag
+            case .afterMiniMaxThink: return MiniMax.lead(text) == .answer ? nil : MiniMax.closeTag
+            }
+        }
     }
 
     /// Tokens up to and including the one that completes `</think>`: the

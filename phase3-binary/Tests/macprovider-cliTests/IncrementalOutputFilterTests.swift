@@ -191,12 +191,12 @@ final class IncrementalOutputFilterTests: XCTestCase {
         ]
         for (index, testCase) in cases.enumerated() {
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: testCase.reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: .init(testCase.reasoningOpen))
             var text = ""
             for piece in testCase.pieces {
                 text += piece
                 let expected = ModelRuntime.streamingSafePrefix(
-                    text, stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: testCase.reasoningOpen)
+                    text, stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: .init(testCase.reasoningOpen))
                 let actual = filter.update(text)
                 XCTAssertEqual(actual.text, expected.text, "case \(index)")
                 XCTAssertEqual(actual.hitStop, expected.hitStop, "case \(index)")
@@ -212,13 +212,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         let scalars = Array(String(repeating: unit, count: 40).unicodeScalars)
         for reasoningOpen in [false, true] {
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .init(reasoningOpen))
             var view = String.UnicodeScalarView()
             for (step, scalar) in scalars.enumerated() {
                 view.append(scalar)
                 let text = String(view)
                 let expected = ModelRuntime.streamingSafePrefix(
-                    text, stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: reasoningOpen)
+                    text, stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .init(reasoningOpen))
                 let actual = filter.update(text)
                 guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                     return XCTFail("reasoningOpen \(reasoningOpen) step \(step)")
@@ -232,13 +232,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         _ text: String, filter stopTokenFilter: StopTokenFilter, stops: [String], reasoningOpen: Bool,
         _ label: String, file: StaticString = #filePath, line: UInt = #line
     ) {
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: .init(reasoningOpen))
         var view = String.UnicodeScalarView()
         for (step, scalar) in text.unicodeScalars.enumerated() {
             view.append(scalar)
             let prefix = String(view)
             let expected = ModelRuntime.streamingSafePrefix(
-                prefix, stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+                prefix, stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: .init(reasoningOpen))
             let actual = filter.update(prefix)
             guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                 return XCTFail("\(label) reasoningOpen \(reasoningOpen) step \(step)", file: file, line: line)
@@ -369,7 +369,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
             let reasoningOpen = streamIndex % 2 == 1
             let decoder = ModelRuntime.WindowedTextDecoder(decode: Self.fakeDecode, lookbackScalars: 16)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: .init(reasoningOpen))
             var ids: [Int] = []
             var previous = ""
             var wholeDecodedTokens = 0
@@ -396,7 +396,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     "stream \(streamIndex) step \(step): unchanged prefix hint")
                 previous = whole
                 let expected = ModelRuntime.streamingSafePrefix(
-                    whole, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+                    whole, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: .init(reasoningOpen))
                 let actual = filter.update(output.text, unchangedPrefixUTF8: output.unchangedPrefixUTF8)
                 guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                     return XCTFail("stream \(streamIndex) step \(step): filter differs for \(whole.debugDescription)")
@@ -436,15 +436,15 @@ final class IncrementalOutputFilterTests: XCTestCase {
                 var reference = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
                 var incremental = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
                 let filter = ModelRuntime.IncrementalStreamFilter(
-                    stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                    stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: .init(reasoningOpen))
                 var stopText = IncrementalToolStopText(observer: incremental)
                 var text = ""
                 for (step, piece) in stream.enumerated() {
                     text += piece
                     let expected = ModelRuntime.observeSerialToolStop(
-                        &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                        &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: .init(reasoningOpen))
                     let actual = ModelRuntime.observeSerialToolStop(
-                        &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: reasoningOpen)
+                        &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: .init(reasoningOpen))
                     guard actual == expected else {
                         return XCTFail("\(testCase.grammar) stream \(streamIndex) step \(step)")
                     }
@@ -561,7 +561,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         func work(pieces count: Int, reasoningOpen: Bool) -> (filterPerStep: Double, decodePerStep: Double) {
             var rng = SeededGenerator(state: 9_2317)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: ["END", "\n\n###"], reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: ["END", "\n\n###"], reasoningOpen: .init(reasoningOpen))
             let decoder = ModelRuntime.WindowedTextDecoder(decode: Self.fakeDecode, lookbackScalars: 64)
             let ascii = (0..<Self.vocabulary.count).filter { Self.vocabulary[$0].allSatisfy { $0 < 0x80 } && Self.vocabulary[$0] != Array("END".utf8) }
             var ids: [Int] = []

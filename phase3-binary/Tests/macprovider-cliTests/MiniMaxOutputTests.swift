@@ -86,7 +86,11 @@ final class MiniMaxOutputTests: XCTestCase {
         ("391", "", "391", true, false),
         ("\n<mm:think>\nOK\n</mm:think>Done.", "\nOK\n", "Done.", true, true),
         ("<mm:think>17*23 is 17*20 plus", "17*23 is 17*20 plus", "", false, true),
-        ("Use <mm:think> tags.", "", "Use <mm:think> tags.", true, false),
+        // A block wherever it occurs is reasoning, as the template reads a
+        // turn; the text outside the blocks is the answer.
+        ("Use <mm:think> tags.", " tags.", "Use ", false, true),
+        ("Let me check.\n<mm:think>plan</mm:think>Answer", "plan", "Let me check.\nAnswer", true, true),
+        ("<mm:think>a</mm:think>Mid <mm:think>b<mm:think></mm:think> End</mm:think>.", "ab", "Mid End.", true, true),
     ]
 
     func testFinalSplit() {
@@ -124,6 +128,9 @@ final class MiniMaxOutputTests: XCTestCase {
         XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(noThink.indices), decode: { $0.map { noThink[$0] }.joined() }), 0)
         let open = Array("<mm:think>abc").map(String.init)
         XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(open.indices), decode: { $0.map { open[$0] }.joined() }), 13)
+        // A block after prose counts from its open tag.
+        let later = Array("xy<mm:think>ab</mm:think>cd").map(String.init)
+        XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(later.indices), decode: { $0.map { later[$0] }.joined() }), 23)
     }
 
     /// Streams `output` in `chunk`-Character steps through the emitter (its
@@ -174,16 +181,29 @@ final class MiniMaxOutputTests: XCTestCase {
 
     func testStreamingPrefixHoldsAnUndecidedLead() {
         for prefix in ["", " \n", "<", "<mm:th", "</mm:thi"] {
-            XCTAssertEqual(ReasoningOutput.MiniMax.splitStreamingPrefix(prefix), ReasoningOutput.Split(reasoning: "", answer: "", closed: false), prefix)
+            XCTAssertEqual(ReasoningOutput.MiniMax.splitStreamingPrefix(prefix), ReasoningOutput.Split(reasoning: "", answer: "", closed: true), prefix)
         }
         XCTAssertEqual(ReasoningOutput.MiniMax.splitStreamingPrefix("<mm:think>abc</mm:th"),
                        ReasoningOutput.Split(reasoning: "abc", answer: "", closed: false))
         XCTAssertEqual(ReasoningOutput.MiniMax.splitStreamingPrefix("<b>bold"), ReasoningOutput.Split(reasoning: "", answer: "<b>bold", closed: true))
-        var incremental = IncrementalMiniMaxReasoningSplit()
-        let output = "<mm:think>abc</mm:think> answer"
-        for end in 0...output.count {
-            let prefix = String(output.prefix(end))
-            XCTAssertEqual(incremental.splitStreamingPrefix(prefix), ReasoningOutput.MiniMax.splitStreamingPrefix(prefix), prefix)
+        XCTAssertEqual(ReasoningOutput.MiniMax.splitStreamingPrefix("Hi <mm:th"), ReasoningOutput.Split(reasoning: "", answer: "Hi ", closed: true))
+        // The incremental split equals the whole-text one at every prefix,
+        // and both only grow.
+        let long = "Let me check " + String(repeating: "the file, ", count: 20) + "<mm:think>"
+            + String(repeating: "plan step; ", count: 30) + "</mm:think>  Answer " + String(repeating: "x", count: 90)
+            + "<mm:think>more</mm:think>\nDone."
+        for output in Self.reasoningCases.map(\.0) + ["<mm:think>abc</mm:think> answer", long] {
+            var incremental = IncrementalMiniMaxReasoningSplit()
+            var previous = ReasoningOutput.Split(reasoning: "", answer: "", closed: true)
+            for end in 0...output.count {
+                let prefix = String(output.prefix(end))
+                let split = ReasoningOutput.MiniMax.splitStreamingPrefix(prefix)
+                XCTAssertEqual(incremental.splitStreamingPrefix(prefix), split, prefix)
+                XCTAssertTrue(split.reasoning.hasPrefix(previous.reasoning) && split.answer.hasPrefix(previous.answer), prefix)
+                previous = split
+            }
+            XCTAssertEqual(previous, ReasoningOutput.MiniMax.split(output), output)
+            XCTAssertEqual(incremental.restartCount, 0, output)
         }
     }
 
@@ -442,6 +462,85 @@ final class MiniMaxOutputTests: XCTestCase {
         // Other families keep stripping every special token.
         XCTAssertEqual(ModelRuntime.toolAwareStopTokenFilter(StopTokenFilter(tokens: ["<filename>"]), grammar: .glm)
                         .stripping(from: ns + "<filename>"), ns)
+    }
+
+    func testCallInsideALaterBlockIsNotACall() throws {
+        let request = try makeRequest(tools: true, stream: false)
+        let output = "Let me check.\n<mm:think>maybe " + Self.wrapper(Self.readHosts) + "</mm:think>No call needed."
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+            mode: .complete(finishReason: "stop"), defaultCompletionTokens: 9, toolCallPrefill: nil)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(parsed.content, "Let me check.\nNo call needed.")
+        XCTAssertEqual(parsed.reasoningContent, "maybe " + Self.wrapper(Self.readHosts))
+        for reference in [false, true] {
+            for chunk in [1, 5, output.count] {
+                let streamed = try stream(output, request: try makeRequest(tools: true), chunk: chunk, reference: reference)
+                XCTAssertTrue(streamed.calls.isEmpty, "chunk \(chunk)")
+                XCTAssertEqual(streamed.content, "Let me check.\nNo call needed.", "chunk \(chunk)")
+                XCTAssertEqual(streamed.reasoning, "maybe " + Self.wrapper(Self.readHosts), "chunk \(chunk)")
+            }
+        }
+        var observer = NativeToolCallStreamEmitter(modelID: Self.model, grammar: .minimax, allowedFunctionNames: ["read_file"])
+        var incrementalObserver = observer
+        var stopText = IncrementalToolStopText(observer: incrementalObserver)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: false)
+        for end in 1...output.count {
+            let prefix = String(output.prefix(end))
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []), prefix)
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&incrementalObserver, decoded: prefix, filter: filter, stopText: &stopText), prefix)
+        }
+    }
+
+    // MARK: Request stops
+
+    func testRequestStopsRunAfterTheFirstReasoningClose() throws {
+        let request = try makeRequest(tools: false)
+        XCTAssertEqual(ModelRuntime.reasoningStopScope(request), .afterMiniMaxThink)
+        let stop = StopTokenFilter(tokens: [])
+        let thinking = "<mm:think>Count: 1, 2, ... 7, 8, 9, 10.</mm:think>\n1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
+        let full = ModelRuntime.applyOutputFilters(thinking, stopTokenFilter: stop, requestStops: ["7"], reasoningOpen: .afterMiniMaxThink)
+        XCTAssertTrue(full.hitStop)
+        XCTAssertEqual(ReasoningOutput.MiniMax.split(full.text).answer, "1, 2, 3, 4, 5, 6, ")
+        XCTAssertEqual(ModelRuntime.matchedRequestStop(in: thinking, stopTokenFilter: stop, requestStops: ["7"], reasoningOpen: .afterMiniMaxThink), "7")
+        // A reply that leads with answer text: stops run over all of it.
+        let answerFirst = "1, 2, <mm:think>7</mm:think> 3"
+        let cut = ModelRuntime.applyOutputFilters(answerFirst, stopTokenFilter: stop, requestStops: ["7"], reasoningOpen: .afterMiniMaxThink)
+        XCTAssertEqual(cut.text, "1, 2, <mm:think>")
+        XCTAssertTrue(cut.hitStop)
+        // Every prefix: no stop while the reasoning is open; the incremental
+        // filter equals the whole-text one; the emitter ends the row on the
+        // stop with the answer before it.
+        for output in [thinking, answerFirst, "  " + thinking] {
+            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stop, requestStops: ["7"], reasoningOpen: .afterMiniMaxThink)
+            for reference in [false, true] {
+                var emitter = SerialStreamingTextEmitter(request: request)
+                if reference { emitter = emitter.usingReferenceText() }
+                let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+                let idle = StructuredStreamingIdleState(enabled: false)
+                var content = ""
+                var stopped = false
+                for end in 1...output.count where !stopped {
+                    let prefix = String(output.prefix(end))
+                    let expected = ModelRuntime.streamingSafePrefix(prefix, stopTokenFilter: stop, requestStops: ["7"], reasoningOpen: .afterMiniMaxThink)
+                    if !reference {
+                        let incremental = filter.update(prefix)
+                        XCTAssertEqual(incremental.text, expected.text, prefix)
+                        XCTAssertEqual(incremental.hitStop, expected.hitStop, prefix)
+                    }
+                    let inReasoning = output.hasPrefix("1") ? false : !prefix.contains("</mm:think>")
+                    XCTAssertFalse(expected.hitStop && inReasoning, prefix)
+                    let step = emitter.step(candidate: expected, structuredAccumulator: accumulator, idleState: idle) {
+                        if case .content(let text) = $0 { content += text }
+                    }
+                    if case .requestStop = step { stopped = true }
+                    XCTAssertEqual(stopped, expected.hitStop, prefix)
+                }
+                XCTAssertTrue(stopped, output)
+                // The emitter's cleanup hold keeps the trailing space until finish.
+                XCTAssertEqual(content, output.hasPrefix("1") ? "1, 2," : "1, 2, 3, 4, 5, 6,", output)
+            }
+        }
     }
 
     func testGuaranteedGrammarAcceptsTheTemplateShape() throws {

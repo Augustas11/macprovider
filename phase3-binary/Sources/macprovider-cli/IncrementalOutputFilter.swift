@@ -192,7 +192,7 @@ extension ModelRuntime {
     final class IncrementalStreamFilter: @unchecked Sendable {
         enum Mode: Equatable {
             /// `streamingSafePrefix(_:stopTokenFilter:requestStops:reasoningOpen:)`.
-            case streamingSafePrefix(reasoningOpen: Bool)
+            case streamingSafePrefix(reasoningOpen: ReasoningOutput.StopScope)
             /// `applyOutputFilters(_:stopTokenFilter:requestStops:)`.
             case outputFilters
         }
@@ -207,6 +207,9 @@ extension ModelRuntime {
         private var answer: Stream?
         private var closeEnd: Int?
         private var head = ""
+        /// `.afterMiniMaxThink`: the text so far leads with answer text, so
+        /// stops run over all of it (`StopScope.closeTag(for:)`).
+        private var miniMaxAnswerLead = false
         private let counter = WorkCounter()
 
         /// UTF-8 bytes the filter has stripped or searched, summed over
@@ -224,7 +227,7 @@ extension ModelRuntime {
             start()
         }
 
-        convenience init(stopTokenFilter: StopTokenFilter, requestStops: [String], reasoningOpen: Bool) {
+        convenience init(stopTokenFilter: StopTokenFilter, requestStops: [String], reasoningOpen: ReasoningOutput.StopScope) {
             self.init(stopTokenFilter: stopTokenFilter, requestStops: requestStops, mode: .streamingSafePrefix(reasoningOpen: reasoningOpen))
         }
 
@@ -244,6 +247,15 @@ extension ModelRuntime {
                 }
             }
             previousRaw = raw
+            if case .streamingSafePrefix(.afterMiniMaxThink) = mode {
+                // The lead is a function of the first Characters: decided once
+                // the text has any, and recomputed if they changed.
+                let answerLead = ReasoningOutput.MiniMax.lead(raw) == .answer
+                if answerLead != miniMaxAnswerLead {
+                    miniMaxAnswerLead = answerLead
+                    start()
+                }
+            }
             return compute(raw)
         }
 
@@ -256,15 +268,20 @@ extension ModelRuntime {
             closeEnd = nil
             head = ""
             switch mode {
-            case .streamingSafePrefix(reasoningOpen: true):
-                thinking = Stream(origin: 0, filter: stopTokenFilter, requestStops: [], holdback: false, watchesCloseTag: true, counter: counter)
+            case .streamingSafePrefix(.afterThink):
+                thinking = Stream(origin: 0, filter: stopTokenFilter, requestStops: [], holdback: false,
+                                  closeTag: ReasoningOutput.closeTag, counter: counter)
                 answer = nil
-            case .streamingSafePrefix(reasoningOpen: false):
+            case .streamingSafePrefix(.afterMiniMaxThink) where !miniMaxAnswerLead:
+                thinking = Stream(origin: 0, filter: stopTokenFilter, requestStops: [], holdback: false,
+                                  closeTag: ReasoningOutput.MiniMax.closeTag, counter: counter)
+                answer = nil
+            case .streamingSafePrefix:
                 thinking = nil
-                answer = Stream(origin: 0, filter: stopTokenFilter, requestStops: requestStops, holdback: true, watchesCloseTag: false, counter: counter)
+                answer = Stream(origin: 0, filter: stopTokenFilter, requestStops: requestStops, holdback: true, closeTag: nil, counter: counter)
             case .outputFilters:
                 thinking = nil
-                answer = Stream(origin: 0, filter: stopTokenFilter, requestStops: requestStops, holdback: false, watchesCloseTag: false, counter: counter)
+                answer = Stream(origin: 0, filter: stopTokenFilter, requestStops: requestStops, holdback: false, closeTag: nil, counter: counter)
             }
         }
 
@@ -286,7 +303,7 @@ extension ModelRuntime {
                     guard let found = scan.closeEnd else { return (scan.text, false) }
                     closeEnd = found
                     head = thinking.strippedHead(raw, through: found)
-                    answer = Stream(origin: found, filter: stopTokenFilter, requestStops: requestStops, holdback: true, watchesCloseTag: false, counter: counter)
+                    answer = Stream(origin: found, filter: stopTokenFilter, requestStops: requestStops, holdback: true, closeTag: nil, counter: counter)
                 }
                 if closeEnd == nil { return (scan.text, false) }
             }
@@ -324,7 +341,9 @@ extension ModelRuntime {
             private let filter: StopTokenFilter
             private let requestStops: [String]
             private let holdback: Bool
-            private let watchesCloseTag: Bool
+            /// The reasoning close tag this stream watches for, if any.
+            private let closeTag: String?
+            private var watchesCloseTag: Bool { closeTag != nil }
             private let counter: WorkCounter
             private let candidates: [String]
             /// Characters of committed stripped / raw text kept for searches.
@@ -343,18 +362,18 @@ extension ModelRuntime {
             private var committedOverlap = ""
             private var rawOverlap = ""
 
-            init(origin: Int, filter: StopTokenFilter, requestStops: [String], holdback: Bool, watchesCloseTag: Bool, counter: WorkCounter) {
+            init(origin: Int, filter: StopTokenFilter, requestStops: [String], holdback: Bool, closeTag: String?, counter: WorkCounter) {
                 self.filter = filter
                 self.requestStops = requestStops
                 self.holdback = holdback
-                self.watchesCloseTag = watchesCloseTag
+                self.closeTag = closeTag
                 self.counter = counter
                 self.origin = origin
                 self.cut = origin
                 candidates = filter.tokens + requestStops
                 let longestCandidate = candidates.map(\.count).max() ?? 0
                 strippedOverlapCount = requestStops.isEmpty && !holdback ? 0 : longestCandidate + 4
-                rawOverlapCount = watchesCloseTag ? ReasoningOutput.closeTag.count + 4 : 0
+                rawOverlapCount = (closeTag?.count).map { $0 + 4 } ?? 0
                 // Matching is by canonical equivalence: an occurrence can be
                 // as long as the token's full decomposition.
                 let longestToken = filter.tokens.map {
@@ -362,17 +381,17 @@ extension ModelRuntime {
                 }.max() ?? 0
                 // A kept token's occurrence starts at its kept prefix.
                 tokenMargin = 2 * longestToken + filter.keptPrefix.unicodeScalars.count + 4
-                rawHoldback = tokenMargin + (watchesCloseTag ? ReasoningOutput.closeTag.unicodeScalars.count : 0) + 8
+                rawHoldback = tokenMargin + (closeTag?.unicodeScalars.count ?? 0) + 8
             }
 
             func process(_ raw: String) -> Result {
                 let tailStart = raw.utf8.index(raw.utf8.startIndex, offsetBy: cut)
                 let tail = String(raw[tailStart...])
                 counter.maxTail = max(counter.maxTail, tail.utf8.count)
-                if watchesCloseTag {
+                if let closeTag {
                     let searched = rawOverlap + tail
                     counter.value += searched.utf8.count
-                    if let close = searched.range(of: ReasoningOutput.closeTag) {
+                    if let close = searched.range(of: closeTag) {
                         let end = searched.utf8.distance(from: searched.utf8.startIndex, to: close.upperBound)
                         return Result(text: "", hitStop: false, closeEnd: cut - rawOverlap.utf8.count + end)
                     }
@@ -817,35 +836,60 @@ struct IncrementalReasoningSplit {
     }
 }
 
-/// Incremental twin of `ReasoningOutput.MiniMax.splitStreamingPrefix`: the
-/// close-tag search covers only the text added since the previous step.
+/// Incremental twin of `ReasoningOutput.MiniMax.splitStreamingPrefix`. The
+/// split of the text through the last tag that a grapheme break follows is
+/// kept (`settled`); each step searches only the text added since the
+/// previous one (plus a margin) for the next tag.
 struct IncrementalMiniMaxReasoningSplit {
-    private var close = IncrementalFirstMatch(needle: ReasoningOutput.MiniMax.closeTag)
-
-    var restartCount: Int { close.restartCount }
+    private typealias MiniMax = ReasoningOutput.MiniMax
+    private var previous = ""
+    /// The split of the text before UTF-8 offset `settled`.
+    private var state = MiniMax.Scan()
+    private var settled = 0
+    /// No tag starts in `settled..<searched`.
+    private var searched = 0
+    private(set) var restartCount = 0
 
     mutating func splitStreamingPrefix(_ text: String) -> ReasoningOutput.Split {
         var text = text
         text.makeContiguousUTF8()
-        // Only a reply that opens `<mm:think>` searches for its close; the
-        // first `</mm:think>` in the text then follows the opener.
-        guard case .thinking(let start) = ReasoningOutput.MiniMax.lead(text) else {
-            return ReasoningOutput.MiniMax.splitStreamingPrefix(text)
+        // A tag before `searched` would end within its length, and the
+        // scalars after it could join its last grapheme.
+        let verified = searched > settled ? min(previous.utf8.count, searched + MiniMax.closeTag.utf8.count + 8) : settled
+        if verified > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: verified) {
+            restartCount += 1
+            state = MiniMax.Scan()
+            settled = 0
+            searched = 0
         }
-        if let range = close.find(in: text) {
-            let answer = text[range.upperBound...].drop(while: { $0.isWhitespace })
-            return ReasoningOutput.Split(reasoning: String(text[start..<range.lowerBound]), answer: String(answer), closed: true)
+        previous = text
+        let scalars = text.unicodeScalars
+        while true {
+            let tail = text[IncrementalEmitterText.index(text, utf8Offset: settled)...]
+            let from = IncrementalEmitterText.breakIndex(tail, atOrBefore: searched - settled, floor: tail.startIndex)
+            guard let next = MiniMax.nextTag(in: tail[from...]) else {
+                searched = max(searched, text.utf8.count - MiniMax.closeTag.utf8.count - IncrementalEmitterText.margin)
+                var result = state
+                result.append(MiniMax.withoutPartialTags(tail))
+                return result.split
+            }
+            let upper = next.range.upperBound
+            guard upper < scalars.endIndex,
+                  ModelRuntime.IncrementalStreamFilter.breaksBetween(scalars[scalars.index(before: upper)], scalars[upper])
+            else {
+                // The scalars after the tag may still join it: not settled.
+                searched = max(searched, IncrementalEmitterText.offset(text, next.range.lowerBound))
+                var result = state
+                result.append(tail[..<next.range.lowerBound])
+                result.apply(tag: next.tag)
+                result.append(MiniMax.withoutPartialTags(text[upper...]))
+                return result.split
+            }
+            state.append(tail[..<next.range.lowerBound])
+            state.apply(tag: next.tag)
+            settled = IncrementalEmitterText.offset(text, upper)
+            searched = settled
         }
-        return ReasoningOutput.Split(
-            reasoning: ReasoningOutput.withoutPartialTag(String(text[start...]), tag: ReasoningOutput.MiniMax.closeTag),
-            answer: "", closed: false)
-    }
-
-    /// The answer once the lead is decided and any reasoning closed, else
-    /// nil (the tool-stop path reads only the answer).
-    mutating func closedAnswer(_ text: String) -> String? {
-        let split = splitStreamingPrefix(text)
-        return split.closed ? split.answer : nil
     }
 }
 
@@ -972,8 +1016,8 @@ struct IncrementalToolStopText {
             guard let answer = reasoningSplit.closedAnswer(text) else { return nil }
             text = String(answer)
         } else if splitsMiniMaxReasoning {
-            guard let answer = miniMaxReasoningSplit.closedAnswer(text) else { return nil }
-            text = answer
+            // Only the answer, outside every `<mm:think>` block, holds calls.
+            text = miniMaxReasoningSplit.splitStreamingPrefix(text).answer
         }
         return toolText.reduce(text).reduced
     }
