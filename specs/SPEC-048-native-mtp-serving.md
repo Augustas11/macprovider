@@ -585,15 +585,15 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.55` | `701cb29cef71e87c0fce86ac48b88d4a03391abc` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.56` | `e7a256000dda3278260667e8c3c9c7b48c4dbd38` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.55` is `3.32.3-macprovider.49`
-(`3ac5b028e6c8f54e09836e6a4486bc354794089c`) plus three DeepSeek V4-only prefill
-commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm) (#2305): attention and indexer prefill tiles are evaluated one ahead
-(asyncEval, at most two in flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no
+The mlx-swift-lm row `3.32.3-macprovider.56` is `3.32.3-macprovider.49`
+(`3ac5b028e6c8f54e09836e6a4486bc354794089c`) plus four DeepSeek V4-only prefill
+commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound) (#2305): attention and indexer prefill tiles are evaluated one ahead
+(asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no
 routing change; the Swift, core and C rows are unchanged.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.49` is `3.32.3-macprovider.48`
@@ -769,9 +769,9 @@ four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
 remain required on the designated Studio.
 
-The mlx-swift-lm row is `3.32.3-macprovider.55` (`701cb29cef71e87c0fce86ac48b88d4a03391abc`), `.49` plus three
-DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm) (#2305): attention and indexer prefill tiles are
-evaluated one ahead (asyncEval, at most two in flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32, with outputs bit-identical to the per-expert loop. `.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`) is `.48` plus one
+The mlx-swift-lm row is `3.32.3-macprovider.56` (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`), `.49` plus four
+DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound) (#2305): attention and indexer prefill tiles are
+evaluated one ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32, with outputs bit-identical to the per-expert loop. `.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`) is `.48` plus one
 tests-only GLM-5-Next commit (#2307). `.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`) is tag
 `3.32.3-macprovider.47` plus the campaign #2111 DeepSeek V4 commits (reference
 arithmetic `.10.16.7`, embedded DSpark drafter, shared MXFP8 multi-row projection
@@ -2558,10 +2558,10 @@ requests.
 ## 9. Changelog and history
 
 - **0.1.92 (2026-11-13, Related: #2305)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.55` (`701cb29cef71e87c0fce86ac48b88d4a03391abc`), which is
-  `3.32.3-macprovider.49` plus three DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm): attention and
+  `3.32.3-macprovider.56` (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`), which is
+  `3.32.3-macprovider.49` plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and
   indexer prefill tiles are evaluated one ahead (asyncEval, at most two in
-  flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no routing change; the Swift,
+  flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no routing change; the Swift,
   core and C rows are unchanged.
 - **0.1.91 (2026-11-12, Related: #2307)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`), which is

@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.55` | `701cb29cef71e87c0fce86ac48b88d4a03391abc` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.56` | `e7a256000dda3278260667e8c3c9c7b48c4dbd38` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,9 +47,9 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-13 (#2305) the LM row is `3.32.3-macprovider.55` (`701cb29`): `.49`
-plus three DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm). Attention and indexer prefill tiles are
-evaluated one ahead (asyncEval, at most two in flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32, so the GPU stays fed between
+As of 2026-11-13 (#2305) the LM row is `3.32.3-macprovider.56` (`e7a2560`): `.49`
+plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound). Attention and indexer prefill tiles are
+evaluated one ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32, so the GPU stays fed between
 tiles and expert groups. Outputs are bit-identical to the per-expert loop, no routing change;
 the Swift, core and C rows are unchanged.
 
@@ -215,6 +215,7 @@ pending real-weight native four-row throughput gate and campaign freeze audit.
 | DeepSeek-V4 CB performance (#2111) | `c8be0f6` | Shared compressor/indexer projections and rotary offsets; one batched attention body for homogeneous rows, two for mixed dense/sparse rows to preserve exact arithmetic; keys-only windows and geometric row-owned pool storage. CPU exact 1/2/4/8-row fixtures pass; GPU parity and throughput remain pending. |
 | DeepSeek-V4 reference fidelity (#2111) | `a4fd218`, `a985f94`, `7285658`, `28db1cf`, `9b5108b`, `012a2c6`, `72f8345`, `19b2c2b`, `790b4fd`, `c14b360`, `c9baca4` | `deepseek_v4` follows DeepSeek's `inference/model.py`/`kernel.py`: ratio-4 overlap state carried in `DeepseekV4PoolCache` (state, metaState, `copy()`), exact indexer top-k by default (HISA only by explicit config; prefill scores tiled under a 512 MiB workspace), float32 router (gate weight widened in sanitize), attention over each query's reference-ordered key list (window in temporal order, then the ratio-128 entries or the indexer's top-k by descending score) in the kernel's 64-key blocks with a running max and bf16 weights before the value product (query tiles for long chunks; explicit-config HISA does not batch: `batchesExactly`), compressor, expert SwiGLU/combine and head logits (`deepseekV4LinearF32`, a bf16-weight float32 GEMV kernel for up to 8 GPU rows). Tiny-fixture oracle regenerated from a port of the reference (`make_oracle.py`), within 7.6e-4 log-probability on the CPU; fixture `tid2eid` made duplicate-free. Full-model parity and throughput pending a Studio window. |
 | DeepSeek-V4 CB/DSpark (#2111) | `cddd1e2`, `7c361cb`, `48fdc4b`, `098c339`, `0c0e58f` | Retains the three embedded draft stages, batches target verification projections/MoE across at most eight ragged positions, ranks cumulative confidence deterministically, and commits exact cache prefixes including ratio-4 overlap. Tests cover every rollback prefix and independent/packed rows. Swift test execution, token parity, throughput, acceptance, TTFT and peak memory remain pending hardware. |
+| DeepSeek-V4 prefill feed (#2305) | `8b08f28`, `b53b302`, `e7a2560`, `e7a2560` | Prefill tiles (indexer top-k, sparse-attention scores, attention parts) are evaluated one ahead, so at most two tiles are live and the tile workspace peaks at 2x the 512 MiB budget. On `applegpu_g15d` the MoE prefill (`quantizedPrefill`) orders experts by routed row count and makes one grouped wide-kernel launch per row-count group, and serves gathered plain and split-K runs with sorted `gather_qmm_rhs` (`deepseekV4PrefillGroupedGatherQMM`, on); single-row experts and declined gathers stay per expert. Experts are processed in ascending-id batches of at most 49,152 routed rows; the per-token float32 sum keeps ascending expert order across batches. Other GPUs run the per-expert loop (`quantizedPrefillReference`). Bit-identical to the per-expert loop on the M3 Ultra at 9, 64, 1K, 8K and 32K tokens; the gather rule copies MLX's `gather_qmm_rhs` dispatch condition (`quantized.cpp`), so re-check it on every core bump. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
@@ -446,6 +447,7 @@ results in the evidence header.
 | Weight-file discovery | Every `.safetensors` file the rebased mlx-swift-lm loader can consume (`safetensorWeightURLs`, index and additional files included) is inside the native-MTP observer's recursive scan (SPEC-048 MTP-2). |
 | Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule` and the `get_qmv_batch_limit` port in `ContinuousBatchDecodeRouteBound` and the `sdpa_vector` dispatch port in `PagedKVVectorAttentionRoute` (their table tests and the Metal-host bitwise attention tests pass on the Studio). |
 | Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with keyed (`conv:`) prompts, whose generation-prompt tail chunk is below the 33-token bound. |
+| DeepSeek-V4 grouped prefill | On the Studio (`applegpu_g15d`): `swift test --filter DeepseekV4GroupedPrefillTests` in the fork reports 0 mismatches for every case, including the gather-vs-per-expert `quantizedMM` rows; a core or Swift pin move that changes MLX's `gather_qmm_rhs` dispatch rule must update `deepseekV4GatherTakesRHS` first. |
 
 ## Package and toolchain preflight
 

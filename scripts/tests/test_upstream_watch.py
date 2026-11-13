@@ -98,7 +98,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "701cb29cef71e87c0fce86ac48b88d4a03391abc"
+            "revision": "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -108,11 +108,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "701cb29cef71e87c0fce86ac48b88d4a03391abc",
+            "e7a256000dda3278260667e8c3c9c7b48c4dbd38",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "701cb29cef71e87c0fce86ac48b88d4a03391abc",
+            "e7a256000dda3278260667e8c3c9c7b48c4dbd38",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -192,7 +192,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         pins = read_pins(resolved)
 
         self.assertEqual(
-            pins["mlx_swift_lm_revision"], "701cb29cef71e87c0fce86ac48b88d4a03391abc"
+            pins["mlx_swift_lm_revision"], "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
         )
         self.assertEqual(
             pins["mlx_swift_revision"], "8f0ac45bc7483b59b1776a8405fa13944e559e06"
