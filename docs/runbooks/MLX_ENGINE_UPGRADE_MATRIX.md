@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.52` | `8b08f2833c3f060d9a44d2a57b223df698c1b375` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.55` | `701cb29cef71e87c0fce86ac48b88d4a03391abc` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,11 +47,10 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-13 (#2305) the LM row is `3.32.3-macprovider.52` (`8b08f28`): `.49`
-plus one DeepSeek V4-only prefill commit. Attention and indexer prefill tiles are
-evaluated one ahead (asyncEval, at most two in flight) and the MoE prefill expert
-loop asyncEvals the running sum every 16 experts, so the GPU stays fed between
-tiles and expert groups. No operation, input or order changes, no routing change;
+As of 2026-11-13 (#2305) the LM row is `3.32.3-macprovider.55` (`701cb29`): `.49`
+plus three DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm). Attention and indexer prefill tiles are
+evaluated one ahead (asyncEval, at most two in flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32, so the GPU stays fed between
+tiles and expert groups. Outputs are bit-identical to the per-expert loop, no routing change;
 the Swift, core and C rows are unchanged.
 
 As of 2026-11-12 (#2307) the LM row is `3.32.3-macprovider.49` (`3ac5b02`): `.48`

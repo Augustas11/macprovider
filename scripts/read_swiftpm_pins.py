@@ -42,10 +42,9 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.52 (#2305) is .49 plus one DeepSeek V4-only prefill commit:
+# 3.32.3-macprovider.55 (#2305) is .49 plus three DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm):
 # attention and indexer prefill tiles are evaluated one ahead (asyncEval, at
-# most two in flight) and the MoE prefill expert loop asyncEvals the running
-# sum every 16 experts. No operation, input or order changes.
+# most two in flight) and the MoE prefill runs one grouped launch per distinct expert row count (sorted gather_qmm for the plain and split-K routes) instead of one per expert, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
 # 3.32.3-macprovider.49 (#2307) is .48 plus one tests-only commit
 # (GLM-5-Next row-invariance up to the provider decode bound, TF32-derived
 # tolerances); no library code changes.
@@ -71,8 +70,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
 # model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
 # maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.52"
-SPEC048_MLX_SWIFT_LM_REVISION = "8b08f2833c3f060d9a44d2a57b223df698c1b375"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.55"
+SPEC048_MLX_SWIFT_LM_REVISION = "701cb29cef71e87c0fce86ac48b88d4a03391abc"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.18"
