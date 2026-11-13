@@ -314,12 +314,24 @@ The gate applies to a diff that touches a Sensitive Path (above) or billing
 and settlement code: `phase4-coordinator/internal/billing/`,
 `phase4-coordinator/internal/payout/` and `phase5-gateway/internal/settlement/`.
 Catalog releases, CLI identity changes, evidence, and spec-text-only PRs need
-no three-lane audit; CI and review cover them.
+no four-lane audit; CI and review cover them.
 
 Implementation slices in scope are not done until the full fix diff is
-audited. Run three lanes over the complete diff as it will land: code review,
-security review, and architecture review. The three lanes run as the coding
-agent's own subagents.
+audited. Run four lanes over the complete diff as it will land:
+
+- **code:** correctness bugs, broken edge cases, regressions and missing tests;
+- **security:** trust-boundary bypasses, weakened signature or identity
+  checks, injection, unsafe subprocess use, secrets exposure;
+- **architecture:** wrong layering, contracts broken for other callers,
+  hidden coupling, behaviour that conflicts with the stated intent;
+- **adversarial verifier:** treats every claim the change makes (exactness,
+  test coverage, measured gains, bounds, fallbacks, "no behaviour change") as
+  unproven, and tries to break each one with a concrete input traced through
+  the code.
+
+All four lanes run in every audit harness: as the coding agent's own Claude
+subagents, or on GLM via the pi harness (`audits/harness/glm-pi/` in the private
+`macprovider-internal` repo).
 
 Audits that run on the lab provider through Malibu get every row of that
 provider. Before the first lane starts, pause the lab provider's buyer-runner
@@ -328,7 +340,7 @@ until the last lane has its verdict, then run `restore`. Never let audit
 requests compete with runner traffic: a lane that fails "at capacity" is a
 missed pause, not a model problem.
 
-Gate: 0 CRITICAL, 0 HIGH, and 0 MEDIUM findings across all three lanes. LOW and
+Gate: 0 CRITICAL, 0 HIGH, and 0 MEDIUM findings across all four lanes. LOW and
 INFO findings may be carried explicitly.
 
 Review the full combined fix, not only a follow-up slice. When needed, find the
