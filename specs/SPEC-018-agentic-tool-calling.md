@@ -1101,7 +1101,7 @@ the generated text up to the first `</think>` is reasoning:
   the whole output. Because every MiniMax M3 reply needs this split, the
   coordinator routes every MiniMax M3 request, plain chat included, only to a
   native provider that declares the family for its exact loaded model, on
-  plaintext, relay-blind and privacy-class routes alike (SPEC-002 v1.6.33).
+  plaintext, relay-blind and privacy-class routes alike (SPEC-002 v1.6.34).
   On a plaintext route with none it fails 503
   `tool_grammar_provider_unavailable` with the retry and settlement
   semantics of a tool request (SPEC-006 §17.9); a request without tools gets
