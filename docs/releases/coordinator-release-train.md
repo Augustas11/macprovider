@@ -22,6 +22,29 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Gateway serving telemetry (SPEC-006-R028) — pending runtime inclusion (2026-11-13)
+
+Related: #2320, #2341. PR #2340 merged as `af2d17d7a`. The gateway records
+time to first reasoning delta, time to first answer delta and an answer
+rate (answer bytes / 4, minus one, over the first-to-last answer delta
+window) for incrementally streamed requests, in new nullable
+`demand_events` columns, with a `serving_engine` label read from the
+route-trace header. `GET /admin/demand-latency` (operator-only) returns
+p50 and p95 per model and engine. The two older columns keep being
+written and are legacy. The coordinator is unchanged.
+
+Audit: four lanes plus one re-check, gate met at `8474776f4`.
+
+Live step: the next Pearl runtime release through
+`scripts/ops/pearl-runtime.sh status`, then `next --run`. This changes
+`phase5-gateway/` source, so the database schema fingerprint changes; per
+`docs/runbooks/pearl-coordinator-rollout.md` that is the path where buyers
+are held with 503 until all serving gates pass, up to about 25 minutes.
+State that figure to the operator before the apply. The added columns are
+nullable, so a rollback to the previous binary keeps working. After the
+apply: one streamed request through the gateway, then
+`/admin/demand-latency?window=24h` shows a sample for its model.
+
 ## Pearl runtime v1.8.286 (2026-11-12)
 
 Applied 2026-11-12 06:55 UTC through `scripts/ops/pearl-runtime.sh`
