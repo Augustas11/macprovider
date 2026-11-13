@@ -13,7 +13,7 @@ Related: #2335.
 FR-KVP4 item 10 names the MLX small-row route as well as ordinary decode. A
 process on the row-invariant route (the default) writes and expects
 `decode_path = ordinary`, so existing entries stay valid. A `serve` process on
-upstream's serial-only small-row route (SPEC-038 FR-CB9, SPEC-048-R003) writes
+the fork's pre-window serial-only small-row route (SPEC-038 FR-CB9, SPEC-048-R003) writes
 and expects `ordinary+serial_small_m`. KV and prompt snapshots written on one
 route are therefore a clean `disk_miss_envelope` on the other. In-memory caches
 never cross routes because a process keeps one route for its whole life.

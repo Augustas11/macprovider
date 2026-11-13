@@ -8,7 +8,7 @@ import MacProviderCore
 /// `rowInvariant` is the core default: rows 1-16 take kernels with one
 /// reduction order, so a row computes the same bits alone and inside a
 /// continuous batch. `serialOnly` sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`,
-/// upstream's per-row `qmv` below the `qmm` limit, which is faster for one row
+/// the MLX fork's pre-window per-row `qmv` below the `qmm` limit, which is faster for one row
 /// but not row-invariant. Only a process that can never batch decode rows may
 /// run it, and such a process refuses every batching entry point.
 enum SmallMRoute: String, Sendable, Equatable {

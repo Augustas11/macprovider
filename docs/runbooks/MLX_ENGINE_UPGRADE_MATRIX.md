@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.56` | `e7a256000dda3278260667e8c3c9c7b48c4dbd38` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.57` | `6024b71aebc73c30158554e8eaa33d1da45d0a8a` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.21` | `477b8362667b370c9ac7323223ffddc93dc87557` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.13` | `1828e2f806dcf48c92400b59cd8cb2e62de6b46e` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
@@ -46,6 +46,18 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-13 the LM row is `3.32.3-macprovider.57` (`6024b71`), on
+`3.32.3-macprovider.56` (#2335): MLX core v0.32.4-macprovider.13 (via
+mlx-swift 0.32.3-macprovider.21): rows 1-2 of a qualifying affine weight take
+affine_qmv_mma1, a single-row kernel with qmv_mma's exact reduction order, and
+rows 3-16 stay on qmv_mma; a row is bit-identical alone and in a batch because
+the two kernels are bit-identical (checked on M5 and M3 Ultra GPUs; not on M1,
+M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT, read once per process, keeps that
+window by default; 0 skips it for the fork's pre-window small-row routing
+(per-row qmv below the qmm limit), which the provider sets only for a
+serial-only serve process (SPEC-038 FR-CB9). Decode tok/s for the core change
+is not yet measured on the merged build. The Swift row moves to `0.32.3-macprovider.21` (`477b836`, `.18` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row to `v0.32.4-macprovider.13` (`1828e2f`, three commits on `.10`); the C row is unchanged.
 
 As of 2026-11-13 (#2305) the LM row is `3.32.3-macprovider.56` (`e7a2560`): `.49`
 plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound). Attention and indexer prefill tiles are

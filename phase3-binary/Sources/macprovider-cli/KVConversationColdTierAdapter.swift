@@ -15,14 +15,14 @@ enum KVBuildIdentity {
     /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
     /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
     /// prior ciphertext hard-misses (accepted — this tier is an optimization).
-    static let mlxSwiftLMRevision = "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
+    static let mlxSwiftLMRevision = "6024b71aebc73c30158554e8eaa33d1da45d0a8a"
     /// The mlx-swift release the pinned revision is based on. Package.resolved
     /// carries no version for a fork revision pin; when it does carry one,
     /// `KVBuildIdentityDriftTests` requires this to equal it.
     static let mlxSwiftVersion = "0.32.3"
     /// The REAL pinned mlx-swift git revision (HIGH-8). Same bump-on-change rule;
     /// `KVBuildIdentityDriftTests` checks it against Package.resolved.
-    static let mlxSwiftRevision = "8f0ac45bc7483b59b1776a8405fa13944e559e06"
+    static let mlxSwiftRevision = "477b8362667b370c9ac7323223ffddc93dc87557"
     /// The envelope `mlx_version` string (FR-KVP4(a)6). It carries the exact
     /// mlx-swift revision as well as the version, so a revision-only pin change
     /// (e.g. a fork moving its MLX core submodule) still hard-misses prior

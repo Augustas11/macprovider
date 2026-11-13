@@ -17,6 +17,18 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.57 (#2335) on 3.32.3-macprovider.56: MLX
+        // core v0.32.4-macprovider.13 (via mlx-swift 0.32.3-macprovider.21):
+        // rows 1-2 of a qualifying affine weight take affine_qmv_mma1, a
+        // single-row kernel with qmv_mma's exact reduction order, and rows
+        // 3-16 stay on qmv_mma; a row is bit-identical alone and in a batch
+        // because the two kernels are bit-identical (checked on M5 and M3
+        // Ultra GPUs; not on M1, M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT,
+        // read once per process, keeps that window by default; 0 skips it for
+        // the fork's pre-window small-row routing (per-row qmv below the qmm
+        // limit), which the provider sets only for a serial-only serve
+        // process (SPEC-038 FR-CB9). Decode tok/s for the core change is not
+        // yet measured on the merged build.
         // Tag 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only
         // prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and indexer prefill tiles are evaluated one
         // ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
@@ -117,8 +129,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.18, MLX
-        // core v0.32.4-macprovider.10 (26ac61533) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.21, MLX
+        // core v0.32.4-macprovider.13 (1828e2f80) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -133,7 +145,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
+            revision: "6024b71aebc73c30158554e8eaa33d1da45d0a8a"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

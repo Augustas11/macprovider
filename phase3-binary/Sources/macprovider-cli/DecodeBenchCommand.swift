@@ -98,7 +98,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("small-m-route"),
-        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route) or serial-only (upstream per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0)."
+        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route) or serial-only (the fork's pre-window per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0)."
     )
     var smallMRoute: String = "row-invariant"
 

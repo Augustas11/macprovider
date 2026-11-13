@@ -11,7 +11,8 @@ FR-CB9 states that a row must compute the same bits alone and inside a batch
 in every process that can batch, and names the one configuration that can
 never batch: continuous batching set `off` explicitly, native MTP `off`, no
 draft model, no shard-group role, not an autotune child. Such a `serve`
-process takes upstream's small-row quantized route
+process takes the MLX fork's pre-window small-row quantized route (per-row
+`qmv` below the `qmm` limit)
 (`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler, refuses batching
 lab commands and keeps disk KV on a separate decode-path class. Every other
 state, including a self-check still pending, keeps the row-invariant route.
@@ -1660,8 +1661,8 @@ for correct serving.
 rows (a CB row, the FR-CB10 self-check, a SPEC-048 native-MTP round, a
 shard-group head) MUST run the MLX core's row-invariant small-row route, so a
 row computes the same bits alone and inside a batch. A `serve` process that
-can never batch for its whole lifetime by configuration MAY take upstream's
-small-row route (`qmv` per row below the `qmm` limit), which is faster for one
+can never batch for its whole lifetime by configuration MAY take the MLX
+fork's pre-window small-row route (`qmv` per row below the `qmm` limit), which is faster for one
 row: the provider sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0` before any model
 loads exactly when continuous batching is set `off` by YAML, environment or
 CLI (the emergency override, which neither the signed policy, a self-check nor

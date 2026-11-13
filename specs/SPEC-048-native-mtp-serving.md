@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.93
+**Version:** 0.1.94
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.93",
+  "version": "0.1.94",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,30 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.56` | `e7a256000dda3278260667e8c3c9c7b48c4dbd38` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.57` | `6024b71aebc73c30158554e8eaa33d1da45d0a8a` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.21` | `477b8362667b370c9ac7323223ffddc93dc87557` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.13` | `1828e2f806dcf48c92400b59cd8cb2e62de6b46e` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.56` is `3.32.3-macprovider.49`
+The mlx-swift-lm row `3.32.3-macprovider.57` is on `3.32.3-macprovider.56`
+(`e7a256000dda3278260667e8c3c9c7b48c4dbd38`) (#2335), at
+`6024b71aebc73c30158554e8eaa33d1da45d0a8a`: MLX core v0.32.4-macprovider.13
+(via mlx-swift 0.32.3-macprovider.21): rows 1-2 of a qualifying affine weight
+take affine_qmv_mma1, a single-row kernel with qmv_mma's exact reduction
+order, and rows 3-16 stay on qmv_mma; a row is bit-identical alone and in a
+batch because the two kernels are bit-identical (checked on M5 and M3 Ultra
+GPUs; not on M1, M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT, read once per
+process, keeps that window by default; 0 skips it for the fork's pre-window
+small-row routing (per-row qmv below the qmm limit), which the provider sets
+only for a serial-only serve process (SPEC-038 FR-CB9). Decode tok/s for the
+core change is not yet measured on the merged build. The Swift row moves to
+`0.32.3-macprovider.21` (`477b8362667b370c9ac7323223ffddc93dc87557`, `.18` plus three
+commits that move the core gitlink and regenerate the quantized jit sources) and
+the core row to `v0.32.4-macprovider.13`
+(`1828e2f806dcf48c92400b59cd8cb2e62de6b46e`, three commits on `.10`); the C row is
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.56` is `3.32.3-macprovider.49`
 (`3ac5b028e6c8f54e09836e6a4486bc354794089c`) plus four DeepSeek V4-only prefill
 commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound) (#2305): attention and indexer prefill tiles are evaluated one ahead
 (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; no
@@ -599,7 +617,7 @@ routing change; the Swift, core and C rows are unchanged.
 Row invariance is required of every process that can batch decode rows: a
 continuous-batching row, a CB self-check, a native-MTP round or a shard-group
 head. A `serve` process that can never batch for its whole lifetime by
-configuration uses upstream's small-row route instead (#2335): the provider
+configuration uses the fork's pre-window small-row route (per-row `qmv` below the `qmm` limit) instead (#2335): the provider
 sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`, read once by the core, before any
 model loads, only when continuous batching is set `off` explicitly by YAML,
 environment or CLI, `native_mtp_mode` is `off`, no draft model is configured,
@@ -787,7 +805,11 @@ four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
 remain required on the designated Studio.
 
-The mlx-swift-lm row is `3.32.3-macprovider.56` (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`), `.49` plus four
+The mlx-swift-lm row is `3.32.3-macprovider.57` (`6024b71aebc73c30158554e8eaa33d1da45d0a8a`, #2335),
+`.56` plus the mlx-swift `0.32.3-macprovider.21` pin (core `v0.32.4-macprovider.13`:
+rows 1-2 on `qmv_mma1`, rows 3-16 on `qmv_mma`, and the
+`MLX_METAL_SMALL_M_ROW_INVARIANT` switch). `.56`
+(`e7a256000dda3278260667e8c3c9c7b48c4dbd38`) is `.49` plus four
 DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound) (#2305): attention and indexer prefill tiles are
 evaluated one ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32, with outputs bit-identical to the per-expert loop. `.49` (`3ac5b028e6c8f54e09836e6a4486bc354794089c`) is `.48` plus one
 tests-only GLM-5-Next commit (#2307). `.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`) is tag
@@ -797,7 +819,8 @@ tiles, last-position-only serving prefill logits, and decode selection and
 attention kernels that replay the graph's steel GEMM order so a row decodes the
 same tokens alone and batched). Its only shared-code edits are DeepSeek-only
 hyper-connection options that default off, so other families keep `.47`'s
-arithmetic and decode kernels. The mlx-swift, MLX core and mlx-c rows are `.47`'s.
+arithmetic and decode kernels. The mlx-c row is `.47`'s; the mlx-swift and MLX core
+rows are `.57`'s (above).
 
 DeepSeek now preserves the QAT-off reference's norm, rotary, hyper-connection,
 router and indexer arithmetic. Its serial and continuous-batch prefill use
@@ -2575,11 +2598,26 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.94 (2026-11-13)** — R003 names mlx-swift-lm `3.32.3-macprovider.57`
+  (`6024b71aebc73c30158554e8eaa33d1da45d0a8a`) on `3.32.3-macprovider.56`
+  (#2335): MLX core v0.32.4-macprovider.13 (via mlx-swift
+  0.32.3-macprovider.21): rows 1-2 of a qualifying affine weight take
+  affine_qmv_mma1, a single-row kernel with qmv_mma's exact reduction order,
+  and rows 3-16 stay on qmv_mma; a row is bit-identical alone and in a batch
+  because the two kernels are bit-identical (checked on M5 and M3 Ultra GPUs;
+  not on M1, M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT, read once per
+  process, keeps that window by default; 0 skips it for the fork's pre-window
+  small-row routing (per-row qmv below the qmm limit), which the provider sets
+  only for a serial-only serve process (SPEC-038 FR-CB9). Decode tok/s for the
+  core change is not yet measured on the merged build. The Swift row moves to
+  `0.32.3-macprovider.21` and the core row to `v0.32.4-macprovider.13`; other model
+  sources and the C row are unchanged. The serial-only route is described as the
+  fork's pre-window small-row route.
 - **0.1.93 (2026-11-13, Related: #2335)** — R003: row invariance is required
   of every process that can batch decode rows; a `serve` process with
   continuous batching explicitly `off`, native MTP `off`, no draft model, no
   shard-group role and not an autotune child sets
-  `MLX_METAL_SMALL_M_ROW_INVARIANT=0` and takes upstream's small-row route. It
+  `MLX_METAL_SMALL_M_ROW_INVARIANT=0` and takes the fork's pre-window small-row route (per-row `qmv` below the `qmm` limit). It
   builds no batch scheduler, batching lab commands refuse it, and disk KV and
   prompt snapshots do not cross routes. No pin, admission or policy change.
 - **0.1.92 (2026-11-13, Related: #2305)** — R003 names mlx-swift-lm
