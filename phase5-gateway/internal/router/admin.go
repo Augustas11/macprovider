@@ -60,6 +60,15 @@ type demandLatencyCellJSON struct {
 	GatewayOutputRateMilli  demandLatencyQuantityJSON `json:"gateway_output_rate_millitokens_per_s"`
 }
 
+type demandServedPathCellJSON struct {
+	Model                   string                    `json:"model"`
+	ServedPath              string                    `json:"served_path"`
+	ServedRowsBand          string                    `json:"served_rows_band"`
+	GatewayFirstReasoningMs demandLatencyQuantityJSON `json:"gateway_first_reasoning_ms"`
+	GatewayFirstAnswerMs    demandLatencyQuantityJSON `json:"gateway_first_answer_ms"`
+	GatewayOutputRateMilli  demandLatencyQuantityJSON `json:"gateway_output_rate_millitokens_per_s"`
+}
+
 // handleDemandLatency is the SPEC-006-R028 operator read of p50/p95 per
 // requested model and serving engine. It names no provider and no buyer.
 func (s *Server) handleDemandLatency(w http.ResponseWriter, r *http.Request) {
@@ -101,11 +110,28 @@ func (s *Server) handleDemandLatency(w http.ResponseWriter, r *http.Request) {
 			GatewayOutputRateMilli:  quantity(cell.OutputTPSMilliTokens),
 		})
 	}
+	servedCells, err := s.readStore().DemandServedPathLatencyPercentiles(ctx, since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "demand_latency_failed", "Could not summarize demand latency")
+		return
+	}
+	served := make([]demandServedPathCellJSON, 0, len(servedCells))
+	for _, cell := range servedCells {
+		served = append(served, demandServedPathCellJSON{
+			Model:                   cell.RequestedModel,
+			ServedPath:              cell.ServedPath,
+			ServedRowsBand:          cell.ServedRowsBand,
+			GatewayFirstReasoningMs: quantity(cell.FirstReasoningMs),
+			GatewayFirstAnswerMs:    quantity(cell.FirstAnswerMs),
+			GatewayOutputRateMilli:  quantity(cell.OutputTPSMilliTokens),
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"window": window,
-		"since":  since.Format(time.RFC3339),
-		"until":  until.Format(time.RFC3339),
-		"cells":  out,
+		"window":            window,
+		"since":             since.Format(time.RFC3339),
+		"until":             until.Format(time.RFC3339),
+		"cells":             out,
+		"served_path_cells": served,
 	})
 }
 

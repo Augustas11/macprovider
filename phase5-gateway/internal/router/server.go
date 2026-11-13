@@ -138,6 +138,7 @@ type ReadStore interface {
 	ListWalletSessionUsageDetails(ctx context.Context, accountID, sessionID string, limit int, cursor string, since, until time.Time) ([]storage.WalletSessionUsageDetail, string, error)
 	GetCapacityTier(ctx context.Context) (storage.CapacityTier, error)
 	DemandLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandLatencyCell, error)
+	DemandServedPathLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandServedPathLatencyCell, error)
 }
 
 type Option func(*Server)

@@ -11,6 +11,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -3775,6 +3776,20 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 	if slices.Contains(storage.DemandStreamingModes, event.StreamingMode) {
 		streamingMode = event.StreamingMode
 	}
+	// SPEC-006-R028: the gateway, not the column, enforces the served-path
+	// vocabulary, so a value outside it stores "unknown" and never fails the
+	// INSERT. Rows are stored only for a known path and only within 1..256.
+	var servedPath, servedRows any
+	if event.ServedPath != "" {
+		path := "unknown"
+		if slices.Contains(storage.DemandServedPaths, event.ServedPath) {
+			path = event.ServedPath
+		}
+		servedPath = path
+		if path != "unknown" && event.ServedRows != nil && *event.ServedRows >= 1 && *event.ServedRows <= storage.DemandServedRowsMax {
+			servedRows = *event.ServedRows
+		}
+	}
 	for _, v := range []*int64{event.GatewayFirstReasoningMs, event.GatewayFirstAnswerMs, event.GatewayOutputTPSMilliTokens} {
 		if v != nil && *v < 0 {
 			return fmt.Errorf("demand serving telemetry must be non-negative")
@@ -3790,8 +3805,9 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 			queue_latency_ms, time_to_first_token_ms, provider_prefill_ms, provider_decode_ms,
 			output_tps_millitokens, total_latency_ms, created_at,
 			gw_first_reasoning_ms, gw_first_answer_ms, gw_output_tps_millitokens, streaming_mode, serving_engine,
-			provider_reported_queue_ms, provider_reported_first_token_ms, provider_reported_first_answer_ms, provider_reported_decode_ms)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			provider_reported_queue_ms, provider_reported_first_token_ms, provider_reported_first_answer_ms, provider_reported_decode_ms,
+			served_path, served_rows)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, event.BuyerHash, event.TrafficClass, event.RequestedModel, event.RoutedModel, event.ProviderID,
 		event.PoolID, event.EngineClass, boolInt(event.Stream), boolInt(event.StructuredOutput), boolInt(event.ToolsRequested), event.MaxOutputTokens,
 		event.RequestedPromptTokens, event.RequestedOutputTokens, event.RequestedTotalTokens,
@@ -3802,7 +3818,8 @@ func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent
 		nullableInt64(event.GatewayFirstReasoningMs), nullableInt64(event.GatewayFirstAnswerMs), nullableInt64(event.GatewayOutputTPSMilliTokens),
 		streamingMode, servingEngine,
 		nullableInt64(event.ProviderReportedQueueMs), nullableInt64(event.ProviderReportedFirstTokenMs),
-		nullableInt64(event.ProviderReportedFirstAnswerMs), nullableInt64(event.ProviderReportedDecodeMs))
+		nullableInt64(event.ProviderReportedFirstAnswerMs), nullableInt64(event.ProviderReportedDecodeMs),
+		servedPath, servedRows)
 	return err
 }
 
@@ -3942,43 +3959,98 @@ var demandLatencyQuantityColumns = []string{"gw_first_reasoning_ms", "gw_first_a
 // unknown_model_id and invalid_model_id buckets are excluded: they pool
 // different models. P50 needs 5 samples and P95 needs 20.
 func (s *Store) DemandLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandLatencyCell, error) {
-	type cellKey struct{ model, engine string }
-	cells := map[cellKey]*storage.DemandLatencyCell{}
-	var order []cellKey
+	groups, err := s.demandLatencyGroups(ctx, since, until, []string{"serving_engine"}, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.DemandLatencyCell, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, storage.DemandLatencyCell{RequestedModel: g.model, ServingEngine: g.keys[0], FirstReasoningMs: g.quantities[0], FirstAnswerMs: g.quantities[1], OutputTPSMilliTokens: g.quantities[2]})
+	}
+	return out, nil
+}
+
+// demandServedRowsBand is the SPEC-006-R028 served_rows_band of a row.
+const demandServedRowsBand = `CASE WHEN served_rows IS NULL THEN 'unknown' WHEN served_rows = 1 THEN '1' WHEN served_rows <= 4 THEN '2-4' WHEN served_rows <= 8 THEN '5-8' WHEN served_rows <= 16 THEN '9-16' ELSE '17+' END`
+
+// DemandServedPathLatencyPercentiles is DemandLatencyPercentiles per
+// (requested model, served path, served rows band) over the rows that carry
+// a served path.
+func (s *Store) DemandServedPathLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandServedPathLatencyCell, error) {
+	groups, err := s.demandLatencyGroups(ctx, since, until, []string{"served_path", demandServedRowsBand}, "served_path IS NOT NULL")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.DemandServedPathLatencyCell, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, storage.DemandServedPathLatencyCell{RequestedModel: g.model, ServedPath: g.keys[0], ServedRowsBand: g.keys[1], FirstReasoningMs: g.quantities[0], FirstAnswerMs: g.quantities[1], OutputTPSMilliTokens: g.quantities[2]})
+	}
+	return out, nil
+}
+
+type demandLatencyGroup struct {
+	model      string
+	keys       []string
+	quantities [3]storage.DemandLatencyQuantity
+}
+
+// demandLatencyGroups computes the three quantities per requested model and
+// the given key expressions. keyExprs and where are fixed SQL, never input.
+func (s *Store) demandLatencyGroups(ctx context.Context, since, until time.Time, keyExprs []string, where string) ([]*demandLatencyGroup, error) {
+	keyList := strings.Join(keyExprs, ", ")
+	keyCols := make([]string, len(keyExprs))
+	for i := range keyExprs {
+		keyCols[i] = "k" + strconv.Itoa(i)
+	}
+	selectKeys := make([]string, len(keyExprs))
+	for i, expr := range keyExprs {
+		selectKeys[i] = expr + " AS " + keyCols[i]
+	}
+	if where != "" {
+		where = " AND " + where
+	}
+	groups := map[string]*demandLatencyGroup{}
+	var order []string
 	for i, column := range demandLatencyQuantityColumns {
 		rows, err := s.db.QueryContext(ctx, `
 			WITH ranked AS (
-				SELECT requested_model, serving_engine, `+column+` AS v,
-					ROW_NUMBER() OVER (PARTITION BY requested_model, serving_engine ORDER BY `+column+`) AS rn,
-					COUNT(*) OVER (PARTITION BY requested_model, serving_engine) AS n
+				SELECT requested_model, `+strings.Join(selectKeys, ", ")+`, `+column+` AS v,
+					ROW_NUMBER() OVER (PARTITION BY requested_model, `+keyList+` ORDER BY `+column+`) AS rn,
+					COUNT(*) OVER (PARTITION BY requested_model, `+keyList+`) AS n
 				FROM demand_events
 				WHERE created_at >= ? AND created_at < ?
 					AND terminal_result = 'success'
 					AND requested_model NOT IN ('unknown_model_id', 'invalid_model_id')
-					AND `+column+` IS NOT NULL
+					AND `+column+` IS NOT NULL`+where+`
 			)
-			SELECT requested_model, serving_engine, MAX(n),
+			SELECT requested_model, `+strings.Join(keyCols, ", ")+`, MAX(n),
 				MAX(CASE WHEN rn = (50 * n + 99) / 100 THEN v END),
 				MAX(CASE WHEN rn = (95 * n + 99) / 100 THEN v END)
 			FROM ranked
-			GROUP BY requested_model, serving_engine
-			ORDER BY requested_model, serving_engine`, encodeTime(since.UTC()), encodeTime(until.UTC()))
+			GROUP BY requested_model, `+strings.Join(keyCols, ", "), encodeTime(since.UTC()), encodeTime(until.UTC()))
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
-			var key cellKey
+			var model string
+			keys := make([]string, len(keyExprs))
 			var n int64
 			var p50, p95 sql.NullInt64
-			if err := rows.Scan(&key.model, &key.engine, &n, &p50, &p95); err != nil {
+			dest := []any{&model}
+			for k := range keys {
+				dest = append(dest, &keys[k])
+			}
+			dest = append(dest, &n, &p50, &p95)
+			if err := rows.Scan(dest...); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			cell := cells[key]
-			if cell == nil {
-				cell = &storage.DemandLatencyCell{RequestedModel: key.model, ServingEngine: key.engine}
-				cells[key] = cell
-				order = append(order, key)
+			id := model + "\x00" + strings.Join(keys, "\x00")
+			group := groups[id]
+			if group == nil {
+				group = &demandLatencyGroup{model: model, keys: keys}
+				groups[id] = group
+				order = append(order, id)
 			}
 			quantity := storage.DemandLatencyQuantity{Samples: n}
 			if n >= 5 && p50.Valid {
@@ -3989,14 +4061,7 @@ func (s *Store) DemandLatencyPercentiles(ctx context.Context, since, until time.
 				v := p95.Int64
 				quantity.P95 = &v
 			}
-			switch i {
-			case 0:
-				cell.FirstReasoningMs = quantity
-			case 1:
-				cell.FirstAnswerMs = quantity
-			case 2:
-				cell.OutputTPSMilliTokens = quantity
-			}
+			group.quantities[i] = quantity
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -4006,15 +4071,10 @@ func (s *Store) DemandLatencyPercentiles(ctx context.Context, since, until time.
 			return nil, err
 		}
 	}
-	sort.Slice(order, func(a, b int) bool {
-		if order[a].model != order[b].model {
-			return order[a].model < order[b].model
-		}
-		return order[a].engine < order[b].engine
-	})
-	out := make([]storage.DemandLatencyCell, 0, len(order))
-	for _, key := range order {
-		out = append(out, *cells[key])
+	sort.Strings(order)
+	out := make([]*demandLatencyGroup, 0, len(order))
+	for _, id := range order {
+		out = append(out, groups[id])
 	}
 	return out, nil
 }

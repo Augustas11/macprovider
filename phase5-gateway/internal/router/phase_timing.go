@@ -32,6 +32,13 @@ type gatewayPhaseTiming struct {
 	deltas        servingDeltaObserver
 	streamingMode string
 	servingEngine string
+	// SPEC-006-R028 served-path labels, from the coordinator's internal
+	// header or trailer. Never logged, never forwarded.
+	servedPath string
+	servedRows *int64
+	// servedPathSuppressed is set on relay-blind responses, which never
+	// carry a served-path label.
+	servedPathSuppressed bool
 }
 
 func newGatewayPhaseTiming(start time.Time) *gatewayPhaseTiming {
@@ -54,10 +61,15 @@ func (t *gatewayPhaseTiming) observeCoordinatorResponse(h http.Header, at time.T
 	t.observeCoordinatorTimings(h)
 	t.streamingMode = streamingModeFromHeader(h)
 	t.servingEngine = servingEngineFromRouteTrace(h)
+	t.observeServedPath(h)
 }
 
 func (t *gatewayPhaseTiming) observeCoordinatorTrailers(h http.Header) {
+	if t == nil {
+		return
+	}
 	t.observeCoordinatorTimings(h)
+	t.observeServedPath(h)
 }
 
 func (t *gatewayPhaseTiming) observeCoordinatorTimings(h http.Header) {

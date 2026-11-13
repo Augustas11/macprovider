@@ -750,3 +750,47 @@ func TestAdminDemandLatencyWindowAndMethod(t *testing.T) {
 		}
 	}
 }
+
+// A relay-blind coordinator response carrying the served-path value as a
+// header and as a trailer stores nothing and reaches no buyer (SPEC-006-R028).
+func TestServedPathRelayBlindResponseStoresNothing(t *testing.T) {
+	res := privacyReservationFixture(t, true, relayblind.EndpointChatCompletions)
+	raw := pilotEnvelopeFixture(t, res)
+	digest := sha256.Sum256(raw)
+	digestText := base64.RawURLEncoding.EncodeToString(digest[:])
+	upstream, _ := privacyCoordinator(t, res, raw, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(relayBlindValidatedHeader, digestText)
+		setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
+		w.Header().Set(settlementModeHeader, "observe")
+		w.Header().Set(streamingModeResponseHeader, "incremental")
+		w.Header().Set(servedPathResponseHeader, "v=1; path=serial; rows=1")
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"object\":\"chat.completion.chunk\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"plain answer\"}}]}\n\ndata: {\"object\":\"chat.completion.chunk\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\ndata: [DONE]\n\n")
+		w.Header().Set(http.TrailerPrefix+servedPathResponseHeader, "v=1; path=native_mtp; rows=2")
+	})
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+		enablePrivacy(c)
+		c.Coordinator.BuyerURL = upstream.URL
+	})
+	key := createAccountAndKey(t, store, cfg, "privacy-served-path")
+	if reserve := postPrivacy(h, key, "/v1/relay-blind/route-reservations", privacyReservationBody(t, res), map[string]string{privacyClassHeader: privacyClassV1}); reserve.Code != http.StatusOK {
+		t.Fatalf("reserve %d %s", reserve.Code, reserve.Body.String())
+	}
+	chat := postPrivacy(h, key, "/v1/chat/completions", raw, privacyChatHeaders())
+	if chat.Code != http.StatusOK {
+		t.Fatalf("status %d %s", chat.Code, chat.Body.String())
+	}
+	result := chat.Result()
+	if result.Header.Get(servedPathResponseHeader) != "" || result.Trailer.Get(servedPathResponseHeader) != "" {
+		t.Fatal("relay-blind buyer response carries the label")
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM demand_events WHERE served_path IS NOT NULL`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("relay-blind stored %d served paths (%v)", n, err)
+	}
+}

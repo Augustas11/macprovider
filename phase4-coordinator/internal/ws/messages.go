@@ -622,6 +622,14 @@ type InferenceResponseEnd struct {
 	// head sends with its receipt. The coordinator verifies and stores it
 	// and clears it before the frame reaches the buyer path.
 	GroupAttestation json.RawMessage `json:"group_attestation,omitempty"`
+	// ServedPath is the provider's SPEC-002-R007 served-path report. The
+	// buyer path decodes and checks it strictly; it is a telemetry label
+	// only and never reaches the buyer, routing, billing or settlement.
+	ServedPath json.RawMessage `json:"served_path,omitempty"`
+	// ShardGroupAttestationVerified is set by the coordinator, never decoded
+	// from the wire: the SPEC-051-R019 group attestation on this frame
+	// verified and was stored.
+	ShardGroupAttestationVerified bool `json:"-"`
 }
 
 // SELivenessChallenge is sent by the coordinator to a provider that completed

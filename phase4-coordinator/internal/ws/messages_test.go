@@ -1753,3 +1753,24 @@ func TestParseHeartbeatAcceptsBoundedCBSelfCheck(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-002-R007: an end frame carrying served_path decodes with the report
+// kept raw for the buyer path, and the coordinator-only verified mark can
+// never be set from the wire.
+func TestInferenceResponseEndServedPathDecode(t *testing.T) {
+	var end InferenceResponseEnd
+	raw := `{"type":"inference_response_end","request_id":"r","status":"complete","chunks_sent":1,"served_path":{"path":"continuous_batching","rows":3},"ShardGroupAttestationVerified":true,"shard_group_attestation_verified":true}`
+	if err := json.Unmarshal([]byte(raw), &end); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(end.ServedPath) != `{"path":"continuous_batching","rows":3}` {
+		t.Fatalf("served_path = %s", end.ServedPath)
+	}
+	if end.ShardGroupAttestationVerified {
+		t.Fatal("the verified mark was decoded from the wire")
+	}
+	var old InferenceResponseEnd
+	if err := json.Unmarshal([]byte(`{"type":"inference_response_end","request_id":"r","status":"complete","chunks_sent":1}`), &old); err != nil || old.ServedPath != nil {
+		t.Fatalf("frame without served_path: %v %s", err, old.ServedPath)
+	}
+}
