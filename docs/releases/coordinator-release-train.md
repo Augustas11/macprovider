@@ -22,6 +22,30 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Measured decode reorder and routed-throughput floor (SPEC-002-R005) — pending runtime inclusion (2026-11-13)
+
+Related: #2321. PR #2339 merged as `ba2732c4c`. The objective sort still
+runs on the heartbeat estimate; candidates whose measured decode signal is
+fresh are then reordered by routed throughput among the positions fresh
+candidates already hold, inside blocks with equal other sort keys. With
+zero or one fresh candidate the order is unchanged. The
+`min_provider_throughput_tps` floor compares routed throughput. The
+measured store is keyed by the served model and shared by buyer routing,
+`/poolz` and the explorer, which gain measured fields (operator-only).
+Pinned requests record no observation, and an attempt whose buyer-blocked
+time is at least 5% of its decode window yields no decode sample.
+
+Audit: four lanes plus two re-checks, gate met at `b8b897de5`.
+
+Live step: the next Pearl runtime release through
+`scripts/ops/pearl-runtime.sh status`, then `next --run`. No database
+schema change on its own ("Same fingerprint: about 1–2 minutes of
+coordinator/gateway restart"), but it rides the same release as the
+gateway telemetry below, whose gateway source change takes the longer
+buyer-hold path. After the apply: `/poolz` rows carry
+`routed_throughput_source`, and the routing-decision log shows
+`throughput_source: "measured"` for a provider with fresh samples.
+
 ## Gateway serving telemetry (SPEC-006-R028) — pending runtime inclusion (2026-11-13)
 
 Related: #2320, #2341. PR #2340 merged as `af2d17d7a`. The gateway records
