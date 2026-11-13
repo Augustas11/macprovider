@@ -66,7 +66,38 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(help: "JSON output path. Partial results are written here after every phase and on a hang.")
     var out: String?
 
+    @Flag(help: "Swarm check mode (#2338): fixed-duration solo-a, solo-b, contended and optional soak phases; prints GATE and GOAL lines. See MultiModelBenchCheck.swift.")
+    var check = false
+
+    @Option(name: .customLong("rows-a"), help: "--check: concurrent lanes on model A. Default 1.")
+    var rowsA: Int = 1
+
+    @Option(name: .customLong("rows-b"), help: "--check: concurrent lanes on model B. Default 4.")
+    var rowsB: Int = 4
+
+    @Option(name: .customLong("max-tokens-a"), help: "--check: max_tokens per model A request. Default 1024.")
+    var maxTokensA: Int = 1024
+
+    @Option(name: .customLong("max-tokens-b"), help: "--check: max_tokens per model B request. Default 256.")
+    var maxTokensB: Int = 256
+
+    @Option(name: .customLong("phase-seconds"), help: "--check: duration of solo-a, solo-b and contended. Must exceed the 10 s ramp. Default 60.")
+    var phaseSeconds: Double = 60
+
+    @Option(name: .customLong("soak-seconds"), help: "--check: contended soak after the contended phase; 0 skips it. Default 0.")
+    var soakSeconds: Double = 0
+
     mutating func validate() throws {
+        if check {
+            guard rowsA > 0, rowsB > 0 else { throw ValidationError("--rows-a and --rows-b must be > 0") }
+            guard maxTokensA > 0, maxTokensB > 0 else { throw ValidationError("--max-tokens-a and --max-tokens-b must be > 0") }
+            guard phaseSeconds > MultiModelCheck.rampSeconds else {
+                throw ValidationError("--phase-seconds must exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
+            }
+            guard soakSeconds == 0 || soakSeconds > MultiModelCheck.rampSeconds else {
+                throw ValidationError("--soak-seconds must be 0 or exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
+            }
+        }
         guard maxTokens > 0 else { throw ValidationError("--max-tokens must be > 0") }
         guard promptTokens > 0 else { throw ValidationError("--prompt-tokens must be > 0") }
         guard runs > 0 else { throw ValidationError("--runs must be > 0") }
@@ -98,6 +129,10 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        if check {
+            try await runCheck()
+            return
+        }
         let phaseList = try Self.parsePhases(phases)
         let order = try Self.parseLoadOrder(loadOrder)
         let ids: [MultiModelBenchSlot: String] = [.a: modelA, .b: modelB]
@@ -105,14 +140,7 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
         // Token-id capture: the runtime appends one record per completion to
         // this file in lab-harness builds. Set before any runtime exists.
         let captureNonce = UUID().uuidString.prefix(8).lowercased()
-        let capturePath: String
-        if let existing = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_TOKEN_CAPTURE"], !existing.isEmpty {
-            capturePath = existing
-        } else {
-            capturePath = (NSTemporaryDirectory() as NSString)
-                .appendingPathComponent("macprovider-multi-model-bench-\(getpid())-\(captureNonce).jsonl")
-            setenv("MACPROVIDER_LAB_TOKEN_CAPTURE", capturePath, 1)
-        }
+        let capturePath = Self.prepareTokenCapture(nonce: String(captureNonce))
 
         // Serve applies the command-buffer budget for its one model before
         // any MLX device use; MLX reads it once. Two runtimes cannot each have
@@ -359,8 +387,20 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
         )
     }
 
+    /// Points `MACPROVIDER_LAB_TOKEN_CAPTURE` at a private file unless already
+    /// set; must run before any runtime exists.
+    static func prepareTokenCapture(nonce: String) -> String {
+        if let existing = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_TOKEN_CAPTURE"], !existing.isEmpty {
+            return existing
+        }
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("macprovider-multi-model-bench-\(getpid())-\(nonce).jsonl")
+        setenv("MACPROVIDER_LAB_TOKEN_CAPTURE", path, 1)
+        return path
+    }
+
     /// The record `LabOutputTokenCapture` wrote for `requestID`, if any.
-    private static func capturedTokenIDs(path: String, requestID: String) -> [Int]? {
+    static func capturedTokenIDs(path: String, requestID: String) -> [Int]? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
         for line in data.split(separator: 0x0A).reversed() {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -555,10 +595,14 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
     private var phaseFootprintMax: UInt64 = 0
     private var stopped = false
     private var thread: Thread?
+    /// Check mode owns its report; on a hang the monitor calls this with
+    /// (phase, seconds since last chunk, phase footprint max) and exits 3.
+    private let hangHandler: (@Sendable (String, Double, UInt64) -> Void)?
 
-    init(outPath: String?, watchdogSeconds: Double) {
+    init(outPath: String?, watchdogSeconds: Double, hangHandler: (@Sendable (String, Double, UInt64) -> Void)? = nil) {
         self.outPath = outPath
         self.watchdogSeconds = watchdogSeconds
+        self.hangHandler = hangHandler
     }
 
     func start() {
@@ -619,11 +663,22 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
             }
             if activePhase != nil, let footprint { phaseFootprintMax = max(phaseFootprintMax, footprint) }
             let idle = Date().timeIntervalSince(lastChunkAt)
-            guard let phase = activePhase, idle >= watchdogSeconds, var hung = report else {
+            guard let phase = activePhase, idle >= watchdogSeconds else {
                 lock.unlock()
                 continue
             }
             let footprintMax = phaseFootprintMax
+            if let hangHandler {
+                lock.unlock()
+                hangHandler(phase, idle, footprintMax)
+                // _exit: exit() runs C++ static destructors under the MLX
+                // threads still encoding, which segfaulted (rc 139) in the smoke.
+                _exit(3)
+            }
+            guard var hung = report else {
+                lock.unlock()
+                continue
+            }
             lock.unlock()
             hung.hang = MultiModelBenchHang(phase: phase, secondsSinceLastChunk: idle)
             if let index = hung.phases.lastIndex(where: { $0.phase == phase }) {
