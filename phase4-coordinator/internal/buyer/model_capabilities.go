@@ -62,9 +62,11 @@ func legacyToolFamily(model string) bool {
 // capability derivation and request eligibility. A SPEC-051 shard group head
 // refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
-	if toolGrammarFamily(p.ModelID) == toolGrammarLFM2 {
-		// LFM shipped after the generic grammar floor. Require the exact
-		// loaded-model declaration, which old providers cannot advertise.
+	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || family == toolGrammarMiniMax {
+		// LFM and MiniMax shipped after the generic grammar floor. Require
+		// the exact loaded-model declaration, which old providers cannot
+		// advertise (a provider without the MiniMax family declares only
+		// auto and none for it).
 		return !p.ShardGroupHeadV1 &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "required"}) &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "named"})
