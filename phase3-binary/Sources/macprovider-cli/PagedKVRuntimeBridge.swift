@@ -893,6 +893,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             : nil
     }
 
+    /// The flattened-token cap `sharedForwardFits` applies to a prefill group.
+    var prefillForwardTokenCap: Int? { maxDecodeRowsPerForward }
+
     /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
     /// forward under this backend's flattened-token cap.
     func sharedForwardFits(rows: Int, tokensPerRow: Int) -> Bool {

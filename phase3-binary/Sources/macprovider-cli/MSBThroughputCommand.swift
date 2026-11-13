@@ -2689,6 +2689,8 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
         self.inner = inner
     }
 
+    var prefillForwardTokenCap: Int? { inner.prefillForwardTokenCap }
+
     struct Snapshot {
         let windowNanoseconds: UInt64
         let windowCalls: Int
