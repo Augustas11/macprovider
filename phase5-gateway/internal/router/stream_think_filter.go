@@ -7,6 +7,9 @@ import "strings"
 type streamThinkFilter struct {
 	thinkPending string
 	thinkInBlock bool
+	// thinkInsideBytes counts the bytes consumed inside <think>...</think>,
+	// tags excluded; SPEC-006-R028 classifies them as reasoning.
+	thinkInsideBytes int64
 }
 
 func (a *streamThinkFilter) filterThinkContent(s string) string {
@@ -16,11 +19,13 @@ func (a *streamThinkFilter) filterThinkContent(s string) string {
 	for input != "" {
 		if a.thinkInBlock {
 			if end := strings.Index(input, "</think>"); end >= 0 {
+				a.thinkInsideBytes += int64(end)
 				input = input[end+len("</think>"):]
 				a.thinkInBlock = false
 				continue
 			}
 			a.thinkPending = longestSuffixThatPrefixes(input, "</think>")
+			a.thinkInsideBytes += int64(len(input) - len(a.thinkPending))
 			return out.String()
 		}
 		if start := strings.Index(input, "<think>"); start >= 0 {

@@ -417,7 +417,12 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	w.Header().Del("X-MacProvider-Relay-Blind-Retry-Action")
-	timing := newGatewayPhaseTiming(now)
+	// The chat handler's demand row reads its own timing; mark that one so
+	// the row describes this dispatch (SPEC-006-R028).
+	timing := gatewayPhaseTimingFromContext(r.Context())
+	if timing == nil {
+		timing = newGatewayPhaseTiming(s.now())
+	}
 	timing.markCoordinatorStart(s.now())
 	client := *s.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -511,6 +516,8 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	resp.Header.Del(privacyPostureVerifiedAtHeader)
 	resp.Header.Del(relayblind.PrivacyRejectReasonHeader)
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	// SPEC-002-R007 sends no route trace for relay-blind work.
+	timing.servingEngine = "unknown"
 	if env.Stream {
 		s.forwardStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, "", false, true, deadlines, false, window, timing)
 	} else {

@@ -201,7 +201,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
 	demand := newDemandTelemetryState(start, requestID(r))
-	r = r.WithContext(withDemandTelemetry(r.Context(), demand))
+	r = r.WithContext(withGatewayPhaseTiming(withDemandTelemetry(r.Context(), demand), timing))
 	// Issue #190 R1 security HIGH: chat-completion responses now
 	// carry per-tenant headers (X-RateLimit-Remaining-Requests).
 	// Forbid intermediary caching unconditionally so a misconfigured
@@ -1780,6 +1780,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
 				}
+				// SPEC-006-R028: classify the upstream delta at its receipt
+				// instant, before any surface conversion.
+				if hasChoices {
+					timing.observeStreamDelta(data, s.now())
+				}
 				// Privacy frames have no choices and no clear usage. Forward the
 				// original line and skip the metadata ceiling; ciphertext is not logged.
 				if relayBlindExecutionFor(r) != nil && privacyOpaqueStreamFrame(data) {
@@ -1802,6 +1807,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					demand.setRoutedModel(demandRoutedModelFromJSON([]byte(data)))
 				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens, true); ok {
+					if demand := demandTelemetryFromContext(r.Context()); demand != nil && err == nil {
+						if labels, ok := providerTimingLabelsFromJSON([]byte(data)); ok {
+							demand.setProviderTimingLabels(labels)
+						}
+					}
 					if err != nil {
 						invalidReportedUsage = true
 						reported = nil
