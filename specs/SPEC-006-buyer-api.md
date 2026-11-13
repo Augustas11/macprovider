@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.77 (2026-11-13, gateway serving telemetry quantities)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Version:** 0.9.78 (2026-11-13, served-path labels on demand rows)
+**Depends on:** SPEC-001 v1.9.56, SPEC-002 v1.6.33, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.78 (2026-11-13, Related: #2341):** SPEC-006-R028 adds two labels to the demand row, `served_path` and `served_rows`, read only from the coordinator's internal `X-MacProvider-Internal-Served-Path` (SPEC-002-R007) after an exact grammar check, as a response header or trailer. Unlike `serving_engine` they describe the provider that served after a failover and the path and rows it reported for that request; the value is self-reported and unverified. Both are nullable; absent means no valid value arrived. The gateway, not the column, enforces the path vocabulary. The value never reaches a buyer: the gateway's `X-MacProvider-*` response strip removes it, the gateway forwards no coordinator trailer, and a buyer-supplied copy is stripped at ingress. `GET /admin/demand-latency` keeps `cells` unchanged and adds `served_path_cells`, p50 and p95 per requested model, served path and row band. The labels never enter the R028 quantities or any routing input, and `served_path_cells` are not qualification or campaign goal-metric evidence.
 
 **Change log v0.9.77 (2026-11-13, Related: #2320):** Add SPEC-006-R028, the gateway's serving telemetry quantities. For incrementally relayed streams the gateway records the gateway time to first reasoning delta and the gateway time to first answer delta, both from the gateway's request start to the receipt of the first upstream Chat Completions delta of that kind, identically for Chat Completions, Responses and Messages; `content` inside `<think>` tags counts as reasoning. The gateway output rate is the SPEC-002-R005 output estimate of the answer deltas over the gateway's first-to-last answer delta window, clamped at 2000 tokens/s; no provider-reported token count enters it. Whitespace-only text never sets either first-delta instant. Buffered streaming modes and non-streamed requests record all three absent; relay-blind and privacy-class requests write no demand row. Each row carries the validated streaming mode, a serving-engine label taken only from the validated SPEC-002-R007 route trace (the first-selected provider's engine family), and may carry bounded provider-reported timing labels. p50 and p95 per model and serving engine are read by an operator-key admin read; buyers never see them. None of these quantities is the SPEC-002-R005 routing TTFT, decode rate or service rate, and none feeds routing. The pre-existing demand-row `time_to_first_token_ms` and `output_tps_millitokens` stay, unchanged and named legacy. §16.3 points to R028.
 
@@ -5516,6 +5518,47 @@ any of the three quantities above, and it MUST NOT enter any routing input.
   valid provider usage (streamed or not), is stored as a label only when each value is an
   integer from 0 to 3600000; any other value stores absent. A later usage
   frame without a field keeps the last value reported for it.
+- `served_path` and `served_rows` come only from the coordinator's internal
+  `X-MacProvider-Internal-Served-Path` (SPEC-002-R007), read from the response
+  headers and, once the body has been read to its end, from the response
+  trailers; a valid trailer value replaces a header value. A value that does
+  not match the SPEC-002-R007 grammar byte for byte is ignored. `served_path`
+  stores `serial`, `continuous_batching`, `native_mtp`, `shard_group` or
+  `unknown`, and `served_rows` stores 1..256, or absent when `served_path` is
+  `unknown`. With no valid value both are absent (SQL `NULL`). They describe
+  the provider attempt that served the request, after any failover, where
+  `serving_engine` describes the first selection. The value is the provider's
+  own report, checked by the coordinator only for consistency with the
+  provider's own profile; it is self-reported and unverified. Relay-blind and
+  privacy-class requests write no demand row, so they never carry it.
+- Both columns are added idempotently to fresh and existing tables (a
+  duplicate-column error on a concurrent add is tolerated), with no schema
+  version change. A CHECK cannot be changed on an already migrated table, so
+  the `served_path` vocabulary is enforced by the gateway at insert, not by
+  the column: the column only bounds the length (`served_path IS NULL OR
+  length(served_path) <= 32`), and the store maps a path outside the
+  vocabulary to `unknown`. `served_rows` has the bound `served_rows IS NULL
+  OR served_rows BETWEEN 1 AND 256`; the store stores a count outside it, or
+  any count with `unknown`, as absent.
+- The served-path value MUST NOT reach a buyer: it is in the
+  `X-MacProvider-*` namespace the gateway removes from every buyer response,
+  the gateway forwards no coordinator trailer, and a buyer-supplied
+  `X-MacProvider-Internal-Served-Path` request header is stripped at ingress
+  with every other `X-MacProvider-Internal-*` header. The row count says how
+  many requests shared a provider, so it is never added to usage, the route
+  trace, a receipt, the gateway's request log line or any buyer-facing
+  endpoint.
+- Known gaps. Both are absent until providers on a CLI that sends
+  `served_path` are serving, on the HTTP-forwarding path, and when the
+  coordinator wrote no value. A streamed request reads the trailer only when
+  the gateway reads the stream to its end: on every surface (Chat
+  Completions, Responses, Messages) it drains to the end after its terminal
+  event only when the coordinator declared settlement-finality trailers,
+  which it does for a gateway that negotiated them under its service bearer
+  and an account context. Without that declaration, or when the drain stops at
+  its 5 s or line-size bound, an incrementally streamed request stores
+  absent. A profile change between dispatch and completion can turn a genuine
+  report into `unknown`.
 
 The stored `serving_engine` and `streaming_mode` vocabularies equal the
 validators' vocabularies. The store maps any other value to `unknown` or
@@ -5533,6 +5576,16 @@ because they pool different models. They are read with
 the operator key exactly like `/admin/feedback-summary` and reads through the
 gateway's read-only database handle. The response names no provider id and no
 buyer hash. No buyer-facing endpoint serves them.
+
+The same read returns `served_path_cells`: the same three quantities per
+requested model, `served_path` and `served_rows_band` (`1`, `2-4`, `5-8`,
+`9-16`, `17+`, or `unknown` when `served_path` is `unknown`), with the same
+percentile rule, small-sample nulls and window, over successful rows that
+carry a `served_path`. The existing `cells` array keeps its key (`model`,
+`serving_engine`) and its members, so a reader of it is unaffected. A band,
+not the exact row count, is returned so a cell holds enough samples for a
+percentile. `served_path_cells` are not qualification or campaign goal-metric
+evidence; SPEC-048 R015 is.
 
 Legacy fields. The demand-row `time_to_first_token_ms` and
 `output_tps_millitokens` keep their pre-R028 values and are legacy: the first

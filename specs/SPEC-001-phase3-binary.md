@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.55 (2026-11-13, heartbeat decode rate and native-MTP acceptance; relay usage timing)
+**Version:** 1.9.56 (2026-11-13, `inference_response_end` `served_path`: the path and rows that ran the request)
+
+**Change log v1.9.56 (2026-11-13, Related: #2341):** A completed
+`inference_response_end` (§6.6) carries `served_path`, the serving path that
+ran the request (`serial`, `continuous_batching`, `native_mtp` or
+`shard_group`) and the mean number of active scheduler rows over its decode
+steps. It is a top-level frame member, not part of `usage`, the receipt or the
+SPEC-015 v0.4 tuple, and it is not sent on relay-blind or privacy-class
+dispatch, on an external loopback runtime, for a replayed result, or on the
+direct HTTP endpoint. It is self-reported and unverified; the coordinator
+checks it for consistency and uses it only as a gateway telemetry label
+(SPEC-002-R007).
 
 **Change log v1.9.55 (2026-11-13, Related: #2319):** The capacity heartbeat
 (§6.5.1) gains `decode_tps_since_last`,
@@ -3745,6 +3756,7 @@ Sent by the provider when inference is complete, cancelled, or failed.
 | `usage` | object | No | Token usage. Present when `status` is `"complete"` and when `status` is `"cancelled"` in response to `cancel_request`. Contains `prompt_tokens`, `completion_tokens`, `total_tokens`. |
 | `error` | string | No | Human-readable error message. Present when `status` starts with `"error_"`. |
 | `relay_blind_settlement_receipt` | string | No | (v1.9.28) Exactly one SPEC-015 §N.13 receipt envelope, present on the terminal frame exactly when the dispatch carried valid `relay_blind_settlement` (SPEC-001-R005). |
+| `served_path` | object | No | (v1.9.56) Present only when `status` is `"complete"`: `{"path": ..., "rows": ...}`, defined below. |
 
 When `inference_response_end` is sent in response to a `cancel_request`
 (per § 6.6's cancel handling), the provider MUST include a `usage` field
@@ -3769,6 +3781,39 @@ fall back to estimation when usage is absent (gateway example:
 **Invariant:** After sending `inference_response_end`, the provider
 MUST NOT send any more `inference_response_chunk` messages for that
 `request_id`.
+
+**`served_path` (v1.9.56).** A provider that implements this sends, on every
+`inference_response_end` with `status: "complete"` that its own runtime
+served, `served_path`, a JSON object with exactly two members and nothing
+else, for example `"served_path":{"path":"continuous_batching","rows":3}`:
+
+- `path`, a string: how this request ran.
+  - `shard_group` when a SPEC-051 shard group served it (the frame comes from
+    the group head);
+  - else `native_mtp` when the request's continuous-batching row proposed
+    native-MTP draft tokens (SPEC-048) on at least half of its decode steps;
+  - else `continuous_batching` when a SPEC-038 scheduler row produced it
+    (including a native-MTP row below that half);
+  - else `serial` (one request decoding alone, with or without draft-model
+    speculative decoding).
+- `rows`, a JSON integer 1..256. For `continuous_batching` and `native_mtp`,
+  the mean number of active scheduler rows (prefilling plus decoding, this row
+  included) over the request's own decode steps, rounded to the nearest
+  integer and clamped to 1..256. For `serial` it is 1. For `shard_group` it is
+  the head runtime's value by the same rule, or 1 when the head decodes one
+  request at a time.
+
+A result replayed from a finished row (`non_settling_replay`) carries no
+`served_path`. The provider MUST NOT send `served_path` on any other status,
+on a relay-blind or privacy-class dispatch, or for a request served by an
+external loopback runtime (SPEC-046-R002 `runtime_source`), which cannot
+observe its upstream's batching. It MUST NOT add `served_path`, a path name or
+a row count to `usage`, to the response body, to a receipt or to the direct
+HTTP endpoint's response: the row count tells how many other requests shared
+the provider. The value is self-reported and unverified. The coordinator
+checks it for consistency with the provider's own R006 profile and
+shard-group advertisement as recorded at dispatch, stores an inconsistent one
+as `unknown`, and uses it only as a telemetry label (SPEC-002-R007).
 
 #### Relay-blind settlement receipt wire (NEW in v1.9.28)
 
