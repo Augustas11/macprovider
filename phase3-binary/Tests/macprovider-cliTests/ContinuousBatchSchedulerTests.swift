@@ -223,6 +223,84 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertNotNil(marks.prefillWallMs)
     }
 
+    /// Issue #2341: a row alone averages one active row; a row that finishes
+    /// without a decode step reports one row; a replay carries no served path.
+    func testServedPathRowAloneZeroStepAndReplay() async throws {
+        let backend = ScriptedBackend(scripts: ["alone": [101, 102, 103, 104], "one": [7]])
+        let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
+        let alone = ContinuousBatchSchedulerRequest(id: "alone", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 4)
+        let result = try await scheduler.submit(alone)
+        XCTAssertEqual(result.outputTokens, [101, 102, 103, 104])
+        XCTAssertEqual(result.servedPath, ServedPath(path: .continuousBatching, rows: 1))
+        let replay = try await scheduler.submit(alone)
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertEqual(replay.outputTokens, result.outputTokens)
+        XCTAssertNil(replay.servedPath)
+        let one = try await scheduler.submit(.init(id: "one", conversationKey: "", promptTokens: [3], maxOutputTokens: 1))
+        XCTAssertEqual(one.outputTokens, [7])
+        XCTAssertEqual(one.servedPath, ServedPath(path: .continuousBatching, rows: 1))
+    }
+
+    /// Issue #2341: row `a` decodes 8 steps; three rows join it for the first
+    /// five (prefilling or decoding: 4 active rows), one stays for the sixth (2)
+    /// and `a` runs the last two alone: (5 x 4 + 2 + 1 + 1) / 8 = 3. The
+    /// counters change no token, terminal or backend call: two runs match.
+    func testServedPathRowMeanCountsJoinedRowsAndLeavesSchedulingUnchanged() async throws {
+        func run() async throws -> (results: [ContinuousBatchSchedulerResult], prefill: Int, decode: Int, batches: [[String]]) {
+            let gate = AsyncGate()
+            let backend = ScriptedBackend(
+                scripts: [
+                    "a": Array(100 ..< 109),
+                    "b": Array(200 ..< 205),
+                    "c": Array(300 ..< 305),
+                    "d": Array(400 ..< 405),
+                ],
+                prefillGate: gate
+            )
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 4,
+                maxPrefillRowsPerIteration: 4,
+                backend: backend
+            )
+            func request(_ id: String, _ tokens: Int) -> ContinuousBatchSchedulerRequest {
+                .init(id: id, conversationKey: "", promptTokens: [1], maxOutputTokens: tokens)
+            }
+            async let a = scheduler.submit(request("a", 9))
+            try await eventually { await backend.prefillCallCount() == 1 }
+            async let b = scheduler.submit(request("b", 5))
+            try await eventually { await scheduler.metrics().waitingCount == 1 }
+            async let c = scheduler.submit(request("c", 5))
+            try await eventually { await scheduler.metrics().waitingCount == 2 }
+            async let d = scheduler.submit(request("d", 5))
+            try await eventually { await scheduler.metrics().waitingCount == 3 }
+            await gate.open()
+            let results = try await [a, b, c, d]
+            return (results, await backend.prefillCallCount(), await backend.decodeCallCount(), await backend.decodeBatches())
+        }
+
+        let first = try await run()
+        let second = try await run()
+        XCTAssertEqual(first.results.map(\.outputTokens), [
+            Array(100 ..< 109), Array(200 ..< 205), Array(300 ..< 305), Array(400 ..< 405),
+        ])
+        XCTAssertEqual(first.results.map(\.terminalStatus), [.length, .length, .length, .length])
+        XCTAssertEqual(first.results, second.results)
+        XCTAssertEqual(first.prefill, second.prefill)
+        XCTAssertEqual(first.decode, second.decode)
+        XCTAssertEqual(first.batches.map { $0.sorted() }, second.batches.map { $0.sorted() })
+        // Every row's decode steps, with the active rows beside it.
+        // Decode batches: b and c prefill together while a decodes, d after them.
+        XCTAssertEqual(first.batches.map { $0.sorted() }, [
+            ["a"], ["a", "b", "c"], ["a", "b", "c", "d"], ["a", "b", "c", "d"], ["a", "b", "c", "d"],
+            ["a", "d"], ["a"], ["a"],
+        ])
+        XCTAssertEqual(first.results[0].servedPath, ServedPath(path: .continuousBatching, rows: 3))
+        // b and c: 4 steps at 4 rows. d: 4, 4, 4, then 2 beside a: 3.5 rounds to 4.
+        for joined in first.results.dropFirst() {
+            XCTAssertEqual(joined.servedPath, ServedPath(path: .continuousBatching, rows: 4))
+        }
+    }
+
     func testConversationKeyWithoutReusableStateBatchesAsFreshRequest() async throws {
         let backend = ScriptedBackend(scripts: ["keyed": [7]])
         let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
