@@ -97,13 +97,17 @@ func InEpsilonCohort(
 		if balancedScore == nil {
 			return false
 		}
+		// SPEC-002-R005: two decode-fresh candidates compare their
+		// measured balanced scores; any other pair the FR-SR-8 scores.
+		st, okT := weights.MeasuredBalanced[top.SortKey()]
+		sc, okC := weights.MeasuredBalanced[candidate.SortKey()]
+		if okT && okC {
+			return WithinRelativeEpsilon(st, sc, epsilon)
+		}
 		return WithinRelativeEpsilon(balancedScore(top), balancedScore(candidate), epsilon)
 	case ObjectiveFast:
-		return WithinRelativeEpsilon(
-			EffectiveThroughput(top, weights),
-			EffectiveThroughput(candidate, weights),
-			epsilon,
-		)
+		tt, tc := pairThroughput(top, candidate, weights)
+		return WithinRelativeEpsilon(tt, tc, epsilon)
 	default:
 		// ObjectiveDefault (utilization mode): slots_free MUST equal
 		// top's, AND effective throughput within epsilon. Per
@@ -112,10 +116,7 @@ func InEpsilonCohort(
 		if top.SlotsFree != candidate.SlotsFree {
 			return false
 		}
-		return WithinRelativeEpsilon(
-			EffectiveThroughput(top, weights),
-			EffectiveThroughput(candidate, weights),
-			epsilon,
-		)
+		tt, tc := pairThroughput(top, candidate, weights)
+		return WithinRelativeEpsilon(tt, tc, epsilon)
 	}
 }

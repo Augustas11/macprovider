@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 const (
@@ -29,10 +31,18 @@ type requestPhaseTiming struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	// providerID and providerModelID come from the provider snapshot the
+	// attempt was dispatched to; SPEC-002-R005 keys its record by them.
+	providerID      string
+	providerModelID string
 	// providerFirstToken is the first delivered chunk that carries generated
 	// content or a tool call (SPEC-002-R005). A role-only opening chunk is a
 	// first byte but not a first token.
 	providerFirstToken time.Time
+	// buyerBlocked sums the buyer writes and flushes of at least
+	// routing.PerfBuyerWriteMin made between the first token and done: time
+	// the coordinator spent blocked on the buyer, not waiting on the provider.
+	buyerBlocked time.Duration
 }
 
 func (t *requestPhaseTiming) init(start time.Time) {
@@ -47,7 +57,7 @@ func (t *requestPhaseTiming) markCoordRoutingDone(at time.Time) {
 	t.coordRoutingDone = at
 }
 
-func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAssignedID string) {
+func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, provider pool.Provider) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.providerDispatchStart = at
@@ -55,7 +65,10 @@ func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAss
 	t.providerFirstByte = time.Time{}
 	t.providerDone = time.Time{}
 	t.providerFirstToken = time.Time{}
-	t.providerAssignedID = providerAssignedID
+	t.buyerBlocked = 0
+	t.providerAssignedID = provider.AssignedID
+	t.providerID = provider.ProviderID
+	t.providerModelID = provider.ModelID
 }
 
 func (t *requestPhaseTiming) markProviderFirstToken(at time.Time) {
@@ -63,6 +76,20 @@ func (t *requestPhaseTiming) markProviderFirstToken(at time.Time) {
 	defer t.mu.Unlock()
 	if t.providerFirstToken.IsZero() {
 		t.providerFirstToken = at
+	}
+}
+
+// addBuyerWrite records one buyer write or flush that took d. Only writes
+// inside the decode window (first token set, done not yet) of at least
+// routing.PerfBuyerWriteMin count. It reads no clock of its own.
+func (t *requestPhaseTiming) addBuyerWrite(d time.Duration) {
+	if d < routing.PerfBuyerWriteMin {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.providerFirstToken.IsZero() && t.providerDone.IsZero() {
+		t.buyerBlocked += d
 	}
 }
 
@@ -99,7 +126,10 @@ func (t *requestPhaseTiming) snapshot() requestPhaseTimingSnapshot {
 		providerFirstByte:     t.providerFirstByte,
 		providerDone:          t.providerDone,
 		providerAssignedID:    t.providerAssignedID,
+		providerID:            t.providerID,
+		providerModelID:       t.providerModelID,
 		providerFirstToken:    t.providerFirstToken,
+		buyerBlocked:          t.buyerBlocked,
 	}
 }
 
@@ -111,7 +141,10 @@ type requestPhaseTimingSnapshot struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	providerID            string
+	providerModelID       string
 	providerFirstToken    time.Time
+	buyerBlocked          time.Duration
 }
 
 type phaseTimingResponseWriter struct {
@@ -126,15 +159,25 @@ func (w *phaseTimingResponseWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Write and the flushes pass the same bytes in the same order; they only
+// time the call for the SPEC-002-R005 buyer-blocked sum.
 func (w *phaseTimingResponseWriter) Write(b []byte) (int, error) {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	return w.ResponseWriter.Write(b)
 }
 
 func (w *phaseTimingResponseWriter) Flush() {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+func (w *phaseTimingResponseWriter) timeBuyerWrite(start time.Time) {
+	if w.state != nil {
+		w.state.phaseTiming.addBuyerWrite(time.Since(start))
 	}
 }
 
@@ -143,6 +186,7 @@ func (w *phaseTimingResponseWriter) Flush() {
 // body; Flush alone would hide the error.
 func (w *phaseTimingResponseWriter) FlushError() error {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
@@ -376,6 +420,22 @@ func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
 
 func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
+}
+
+// routingProviderDecodeMs is routingDecodeMs unchanged, except that ok is
+// false when the coordinator was blocked writing to the buyer for at least
+// routing.PerfBuyerLimitedShare of the window (SPEC-002-R005): a
+// buyer-limited attempt yields no decode sample.
+func (snap requestPhaseTimingSnapshot) routingProviderDecodeMs() (float64, bool) {
+	raw := snap.routingDecodeMs()
+	if raw == nil {
+		return 0, false
+	}
+	blocked := float64(snap.buyerBlocked) / float64(time.Millisecond)
+	if blocked >= routing.PerfBuyerLimitedShare**raw {
+		return 0, false
+	}
+	return *raw, true
 }
 
 func (snap requestPhaseTimingSnapshot) matchesProviderAssignedID(providerAssignedID string) bool {

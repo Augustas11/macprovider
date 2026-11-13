@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 var perfNow = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
@@ -153,8 +155,10 @@ func TestPerfPrefillUsesServiceTime(t *testing.T) {
 	if e, _ := s.Lookup("chatty", "m"); e.PrefillSamples != 0 {
 		t.Fatalf("decode-dominated attempt gave a prefill sample: %+v", e)
 	}
-	if got := s.LookupMany("m", []string{"gamer", "absent"}); len(got) != 1 || got["gamer"].PrefillTPS != 2000 {
-		t.Fatalf("LookupMany = %+v", got)
+	gamer := pool.Provider{ProviderID: "gamer", AssignedID: "s-gamer", ModelID: "M"}
+	absent := pool.Provider{ProviderID: "absent", AssignedID: "s-absent", ModelID: "m"}
+	if got := s.LookupCandidates([]pool.Provider{gamer, absent}); len(got) != 1 || got[gamer.SortKey()].PrefillTPS != 2000 {
+		t.Fatalf("LookupCandidates = %+v", got)
 	}
 }
 

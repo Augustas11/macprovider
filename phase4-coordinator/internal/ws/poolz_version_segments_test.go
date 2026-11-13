@@ -2,6 +2,7 @@ package ws
 
 import (
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -34,7 +35,7 @@ func TestPoolzVersionSegmentsSeparatesBackendLatency(t *testing.T) {
 			State: pool.StateReady, SlotsTotal: 1, SlotsFree: 1,
 		},
 	}
-	segments := poolzVersionSegments(providers)
+	segments := poolzVersionSegments(providers, nil, time.Time{})
 	if len(segments) != 3 {
 		t.Fatalf("segments = %d, want 3 (1.8.48, 1.8.40, unknown)", len(segments))
 	}
@@ -77,7 +78,7 @@ func TestPoolzVersionSegmentsSeparatesBackendLatency(t *testing.T) {
 
 func TestPoolzVersionSegmentsEmptyPool(t *testing.T) {
 	t.Parallel()
-	if got := poolzVersionSegments(nil); len(got) != 0 {
+	if got := poolzVersionSegments(nil, nil, time.Time{}); len(got) != 0 {
 		t.Fatalf("segments for an empty pool = %v, want empty", got)
 	}
 }

@@ -2,8 +2,11 @@ package routing
 
 import (
 	"math"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 // SPEC-002-R005 measured-performance store constants.
@@ -28,6 +31,17 @@ const (
 	PerfMaxDecodeTPS         = 2_000
 	PerfPriorWeightSamples   = 2
 	PerfPriorCapOverMeasure  = 1.25
+	// PerfBuyerWriteMin: a buyer write or flush inside the decode window that
+	// takes at least this long counts as time blocked on the buyer.
+	PerfBuyerWriteMin = time.Millisecond
+	// PerfBuyerLimitedShare: when buyer-blocked time inside the decode
+	// window is at least this share of the window, the attempt was
+	// buyer-limited and yields no decode sample; below it the window is
+	// used unchanged.
+	PerfBuyerLimitedShare = 0.05
+	// PerfClockSkewTolerance: a sample timestamped further than this in
+	// the future (the clock stepped back) is not recent.
+	PerfClockSkewTolerance = 5 * time.Second
 )
 
 // PerfObservation is one coordinator-timed served attempt. Durations come
@@ -86,7 +100,11 @@ func signalFresh(samples int, last, now time.Time) bool {
 }
 
 func signalRecent(samples int, last, now time.Time) bool {
-	return samples > 0 && !last.IsZero() && now.Sub(last) <= PerfFreshMaxAge
+	if samples <= 0 || last.IsZero() {
+		return false
+	}
+	age := now.Sub(last)
+	return age >= -PerfClockSkewTolerance && age <= PerfFreshMaxAge
 }
 
 // TTFTFresh, PrefillFresh, DecodeFresh and ServiceFresh report whether one signal has at
@@ -164,8 +182,14 @@ type perfKey struct {
 	model      string
 }
 
-// PerfStore is the in-memory SPEC-002-R005 store keyed by provider and
-// requested model. It is not persisted.
+// newPerfKey case-folds the served model (SPEC-002 model equality), so every
+// spelling of one session's model shares a record.
+func newPerfKey(providerID, model string) perfKey {
+	return perfKey{providerID: providerID, model: strings.ToLower(model)}
+}
+
+// PerfStore is the in-memory SPEC-002-R005 store keyed by provider and the
+// served model of the dispatched session. It is not persisted.
 type PerfStore struct {
 	mu          sync.RWMutex
 	entries     map[perfKey]*PerfEvidence
@@ -229,7 +253,7 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	if o.EndToEnd && math.IsNaN(prefill) && math.IsNaN(service) {
 		return
 	}
-	key := perfKey{providerID: o.ProviderID, model: o.Model}
+	key := newPerfKey(o.ProviderID, o.Model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[key]
@@ -332,18 +356,19 @@ func (s *PerfStore) evictLocked(now time.Time) {
 	s.deleteLocked(oldestKey)
 }
 
-// LookupMany returns copies of the records for model and each providerID
-// present, under one read lock.
-func (s *PerfStore) LookupMany(model string, providerIDs []string) map[string]PerfEvidence {
-	out := make(map[string]PerfEvidence, len(providerIDs))
+// LookupCandidates returns copies of the records for each candidate's
+// provider and served model, keyed by pool.Provider.SortKey(), under one read
+// lock.
+func (s *PerfStore) LookupCandidates(candidates []pool.Provider) map[string]PerfEvidence {
+	out := make(map[string]PerfEvidence, len(candidates))
 	if s == nil {
 		return out
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, id := range providerIDs {
-		if e, ok := s.entries[perfKey{providerID: id, model: model}]; ok {
-			out[id] = *e
+	for _, p := range candidates {
+		if e, ok := s.entries[newPerfKey(p.ProviderID, p.ModelID)]; ok {
+			out[p.SortKey()] = *e
 		}
 	}
 	return out
@@ -356,7 +381,7 @@ func (s *PerfStore) Lookup(providerID, model string) (PerfEvidence, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	e, ok := s.entries[perfKey{providerID: providerID, model: model}]
+	e, ok := s.entries[newPerfKey(providerID, model)]
 	if !ok {
 		return PerfEvidence{}, false
 	}

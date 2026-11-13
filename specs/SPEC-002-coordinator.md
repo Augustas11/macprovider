@@ -1,6 +1,33 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.30 (2026-11-07, a revoked release stays connected update-only and the CLI train reloads it with SIGHUP)
+**Version:** 1.6.31 (2026-11-13, objective ordering and the throughput floor use measured decode tok/s when fresh)
+
+**Change log v1.6.31 (2026-11-13, Related: #2321):** Defines **routed
+throughput** in `SPEC-002-R005`: the measured decode average, blended with the
+heartbeat `throughput_tps_estimate` as the existing capped prior, when the
+provider's decode signal is fresh, and the estimate otherwise. The objective
+sort still runs on the estimate; afterwards only decode-fresh candidates are
+reordered by routed throughput, among the positions they already hold and
+within equal non-throughput objective keys, so every unmeasured candidate
+keeps its position and with zero or one decode-fresh candidate the order is
+unchanged; pairwise comparisons (epsilon cohorts, sticky, tiebreak) of a fresh
+and an unmeasured candidate use estimates. Pinned requests record no
+observation; an attempt whose buyer writes and flushes blocked at least 5% of
+its decode window yields no decode sample, and every other sample is unchanged;
+samples more than 5 s in the future are not recent. SPEC-004 FR-SR-16 epsilon
+cohorts compare routed values only between two decode-fresh candidates. The
+`routing.min_provider_throughput_tps` floor (buyer selection, the slot-queue
+re-check and `/poolz.routing_eligible`, which feeds `serving_eligible`)
+compares routed throughput. The store is keyed by the served model ID of the
+dispatched provider snapshot (case-folded) instead of the buyer's requested
+model string, so one record serves exact, alias, class and differently cased
+requests and can be read without a request; one store is shared by buyer
+routing, `/poolz` and the explorer. The store stays in memory: after a restart
+every provider is ordered by its estimate until it is decode-fresh again.
+`/poolz` rows, the `/poolz` per-version segments, the operator explorer
+provider rows and the SPEC-004 routing-decision `candidate_set` show the
+measured values next to the estimate. No admission, trust tier, pricing,
+settlement or buyer-visible grammar changes.
 
 **Change log v1.6.30 (2026-11-07, Related: #2247):** `SPEC-002-R004` reload.
 An exact revocation of a connected buyer-serving session marks that session
@@ -2235,7 +2262,7 @@ request header:
 
 | Value | Meaning | Selection effect |
 |---|---|---|
-| `fast` | Maximize throughput | Prefer highest `throughput_tps_estimate` |
+| `fast` | Maximize throughput | Prefer highest `throughput_tps_estimate`, then the SPEC-002-R005 routed-throughput reorder |
 | `accurate` | Maximize model quality | Prefer highest `model_params_b` |
 | (absent) | Default | Utilization-favoring (FR-R1) |
 
@@ -2257,6 +2284,14 @@ expected but unavailable tokenizer never triggers fallback).
 It is 0 when unmeasured (probe failed, did not run, or an autotune candidate),
 which sits below any positive floor. It is a provider-reported startup value,
 not a sustained decode benchmark, and not a billed or attested quantity.
+
+**Routed throughput (v1.6.31).** The floor compares routed throughput
+(SPEC-002-R005). The objective sorts (`fast`, the `accurate` and default-mode
+tie-breaks, SPEC-004 `balanced`) still compare this estimate; SPEC-002-R005
+then reorders only decode-fresh candidates among their own positions by
+routed throughput. Routed throughput equals the estimate for a provider
+without fresh measured decode, so a coordinator with no evidence compares
+exactly the quantity above.
 
 **FR-R3. Provider pinning via buyer header.**
 The buyer can pin to a specific provider via
@@ -2389,6 +2424,23 @@ Response:
   }
 }
 ```
+
+**Measured throughput fields (v1.6.31).** Each `pool` row also carries
+`measured_decode_tps` (the SPEC-002-R005 decode average for the row's
+provider and served model, `null` without a decode sample in the last 15
+minutes), `measured_decode_samples` (integer, 0 without a record),
+`measured_decode_age_s` (seconds since the last decode sample, `null`
+without one), `routed_throughput_tps` (the routed throughput the floor compares and the
+decode-fresh reorder uses) and `routed_throughput_source` (`measured` when the decode
+signal is fresh, else `reported`). `routing_eligible` applies the floor to
+`routed_throughput_tps`. Each `summary.by_binary_version` segment gains
+`measured_decode_tps_samples` (rows with a fresh decode signal) and
+`measured_decode_tps_avg` (their mean decode average, `null` when none) next
+to `reported_tps_estimate_samples` and `reported_tps_estimate_avg`. The
+operator-token explorer provider rows carry the same five row fields next to
+`throughput_tps_estimate`. These are
+per-provider aggregates of the coordinator's own measurements; no request,
+buyer or prompt data appears.
 
 The `summary` block is the raw coordinator/operator summary; per the SPEC-002 v1.4.1 aggregation rule below, the SPEC-006 gateway derives buyer-facing `/v1/status` counters from the detailed `pool` array (applying the `auth_state == "bearerless_duplicate"` exclusion) when those rows are present, and MAY fall back to `summary` only when the coordinator omitted the detailed `pool` array entirely. The detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
 
@@ -2637,6 +2689,10 @@ function route(request, pool, headers) -> provider | error:
         # Prefer lowest positive slots_free (concentrate load)
         # Break ties by throughput descending
         sort(candidates, key=(slots_free, -effective_throughput))
+
+    # Step 3.5 (v1.6.31): SPEC-002-R005 routed-throughput reorder of the
+    # decode-fresh candidates among their own positions, within equal
+    # non-throughput keys; no-op with zero or one decode-fresh candidate
 
     # Step 4: Select and preflight
     for provider in candidates:
@@ -5529,14 +5585,23 @@ rather than replacing it with a protocol-shape error.
 ## SPEC-002-R005 — Measured-performance store
 
 The coordinator MUST keep an in-memory performance record per
-(`provider_id`, requested model) built only from requests it served and
-measured itself. An observation is recorded once per provider attempt, when
+(`provider_id`, served model) built only from requests it served and
+measured itself. The served model is the `model_id` of the provider snapshot
+the attempt was dispatched to, taken at dispatch time and case-folded
+(SPEC-002 model equality), so an exact request, an alias, a SPEC-004 class
+request and a differently cased request served by the same session feed one
+record. An observation is recorded once per provider attempt, when
 the attempt completed with a 2xx status and no recorded error, error code or
 fault, names its provider, has coordinator timing for that same attempt, and
 has a normally completed settlement output that delivered content or a tool
 call. Missing or unavailable output is not empty output: such an attempt has no
 output estimate and yields no observation. Relay-blind and privacy-class
-attempts MUST NOT be recorded.
+attempts MUST NOT be recorded. Pinned requests (an `X-MacProvider-Provider`
+or `X-MacProvider-Session` header) MUST NOT be recorded: the buyer chose the
+provider, so the attempt is not a routing outcome and a buyer must not be able
+to aim samples at one provider. The gateway strips these headers from buyer
+requests, so ordinary gateway traffic is unaffected; only direct pinned
+traffic, such as the integrity probe, stops recording.
 
 The first-token time is when the first delivered event carrying generated
 content or a tool call reaches the buyer side of the coordinator; an opening
@@ -5571,7 +5636,14 @@ shorten it; no provider usage count enters a rate:
   cannot inflate it;
 - a decode rate (timed only), the output estimate minus 1 divided by the
   first-token-to-done time, when the output estimate is at least 8 and the
-  time is positive, clamped to at most 2000 tokens/s;
+  time is positive, clamped to at most 2000 tokens/s. Every buyer write or
+  flush of the attempt that takes at least 1 ms and starts after the first
+  token and before done is summed as buyer-blocked time. When that sum is at
+  least 5% of the raw first-token-to-done time, the buyer limited the stream
+  and the attempt yields no decode sample; otherwise the raw time is used
+  unchanged. Buyer-blocked time never adjusts any time or sample. The timing
+  only measures the existing write and flush calls; it changes neither the
+  bytes written nor their order;
 - a service throughput (non-streamed attempts only), the output estimate
   divided by the service time, when the output estimate is at least 8, the
   coordinator's estimate of the whole request (cached or not) is at most 16
@@ -5592,7 +5664,8 @@ it.
 Each metric is an exponentially weighted moving average with weight 0.2 for
 the new sample, with its own sample count and the time of its own last
 observation. A signal is **fresh** when it has at least 3 samples and its last
-observation is at most 15 minutes old; a record is fresh for a phase when the
+observation is at most 15 minutes old and at most 5 seconds in the future (a
+later timestamp is clock skew and is not recent); a record is fresh for a phase when the
 signal that phase is judged on (SPEC-002-R006) is fresh, and is otherwise
 **unmeasured** for it. Samples of one signal never refresh another, so a
 missing or stale TTFT is never read as zero or as fast.
@@ -5602,14 +5675,97 @@ score weighs equally, it cannot change the prefill rate, and the bounds in SPEC-
 
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior (not a service-throughput prior) worth 2 samples and capped at 1.25 times the measured decode
-average, so a self-report never outranks measurements. The SPEC-001-R006
+average, so a self-report never outranks measurements, and as the routed
+throughput fallback below. The SPEC-001-R006
 engine profile MUST NOT be read as a measurement. The store holds at most
 65536 records and at most 64 per provider; a provider at its budget replaces
 its own least recently observed record, so it never displaces another
 provider's, and a full store evicts records with no fresh signal first, then
 the least recently observed. It is not persisted: after a coordinator restart every
-provider is unmeasured until traffic rebuilds it. The store never changes
-eligibility, admission, trust tier, pricing or settlement.
+provider is unmeasured until traffic rebuilds it, and its routed throughput is
+its estimate. The store never changes admission, trust tier, pricing or
+settlement; its only effect on eligibility is the optional
+`routing.min_provider_throughput_tps` floor below.
+
+**Routed throughput (v1.6.31).** For a candidate, routed throughput is:
+
+- when the record for its provider and served model has a fresh decode signal
+  (at least 3 decode samples, the latest at most 15 minutes old): the decode
+  average blended with `throughput_tps_estimate` as the prior above
+  (`(2 × min(estimate, 1.25 × decode) + n × decode) / (2 + n)` for `n`
+  decode samples; the decode average alone when the estimate is 0 or not
+  finite). Source `measured`; the candidate is **decode-fresh**;
+- otherwise: `throughput_tps_estimate`. Source `reported`.
+
+**Objective order.** The SPEC-002 FR-R2 and SPEC-004 FR-SR-8 objective sort
+runs on `throughput_tps_estimate` exactly as before. Then, inside each block of
+consecutive candidates whose non-throughput objective keys are equal (default
+mode: equal `slots_free`; `accurate`: equal `model_params_b`; `fast` and
+`balanced`: the whole list, because for `fast` throughput is the first key
+and for `balanced` it is a weighted term of the one score), the
+decode-fresh candidates are reordered among the positions they already hold:
+by routed throughput times the admission-tier weight (ties: fewer
+`slots_free` first), and for `balanced` by the FR-SR-8 score with its
+throughput term normalized over the decode-fresh candidates' routed
+throughput and its other terms over all candidates. Every other candidate
+keeps its exact position, and with fewer than two decode-fresh candidates in
+a block nothing moves, so with zero or one decode-fresh candidate the order is
+the estimate order. Routed throughput reorders only decode-fresh candidates
+among the positions the estimate order gives them, within equal
+non-throughput objective keys. The pairwise comparison (epsilon cohorts,
+sticky, tiebreak) of a fresh and an unmeasured candidate uses estimates, while
+the order is positional: fresh candidates exchange positions among
+themselves, so a fresh candidate can end up ahead of an unmeasured one whose
+estimate is higher than its own. Example: estimate order F1 U F2 (F1 and F2
+decode-fresh, U unmeasured) with F2 routed faster than F1 becomes F2 U F1;
+F2 now precedes U although U's estimate is higher than F2's. The SPEC-004 FR-SR-16 epsilon cohorts likewise
+compare routed values (or, for `balanced`, the measured scores above) only
+when both candidates are decode-fresh, and estimates otherwise. One selection
+computes routed throughput once per candidate, at one coordinator time, and
+its sort, sticky judgement, epsilon cohorts and SPEC-004 routing-decision log
+read those values.
+
+**Floor.** The `routing.min_provider_throughput_tps` floor compares routed
+throughput without the tier weight, evaluated when the check runs, on the
+live store (not on the snapshot of the selection's sort): at buyer
+selection, at the slot-queue re-check when a queued provider is polled, and
+for `/poolz.routing_eligible`. The provider server reads the same shared
+measurement store as buyer routing. `routing_eligible` feeds
+`/poolz.serving_eligible`, which the gateway uses for the context the
+OpenRouter document advertises, so the floor reaches that document as it did
+before through the estimate. A provider the floor excludes on its measured
+decode receives no traffic, so its decode signal goes stale after 15 minutes
+and it is judged on its estimate again; sample counts are never reset, so its
+first new decode sample makes the record fresh again with the existing
+average (unless the store evicted the record in the meantime). The floor stays
+off at its default of 0.
+
+**Exploration.** SPEC-002-R006 exploration applies to candidates unmeasured
+for the request's phase, outside sticky hits, among candidates that passed the
+floor; throughput-phase traffic yields no decode sample. Routed throughput
+adds no exploration of its own.
+
+**Where the objective order decides.** The objective order (with the
+reorder above) is the final order, or part of it, in these cases: a sticky
+judgement and sticky hit; a `fallback` decision with fewer than two
+candidates fresh for the phase, for every phase, including `throughput`
+requests (fresh means fresh service throughput) and `long_input` requests
+(fresh prefill or TTFT); the order of the unmeasured candidates after the
+fresh ones in a `measured` decision; the order of the unmeasured candidates
+placed first in an `explore` decision; the SPEC-004 random tiebreak cohort;
+the slot-queue order; and the floor.
+
+Note (non-normative): known limits. The decode rate is the coordinator's
+estimate of delivered output over its own first-token-to-done time, and no
+provider usage count enters it. A provider that delivers its whole output in
+one late burst gets a short decode window, so decode alone can be inflated
+(up to the 2000 tokens/s clamp) at the cost of TTFT. The
+positional rule limits what that can change to the order among already-fresh
+candidates with equal other objective keys and to the floor; unmeasured
+candidates keep their positions. With two or more fresh candidates in the `interactive`
+phase, the SPEC-002-R006 score, which weighs TTFT equally with decode, still
+decides. The estimate can never raise routed throughput above 1.25 times the
+measured decode once decode is fresh.
 
 ## SPEC-002-R006 — Phase-aware selection
 
@@ -5655,6 +5811,11 @@ the unmeasured candidates in objective order. Basis `measured`.
 fresh, a per-request draw below 0.10 puts the unmeasured candidates first, in
 objective order, followed by the fresh ones by score. Basis `explore`. So a
 new or idle provider keeps receiving traffic until it is measured.
+
+The objective order this step starts from, and the order it keeps for
+unmeasured candidates, is the estimate order with the SPEC-002-R005 routed
+throughput reorder of decode-fresh candidates, and records are looked up by
+each candidate's provider and served model.
 
 **Fallback.** With fewer than two fresh candidates (and no exploration draw),
 the objective order is kept and the existing sticky and random tiebreak steps

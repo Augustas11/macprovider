@@ -70,6 +70,12 @@ type Candidate struct {
 type Weights struct {
 	Pinned      float64
 	Provisional float64
+	// Measured is SPEC-002-R005 routed throughput of the decode-fresh
+	// candidates of one request, keyed by SortKey (MeasuredThroughputs).
+	// nil or a single entry leaves every order and cohort unchanged.
+	Measured map[string]float64
+	// MeasuredBalanced is MeasuredBalancedScores for the same request.
+	MeasuredBalanced map[string]float64
 }
 
 // DefaultWeights returns the SPEC-002 v1.1 default tier weights.
