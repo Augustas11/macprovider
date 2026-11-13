@@ -1,5 +1,11 @@
 package sqlite
 
+import (
+	"strings"
+
+	"github.com/augstar/macprovider-gateway/internal/storage"
+)
+
 // usageEventsTableDDL is the canonical CREATE TABLE for usage_events
 // in its post-#196 composite-PK shape. Used both inside schemaSQL
 // (fresh installs) and inside ensureUsageEventsCompositePK
@@ -303,6 +309,34 @@ CREATE INDEX IF NOT EXISTS idx_demand_created_model ON demand_events(created_at,
 CREATE INDEX IF NOT EXISTS idx_demand_model_created ON demand_events(requested_model, created_at);
 CREATE INDEX IF NOT EXISTS idx_demand_buyer_model_created ON demand_events(buyer_hash, requested_model, created_at);
 ` + demandEventsUpdateTriggerDDL
+
+// demandEventsServingTelemetryColumns are the SPEC-006-R028 columns.
+// ensureDemandEventsServingTelemetryColumns adds them to fresh and existing
+// tables alike, so both have one shape. NULL means absent, never zero.
+var demandEventsServingTelemetryColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"gw_first_reasoning_ms", "INTEGER CHECK (gw_first_reasoning_ms IS NULL OR gw_first_reasoning_ms >= 0)"},
+	{"gw_first_answer_ms", "INTEGER CHECK (gw_first_answer_ms IS NULL OR gw_first_answer_ms >= 0)"},
+	{"gw_output_tps_millitokens", "INTEGER CHECK (gw_output_tps_millitokens IS NULL OR gw_output_tps_millitokens >= 0)"},
+	{"streaming_mode", "TEXT NOT NULL DEFAULT '' CHECK (streaming_mode IN (" + sqlStringList(append([]string{""}, storage.DemandStreamingModes...)) + "))"},
+	{"serving_engine", "TEXT NOT NULL DEFAULT 'unknown' CHECK (serving_engine IN (" + sqlStringList(storage.DemandServingEngines) + "))"},
+	{"provider_reported_queue_ms", "INTEGER CHECK (provider_reported_queue_ms IS NULL OR provider_reported_queue_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_first_token_ms", "INTEGER CHECK (provider_reported_first_token_ms IS NULL OR provider_reported_first_token_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_first_answer_ms", "INTEGER CHECK (provider_reported_first_answer_ms IS NULL OR provider_reported_first_answer_ms BETWEEN 0 AND 3600000)"},
+	{"provider_reported_decode_ms", "INTEGER CHECK (provider_reported_decode_ms IS NULL OR provider_reported_decode_ms BETWEEN 0 AND 3600000)"},
+}
+
+// sqlStringList renders fixed vocabulary values as a SQL IN list. The values
+// are compile-time constants without quotes.
+func sqlStringList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = "'" + v + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
 
 const demandEventsUpdateTriggerDDL = `
 

@@ -4,8 +4,10 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 // Issue #764 asked for TTFT/TPS rollups segmented by binary_version so a slow
@@ -44,6 +46,10 @@ type poolzVersionSegment struct {
 	ReportedTPSSamples int      `json:"reported_tps_estimate_samples"`
 	ReportedTPSAvg     *float64 `json:"reported_tps_estimate_avg"`
 
+	// SPEC-002-R005 measured decode of the rows whose decode signal is fresh.
+	MeasuredDecodeTPSSamples int      `json:"measured_decode_tps_samples"`
+	MeasuredDecodeTPSAvg     *float64 `json:"measured_decode_tps_avg"`
+
 	Models []string `json:"models"`
 }
 
@@ -53,12 +59,13 @@ const poolzUnknownBinaryVersion = "unknown"
 
 // poolzVersionSegments builds the per-binary_version breakdown. Pure over the
 // snapshot; safe to call under the /poolz handler with no additional locking.
-func poolzVersionSegments(providers []pool.Provider) map[string]poolzVersionSegment {
+func poolzVersionSegments(providers []pool.Provider, perf *routing.PerfStore, now time.Time) map[string]poolzVersionSegment {
 	type accumulator struct {
 		seg          poolzVersionSegment
 		ttftSum      float64
 		tpsSum       float64
 		reportedSum  float64
+		measuredSum  float64
 		ttftMax      int
 		modelsSeen   map[string]struct{}
 		modelsSorted []string
@@ -95,6 +102,10 @@ func poolzVersionSegments(providers []pool.Provider) map[string]poolzVersionSegm
 			a.seg.ReportedTPSSamples++
 			a.reportedSum += p.ThroughputTPSEstimate
 		}
+		if e, ok := perf.Lookup(p.ProviderID, p.ModelID); ok && e.DecodeFresh(now) && finitePositive(e.DecodeTPS) {
+			a.seg.MeasuredDecodeTPSSamples++
+			a.measuredSum += e.DecodeTPS
+		}
 		if model := strings.TrimSpace(p.ModelID); model != "" {
 			if _, seen := a.modelsSeen[model]; !seen {
 				a.modelsSeen[model] = struct{}{}
@@ -118,6 +129,10 @@ func poolzVersionSegments(providers []pool.Provider) map[string]poolzVersionSegm
 		if seg.ReportedTPSSamples > 0 {
 			avg := a.reportedSum / float64(seg.ReportedTPSSamples)
 			seg.ReportedTPSAvg = &avg
+		}
+		if seg.MeasuredDecodeTPSSamples > 0 {
+			avg := a.measuredSum / float64(seg.MeasuredDecodeTPSSamples)
+			seg.MeasuredDecodeTPSAvg = &avg
 		}
 		sort.Strings(a.modelsSorted)
 		seg.Models = a.modelsSorted

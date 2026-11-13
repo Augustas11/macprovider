@@ -145,6 +145,7 @@ type DemandTelemetryStore interface {
 	PruneDemandEvents(ctx context.Context, before time.Time) (int64, error)
 	DemandSummary(ctx context.Context, query DemandSummaryQuery) ([]DemandSummaryRow, error)
 	DemandRouteSummary(ctx context.Context, query DemandSummaryQuery) ([]DemandRouteSummaryRow, error)
+	DemandLatencyPercentiles(ctx context.Context, since, until time.Time) ([]DemandLatencyCell, error)
 }
 
 type WalletSessionStore interface {

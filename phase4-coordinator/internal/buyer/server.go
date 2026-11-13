@@ -721,8 +721,18 @@ func (s *Server) providerMeetsRoutingQuality(p pool.Provider) bool {
 	s.routingMu.RLock()
 	floor := s.minProviderThroughput
 	s.routingMu.RUnlock()
-	if floor <= 0 || p.ThroughputTPSEstimate >= floor {
+	if floor <= 0 {
 		return true
+	}
+	// SPEC-002-R005: the floor compares routed throughput (untiered),
+	// evaluated when the check runs, including the slot-queue re-check.
+	routed, measured := routing.RoutedThroughput(p, s.perf, s.now())
+	if routed >= floor {
+		return true
+	}
+	source := routing.ThroughputSourceReported
+	if measured {
+		source = routing.ThroughputSourceMeasured
 	}
 	s.log.Debug().
 		Str("event", "provider_throughput_floor_excluded").
@@ -730,6 +740,8 @@ func (s *Server) providerMeetsRoutingQuality(p pool.Provider) bool {
 		Str("assigned_id", p.AssignedID).
 		Str("model_id", p.ModelID).
 		Float64("throughput_tps_estimate", p.ThroughputTPSEstimate).
+		Float64("routed_throughput_tps", routed).
+		Str("throughput_source", source).
 		Float64("min_provider_throughput_tps", floor).
 		Msg("provider excluded by routing throughput floor")
 	return false
@@ -2659,6 +2671,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// state values at log-write time, so it holds *forwardState.
 	state := newForwardState(startedAt)
 	state.markConversationCacheOnly(r.Header)
+	// SPEC-002-R005: the buyer chose the target of a pinned request, so none
+	// of its attempts is a routing measurement.
+	state.perfPinned = hasPinnedRoute(r.Header)
 	state.capacityShed429Negotiated = strings.TrimSpace(r.Header.Get(capacityShed429CapabilityHeader)) == "1"
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
@@ -3613,7 +3628,7 @@ func (s *Server) forwardHTTPSequence(
 			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			providerhttp.SetCoordinatorOrigin(upReq.Header)
-			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
+			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			if doErr == nil && resp != nil {
 				s.noteProviderAcceptedRequest(state)
@@ -4187,7 +4202,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	var relay *providerws.RelayStream
 	var err error
 	if state != nil {
-		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}
 	if stream {
 		// forwardWSStreaming registers the delivered-output measure; a
@@ -5366,7 +5381,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 	}
 	if state != nil {
-		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}
 	resp, err := providerhttp.Client.Do(upReq)
 	if err == nil && resp != nil {
@@ -8797,11 +8812,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// applySticky's sticky-path log emitters,
 	// logRoutingDecisionFullWithCache) finds the same value the
 	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
-	balancedCache := s.sortCandidates(candidates, objective)
+	view := s.sortCandidates(candidates, objective)
 	// SPEC-004 sticky affinity is judged against the objective order. A
 	// sticky hit keeps its provider first and skips the SPEC-002-R006 phase
 	// reorder; otherwise the phase step reorders (only the order changes).
-	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
+	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, view)
 	var phaseDecision routeDecision
 	if stickyResult == "hit" {
 		phaseDecision = s.stickyRouteDecision(req, estimatedTokens, candidates)
@@ -8811,7 +8826,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
 		if phaseDecision.basis == routing.BasisFallback {
-			candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+			candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, view)
 		} else {
 			reason = "phase_" + string(phaseDecision.basis)
 		}
@@ -8822,7 +8837,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// post-filter slice length, and filtered_counts was always
 	// omitted). routeKeyedFilterCounts converts routing.RejectionReason
 	// enum keys to SPEC-004 §7 stringly names.
-	s.logRoutingDecisionFullWithCache(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "", balancedCache)
+	s.logRoutingDecisionFullWithCache(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "", view)
 	var capacityErr *routeError
 	var busyCandidates []pool.Provider
 	preflightRejected := false
@@ -9202,17 +9217,49 @@ func (s *Server) SetSlotQueueConfig(maxPendingPerProvider int, deadline, pollInt
 // Returns nil for non-balanced objectives — the cache is meaningless
 // outside the balanced score-map shape, and downstream consumers
 // gate on nil to fall through to their own per-objective compute.
-func (s *Server) sortCandidates(candidates []pool.Provider, objective string) map[string]float64 {
-	return routing.SortCandidatesWithScores(candidates, routing.Objective(objective), routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}, nil)
+func (s *Server) sortCandidates(candidates []pool.Provider, objective string) *objectiveView {
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	balanced := routing.SortCandidatesWithScores(candidates, routing.Objective(objective), weights, nil)
+	// SPEC-002-R005 routed throughput: computed once, then only decode-fresh
+	// candidates move, among the positions the estimate order gave them.
+	weights.Measured = routing.MeasuredThroughputs(candidates, s.perf, s.now())
+	if routing.Objective(objective) == routing.ObjectiveBalanced {
+		weights.MeasuredBalanced = routing.MeasuredBalancedScores(candidates, weights)
+	}
+	routing.ReorderMeasured(candidates, routing.Objective(objective), weights)
+	return &objectiveView{balanced: balanced, weights: weights}
 }
 
-func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective, dailyKey string, balancedCache map[string]float64) ([]pool.Provider, int64, float64, string) {
+// objectiveView is one selection's objective inputs: the FR-SR-8 balanced
+// scores and the weights carrying SPEC-002-R005 routed throughput. The sort,
+// sticky judgement, epsilon cohorts and the routing-decision log of one
+// selection read the same view. A nil view means estimates only.
+type objectiveView struct {
+	balanced map[string]float64
+	weights  routing.Weights
+}
+
+func (v *objectiveView) routingWeights(s *Server) routing.Weights {
+	if v == nil {
+		return routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	}
+	return v.weights
+}
+
+func (v *objectiveView) balancedScores() map[string]float64 {
+	if v == nil {
+		return nil
+	}
+	return v.balanced
+}
+
+func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective, dailyKey string, view *objectiveView) ([]pool.Provider, int64, float64, string) {
 	if !s.tiebreakRandomize || len(candidates) < 2 {
 		return candidates, 0, 0, "deterministic"
 	}
 	cohortEnd := 1
 	for cohortEnd < len(candidates) {
-		if !s.inEpsilonCohort(candidates[0], candidates[cohortEnd], objective, candidates, balancedCache) {
+		if !s.inEpsilonCohort(candidates[0], candidates[cohortEnd], objective, candidates, view) {
 			break
 		}
 		cohortEnd++
@@ -9242,7 +9289,7 @@ func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provide
 	return candidates, seed, draw, "randomized"
 }
 
-func (s *Server) applySticky(requestID string, headers http.Header, model string, class *config.ModelClassConfig, candidates []pool.Provider, balancedCache map[string]float64) ([]pool.Provider, string, string) {
+func (s *Server) applySticky(requestID string, headers http.Header, model string, class *config.ModelClassConfig, candidates []pool.Provider, view *objectiveView) ([]pool.Provider, string, string) {
 	if !s.stickyEnabled || hasPinnedRoute(headers) {
 		return candidates, "disabled", ""
 	}
@@ -9255,7 +9302,7 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	}
 	entry, ok, reason := s.stickyLookup(key)
 	if !ok {
-		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_"+reason, "", balancedCache)
+		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_"+reason, "", view)
 		return candidates, "miss", reason
 	}
 	for i, candidate := range candidates {
@@ -9265,15 +9312,15 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 		if i == 0 {
 			return candidates, "hit", ""
 		}
-		if !s.inEpsilonCohort(candidates[0], candidate, s.objectiveForRequest(headers, class), candidates, balancedCache) {
-			s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_outside_epsilon", candidate.ProviderID, balancedCache)
+		if !s.inEpsilonCohort(candidates[0], candidate, s.objectiveForRequest(headers, class), candidates, view) {
+			s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_outside_epsilon", candidate.ProviderID, view)
 			return candidates, "miss", "outside_epsilon"
 		}
 		candidates[0], candidates[i] = candidates[i], candidates[0]
-		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_hit", candidate.ProviderID, balancedCache)
+		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_hit", candidate.ProviderID, view)
 		return candidates, "hit", ""
 	}
-	s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_provider_not_candidate", "", balancedCache)
+	s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_provider_not_candidate", "", view)
 	return candidates, "miss", "provider_not_candidate"
 }
 
@@ -9375,11 +9422,11 @@ func (s *Server) routingScores(candidates []pool.Provider, objective string) map
 // EVERY epsilon comparison — O(N) per applySticky/applyRandomTiebreak
 // iteration. nil cache + balanced objective falls through to a
 // freshly-computed map (legacy / test path).
-func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string, candidates []pool.Provider, balancedCache map[string]float64) bool {
-	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string, candidates []pool.Provider, view *objectiveView) bool {
+	weights := view.routingWeights(s)
 	var scoreFn func(pool.Provider) float64
 	if objective == "balanced" {
-		scores := balancedCache
+		scores := view.balancedScores()
 		if scores == nil {
 			scores = routing.KeyedBalancedScores(candidates)
 		}
@@ -9468,12 +9515,12 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 // at log-emit time. nil cache falls through to ObjectiveScores
 // (which recomputes — used by retry / sticky-miss log paths that
 // don't share the cache).
-func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCount int, filteredCounts map[string]int, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string, balancedCache map[string]float64) {
+func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCount int, filteredCounts map[string]int, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string, view *objectiveView) {
 	if chosen == "" && len(candidates) > 0 {
 		chosen = candidates[0].ProviderID
 	}
-	scores := routing.ObjectiveScoresWithCache(candidates, routing.Objective(objective), routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}, balancedCache)
-	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	weights := view.routingWeights(s)
+	scores := routing.ObjectiveScoresWithCache(candidates, routing.Objective(objective), weights, view.balancedScores())
 	set := make([]routing.CandidateLogEntry, 0, len(candidates))
 	var chosenAssignedID string
 	for _, p := range candidates {
@@ -9516,8 +9563,8 @@ func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCoun
 // formula doesn't recompute at every sticky log emission under
 // balanced+sticky enabled. Issue #266 T3 R1 CODE audit LOW fix
 // (closes the perf-cache integration gap in applySticky).
-func (s *Server) logRoutingDecisionWithCache(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string, balancedCache map[string]float64) {
-	s.logRoutingDecisionFullWithCache(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen, balancedCache)
+func (s *Server) logRoutingDecisionWithCache(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string, view *objectiveView) {
+	s.logRoutingDecisionFullWithCache(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen, view)
 }
 
 // retryDecisionAttrs carries the per-attempt FR-SR-17 / SPEC-004 §7
@@ -9565,6 +9612,10 @@ func (s *Server) logRoutingDecisionRetry(requestID string, candidates []pool.Pro
 	}
 	scores := s.routingScores(candidates, objective)
 	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	weights.Measured = routing.MeasuredThroughputs(candidates, s.perf, s.now())
+	if routing.Objective(objective) == routing.ObjectiveBalanced {
+		weights.MeasuredBalanced = routing.MeasuredBalancedScores(candidates, weights)
+	}
 	set := make([]routing.CandidateLogEntry, 0, len(candidates))
 	var chosenAssignedID string
 	for _, p := range candidates {
@@ -9791,11 +9842,11 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 	}
 	ordered := append([]pool.Provider(nil), candidates...)
 	objective := s.objectiveForRequest(headers, class)
-	balancedCache := s.sortCandidates(ordered, objective)
-	ordered, stickyResult, stickyMissReason := s.applySticky(requestID, headers, model, class, ordered, balancedCache)
+	view := s.sortCandidates(ordered, objective)
+	ordered, stickyResult, stickyMissReason := s.applySticky(requestID, headers, model, class, ordered, view)
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
-		ordered, seed, draw, reason = s.applyRandomTiebreak(requestID, ordered, objective, dailyKey, balancedCache)
+		ordered, seed, draw, reason = s.applyRandomTiebreak(requestID, ordered, objective, dailyKey, view)
 	}
 	deadline := s.slotQueueDeadline
 	if deadline <= 0 {
@@ -9847,7 +9898,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.stickyMissReason = stickyMissReason
 				// SPEC-002-R007: the slot queue keeps its own order.
 				state.routeDecision = &routeDecision{basis: routing.BasisFallback, scope: "slot_queue", inputTokens: estimatedTokens, candidates: len(candidates)}
-				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
+				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, view)
 				return selected, nil, true
 			case queuedProviderTerminal:
 				s.slotQueue.leave(waiter)

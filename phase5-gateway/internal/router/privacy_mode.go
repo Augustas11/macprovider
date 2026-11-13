@@ -115,6 +115,11 @@ func effectivePrivacyModeForPlaintext(w http.ResponseWriter, requested, poolID s
 	return effective, true
 }
 
+// routeTraceEngineValues is the SPEC-002-R007 engine vocabulary.
+// TestServingVocabulariesMatchStoredChecks pins it to the demand_events
+// serving_engine CHECK (storage.DemandServingEngines).
+var routeTraceEngineValues = []string{"general_mlx", "continuous_batching", "native_mtp", "unknown"}
+
 // buyerVisibleRouteTraceHeader returns value only when it byte-exactly
 // matches the SPEC-002-R007 grammar (SPEC-006-R020).
 func buyerVisibleRouteTraceHeader(value string) string {
@@ -129,7 +134,7 @@ func buyerVisibleRouteTraceHeader(value string) string {
 		{"phase", []string{"interactive", "long_input", "throughput"}},
 		{"basis", []string{"measured", "explore", "fallback", "pinned"}},
 		{"evidence", []string{"fresh", "none"}},
-		{"engine", []string{"general_mlx", "continuous_batching", "native_mtp", "unknown"}},
+		{"engine", routeTraceEngineValues},
 		{"latency", []string{"low", "medium", "high", "unknown"}},
 	}
 	parts := strings.Split(rest, "; ")

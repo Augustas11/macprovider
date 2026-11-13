@@ -131,6 +131,7 @@ func TestMigrationProbesReturnRowIterationErrors(t *testing.T) {
 		{"quota reservation funding source", "table_info(quota_reservations)", 1, s.ensureQuotaReservationFundingSource},
 		{"relay-blind settlement dispatch columns", "table_info(quota_reservations)", 1, s.ensureRelayBlindSettlementDispatchColumns},
 		{"demand events observation columns", "table_info(demand_events)", 1, s.ensureDemandEventsObservationColumns},
+		{"demand events serving telemetry columns", "table_info(demand_events)", 1, s.ensureDemandEventsServingTelemetryColumns},
 		// The table is empty here, so the fault is the first read.
 		{"demand events privacy buckets", "FROM demand_events", 0, s.ensureDemandEventsPrivacyBuckets},
 		{"relay-blind accounting columns", "table_info(usage_events)", 1, s.ensureRelayBlindAccountingColumns},

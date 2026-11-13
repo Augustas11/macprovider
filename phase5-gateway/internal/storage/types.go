@@ -163,7 +163,44 @@ type DemandEvent struct {
 	ProviderDecodeMs       int64
 	OutputTPSMilliTokens   int64
 	TotalLatencyMs         int64
-	CreatedAt              time.Time
+	// SPEC-006-R028 gateway serving telemetry. nil is stored as NULL.
+	GatewayFirstReasoningMs       *int64
+	GatewayFirstAnswerMs          *int64
+	GatewayOutputTPSMilliTokens   *int64
+	StreamingMode                 string
+	ServingEngine                 string
+	ProviderReportedQueueMs       *int64
+	ProviderReportedFirstTokenMs  *int64
+	ProviderReportedFirstAnswerMs *int64
+	ProviderReportedDecodeMs      *int64
+	CreatedAt                     time.Time
+}
+
+// DemandServingEngines and DemandStreamingModes are the stored vocabularies
+// of demand_events.serving_engine and streaming_mode (streaming_mode also
+// stores ""). InsertDemandEvent stores any other value as "unknown" or "", so a
+// value the router learns to accept later can never fail the INSERT.
+var (
+	DemandServingEngines = []string{"general_mlx", "continuous_batching", "native_mtp", "unknown"}
+	DemandStreamingModes = []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection"}
+)
+
+// DemandLatencyQuantity is one SPEC-006-R028 quantity's nearest-rank
+// percentiles over the non-absent values of a cell. P50 is nil below 5
+// samples and P95 below 20.
+type DemandLatencyQuantity struct {
+	Samples int64
+	P50     *int64
+	P95     *int64
+}
+
+// DemandLatencyCell is one (requested model, serving engine) cell.
+type DemandLatencyCell struct {
+	RequestedModel       string
+	ServingEngine        string
+	FirstReasoningMs     DemandLatencyQuantity
+	FirstAnswerMs        DemandLatencyQuantity
+	OutputTPSMilliTokens DemandLatencyQuantity
 }
 
 type DemandSummaryQuery struct {
@@ -174,22 +211,22 @@ type DemandSummaryQuery struct {
 }
 
 type DemandSummaryRow struct {
-	RequestedModel              string
-	TrafficClass                string
-	RequestedRequests           int64
-	ServedRequests              int64
-	UnmetRequests               int64
-	CapacityConstrainedRequests int64
-	SubstitutedRequests         int64
-	RequestedTokens             int64
-	ServedTokens                int64
-	ReasoningTokens             int64
-	AvgQueueLatencyMs           int64
-	AvgTimeToFirstTokenMs       int64
-	AvgTotalLatencyMs           int64
-	AvgOutputTPSMilliTokens     int64
-	DistinctBuyers              int64
-	RepeatBuyers                int64
+	RequestedModel                string
+	TrafficClass                  string
+	RequestedRequests             int64
+	ServedRequests                int64
+	UnmetRequests                 int64
+	CapacityConstrainedRequests   int64
+	SubstitutedRequests           int64
+	RequestedTokens               int64
+	ServedTokens                  int64
+	ReasoningTokens               int64
+	AvgQueueLatencyMs             int64
+	LegacyAvgTimeToFirstTokenMs   int64
+	AvgTotalLatencyMs             int64
+	LegacyAvgOutputTPSMilliTokens int64
+	DistinctBuyers                int64
+	RepeatBuyers                  int64
 }
 
 type DemandRouteSummaryRow struct {

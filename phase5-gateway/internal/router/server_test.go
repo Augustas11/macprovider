@@ -7598,7 +7598,7 @@ var gatewayEmittedErrorCodes = []string{
 	"privacy_class_disabled", "privacy_class_downgrade_rejected", "privacy_class_posture_stale", "privacy_class_unavailable", "privacy_class_unconfirmed",
 	"privacy_missing", "privacy_render_failed",
 	"feedback_limit_check_failed", "feedback_rate_limited", "feedback_store_failed",
-	"feedback_summary_failed", "identity_create_failed", "internal_error",
+	"feedback_summary_failed", "demand_latency_failed", "identity_create_failed", "internal_error",
 	"invalid_api_key", "invalid_capacity_signal", "invalid_conversation_tag",
 	"invalid_demo_token", "invalid_feedback", "invalid_feedback_scope",
 	"invalid_feedback_source", "invalid_handoff", "invalid_kill_switch",

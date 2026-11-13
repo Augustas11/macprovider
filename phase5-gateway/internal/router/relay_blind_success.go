@@ -233,6 +233,11 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 // settlement owners, without passing ciphertext through the plaintext parser,
 // prompt estimator, id-less dedupe, model rewriter, or retry loop.
 func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, raw []byte, account string, sessionAuth *walletSessionAuth) {
+	// SPEC-006-R028: relay-blind and privacy-class requests write no demand
+	// row, whatever order the chat handler sets the row's fields in.
+	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+		demand.suppress()
+	}
 	present, valid := privacyRequested(r)
 	if present && privacyPoolIntentDenied(r, account, false) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, account, false))

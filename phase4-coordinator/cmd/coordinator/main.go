@@ -45,6 +45,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
@@ -732,7 +733,11 @@ func runCoordinator() (exitCode int) {
 			statsRollup.Wait()
 		}
 	}()
-	wsOpts := []providerws.Option{}
+	// SPEC-002-R005: one measured-performance store, shared by buyer routing,
+	// /poolz and the explorer, so the floor and the operator views read the
+	// same routed throughput.
+	perfStore := routing.NewPerfStore()
+	wsOpts := []providerws.Option{providerws.WithPerfStore(perfStore)}
 	var grandfatherBefore *time.Time
 	if raw := strings.TrimSpace(cfg.Referrals.GrandfatherBefore); raw != "" && cfg.Referrals.RequireForRegistration {
 		parsed, err := time.Parse(time.RFC3339, raw)
@@ -950,7 +955,7 @@ func runCoordinator() (exitCode int) {
 		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); tokenless provisional admissions will self-mint per SPEC-003 FR-C9")
 	}
 	if cfg.Explorer.Enabled {
-		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, billingReadDB, registry, startedAt)))
+		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, billingReadDB, registry, startedAt).WithPerfStore(perfStore)))
 		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
 	if rewardsDB != nil {
@@ -1181,6 +1186,7 @@ func runCoordinator() (exitCode int) {
 		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
 	}
 	buyerOpts := []buyer.Option{
+		buyer.WithPerfStore(perfStore),
 		buyer.WithVersion(version),
 		buyer.WithPreflightConfig(cfg.Routing.PreflightThresholdTokens, time.Duration(cfg.Routing.PreflightTimeoutS)*time.Second),
 		buyer.WithRecoveryConfig(time.Duration(cfg.Pool.DegradedBackoffS)*time.Second, cfg.Pool.DegradedMaxRetries, cfg.Pool.DegradedProbeAfter502),

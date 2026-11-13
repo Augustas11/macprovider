@@ -137,6 +137,7 @@ type ReadStore interface {
 	WalletSessionUsage(ctx context.Context, accountID, sessionID string) (storage.WalletSessionUsage, error)
 	ListWalletSessionUsageDetails(ctx context.Context, accountID, sessionID string, limit int, cursor string, since, until time.Time) ([]storage.WalletSessionUsageDetail, string, error)
 	GetCapacityTier(ctx context.Context) (storage.CapacityTier, error)
+	DemandLatencyPercentiles(ctx context.Context, since, until time.Time) ([]storage.DemandLatencyCell, error)
 }
 
 type Option func(*Server)
@@ -287,6 +288,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/admin/feedback-summary", s.handleFeedbackSummary)
+	mux.HandleFunc("/admin/demand-latency", s.handleDemandLatency)
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/buyer-hold", s.handleBuyerHold)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
@@ -1722,7 +1724,7 @@ var gatewayPermanentCodes = map[string]bool{
 	// these are ambiguous store/settlement faults, not availability
 	// signals, and reclassifying them is out of this sweep's scope.
 	"settlement_failed": true, "admin_state_write_failed": true,
-	"feedback_summary_failed": true, "capacity_signal_store_failed": true,
+	"feedback_summary_failed": true, "demand_latency_failed": true, "capacity_signal_store_failed": true,
 	"capacity_tier_load_failed": true, "capacity_signal_load_failed": true,
 	"state_generation_failed": true, "session_generation_failed": true,
 	"oauth_state_store_failed": true, "oauth_exchange_failed": true,
@@ -2010,12 +2012,18 @@ func isStreamingModeResponseHeader(key string) bool {
 // negotiate on it — so the strict enum guard is safe and prevents header
 // injection should the upstream ever be compromised.
 func buyerVisibleStreamingModeHeader(raw string) string {
-	switch raw {
-	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection":
-		return raw
+	for _, mode := range streamingModeValues {
+		if raw == mode {
+			return raw
+		}
 	}
 	return ""
 }
+
+// streamingModeValues is the SPEC-018 AC-45 streaming-mode vocabulary.
+// TestServingVocabulariesMatchStoredChecks pins it to the demand_events
+// streaming_mode CHECK (storage.DemandStreamingModes).
+var streamingModeValues = []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection"}
 
 func buyerVisibleReceiptHeader(raw string) string {
 	value := strings.TrimSpace(raw)

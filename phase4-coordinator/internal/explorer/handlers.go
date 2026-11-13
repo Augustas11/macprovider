@@ -20,6 +20,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 type Handler struct {
@@ -42,6 +43,13 @@ func NewHandler(cfg config.Config, db *sql.DB, registry *pool.Registry, started 
 		client:  &http.Client{Timeout: time.Duration(cfg.Explorer.GatewayTimeoutMs) * time.Millisecond},
 		stamps:  map[string][]time.Time{},
 	}
+}
+
+// WithPerfStore shows the shared SPEC-002-R005 measured decode values on the
+// provider rows.
+func (h *Handler) WithPerfStore(store *routing.PerfStore) *Handler {
+	h.store.perf = store
+	return h
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

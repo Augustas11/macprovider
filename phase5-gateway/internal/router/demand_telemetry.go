@@ -59,6 +59,8 @@ type demandTelemetryState struct {
 	providerDecodeMs       int64
 	outputTPSMilliTokens   int64
 	totalLatencyMs         int64
+	serving                servingTelemetrySnapshot
+	providerTiming         providerTimingLabels
 	suppressed             bool
 }
 
@@ -190,6 +192,26 @@ func (d *demandTelemetryState) setTiming(timing *gatewayPhaseTiming, now time.Ti
 	d.providerPrefillMs = snapshot.providerPrefillMS
 	d.providerDecodeMs = snapshot.providerDecodeMS
 	d.outputTPSMilliTokens = snapshot.outputTokensPerSecondMilliTokens
+	d.serving = timing.servingSnapshot()
+}
+
+func (d *demandTelemetryState) setProviderTimingLabels(labels providerTimingLabels) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// A later usage frame without a field keeps the last reported value.
+	for _, f := range []struct {
+		dst **int64
+		src *int64
+	}{
+		{&d.providerTiming.queueMS, labels.queueMS},
+		{&d.providerTiming.firstTokenMS, labels.firstTokenMS},
+		{&d.providerTiming.firstAnswerMS, labels.firstAnswerMS},
+		{&d.providerTiming.decodeMS, labels.decodeMS},
+	} {
+		if f.src != nil {
+			*f.dst = f.src
+		}
+	}
 }
 
 func (d *demandTelemetryState) markTerminalOutcome(prompt, completion int64, outcome string, eligibleProviderExists bool) {
@@ -265,37 +287,46 @@ func (d *demandTelemetryState) snapshot(now time.Time, status int) (storage.Dema
 	}
 	substituted := d.substituted || (routed != "" && routed != d.requestedModel)
 	return storage.DemandEvent{
-		RequestID:              d.requestID,
-		BuyerHash:              d.buyerHash,
-		TrafficClass:           nonEmptyString(d.trafficClass, "unknown"),
-		RequestedModel:         d.requestedModel,
-		RoutedModel:            routed,
-		ProviderID:             d.providerID,
-		PoolID:                 d.poolID,
-		EngineClass:            d.engineClass,
-		Stream:                 d.stream,
-		StructuredOutput:       d.structuredOutput,
-		ToolsRequested:         d.toolsRequested,
-		MaxOutputTokens:        d.maxOutputTokens,
-		RequestedPromptTokens:  maxInt64(d.requestedPromptTokens, 0),
-		RequestedOutputTokens:  maxInt64(d.requestedOutputTokens, 0),
-		RequestedTotalTokens:   maxInt64(d.requestedPromptTokens, 0) + maxInt64(d.requestedOutputTokens, 0),
-		PromptTokens:           maxInt64(d.promptTokens, 0),
-		CachedPromptTokens:     maxInt64(d.cachedPromptTokens, 0),
-		CompletionTokens:       maxInt64(d.completionTokens, 0),
-		ReasoningTokens:        maxInt64(d.reasoningTokens, 0),
-		TotalTokens:            maxInt64(total, 0),
-		TerminalResult:         terminal,
-		FailureReason:          reason,
-		EligibleProviderExists: d.eligibleProviderExists,
-		Substituted:            substituted,
-		QueueLatencyMs:         maxInt64(d.queueLatencyMs, 0),
-		TimeToFirstTokenMs:     maxInt64(d.timeToFirstTokenMs, 0),
-		ProviderPrefillMs:      maxInt64(d.providerPrefillMs, 0),
-		ProviderDecodeMs:       maxInt64(d.providerDecodeMs, 0),
-		OutputTPSMilliTokens:   maxInt64(d.outputTPSMilliTokens, 0),
-		TotalLatencyMs:         maxInt64(maxInt64(d.totalLatencyMs, 0), maxInt64(now.Sub(d.startedAt).Milliseconds(), 0)),
-		CreatedAt:              now.UTC(),
+		RequestID:                     d.requestID,
+		BuyerHash:                     d.buyerHash,
+		TrafficClass:                  nonEmptyString(d.trafficClass, "unknown"),
+		RequestedModel:                d.requestedModel,
+		RoutedModel:                   routed,
+		ProviderID:                    d.providerID,
+		PoolID:                        d.poolID,
+		EngineClass:                   d.engineClass,
+		Stream:                        d.stream,
+		StructuredOutput:              d.structuredOutput,
+		ToolsRequested:                d.toolsRequested,
+		MaxOutputTokens:               d.maxOutputTokens,
+		RequestedPromptTokens:         maxInt64(d.requestedPromptTokens, 0),
+		RequestedOutputTokens:         maxInt64(d.requestedOutputTokens, 0),
+		RequestedTotalTokens:          maxInt64(d.requestedPromptTokens, 0) + maxInt64(d.requestedOutputTokens, 0),
+		PromptTokens:                  maxInt64(d.promptTokens, 0),
+		CachedPromptTokens:            maxInt64(d.cachedPromptTokens, 0),
+		CompletionTokens:              maxInt64(d.completionTokens, 0),
+		ReasoningTokens:               maxInt64(d.reasoningTokens, 0),
+		TotalTokens:                   maxInt64(total, 0),
+		TerminalResult:                terminal,
+		FailureReason:                 reason,
+		EligibleProviderExists:        d.eligibleProviderExists,
+		Substituted:                   substituted,
+		QueueLatencyMs:                maxInt64(d.queueLatencyMs, 0),
+		TimeToFirstTokenMs:            maxInt64(d.timeToFirstTokenMs, 0),
+		ProviderPrefillMs:             maxInt64(d.providerPrefillMs, 0),
+		ProviderDecodeMs:              maxInt64(d.providerDecodeMs, 0),
+		OutputTPSMilliTokens:          maxInt64(d.outputTPSMilliTokens, 0),
+		TotalLatencyMs:                maxInt64(maxInt64(d.totalLatencyMs, 0), maxInt64(now.Sub(d.startedAt).Milliseconds(), 0)),
+		GatewayFirstReasoningMs:       d.serving.firstReasoningMS,
+		GatewayFirstAnswerMs:          d.serving.firstAnswerMS,
+		GatewayOutputTPSMilliTokens:   d.serving.outputTPSMilliTokens,
+		StreamingMode:                 d.serving.streamingMode,
+		ServingEngine:                 nonEmptyString(d.serving.servingEngine, "unknown"),
+		ProviderReportedQueueMs:       d.providerTiming.queueMS,
+		ProviderReportedFirstTokenMs:  d.providerTiming.firstTokenMS,
+		ProviderReportedFirstAnswerMs: d.providerTiming.firstAnswerMS,
+		ProviderReportedDecodeMs:      d.providerTiming.decodeMS,
+		CreatedAt:                     now.UTC(),
 	}, true
 }
 

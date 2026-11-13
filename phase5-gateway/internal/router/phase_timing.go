@@ -27,6 +27,11 @@ type gatewayPhaseTiming struct {
 	providerPrefillMS  int64
 	providerDecodeMS   int64
 	coordinatorTotalMS int64
+
+	// SPEC-006-R028 serving telemetry, read only into the demand row.
+	deltas        servingDeltaObserver
+	streamingMode string
+	servingEngine string
 }
 
 func newGatewayPhaseTiming(start time.Time) *gatewayPhaseTiming {
@@ -47,6 +52,8 @@ func (t *gatewayPhaseTiming) markFirstToken(at time.Time) {
 func (t *gatewayPhaseTiming) observeCoordinatorResponse(h http.Header, at time.Time) {
 	t.coordinatorResponseAt = at
 	t.observeCoordinatorTimings(h)
+	t.streamingMode = streamingModeFromHeader(h)
+	t.servingEngine = servingEngineFromRouteTrace(h)
 }
 
 func (t *gatewayPhaseTiming) observeCoordinatorTrailers(h http.Header) {

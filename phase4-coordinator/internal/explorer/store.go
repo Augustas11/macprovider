@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 var ErrBadCursor = errors.New("bad cursor")
@@ -20,7 +21,11 @@ type ReadDB interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-type Store struct{}
+// Store reads the explorer views. perf is the shared SPEC-002-R005 store;
+// nil shows estimates only.
+type Store struct {
+	perf *routing.PerfStore
+}
 
 type ListResult struct {
 	Items        []map[string]any
@@ -139,19 +144,19 @@ func (Store) SessionDetail(ctx context.Context, q ReadDB, requestID string) (map
 	}, nil
 }
 
-func (Store) Providers(ctx context.Context, q ReadDB, providers []pool.Provider) ([]map[string]any, error) {
+func (s Store) Providers(ctx context.Context, q ReadDB, providers []pool.Provider) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(providers))
 	for _, p := range providers {
 		token, err := tokenStatus(ctx, q, p.ProviderID)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, providerMap(p, token))
+		out = append(out, providerMap(p, token, routing.ProviderThroughput(p, s.perf, time.Now())))
 	}
 	return out, nil
 }
 
-func (Store) ProviderDetail(ctx context.Context, q ReadDB, p pool.Provider) (map[string]any, error) {
+func (s Store) ProviderDetail(ctx context.Context, q ReadDB, p pool.Provider) (map[string]any, error) {
 	token, err := tokenStatus(ctx, q, p.ProviderID)
 	if err != nil {
 		return nil, err
@@ -178,7 +183,7 @@ func (Store) ProviderDetail(ctx context.Context, q ReadDB, p pool.Provider) (map
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": providerMap(p, token), "ledger_rows": ledger, "settlements": settlements, "partial": false, "error": nil}, nil
+	return map[string]any{"provider": providerMap(p, token, routing.ProviderThroughput(p, s.perf, time.Now())), "ledger_rows": ledger, "settlements": settlements, "partial": false, "error": nil}, nil
 }
 
 func (Store) Ledger(ctx context.Context, q ReadDB, from, to time.Time, limit int) ([]map[string]any, error) {
@@ -558,28 +563,34 @@ func tokenStatus(ctx context.Context, q ReadDB, providerID string) (map[string]a
 	return map[string]any{"status": status, "token_prefix": prefix, "revoked_at": nullString(revoked)}, nil
 }
 
-func providerMap(p pool.Provider, token map[string]any) map[string]any {
+func providerMap(p pool.Provider, token map[string]any, measured routing.ThroughputView) map[string]any {
 	return map[string]any{
-		"provider_id":             p.ProviderID,
-		"assigned_id":             p.AssignedID,
-		"hostname":                p.Hostname,
-		"model_id":                p.ModelID,
-		"state":                   p.State,
-		"tier":                    p.Tier,
-		"inference_path":          p.InferencePath,
-		"slots_free":              p.SlotsFree,
-		"slots_total":             p.SlotsTotal,
-		"throughput_tps_estimate": p.ThroughputTPSEstimate,
-		"max_context_tokens":      p.MaxContextTokens,
-		"last_heartbeat_at":       encodeTime(p.LastHeartbeatAt),
-		"last_activity_at":        encodeTime(p.LastActivityAt),
-		"connected_at":            encodeTime(p.ConnectedAt),
-		"binary_version":          p.BinaryVersion,
-		"hash_status":             p.HashStatus,
-		"attestation_status":      p.AttestationStatus,
-		"encrypted_leg":           p.EncryptedLeg,
-		"token_status":            token["status"],
-		"token_prefix":            token["token_prefix"],
+		// SPEC-002 FR-O2 v1.6.31 measured-throughput fields.
+		"measured_decode_tps":      measured.MeasuredDecodeTPS,
+		"measured_decode_samples":  measured.MeasuredDecodeSamples,
+		"measured_decode_age_s":    measured.MeasuredDecodeAgeS,
+		"routed_throughput_tps":    measured.RoutedThroughputTPS,
+		"routed_throughput_source": measured.RoutedThroughputSource,
+		"provider_id":              p.ProviderID,
+		"assigned_id":              p.AssignedID,
+		"hostname":                 p.Hostname,
+		"model_id":                 p.ModelID,
+		"state":                    p.State,
+		"tier":                     p.Tier,
+		"inference_path":           p.InferencePath,
+		"slots_free":               p.SlotsFree,
+		"slots_total":              p.SlotsTotal,
+		"throughput_tps_estimate":  p.ThroughputTPSEstimate,
+		"max_context_tokens":       p.MaxContextTokens,
+		"last_heartbeat_at":        encodeTime(p.LastHeartbeatAt),
+		"last_activity_at":         encodeTime(p.LastActivityAt),
+		"connected_at":             encodeTime(p.ConnectedAt),
+		"binary_version":           p.BinaryVersion,
+		"hash_status":              p.HashStatus,
+		"attestation_status":       p.AttestationStatus,
+		"encrypted_leg":            p.EncryptedLeg,
+		"token_status":             token["status"],
+		"token_prefix":             token["token_prefix"],
 		// auth_state surfaces WHY a session is (non-)routable per
 		// SPEC-003 FR-C9.4 (#82 item 4). Empty string is the legacy
 		// pre-FR-C9 admit; operators see the same distinct values

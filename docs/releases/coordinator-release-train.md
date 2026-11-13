@@ -22,6 +22,53 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Measured decode reorder and routed-throughput floor (SPEC-002-R005) — pending runtime inclusion (2026-11-13)
+
+Related: #2321. PR #2339 merged as `ba2732c4c`. The objective sort still
+runs on the heartbeat estimate; candidates whose measured decode signal is
+fresh are then reordered by routed throughput among the positions fresh
+candidates already hold, inside blocks with equal other sort keys. With
+zero or one fresh candidate the order is unchanged. The
+`min_provider_throughput_tps` floor compares routed throughput. The
+measured store is keyed by the served model and shared by buyer routing,
+`/poolz` and the explorer, which gain measured fields (operator-only).
+Pinned requests record no observation, and an attempt whose buyer-blocked
+time is at least 5% of its decode window yields no decode sample.
+
+Audit: four lanes plus two re-checks, gate met at `b8b897de5`.
+
+Live step: the next Pearl runtime release through
+`scripts/ops/pearl-runtime.sh status`, then `next --run`. No database
+schema change on its own ("Same fingerprint: about 1–2 minutes of
+coordinator/gateway restart"), but it rides the same release as the
+gateway telemetry below, whose gateway source change takes the longer
+buyer-hold path. After the apply: `/poolz` rows carry
+`routed_throughput_source`, and the routing-decision log shows
+`throughput_source: "measured"` for a provider with fresh samples.
+
+## Gateway serving telemetry (SPEC-006-R028) — pending runtime inclusion (2026-11-13)
+
+Related: #2320, #2341. PR #2340 merged as `af2d17d7a`. The gateway records
+time to first reasoning delta, time to first answer delta and an answer
+rate (answer bytes / 4, minus one, over the first-to-last answer delta
+window) for incrementally streamed requests, in new nullable
+`demand_events` columns, with a `serving_engine` label read from the
+route-trace header. `GET /admin/demand-latency` (operator-only) returns
+p50 and p95 per model and engine. The two older columns keep being
+written and are legacy. The coordinator is unchanged.
+
+Audit: four lanes plus one re-check, gate met at `8474776f4`.
+
+Live step: the next Pearl runtime release through
+`scripts/ops/pearl-runtime.sh status`, then `next --run`. This changes
+`phase5-gateway/` source, so the database schema fingerprint changes; per
+`docs/runbooks/pearl-coordinator-rollout.md` that is the path where buyers
+are held with 503 until all serving gates pass, up to about 25 minutes.
+State that figure to the operator before the apply. The added columns are
+nullable, so a rollback to the previous binary keeps working. After the
+apply: one streamed request through the gateway, then
+`/admin/demand-latency?window=24h` shows a sample for its model.
+
 ## Pearl runtime v1.8.286 (2026-11-12)
 
 Applied 2026-11-12 06:55 UTC through `scripts/ops/pearl-runtime.sh`

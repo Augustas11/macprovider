@@ -189,13 +189,20 @@ func TestServedPerformanceObservation(t *testing.T) {
 		dispatchAccepted, serviceMs int
 		foreignTiming, unavailable  bool
 	}
+	// SPEC-002-R005 keys the record by the dispatched session's served model
+	// ("model-a" for every attempt here), so each scenario label starts from
+	// an empty store.
+	label := ""
 	record := func(a attempt) {
+		if a.model != label {
+			label, s.perf = a.model, routing.NewPerfStore()
+		}
 		state := &forwardState{estimatedTokens: a.estimate, routingEstimatedTokens: a.estimate}
 		session := "s-fast"
 		if a.foreignTiming {
 			session = "s-other"
 		}
-		state.phaseTiming.markProviderDispatchStart(phaseTestNow, session)
+		state.phaseTiming.markProviderDispatchStart(phaseTestNow, pool.Provider{AssignedID: session, ProviderID: "fast", ModelID: "model-a"})
 		state.phaseTiming.markProviderDispatchDone(phaseTestNow.Add(time.Duration(a.dispatchAccepted) * time.Millisecond))
 		// A role-only opening chunk is a first byte, not a first token.
 		state.phaseTiming.markProviderFirstByte(phaseTestNow.Add(time.Millisecond))
@@ -227,6 +234,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 		"foreign timing": {stream: true, firstToken: true, status: http.StatusOK, foreignTiming: true},
 	} {
 		base := streamed
+		base.model = "rejected-" + name
 		base.stream, base.firstToken, base.status, base.relayBlind = a.stream, a.firstToken, a.status, a.relayBlind
 		base.errMsg, base.errCode, base.fault, base.foreignTiming = a.errMsg, a.errCode, a.fault, a.foreignTiming
 		record(base)
@@ -235,7 +243,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 		}
 	}
 	record(streamed)
-	e, found := s.perf.Lookup("fast", "stream")
+	e, found := s.perf.Lookup("fast", "model-a")
 	// Decode: 100 tokens after the first over the 1 s after it. A streamed
 	// attempt is done only after its buyer writes, so even a prefill-sized
 	// one gives no prefill or service-throughput sample.
@@ -247,13 +255,13 @@ func TestServedPerformanceObservation(t *testing.T) {
 	prefillAttempt := streamed
 	prefillAttempt.model, prefillAttempt.stream, prefillAttempt.firstToken = "prefill", false, false
 	record(prefillAttempt)
-	if e, _ := s.perf.Lookup("fast", "prefill"); math.Abs(e.PrefillTPS-4000/1.05) > 1e-9 || e.PrefillSamples != 1 || e.TTFTSamples != 0 {
+	if e, _ := s.perf.Lookup("fast", "model-a"); math.Abs(e.PrefillTPS-4000/1.05) > 1e-9 || e.PrefillSamples != 1 || e.TTFTSamples != 0 {
 		t.Fatalf("non-stream prefill: %+v", e)
 	}
 	cachedAttempt := prefillAttempt
 	cachedAttempt.cached = 400
 	record(cachedAttempt)
-	if e, _ := s.perf.Lookup("fast", "prefill"); e.PrefillSamples != 1 {
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.PrefillSamples != 1 {
 		t.Fatalf("withheld prefill: %+v", e)
 	}
 	// A short streamed request gives no service throughput (only
@@ -262,7 +270,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	short := streamed
 	short.model, short.estimate, short.dispatchAccepted = "stream-short", 100, 40
 	record(short)
-	if e, _ := s.perf.Lookup("fast", "stream-short"); e.TTFTMs != 50 || e.ServiceSamples != 0 || e.PrefillSamples != 0 || e.DecodeSamples != 1 {
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.TTFTMs != 50 || e.ServiceSamples != 0 || e.PrefillSamples != 0 || e.DecodeSamples != 1 {
 		t.Fatalf("short stream: %+v", e)
 	}
 
@@ -271,7 +279,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	// still runs from dispatch start. 800 bytes are 200 tokens over 4 s.
 	nonStream := attempt{model: "non-stream", status: http.StatusOK, estimate: 300, contentBytes: 800, dispatchAccepted: 3000, serviceMs: 4000}
 	record(nonStream)
-	e, found = s.perf.Lookup("fast", "non-stream")
+	e, found = s.perf.Lookup("fast", "model-a")
 	if !found || e.ServiceTPS != 50 || e.ServiceSamples != 1 || e.DecodeSamples != 0 || e.TTFTSamples != 0 || e.TTFTMs != 0 || e.PrefillSamples != 0 {
 		t.Fatalf("non-stream evidence = %+v found=%v", e, found)
 	}
@@ -280,7 +288,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	buffered := nonStream
 	buffered.stream = true
 	record(buffered)
-	if e, _ := s.perf.Lookup("fast", "non-stream"); e.ServiceSamples != 1 || e.TTFTSamples != 0 || e.DecodeSamples != 0 {
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.ServiceSamples != 1 || e.TTFTSamples != 0 || e.DecodeSamples != 0 {
 		t.Fatalf("buffered stream: %+v", e)
 	}
 	// An attempt that delivered nothing (a path that logs no output gets an
@@ -288,7 +296,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	empty := nonStream
 	empty.model, empty.estimate, empty.contentBytes = "empty", 8000, 0
 	record(empty)
-	if _, ok := s.perf.Lookup("fast", "empty"); ok {
+	if _, ok := s.perf.Lookup("fast", "model-a"); ok {
 		t.Fatal("an attempt with no delivered output was recorded")
 	}
 	// An unavailable settlement output (an unparseable or choice-less body) is
@@ -298,7 +306,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	record(unavailable)
 	unavailable.stream, unavailable.firstToken = true, true
 	record(unavailable)
-	if _, ok := s.perf.Lookup("fast", "unavailable"); ok {
+	if _, ok := s.perf.Lookup("fast", "model-a"); ok {
 		t.Fatal("an attempt without settlement output was recorded")
 	}
 	// A prompt-heavy non-streamed attempt is neither a throughput nor a
@@ -306,7 +314,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 	heavy := nonStream
 	heavy.model, heavy.estimate = "heavy", routing.PerfServiceMaxInputRatio*200+1
 	record(heavy)
-	if _, ok := s.perf.Lookup("fast", "heavy"); ok {
+	if _, ok := s.perf.Lookup("fast", "model-a"); ok {
 		t.Fatal("prompt-heavy non-stream attempt was recorded")
 	}
 }
@@ -316,7 +324,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 func TestFirstTokenMarkedOnFirstContent(t *testing.T) {
 	s, _ := phaseTestServer(t)
 	state := &forwardState{}
-	state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-fast")
+	state.phaseTiming.markProviderDispatchStart(phaseTestNow, pool.Provider{AssignedID: "s-fast", ProviderID: "fast", ModelID: "model-a"})
 	acct := newDeliveredSSEAccounting()
 	s.markFirstTokenOnContent(acct, state)
 	acct.written([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"))
@@ -345,7 +353,9 @@ func TestValidateChatRequestCapturesMaxTokens(t *testing.T) {
 func TestStickyHitSkipsPhaseReorder(t *testing.T) {
 	s, _ := phaseTestServer(t)
 	s.stickyEnabled = true
-	warmProvider(s, "slow", 800, 2000)
+	// "slow" decodes faster (so it stays first in the measured objective
+	// order) but its TTFT makes the interactive phase score prefer "fast".
+	warmProvider(s, "slow", 800, 500)
 	warmProvider(s, "fast", 40, 1000)
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer gateway-secret")
