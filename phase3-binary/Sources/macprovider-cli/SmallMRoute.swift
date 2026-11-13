@@ -168,27 +168,27 @@ enum SmallMRoute: String, Sendable, Equatable {
 
     /// The route the MLX core takes for a given environment value. The core
     /// parses a set value with C `atoi` and leaves the window off when it is
-    /// 0, so "", "false", "00", "-0", " 0" and "0abc" are all serial-only.
+    /// 0, so "", "false", "00", "-0", " 0", "0abc" and, on Darwin, a value
+    /// that wraps to 0 such as "4294967296" are all serial-only. This calls
+    /// the same C library `atoi`, so the label always matches the core.
     static func route(environmentValue: String?) -> SmallMRoute {
         guard let environmentValue else { return .rowInvariant }
-        return atoiIsNonZero(environmentValue) ? .rowInvariant : .serialOnly
+        return environmentValue.withCString { atoi($0) } == 0 ? .serialOnly : .rowInvariant
     }
 
-    /// Whether C `atoi` gives a non-zero value: leading whitespace
-    /// (`isspace`: space, \t \n \v \f \r), an optional sign, then leading
-    /// decimal digits; no digit gives 0. The value is non-zero exactly when
-    /// one of those leading digits is not '0' (overflow aside, which needs a
-    /// 20-digit value no operator sets).
-    static func atoiIsNonZero(_ value: String) -> Bool {
-        var bytes = Substring(value).utf8.drop(while: { $0 == 0x20 || (0x09...0x0D).contains($0) })
-        if let sign = bytes.first, sign == UInt8(ascii: "+") || sign == UInt8(ascii: "-") {
-            bytes = bytes.dropFirst()
-        }
-        for byte in bytes {
-            guard (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) else { return false }
-            if byte != UInt8(ascii: "0") { return true }
-        }
-        return false
+    /// SPEC-038 FR-CB9: the count a serial-only `serve` serves and reports,
+    /// the same as the row-invariant route serves for the same Mac. With a
+    /// stored one-row decision that is the self-check's served count (owner
+    /// pin, capped by the verified count and the rows); with continuous
+    /// batching off by configuration it is the count already planned (the
+    /// owner pin, else one), as an emergency-off process serves.
+    static func serialOnlyServedSlots(
+        stored decision: ContinuousBatchingSelfCheckDecision?,
+        ownerPinned: Int?,
+        servedNow: Int
+    ) -> Int {
+        guard let decision else { return max(1, servedNow) }
+        return ContinuousBatchingSelfCheck.servedSlots(decision: decision, ownerPinned: ownerPinned, maxRows: servedNow)
     }
 
     private static let lock = NSLock()

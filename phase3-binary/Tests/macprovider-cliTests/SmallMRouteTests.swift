@@ -316,13 +316,35 @@ final class SmallMRouteTests: XCTestCase {
             ("-", .serialOnly), ("true", .serialOnly), ("x1", .serialOnly),
             ("1", .rowInvariant), ("2", .rowInvariant), ("-1", .rowInvariant), (" 1", .rowInvariant),
             ("+1", .rowInvariant), ("01", .rowInvariant), ("1abc", .rowInvariant), ("10", .rowInvariant),
+            // Darwin's atoi wraps these to 0, so the core takes the serial route.
+            ("4294967296", .serialOnly), ("8589934592", .serialOnly),
         ]
         for (value, expected) in table {
             XCTAssertEqual(SmallMRoute.route(environmentValue: value), expected, String(describing: value))
             if let value {
-                XCTAssertEqual(SmallMRoute.atoiIsNonZero(value), value.withCString { atoi($0) } != 0, value)
+                let core: SmallMRoute = value.withCString { atoi($0) } == 0 ? .serialOnly : .rowInvariant
+                XCTAssertEqual(SmallMRoute.route(environmentValue: value), core, value)
             }
         }
+    }
+
+    /// A serial-only process serves and reports what the row-invariant route
+    /// serves for the same Mac: the self-check's served count under a stored
+    /// one-row decision, the planned count (the owner pin) with batching off
+    /// by configuration.
+    func testSerialOnlyServedSlotsMatchTheInvariantRoute() {
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 3)
+        for (decision, pin, servedNow) in [(divergence, 4, 4), (noGain, 4, 4), (noGain, nil, 1), (divergence, nil, 1)] as [(ContinuousBatchingSelfCheckDecision, Int?, Int)] {
+            XCTAssertEqual(
+                SmallMRoute.serialOnlyServedSlots(stored: decision, ownerPinned: pin, servedNow: servedNow),
+                ContinuousBatchingSelfCheck.servedSlots(decision: decision, ownerPinned: pin, maxRows: servedNow)
+            )
+        }
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: divergence, ownerPinned: 4, servedNow: 4), 1)
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: noGain, ownerPinned: 4, servedNow: 4), 3)
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: nil, ownerPinned: 4, servedNow: 4), 4)
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: nil, ownerPinned: nil, servedNow: 1), 1)
     }
 
     func testSerialOnlyProcessRefusesEveryBatchingEntry() {

@@ -1756,7 +1756,11 @@ with a batched one. In a serial-only process:
   refused self-check does (no strict-mode error, no per-request canary
   serial routing), and `continuous_batching.self_check` reports the stored
   one-row decision as refused (`small_m_route_serial_only` when batching is
-  off by configuration), never `pending`;
+  off by configuration), never `pending`. It serves, and reports, the count
+  the invariant route serves for the same Mac: the FR-CB10 served count for
+  the stored decision (owner pin capped by the verified count), or the
+  planned count (the owner pin, else one) with batching off by
+  configuration;
 - SPEC-037 disk KV and prompt snapshots carry the route in their decode-path
   class (SPEC-037 v0.2.5), so an entry written on one route misses on the
   other;

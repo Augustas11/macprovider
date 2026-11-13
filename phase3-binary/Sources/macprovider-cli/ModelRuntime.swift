@@ -6681,17 +6681,27 @@ maxTokens: 1,
     /// self-check, so it reports the stored one-row decision that put it on
     /// the serial route as refused (`small_m_route_serial_only` when batching
     /// is off by configuration), as a refused check reads on the invariant
-    /// route. Kept across swaps. No-op on the row-invariant route.
-    func applySerialOnlySelfCheck(stored decision: ContinuousBatchingSelfCheckDecision?, key: ContinuousBatchingSelfCheckKey?) {
-        guard smallMRoute == .serialOnly else { return }
+    /// route. Kept across swaps. Serves `servedSlots`
+    /// (`SmallMRoute.serialOnlyServedSlots`) and reports the count it serves.
+    /// Returns that count; nil (and no change) on the row-invariant route.
+    @discardableResult
+    func applySerialOnlySelfCheck(
+        stored decision: ContinuousBatchingSelfCheckDecision?,
+        key: ContinuousBatchingSelfCheckKey?,
+        servedSlots: Int
+    ) async -> Int? {
+        guard smallMRoute == .serialOnly else { return nil }
+        let served = min(max(1, servedSlots), maxBatch)
         let reason = decision?.reason ?? "small_m_route_serial_only"
         let state = ContinuousBatchingSelfCheckState.refused(reason: reason)
         let report = ContinuousBatchingSelfCheckReport(
-            decision: reason, servedSlots: 1, verifiedSlots: decision?.verifiedSlots ?? 1, key: key
+            decision: reason, servedSlots: served, verifiedSlots: decision?.verifiedSlots ?? 1, key: key
         )
         serialOnlySelfCheck = (state, report)
         continuousBatchingSelfCheck = state
         continuousBatchingSelfCheckReport = report
+        await applyServedSlots(served)
+        return served
     }
 
     func continuousBatchingSelfCheckState() -> ContinuousBatchingSelfCheckState {

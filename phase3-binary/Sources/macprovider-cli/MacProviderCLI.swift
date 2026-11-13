@@ -3348,7 +3348,19 @@ struct ServeCommand: AsyncParsableCommand {
             let stored = smallMRouteStartupIdentity.flatMap {
                 smallMRouteVerdictStore.oneRowDecision(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
             }
-            await mlxRuntime.applySerialOnlySelfCheck(stored: stored?.decision, key: stored?.key)
+            let servedNow = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+            if let served = await mlxRuntime.applySerialOnlySelfCheck(
+                stored: stored?.decision,
+                key: stored?.key,
+                servedSlots: SmallMRoute.serialOnlyServedSlots(
+                    stored: stored?.decision, ownerPinned: autoServedSlots?.ownerPinned, servedNow: servedNow
+                )
+            ), served != servedNow {
+                resolved.maxConcurrencyOverride = served
+                FileHandle.standardError.write(Data(
+                    "event=served_slots action=applied slots=\(served) reason=small_m_route_serial_only\n".utf8
+                ))
+            }
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to

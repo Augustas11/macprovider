@@ -274,13 +274,15 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
             let invariant = makeRuntime(backend: SelfCheckRetirementBackend(), policyRollout: rollout)
             let invariantMode = await invariant.continuousBatchingCapabilityForTest().mode
             XCTAssertEqual(invariantMode, rollout, "control: the entry applies while the self-check is pending")
-            await invariant.applySerialOnlySelfCheck(stored: noGain, key: nil)
+            let ignored = await invariant.applySerialOnlySelfCheck(stored: noGain, key: nil, servedSlots: 1)
+            XCTAssertNil(ignored)
             let invariantState = await invariant.continuousBatchingSelfCheckState()
             XCTAssertEqual(invariantState, .pending, "a row-invariant runtime ignores the serial-only state")
 
             let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, policyRollout: rollout)
             let key = await invariant.continuousBatchingSelfCheckTarget()?.key
-            await runtime.applySerialOnlySelfCheck(stored: noGain, key: key)
+            let served = await runtime.applySerialOnlySelfCheck(stored: noGain, key: key, servedSlots: 1)
+            XCTAssertEqual(served, 1)
             let capability = await runtime.continuousBatchingCapabilityForTest()
             XCTAssertEqual(capability.mode, .off, "\(rollout)")
             XCTAssertTrue(capability.shouldUseSerialPath)
@@ -299,7 +301,7 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
 
             // Batching off by configuration: no stored decision to report.
             let configured = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, policyRollout: rollout)
-            await configured.applySerialOnlySelfCheck(stored: nil, key: nil)
+            await configured.applySerialOnlySelfCheck(stored: nil, key: nil, servedSlots: 1)
             let configuredState = await configured.continuousBatchingSelfCheckState()
             XCTAssertEqual(configuredState, .refused(reason: "small_m_route_serial_only"))
             let configuredMode = await configured.continuousBatchingCapabilityForTest().mode
@@ -307,11 +309,31 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         }
     }
 
+    /// An owner pin of 4 serves what the invariant route serves, and status
+    /// reports exactly the count served: 1 under a stored divergence at two
+    /// rows (verified 1), the full pin with batching off by configuration.
+    func testSerialOnlyRuntimeServesAndReportsTheOwnerPinnedCount() async throws {
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        let cases: [(ContinuousBatchingSelfCheckDecision?, Int)] = [(divergence, 1), (nil, 4)]
+        for (decision, expected) in cases {
+            let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .serialOnly, maxBatch: 4)
+            let slots = SmallMRoute.serialOnlyServedSlots(stored: decision, ownerPinned: 4, servedNow: 4)
+            let served = await runtime.applySerialOnlySelfCheck(stored: decision, key: nil, servedSlots: slots)
+            XCTAssertEqual(served, expected)
+            let gate = await runtime.servedSlotLimitForTest()
+            XCTAssertEqual(gate, expected)
+            let report = await runtime.currentSnapshot().continuousBatching?.selfCheck
+            XCTAssertEqual(report?.servedSlots, expected)
+            XCTAssertEqual(report?.decision, decision?.reason ?? "small_m_route_serial_only")
+        }
+    }
+
     private func makeRuntime(
         backend: SelfCheckRetirementBackend,
         warmSwapEnabled: Bool = false,
         smallMRoute: SmallMRoute = .rowInvariant,
-        policyRollout: ContinuousBatchingMode? = nil
+        policyRollout: ContinuousBatchingMode? = nil,
+        maxBatch: Int = 3
     ) -> ModelRuntime {
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
@@ -355,7 +377,7 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         return ModelRuntime(
             modelID: modelID, modelHash: modelSHA,
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
-            maxBatch: 3, continuousBatchingMode: .on,
+            maxBatch: maxBatch, continuousBatchingMode: .on,
             continuousBatchingPolicyLoadResult: policy,
             continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: warmSwapEnabled,
