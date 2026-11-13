@@ -743,8 +743,10 @@ enum ToolCallParser {
         }
         switch node {
         case .text(let raw):
-            // A nullable type's `null` (the template writes JSON null raw).
-            if nullable, raw.trimmingCharacters(in: .whitespacesAndNewlines) == "null" { return .null }
+            // The template omits a None value and writes strings raw, so
+            // `null` for a type that admits text is the literal text; for a
+            // nullable non-string type it is JSON null.
+            if nullable, type != "string", raw.trimmingCharacters(in: .whitespacesAndNewlines) == "null" { return .null }
             guard raw.isEmpty else { return try glmValue(raw, type: type) }
             switch type {
             case "object"?: return .object([:])

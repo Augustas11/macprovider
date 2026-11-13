@@ -285,10 +285,10 @@ final class MiniMaxOutputTests: XCTestCase {
         let parsed = ToolCallParser.parseToolCalls(rawOutput: output, grammar: .minimax, modelID: Self.model,
                                                    allowedFunctionNames: ["f"], schemas: schemas)
         XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"code":"42","n":7}"#])
-        // A nullable type's null is null, for either type.
+        // `null` is literal text for a type that admits a string, and JSON null otherwise.
         let nulls = ToolCallParser.parseToolCalls(rawOutput: Self.wrapper(Self.invoke("f", [("code", "null"), ("n", "null")])), grammar: .minimax,
                                                   modelID: Self.model, allowedFunctionNames: ["f"], schemas: schemas)
-        XCTAssertEqual(nulls.toolCalls.map(\.arguments), [#"{"code":null,"n":null}"#])
+        XCTAssertEqual(nulls.toolCalls.map(\.arguments), [#"{"code":"null","n":null}"#])
     }
 
     /// The speculative collectors do not split MiniMax reasoning: a MiniMax
