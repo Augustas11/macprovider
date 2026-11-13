@@ -132,6 +132,8 @@ Record all evidence in an append-only bundle named by date, provider id, package
 version, hardware tuple, and model tuple. The bundle must contain sanitized logs
 only.
 
+Aggregate tok/s from `msb-throughput`, `msb03` and `native-mtp-bench` use different windows and are not comparable; see `docs/runbooks/model-family-performance-intake.md`.
+
 | Gate | Required proof |
 | --- | --- |
 | Package identity | Installed RC version, binary path, package provenance, `default.metallib` presence, and standalone/Malibu byte-identity proof when the RC ships both artifacts. |

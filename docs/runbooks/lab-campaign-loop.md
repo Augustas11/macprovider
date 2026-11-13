@@ -7,6 +7,8 @@ merge → cut CLI → reinstall → retest loop wastes hours that a local
 
 Canonical short form: `AGENTS.md` (Hardware campaign loop).
 
+Performance cells for a new or changed model family follow `docs/runbooks/model-family-performance-intake.md`.
+
 Pearl catalog activation still follows the ordered `scripts/ops/` entry
 points. Do not use this runbook as permission to skip those ordered
 production mutations.
