@@ -276,3 +276,90 @@ func TestCandidateLogEntryThroughputSource(t *testing.T) {
 		t.Fatalf("reported entry = %+v", eb)
 	}
 }
+
+// SPEC-002-R005: a decode sample is bounded by PerfDecodeServiceBound times
+// the attempt's output over its service time, so output withheld and sent
+// in one burst cannot reach the clamp; a normal sample is unchanged.
+func TestDecodeSampleBoundedByServiceRate(t *testing.T) {
+	s := NewPerfStore()
+	s.Observe(PerfObservation{ProviderID: "normal", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 50, DecodeMs: 1000, ServiceMs: 1050, At: perfNow})
+	if e, _ := s.Lookup("normal", "m"); e.DecodeTPS != 100 {
+		t.Fatalf("normal sample changed: %+v", e)
+	}
+	s.Observe(PerfObservation{ProviderID: "burst", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 9990, DecodeMs: 10, ServiceMs: 10000, At: perfNow})
+	want := PerfDecodeServiceBound * 101 / 10.0
+	if e, _ := s.Lookup("burst", "m"); math.Abs(e.DecodeTPS-want) > 1e-9 {
+		t.Fatalf("burst decode = %v, want %v", e.DecodeTPS, want)
+	}
+	// Without a service time only the clamp applies.
+	s.Observe(PerfObservation{ProviderID: "noservice", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 50, DecodeMs: 10, At: perfNow})
+	if e, _ := s.Lookup("noservice", "m"); e.DecodeTPS != PerfMaxDecodeTPS {
+		t.Fatalf("clamp: %+v", e)
+	}
+}
+
+// A sample dated in the future (the clock stepped back) is fresh only within
+// PerfClockSkewTolerance; beyond it the record is unmeasured.
+func TestFreshnessRejectsFutureSamples(t *testing.T) {
+	s := NewPerfStore()
+	warmDecode(s, "p", 100, PerfFreshMinSamples, perfNow)
+	e, _ := s.Lookup("p", "org/model-a")
+	if !e.DecodeFresh(perfNow.Add(-PerfClockSkewTolerance)) {
+		t.Fatal("a skew within tolerance must stay fresh")
+	}
+	if e.DecodeFresh(perfNow.Add(-PerfClockSkewTolerance-time.Second)) || e.Fresh(perfNow.Add(-time.Hour)) {
+		t.Fatal("a sample from the future beyond tolerance must not be fresh")
+	}
+	p := measuredProvider("p", 30, 1, 7)
+	if v, measured := RoutedThroughput(p, s, perfNow.Add(-time.Hour)); measured || v != 30 {
+		t.Fatalf("routed = %v measured=%v", v, measured)
+	}
+}
+
+// DecodeWithPrior caps the prior at 1.25 times the measured decode for any
+// estimate, and ignores a non-positive or non-finite one.
+func TestDecodeWithPriorCapParametrised(t *testing.T) {
+	e := PerfEvidence{DecodeTPS: 100, DecodeSamples: 3}
+	capped := (PerfPriorWeightSamples*100*PerfPriorCapOverMeasure + 3*100) / (PerfPriorWeightSamples + 3)
+	for _, tc := range []struct {
+		name     string
+		estimate float64
+		want     float64
+	}{
+		{"huge", 1e300, capped},
+		{"+Inf", math.Inf(1), 100},
+		{"-Inf", math.Inf(-1), 100},
+		{"NaN", math.NaN(), 100},
+		{"zero", 0, 100},
+		{"negative", -50, 100},
+		{"lower", 50, (PerfPriorWeightSamples*50 + 3*100) / (PerfPriorWeightSamples + 3)},
+	} {
+		if got := e.DecodeWithPrior(tc.estimate); math.Abs(got-tc.want) > 1e-9 {
+			t.Fatalf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The order is positional. F1 (estimate 100, measured 50), U (estimate 90,
+// unmeasured) and F2 (estimate 80, measured 200) sort F1 U F2 on estimates;
+// the fresh pair permutes among positions 0 and 2, giving F2 U F1. F2 sits
+// above U although U's estimate is higher: only pairwise comparisons
+// (cohorts, sticky, tiebreak) of a fresh and an unmeasured candidate use
+// estimates.
+func TestMeasuredReorderDocumentedExample(t *testing.T) {
+	f1 := measuredProvider("F1", 100, 1, 7)
+	u := measuredProvider("U", 90, 1, 7)
+	f2 := measuredProvider("F2", 80, 1, 7)
+	w := DefaultWeights()
+	w.Measured = map[string]float64{f1.SortKey(): 50, f2.SortKey(): 200}
+	for _, objective := range []Objective{ObjectiveFast, ObjectiveDefault} {
+		got := []pool.Provider{f1, u, f2}
+		ReorderMeasured(got, objective, w)
+		if want := []string{"F2", "U", "F1"}; !reflect.DeepEqual(ids(got), want) {
+			t.Fatalf("%s: order = %v, want %v", objective, ids(got), want)
+		}
+	}
+	if !InEpsilonCohort(f2, u, ObjectiveFast, 0.15, w, nil) {
+		t.Fatal("F2 and U compare estimates (80 vs 90) for the cohort")
+	}
+}
