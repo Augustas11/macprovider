@@ -14538,11 +14538,26 @@ maxTokens: maxTokens,
 
     /// Native call markers are parser framing, even when the tokenizer marks
     /// them special. Strip the model's other control tokens as usual.
+    /// MiniMax M3 (#2189): an element tag directly after the namespace token
+    /// is the parameter key the call writes (`ns<filename>`), and that
+    /// vocabulary marks `<filename>`, `<commit_msg>` and other code tokens
+    /// special; there they stay for the parser, which strips namespaced
+    /// markup from content itself. Elsewhere they are stripped as usual.
     static func toolAwareStopTokenFilter(_ filter: StopTokenFilter, grammar: ToolCallGrammar?) -> StopTokenFilter {
-        guard grammar == .lfm2 else { return filter }
-        return StopTokenFilter(tokens: filter.tokens.filter {
-            $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
-        })
+        switch grammar {
+        case .lfm2?:
+            return StopTokenFilter(tokens: filter.tokens.filter {
+                $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
+            })
+        case .minimax?:
+            let tokens = filter.tokens.filter { $0 != ToolCallParser.miniMaxNamespace }
+            return StopTokenFilter(
+                tokens: tokens,
+                keeping: Set(tokens.filter { $0.hasPrefix("<") && $0.hasSuffix(">") }),
+                after: ToolCallParser.miniMaxNamespace)
+        default:
+            return filter
+        }
     }
 
     static func applyOutputFilters(

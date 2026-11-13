@@ -241,6 +241,26 @@ final class MiniMaxOutputTests: XCTestCase {
         XCTAssertEqual(undeclared.cleanedContent, "Sure. ")
     }
 
+    func testProseBetweenInvokesDropsOnlyTheProse() {
+        let parsed = parse(Self.wrapper(Self.readHosts, "Now the other one.\n", Self.readPasswd))
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"path":"/etc/hosts"}"#, #"{"path":"/etc/passwd"}"#])
+        // Namespaced markup after a close is not prose: that call is malformed.
+        let stray = Self.ns + "<invoke name=\"read_file\">" + Self.ns + "<path>/a" + Self.ns + "</path>" + Self.ns + "</invoke>"
+            + Self.ns + "<path>/b" + Self.ns + "</path>\n"
+        XCTAssertEqual(parse(Self.wrapper(stray, Self.readPasswd)).toolCalls.map(\.arguments), [#"{"path":"/etc/passwd"}"#])
+    }
+
+    func testTypeArraysWithStringKeepTextValues() {
+        let schemas: [String: JSONValue] = ["f": .object(["type": .string("object"), "properties": .object([
+            "code": .object(["type": .array([.string("string"), .string("null")])]),
+            "n": .object(["type": .array([.string("integer"), .string("null")])]),
+        ])])]
+        let output = Self.wrapper(Self.invoke("f", [("code", "42"), ("n", "7")]))
+        let parsed = ToolCallParser.parseToolCalls(rawOutput: output, grammar: .minimax, modelID: Self.model,
+                                                   allowedFunctionNames: ["f"], schemas: schemas)
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"code":"42","n":7}"#])
+    }
+
     func testUnclosedWrapperKeepsOnlyCompleteInvokes() {
         // The end-of-turn token replaced the wrapper close.
         let complete = parse(Self.ns + "<tool_call>\n" + Self.readHosts)
@@ -311,6 +331,117 @@ final class MiniMaxOutputTests: XCTestCase {
         let calling = "<mm:think>x</mm:think>" + Self.wrapper(Self.readHosts)
         var stopper = NativeToolCallStreamEmitter(modelID: Self.model, grammar: .minimax, allowedFunctionNames: ["read_file"])
         XCTAssertTrue(ModelRuntime.observeSerialToolStop(&stopper, decoded: calling, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []))
+    }
+
+    // MARK: Special-token parameter keys
+
+    /// Added tokens of `MiniMaxAI/MiniMax-M3.1-Flash` `tokenizer_config.json`
+    /// (ids and `special` flags as published): code-pretraining tags that are
+    /// special, and the call markup that is not.
+    private static let addedTokens: [(id: Int, content: String, special: Bool)] = [
+        (200005, "<reponame>", true), (200006, "<filename>", true), (200017, "<commit_msg>", true),
+        (200019, "]~b]", true), (200020, "[e~[", true), (200022, "<function_call>", true),
+        (200023, "<code_interpreter>", true), (200036, "<add_file>", true), (200037, "<delete_file>", true),
+        (200038, "<rename_file>", true), (200039, "<edit_file>", true), (200040, "<commit_message>", true),
+        (200044, "<file_content>", true), (200045, "<source_files>", true), (200048, "<filepath>", true),
+        (200050, "<think>", false), (200051, "</think>", false), (200052, "<tool_call>", false),
+        (200053, "</tool_call>", false), (200058, "]<]minimax[>[", false), (200059, "<mm:think>", false),
+        (200060, "</mm:think>", false),
+    ]
+
+    /// The served row's filters: the tokenizer config's stop tokens with the
+    /// MiniMax tool-aware exemption, and the control-token table.
+    private func servedFilters() throws -> (stop: StopTokenFilter, control: ControlTokenTable) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("minimax-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var decoder: [String: Any] = [:]
+        for token in Self.addedTokens {
+            decoder[String(token.id)] = ["content": token.content, "special": token.special, "lstrip": false, "rstrip": false,
+                                         "normalized": false, "single_word": false]
+        }
+        let url = directory.appendingPathComponent("tokenizer_config.json")
+        try JSONSerialization.data(withJSONObject: [
+            "added_tokens_decoder": decoder, "bos_token": "]~b]", "eos_token": "[e~[",
+        ]).write(to: url)
+        let stop = ModelRuntime.toolAwareStopTokenFilter(try StopTokenConfigExtractor.extract(fromTokenizerConfigAt: url), grammar: .minimax)
+        let control = ControlTokenTable(
+            addedTokens: Self.addedTokens.map { .init(content: $0.content, id: $0.id, special: $0.special, lstrip: false, rstrip: false) },
+            structuralSources: [])
+        return (stop, control)
+    }
+
+    /// Decodes `pieces` as the runtime does: added tokens by id (real control
+    /// tokens), everything else as ordinary text tokens, through the shield.
+    private func shieldedDecode(_ pieces: [String], control: ControlTokenTable, spelled: Set<String> = []) -> String {
+        var vocabulary: [Int: String] = [:]
+        var ids: [Int] = []
+        for piece in pieces {
+            if !spelled.contains(piece), let id = control.idsByText[piece] {
+                ids.append(id)
+                vocabulary[id] = piece
+            } else {
+                // Ordinary tokens, one per Character.
+                for character in piece {
+                    let id = 1_000 + vocabulary.count
+                    vocabulary[id] = String(character)
+                    ids.append(id)
+                }
+            }
+        }
+        return ControlTextShield.decode(tokenIds: ids, skipSpecialTokens: false, control: control) { ids, _ in
+            ids.map { vocabulary[$0] ?? "" }.joined()
+        }
+    }
+
+    func testSpecialTokenParameterKeysParseThroughShieldAndStopFilter() throws {
+        let (stop, control) = try servedFilters()
+        let ns = Self.ns
+        // `write_file(filename, file_content, meta: {commit_msg, filepath})`:
+        // every key is a special added token of this vocabulary.
+        let pieces = [
+            "Writing.\n", ns, "<tool_call>", "\n", ns, "<invoke name=\"write_file\">",
+            ns, "<filename>", "a.txt", ns, "</filename>",
+            ns, "<file_content>", "hi ", "<filename>", " x", ns, "</file_content>",
+            ns, "<meta>", ns, "<commit_msg>", "init", ns, "</commit_msg>", ns, "<filepath>", "src/a.txt", ns, "</filepath>", ns, "</meta>",
+            ns, "</invoke>", "\n", ns, "</tool_call>",
+        ]
+        let schemas: [String: JSONValue] = ["write_file": .object(["type": .string("object"), "properties": .object([
+            "filename": .object(["type": .string("string")]), "file_content": .object(["type": .string("string")]),
+            "meta": .object(["type": .string("object")]),
+        ])])]
+        let expected = #"{"file_content":"hi  x","filename":"a.txt","meta":{"commit_msg":"init","filepath":"src/a.txt"}}"#
+        // Path A: the keys are real special tokens; path B: the model spelled
+        // them with ordinary tokens, so the shield marks them.
+        for spelled in [Set<String>(), ["<filename>", "<file_content>", "<commit_msg>", "<filepath>"]] {
+            let decoded = shieldedDecode(pieces, control: control, spelled: spelled)
+            XCTAssertEqual(decoded.unicodeScalars.contains(ControlTextShield.mark), !spelled.isEmpty)
+            let filtered = ModelRuntime.applyOutputFilters(decoded, stopTokenFilter: stop, requestStops: [], reasoningOpen: false)
+            let parsed = ToolCallParser.parseToolCalls(rawOutput: filtered.text, grammar: .minimax, modelID: Self.model,
+                                                       allowedFunctionNames: ["write_file"], schemas: schemas)
+            let call = try XCTUnwrap(parsed.toolCalls.first, "\(spelled)")
+            XCTAssertEqual(ControlTextShield.strip(call.arguments),
+                           spelled.isEmpty ? expected : expected.replacingOccurrences(of: "hi  x", with: "hi <filename> x"), "\(spelled)")
+            XCTAssertEqual(parsed.leadingContent, "Writing.\n")
+            // The incremental stream filter agrees with the whole-text filter
+            // at every prefix: no cut separates a kept tag from its namespace.
+            let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stop, requestStops: [], reasoningOpen: false)
+            for end in stride(from: 1, through: decoded.unicodeScalars.count, by: 2) {
+                var view = String.UnicodeScalarView()
+                view.append(contentsOf: decoded.unicodeScalars.prefix(end))
+                let prefix = String(view)
+                XCTAssertEqual(incremental.update(prefix).text,
+                               ModelRuntime.streamingSafePrefix(prefix, stopTokenFilter: stop, requestStops: [], reasoningOpen: false).text,
+                               "\(spelled) \(end)")
+            }
+        }
+        // A special tag outside namespaced markup is still stripped.
+        let prose = shieldedDecode(["See ", "<filename>", " here", "]~b]"], control: control)
+        XCTAssertEqual(ControlTextShield.strip(ModelRuntime.applyOutputFilters(prose, stopTokenFilter: stop, requestStops: [], reasoningOpen: false).text),
+                       "See  here")
+        // Other families keep stripping every special token.
+        XCTAssertEqual(ModelRuntime.toolAwareStopTokenFilter(StopTokenFilter(tokens: ["<filename>"]), grammar: .glm)
+                        .stripping(from: ns + "<filename>"), ns)
     }
 
     func testGuaranteedGrammarAcceptsTheTemplateShape() throws {

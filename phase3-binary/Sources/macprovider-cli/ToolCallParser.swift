@@ -537,7 +537,6 @@ enum ToolCallParser {
     /// (`IncrementalToolText`), and each namespace token contains this.
     static let miniMaxMarker = String(miniMaxNamespace.dropFirst())
     private static let miniMaxInvokeOpen = miniMaxNamespace + "<invoke name=\""
-    private static let miniMaxInvokeClose = miniMaxNamespace + "</invoke>"
 
     /// One parsed MiniMax element value: the text between `ns<KEY>` and
     /// `ns</KEY>`, or the child elements the template expanded a mapping or
@@ -642,10 +641,12 @@ enum ToolCallParser {
         }
     }
 
-    /// One `ns<invoke name="NAME">…ns</invoke>` call; only whitespace may
-    /// follow its close. Values are typed by the declared schema: the
-    /// template writes strings raw, booleans and numbers as their JSON text,
-    /// and mappings and lists as nested elements (`ns<item>` per element).
+    /// One `ns<invoke name="NAME">…ns</invoke>` call. Text after its close
+    /// (up to the next invoke or the wrapper close) is prose inside the
+    /// wrapper and is dropped; namespaced markup there makes the call
+    /// malformed. Values are typed by the declared schema: the template
+    /// writes strings raw, booleans and numbers as their JSON text, and
+    /// mappings and lists as nested elements (`ns<item>` per element).
     static func miniMaxCall(_ invoke: Substring, schemas: [String: JSONValue]?) throws -> ToolCall {
         guard invoke.hasPrefix(miniMaxInvokeOpen) else { throw ParseError.invalidShape }
         let nameStart = invoke.index(invoke.startIndex, offsetBy: miniMaxInvokeOpen.count)
@@ -654,8 +655,8 @@ enum ToolCallParser {
         guard isValidToolFunctionName(name) else { throw ParseError.invalidShape }
         let rest = invoke[invoke.index(after: quote)...]
         guard rest.hasPrefix(">") else { throw ParseError.invalidShape }
-        let parsed = try miniMaxElements(rest.dropFirst(), closing: miniMaxInvokeClose, depth: 1)
-        guard isBlank(String(parsed.rest)) else { throw ParseError.invalidShape }
+        let parsed = try miniMaxElements(rest.dropFirst(), closingKey: "/invoke", depth: 1)
+        guard parsed.rest.range(of: miniMaxNamespace) == nil else { throw ParseError.invalidShape }
         guard parsed.elements.allSatisfy({ isValidToolParameterName($0.key) }) else { throw ParseError.invalidArguments }
         let value = try miniMaxValue(.elements(parsed.elements), schema: schemas?[name] ?? .object(["type": .string("object")]), depth: 1)
         guard case .object = value, ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
@@ -664,40 +665,56 @@ enum ToolCallParser {
         return ToolCall(id: newCallID(), functionName: name, arguments: json)
     }
 
-    /// Elements `ns<KEY>VALUE ns</KEY>` up to `closing`, which must follow;
-    /// whitespace between elements is free. Also returns the text after
-    /// `closing`.
+    /// Elements `ns<KEY>VALUE ns</KEY>` up to the `ns<closingKey>` tag,
+    /// which must follow; whitespace between elements is free. Also returns
+    /// the text after that tag.
     private static func miniMaxElements(
-        _ text: Substring, closing: String, depth: Int
+        _ text: Substring, closingKey: String, depth: Int
     ) throws -> (elements: [(key: String, value: MiniMaxNode)], rest: Substring) {
         guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else { throw ParseError.invalidArguments }
         var elements: [(key: String, value: MiniMaxNode)] = []
         var rest = text
         while true {
             rest = rest.drop(while: \.isWhitespace)
-            if rest.hasPrefix(closing) { return (elements, rest.dropFirst(closing.count)) }
-            guard rest.hasPrefix(miniMaxNamespace + "<") else {
+            if let after = miniMaxTag(rest, is: closingKey) { return (elements, after) }
+            guard let open = miniMaxTag(rest) else {
                 throw rest.isEmpty ? ParseError.missingEndDelimiter : ParseError.invalidShape
             }
-            let keyStart = rest.index(rest.startIndex, offsetBy: miniMaxNamespace.count + 1)
-            guard let keyEnd = rest[keyStart...].firstIndex(of: ">") else { throw ParseError.missingEndDelimiter }
-            let key = String(rest[keyStart..<keyEnd])
+            let key = open.key
             guard (1...128).contains(key.count), !key.hasPrefix("/"),
-                  !key.contains(where: { $0 == "<" || $0 == "\"" || $0.isWhitespace }) else { throw ParseError.invalidShape }
-            let close = miniMaxNamespace + "</" + key + ">"
-            let value = rest[rest.index(after: keyEnd)...]
+                  !key.contains(where: { $0 == "\"" || $0.isWhitespace }) else { throw ParseError.invalidShape }
+            let value = open.rest
             let lead = value.drop(while: \.isWhitespace)
-            if lead.hasPrefix(miniMaxNamespace + "<"), !lead.hasPrefix(close) {
-                let nested = try miniMaxElements(value, closing: close, depth: depth + 1)
+            if lead.hasPrefix(miniMaxNamespace + "<"), miniMaxTag(lead, is: "/" + key) == nil {
+                let nested = try miniMaxElements(value, closingKey: "/" + key, depth: depth + 1)
                 elements.append((key, .elements(nested.elements)))
                 rest = nested.rest
             } else {
                 guard let next = value.range(of: miniMaxNamespace) else { throw ParseError.missingEndDelimiter }
-                guard value[next.lowerBound...].hasPrefix(close) else { throw ParseError.invalidShape }
+                guard let after = miniMaxTag(value[next.lowerBound...], is: "/" + key) else { throw ParseError.invalidShape }
                 elements.append((key, .text(String(value[..<next.lowerBound]))))
-                rest = value[next.lowerBound...].dropFirst(close.count)
+                rest = after
             }
         }
+    }
+
+    /// The tag `ns<KEY>` that starts `text`: its key and the text after it.
+    /// The namespace token is the structure; the tag after it is the key the
+    /// call wrote. MiniMax's vocabulary holds `<filename>`, `<commit_msg>`
+    /// and other code tokens, so a key the model spelled with ordinary
+    /// tokens carries the control-text shield's mark (`ControlTextShield`):
+    /// it is removed from the key.
+    private static func miniMaxTag(_ text: Substring) -> (key: String, rest: Substring)? {
+        guard text.hasPrefix(miniMaxNamespace + "<") else { return nil }
+        let tag = text.dropFirst(miniMaxNamespace.count + 1)
+        guard let end = tag.firstIndex(where: { $0 == ">" || $0 == "<" }), tag[end] == ">" else { return nil }
+        return (ControlTextShield.strip(String(tag[..<end])), tag[tag.index(after: end)...])
+    }
+
+    /// The text after `ns<key>` when `text` starts with that tag.
+    private static func miniMaxTag(_ text: Substring, is key: String) -> Substring? {
+        guard let tag = miniMaxTag(text), tag.key == key else { return nil }
+        return tag.rest
     }
 
     /// A node as JSON, typed by `schema` as `glmValue` types GLM values. An
@@ -709,7 +726,19 @@ enum ToolCallParser {
         var declared: [String: JSONValue] = [:]
         if case .object(let object)? = schema { declared = object }
         var type: String?
-        if case .string(let name)? = declared["type"] { type = name }
+        switch declared["type"] {
+        case .string(let name)?:
+            type = name
+        case .array(let names)?:
+            // `["string", "null"]`: a value the template wrote raw is text.
+            let declaredNames = names.compactMap { name -> String? in
+                if case .string(let text) = name, text != "null" { return text }
+                return nil
+            }
+            type = declaredNames.contains("string") ? "string" : declaredNames.count == 1 ? declaredNames[0] : nil
+        default:
+            break
+        }
         switch node {
         case .text(let raw):
             guard raw.isEmpty else { return try glmValue(raw, type: type) }

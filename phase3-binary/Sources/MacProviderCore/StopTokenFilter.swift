@@ -3,8 +3,15 @@ import Foundation
 public struct StopTokenFilter: Sendable {
     public let tokens: [String]
     public let maxTokenLength: Int
+    /// Tokens of `keptTokens` that directly follow this text are kept
+    /// (MiniMax M3 element tags after its namespace token, #2189). Empty:
+    /// every occurrence is stripped.
+    public let keptPrefix: String
+    private let keptTokens: Set<String>
 
-    public init(tokens: [String]) {
+    public init(tokens: [String], keeping keptTokens: Set<String> = [], after keptPrefix: String = "") {
+        self.keptPrefix = keptTokens.isEmpty ? "" : keptPrefix
+        self.keptTokens = keptPrefix.isEmpty ? [] : keptTokens
         var seen = Set<String>()
         self.tokens = tokens
             .filter { !$0.isEmpty }
@@ -81,6 +88,8 @@ public struct StopTokenFilter: Sendable {
     /// positions of one text. Byte-exact tokens come from a byte scan, which
     /// also reports an occurrence a Character match would reject (a combining
     /// mark after it): a superset, never missing one the string search finds.
+    /// An occurrence directly after `keptPrefix` starts at that prefix, so a
+    /// cut never separates the two.
     public func occurrenceUTF8Ranges(in text: String) -> [Range<Int>] {
         if tokens.isEmpty { return [] }
         var contiguous = text
@@ -94,20 +103,28 @@ public struct StopTokenFilter: Sendable {
                 from = contiguous.unicodeScalars.index(after: range.lowerBound)
             }
         }
-        guard !byteTokens.isEmpty else { return ranges }
-        contiguous.utf8.withContiguousStorageIfAvailable { bytes in
-            let count = bytes.count
-            for index in 0..<count where firstBytes[Int(bytes[index])] {
-                for token in byteTokens where token.count <= count - index && token[0] == bytes[index] {
-                    var offset = 1
-                    while offset < token.count, bytes[index + offset] == token[offset] {
-                        offset += 1
+        if !byteTokens.isEmpty {
+            contiguous.utf8.withContiguousStorageIfAvailable { bytes in
+                let count = bytes.count
+                for index in 0..<count where firstBytes[Int(bytes[index])] {
+                    for token in byteTokens where token.count <= count - index && token[0] == bytes[index] {
+                        var offset = 1
+                        while offset < token.count, bytes[index + offset] == token[offset] {
+                            offset += 1
+                        }
+                        if offset == token.count { ranges.append(index..<(index + token.count)) }
                     }
-                    if offset == token.count { ranges.append(index..<(index + token.count)) }
                 }
             }
         }
-        return ranges
+        guard !keptPrefix.isEmpty else { return ranges }
+        let prefix = Array(keptPrefix.utf8)
+        let bytes = Array(contiguous.utf8)
+        return ranges.map { range in
+            let start = range.lowerBound - prefix.count
+            guard start >= 0, Array(bytes[start..<range.lowerBound]) == prefix else { return range }
+            return start..<range.upperBound
+        }
     }
 
     public func stripping(from text: String) -> String {
@@ -127,14 +144,17 @@ public struct StopTokenFilter: Sendable {
         var output = text
         for token in tokens {
             guard output.contains(token) else { continue }
-            if joiner.isEmpty {
+            let keepsAfterPrefix = keptTokens.contains(token)
+            if joiner.isEmpty, !keepsAfterPrefix {
                 output = output.replacingOccurrences(of: token, with: "")
                 continue
             }
             let parts = output.components(separatedBy: token)
             var joined = ""
             for (index, part) in parts.enumerated() {
-                if index > 0, !joined.isEmpty, parts[index...].contains(where: { !$0.isEmpty }) {
+                if index > 0, keepsAfterPrefix, joined.hasSuffix(keptPrefix) {
+                    joined += token
+                } else if index > 0, !joiner.isEmpty, !joined.isEmpty, parts[index...].contains(where: { !$0.isEmpty }) {
                     joined += joiner
                 }
                 joined += part

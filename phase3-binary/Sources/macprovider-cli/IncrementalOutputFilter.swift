@@ -360,7 +360,8 @@ extension ModelRuntime {
                 let longestToken = filter.tokens.map {
                     max($0.unicodeScalars.count, $0.decomposedStringWithCanonicalMapping.unicodeScalars.count)
                 }.max() ?? 0
-                tokenMargin = 2 * longestToken + 4
+                // A kept token's occurrence starts at its kept prefix.
+                tokenMargin = 2 * longestToken + filter.keptPrefix.unicodeScalars.count + 4
                 rawHoldback = tokenMargin + (watchesCloseTag ? ReasoningOutput.closeTag.unicodeScalars.count : 0) + 8
             }
 
