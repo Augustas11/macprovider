@@ -2134,16 +2134,23 @@ actor InferenceRelay {
     /// placeholder or display-only counts, so its billing fields are omitted
     /// and the coordinator falls back to its own byte estimate.
     static func usage(_ completion: CompletionResult) -> [String: Any] {
-        guard completion.settlementDisposition != .usageUnattested else {
-            return ["macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull()]
-        }
+        // The SPEC-001 request timing, as on the direct HTTP usage block:
+        // display-only vendor fields that billing and settlement never read.
+        let timeline = completion.timeline?.snapshot()
         var usage: [String: Any] = [
-            "prompt_tokens": completion.promptTokens,
-            "cached_prompt_tokens": completion.cachedPromptTokens,
-            "completion_tokens": completion.completionTokens,
-            "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
+            "macprovider_queue_ms": timeline?.queueMs ?? NSNull(),
+            "macprovider_first_token_ms": timeline?.firstTokenMs ?? NSNull(),
+            "macprovider_first_answer_ms": timeline?.firstAnswerMs ?? NSNull(),
+            "macprovider_decode_ms": timeline?.decodeMs ?? NSNull(),
         ]
+        guard completion.settlementDisposition != .usageUnattested else {
+            return usage
+        }
+        usage["prompt_tokens"] = completion.promptTokens
+        usage["cached_prompt_tokens"] = completion.cachedPromptTokens
+        usage["completion_tokens"] = completion.completionTokens
+        usage["total_tokens"] = completion.promptTokens + completion.completionTokens
         if completion.reasoningContent != nil {
             usage["completion_tokens_details"] = ["reasoning_tokens": completion.reasoningTokens]
         }
