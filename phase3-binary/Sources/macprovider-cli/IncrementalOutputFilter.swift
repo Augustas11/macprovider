@@ -866,9 +866,21 @@ struct IncrementalMiniMaxReasoningSplit {
         let scalars = text.unicodeScalars
         while true {
             let tail = text[IncrementalEmitterText.index(text, utf8Offset: settled)...]
+            if state.verbatim {
+                // After the namespace token the text is answer as it stands:
+                // commit all but the margin.
+                let keep = IncrementalEmitterText.breakIndex(
+                    tail, atOrBefore: tail.utf8.count - IncrementalEmitterText.margin, floor: tail.startIndex)
+                state.append(tail[..<keep])
+                settled = IncrementalEmitterText.offset(text, keep)
+                searched = settled
+                var result = state
+                result.append(text[keep...])
+                return result.split
+            }
             let from = IncrementalEmitterText.breakIndex(tail, atOrBefore: searched - settled, floor: tail.startIndex)
-            guard let next = MiniMax.nextTag(in: tail[from...]) else {
-                searched = max(searched, text.utf8.count - MiniMax.closeTag.utf8.count - IncrementalEmitterText.margin)
+            guard let next = MiniMax.nextTag(in: tail[from...], inside: state.inside) else {
+                searched = max(searched, text.utf8.count - ToolCallParser.miniMaxNamespace.utf8.count - IncrementalEmitterText.margin)
                 var result = state
                 result.append(MiniMax.withoutPartialTags(tail))
                 return result.split
@@ -882,7 +894,7 @@ struct IncrementalMiniMaxReasoningSplit {
                 var result = state
                 result.append(tail[..<next.range.lowerBound])
                 result.apply(tag: next.tag)
-                result.append(MiniMax.withoutPartialTags(text[upper...]))
+                result.append(result.verbatim ? text[upper...] : MiniMax.withoutPartialTags(text[upper...]))
                 return result.split
             }
             state.append(tail[..<next.range.lowerBound])

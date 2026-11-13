@@ -154,10 +154,13 @@ enum ReasoningOutput {
         }
 
         /// The split of a scanned prefix: text between tags goes to
-        /// `append`, each tag to `apply`.
+        /// `append`, each tag to `apply`. The namespace token outside a block
+        /// ends the scan (`verbatim`): a tool call follows, and its values
+        /// may hold either tag as text.
         struct Scan {
             private(set) var inside = false
             private(set) var opened = false
+            private(set) var verbatim = false
             private(set) var reasoning = ""
             private(set) var answer = ""
             private var dropsWhitespace = true
@@ -180,21 +183,34 @@ enum ReasoningOutput {
                 if tag == openTag {
                     if !inside { opened = true }
                     inside = true
-                } else {
+                } else if tag == closeTag {
                     inside = false
                     dropsWhitespace = true
+                } else {
+                    append(tag)
+                    verbatim = true
                 }
             }
 
             var split: Split { Split(reasoning: reasoning, answer: answer, closed: !inside) }
         }
 
-        /// The first tag in `text`.
-        static func nextTag(in text: Substring) -> (range: Range<String.Index>, tag: String)? {
+        /// The first tag in `text`, or the namespace token when it comes
+        /// first outside a block.
+        static func nextTag(in text: Substring, inside: Bool) -> (range: Range<String.Index>, tag: String)? {
             let open = text.range(of: openTag)
             let close = text.range(of: closeTag)
-            if let open, close.map({ open.lowerBound < $0.lowerBound }) ?? true { return (open, openTag) }
-            return close.map { ($0, closeTag) }
+            var next: (range: Range<String.Index>, tag: String)?
+            if let open, close.map({ open.lowerBound < $0.lowerBound }) ?? true {
+                next = (open, openTag)
+            } else if let close {
+                next = (close, closeTag)
+            }
+            if !inside, let namespace = text.range(of: ToolCallParser.miniMaxNamespace),
+               next.map({ namespace.lowerBound < $0.range.lowerBound }) ?? true {
+                return (namespace, ToolCallParser.miniMaxNamespace)
+            }
+            return next
         }
 
         /// `text` without a suffix that could still become a tag.
@@ -209,12 +225,12 @@ enum ReasoningOutput {
         static func scan(_ text: String, streaming: Bool) -> Scan {
             var scan = Scan()
             var rest = text[...]
-            while let next = nextTag(in: rest) {
+            while !scan.verbatim, let next = nextTag(in: rest, inside: scan.inside) {
                 scan.append(rest[..<next.range.lowerBound])
                 scan.apply(tag: next.tag)
                 rest = rest[next.range.upperBound...]
             }
-            scan.append(streaming ? withoutPartialTags(rest) : rest)
+            scan.append(streaming && !scan.verbatim ? withoutPartialTags(rest) : rest)
             return scan
         }
 
@@ -236,28 +252,30 @@ enum ReasoningOutput {
             scan(text, streaming: false).opened
         }
 
-        /// The tokens from the one that starts the first block's text through
-        /// the one that completes the last block's `</mm:think>` (to the end
-        /// when that block never closed); none without a block. Prefix
-        /// decode lengths are monotone, so each bound is a binary search.
+        /// The tokens of each block, from the one that starts its text
+        /// through the one that completes its `</mm:think>` (to the end when
+        /// it never closed), summed; a token two blocks share counts once.
+        /// None without a block. Prefix decode lengths are monotone, so each
+        /// bound is a binary search.
         static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String) -> Int {
             guard !tokenIDs.isEmpty else { return 0 }
             let text = decode(tokenIDs)
             var scan = Scan()
             var rest = text[...]
-            var firstOpen: Int?
-            var lastClose: Int?
-            while let next = nextTag(in: rest) {
+            // UTF-8 offsets of each block's open and close (nil: never closed).
+            var blocks: [(open: Int, close: Int?)] = []
+            while !scan.verbatim, let next = nextTag(in: rest, inside: scan.inside) {
                 scan.append(rest[..<next.range.lowerBound])
                 let wasInside = scan.inside
                 scan.apply(tag: next.tag)
-                if scan.inside, !wasInside, firstOpen == nil {
-                    firstOpen = text.utf8.distance(from: text.startIndex, to: next.range.lowerBound)
+                if scan.inside, !wasInside {
+                    blocks.append((text.utf8.distance(from: text.startIndex, to: next.range.lowerBound), nil))
                 }
-                if wasInside, !scan.inside { lastClose = text.utf8.distance(from: text.startIndex, to: next.range.upperBound) }
+                if wasInside, !scan.inside {
+                    blocks[blocks.count - 1].close = text.utf8.distance(from: text.startIndex, to: next.range.upperBound)
+                }
                 rest = rest[next.range.upperBound...]
             }
-            guard let firstOpen else { return 0 }
             /// The fewest tokens whose decode is longer than `bytes` UTF-8 bytes.
             func tokens(past bytes: Int) -> Int {
                 var low = 1
@@ -268,9 +286,15 @@ enum ReasoningOutput {
                 }
                 return low
             }
-            let end = scan.inside ? tokenIDs.count : lastClose.map { tokens(past: $0 - 1) } ?? tokenIDs.count
-            let before = tokens(past: firstOpen) - 1
-            return max(0, end - before)
+            var count = 0
+            var counted = 0
+            for block in blocks {
+                let before = max(counted, tokens(past: block.open) - 1)
+                let end = block.close.map { tokens(past: $0 - 1) } ?? tokenIDs.count
+                count += max(0, end - before)
+                counted = max(counted, end)
+            }
+            return count
         }
     }
 

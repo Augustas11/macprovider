@@ -46,12 +46,19 @@ final class IncrementalOutputFilterTests: XCTestCase {
         "\u{FFFD}", ControlTextShield.markString, "x", "y", "z", " im_end|>x",
     ]
 
-    private func randomStream(_ rng: inout SeededGenerator, count: Int) -> [String] {
+    /// MiniMax (#2189) reasoning tags and the namespace token, whole and
+    /// split, with whitespace.
+    private let miniMaxPieces: [String] = [
+        "<mm:think>", "</mm:think>", "<mm:", "think>", "</mm:th", "ink>", "]<]minimax[>[", "]<]mini", "max[>[",
+        "]<]minimax[>[<invoke name=\"f\">", "]<]minimax[>[<x>", "]<]minimax[>[</x>", " ", "\n", "  \n", "END",
+    ]
+
+    private func randomStream(_ rng: inout SeededGenerator, count: Int, extra: [String] = []) -> [String] {
         (0..<count).map { _ in
             // Mostly prose so the filter commits; markup often enough to hit
             // every edge.
             if Int.random(in: 0..<3, using: &rng) == 0 {
-                return pieces.randomElement(using: &rng)!
+                return (pieces + extra).randomElement(using: &rng)!
             }
             return ["the", " cat", " sat", " on", " a", " mat", ",", ".", "\n", " 42", " und", " 中文", " ok"].randomElement(using: &rng)!
         }
@@ -80,6 +87,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         seed: UInt64,
         streams: Int,
         length: Int,
+        extra: [String] = [],
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -92,7 +100,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         for streamIndex in 0..<streams {
             let stops = requestStopSets[streamIndex % requestStopSets.count]
             let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: mode)
-            for (step, text) in texts(of: randomStream(&rng, count: length), &rng).enumerated() {
+            for (step, text) in texts(of: randomStream(&rng, count: length, extra: extra), &rng).enumerated() {
                 let expected: (text: String, hitStop: Bool)
                 switch mode {
                 case .streamingSafePrefix(let reasoningOpen):
@@ -133,6 +141,28 @@ final class IncrementalOutputFilterTests: XCTestCase {
 
     func testReasoningSafePrefixMatchesReferenceOnRandomStreams() {
         assertDifferential(mode: .streamingSafePrefix(reasoningOpen: true), seed: 23_171, streams: 36, length: 400)
+    }
+
+    func testMiniMaxSafePrefixMatchesReferenceOnRandomStreams() {
+        assertDifferential(
+            mode: .streamingSafePrefix(reasoningOpen: .afterMiniMaxThink), seed: 23_174, streams: 36, length: 400, extra: miniMaxPieces)
+    }
+
+    /// The MiniMax split twin against its reference at every step.
+    func testMiniMaxSplitMatchesReferenceOnRandomStreams() {
+        var rng = SeededGenerator(state: 23_175)
+        var restarts = 0
+        for streamIndex in 0..<36 {
+            var split = IncrementalMiniMaxReasoningSplit()
+            for (step, text) in texts(of: randomStream(&rng, count: 400, extra: miniMaxPieces), &rng).enumerated() {
+                let expected = ReasoningOutput.MiniMax.splitStreamingPrefix(text)
+                guard split.splitStreamingPrefix(text) == expected else {
+                    return XCTFail("stream \(streamIndex) step \(step) differs for \(text.debugDescription)")
+                }
+            }
+            restarts += split.restartCount
+        }
+        XCTAssertLessThan(restarts, 36 * 400 / 4)
     }
 
     func testOutputFiltersMatchReferenceOnRandomStreams() {
@@ -748,15 +778,18 @@ final class IncrementalOutputFilterTests: XCTestCase {
             "\u{FE0F}", "\u{1F3FD}", "👍", "가", "\u{1100}", "\u{1161}", "\u{0915}", "\u{094D}", "🇺", "\r",
             "<think>", "</think>", "</th", "ink>", "<tool_call>", "<|eot_id|>", "<|eo", "t_id|>", "STOP", "word ", "prose here ",
             "<div>", "</div>", "</", "<a ", "href=\"x\">", "<?xml", " version=\"1.0\"?>", "\n  <item/>", "<th", "<tool", "<|", "< ",
+            "<mm:think>", "</mm:think>", "</mm:th", "]<]minimax[>[", "]<]mini", "max[>[", "  ",
         ]
         var mismatches = 0
         for stream in 0..<30 {
             let stops = stream % 2 == 0 ? ["STOP"] : []
             let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
                 .outputFilters, .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true),
+                .streamingSafePrefix(reasoningOpen: .afterMiniMaxThink),
             ]
             let filters = modes.map { ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: $0) }
             var split = IncrementalReasoningSplit()
+            var miniMaxSplit = IncrementalMiniMaxReasoningSplit()
             var stray = IncrementalStrayTagRemoval()
             var text = ""
             for _ in 0..<500 {
@@ -775,6 +808,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     if actual.text != expected.text || actual.hitStop != expected.hitStop { mismatches += 1 }
                 }
                 if split.splitStreamingPrefix(text) != ReasoningOutput.splitStreamingPrefix(text) { mismatches += 1 }
+                if miniMaxSplit.splitStreamingPrefix(text) != ReasoningOutput.MiniMax.splitStreamingPrefix(text) { mismatches += 1 }
                 if stray.removingStrayTags(text) != ReasoningOutput.removingStrayTags(text, streaming: true) { mismatches += 1 }
             }
         }

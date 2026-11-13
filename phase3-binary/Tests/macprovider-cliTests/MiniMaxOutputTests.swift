@@ -131,6 +131,12 @@ final class MiniMaxOutputTests: XCTestCase {
         // A block after prose counts from its open tag.
         let later = Array("xy<mm:think>ab</mm:think>cd").map(String.init)
         XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(later.indices), decode: { $0.map { later[$0] }.joined() }), 23)
+        // Two blocks count their own spans, not the answer between them.
+        let twice = Array("<mm:think>a</mm:think>" + String(repeating: "x", count: 50) + "<mm:think>b</mm:think>").map(String.init)
+        XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(twice.indices), decode: { $0.map { twice[$0] }.joined() }), 44)
+        // A tag inside a tool call is no block.
+        let call = Array(Self.ns + "<tool_call><mm:think>ab</mm:think>").map(String.init)
+        XCTAssertEqual(ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: Array(call.indices), decode: { $0.map { call[$0] }.joined() }), 0)
     }
 
     /// Streams `output` in `chunk`-Character steps through the emitter (its
@@ -353,6 +359,37 @@ final class MiniMaxOutputTests: XCTestCase {
                     XCTAssertEqual(streamed.reasoning, output.hasPrefix("<mm:think>") ? reasoning : "", "\(output) chunk \(chunk)")
                 }
             }
+        }
+    }
+
+    /// Round-2 audit A: once a call starts, both tags in a value are text.
+    func testReasoningTagsInsideAToolArgumentStayInTheArgument() throws {
+        let code = "s = \"<mm:think>x</mm:think>\"; t = \"</mm:think>\""
+        let call = Self.wrapper(Self.invoke("read_file", [("path", code)]))
+        let expected = try String(data: JSONSerialization.data(withJSONObject: ["path": code], options: .withoutEscapingSlashes), encoding: .utf8)!
+        for output in [call, "<mm:think>plan</mm:think>\n" + call, "Writing it.\n" + call] {
+            XCTAssertFalse(ReasoningOutput.MiniMax.reasoned(output) && !output.hasPrefix("<mm:think>"), output)
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: makeRequest(tools: true, stream: false),
+                mode: .complete(finishReason: "stop"), defaultCompletionTokens: 9, toolCallPrefill: nil)
+            XCTAssertEqual(parsed.toolCalls.map(\.arguments), [expected], output)
+            XCTAssertEqual(parsed.reasoningContent ?? "", output.hasPrefix("<mm:think>") ? "plan" : "", output)
+            let request = try makeRequest(tools: true)
+            for chunk in [1, 5, output.count] {
+                for reference in [false, true] {
+                    let streamed = try stream(output, request: request, chunk: chunk, reference: reference)
+                    XCTAssertEqual(streamed.calls, [expected], "\(output) chunk \(chunk) reference \(reference)")
+                    XCTAssertEqual(streamed.reasoning, output.hasPrefix("<mm:think>") ? "plan" : "", "\(output) chunk \(chunk)")
+                    XCTAssertEqual(streamed.content, output.hasPrefix("Writing") ? "Writing it.\n" : "", "\(output) chunk \(chunk)")
+                }
+            }
+            // The incremental split equals the whole-text one at every prefix.
+            var incremental = IncrementalMiniMaxReasoningSplit()
+            for end in 0...output.count {
+                let prefix = String(output.prefix(end))
+                XCTAssertEqual(incremental.splitStreamingPrefix(prefix), ReasoningOutput.MiniMax.splitStreamingPrefix(prefix), prefix)
+            }
+            XCTAssertEqual(incremental.restartCount, 0)
         }
     }
 
