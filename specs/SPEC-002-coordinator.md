@@ -1,6 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.30 (2026-11-07, a revoked release stays connected update-only and the CLI train reloads it with SIGHUP)
+**Version:** 1.6.31 (2026-11-13, provider heartbeat decode telemetry fields documented)
+
+**Change log v1.6.31 (2026-11-13, Related: #2319):** The provider heartbeat
+example lists the SPEC-001 v1.9.55 observability fields
+`decode_tps_since_last`, `native_mtp_proposed_tokens_since_last` and
+`native_mtp_accepted_tokens_since_last`. The coordinator does not read them
+and accepts a heartbeat that carries them or omits them; no coordinator
+behavior changes.
 
 **Change log v1.6.30 (2026-11-07, Related: #2247):** `SPEC-002-R004` reload.
 An exact revocation of a connected buyer-serving session marks that session
@@ -2943,12 +2950,18 @@ Coordinator behavior:
   "throughput_tps_estimate": 19.8,
   "requests_served_since_last": 12,
   "avg_latency_ms_since_last": 450.0,
-  "throughput_tps_since_last": 18.5
+  "throughput_tps_since_last": 18.5,
+  "decode_tps_since_last": 24.7,
+  "native_mtp_proposed_tokens_since_last": 0,
+  "native_mtp_accepted_tokens_since_last": 0
 }
 ```
 
 Coordinator behavior:
 - Updates pool entry with all fields (FR-P4).
+- Reads named fields only and ignores keys it does not know. The last three
+  fields above are provider observability defined in SPEC-001 §6.5.1; the
+  coordinator does not read them, and a heartbeat without them is valid.
 - Updates `last_heartbeat_at`.
 - If `status` differs from pool state, treats as implicit state_update.
 - If `last_heartbeat_at` gap > 120s (wake detection), triggers FR-P8.
