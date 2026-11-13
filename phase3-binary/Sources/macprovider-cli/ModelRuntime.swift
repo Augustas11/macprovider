@@ -9008,6 +9008,9 @@ maxTokens: 1,
             cachedPromptTokens: result.cachedPromptTokens,
             decode: decode
         )
+        // A replay waiter shares the original row's counters; only the
+        // original reports them, so a heartbeat window counts each row once.
+        let mtpCounters = result.settlementDisposition == .nonSettlingReplay ? nil : result.nativeMTPCounters
         return ContinuousBatchFinalizedRow(
             completion: CompletionResult(
                 content: parsed.content,
@@ -9021,6 +9024,10 @@ maxTokens: 1,
                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                 modelHashObserved: validObservedModelHash(modelHash),
                 settlementDisposition: result.settlementDisposition,
+                nativeMTPProposedTokens: mtpCounters.map {
+                    Int(clamping: NativeMTPDepthAdaptationState.saturatingAdd($0.acceptedTokens, $0.rejectedTokens))
+                } ?? 0,
+                nativeMTPAcceptedTokens: mtpCounters.map { Int(clamping: $0.acceptedTokens) } ?? 0,
                 reasoningContent: parsed.reasoningContent,
                 reasoningTokens: parsed.reasoningTokens,
                 // The scheduler removes stop tokens from outputTokens; the
@@ -16341,6 +16348,8 @@ maxTokens: maxTokens,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
             specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
             specDecodeGeneration: completion.specDecodeGeneration,
+            nativeMTPProposedTokens: completion.nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: completion.nativeMTPAcceptedTokens,
             reasoningContent: completion.reasoningContent,
             reasoningTokens: completion.reasoningTokens,
             stopSequence: completion.stopSequence,
@@ -17566,6 +17575,11 @@ struct CompletionResult: Sendable {
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
+    /// Native-MTP draft tokens proposed and accepted for this request: the
+    /// batched row's scheduler counters, read once at finalize. 0 on every
+    /// other path and on a replay waiter (the original row reports them).
+    let nativeMTPProposedTokens: Int
+    let nativeMTPAcceptedTokens: Int
     /// #1690 E2E-F3: set on every loopback stream result, nil otherwise.
     /// Maps each content UTF-8 byte length at an upstream chunk boundary to
     /// the completion tokens generated through it, as the upstream attested
@@ -17598,6 +17612,8 @@ struct CompletionResult: Sendable {
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil,
+        nativeMTPProposedTokens: Int = 0,
+        nativeMTPAcceptedTokens: Int = 0,
         loopbackPrefixCompletionTokens: [Int: Int]? = nil,
         shardGroupEvidence: ShardGroupCompletionEvidence? = nil,
         reasoningContent: String? = nil,
@@ -17606,6 +17622,8 @@ struct CompletionResult: Sendable {
         timeline: RequestTimeline? = nil
     ) {
         self.timeline = timeline
+        self.nativeMTPProposedTokens = max(0, nativeMTPProposedTokens)
+        self.nativeMTPAcceptedTokens = max(0, min(nativeMTPAcceptedTokens, nativeMTPProposedTokens))
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.shardGroupEvidence = shardGroupEvidence
         self.reasoningContent = reasoningContent
@@ -17649,6 +17667,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
@@ -17675,6 +17695,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
             shardGroupEvidence: content == self.content ? shardGroupEvidence : nil,
             reasoningContent: reasoningContent,
@@ -17701,6 +17723,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
@@ -17737,6 +17761,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
             stopSequence: stopSequence,
             timeline: timeline
         )
