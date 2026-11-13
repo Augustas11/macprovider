@@ -2,7 +2,6 @@ package buyer
 
 import (
 	"io"
-	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -423,30 +422,20 @@ func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
 }
 
-// routingProviderDecodeMs is routingDecodeMs without the time the
-// coordinator was blocked writing to the buyer (SPEC-002-R005), at least 1
-// ms. ok is false without a window, or when the remainder is below
-// routing.PerfBuyerLimitedMinShare of the window: a buyer-limited attempt
-// yields no decode sample. With no blocked time it is routingDecodeMs.
+// routingProviderDecodeMs is routingDecodeMs unchanged, except that ok is
+// false when the coordinator was blocked writing to the buyer for at least
+// routing.PerfBuyerLimitedShare of the window (SPEC-002-R005): a
+// buyer-limited attempt yields no decode sample.
 func (snap requestPhaseTimingSnapshot) routingProviderDecodeMs() (float64, bool) {
 	raw := snap.routingDecodeMs()
 	if raw == nil {
 		return 0, false
 	}
-	if snap.buyerBlocked <= 0 {
-		return *raw, true
-	}
 	blocked := float64(snap.buyerBlocked) / float64(time.Millisecond)
-	left := *raw - blocked
-	if left < routing.PerfBuyerLimitedMinShare**raw {
+	if blocked >= routing.PerfBuyerLimitedShare**raw {
 		return 0, false
 	}
-	return math.Max(left, 1), true
-}
-
-// buyerBlockedMs is buyerBlocked in milliseconds.
-func (snap requestPhaseTimingSnapshot) buyerBlockedMs() float64 {
-	return float64(snap.buyerBlocked) / float64(time.Millisecond)
+	return *raw, true
 }
 
 func (snap requestPhaseTimingSnapshot) matchesProviderAssignedID(providerAssignedID string) bool {

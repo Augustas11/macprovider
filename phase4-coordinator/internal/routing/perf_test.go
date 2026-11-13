@@ -205,7 +205,7 @@ func TestPerfStoreEndToEndObservation(t *testing.T) {
 	// Streamed attempts never give service throughput (their done follows
 	// the buyer writes), timed or buffered, so the response mode never
 	// decides which provider looks faster.
-	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", Streamed: true, RequestTokens: 100, CompletionTokens: 101, TTFTMs: 150, DecodeMs: 1000, ServiceMs: 1150, At: perfNow})
+	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", Streamed: true, RequestTokens: 100, CompletionTokens: 101, TTFTMs: 9000, DecodeMs: 1000, ServiceMs: 10000, At: perfNow})
 	s.Observe(PerfObservation{ProviderID: "buffered", Model: "m", Streamed: true, EndToEnd: true, RequestTokens: 100, CompletionTokens: 101, ServiceMs: 10000, At: perfNow})
 	if timed, _ := s.Lookup("timed", "m"); timed.ServiceSamples != 0 || timed.DecodeTPS != 100 || timed.TTFTSamples != 1 {
 		t.Fatalf("timed stream: %+v", timed)

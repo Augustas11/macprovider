@@ -238,15 +238,11 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if ttft := timing.routingTTFTMs(); ttft != nil {
 		obs.EndToEnd = false
 		obs.TTFTMs = *ttft
-		// The decode window and the service time leave out the time the
-		// coordinator was blocked writing to the buyer, so a slow reader
-		// cannot lower the provider's rate; a buyer-limited window gives no
-		// decode sample. Only a timed (streamed) attempt has such time.
+		// A window in which the coordinator was blocked on the buyer for a
+		// material share gives no decode sample, so a slow reader can neither
+		// lower nor raise the provider's rate.
 		if decode, ok := timing.routingProviderDecodeMs(); ok {
 			obs.DecodeMs = decode
-		}
-		if blocked := timing.buyerBlockedMs(); blocked > 0 {
-			obs.ServiceMs = math.Max(obs.ServiceMs-blocked, 1)
 		}
 	}
 	if b.state.perfHold {

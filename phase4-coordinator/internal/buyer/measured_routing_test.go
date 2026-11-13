@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -149,11 +150,11 @@ func (w blockingWriter) Write(b []byte) (int, error) {
 	return w.ResponseRecorder.Write(b)
 }
 
-// SPEC-002-R005: the decode window leaves out the time the coordinator was
-// blocked writing to the buyer, so a slow reader cannot lower a fast
-// provider's rate; a mostly buyer-limited window gives no decode sample; a
-// non-blocking buyer gives exactly the unadjusted sample, and the bytes
-// reach the buyer unchanged and in order.
+// SPEC-002-R005: buyer-blocked time never adjusts a sample. Below
+// routing.PerfBuyerLimitedShare of the decode window the attempt records
+// exactly what it recorded before #2321 (every signal, not only decode); at or
+// above it the attempt yields no decode sample. The timing wrapper passes the
+// bytes to the buyer unchanged and in order.
 func TestBuyerBlockedTimeLeavesDecodeAtProviderPace(t *testing.T) {
 	chunks := []string{"data: a\n\n", "data: bb\n\n", "data: ccc\n\n"}
 	write := func(state *forwardState, underlying http.ResponseWriter) {
@@ -163,35 +164,48 @@ func TestBuyerBlockedTimeLeavesDecodeAtProviderPace(t *testing.T) {
 			w.Flush()
 		}
 	}
-	// Non-blocking buyer: 100 tokens over the 1000 ms window, as before.
+	// Baseline: the attempt with no buyer writes at all, which is what
+	// origin/main records for it: 100 tokens over the 1000 ms window.
 	s, _ := phaseTestServer(t)
+	streamedAttempt(s, http.Header{}, 1050, nil)
+	baseline, _ := s.perf.Lookup("fast", "model-a")
+	if baseline.DecodeTPS != 100 || baseline.DecodeSamples != 1 || baseline.TTFTSamples != 1 {
+		t.Fatalf("baseline: %+v", baseline)
+	}
+	same := func(label string, s *Server) {
+		t.Helper()
+		if e, _ := s.perf.Lookup("fast", "model-a"); !reflect.DeepEqual(e, baseline) {
+			t.Fatalf("%s: %+v, want baseline %+v", label, e, baseline)
+		}
+	}
+	// Non-blocking buyer: identical record, identical bytes.
+	s, _ = phaseTestServer(t)
 	plain := httptest.NewRecorder()
 	streamedAttempt(s, http.Header{}, 1050, func(state *forwardState) { write(state, plain) })
-	if e, _ := s.perf.Lookup("fast", "model-a"); e.DecodeTPS != 100 || e.DecodeSamples != 1 {
-		t.Fatalf("non-blocking: %+v", e)
-	}
+	same("non-blocking", s)
 	if plain.Body.String() != strings.Join(chunks, "") {
 		t.Fatalf("bytes changed: %q", plain.Body.String())
 	}
-	// Slow buyer: three writes of at least 40 ms each inside a 1000 ms
-	// window. Without the adjustment the rate would be 100 tok/s; with it
-	// the provider's pace is higher, never lower.
+	// Just under the threshold (49 ms of a 1000 ms window): unchanged.
+	s, _ = phaseTestServer(t)
+	streamedAttempt(s, http.Header{}, 1050, func(state *forwardState) { state.phaseTiming.addBuyerWrite(49 * time.Millisecond) })
+	same("under threshold", s)
+	// At the threshold: no decode sample, TTFT kept.
+	s, _ = phaseTestServer(t)
+	streamedAttempt(s, http.Header{}, 1050, func(state *forwardState) { state.phaseTiming.addBuyerWrite(50 * time.Millisecond) })
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.DecodeSamples != 0 || e.TTFTSamples != 1 || e.TTFTMs != baseline.TTFTMs {
+		t.Fatalf("at threshold: %+v", e)
+	}
+	// A slow buyer (three writes of 40 ms) blocks the stream: no decode
+	// sample, bytes unchanged.
 	s, _ = phaseTestServer(t)
 	slow := blockingWriter{ResponseRecorder: httptest.NewRecorder(), delay: 40 * time.Millisecond}
 	streamedAttempt(s, http.Header{}, 1050, func(state *forwardState) { write(state, slow) })
-	e, _ := s.perf.Lookup("fast", "model-a")
-	if e.DecodeSamples != 1 || e.DecodeTPS <= 100 {
-		t.Fatalf("slow buyer lowered or lost the decode sample: %+v", e)
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.DecodeSamples != 0 || e.TTFTSamples != 1 {
+		t.Fatalf("blocked stream kept a decode sample: %+v", e)
 	}
 	if slow.Body.String() != strings.Join(chunks, "") {
 		t.Fatalf("bytes changed: %q", slow.Body.String())
-	}
-	// Buyer-limited: 900 ms of the 1000 ms window blocked on the buyer.
-	s, _ = phaseTestServer(t)
-	streamedAttempt(s, http.Header{}, 1050, func(state *forwardState) { state.phaseTiming.addBuyerWrite(900 * time.Millisecond) })
-	e, _ = s.perf.Lookup("fast", "model-a")
-	if e.DecodeSamples != 0 || e.TTFTSamples != 1 {
-		t.Fatalf("buyer-limited attempt kept a decode sample: %+v", e)
 	}
 	// Writes outside the window and sub-millisecond writes do not count.
 	state := &forwardState{}

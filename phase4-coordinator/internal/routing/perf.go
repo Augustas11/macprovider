@@ -31,17 +31,14 @@ const (
 	PerfMaxDecodeTPS         = 2_000
 	PerfPriorWeightSamples   = 2
 	PerfPriorCapOverMeasure  = 1.25
-	// PerfDecodeServiceBound bounds a decode sample by this many times the
-	// attempt's own output over its service time, so output withheld and
-	// sent in one burst cannot reach the decode clamp.
-	PerfDecodeServiceBound = 4
 	// PerfBuyerWriteMin: a buyer write or flush inside the decode window that
 	// takes at least this long counts as time blocked on the buyer.
 	PerfBuyerWriteMin = time.Millisecond
-	// PerfBuyerLimitedMinShare: when the window left after removing buyer
-	// blocked time is below this share of the raw window, the attempt was
-	// buyer-limited and yields no decode sample.
-	PerfBuyerLimitedMinShare = 0.2
+	// PerfBuyerLimitedShare: when buyer-blocked time inside the decode
+	// window is at least this share of the window, the attempt was
+	// buyer-limited and yields no decode sample; below it the window is
+	// used unchanged.
+	PerfBuyerLimitedShare = 0.05
 	// PerfClockSkewTolerance: a sample timestamped further than this in
 	// the future (the clock stepped back) is not recent.
 	PerfClockSkewTolerance = 5 * time.Second
@@ -248,9 +245,6 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	decode := math.NaN()
 	if !o.EndToEnd && o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.DecodeMs) {
 		decode = clampFloat(float64(o.CompletionTokens-1)/(o.DecodeMs/1000), 0, PerfMaxDecodeTPS)
-		if positiveMs(o.ServiceMs) {
-			decode = math.Min(decode, PerfDecodeServiceBound*float64(o.CompletionTokens)/(o.ServiceMs/1000))
-		}
 	}
 	service := math.NaN()
 	if !o.Streamed && o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.ServiceMs) && o.RequestTokens <= PerfServiceMaxInputRatio*o.CompletionTokens {

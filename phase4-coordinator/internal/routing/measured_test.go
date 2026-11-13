@@ -277,24 +277,13 @@ func TestCandidateLogEntryThroughputSource(t *testing.T) {
 	}
 }
 
-// SPEC-002-R005: a decode sample is bounded by PerfDecodeServiceBound times
-// the attempt's output over its service time, so output withheld and sent
-// in one burst cannot reach the clamp; a normal sample is unchanged.
-func TestDecodeSampleBoundedByServiceRate(t *testing.T) {
+// The decode sample of a long-prompt attempt is exactly the first-token-to-
+// done rate, as before #2321: no bound from the service time applies.
+func TestLongPromptDecodeSampleUnchanged(t *testing.T) {
 	s := NewPerfStore()
-	s.Observe(PerfObservation{ProviderID: "normal", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 50, DecodeMs: 1000, ServiceMs: 1050, At: perfNow})
-	if e, _ := s.Lookup("normal", "m"); e.DecodeTPS != 100 {
-		t.Fatalf("normal sample changed: %+v", e)
-	}
-	s.Observe(PerfObservation{ProviderID: "burst", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 9990, DecodeMs: 10, ServiceMs: 10000, At: perfNow})
-	want := PerfDecodeServiceBound * 101 / 10.0
-	if e, _ := s.Lookup("burst", "m"); math.Abs(e.DecodeTPS-want) > 1e-9 {
-		t.Fatalf("burst decode = %v, want %v", e.DecodeTPS, want)
-	}
-	// Without a service time only the clamp applies.
-	s.Observe(PerfObservation{ProviderID: "noservice", Model: "m", Streamed: true, CompletionTokens: 101, TTFTMs: 50, DecodeMs: 10, At: perfNow})
-	if e, _ := s.Lookup("noservice", "m"); e.DecodeTPS != PerfMaxDecodeTPS {
-		t.Fatalf("clamp: %+v", e)
+	s.Observe(PerfObservation{ProviderID: "long", Model: "m", Streamed: true, CompletionTokens: 200, TTFTMs: 55000, DecodeMs: 5000, ServiceMs: 60000, At: perfNow})
+	if e, _ := s.Lookup("long", "m"); math.Abs(e.DecodeTPS-39.8) > 1e-9 {
+		t.Fatalf("long-prompt decode = %v, want 39.8", e.DecodeTPS)
 	}
 }
 
