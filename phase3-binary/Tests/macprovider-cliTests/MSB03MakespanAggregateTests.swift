@@ -113,6 +113,34 @@ final class MSB03MakespanAggregateTests: XCTestCase {
         XCTAssertFalse(msb03AggregatePass(aggregateVsSerial: ratio))
     }
 
+    /// SPEC-038 v0.3.52: msb03's makespan and TTFT gates together.
+    private func msb03Passes(makespan: Double, ttftRatio: Double, prefill: MSB03PrefillKind) -> Bool {
+        msb03AggregatePass(aggregateVsSerial: makespan, prefill: prefill)
+            && msb03ShortRequestTTFTPass(ratio: ttftRatio)
+    }
+
+    func testPrefillKindFollowsTheBackendsFlattenedPrefillCap() {
+        // `glm5_next` pagedMLA: an 8-token cap against 512-token chunks.
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 8, promptChunkTokens: 512), .perRow)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: nil, promptChunkTokens: 512), .shared)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 1024, promptChunkTokens: 512), .shared)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 1023, promptChunkTokens: 512), .perRow)
+        XCTAssertEqual(msb03MakespanBar(prefill: .perRow), 1.0)
+        XCTAssertEqual(msb03MakespanBar(prefill: .shared), 1.2)
+    }
+
+    func testPerRowPrefillBackendPassesAboveSerialMakespan() {
+        // GLM-5.3-Flash on the M3 Ultra: 1.19x against a 1.17x-1.19x ceiling.
+        XCTAssertTrue(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .perRow))
+        XCTAssertFalse(msb03Passes(makespan: 0.99, ttftRatio: 1.0, prefill: .perRow))
+        XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 2.5, prefill: .perRow))
+    }
+
+    func testSharedForwardBackendKeepsTheAbove1point2Bar() {
+        XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .shared))
+        XCTAssertTrue(msb03Passes(makespan: 1.21, ttftRatio: 1.0, prefill: .shared))
+    }
+
     func testMakespanSampleRejectsARowThatEndsBeforeItArrives() {
         let row = MSBSchedulerRowTiming(submittedAt: t0, firstTokenAt: t0, completedAt: t0)
         XCTAssertThrowsError(try row.makespanSample(outputTokens: 2))

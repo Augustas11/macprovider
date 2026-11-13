@@ -1,11 +1,23 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.51
+Version: v0.3.52
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.52 (2026-11-14, FR-CB14 MSB-03 bar for per-row prefill backends, Related: #2331):**
+FR-CB14: on a backend whose prefill group runs one forward per row (its
+flattened-token cap is below the group's tokens, as FR-CB2 v0.3.49 names it),
+batching cannot shorten prefill, so MSB-03's makespan ratio is bounded by
+`(P + D_serial) / (P + D_batched)`. For such a backend the MSB-03 bar is
+short-request TTFT at most 2x serial and makespan above 1.0x serial, with the
+measured ratio recorded per release. Backends that share the prefill forward
+keep the above-1.2x bar. `msb-throughput --scenario msb03` reports the bar and
+the prefill kind. GLM-5.3-Flash (M3 Ultra, prompts 512/1024/1536/2048,
+`--decode-tokens 128 --runs 3`) measured 1.18x and 1.19x; its ceiling is
+1.17x to 1.19x.
+
 **Change log v0.3.51 (2026-11-14, small-row route from resolved state, Related: #2335):**
 FR-CB9 decides the serial small-row route from resolved state instead of
 explicit configuration only. Native MTP `auto` counts as inactive when the
@@ -2335,8 +2347,8 @@ throughput MUST be computed as total decoded tokens over the common wall-clock
 interval, never as a sum of per-request elapsed durations. OPoI/drift MUST NOT
 compare batched aggregate TG against a single-stream per-stream baseline;
 per-stream and aggregate throughput MUST be reported as distinct values. The
-Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01,
-at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
+Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01
+or the v0.3.52 per-row prefill bar below, at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
 bound) are the promotion thresholds; failing them triggers profiling or pivot,
 not a shipped number.
 
@@ -2352,6 +2364,25 @@ one's last token. The gate passes above 1.2x. The decode-interval aggregate
 as a non-gating field. The short-request gate is unchanged: the shortest
 prompt's batched TTFT p95 MUST be at most 2x its serial TTFT p95. Equal-length
 scenarios (MSB-02, MSB-04) keep the decode-interval aggregate and their gates.
+
+**(v0.3.52) MSB-03 on a per-row prefill backend (Related: #2331).** Where a
+backend's prefill group runs one forward per row (its flattened-token cap is
+below the group's tokens, FR-CB2 v0.3.49), the summed prefill time P is the
+same served serially or batched, and batching shortens only decode. The
+makespan ratio is then at most `(P + D_serial) / (P + D_batched)`, with
+D_serial the back-to-back serial decode time and D_batched the same tokens at
+the batched aggregate decode rate. For such a backend MSB-03 passes when the
+short-request TTFT gate passes (unchanged) and the makespan ratio is above
+1.0x serial; the measured ratio is recorded per release. A backend that shares
+the prefill forward across rows keeps the above-1.2x bar. Measured on
+GLM-5.3-Flash (`glm5_next` pagedMLA, 8-token cap), M3 Ultra, `--runs 3
+--decode-tokens 128`: serial makespan aggregate 18.72 tok/s (512 decoded
+tokens in 27.35 s); short-row serial TTFT 1.55 s for 512 prompt tokens, so P is
+about 15.5 s for the 5120 prompt tokens and D_serial about 11.8 s (4 x 128
+tokens at 42.5 tok/s); equal-length four-row cells in the same window decode at
+69.6 tok/s (1024-token prompts) and 64.9 tok/s (2048), so D_batched is 7.4 to
+7.9 s and the ceiling 1.17x to 1.19x. Batched makespan measured 1.18x and
+1.19x.
 
 **DeepSeek V4 campaign gate (Related: #2111).** For the
 `TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX` artifact on the M3 Ultra
