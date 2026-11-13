@@ -375,7 +375,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         }
         // MiniMax M3 reasons in `<mm:think>` blocks the shard stream does not
         // split (#2189); refused rather than leaked into content.
-        guard ToolCallGrammar.family(modelID: request.model) != .minimax else {
+        guard ModelRuntime.toolGrammar(for: request) != .minimax else {
             throw APIError(status: 400, message: "MiniMax M3 is not supported by a shard group yet", code: "shard_group_model_unsupported", param: "model")
         }
         guard case .text = request.responseFormat else {

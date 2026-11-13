@@ -1709,8 +1709,9 @@ actor ModelRuntime: ModelRuntimeServing {
               !HarmonyResponseParser.isHarmonyModelID(request.model),
               !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
-              // The speculative collectors do not split reasoning (§3.12).
-              !request.outputTraits.reasoningOpen,
+              // The speculative collectors do not split reasoning or run
+              // stops after it (§3.12).
+              reasoningStopScope(request) == .whole,
               draftLoaded,
               numDraftTokens != nil else {
             return .tokenIterator
@@ -15706,7 +15707,7 @@ maxTokens: maxTokens,
     ) -> Bool {
         guard !guaranteedSelection else { return false }
         let candidate = filter.update(decoded, unchangedPrefixUTF8: unchangedPrefixUTF8)
-        guard let answer = stopText.observedText(candidate.text, reasoningOpen: reasoningOpen == .afterThink) else { return false }
+        guard let answer = stopText.observedText(candidate.text, reasoningOpen: reasoningOpen) else { return false }
         _ = observer.observe(answer)
         return observer.hasCompletedValidToolCall
     }
@@ -15718,14 +15719,17 @@ maxTokens: maxTokens,
         reasoningOpen: ReasoningOutput.StopScope
     ) -> Bool {
         var text = candidate.text
-        if reasoningOpen == .afterThink {
+        switch reasoningOpen {
+        case .afterThink:
             // A call inside the reasoning is not a call (SPEC-018 §3.12).
             let split = ReasoningOutput.split(text)
             guard split.closed else { return false }
             text = split.answer
-        } else if observer.splitsMiniMaxReasoning {
+        case .afterMiniMaxThink:
             // Only the answer, outside every `<mm:think>` block, holds calls.
             text = ReasoningOutput.MiniMax.splitStreamingPrefix(text).answer
+        case .whole:
+            break
         }
         _ = observer.observe(text)
         return observer.hasCompletedValidToolCall
@@ -16751,10 +16755,12 @@ struct SerialStreamingTextEmitter {
 
     private let streamToolsIncrementally: Bool
     private let stopsAfterFirstCompleteToolCall: Bool
-    private let reasoningOpen: Bool
+    /// `ModelRuntime.reasoningStopScope`: which reasoning split the row runs.
+    private let stopScope: ReasoningOutput.StopScope
+    private var reasoningOpen: Bool { stopScope == .afterThink }
     /// MiniMax rows (#2189): `<mm:think>` blocks stream as
     /// `reasoning_content` (`ReasoningOutput.MiniMax`).
-    private let splitsMiniMaxReasoning: Bool
+    private var splitsMiniMaxReasoning: Bool { stopScope == .afterMiniMaxThink }
     private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
@@ -16807,8 +16813,7 @@ struct SerialStreamingTextEmitter {
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
-        reasoningOpen = request.outputTraits.reasoningOpen
-        splitsMiniMaxReasoning = ModelRuntime.splitsMiniMaxReasoning(request)
+        stopScope = ModelRuntime.reasoningStopScope(request)
         stripsStrayThinkTags = (try? ModelRuntime.stripsStrayThinkTags(request)) ?? false
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
@@ -17195,10 +17200,6 @@ struct NativeToolCallStreamEmitter {
                ToolCallParser.qwenBareWrapperOpen]
             + ToolCallParser.glmCallMarkup
     }
-
-    /// MiniMax rows split `<mm:think>` reasoning off the answer
-    /// (`ReasoningOutput.MiniMax`): a call inside it is not a call.
-    var splitsMiniMaxReasoning: Bool { grammar == .minimax }
 
     /// Qwen rows hold an output that opens like a bare call
     /// (`mayOpenQwenBareCalls`).

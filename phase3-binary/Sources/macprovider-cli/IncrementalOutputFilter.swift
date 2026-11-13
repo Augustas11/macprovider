@@ -1006,13 +1006,11 @@ struct IncrementalStrayTagRemoval {
 struct IncrementalToolStopText {
     private var reasoningSplit = IncrementalReasoningSplit()
     private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
-    private let splitsMiniMaxReasoning: Bool
     private var toolText: IncrementalToolText
 
     init(observer: NativeToolCallStreamEmitter) {
         toolText = IncrementalToolText(
             markers: observer.markerTexts, bracesMatter: observer.bareBracesMayOpenCall, qwenBareCalls: observer.bareQwenCallsMayOpen)
-        splitsMiniMaxReasoning = observer.splitsMiniMaxReasoning
     }
 
     var restartCount: Int { reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + toolText.restartCount }
@@ -1022,14 +1020,17 @@ struct IncrementalToolStopText {
 
     /// Nil while the reasoning is open: a call inside it is not a call
     /// (SPEC-018 §3.12).
-    mutating func observedText(_ text: String, reasoningOpen: Bool) -> String? {
+    mutating func observedText(_ text: String, reasoningOpen: ReasoningOutput.StopScope) -> String? {
         var text = text
-        if reasoningOpen {
+        switch reasoningOpen {
+        case .afterThink:
             guard let answer = reasoningSplit.closedAnswer(text) else { return nil }
             text = String(answer)
-        } else if splitsMiniMaxReasoning {
+        case .afterMiniMaxThink:
             // Only the answer, outside every `<mm:think>` block, holds calls.
             text = miniMaxReasoningSplit.splitStreamingPrefix(text).answer
+        case .whole:
+            break
         }
         return toolText.reduce(text).reduced
     }

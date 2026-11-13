@@ -285,6 +285,25 @@ final class MiniMaxOutputTests: XCTestCase {
         let parsed = ToolCallParser.parseToolCalls(rawOutput: output, grammar: .minimax, modelID: Self.model,
                                                    allowedFunctionNames: ["f"], schemas: schemas)
         XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"code":"42","n":7}"#])
+        // A nullable type's null is null, for either type.
+        let nulls = ToolCallParser.parseToolCalls(rawOutput: Self.wrapper(Self.invoke("f", [("code", "null"), ("n", "null")])), grammar: .minimax,
+                                                  modelID: Self.model, allowedFunctionNames: ["f"], schemas: schemas)
+        XCTAssertEqual(nulls.toolCalls.map(\.arguments), [#"{"code":null,"n":null}"#])
+    }
+
+    /// The speculative collectors do not split MiniMax reasoning: a MiniMax
+    /// request decodes on the token iterator.
+    func testMiniMaxRequestsNeverTakeTheSpeculativeRoute() throws {
+        let body: [String: Any] = ["model": Self.model, "messages": [["role": "user", "content": "hi"]], "temperature": 0.0, "top_p": 1.0]
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+        XCTAssertEqual(ModelRuntime.speculativeRoute(for: request, draftLoaded: true, numDraftTokens: 3), .tokenIterator)
+        // A family the catalog resolved counts too; another family is speculative.
+        var other = body
+        other["model"] = "target"
+        let resolved = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: other))
+        XCTAssertEqual(ModelRuntime.speculativeRoute(for: resolved, draftLoaded: true, numDraftTokens: 3), .speculative)
+        resolved.outputState.resolve(RequestOutputTraits(toolGrammar: .minimax))
+        XCTAssertEqual(ModelRuntime.speculativeRoute(for: resolved, draftLoaded: true, numDraftTokens: 3), .tokenIterator)
     }
 
     func testUnclosedWrapperKeepsOnlyCompleteInvokes() {
@@ -405,16 +424,16 @@ final class MiniMaxOutputTests: XCTestCase {
         var observer = NativeToolCallStreamEmitter(modelID: Self.model, grammar: .minimax, allowedFunctionNames: ["read_file"])
         var incrementalObserver = observer
         var stopText = IncrementalToolStopText(observer: incrementalObserver)
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: false)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .afterMiniMaxThink)
         for end in 1...output.count {
             let prefix = String(output.prefix(end))
-            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []), prefix)
-            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&incrementalObserver, decoded: prefix, filter: filter, stopText: &stopText), prefix)
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .afterMiniMaxThink), prefix)
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&incrementalObserver, decoded: prefix, filter: filter, stopText: &stopText, reasoningOpen: .afterMiniMaxThink), prefix)
         }
         // After the reasoning, a complete call stops the turn.
         let calling = "<mm:think>x</mm:think>" + Self.wrapper(Self.readHosts)
         var stopper = NativeToolCallStreamEmitter(modelID: Self.model, grammar: .minimax, allowedFunctionNames: ["read_file"])
-        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&stopper, decoded: calling, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []))
+        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&stopper, decoded: calling, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .afterMiniMaxThink))
     }
 
     // MARK: Special-token parameter keys
@@ -548,11 +567,11 @@ final class MiniMaxOutputTests: XCTestCase {
         var observer = NativeToolCallStreamEmitter(modelID: Self.model, grammar: .minimax, allowedFunctionNames: ["read_file"])
         var incrementalObserver = observer
         var stopText = IncrementalToolStopText(observer: incrementalObserver)
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: false)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .afterMiniMaxThink)
         for end in 1...output.count {
             let prefix = String(output.prefix(end))
-            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []), prefix)
-            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&incrementalObserver, decoded: prefix, filter: filter, stopText: &stopText), prefix)
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .afterMiniMaxThink), prefix)
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(&incrementalObserver, decoded: prefix, filter: filter, stopText: &stopText, reasoningOpen: .afterMiniMaxThink), prefix)
         }
     }
 

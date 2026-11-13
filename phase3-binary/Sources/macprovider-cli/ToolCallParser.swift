@@ -726,10 +726,12 @@ enum ToolCallParser {
         var declared: [String: JSONValue] = [:]
         if case .object(let object)? = schema { declared = object }
         var type: String?
+        var nullable = false
         switch declared["type"] {
         case .string(let name)?:
             type = name
         case .array(let names)?:
+            nullable = names.contains(.string("null"))
             // `["string", "null"]`: a value the template wrote raw is text.
             let declaredNames = names.compactMap { name -> String? in
                 if case .string(let text) = name, text != "null" { return text }
@@ -741,6 +743,8 @@ enum ToolCallParser {
         }
         switch node {
         case .text(let raw):
+            // A nullable type's `null` (the template writes JSON null raw).
+            if nullable, raw.trimmingCharacters(in: .whitespacesAndNewlines) == "null" { return .null }
             guard raw.isEmpty else { return try glmValue(raw, type: type) }
             switch type {
             case "object"?: return .object([:])

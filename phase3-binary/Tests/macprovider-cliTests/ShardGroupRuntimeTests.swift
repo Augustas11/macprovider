@@ -258,6 +258,16 @@ final class ShardGroupRuntimeTests: XCTestCase {
                 XCTAssertEqual(error.code, code)
             }
         }
+        // A MiniMax family the catalog resolved for another model ID is
+        // refused too.
+        let resolved = try request("x", extra: [:])
+        resolved.outputState.resolve(RequestOutputTraits(toolGrammar: .minimax))
+        do {
+            _ = try await runtime.prepare(resolved)
+            XCTFail("expected shard_group_model_unsupported")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "shard_group_model_unsupported")
+        }
         let prepared = try await runtime.prepare(try request("x", extra: ["seed": 7, "temperature": 0.5, "top_p": 0.8]))
         XCTAssertEqual(prepared.control, ShardRequestControl(temperature: 0.5, topP: 0.8, seed: 7))
         await runtime.stop()
