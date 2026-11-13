@@ -226,6 +226,46 @@ final class SmallMRouteTests: XCTestCase {
         )
     }
 
+    /// Only a one-row decision that settles the key moves a start to the
+    /// serial route; one that re-runs on bound growth keeps the invariant
+    /// route, the only one where the self-check can run.
+    func testOnlySettledOneRowReasonsGrantNoBatching() {
+        let table: [(String, SmallMRoute.SelfCheckVerdict)] = [
+            ("no_net_gain", .grantsNoBatching),
+            ("row_divergence_at_2", .grantsNoBatching),
+            ("row_divergence_at_4", .grantsNoBatching),
+            ("crashed_at_3", .grantsNoBatching),
+            ("single_row", .grantsNoBatching),
+            ("serial_baseline_unavailable", .recheckPending),
+            ("probe_shape_unmet_at_2", .recheckPending),
+            ("probe_shape_unavailable", .recheckPending),
+            ("kept_prior_grant_no_net_gain", .recheckPending),
+        ]
+        for (reason, expected) in table {
+            let decision = ContinuousBatchingSelfCheckDecision(slots: 1, reason: reason, verifiedSlots: 1)
+            XCTAssertEqual(SmallMRouteVerdictStore.verdict(record: Self.record(Self.key(), decision: decision)), expected, reason)
+        }
+    }
+
+    func testOneRowDecisionBehindTheVerdict() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("small-m-route-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let selfCheck = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent("cb-self-check.json"))
+        let store = SmallMRouteVerdictStore(selfCheckStore: selfCheck)
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m"])
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        XCTAssertNil(store.oneRowDecision(startupIdentity: identity, selfCheckStore: selfCheck))
+        try selfCheck.store(Self.record(Self.key(), decision: divergence))
+        XCTAssertTrue(store.record(startupIdentity: identity, key: Self.key(), decision: divergence))
+        let stored = try XCTUnwrap(store.oneRowDecision(startupIdentity: identity, selfCheckStore: selfCheck))
+        XCTAssertEqual(stored.key, Self.key())
+        XCTAssertEqual(stored.decision, divergence)
+        // A key that re-checks gives no decision to report.
+        let unmet = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "probe_shape_unmet_at_2", verifiedSlots: 1)
+        try selfCheck.store(Self.record(Self.key(), decision: unmet))
+        XCTAssertNil(store.oneRowDecision(startupIdentity: identity, selfCheckStore: selfCheck))
+    }
+
     func testVerdictStoreAcrossStarts() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("small-m-route-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -266,12 +306,23 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertEqual(store.verdict(startupIdentity: identity, selfCheckStore: selfCheck), .absent)
     }
 
+    /// The MLX core parses a set value with C `atoi`; 0 is the serial route.
     func testEnvironmentValueMapsToTheCoreRoute() {
-        XCTAssertEqual(SmallMRoute.route(environmentValue: nil), .rowInvariant)
-        XCTAssertEqual(SmallMRoute.route(environmentValue: ""), .rowInvariant)
-        XCTAssertEqual(SmallMRoute.route(environmentValue: "1"), .rowInvariant)
-        XCTAssertEqual(SmallMRoute.route(environmentValue: "false"), .rowInvariant)
-        XCTAssertEqual(SmallMRoute.route(environmentValue: "0"), .serialOnly)
+        let table: [(String?, SmallMRoute)] = [
+            (nil, .rowInvariant),
+            ("0", .serialOnly), ("", .serialOnly), ("false", .serialOnly), ("off", .serialOnly),
+            ("00", .serialOnly), ("-0", .serialOnly), ("+0", .serialOnly), (" 0", .serialOnly),
+            ("\t\n0", .serialOnly), ("0x1", .serialOnly), ("0abc", .serialOnly), (" ", .serialOnly),
+            ("-", .serialOnly), ("true", .serialOnly), ("x1", .serialOnly),
+            ("1", .rowInvariant), ("2", .rowInvariant), ("-1", .rowInvariant), (" 1", .rowInvariant),
+            ("+1", .rowInvariant), ("01", .rowInvariant), ("1abc", .rowInvariant), ("10", .rowInvariant),
+        ]
+        for (value, expected) in table {
+            XCTAssertEqual(SmallMRoute.route(environmentValue: value), expected, String(describing: value))
+            if let value {
+                XCTAssertEqual(SmallMRoute.atoiIsNonZero(value), value.withCString { atoi($0) } != 0, value)
+            }
+        }
     }
 
     func testSerialOnlyProcessRefusesEveryBatchingEntry() {

@@ -3341,6 +3341,15 @@ struct ServeCommand: AsyncParsableCommand {
                 "event=served_slots action=applied slots=\(served) rows=\(rows) reason=\(source)\n".utf8
             ))
         }
+        // SPEC-038 FR-CB9: a serial-only process never applies a self-check
+        // (it has no target), so it reports the stored one-row decision as
+        // refused instead of pending forever.
+        if appliedSmallMRoute == .serialOnly, let mlxRuntime = modelRuntime as? ModelRuntime {
+            let stored = smallMRouteStartupIdentity.flatMap {
+                smallMRouteVerdictStore.oneRowDecision(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
+            }
+            await mlxRuntime.applySerialOnlySelfCheck(stored: stored?.decision, key: stored?.key)
+        }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to
         // the model runtime (data path) and the control socket (in-process
@@ -4745,6 +4754,7 @@ struct SelfTestCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "self-test")
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )

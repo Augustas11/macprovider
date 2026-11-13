@@ -17,7 +17,8 @@ enum SmallMRoute: String, Sendable, Equatable {
     case serialOnly = "serial_only"
 
     /// Read once per process by the MLX core at its first small-row dispatch;
-    /// anything but "0" keeps the row-invariant window.
+    /// unset, or a value `atoi` parses to non-zero, keeps the row-invariant
+    /// window (`route(environmentValue:)`).
     static let environmentKey = "MLX_METAL_SMALL_M_ROW_INVARIANT"
 
     struct Decision: Sendable, Equatable {
@@ -165,9 +166,29 @@ enum SmallMRoute: String, Sendable, Equatable {
             && !(inputs.continuousBatchingExplicitlyConfigured && inputs.continuousBatching == .off)
     }
 
-    /// The route the MLX core takes for a given environment value.
+    /// The route the MLX core takes for a given environment value. The core
+    /// parses a set value with C `atoi` and leaves the window off when it is
+    /// 0, so "", "false", "00", "-0", " 0" and "0abc" are all serial-only.
     static func route(environmentValue: String?) -> SmallMRoute {
-        environmentValue == "0" ? .serialOnly : .rowInvariant
+        guard let environmentValue else { return .rowInvariant }
+        return atoiIsNonZero(environmentValue) ? .rowInvariant : .serialOnly
+    }
+
+    /// Whether C `atoi` gives a non-zero value: leading whitespace
+    /// (`isspace`: space, \t \n \v \f \r), an optional sign, then leading
+    /// decimal digits; no digit gives 0. The value is non-zero exactly when
+    /// one of those leading digits is not '0' (overflow aside, which needs a
+    /// 20-digit value no operator sets).
+    static func atoiIsNonZero(_ value: String) -> Bool {
+        var bytes = Substring(value).utf8.drop(while: { $0 == 0x20 || (0x09...0x0D).contains($0) })
+        if let sign = bytes.first, sign == UInt8(ascii: "+") || sign == UInt8(ascii: "-") {
+            bytes = bytes.dropFirst()
+        }
+        for byte in bytes {
+            guard (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) else { return false }
+            if byte != UInt8(ascii: "0") { return true }
+        }
+        return false
     }
 
     private static let lock = NSLock()
@@ -218,14 +239,23 @@ enum SmallMRoute: String, Sendable, Equatable {
         return "small_m_route_serial_only: \(entry) batches decode rows, but this process runs the serial-only small-row route (\(environmentKey)=0), which is not row-invariant"
     }
 
-    /// For lab commands that batch rows: exits 2 on a serial-only process,
-    /// else pins the row-invariant route before MLX starts.
+    /// For every command other than `serve` and `decode-bench` that runs MLX
+    /// compute: pins the row-invariant route before MLX starts, removing an
+    /// inherited value (any value `atoi` parses to 0), so the command never
+    /// runs the serial route. Exits 2 only when this process already applied
+    /// the serial route, which no command entry does.
     static func requireRowInvariant(entry: String) throws {
-        if let refusal = batchingRefusal(route: processRoute, entry: entry) {
+        let inherited = ProcessInfo.processInfo.environment[environmentKey]
+        let applied = apply(.rowInvariant, reason: "command")
+        if let refusal = batchingRefusal(route: applied, entry: entry) {
             FileHandle.standardError.write(Data("\(refusal)\n".utf8))
             throw ExitCode(2)
         }
-        apply(.rowInvariant, reason: "batching_command")
+        if let inherited, route(environmentValue: inherited) == .serialOnly {
+            FileHandle.standardError.write(Data(
+                "event=small_m_route action=inherited_value_removed entry=\(entry) mode=\(applied.rawValue)\n".utf8
+            ))
+        }
     }
 
     /// SPEC-037 FR-KVP4 item 10: the decode-path class in a disk-cache
@@ -299,12 +329,38 @@ struct SmallMRouteVerdictStore: Sendable {
               record.remeasureInProgress != true,
               record.widthProgress == nil
         else { return .recheckPending }
-        return decision.slots > 1 ? .grantsBatching : .grantsNoBatching
+        if decision.slots > 1 { return .grantsBatching }
+        return decidesOneRow(reason: decision.reason) ? .grantsNoBatching : .recheckPending
+    }
+
+    /// One-row reasons that settle the key: measured with no gain, a row
+    /// divergence or leak, a crash, or a configured single row (the slot
+    /// configuration is in the startup identity). Any other one-row reason
+    /// (`serial_baseline_unavailable`, `probe_shape_unmet_at_<k>`,
+    /// `probe_shape_unavailable`) re-runs on bound growth, which only a
+    /// row-invariant process can do, so it keeps that route.
+    static func decidesOneRow(reason: String) -> Bool {
+        reason == "no_net_gain" || reason == "single_row"
+            || reason.hasPrefix("row_divergence_at_") || reason.hasPrefix("crashed_at_")
     }
 
     func verdict(startupIdentity: String, selfCheckStore: ContinuousBatchingSelfCheckStore) -> SmallMRoute.SelfCheckVerdict {
         guard let entry = read().last(where: { $0.startupIdentity == startupIdentity }) else { return .absent }
         return Self.verdict(record: selfCheckStore.record(for: entry.key))
+    }
+
+    /// The stored decision behind a `grantsNoBatching` verdict, for the
+    /// refused self-check state a serial-only process reports.
+    func oneRowDecision(
+        startupIdentity: String,
+        selfCheckStore: ContinuousBatchingSelfCheckStore
+    ) -> (key: ContinuousBatchingSelfCheckKey, decision: ContinuousBatchingSelfCheckDecision)? {
+        guard let entry = read().last(where: { $0.startupIdentity == startupIdentity }),
+              let record = selfCheckStore.record(for: entry.key),
+              Self.verdict(record: record) == .grantsNoBatching,
+              let decision = record.decision
+        else { return nil }
+        return (entry.key, decision)
     }
 
     /// Records the self-check key the startup identity resolved to when its

@@ -44,6 +44,7 @@ struct NativeMTPRequestShapeReplayCommand: AsyncParsableCommand {
     var modelID: String = nativeMTPHardwareDefaultModelID
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "native-mtp-request-shape-replay")
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-request-shape-replay: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))

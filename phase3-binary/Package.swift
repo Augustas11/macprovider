@@ -26,11 +26,15 @@ let package = Package(
         // M1, M2 or M4). The switch point is a speed choice (M3 Ultra, Llama
         // 3.1 8B 4-bit, aggregate tok/s: 1 row 93 on qmv_mma1 against 75 on
         // qmv_mma, 2 rows 120 against 146). MLX_METAL_SMALL_M_ROW_INVARIANT,
-        // read once per process, keeps that window by default; 0 skips it for
-        // the fork's pre-window small-row routing (per-row qmv below the qmm
-        // limit), which the provider sets only for a serial-only serve process
-        // (SPEC-038 FR-CB9). Decode tok/s for the core change is not yet
-        // measured on the merged build.
+        // read once per process with atoi, keeps that window by default; a
+        // value that parses to 0 skips it for the fork's pre-window small-row
+        // routing (per-row qmv below the qmm limit), which the provider sets
+        // only for a serial-only serve process (SPEC-038 FR-CB9). Measured on
+        // the M3 Ultra, Llama 3.1 8B 4-bit, one row over HTTP against stock
+        // mlx-lm in the same window: serial-only route 0.93 to 0.97x,
+        // row-invariant route 0.81 to 0.84x, main 0.65 to 0.71x. Core
+        // `pytest python/tests/test_quantized.py -k small_m`: 5 passed at
+        // 0f26baba on the M3 Ultra. Not measured on M1.
         // Tag 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only
         // prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound): attention and indexer prefill tiles are evaluated one
         // ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.

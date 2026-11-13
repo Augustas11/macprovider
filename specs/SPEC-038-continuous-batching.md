@@ -15,7 +15,14 @@ unverifiable set keeps the invariant route. A decided one-row self-check verdict
 the startup identity resolved to counts as batching unable to activate, so an
 ordinary install whose self-check found no net gain takes the serial route from
 its next start. Re-checks wait for a start on the invariant route. Warm-swap
-targets keep the invariant route.
+targets keep the invariant route. Only a one-row reason that settles the key
+counts (`no_net_gain`, a row divergence, a crash, a configured single row); a
+reason that re-runs on ladder-bound growth keeps the invariant route, and a
+serial-only process serves with continuous batching off and reports its
+stored one-row decision as a refused self-check whatever the signed policy
+says. The route follows the core's C `atoi` parse of the variable, and every
+other command that runs MLX compute pins the invariant route, removing an
+inherited value.
 
 **Change log v0.3.50 (2026-11-13, serial-only small-row route, Related: #2335):**
 FR-CB9 states that a row must compute the same bits alone and inside a batch
@@ -24,8 +31,8 @@ never batch: continuous batching set `off` explicitly, native MTP `off`, no
 draft model, no shard-group role, not an autotune child. Such a `serve`
 process takes the MLX fork's pre-window small-row quantized route (per-row
 `qmv` below the `qmm` limit)
-(`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler, refuses batching
-lab commands and keeps disk KV on a separate decode-path class. Every other
+(`MLX_METAL_SMALL_M_ROW_INVARIANT=0`), builds no scheduler and keeps disk KV
+on a separate decode-path class; every other command runs the invariant route. Every other
 state, including a self-check still pending, keeps the row-invariant route.
 
 **Change log v0.3.49 (2026-11-14, FR-CB2 serial-cohort backends run the head's forward first, Related: #2345):**
@@ -1712,9 +1719,13 @@ these hold:
 2. continuous batching cannot activate: it is set `off` explicitly by YAML,
    environment or CLI (the emergency override, which no signed policy,
    self-check or warm swap lifts), or the FR-CB10 store holds a decided
-   verdict serving one row (`no_net_gain`, a row divergence, a crash, a probe
-   that cannot fit) on the self-check key this startup identity resolved to,
-   with no unfinished step and no re-measurement scheduled. The startup
+   verdict serving one row that settles the key (`no_net_gain`, a row
+   divergence or leak, a crash, or `single_row` for a configured single row)
+   on the self-check key this startup identity resolved to, with no
+   unfinished step and no re-measurement scheduled. A one-row decision that
+   re-runs when the ladder bound grows (`serial_baseline_unavailable`,
+   `probe_shape_unmet_at_<k>`, `probe_shape_unavailable`) keeps the
+   invariant route, the only one on which the self-check can run. The startup
    identity covers the inputs the key and the ladder bound derive from: model
    bytes, CLI version, decode-path digest, MLX pins, OS build, chip and memory,
    signed CB policy, rows, owner pin, queue limit, context, `kv_bits`, prefill
@@ -1739,15 +1750,32 @@ with a batched one. In a serial-only process:
   start (`event=cb_self_check action=deferred reason=small_m_route_serial_only
   next=restart`), the runtime exposes no self-check target and refuses a
   self-check batch, and the native-MTP drafter load is refused, so no batched
-  row, self-check or native-MTP round can start; `msb-throughput`,
-  `native-mtp-bench`, `native-mtp-hardware-e2e` and `relay-blind-fixture`
-  MUST exit 2;
+  row, self-check or native-MTP round can start;
+- the effective continuous-batching mode MUST be `off` whatever the signed
+  policy entry for the model says, so the process serves serially as a
+  refused self-check does (no strict-mode error, no per-request canary
+  serial routing), and `continuous_batching.self_check` reports the stored
+  one-row decision as refused (`small_m_route_serial_only` when batching is
+  off by configuration), never `pending`;
 - SPEC-037 disk KV and prompt snapshots carry the route in their decode-path
   class (SPEC-037 v0.2.5), so an entry written on one route misses on the
   other;
 - startup prints `event=small_m_route mode=... reason=...` with the value of
   every condition above, and local `/v1/status` reports
   `continuous_batching.small_m_route` and `small_m_route_reason`.
+
+The MLX core reads the variable once with C `atoi` semantics: unset, or a
+value that parses to non-zero, keeps the invariant route; any value that
+parses to 0 (`0`, `""`, `false`, `00`, `-0`, ` 0`, `0x1`) takes the serial
+route, and the provider labels its route by the same parse. Every other
+command that runs MLX compute (`self-test`, `msb-throughput`,
+`msb-compute-score`, `hardware-check` and `performance-check` (and their
+legacy `spec028-canary` and `spec028-benchmark` names), `shard-bench`,
+`glm-parity`, `dsv4-parity`, `native-mtp-bench`, `native-mtp-hardware-e2e`,
+`native-mtp-journey-e2e`, `native-mtp-request-shape-replay`, the
+`native-mtp-qualify bench` and `replay`, `relay-blind-fixture`) MUST
+pin the invariant route before MLX starts, removing an inherited value;
+`decode-bench` applies its own `--small-m-route` option.
 
 A missed case costs single-row speed, never exactness.
 

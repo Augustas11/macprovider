@@ -77,6 +77,7 @@ struct GLMParityCommand: AsyncParsableCommand {
         modelDir: String, oracle: [String], steps: Int, prefillStepSize: Int,
         mlxCacheLimitMB configuredCacheLimitMB: Int?, output: String?, mode: Mode
     ) async throws {
+        try SmallMRoute.requireRowInvariant(entry: mode.name)
         // Serve's selection for the same setting (SPEC-038 FR-CB2).
         let mlxCacheLimitMB = ModelRuntime.resolvedMLXCacheLimitMB(
             configured: configuredCacheLimitMB, physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory

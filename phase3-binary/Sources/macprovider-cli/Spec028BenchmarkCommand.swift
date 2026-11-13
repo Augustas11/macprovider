@@ -81,6 +81,7 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "performance-check")
         let fixtures = try loadFixtures()
         var results: [Spec028BenchmarkFixtureResult] = []
         for fixture in fixtures {

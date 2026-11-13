@@ -86,6 +86,7 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "hardware-check")
         switch kind {
         case .supported16GB:
             try await runAC10()

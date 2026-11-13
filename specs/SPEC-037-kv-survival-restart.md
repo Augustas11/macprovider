@@ -11,8 +11,9 @@ Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + advers
 Related: #2335.
 
 SPEC-038 FR-CB9 now also takes the serial small-row route for a `serve`
-process whose native MTP is `auto` with no admission set and whose stored
-self-check verdict serves one row. The decode-path class rule of v0.2.5 is
+process whose native MTP is `auto` and inactive for the loaded model (no
+admission set, or a verified set with no entry for this model and artifact
+digest) and whose stored self-check verdict serves one row. The decode-path class rule of v0.2.5 is
 unchanged: such a process writes and expects `ordinary+serial_small_m`, so a
 provider whose route changes between starts misses its earlier entries once.
 

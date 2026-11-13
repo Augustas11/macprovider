@@ -2388,6 +2388,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    /// SPEC-038 FR-CB9: the refused state a serial-only process reports for
+    /// its whole life (it never runs a self-check), kept across swaps.
+    private var serialOnlySelfCheck: (state: ContinuousBatchingSelfCheckState, report: ContinuousBatchingSelfCheckReport)?
     /// SPEC-038 AC-26 leg (a) inside the FR-CB10 self-check (v0.3.41): nil
     /// until it runs for the loaded tuple (a signed `cached_turns_accepted`
     /// grant then applies provisionally), true when keyed cached turns
@@ -6674,6 +6677,23 @@ maxTokens: 1,
         continuousBatchingSelfCheckReport = report
     }
 
+    /// SPEC-038 FR-CB9: a serial-only process never runs or applies a
+    /// self-check, so it reports the stored one-row decision that put it on
+    /// the serial route as refused (`small_m_route_serial_only` when batching
+    /// is off by configuration), as a refused check reads on the invariant
+    /// route. Kept across swaps. No-op on the row-invariant route.
+    func applySerialOnlySelfCheck(stored decision: ContinuousBatchingSelfCheckDecision?, key: ContinuousBatchingSelfCheckKey?) {
+        guard smallMRoute == .serialOnly else { return }
+        let reason = decision?.reason ?? "small_m_route_serial_only"
+        let state = ContinuousBatchingSelfCheckState.refused(reason: reason)
+        let report = ContinuousBatchingSelfCheckReport(
+            decision: reason, servedSlots: 1, verifiedSlots: decision?.verifiedSlots ?? 1, key: key
+        )
+        serialOnlySelfCheck = (state, report)
+        continuousBatchingSelfCheck = state
+        continuousBatchingSelfCheckReport = report
+    }
+
     func continuousBatchingSelfCheckState() -> ContinuousBatchingSelfCheckState {
         continuousBatchingSelfCheck
     }
@@ -6946,6 +6966,9 @@ maxTokens: 1,
         requestedTuple: ContinuousBatchingRequestedTuple? = nil
     ) -> ContinuousBatchingMode {
         if continuousBatchingEmergencyOffOverride { return .off }
+        // SPEC-038 FR-CB9: a serial-only process can never batch, so it
+        // serves serially like a refused self-check, whatever the policy says.
+        if smallMRoute == .serialOnly { return .off }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
         if let tuple, continuousBatchingAcceptanceCoverage.isRevoked(tuple) { return .off }
         // SPEC-038 v0.3.15: a signed positive entry for this model artifact is
@@ -7549,8 +7572,8 @@ maxTokens: 1,
         // SPEC-038 v0.3.15: a new model or runtime is re-checked.
         selfCheckGeneration += 1
         let swapGeneration = selfCheckGeneration
-        continuousBatchingSelfCheck = .pending
-        continuousBatchingSelfCheckReport = nil
+        continuousBatchingSelfCheck = serialOnlySelfCheck?.state ?? .pending
+        continuousBatchingSelfCheckReport = serialOnlySelfCheck?.report
         continuousBatchingCachedTurnsSelfCheck = nil
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
