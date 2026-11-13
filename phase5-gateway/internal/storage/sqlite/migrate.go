@@ -326,6 +326,10 @@ var demandEventsServingTelemetryColumns = []struct {
 	{"provider_reported_first_token_ms", "INTEGER CHECK (provider_reported_first_token_ms IS NULL OR provider_reported_first_token_ms BETWEEN 0 AND 3600000)"},
 	{"provider_reported_first_answer_ms", "INTEGER CHECK (provider_reported_first_answer_ms IS NULL OR provider_reported_first_answer_ms BETWEEN 0 AND 3600000)"},
 	{"provider_reported_decode_ms", "INTEGER CHECK (provider_reported_decode_ms IS NULL OR provider_reported_decode_ms BETWEEN 0 AND 3600000)"},
+	// served_path's vocabulary is enforced by the gateway at insert, not by
+	// the column: a CHECK cannot be changed on an already migrated table.
+	{"served_path", "TEXT CHECK (served_path IS NULL OR length(served_path) <= 32)"},
+	{"served_rows", "INTEGER CHECK (served_rows IS NULL OR served_rows BETWEEN 1 AND 256)"},
 }
 
 // sqlStringList renders fixed vocabulary values as a SQL IN list. The values

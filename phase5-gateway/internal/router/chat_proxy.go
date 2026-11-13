@@ -892,6 +892,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	// A trailer is published only once the body was read to EOF; this runs
+	// after that on every path that reads it (SPEC-006-R028 served path).
+	defer timing.observeCoordinatorTrailers(resp.Trailer)
 	s.noteAllowanceResponse(r, &subject, resp.Header)
 	if priorProviderDispatch {
 		if resp.Header == nil {
