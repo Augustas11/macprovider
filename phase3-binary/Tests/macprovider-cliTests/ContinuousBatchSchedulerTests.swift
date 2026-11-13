@@ -5604,6 +5604,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 maxOutputTokens: 1
             ))
         }
+        // The decode gate holds `active` mid-decode; open it only once `long`
+        // is queued, or `active` can finish before `long` ever arrives.
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
         await decodeGate.open()
 
         _ = try await active.value
@@ -7373,6 +7376,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             descriptor: Self.descriptor(maxPhysicalBlocks: 64),
             maxActiveRows: 4,
             maxPromptChunkTokens: 2,
+            // The running row streams 80 tokens to the default no-op sink in
+            // microseconds of backend time. The sink drains on its own Task,
+            // so a 16-event buffer overflows (a deliveryBackpressure failure)
+            // whenever that Task is scheduled late. Bound it above the output.
+            tokenDeliveryBufferLimit: 128,
             maxDecodeStepsWhilePrefilling: 2,
             maxPrefillRowsPerIteration: 4,
             maxPrefillTokensPerIteration: 8,
@@ -7382,12 +7390,20 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let installed = await scheduler.installLabBatchComposition(ids)
         XCTAssertTrue(installed)
-        let tasks = ids.map { id in
-            Task {
+        // Admission order is arrival order, and the installed composition holds
+        // every row until all four are queued, so each submit is confirmed
+        // queued before the next starts.
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for (index, id) in ids.enumerated() {
+            tasks.append(Task {
                 try await scheduler.submit(.init(
                     id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!),
                     maxOutputTokens: id == "running" ? 80 : 1
                 ))
+            })
+            // The last row completes the composition and may be admitted at once.
+            if index < ids.count - 1 {
+                try await eventually { await scheduler.metrics().waitingCount == index + 1 }
             }
         }
         for task in tasks { _ = try await task.value }
