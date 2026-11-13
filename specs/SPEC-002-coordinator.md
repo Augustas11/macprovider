@@ -12,10 +12,9 @@ within equal non-throughput objective keys, so every unmeasured candidate
 keeps its position and with zero or one decode-fresh candidate the order is
 unchanged; pairwise comparisons (epsilon cohorts, sticky, tiebreak) of a fresh
 and an unmeasured candidate use estimates. Pinned requests record no
-observation; buyer write and flush time is excluded from the decode window
-(the sample is dropped when the buyer limited the stream); the decode sample is
-bounded by 4 times the attempt's end-to-end rate; samples more than 5 s in the
-future are not recent. SPEC-004 FR-SR-16 epsilon
+observation; an attempt whose buyer writes and flushes blocked at least 5% of
+its decode window yields no decode sample, and every other sample is unchanged;
+samples more than 5 s in the future are not recent. SPEC-004 FR-SR-16 epsilon
 cohorts compare routed values only between two decode-fresh candidates. The
 `routing.min_provider_throughput_tps` floor (buyer selection, the slot-queue
 re-check and `/poolz.routing_eligible`, which feeds `serving_eligible`)
@@ -5600,7 +5599,9 @@ output estimate and yields no observation. Relay-blind and privacy-class
 attempts MUST NOT be recorded. Pinned requests (an `X-MacProvider-Provider`
 or `X-MacProvider-Session` header) MUST NOT be recorded: the buyer chose the
 provider, so the attempt is not a routing outcome and a buyer must not be able
-to aim samples at one provider.
+to aim samples at one provider. The gateway strips these headers from buyer
+requests, so ordinary gateway traffic is unaffected; only direct pinned
+traffic, such as the integrity probe, stops recording.
 
 The first-token time is when the first delivered event carrying generated
 content or a tool call reaches the buyer side of the coordinator; an opening
@@ -5635,17 +5636,14 @@ shorten it; no provider usage count enters a rate:
   cannot inflate it;
 - a decode rate (timed only), the output estimate minus 1 divided by the
   first-token-to-done time, when the output estimate is at least 8 and the
-  time is positive, clamped to at most 2000 tokens/s, and then bounded by 4
-  times the output estimate divided by the service time, so a late burst
-  cannot raise decode above 4 times the attempt's end-to-end rate. Buyer-blocked
-  time is excluded: every buyer write or flush of the attempt that takes at
-  least 1 ms and starts after the first token and before done is summed; that
-  sum is subtracted from the first-token-to-done time (floor 1 ms) and from the
-  service time (floor 1 ms). When the remaining first-token-to-done time is
-  below 20% of the raw time, the buyer limited the stream and the attempt
-  yields no decode sample. With no blocked time both times are unchanged. The
-  timing only measures the existing write and flush calls; it changes neither
-  the bytes written nor their order;
+  time is positive, clamped to at most 2000 tokens/s. Every buyer write or
+  flush of the attempt that takes at least 1 ms and starts after the first
+  token and before done is summed as buyer-blocked time. When that sum is at
+  least 5% of the raw first-token-to-done time, the buyer limited the stream
+  and the attempt yields no decode sample; otherwise the raw time is used
+  unchanged. Buyer-blocked time never adjusts any time or sample. The timing
+  only measures the existing write and flush calls; it changes neither the
+  bytes written nor their order;
 - a service throughput (non-streamed attempts only), the output estimate
   divided by the service time, when the output estimate is at least 8, the
   coordinator's estimate of the whole request (cached or not) is at most 16
@@ -5760,12 +5758,8 @@ the slot-queue order; and the floor.
 Note (non-normative): known limits. The decode rate is the coordinator's
 estimate of delivered output over its own first-token-to-done time, and no
 provider usage count enters it. A provider that delivers its whole output in
-one late burst gets a short decode window; the service bound limits that
-inflation to 4 times its end-to-end rate, which it pays for in TTFT, but
-within that bound a burst still reads as faster decode. The same bound lowers
-the decode sample of an honest attempt whose prefill takes more than three
-quarters of its service time (very long prompts), so such providers can look
-slower than they decode. The
+one late burst gets a short decode window, so decode alone can be inflated
+(up to the 2000 tokens/s clamp) at the cost of TTFT. The
 positional rule limits what that can change to the order among already-fresh
 candidates with equal other objective keys and to the floor; unmeasured
 candidates keep their positions. With two or more fresh candidates in the `interactive`
