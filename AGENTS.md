@@ -328,6 +328,46 @@ private `macprovider-internal` repo under `audits/<date>-<topic>/`. Do not
 commit them to this public repo. Evidence that code or `specs/CONFORMANCE.json`
 reads goes in `docs/evidence/`.
 
+## Swarm Runs
+
+A swarm run puts several agents on one goal that has a measurable check. Use
+it for performance, parity, cleanup and bug-hunt work. Work with no number is
+not a swarm job. Every rule above still applies; a swarm run is one campaign
+(rules 4, 12 and 13).
+
+Before any agent starts, write the brief:
+
+- **Goal metric:** the one end-to-end number (rule 12).
+- **Check:** the single command that produces it.
+- **Reference:** the known-good comparison. For runtime speed that is stock
+  `mlx-lm` on the same weights, prompt and token count, greedy sampling,
+  measured in the same Studio window.
+- **Gate:** what must not change. A speed metric is always gated by identical
+  output and identical token count, so nothing wins by doing less work.
+- **Cells:** the independent pieces, one per agent, no shared files. A grid of
+  model by output length by context length by rows is a split; one big failing
+  test is not.
+
+Then:
+
+1. Prove the check on unmodified `main` before any fix is written. It fails
+   where we are known to be slow and passes where we are not. A check that
+   cannot run fails loudly.
+2. Profile before ideas. Each idea states the share of the metric it can
+   touch; ideas without that number are not built.
+3. Keep or revert is automatic against a baseline from the same window.
+4. The judge is never an author of what it judges and has a veto. Disprovers
+   attack every kept change on inputs the builder did not use.
+5. Log every rejected candidate with its measured number. Scouts read the log
+   before proposing.
+6. Stop after two rounds with nothing promoted.
+7. Report once, at the end: baseline and final metric, candidates tried, kept
+   and vetoed, cost, and any new reusable check with its command.
+
+Upstream fixes (`mlx`, `mlx-swift-lm`): prepare a branch with a minimal
+reproduction and a one-command benchmark, and draft the description. The
+operator approves each upstream pull request or issue before it is opened.
+
 ## Release Verification
 
 Provider CLI releases that ship both Malibu.app and the standalone tarball need
