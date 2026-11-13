@@ -1,9 +1,20 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.0-draft
-**Date:** 2026-11-07
+**Status:** v0.3.1-draft
+**Date:** 2026-11-13
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.1 (2026-11-13, Related: #2338 — several warm models per session):**
+FR-19 no longer relies on a session serving one model. A provider session may
+serve several warm models (SPEC-001-R016); the verification key stays
+`(provider_id, model_id)`, where `model_id` is the served model of the warm
+entry that served the request, so a decision still names exactly the traffic
+it affects. The cohort hash is per (session, served model). FR-20 requests
+and FR-21 scoring jobs to a multi-model session name the served model
+(`served_model_id`). FR-23 consequences and the SPEC-022-R016 hold apply to
+the key's model only. No scorer, threshold, trust tier or attestation label
+changes.
 
 **Change log v0.3.0 (2026-11-07, issue #1644 — reference scorers):**
 Adds FR-26 (SPEC-036-R026). Until v0.2.1 a key could be verified only when a
@@ -2111,11 +2122,19 @@ serving.
 
 ### FR-19 Scope and keys (SPEC-036-R019)
 
-A **verification key** is `(provider_id, model_id)`. A provider session serves
-one model at a time, so the key names exactly the traffic a decision affects.
-The **cohort hash** of a session is its coordinator-verified catalog model
-hash. A provider cannot choose it, so a provider-reported value never decides
-which scorers a provider is compared with. A session's reported
+A **verification key** is `(provider_id, model_id)`, where `model_id` is the
+served model: the `model_id` of the warm entry (SPEC-001-R016) that served the
+request, never the buyer's requested alias. A provider session may serve
+several warm models; each is its own key, and every request is attributed to
+exactly one key through its route snapshot (SPEC-002-R011), so the key names
+exactly the traffic a decision affects. A request, scoring job or consequence
+for one key never reads or changes another key of the same session. The
+**cohort hash** of a session for a key is the coordinator-verified catalog
+model hash of that warm entry. A provider cannot choose it, so a
+provider-reported value never decides which scorers a provider is compared
+with. A verification request or scoring job sent to a session that reports
+`warm_models` MUST carry `served_model_id` naming the key's model, and is
+answered by that member's runtime only. A session's reported
 `weights_manifest_sha256` is only what a scoring job to that session carries
 (FR-21).
 

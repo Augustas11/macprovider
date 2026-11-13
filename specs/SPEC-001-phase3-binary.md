@@ -1,6 +1,25 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.56 (2026-11-13, `inference_response_end` `served_path`: the path and rows that ran the request)
+**Version:** 1.9.57 (2026-11-15, a provider process may keep and serve a set of warm models)
+
+**Change log v1.9.57 (2026-11-15, Related: #2338):** Lifts the
+one-model-per-process limit (SPEC-010 L-3). New §6.16 adds `SPEC-001-R016`
+(warm set, primary model, `warm_models` on the handshake and heartbeat,
+`served_model_id` routing, wire compatibility), `SPEC-001-R017` (one memory
+budget, row admission against it, load, LRU eviction of idle unpinned models,
+pinning, `warm_models` configuration), `SPEC-001-R018` (no cross-model
+batching, one GPU submission order, token parity, fairness, contended
+capacity) and `SPEC-001-R019` (signed CB / native-MTP admission and the
+batched-isolation self-check per member; receipts bind the serving member).
+A provider without `warm_models` (every earlier binary) is served exactly as
+before; a provider built to this section always reports it. No trust tier or
+attestation label is minted, upgraded or downgraded. Rationale: a lab
+prototype on a 256 GB M3 Ultra (2026-11-13) held a large MoE model and an 8B
+model in one process, both decoding at once: both models' tokens matched solo
+in all 18 runs, and the two models kept 0.69 and 0.50 of their solo decode
+rates, no worse than the same two models in two separate processes (which share
+no memory budget and cannot give the second process the device attestation
+tier). Separate GPU streams per runtime gave no gain over one shared stream.
 
 **Change log v1.9.56 (2026-11-13, Related: #2341):** A completed
 `inference_response_end` (§6.6) carries `served_path`, the serving path that
@@ -857,7 +876,7 @@ behind the Phase 4 coordinator.
 
 - Swift CLI binary targeting macOS 14+ on Apple Silicon (M1 through M4)
 - Config loader: YAML config file, CLI flag overrides, env var fallbacks
-- Model loading via `mlx-swift-lm` (single model per process)
+- Model loading via `mlx-swift-lm`: one primary model, plus further warm models in one memory budget (v1.9.57, §6.16)
 - HTTP server on configurable local port (default 8080)
 - `/v1/models` endpoint (OpenAI-compatible)
 - `/v1/chat/completions` endpoint (streaming and non-streaming, OpenAI-compatible)
@@ -918,7 +937,7 @@ chain (see Section 3 for the hook-point diagram).
 
 ### Out of scope
 
-- Multi-model rotation within a single process (operator restarts with different model)
+- Batching rows of different models in one forward pass (v1.9.57: several models may be warm in one process, §6.16, but each forward runs one model)
 - Billing, payment, or reward distribution logic
 - Coordinator implementation (Phase 4 separate SPEC)
 - Smart router logic (Phase 4/5)
@@ -5416,6 +5435,146 @@ JSON escaping and base64.
 answered `413 request_too_large` by the gateway before any provider is
 selected. The coordinator's 413 `request_too_large` reaches the buyer
 unchanged.
+
+### 6.16. Multi-model warm set (NEW in v1.9.57)
+
+A provider process MAY keep a **warm set**: several models loaded at once,
+each served concurrently. `supported_models` (SPEC-010) keeps meaning
+willingness only; the warm set is what is loaded now and is always a subset of
+it. A provider with one warm model is a warm set of one and stays valid
+unchanged on the wire. The coordinator side is `SPEC-002-R011`; adding a
+model through demand-pull is SPEC-012 R-4.4.10; replacing a member by warm
+swap is SPEC-011 §3.10.
+
+**SPEC-001-R016 — Warm set state and wire.** Each warm-set member has its own
+runtime: its own model container (with any draft or native-MTP drafter
+container), its own scheduler and its own KV pool. Requests are routed to a
+runtime by model id, never by arrival order.
+
+*Primary model.* Exactly one warm member is the **primary**: the boot
+`model`, or the target of the latest SPEC-011 swap of the primary. The
+existing single-model fields of `hello`, the v2 `auth_request`, `heartbeat`,
+`state_update.metrics_snapshot` and `/v1/status` (`model_id`, `model_hash`,
+`model_hash_algorithm`, `weights_manifest_sha256`,
+`weights_manifest_algorithm`, `model_params_b`, `max_context_tokens`,
+`max_concurrency`, `slots_free`, `slots_total`, `throughput_tps_estimate`,
+`loading`, `cb_self_check`, `engine_profile` and the SPEC-028 fields) keep
+their current meaning and describe the primary only. The SPEC-012 term
+`loaded_model` names the same primary.
+
+*`warm_models`.* A provider that implements this section MUST send
+`warm_models` on the v2 `auth_request` initial stage, on the legacy `hello`,
+and on every `heartbeat`, also while its warm set has one member, because the
+field is what tells the coordinator it may add models (SPEC-012 R-4.4.10).
+It is an array with one entry per member, the primary included and listed
+first:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model_id` | string | Served model id, unique in the array (case-folded per SPEC-010). |
+| `state` | string | `loading`, `warm` or `evicting`. Only `warm` is routing-eligible. |
+| `primary` | bool | True on exactly one entry. |
+| `pinned` | bool | Pinned members are never evicted (R017). |
+| `slots_total`, `slots_free` | int | Rows this model may hold and may admit now (R017). |
+| `max_context_tokens` | int | Per-model context capacity. |
+| `throughput_tps_estimate` | number | Per-model decode estimate under current contention (R018). |
+| `model_hash`, `model_hash_algorithm`, `weights_manifest_sha256`, `weights_manifest_algorithm` | string | This member's identity, with the SPEC-010 §3.7 semantics. |
+| `model_params_b` | number | As the top-level field. |
+| `cb_self_check`, `engine_profile` | object | This member's values, same schema as the top-level fields. |
+
+A `loading` or `evicting` entry carries no `slots_free` (absent means zero).
+`supported_models` MUST contain every entry's `model_id`. The array is at most
+`supported_models` long and each entry is bounded like its top-level
+counterpart. An entry changes state only through R017 (load, evict) or SPEC-011
+/ SPEC-012 (swap, add); the next heartbeat reports the change.
+
+*Request routing.* `preflight` and `inference_request` (§6.6) gain an
+optional `served_model_id`; an HTTP-forwarded dispatch carries the same value
+in `X-MacProvider-Served-Model`. When present it names the warm entry the
+coordinator chose, and the provider MUST serve the request on that runtime or
+reject it: `preflight_ack` reason `model_not_loaded`, or the existing
+retryable `model_not_loaded` dispatch failure, when no entry with that id is
+`warm`. When absent the provider serves on the primary, exactly as today. A
+loopback local request is served on the warm entry whose id equals the body
+`model` (case-folded), else on the primary. The buyer body is never rewritten.
+
+*Compatibility.* A provider built before this section sends no
+`warm_models`; a coordinator MUST treat the top-level fields as a warm set of
+one, so such a provider is served exactly as today. For a warm set of one the
+top-level fields and the single entry say the same thing. An old coordinator
+ignores `warm_models` and `served_model_id` is never sent, so a multi-model
+provider serves that coordinator its primary only, exactly as a single-model
+provider; its other members take no network traffic from it.
+
+*Trust.* The warm set changes no trust tier or attestation label: the process
+keeps one provider id, one session and one SPEC-008 trust tier, applied
+equally to every member. Each entry's `model_hash` applies to that entry's
+`model_id` (the SPEC-008 §5.4 "multi-model shape"), and the SPEC-008 §5.5 hash
+state is computed per (provider, model) pair: a mismatch on one member
+excludes that pair only, as SPEC-008 §5.5 allows when multi-model support
+exists.
+
+**SPEC-001-R017 — One memory budget.** All members share one process memory
+budget under one wired-memory limit. The budget is charged with the resident
+weights of every `loading`, `warm` and `evicting` member (draft and drafter
+containers included), the KV and working memory of every admitted row of
+every member, and the runtime's existing reserve. Process-global MLX state
+(the buffer cache limit, cache clears, the wired limit, settings read once at
+Metal device creation, and the model liveness tracker) has one owner per
+process; a runtime MUST NOT set or reset it for itself, and a cache clear by
+one runtime MUST NOT free memory another runtime's rows hold.
+
+- *Row admission.* A row of any member is admitted only if its KV growth to
+  the request's token bound fits the shared budget at admission. A row that
+  does not fit fails exactly like today's over-capacity dispatch (retryable);
+  it never evicts a model. Each member's `slots_free` is what that member
+  could admit now against the shared budget, so per-member values are not
+  additive and admission, not the advertised count, is authoritative.
+- *Load.* A load is admitted only if the model's weights fit the budget after
+  evicting idle unpinned members (below); otherwise it is refused with
+  `insufficient_memory` and the warm set is unchanged.
+- *Eviction.* Only an idle unpinned member may be evicted: no in-flight,
+  admitted or queued row. A member with any in-flight row MUST NOT be
+  evicted. Candidates are evicted least-recently-used first (by last row
+  admission). An evicting member is routing-ineligible, admits no new row and
+  is unloaded once idle.
+- *Pinning.* The primary and every model in the boot `warm_models`
+  configuration are pinned. A load MUST NOT reduce a pinned member's
+  `slots_total` below its value before the load; a load that would is
+  refused with `insufficient_memory`.
+- *Configuration.* `model` stays the primary. An optional `warm_models` list
+  (config file, `MACPROVIDER_WARM_MODELS`, `--warm-models`, with the
+  SPEC-010 R-3.6.1 precedence) names further models loaded at boot in list
+  order while they fit. When `supported_models` is set it MUST contain each of
+  them; when it is unset the effective `supported_models` is the primary
+  followed by `warm_models`. Its absence is a warm set of one.
+
+**SPEC-001-R018 — Sharing one GPU.** Rows of different models MUST NOT be
+batched in one forward; continuous batching (SPEC-038) batches rows of one
+member only. Members take turns on the GPU through one submission order for
+the process (one GPU stream), and sharing the GPU MUST NOT change any row's
+tokens: a row's output is identical to the same request served with no
+sibling busy.
+
+- *Fairness.* No warm member with admitted rows may be starved by another
+  member's prefill or decode. While any member has decoding rows, every other
+  member's prefill MUST be chunked so that decode steps of busy members run
+  between chunks. Chunk size and the share of GPU time owed to decode are
+  implementation constants fixed by measurement, not by this SPEC.
+- *Advertised capacity.* Each member's `throughput_tps_estimate` MUST reflect
+  contention: while sibling members are busy it is the decode rate the member
+  achieves under that load (measured, or its solo rate scaled by the measured
+  share), never its solo rate.
+
+**SPEC-001-R019 — Per-member policy, self-check and settlement.** Signed
+continuous-batching admission (SPEC-038), signed native-MTP admission
+(SPEC-048-R014) and the batched-isolation self-check (`cb_self_check`) are
+evaluated and reported per warm member against that member's own tuple.
+Loading, evicting or swapping another member MUST NOT turn continuous batching
+or native MTP off for a warm member, or change its admitted tuple. A receipt
+(SPEC-015) and its usage bind the `model_id` and `model_hash` of the member
+that served the request, read from that member's own hash-tracking state
+(SPEC-015 §M.2.4); a request never settles against another member.
 
 ---
 

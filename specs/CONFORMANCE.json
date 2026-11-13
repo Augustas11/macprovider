@@ -5118,7 +5118,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-036 v0.3.1 (#2338): keys are per served warm model when one session serves several; served_model_id on scoring requests to a multi-model session is not implemented yet."
       }
     },
     {
@@ -13360,7 +13360,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-022 v0.4.10 (#2338): R-16.2a served-model scoping of holds for credits dispatched with served_model_id is not implemented yet."
       }
     },
     {
@@ -15814,6 +15814,81 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2157",
         "rationale": "Original-family local privacy consumer and provider-side Responses/Messages conversion are under implementation. Targeted protocol and local client checks do not establish signed production deployment or actual multi-turn tool-using Codex and Claude sessions. Code-bound hardware acceptance remains pending. No conformance promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R016",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.57 (#2338) warm set state and wire: primary model, warm_models on handshake and heartbeat, served_model_id routing, single-model compatibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R017",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.57 (#2338) one memory budget for every warm model: row admission against the shared budget, load, LRU eviction of idle unpinned models, pinning, warm_models configuration. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R018",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.57 (#2338) sharing one GPU: no cross-model batching, one submission order, token parity with solo, prefill/decode fairness, contended per-model capacity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R019",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.57 (#2338) signed CB / native-MTP admission and the batched-isolation self-check per warm model; receipts bind the serving member. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R011",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-002 v1.6.36 (#2338) multi-model providers: registration, heartbeat, slot accounting, routing, pool views and route snapshots per (provider, model). Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     }
   ]

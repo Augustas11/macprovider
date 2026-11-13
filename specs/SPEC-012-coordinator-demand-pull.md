@@ -1,6 +1,6 @@
 # SPEC-012 — Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility
 
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Draft (round-three audit failed; not ready to lock)
 **Owner:** @Augustas11
 **Authority:** The still-unique normative requirements in §4 own coordinator-initiated
@@ -17,6 +17,15 @@ MAJOR findings and a NOT READY TO LOCK verdict, so `CONFORMANCE.json` records
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
+
+**Change log v0.4 (2026-11-13, Related: #2338):** L-3 is lifted: a provider
+process may keep a set of warm models (SPEC-001-R016, coordinator
+SPEC-002-R011). `loaded_model` is the primary warm model; L-4 hash semantics
+apply per warm model. `set_model` gains `mode` (R-4.4.10): `"add"` loads the
+target into the warm set without dropping the current models when the shared
+memory budget allows, and the reject enum gains `insufficient_memory`. The
+candidate filter and warm-first ranking read the warm set. A provider without
+`warm_models` and a `set_model` without `mode` behave exactly as in v0.3.
 
 **Trigger:** arm64golf canary run (2026-06-05). Operator reported four
 concrete pains, three of them operator-facing: (1) no CLI to change
@@ -79,8 +88,8 @@ Non-negotiable inputs. Not subject to audit revision.
 |---|---|
 | L-1 | **Backward compatible.** With all SPEC-010 fields absent AND `publish_unwarm_models: false`, coordinator behavior MUST be byte-identical to pre-SPEC-010 production. `/v1/models`, `/v1/status`, log lines, routing decisions, error envelopes — all identical. |
 | L-2 | **No closed allowlist.** Coordinator consumes the SPEC-010 model identity set without adding a server-side whitelist. Curation remains guidance under SPEC-010/SPEC-013, never a hard rule. Permissionless onboarding stays. |
-| L-3 | **One *active* model per provider process at a time.** Multi-model serving (parallel loaded weights) is OUT OF SCOPE. A provider declares `supported_models` (willing) and `loaded_model` (warm now). The set of warm models on a provider is always exactly `{loaded_model}` while `state == ready`, and `{}` while `state == loading_model`. |
-| L-4 | **Pillar A hash semantics unchanged.** `model_hash` continues to refer ONLY to `loaded_model`. `supported_models` entries are unverified. SPEC-008 §5.5's five hash states are not extended. During the `loading_model` sub-state the provider is not routable (per L-3), so the hash predicate does not apply. |
+| L-3 | **A set of warm models per provider process (amended v0.4).** A provider declares `supported_models` (willing) and its warm set (SPEC-001-R016 `warm_models`, warm now); `loaded_model` is the primary member. A provider that reports no `warm_models` has the warm set `{loaded_model}` while `state == ready` and `{}` while `state == loading_model`, as in v0.3. For a multi-model provider, `SwapState` and routability are per warm member (SPEC-002-R011): a `replace` swap makes only the replaced member unroutable, and an `add` makes no current member unroutable. |
+| L-4 | **Pillar A hash semantics unchanged.** `model_hash` continues to refer ONLY to `loaded_model`; each `warm_models` entry's `model_hash` refers only to that entry's model (v0.4). `supported_models` entries are unverified. SPEC-008 §5.5's five hash states are not extended. During the `loading_model` sub-state the provider is not routable (per L-3), so the hash predicate does not apply. |
 | L-5 | **No paid-tier gating.** Per Entry 21, advertising more models or using warm-swap does not change earnings. SPEC-005 billing is untouched. |
 | L-6 | **F-1.5 survivability invariants preserved.** No SPEC-010 wire field, message type, or routing path may feed into sticky-key derivation, expose `conv:` to the provider, hand a sticky lifecycle message to the provider, or extend sticky TTL. Cross-check: SPEC-008 §2.1–2.5. |
 
@@ -165,7 +174,7 @@ Or reject:
   "type": "set_model_ack",
   "request_id": "swap_01HK4Z3VYE...",
   "state": "rejected",
-  "reason_code": "not_in_supported_models" | "already_loaded" | "load_in_progress" | "cooldown" | "other"
+  "reason_code": "not_in_supported_models" | "already_loaded" | "load_in_progress" | "cooldown" | "insufficient_memory" | "other"
 }
 ```
 
@@ -377,6 +386,25 @@ Note: `drain_timeout` is intentionally NOT in the failure
   All redaction rules from SPEC-006 §F-1.5 apply: NO `conv:`
   identifier, NO raw `account_id`, NO buyer prompt text in any
   event payload.
+- **R-4.4.10** **Add to the warm set (v0.4).** `set_model` MAY carry
+  `mode`: `"replace"` (the default when absent; R-4.4.1 to R-4.4.9 as
+  written, applied to the primary member per SPEC-011 §3.10) or `"add"`.
+  The coordinator MAY send `mode: "add"` only to a provider that reports
+  `warm_models` (SPEC-001-R016). On `add` the provider loads the target
+  into its warm set without draining or dropping any current member,
+  admitting the load against its shared memory budget and evicting only
+  idle unpinned members (SPEC-001-R017). If the target does not fit, the
+  provider rejects with `reason_code: "insufficient_memory"` and its warm
+  set is unchanged. `already_loaded` means the target is already a warm
+  member. During an `add`, R-4.4.4 and R-4.4.5 apply to the target only:
+  every current member stays routing-eligible and keeps serving.
+  `set_model_complete{succeeded}` for an add carries the target as
+  `loaded_model` and its `model_hash`; R-4.4.7 verification applies to the
+  new entry only, and `rolled_back_to_model` on failure names the primary.
+  For a cold-wake (§4.5.3) to a provider that reports `warm_models`, the
+  coordinator MUST try `add` first and MAY fall back to `replace` after an
+  `insufficient_memory` reject, subject to R-4.4.2. Events and the cooldown
+  of R-4.4.2 and R-4.4.9 are per provider for both modes.
 
 ### 4.5 Router: candidate filter + cold-supported wake path
 
@@ -396,6 +424,11 @@ candidates(req_model) :=
 Note: `req_model in p.SupportedModels` subsumes the prior
 `req_model == p.ModelID` predicate, because SPEC-010 requires
 `ModelID ∈ SupportedModels`.
+
+(v0.4) For a provider that reports `warm_models`, `p.ModelID == req_model`
+below reads "some `warm_models` entry in state `warm` has `model_id ==
+req_model`", and `p.SlotsFree` reads that entry's `slots_free`
+(SPEC-002-R011).
 
 #### 4.5.2 Warm-first ranking (NORMATIVE for Phase 1)
 
@@ -884,9 +917,8 @@ Phase 1 (gates v0.2 implementation):
 
 ## 11. Out of scope
 
-- Multi-model serving in a single provider process (parallel
-  loaded weights). Single warm model per process remains the rule
-  (L-3).
+- Batching rows of different models in one forward pass. Several
+  warm models per process are in scope since v0.4 (L-3).
 - GPU/CPU memory accounting per advertised supported model.
   Provider self-reports `supported_models`; coordinator does not
   audit memory feasibility.

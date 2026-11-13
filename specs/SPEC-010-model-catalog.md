@@ -1,7 +1,7 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.17
-**Status:** v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
+**Version:** 1.18
+**Status:** v1.18 multi-model warm set (L-3 lifted, #2338, 2026-11-13) over v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
 2026-10-01; v1.15 draft amended before landing) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
@@ -46,6 +46,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.18 (2026-11-13, Related: #2338 — several warm models per process):**
+- L-3 is lifted: a provider process may keep a set of warm models and serve
+  them concurrently (SPEC-001-R016 to R019; coordinator SPEC-002-R011).
+  `supported_models` still declares willingness only; the warm set is a
+  subset of it. `model_id` (SPEC-012 `loaded_model`) is the primary warm
+  model; a single-model provider is unchanged.
+- L-4: `model_hash` and the §3.7 identity fields apply per warm model; each
+  `warm_models` entry carries its own. No R001-R009 semantics, pricing or
+  settlement identity change.
 
 **Change log v1.17 (Related: #2059 — Malibu catalog download):**
 - R008: `models prepare-catalog <key> --transaction-id <uuid> --json` is the
@@ -480,8 +490,8 @@ entirely.
 |---|---|
 | L-1 | **Backward compatible.** With no SPEC-010 field present in the auth frame AND no provider opted in to `publishes_supported_models`, coordinator behavior MUST be byte-identical to pre-SPEC-010 production. Every public response and log line is unchanged. |
 | L-2 | **No closed allowlist.** Coordinator does not validate model IDs against a server-side whitelist. Any string the provider sends in `supported_models` is accepted, subject only to length/shape limits in §4.1. Permissionless onboarding stays. |
-| L-3 | **One *active* model per provider process at a time.** Multi-model serving (parallel loaded weights) is out of scope. `supported_models` declares *willingness*; `model_id` is what is warm right now. v1.0 has no mechanism to make a non-warm declared model become warm — that's SPEC-011/SPEC-012. |
-| L-4 | **Trivial SPEC-008 Pillar A interaction.** Because v1.0 adds no new routing-eligible state and no `/v1/models` aggregation, `model_hash` continues to refer to `loaded_model` only and Pillar A logic is unchanged. No interaction surface. |
+| L-3 | **A set of warm models per provider process (amended v1.18).** `supported_models` declares *willingness*; the warm set (SPEC-001-R016 `warm_models`) is what is loaded and served now, always a subset of `supported_models`; `model_id` is the primary warm model. A provider that reports no `warm_models` has the warm set `{model_id}`. SPEC-010 itself has no mechanism to make a non-warm declared model warm — that's SPEC-011/SPEC-012. (v1.0-v1.17 allowed one active model per process.) |
+| L-4 | **Trivial SPEC-008 Pillar A interaction.** Because v1.0 adds no new routing-eligible state and no `/v1/models` aggregation, `model_hash` continues to refer to `loaded_model` only and Pillar A logic is unchanged. No interaction surface. (v1.18: each `warm_models` entry carries its own `model_hash`, verified per (provider, model) pair per SPEC-001-R016.) |
 | L-5 | **No billing change.** No new SPEC-005 ledger interaction. SPEC-010 v1.0 is invisible to the request_log. |
 | L-6 | **F-1.5 invariants trivially preserved.** No new wire surface that touches sticky derivation, `conv:`, or sticky TTL. |
 
@@ -1955,7 +1965,7 @@ predicate available for SPEC-011 / SPEC-012 to consume.
 | `503 model_not_warm` envelope | **SPEC-012** | Only meaningful if cold-supported is buyer-visible |
 | `/v1/status.state` field with `loading`/`ready`/`down` | **SPEC-012** | Only meaningful when swap state exists on coordinator side |
 | Recommended catalog (`GET /v1/recommended-catalog`) | **SPEC-013** (future) | Closes pain #4 (HF ID discovery) |
-| Multi-model serving in a single provider process | (none planned) | Architectural; L-3 |
+| Batching rows of different models in one forward | (none planned) | Several warm models per process are in scope since v1.18 (SPEC-001-R016); each forward runs one model |
 | Catalog signing | (none planned) | Phase 3+ |
 
 ---

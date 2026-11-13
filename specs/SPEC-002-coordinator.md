@@ -1,6 +1,17 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
+**Version:** 1.6.36 (2026-11-15, registration, slots, routing and the pool are per provider and model for a multi-model provider)
+
+**Change log v1.6.36 (2026-11-15, Related: #2338):** Adds `SPEC-002-R011`. A
+provider process may keep a set of warm models (SPEC-001-R016). The
+coordinator keeps one session per provider and, under it, one pool entry per
+warm model: hash state, catalog and CB / native-MTP admission, slots, state,
+throughput and measured performance are per (provider, model), and routing
+selects an entry and dispatches with `served_model_id`. A provider that sends
+no `warm_models` is a warm set of one and is handled exactly as before. Route
+snapshots, receipts and settlement use the dispatched entry's model. The
+breaker counter stays per provider session. Trust tier and attestation labels
+are per provider session and unchanged.
 
 **Change log v1.6.35 (2026-11-14, PR #2374, Related: #2371):** A provider
 that is busy serving is not degraded. FR-B1 defines **in service**
@@ -1090,7 +1101,7 @@ insertion points for each. See Section 3 for hook-point locations.
   HTTP API is wire-compatible with what SPEC-003 will need)
 - Buyer-side privacy stack (Tier 2)
 - TLS termination (deployment concern; Caddy or nginx in front)
-- Multi-model-per-provider support (SPEC-001 is single model per binary)
+- Batching rows of different models in one provider forward (a provider may keep several warm models since v1.6.36, `SPEC-002-R011`; each forward runs one model)
 - Automatic scaling or auto-restart of provider binaries
 
 ---
@@ -1652,8 +1663,9 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
   `degraded` (routing-ineligible per FR-P5), logs
   `state_update.reason = "breaker_tripped"` with fault type and count, and
-  runs the FR-P11 recovery cycle. The counter is per provider (a provider
-  serves a single model). Simultaneous faults across a multi-slot provider
+  runs the FR-P11 recovery cycle. The counter is per provider session, for a
+  multi-model provider too (`SPEC-002-R011`): its models share one process
+  and one GPU, so a wedge in one can stall all of them. Simultaneous faults across a multi-slot provider
   from one wedge event each count, intentionally tripping immediately. The
   breaker applies to all tiers (pinned, trusted, and provisional). Transition to
   `draining`/`unavailable` (any cause) clears the counter; a successful
@@ -6170,3 +6182,46 @@ longest a provider can legitimately keep working on a request after it was
 retired. The retired set MUST be bounded per provider session (8192 entries; the oldest
 entry without an armed cancel terminal is evicted first); an evicted request's late frames take the unknown-request
 path above and are still discarded without closing the session.
+
+## SPEC-002-R011 — Multi-model providers
+
+A provider that sends `warm_models` (SPEC-001-R016) keeps one session, one
+`provider_id`, one admission tier and one SPEC-008 trust tier, and under that
+session one pool entry per warm model. A provider that sends no `warm_models`
+is a warm set of one built from its top-level fields; every rule below then
+reduces to today's per-provider behaviour, byte for byte.
+
+- *Registration and heartbeat.* The handshake and every heartbeat replace the
+  session's entry set with the reported `warm_models` (an entry missing from a
+  heartbeat is gone; in-flight requests on it finish). Each entry's
+  `model_id` MUST be in the session's `supported_models`; a heartbeat that
+  breaks this, repeats a `model_id`, or has other than one `primary` entry is
+  rejected as malformed and changes nothing. Each entry's hash is verified
+  (SPEC-008 §5.3-§5.6, SPEC-010 §3.7) and its catalog, continuous-batching
+  and native-MTP admission (SPEC-038, SPEC-048-R014) are resolved for that
+  entry's tuple alone. A failing entry is excluded on its own; the other
+  entries keep serving.
+- *Slots and state.* Slot accounting is per entry, from that entry's
+  `slots_total` / `slots_free`. Entry slots are not additive across entries:
+  a dispatch the provider refuses for lack of shared memory is the existing
+  retryable over-capacity outcome, never a breaker fault. Only an entry in
+  state `warm` is routing-eligible. Session-level state (`draining`,
+  `degraded`, `unavailable`, disconnect, the breaker) applies to every entry.
+- *Routing.* A candidate is a (provider, model) entry. Selection, the
+  SPEC-002-R005 measured-performance store (already keyed by provider and
+  served model), the throughput floor and the SPEC-004 objective all read the
+  entry. The coordinator MUST NOT assume an entry's solo throughput while its
+  sibling entries are busy: it uses the entry's reported contended
+  `throughput_tps_estimate` and its measured decode. Every dispatch to a
+  provider that sent `warm_models` carries `served_model_id` naming the
+  chosen entry, on `preflight` and `inference_request` or as
+  `X-MacProvider-Served-Model`.
+- *Pool and operator views.* `/poolz`, the operator explorer and
+  `/v1/models` aggregation count each entry as one provider serving that
+  model.
+- *Settlement.* The route snapshot's `model_id`, `spec008_hash_status`,
+  `provider_reported_model_hash` and `expected_catalog_model_hash` (SPEC-022)
+  come from the dispatched entry, and the request settles against that
+  model.
+- *Trust.* No trust tier, admission tier or attestation label is minted,
+  upgraded or downgraded by the number of warm models.
