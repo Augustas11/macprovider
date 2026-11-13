@@ -2388,9 +2388,13 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
-    /// SPEC-038 FR-CB9: the refused state a serial-only process reports for
-    /// its whole life (it never runs a self-check), kept across swaps.
-    private var serialOnlySelfCheck: (state: ContinuousBatchingSelfCheckState, report: ContinuousBatchingSelfCheckReport)?
+    /// SPEC-038 FR-CB9: the refused decision a serial-only process reports
+    /// for its whole life (it never runs a self-check) and the count it
+    /// serves, kept across swaps: no self-check target exists there to
+    /// re-resolve the count after a swap.
+    private var serialOnlySelfCheck: (
+        decision: ContinuousBatchingSelfCheckDecision?, key: ContinuousBatchingSelfCheckKey?, servedSlots: Int
+    )?
     /// SPEC-038 AC-26 leg (a) inside the FR-CB10 self-check (v0.3.41): nil
     /// until it runs for the loaded tuple (a signed `cached_turns_accepted`
     /// grant then applies provisionally), true when keyed cached turns
@@ -6692,16 +6696,24 @@ maxTokens: 1,
     ) async -> Int? {
         guard smallMRoute == .serialOnly else { return nil }
         let served = min(max(1, servedSlots), maxBatch)
-        let reason = decision?.reason ?? "small_m_route_serial_only"
-        let state = ContinuousBatchingSelfCheckState.refused(reason: reason)
-        let report = ContinuousBatchingSelfCheckReport(
-            decision: reason, servedSlots: served, verifiedSlots: decision?.verifiedSlots ?? 1, key: key
-        )
-        serialOnlySelfCheck = (state, report)
-        continuousBatchingSelfCheck = state
-        continuousBatchingSelfCheckReport = report
+        serialOnlySelfCheck = (decision, key, served)
+        applySerialOnlySelfCheckState(servedSlots: served)
         await applyServedSlots(served)
         return served
+    }
+
+    /// Sets the refused state and its report for the stored serial-only
+    /// decision, reporting `servedSlots`, the count the gate serves.
+    private func applySerialOnlySelfCheckState(servedSlots: Int) {
+        guard let serialOnly = serialOnlySelfCheck else { return }
+        let reason = serialOnly.decision?.reason ?? "small_m_route_serial_only"
+        continuousBatchingSelfCheck = .refused(reason: reason)
+        continuousBatchingSelfCheckReport = ContinuousBatchingSelfCheckReport(
+            decision: reason,
+            servedSlots: servedSlots,
+            verifiedSlots: serialOnly.decision?.verifiedSlots ?? 1,
+            key: serialOnly.key
+        )
     }
 
     func continuousBatchingSelfCheckState() -> ContinuousBatchingSelfCheckState {
@@ -7582,8 +7594,8 @@ maxTokens: 1,
         // SPEC-038 v0.3.15: a new model or runtime is re-checked.
         selfCheckGeneration += 1
         let swapGeneration = selfCheckGeneration
-        continuousBatchingSelfCheck = serialOnlySelfCheck?.state ?? .pending
-        continuousBatchingSelfCheckReport = serialOnlySelfCheck?.report
+        continuousBatchingSelfCheck = .pending
+        continuousBatchingSelfCheckReport = nil
         continuousBatchingCachedTurnsSelfCheck = nil
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
@@ -7598,9 +7610,14 @@ maxTokens: 1,
         )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
-        let swapServedSlots: Int? = servedSlotsManaged
+        // A serial-only process keeps its startup count and refused state:
+        // it has no self-check target to re-resolve them (SPEC-038 FR-CB9).
+        let swapServedSlots: Int? = serialOnlySelfCheck.map { min($0.servedSlots, maxBatch) } ?? (servedSlotsManaged
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
-            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) }
+            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) })
+        if let swapServedSlots, serialOnlySelfCheck != nil {
+            applySerialOnlySelfCheckState(servedSlots: swapServedSlots)
+        }
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)

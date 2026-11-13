@@ -328,6 +328,43 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         }
     }
 
+    /// A swap re-plans the gate to the owner pin and re-resolves it from a
+    /// self-check target, which a serial-only process has none of: its
+    /// startup count and refused report must survive, so served, advertised
+    /// and reported counts stay equal.
+    func testSerialOnlyRuntimeKeepsItsServedCountAcrossASwap() async throws {
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        let cases: [(ContinuousBatchingSelfCheckDecision?, Int)] = [(divergence, 1), (nil, 4)]
+        for (decision, expected) in cases {
+            let runtime = makeRuntime(
+                backend: SelfCheckRetirementBackend(), warmSwapEnabled: true, smallMRoute: .serialOnly, maxBatch: 4
+            )
+            let providerStatus = ProviderStatus(
+                modelID: "mlx-community/Qwen-Test",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 1024, maxConcurrencyOverride: 4),
+                modelHash: String(repeating: "a", count: 64)
+            )
+            await runtime.setProviderStatus(providerStatus)
+            await runtime.configureServedSlots(managed: true, ownerPinned: 4)
+            let slots = SmallMRoute.serialOnlyServedSlots(stored: decision, ownerPinned: 4, servedNow: 4)
+            _ = await runtime.applySerialOnlySelfCheck(stored: decision, key: nil, servedSlots: slots)
+
+            try await runtime.beginSwap(targetModelID: "mlx-community/Qwen-Replacement").value
+
+            let gate = await runtime.servedSlotLimitForTest()
+            XCTAssertEqual(gate, expected)
+            let advertised = await providerStatus.snapshot().capacity.maxConcurrency
+            XCTAssertEqual(advertised, expected)
+            let snapshot = await runtime.currentSnapshot().continuousBatching
+            XCTAssertEqual(snapshot?.selfCheck?.servedSlots, expected)
+            XCTAssertEqual(snapshot?.selfCheck?.decision, decision?.reason ?? "small_m_route_serial_only")
+            XCTAssertEqual(snapshot?.mode, .off)
+            let state = await runtime.continuousBatchingSelfCheckState()
+            XCTAssertEqual(state, .refused(reason: decision?.reason ?? "small_m_route_serial_only"))
+        }
+    }
+
     private func makeRuntime(
         backend: SelfCheckRetirementBackend,
         warmSwapEnabled: Bool = false,
