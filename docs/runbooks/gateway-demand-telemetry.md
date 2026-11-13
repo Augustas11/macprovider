@@ -55,9 +55,10 @@ request path. Database snapshots, filesystem backups, WAL files, and operator
 exports that include raw `demand_events` must use the same retention window or
 be treated as separate operator-retained analytics data. Run any explicit WAL
 truncation or compaction as off-path maintenance, not from the hourly gateway
-pruner. Preserve longer-lived reporting through aggregated exports from
-`DemandSummary` and `DemandRouteSummary`, not by retaining per-request rows
-indefinitely.
+pruner. Preserve longer-lived latency reporting through saved responses of
+the `GET /admin/demand-latency` read (below), and demand counts through
+`DemandRouteSummary`, not by retaining per-request rows indefinitely.
+`DemandSummary` timing averages are legacy (`Legacy`-prefixed fields).
 
 `demand_events` rejects updates so rows cannot be rewritten in place. Deletes
 are allowed only for retention pruning.
@@ -104,6 +105,11 @@ is the first-selected provider's engine family from the route trace, not the
 path the request ran, so a cell does not separate failover, active rows or
 shard groups. These numbers never feed routing; the coordinator's routing
 store is SPEC-002-R005.
+
+The output rate is the answer bytes divided by 4, minus one, over the window
+from the first to the last answer delta: an estimate on the same basis for
+every model family, counting answer text only. It includes buyer write
+backpressure, because the gateway writes each frame before it reads the next.
 
 ## Reporting Scope
 
