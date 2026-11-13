@@ -198,7 +198,20 @@ func (d *demandTelemetryState) setTiming(timing *gatewayPhaseTiming, now time.Ti
 func (d *demandTelemetryState) setProviderTimingLabels(labels providerTimingLabels) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.providerTiming = labels
+	// A later usage frame without a field keeps the last reported value.
+	for _, f := range []struct {
+		dst **int64
+		src *int64
+	}{
+		{&d.providerTiming.queueMS, labels.queueMS},
+		{&d.providerTiming.firstTokenMS, labels.firstTokenMS},
+		{&d.providerTiming.firstAnswerMS, labels.firstAnswerMS},
+		{&d.providerTiming.decodeMS, labels.decodeMS},
+	} {
+		if f.src != nil {
+			*f.dst = f.src
+		}
+	}
 }
 
 func (d *demandTelemetryState) markTerminalOutcome(prompt, completion int64, outcome string, eligibleProviderExists bool) {

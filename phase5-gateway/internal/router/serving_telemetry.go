@@ -2,7 +2,6 @@ package router
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -24,7 +23,13 @@ const (
 	// servingMaxHeldToolArgumentBytes bounds the tool-call arguments held for
 	// canonical re-encoding; arguments past it count at their raw length.
 	servingMaxHeldToolArgumentBytes = 1 << 20
-	servingMaxThinkFilters          = 16
+	// Choice and tool-call indexes are provider-controlled. Past these bounds
+	// choices share one think filter, and new tool calls are counted at their
+	// raw length without being stored, so neither map grows with the stream
+	// and the work at flush stays bounded. Telemetry-only: a stream past the
+	// bounds is classified less exactly, never rejected.
+	servingMaxThinkFilters = 16
+	servingMaxToolCalls    = 64
 	// providerTimingLabelMaxMs bounds a provider-reported timing label.
 	providerTimingLabelMaxMs = 3_600_000
 )
@@ -34,16 +39,22 @@ type servingToolKey struct {
 	tool   int
 }
 
+type servingToolCall struct {
+	named     bool
+	arguments strings.Builder
+}
+
 // servingDeltaObserver classifies upstream Chat Completions deltas into
-// reasoning and answer deltas and estimates answer tokens the way
-// SPEC-002-R005 estimates delivered output.
+// reasoning and answer deltas and estimates answer tokens with the same rule
+// as the coordinator's SPEC-002-R005 output estimator, applied to answer text
+// only.
 type servingDeltaObserver struct {
 	thinkFilters     map[int]*streamThinkFilter
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 	lastAnswerAt     time.Time
 	answerBytes      int64
-	toolArguments    map[servingToolKey]*strings.Builder
+	toolCalls        map[servingToolKey]*servingToolCall
 	heldArgBytes     int64
 	rawArgBytes      int64
 }
@@ -66,18 +77,39 @@ type servingStreamDelta struct {
 	} `json:"tool_calls"`
 }
 
-func (o *servingDeltaObserver) observe(data string, at time.Time) {
-	var envelope struct {
-		Choices []struct {
-			Index int             `json:"index"`
-			Delta json.RawMessage `json:"delta"`
-		} `json:"choices"`
+// streamingChoiceIndex reads a choice index for telemetry only; a missing or
+// non-integer index shares the overflow filter.
+func streamingChoiceIndex(raw json.RawMessage) int {
+	var index int
+	if len(raw) == 0 || json.Unmarshal(raw, &index) != nil {
+		return -1
 	}
-	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
-		return
-	}
+	return index
+}
+
+func hasNonSpace(s string) bool {
+	return strings.TrimSpace(s) != ""
+}
+
+// observe classifies one upstream frame from its already-parsed choices.
+//
+// A reasoning delta has non-whitespace reasoning_content or non-whitespace
+// content inside <think>...</think>. An answer delta has non-whitespace
+// visible content (outside think tags), non-whitespace refusal or text, or a
+// tool call with a name or arguments. Whitespace-only visible text counts
+// toward the answer estimate only once an answer delta has been seen.
+func (o *servingDeltaObserver) observe(choices []streamingChoiceFrame, at time.Time) {
 	reasoning, answer := false, false
-	for _, choice := range envelope.Choices {
+	var whitespaceBytes int64
+	visibleText := func(s string) {
+		if hasNonSpace(s) {
+			answer = true
+			o.answerBytes += int64(len(s))
+		} else {
+			whitespaceBytes += int64(len(s))
+		}
+	}
+	for _, choice := range choices {
 		if len(choice.Delta) == 0 || bytes.Equal(choice.Delta, []byte("null")) {
 			continue
 		}
@@ -85,29 +117,28 @@ func (o *servingDeltaObserver) observe(data string, at time.Time) {
 		if err := json.Unmarshal(choice.Delta, &delta); err != nil {
 			continue
 		}
-		if delta.ReasoningContent != nil && *delta.ReasoningContent != "" {
+		index := streamingChoiceIndex(choice.Index)
+		if delta.ReasoningContent != nil && hasNonSpace(*delta.ReasoningContent) {
 			reasoning = true
 		}
 		if delta.Content != nil && *delta.Content != "" {
-			filter := o.thinkFilter(choice.Index)
-			before := filter.thinkInsideBytes
+			filter := o.thinkFilter(index)
+			before := filter.thinkInsideTextChunks
 			visible := filter.filterThinkContent(*delta.Content)
-			if filter.thinkInsideBytes > before {
+			if filter.thinkInsideTextChunks > before {
 				reasoning = true
 			}
 			if visible != "" {
-				answer = true
-				o.answerBytes += int64(len(visible))
+				visibleText(visible)
 			}
 		}
 		for _, s := range []*string{delta.Refusal, delta.Text} {
 			if s != nil && *s != "" {
-				answer = true
-				o.answerBytes += int64(len(*s))
+				visibleText(*s)
 			}
 		}
 		if fc := delta.FunctionCall; fc != nil {
-			if o.recordToolCall(servingToolKey{choice: choice.Index, tool: -1}, fc.Name, fc.Arguments) {
+			if o.recordToolCall(servingToolKey{choice: index, tool: -1}, fc.Name, fc.Arguments) {
 				answer = true
 			}
 		}
@@ -115,7 +146,7 @@ func (o *servingDeltaObserver) observe(data string, at time.Time) {
 			if tc.Function == nil {
 				continue
 			}
-			key := servingToolKey{choice: choice.Index, tool: i}
+			key := servingToolKey{choice: index, tool: i}
 			if tc.Index != nil {
 				key.tool = *tc.Index
 			}
@@ -133,14 +164,15 @@ func (o *servingDeltaObserver) observe(data string, at time.Time) {
 		}
 		o.lastAnswerAt = at
 	}
+	if !o.firstAnswerAt.IsZero() {
+		o.answerBytes += whitespaceBytes
+	}
 }
 
 func (o *servingDeltaObserver) thinkFilter(choice int) *streamThinkFilter {
 	if o.thinkFilters == nil {
 		o.thinkFilters = map[int]*streamThinkFilter{}
 	}
-	// Choice indexes are provider-controlled; past the bound they share one
-	// filter so the map cannot grow with the stream.
 	if choice < 0 || choice >= servingMaxThinkFilters {
 		choice = -1
 	}
@@ -152,42 +184,59 @@ func (o *servingDeltaObserver) thinkFilter(choice int) *streamThinkFilter {
 	return filter
 }
 
+// recordToolCall counts a tool call's name once per (choice, index) and holds
+// its arguments for canonical re-encoding, within the key and byte bounds.
 func (o *servingDeltaObserver) recordToolCall(key servingToolKey, name, arguments *string) bool {
-	answer := false
-	if name != nil && *name != "" {
-		answer = true
+	hasName := name != nil && *name != ""
+	hasArguments := arguments != nil && *arguments != ""
+	if !hasName && !hasArguments {
+		return false
+	}
+	if o.toolCalls == nil {
+		o.toolCalls = map[servingToolKey]*servingToolCall{}
+	}
+	call := o.toolCalls[key]
+	if call == nil {
+		if len(o.toolCalls) >= servingMaxToolCalls {
+			if hasName {
+				o.rawArgBytes += int64(len(*name))
+			}
+			if hasArguments {
+				o.rawArgBytes += int64(len(*arguments))
+			}
+			return true
+		}
+		call = &servingToolCall{}
+		o.toolCalls[key] = call
+	}
+	if hasName && !call.named {
+		call.named = true
 		o.answerBytes += int64(len(*name))
 	}
-	if arguments != nil && *arguments != "" {
-		answer = true
+	if hasArguments {
 		if o.heldArgBytes+int64(len(*arguments)) > servingMaxHeldToolArgumentBytes {
 			o.rawArgBytes += int64(len(*arguments))
-			return answer
+		} else {
+			call.arguments.WriteString(*arguments)
+			o.heldArgBytes += int64(len(*arguments))
 		}
-		if o.toolArguments == nil {
-			o.toolArguments = map[servingToolKey]*strings.Builder{}
-		}
-		held := o.toolArguments[key]
-		if held == nil {
-			held = &strings.Builder{}
-			o.toolArguments[key] = held
-		}
-		held.WriteString(*arguments)
-		o.heldArgBytes += int64(len(*arguments))
 	}
-	return answer
+	return true
 }
 
-// estimatedAnswerTokens mirrors the coordinator's generatedOutputTokens:
-// answer bytes, tool-call names, and tool-call arguments at their canonical
-// compact-JSON length, divided by 4 and rounded up.
+// estimatedAnswerTokens applies the coordinator's output-estimate rule
+// (generatedOutputTokens) to answer text only: visible answer bytes, each
+// tool-call name once, and tool-call arguments at their canonical compact-JSON
+// length, divided by 4 and rounded up.
 func (o *servingDeltaObserver) estimatedAnswerTokens() int64 {
 	n := o.answerBytes + o.rawArgBytes
-	for _, filter := range o.thinkFilters {
-		n += int64(len(filter.thinkPendingOutside()))
+	if !o.firstAnswerAt.IsZero() {
+		for _, filter := range o.thinkFilters {
+			n += int64(len(filter.thinkPendingOutside()))
+		}
 	}
-	for _, held := range o.toolArguments {
-		n += servingCanonicalArgumentsLen(held.String())
+	for _, call := range o.toolCalls {
+		n += servingCanonicalArgumentsLen(call.arguments.String())
 	}
 	return (n + servingOutputBytesPerToken - 1) / servingOutputBytesPerToken
 }
@@ -201,8 +250,8 @@ func (a *streamThinkFilter) thinkPendingOutside() string {
 	return a.thinkPending
 }
 
-// servingCanonicalArgumentsLen is the coordinator's canonicalArgumentsLen:
-// arguments re-encoded as compact JSON with every number in its shortest
+// servingCanonicalArgumentsLen follows the same rule as the coordinator's
+// canonicalArgumentsLen: arguments re-encoded as compact JSON with every number in its shortest
 // spelling; arguments that are not one JSON value count at their raw length.
 func servingCanonicalArgumentsLen(arguments string) int64 {
 	dec := json.NewDecoder(strings.NewReader(arguments))
@@ -309,22 +358,11 @@ type servingTelemetrySnapshot struct {
 	servingEngine        string
 }
 
-type gatewayPhaseTimingContextKey struct{}
-
-func withGatewayPhaseTiming(ctx context.Context, timing *gatewayPhaseTiming) context.Context {
-	return context.WithValue(ctx, gatewayPhaseTimingContextKey{}, timing)
-}
-
-func gatewayPhaseTimingFromContext(ctx context.Context) *gatewayPhaseTiming {
-	timing, _ := ctx.Value(gatewayPhaseTimingContextKey{}).(*gatewayPhaseTiming)
-	return timing
-}
-
-func (t *gatewayPhaseTiming) observeStreamDelta(data string, at time.Time) {
+func (t *gatewayPhaseTiming) observeStreamDelta(choices []streamingChoiceFrame, at time.Time) {
 	if t == nil {
 		return
 	}
-	t.deltas.observe(data, at)
+	t.deltas.observe(choices, at)
 }
 
 // servingSnapshot returns the SPEC-006-R028 quantities. All three are absent

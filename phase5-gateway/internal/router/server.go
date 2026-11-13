@@ -2012,12 +2012,18 @@ func isStreamingModeResponseHeader(key string) bool {
 // negotiate on it — so the strict enum guard is safe and prevents header
 // injection should the upstream ever be compromised.
 func buyerVisibleStreamingModeHeader(raw string) string {
-	switch raw {
-	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection":
-		return raw
+	for _, mode := range streamingModeValues {
+		if raw == mode {
+			return raw
+		}
 	}
 	return ""
 }
+
+// streamingModeValues is the SPEC-018 AC-45 streaming-mode vocabulary.
+// TestServingVocabulariesMatchStoredChecks pins it to the demand_events
+// streaming_mode CHECK (storage.DemandStreamingModes).
+var streamingModeValues = []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection"}
 
 func buyerVisibleReceiptHeader(raw string) string {
 	value := strings.TrimSpace(raw)
