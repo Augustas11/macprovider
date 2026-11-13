@@ -1261,6 +1261,7 @@ actor InferenceRelay {
                 "usage": usage(completion),
                 "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
             ]
+            attachServedPath(&endFrame, completion: completion, privacySealed: privacySealer != nil, relayBlind: relayBlindClaim != nil)
             if let receiptHeader {
                 endFrame["receipt"] = receiptHeader
                 attachShardGroupAttestation(&endFrame, receipt: receiptHeader, completion: completion, receiptBuilder: receiptBuilder, providerID: receiptProviderID)
@@ -1800,6 +1801,7 @@ actor InferenceRelay {
                     "usage": usage(completion),
                     "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
                 ]
+                attachServedPath(&endFrame, completion: completion, privacySealed: privacySealer != nil, relayBlind: relayBlindClaim != nil)
                 let modelHashSource = RouterHandler.resolveModelHashSource(
                     warmSwapEnabled: warmSwapEnabled,
                     snapshot: handle.snapshot,
@@ -1937,6 +1939,20 @@ actor InferenceRelay {
     /// SPEC-051-R019: a shard group head's end frame carries the group attestation
     /// bound to the receipt it sends. Without one the coordinator drops the receipt,
     /// so a failure to build it is logged, never hidden.
+    /// Issue #2341: the ordinary `complete` end frame names the path that
+    /// served the request as one top-level member, outside `usage` and the
+    /// receipt. Privacy-class and relay-blind dispatch never carry it, and a
+    /// completion without a served path (replay, loopback) sends none.
+    static func attachServedPath(
+        _ endFrame: inout [String: Any],
+        completion: CompletionResult,
+        privacySealed: Bool,
+        relayBlind: Bool
+    ) {
+        guard !privacySealed, !relayBlind, let servedPath = completion.servedPath else { return }
+        endFrame["served_path"] = servedPath.wireObject
+    }
+
     private static func attachShardGroupAttestation(
         _ frame: inout [String: Any],
         receipt: String,
