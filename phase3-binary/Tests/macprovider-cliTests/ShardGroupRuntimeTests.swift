@@ -249,6 +249,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
             (["tools": tools] as [String: Any], "shard_group_tools_unsupported"),
             (["presence_penalty": 0.5], "shard_group_sampling_unsupported"),
             (["response_format": ["type": "json_object"]], "shard_group_response_format_unsupported"),
+            (["model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"], "shard_group_model_unsupported"),
         ] {
             do {
                 _ = try await runtime.prepare(try request("x", extra: extra))

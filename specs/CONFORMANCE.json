@@ -2350,7 +2350,10 @@
         "phase4-coordinator/internal/buyer/tool_grammar_lfm_test.go:TestLFMToolsRequireExactLoadedModelCapability",
         "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
         "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests",
-        "phase3-binary/Tests/macprovider-cliTests/QwenAutoToolArgumentTests.swift:final class QwenAutoToolArgumentTests"
+        "phase3-binary/Tests/macprovider-cliTests/QwenAutoToolArgumentTests.swift:final class QwenAutoToolArgumentTests",
+        "phase3-binary/Tests/macprovider-cliTests/MiniMaxOutputTests.swift:final class MiniMaxOutputTests",
+        "phase4-coordinator/internal/buyer/tool_grammar_minimax_test.go:TestMiniMaxToolsAdvertisedFromDeclaringProvider",
+        "phase4-coordinator/internal/buyer/tool_grammar_minimax_test.go:TestMiniMaxPlainChatNeedsTheDeclaringProvider"
       ],
       "journeys": [],
       "evidence": [],

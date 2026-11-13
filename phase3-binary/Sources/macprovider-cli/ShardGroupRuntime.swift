@@ -363,14 +363,20 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     }
 
     /// Validate what a shard group serves and render the prompt: text chat with
-    /// temperature, top_p and seed. Tools, structured output, images and
-    /// penalties have no stage-side support yet and are refused, not ignored.
+    /// temperature, top_p and seed. Tools, structured output, images,
+    /// penalties and MiniMax M3 reasoning have no stage-side support yet and
+    /// are refused, not ignored.
     func prepare(_ request: ChatCompletionRequest) throws -> PreparedRequest {
         guard !request.containsNonTextMessageContentPart else {
             throw APIError(status: 400, message: "Images are not supported by this model", code: "unsupported_content_shape", param: "messages")
         }
         guard !ModelRuntime.hasEnabledTools(request.promptSource.tools) else {
             throw APIError(status: 400, message: "Tools are not supported by a shard group yet", code: "shard_group_tools_unsupported", param: "tools")
+        }
+        // MiniMax M3 reasons in `<mm:think>` blocks the shard stream does not
+        // split (#2189); refused rather than leaked into content.
+        guard ToolCallGrammar.family(modelID: request.model) != .minimax else {
+            throw APIError(status: 400, message: "MiniMax M3 is not supported by a shard group yet", code: "shard_group_model_unsupported", param: "model")
         }
         guard case .text = request.responseFormat else {
             throw APIError(status: 400, message: "Structured output is not supported by a shard group yet", code: "shard_group_response_format_unsupported", param: "response_format")
