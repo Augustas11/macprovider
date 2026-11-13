@@ -13433,7 +13433,7 @@
       ],
       "tests": [
         "scripts/test-catalog-release.sh:PASS: release manifest signature is verified against the static-feed signer",
-        "scripts/tests/test_native_binding_ops.py::NativeBindingOpsTests",
+        "scripts/tests/test_native_binding_ops.py::ReleaseManifestSignatureAssemblyTests",
         "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestServedWhenSignedAndBindingServedFeeds",
         "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestFailsClosed",
         "phase3-binary/Tests/macprovider-cliTests/CatalogReleaseManifestTests.swift:final class CatalogReleaseManifestTests",
@@ -13445,7 +13445,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2302",
-        "rationale": "SPEC-023 v0.22.41 adds the signed release manifest: release.json.sig produced by the signing step, verified by the generator, the coordinator (served at /v1/catalog-release) and the CLI, with per-feed sidecars kept as the fallback. Pending until a catalog release signed with release.json.sig is live and a CLI carrying the consumer is promoted; removing the per-feed sidecars is a later revision."
+        "rationale": "SPEC-023 v0.22.42 adds the signed release manifest: release.json.sig produced by the signing step, verified by the generator, the coordinator (served at /v1/catalog-release) and the CLI, with per-feed sidecars kept as the fallback. Pending until a catalog release signed with release.json.sig is live and a CLI carrying the consumer is promoted; removing the per-feed sidecars is a later revision."
       }
     },
     {

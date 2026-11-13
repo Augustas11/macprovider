@@ -21,7 +21,9 @@ def function(path, name):
     return text[start:text.index('\n}', start) + 2]
 
 
-class NativeBindingOpsTests(unittest.TestCase):
+class AssemblyFixture:
+    """A committed fixture repo plus the extracted pf_assemble harness."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -74,6 +76,22 @@ release_dirname() { echo test-release; }
         values.update(env or {})
         return self.shell(code, values), work
 
+
+class ReleaseManifestSignatureAssemblyTests(AssemblyFixture, unittest.TestCase):
+    """SPEC-023 §3.8: the content lane carries release.json.sig."""
+
+    def test_assembly_carries_the_committed_release_manifest_signature(self):
+        sig = self.repo / 'phase3-binary/catalog/autotune/release.json.sig'
+        sig.write_text('committed-release.json.sig')
+        for args in [('add', '.'), ('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'manifest sig')]:
+            subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True)
+        self.commit = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        result, work = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((work / 'release/release.json.sig').read_text(), 'committed-release.json.sig')
+
+
+class NativeBindingOpsTests(AssemblyFixture, unittest.TestCase):
     def test_core_helper_api_matches_ops_and_catalog_contract(self):
         spec = importlib.util.spec_from_file_location('native_binding_ops_api', SCRIPTS / 'native_mtp_binding_bundle.py')
         module = importlib.util.module_from_spec(spec)
@@ -97,16 +115,6 @@ release_dirname() { echo test-release; }
         self.assertFalse((work / 'binding').exists())
         # A release cut before SPEC-023 §3.8 carries no manifest signature.
         self.assertFalse((work / 'release/release.json.sig').exists())
-
-    def test_assembly_carries_the_committed_release_manifest_signature(self):
-        sig = self.repo / 'phase3-binary/catalog/autotune/release.json.sig'
-        sig.write_text('committed-release.json.sig')
-        for args in [('add', '.'), ('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'manifest sig')]:
-            subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True)
-        self.commit = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
-        result, work = self.assemble()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((work / 'release/release.json.sig').read_text(), 'committed-release.json.sig')
 
     def test_legacy_gates_run_under_macos_bash_nounset_with_zero_optional_args(self):
         work = self.root / 'gate-work'

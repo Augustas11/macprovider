@@ -2074,7 +2074,7 @@ func nativeMTPCanaryBootOption(cfg config.AutotuneFeedsConfig, feeds buyer.Autot
 // loadAutotuneCatalogForReload, which rejects a bad manifest.
 func loadBootAutotuneFeeds(cfg config.AutotuneFeedsConfig, logger zerolog.Logger) (buyer.AutotuneFeeds, error) {
 	return buyer.LoadAutotuneFeeds(cfg, buyer.DropRejectedReleaseManifest(func(rejected *buyer.ReleaseManifestError) {
-		logger.Error().Err(rejected).Msg("signed release manifest rejected at boot; /v1/catalog-release answers 404 and CLIs use per-feed sidecars")
+		logger.Error().Err(rejected).Msg("signed release manifest rejected at boot; /v1/catalog-release answers 404 and CLIs use per-feed sidecars; every SIGHUP reload of this release stays rejected until the release manifest is fixed")
 	}))
 }
 

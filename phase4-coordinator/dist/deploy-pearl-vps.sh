@@ -4041,6 +4041,9 @@ $SSH "set -e
       echo 'catalog release envelope $AUTOTUNE_RELEASE_DIR_NAME already exists with different bytes' >&2
       exit 1
     fi
+    if [ -e \$_autotune_stage/release.json.sig ] && [ ! -e \$_autotune_release/release.json.sig ]; then
+      echo 'catalog release $AUTOTUNE_RELEASE_ID: the existing envelope has no release.json.sig and stays immutable, so the signed manifest stays unserved (/v1/catalog-release answers 404) for this release id; the first signed manifest goes live with the next content release' >&2
+    fi
     rm -rf \$_autotune_stage
   else
     mv \$_autotune_stage \$_autotune_release

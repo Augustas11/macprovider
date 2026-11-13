@@ -39,7 +39,8 @@ func TestBootTreatsRejectedReleaseManifestAsAbsent(t *testing.T) {
 	if len(feeds.AutotuneCandidatesJSON) == 0 || len(feeds.ReleaseManifestJSON) != 0 || len(feeds.ReleaseManifestSig) != 0 {
 		t.Fatalf("boot feeds: candidates=%d manifest=%d sig=%d", len(feeds.AutotuneCandidatesJSON), len(feeds.ReleaseManifestJSON), len(feeds.ReleaseManifestSig))
 	}
-	if !strings.Contains(logs.String(), `"level":"error"`) || !strings.Contains(logs.String(), "release manifest rejected") {
+	if !strings.Contains(logs.String(), `"level":"error"`) || !strings.Contains(logs.String(), "release manifest rejected") ||
+		!strings.Contains(logs.String(), "SIGHUP reload of this release stays rejected until the release manifest is fixed") {
 		t.Fatalf("boot did not log the rejection: %s", logs.String())
 	}
 	for path, want := range map[string]int{

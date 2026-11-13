@@ -54,8 +54,10 @@ and promotion gates still apply.
 
 A CLI's binary SHA-256, CDHash and decode-path digest are provenance only
 (SPEC-048 0.1.81, #2282), so a CLI cut needs no rebind, no binding bundle and
-no matched binary/policy transaction. A new or changed admission goes live
-through ordinary catalog activation:
+no matched binary/policy transaction. This no-rebind rule holds for CLIs that
+carry #2282 (1.8.287 and later); a provider still on 1.8.283 must upgrade
+before it can take a new native-MTP admission. A new or changed admission goes
+live through ordinary catalog activation:
 
 ```bash
 scripts/ops/catalog-activate.sh status

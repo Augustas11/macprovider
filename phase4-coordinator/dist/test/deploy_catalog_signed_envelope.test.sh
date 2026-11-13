@@ -168,6 +168,12 @@ envelope "$STAGED" "$TMP/release.json.sig"
 envelope "$EXISTING"
 envelope "$STAGED" "$TMP/release.json.sig"
 [ "$(run_preflight "$STAGED")" = 0 ] || { cat "$TMP/preflight.err" >&2; fail "a staged signature over the identical release.json must be accepted"; }
+run_stage "$STAGED" "$EXISTING" || { cat "$TMP/stage.out" >&2; fail "staging must accept a staged signature over the identical release.json"; }
+[ ! -e "$EXISTING/release.json.sig" ] || fail "staging must leave the existing unsigned envelope untouched"
+grep -qF 'signed manifest stays unserved (/v1/catalog-release answers 404) for this release id' "$TMP/stage.out" ||
+  fail "staging must say the signed manifest stays unserved for an existing unsigned envelope"
+grep -qF 'the first signed manifest goes live with the next content release' "$TMP/stage.out" ||
+  fail "staging must say when the first signed manifest goes live"
 
 # 4. Existing carries a signature from a key the release does not trust: refused.
 envelope "$EXISTING" "$TMP/forged-release.json.sig"
