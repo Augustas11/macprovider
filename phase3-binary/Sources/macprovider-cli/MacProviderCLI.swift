@@ -664,15 +664,32 @@ struct ServeCommand: AsyncParsableCommand {
         return authorities
     }
 
-    /// SPEC-038 FR-CB9: whether native MTP `auto` could load a drafter for
-    /// the startup model: a feed-resolved admission set, or one placed next
-    /// to the model where `ModelRuntime` looks. Unknown counts as present.
-    static func nativeMTPAdmissionPresent(feedSidecarPath: String?, loadPath: String?) -> Bool {
-        if feedSidecarPath != nil { return true }
-        guard let loadPath, let directory = try? ModelRuntime.localModelDirectory(for: loadPath) else { return true }
-        let name = "native-mtp-admission.json"
-        return FileManager.default.fileExists(atPath: directory.deletingLastPathComponent().appendingPathComponent(name).path)
-            || FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path)
+    /// SPEC-038 FR-CB9: the native-MTP admission state of the startup model,
+    /// read from the set the startup loader would read (the feed-resolved
+    /// sidecar, else `native-mtp-admission.json` beside or in the model
+    /// directory) and matched on the model id and verified artifact digest
+    /// the loader is given.
+    static func nativeMTPAdmission(
+        feedSidecarPath: String?,
+        loadPath: String?,
+        modelID: String?,
+        modelArtifactSHA256: String?
+    ) -> SmallMRoute.NativeMTPAdmission {
+        // The startup loader runs only with a verified artifact digest and a
+        // local model directory.
+        guard let modelID, let modelArtifactSHA256, !modelArtifactSHA256.isEmpty, let loadPath,
+              let directory = try? ModelRuntime.localModelDirectory(for: loadPath)
+        else { return .none }
+        let sidecarURL: URL
+        if let feedSidecarPath {
+            sidecarURL = URL(fileURLWithPath: (feedSidecarPath as NSString).expandingTildeInPath)
+        } else {
+            let bundled = directory.deletingLastPathComponent().appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)
+            sidecarURL = FileManager.default.fileExists(atPath: bundled.path)
+                ? bundled
+                : directory.appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)
+        }
+        return SmallMRoute.nativeMTPAdmission(sidecarURL: sidecarURL, modelID: modelID, modelRevision: modelArtifactSHA256)
     }
 
     static func localRuntimeTargetModelIDs(
@@ -3025,9 +3042,11 @@ struct ServeCommand: AsyncParsableCommand {
             continuousBatching: resolved.continuousBatching,
             continuousBatchingExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
             nativeMTPMode: resolved.nativeMTPMode,
-            nativeMTPAdmissionPresent: Self.nativeMTPAdmissionPresent(
+            nativeMTPAdmission: resolved.nativeMTPMode == .off ? .none : Self.nativeMTPAdmission(
                 feedSidecarPath: startupPreflight.runtimeBinding?.nativeMTPAdmissionSidecarPath,
-                loadPath: startupLoadPath
+                loadPath: startupLoadPath,
+                modelID: resolved.model,
+                modelArtifactSHA256: resolved.modelArtifactSHA256
             ),
             draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
             shardGroupRole: shardHeadConfig != nil || shardMemberConfig != nil,

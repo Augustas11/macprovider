@@ -621,8 +621,9 @@ head. A `serve` process that cannot batch for its whole lifetime uses the
 fork's pre-window small-row route (per-row `qmv` below the `qmm` limit)
 instead (#2335): the provider sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0`, read
 once by the core, before any model loads, only when, from resolved state,
-native MTP is inactive (mode `off`, or `auto` with no admission set for the
-model), continuous batching cannot activate (set `off` explicitly, or a
+native MTP is inactive (mode `off`, or `auto` and the signed admission set
+the loader reads has no entry for the loaded model id and artifact digest; an
+unverifiable set keeps the invariant route), continuous batching cannot activate (set `off` explicitly, or a
 decided one-row self-check verdict on the current key with no re-check
 scheduled), no draft model is configured, the process holds no shard-group
 role or other warm-swap target and is not an autotune child (SPEC-038 FR-CB9).
@@ -2606,8 +2607,9 @@ requests.
 ## 9. Changelog and history
 
 - **0.1.96 (2026-11-14, Related: #2335)** — R003: the serial small-row route
-  is decided from resolved state. Native MTP `auto` with no admission set for
-  the model is inactive, and a decided one-row self-check verdict on the
+  is decided from resolved state. Native MTP `auto` is inactive when the
+  signed admission set the loader reads (the baked feed on an ordinary
+  install) has no entry for the loaded model and artifact digest, and a decided one-row self-check verdict on the
   current key makes batching unable to activate, so an ordinary install whose
   self-check found no net gain takes the serial route from its next start. A
   serial-only process refuses the native-MTP drafter load and runs no

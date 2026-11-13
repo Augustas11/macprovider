@@ -1,3 +1,4 @@
+import CryptoKit
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
@@ -9,7 +10,7 @@ final class SmallMRouteTests: XCTestCase {
         mode: ContinuousBatchingMode = .off,
         explicit: Bool = true,
         nativeMTP: NativeMTPMode = .off,
-        admission: Bool = false,
+        admission: SmallMRoute.NativeMTPAdmission = .none,
         draft: Bool = false,
         shard: Bool = false,
         autotune: Bool = false,
@@ -20,7 +21,7 @@ final class SmallMRouteTests: XCTestCase {
             continuousBatching: mode,
             continuousBatchingExplicitlyConfigured: explicit,
             nativeMTPMode: nativeMTP,
-            nativeMTPAdmissionPresent: admission,
+            nativeMTPAdmission: admission,
             draftConfigured: draft,
             shardGroupRole: shard,
             autotuneCandidate: autotune,
@@ -35,7 +36,7 @@ final class SmallMRouteTests: XCTestCase {
         for mode in [ContinuousBatchingMode.off, .canary, .on] {
             for explicit in [false, true] {
                 for nativeMTP in [NativeMTPMode.off, .auto] {
-                    for admission in [false, true] {
+                    for admission in SmallMRoute.NativeMTPAdmission.allCases {
                         for draft in [false, true] {
                             for shard in [false, true] {
                                 for autotune in [false, true] {
@@ -46,7 +47,8 @@ final class SmallMRouteTests: XCTestCase {
                                                 admission: admission, draft: draft, shard: shard,
                                                 autotune: autotune, switchTargets: switchTargets, verdict: verdict
                                             )
-                                            let mtpInactive = nativeMTP == .off || !admission
+                                            let mtpInactive = nativeMTP == .off
+                                                || admission == .none || admission == .noEntryForModel
                                             let cbCannotActivate = (explicit && mode == .off) || verdict == .grantsNoBatching
                                             let expected = mtpInactive && cbCannotActivate
                                                 && !draft && !shard && !autotune && !switchTargets
@@ -70,7 +72,10 @@ final class SmallMRouteTests: XCTestCase {
             (inputs(), .serialOnly, "continuous_batching_off_by_configuration"),
             // Native MTP auto with no admission set for the model stays inactive.
             (inputs(nativeMTP: .auto), .serialOnly, "continuous_batching_off_by_configuration"),
-            (inputs(nativeMTP: .auto, admission: true), .rowInvariant, "native_mtp_admission_present"),
+            (inputs(nativeMTP: .auto, admission: .noEntryForModel), .serialOnly, "continuous_batching_off_by_configuration"),
+            (inputs(nativeMTP: .auto, admission: .entryForModel), .rowInvariant, "native_mtp_entry_for_model"),
+            (inputs(nativeMTP: .auto, admission: .unverifiable), .rowInvariant, "native_mtp_unverifiable"),
+            (inputs(nativeMTP: .off, admission: .entryForModel), .serialOnly, "continuous_batching_off_by_configuration"),
             // The ordinary install: implicit CB default, native MTP auto.
             (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .rowInvariant, "self_check_verdict_absent"),
             (inputs(explicit: false, nativeMTP: .auto, verdict: .grantsNoBatching), .serialOnly, "self_check_no_batching"),
@@ -93,7 +98,8 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertTrue(SmallMRoute.verdictDecidesNextStart(inputs(explicit: false, nativeMTP: .auto)))
         // Explicit off is already serial; no verdict is needed.
         XCTAssertFalse(SmallMRoute.verdictDecidesNextStart(inputs()))
-        XCTAssertFalse(SmallMRoute.verdictDecidesNextStart(inputs(explicit: false, nativeMTP: .auto, admission: true)))
+        XCTAssertTrue(SmallMRoute.verdictDecidesNextStart(inputs(explicit: false, nativeMTP: .auto, admission: .noEntryForModel)))
+        XCTAssertFalse(SmallMRoute.verdictDecidesNextStart(inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel)))
         XCTAssertFalse(SmallMRoute.verdictDecidesNextStart(inputs(explicit: false, autotune: true)))
     }
 
@@ -101,8 +107,81 @@ final class SmallMRouteTests: XCTestCase {
         let value = inputs(explicit: false, nativeMTP: .auto, verdict: .grantsNoBatching)
         XCTAssertEqual(
             SmallMRoute.event(SmallMRoute.decide(value), fields: value.logFields),
-            "event=small_m_route mode=serial_only reason=self_check_no_batching cb=off/implicit native_mtp=auto mtp_admission=absent draft=false shard=false autotune_candidate=false switch_targets=false self_check=grants_no_batching\n"
+            "event=small_m_route mode=serial_only reason=self_check_no_batching cb=off/implicit native_mtp=auto mtp_admission=none draft=false shard=false autotune_candidate=false switch_targets=false self_check=grants_no_batching\n"
         )
+    }
+
+    private static let bakedFeed = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("dist/static/native-mtp-admission.json")
+
+    /// The baked static feed every ordinary install fetches names only its
+    /// admitted models; any other loaded model resolves to no entry.
+    func testBakedFeedResolvesPerLoadedModel() throws {
+        let data = try Data(contentsOf: Self.bakedFeed)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let entries = try XCTUnwrap(object["entries"] as? [[String: Any]])
+        let glm = try XCTUnwrap(entries.first { $0["model_key"] as? String == "zai-org/glm-5.3-flash" })
+        let glmHash = try XCTUnwrap(glm["artifact_hash"] as? String)
+        XCTAssertEqual(
+            SmallMRoute.nativeMTPAdmission(sidecarURL: Self.bakedFeed, modelID: "zai-org/glm-5.3-flash", modelRevision: glmHash),
+            .entryForModel
+        )
+        XCTAssertEqual(
+            SmallMRoute.nativeMTPAdmission(
+                sidecarURL: Self.bakedFeed, modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                modelRevision: String(repeating: "c", count: 64)
+            ),
+            .noEntryForModel
+        )
+        // The admitted model under another artifact digest has no entry either.
+        XCTAssertEqual(
+            SmallMRoute.nativeMTPAdmission(
+                sidecarURL: Self.bakedFeed, modelID: "zai-org/glm-5.3-flash",
+                modelRevision: String(repeating: "c", count: 64)
+            ),
+            .noEntryForModel
+        )
+    }
+
+    func testAdmissionSetRowsFailTowardsTheInvariantRoute() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("small-m-admission-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sidecar = directory.appendingPathComponent("native-mtp-admission.json")
+        let signature = directory.appendingPathComponent("native-mtp-admission.json.sig")
+        let key = Curve25519.Signing.PrivateKey()
+        let keyring = NativeMTPAdmissionSidecar.TrustedKeyring(
+            publicKeysByKeyID: ["test-key": key.publicKey.rawRepresentation.base64EncodedString()],
+            requiredKeyID: "test-key"
+        )
+        let hash = String(repeating: "a", count: 64)
+        func write(_ body: String, signedBy signer: Curve25519.Signing.PrivateKey? = nil) throws {
+            let bytes = Data(body.utf8)
+            try bytes.write(to: sidecar)
+            let signatureBytes = try (signer ?? key).signature(for: bytes).base64EncodedString()
+            try Data(#"{"key_id":"test-key","alg":"ed25519","signature":"\#(signatureBytes)"}"#.utf8).write(to: signature)
+        }
+        func resolve(_ model: String = "org/model") -> SmallMRoute.NativeMTPAdmission {
+            SmallMRoute.nativeMTPAdmission(sidecarURL: sidecar, modelID: model, modelRevision: hash, trustedKeyring: keyring)
+        }
+        XCTAssertEqual(resolve(), .none)
+        try write(#"{"entries":[{"model_key":"org/other","artifact_hash":"\#(hash)"}]}"#)
+        XCTAssertEqual(resolve(), .noEntryForModel)
+        XCTAssertEqual(resolve("org/other"), .entryForModel)
+        // An entry the loader could not be ruled out for counts as a match.
+        try write(#"{"entries":[{"model_key":"org/other"}]}"#)
+        XCTAssertEqual(resolve(), .entryForModel)
+        try write(#"{"entries":[{"model_key":"org/other","artifact_hash":"\#(hash)"}]}"#, signedBy: Curve25519.Signing.PrivateKey())
+        XCTAssertEqual(resolve(), .unverifiable)
+        try write("not json")
+        XCTAssertEqual(resolve(), .unverifiable)
+        try write(#"{"entries":{}}"#)
+        XCTAssertEqual(resolve(), .unverifiable)
+        try write(#"{"entries":[{"model_key":"org/other","artifact_hash":"\#(hash)"}]}"#)
+        try FileManager.default.removeItem(at: signature)
+        XCTAssertEqual(resolve(), .unverifiable)
     }
 
     func testSerialOnlyProcessRefusesNativeMTPActivation() {

@@ -42,16 +42,58 @@ enum SmallMRoute: String, Sendable, Equatable {
         case grantsNoBatching = "grants_no_batching"
     }
 
+    /// The native-MTP admission set where the startup loader looks for it
+    /// (`ModelRuntime.loadNativeMTPDrafterIfAdmitted`), against the loaded
+    /// model. Startup is the only activation: a creative-hold restore
+    /// reloads only a tuple that startup activated.
+    enum NativeMTPAdmission: String, Sendable, Equatable, CaseIterable {
+        /// No set where the loader looks, or no verified artifact digest
+        /// (the loader then never runs).
+        case none
+        /// A verified set with no entry for this model and artifact digest,
+        /// such as the baked feed for a model it does not name.
+        case noEntryForModel = "no_entry_for_model"
+        case entryForModel = "entry_for_model"
+        /// A set that cannot be read or whose signature fails.
+        case unverifiable
+
+        /// Whether `auto` could activate native MTP for the loaded model.
+        /// An unverifiable set counts, so doubt keeps the invariant route.
+        var mayActivate: Bool { self == .entryForModel || self == .unverifiable }
+    }
+
+    /// Resolves `NativeMTPAdmission` for a set at `sidecarURL`, with its
+    /// signature beside it, matched as the loader matches it.
+    static func nativeMTPAdmission(
+        sidecarURL: URL,
+        modelID: String,
+        modelRevision: String,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring = NativeMTPAdmissionSidecar.TrustedKeyring(
+            publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
+            requiredKeyID: AutotuneStaticInputs.keyID
+        )
+    ) -> NativeMTPAdmission {
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else { return .none }
+        do {
+            return try NativeMTPAdmissionSidecar.namesEntry(
+                sidecarURL: sidecarURL,
+                signatureURL: sidecarURL.deletingLastPathComponent()
+                    .appendingPathComponent(NativeMTPAdmissionFeed.signatureFileName),
+                trustedKeyring: trustedKeyring,
+                modelID: modelID,
+                modelRevision: modelRevision
+            ) ? .entryForModel : .noEntryForModel
+        } catch {
+            return .unverifiable
+        }
+    }
+
     /// Everything the route depends on, resolved before MLX is first used.
     struct Inputs: Sendable, Equatable {
         var continuousBatching: ContinuousBatchingMode
         var continuousBatchingExplicitlyConfigured: Bool
         var nativeMTPMode: NativeMTPMode
-        /// A native-MTP admission set this process could load for its model:
-        /// a feed-resolved sidecar, or `native-mtp-admission.json` next to the
-        /// model. Only startup and a creative-hold restore of the same model
-        /// load a drafter, so none present means `auto` stays inactive.
-        var nativeMTPAdmissionPresent: Bool
+        var nativeMTPAdmission: NativeMTPAdmission
         var draftConfigured: Bool
         var shardGroupRole: Bool
         var autotuneCandidate: Bool
@@ -63,7 +105,7 @@ enum SmallMRoute: String, Sendable, Equatable {
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
             let cb = "\(continuousBatching.rawValue)/\(continuousBatchingExplicitlyConfigured ? "explicit" : "implicit")"
-            return "cb=\(cb) native_mtp=\(nativeMTPMode.rawValue) mtp_admission=\(nativeMTPAdmissionPresent ? "present" : "absent") "
+            return "cb=\(cb) native_mtp=\(nativeMTPMode.rawValue) mtp_admission=\(nativeMTPAdmission.rawValue) "
                 + "draft=\(draftConfigured) shard=\(shardGroupRole) autotune_candidate=\(autotuneCandidate) "
                 + "switch_targets=\(otherSwitchTargets) self_check=\(selfCheckVerdict.rawValue)"
         }
@@ -72,8 +114,9 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// SPEC-038 FR-CB9: the route a `serve` process runs, decided once before
     /// MLX is first used, from state that cannot turn batching on later in
     /// the same process. Serial-only needs all of:
-    /// - native MTP inactive: mode `off`, or `auto` with no admission set for
-    ///   the model (its rounds batch target rows);
+    /// - native MTP inactive: mode `off`, or `auto` with no verified entry
+    ///   for the loaded model and artifact digest (its rounds batch target
+    ///   rows); an unreadable or unverifiable set keeps the invariant route;
     /// - continuous batching unable to activate: set `off` explicitly (the
     ///   emergency override, which no signed policy, self-check or swap
     ///   lifts), or a decided self-check verdict for the current key that
@@ -91,8 +134,8 @@ enum SmallMRoute: String, Sendable, Equatable {
         if inputs.draftConfigured { return Decision(route: .rowInvariant, reason: "draft_model") }
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }
         if inputs.autotuneCandidate { return Decision(route: .rowInvariant, reason: "autotune_candidate") }
-        if inputs.nativeMTPMode != .off, inputs.nativeMTPAdmissionPresent {
-            return Decision(route: .rowInvariant, reason: "native_mtp_admission_present")
+        if inputs.nativeMTPMode != .off, inputs.nativeMTPAdmission.mayActivate {
+            return Decision(route: .rowInvariant, reason: "native_mtp_\(inputs.nativeMTPAdmission.rawValue)")
         }
         if inputs.otherSwitchTargets { return Decision(route: .rowInvariant, reason: "switch_targets") }
         if inputs.continuousBatchingExplicitlyConfigured, inputs.continuousBatching == .off {

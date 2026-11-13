@@ -8,8 +8,10 @@ Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security /
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.50 (2026-11-14, small-row route from resolved state, Related: #2335):**
 FR-CB9 decides the serial small-row route from resolved state instead of
-explicit configuration only. Native MTP `auto` with no admission set for the
-model counts as inactive, and a decided one-row self-check verdict on the key
+explicit configuration only. Native MTP `auto` counts as inactive when the
+admission set the loader reads (the baked feed on an ordinary install) has no
+verified entry for the loaded model and artifact digest; an unreadable or
+unverifiable set keeps the invariant route. A a decided one-row self-check verdict on the key
 the startup identity resolved to counts as batching unable to activate, so an
 ordinary install whose self-check found no net gain takes the serial route from
 its next start. Re-checks wait for a start on the invariant route. Warm-swap
@@ -1677,10 +1679,18 @@ any model loads, and sets `MLX_METAL_SMALL_M_ROW_INVARIANT=0` only when all of
 these hold:
 
 1. native MTP is inactive for the whole process: `native_mtp_mode` is `off`,
-   or `auto` with no admission set for the startup model (no feed-resolved
-   sidecar and no `native-mtp-admission.json` beside the model). Only
-   startup and a creative-hold restore of the same model load a drafter, and
-   a serial-only process refuses that load even if a set appears later;
+   or `auto` and the admission set the startup loader reads (the
+   feed-resolved sidecar, else `native-mtp-admission.json` beside or in the
+   model directory) has a valid signature and no entry whose `model_key` and
+   `artifact_hash` equal the loaded model id and verified artifact digest,
+   the loader's broadest match (a same-architecture variant has its own
+   signed entry, SPEC-048-R013). No set, or no verified artifact digest,
+   also counts as inactive; a set that cannot be read, parsed or verified
+   does not. The baked static feed every ordinary install fetches names only
+   its admitted models, so any other model qualifies. Only startup activates
+   native MTP (a creative-hold restore reloads only the tuple startup
+   activated), and a serial-only process refuses the drafter load even if a
+   feed refresh adds an entry later;
 2. continuous batching cannot activate: it is set `off` explicitly by YAML,
    environment or CLI (the emergency override, which no signed policy,
    self-check or warm swap lifts), or the FR-CB10 store holds a decided
