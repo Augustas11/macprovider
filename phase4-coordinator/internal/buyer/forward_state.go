@@ -254,6 +254,10 @@ type forwardState struct {
 	// the write succeeds; pendingPerf holds it meanwhile.
 	perfHold    bool
 	pendingPerf *routing.PerfObservation
+	// perfPinned marks a request that pins its provider
+	// (X-MacProvider-Provider / X-MacProvider-Session): it feeds no
+	// SPEC-002-R005 observation, because the buyer chose the target.
+	perfPinned bool
 
 	stickyResult     string
 	stickyMissReason string

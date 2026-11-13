@@ -2671,6 +2671,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// state values at log-write time, so it holds *forwardState.
 	state := newForwardState(startedAt)
 	state.markConversationCacheOnly(r.Header)
+	// SPEC-002-R005: the buyer chose the target of a pinned request, so none
+	// of its attempts is a routing measurement.
+	state.perfPinned = hasPinnedRoute(r.Header)
 	state.capacityShed429Negotiated = strings.TrimSpace(r.Header.Get(capacityShed429CapabilityHeader)) == "1"
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
@@ -9609,6 +9612,10 @@ func (s *Server) logRoutingDecisionRetry(requestID string, candidates []pool.Pro
 	}
 	scores := s.routingScores(candidates, objective)
 	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	weights.Measured = routing.MeasuredThroughputs(candidates, s.perf, s.now())
+	if routing.Objective(objective) == routing.ObjectiveBalanced {
+		weights.MeasuredBalanced = routing.MeasuredBalancedScores(candidates, weights)
+	}
 	set := make([]routing.CandidateLogEntry, 0, len(candidates))
 	var chosenAssignedID string
 	for _, p := range candidates {
@@ -9891,7 +9898,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.stickyMissReason = stickyMissReason
 				// SPEC-002-R007: the slot queue keeps its own order.
 				state.routeDecision = &routeDecision{basis: routing.BasisFallback, scope: "slot_queue", inputTokens: estimatedTokens, candidates: len(candidates)}
-				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
+				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, view)
 				return selected, nil, true
 			case queuedProviderTerminal:
 				s.slotQueue.leave(waiter)

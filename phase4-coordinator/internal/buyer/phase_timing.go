@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 const (
@@ -38,6 +40,10 @@ type requestPhaseTiming struct {
 	// content or a tool call (SPEC-002-R005). A role-only opening chunk is a
 	// first byte but not a first token.
 	providerFirstToken time.Time
+	// buyerBlocked sums the buyer writes and flushes of at least
+	// routing.PerfBuyerWriteMin made between the first token and done: time
+	// the coordinator spent blocked on the buyer, not waiting on the provider.
+	buyerBlocked time.Duration
 }
 
 func (t *requestPhaseTiming) init(start time.Time) {
@@ -60,6 +66,7 @@ func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, provider po
 	t.providerFirstByte = time.Time{}
 	t.providerDone = time.Time{}
 	t.providerFirstToken = time.Time{}
+	t.buyerBlocked = 0
 	t.providerAssignedID = provider.AssignedID
 	t.providerID = provider.ProviderID
 	t.providerModelID = provider.ModelID
@@ -70,6 +77,20 @@ func (t *requestPhaseTiming) markProviderFirstToken(at time.Time) {
 	defer t.mu.Unlock()
 	if t.providerFirstToken.IsZero() {
 		t.providerFirstToken = at
+	}
+}
+
+// addBuyerWrite records one buyer write or flush that took d. Only writes
+// inside the decode window (first token set, done not yet) of at least
+// routing.PerfBuyerWriteMin count. It reads no clock of its own.
+func (t *requestPhaseTiming) addBuyerWrite(d time.Duration) {
+	if d < routing.PerfBuyerWriteMin {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.providerFirstToken.IsZero() && t.providerDone.IsZero() {
+		t.buyerBlocked += d
 	}
 }
 
@@ -109,6 +130,7 @@ func (t *requestPhaseTiming) snapshot() requestPhaseTimingSnapshot {
 		providerID:            t.providerID,
 		providerModelID:       t.providerModelID,
 		providerFirstToken:    t.providerFirstToken,
+		buyerBlocked:          t.buyerBlocked,
 	}
 }
 
@@ -123,6 +145,7 @@ type requestPhaseTimingSnapshot struct {
 	providerID            string
 	providerModelID       string
 	providerFirstToken    time.Time
+	buyerBlocked          time.Duration
 }
 
 type phaseTimingResponseWriter struct {
@@ -137,15 +160,25 @@ func (w *phaseTimingResponseWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Write and the flushes pass the same bytes in the same order; they only
+// time the call for the SPEC-002-R005 buyer-blocked sum.
 func (w *phaseTimingResponseWriter) Write(b []byte) (int, error) {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	return w.ResponseWriter.Write(b)
 }
 
 func (w *phaseTimingResponseWriter) Flush() {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+func (w *phaseTimingResponseWriter) timeBuyerWrite(start time.Time) {
+	if w.state != nil {
+		w.state.phaseTiming.addBuyerWrite(time.Since(start))
 	}
 }
 
@@ -154,6 +187,7 @@ func (w *phaseTimingResponseWriter) Flush() {
 // body; Flush alone would hide the error.
 func (w *phaseTimingResponseWriter) FlushError() error {
 	w.inject()
+	defer w.timeBuyerWrite(time.Now())
 	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
@@ -387,6 +421,32 @@ func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
 
 func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
+}
+
+// routingProviderDecodeMs is routingDecodeMs without the time the
+// coordinator was blocked writing to the buyer (SPEC-002-R005), at least 1
+// ms. ok is false without a window, or when the remainder is below
+// routing.PerfBuyerLimitedMinShare of the window: a buyer-limited attempt
+// yields no decode sample. With no blocked time it is routingDecodeMs.
+func (snap requestPhaseTimingSnapshot) routingProviderDecodeMs() (float64, bool) {
+	raw := snap.routingDecodeMs()
+	if raw == nil {
+		return 0, false
+	}
+	if snap.buyerBlocked <= 0 {
+		return *raw, true
+	}
+	blocked := float64(snap.buyerBlocked) / float64(time.Millisecond)
+	left := *raw - blocked
+	if left < routing.PerfBuyerLimitedMinShare**raw {
+		return 0, false
+	}
+	return math.Max(left, 1), true
+}
+
+// buyerBlockedMs is buyerBlocked in milliseconds.
+func (snap requestPhaseTimingSnapshot) buyerBlockedMs() float64 {
+	return float64(snap.buyerBlocked) / float64(time.Millisecond)
 }
 
 func (snap requestPhaseTimingSnapshot) matchesProviderAssignedID(providerAssignedID string) bool {

@@ -189,7 +189,7 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if errMsg != "" || errCode != "" || (faultFlag != "" && faultFlag != billing.FaultNone) {
 		return
 	}
-	if providerAssignedID == "" || b.model == "" || b.state == nil {
+	if providerAssignedID == "" || b.model == "" || b.state == nil || b.state.perfPinned {
 		return
 	}
 	// Without a normally completed settlement output that delivered content
@@ -238,8 +238,15 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if ttft := timing.routingTTFTMs(); ttft != nil {
 		obs.EndToEnd = false
 		obs.TTFTMs = *ttft
-		if decode := timing.routingDecodeMs(); decode != nil {
-			obs.DecodeMs = *decode
+		// The decode window and the service time leave out the time the
+		// coordinator was blocked writing to the buyer, so a slow reader
+		// cannot lower the provider's rate; a buyer-limited window gives no
+		// decode sample. Only a timed (streamed) attempt has such time.
+		if decode, ok := timing.routingProviderDecodeMs(); ok {
+			obs.DecodeMs = decode
+		}
+		if blocked := timing.buyerBlockedMs(); blocked > 0 {
+			obs.ServiceMs = math.Max(obs.ServiceMs-blocked, 1)
 		}
 	}
 	if b.state.perfHold {

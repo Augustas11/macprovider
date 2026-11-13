@@ -94,6 +94,10 @@ type CandidateLogEntry struct {
 	ThroughputSource      string  `json:"throughput_source"`
 	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
 	RoutedThroughputTPS   float64 `json:"routed_throughput_tps"`
+	// MeasuredBalancedScore is the score a decode-fresh candidate was
+	// reordered by under `balanced` (MeasuredBalancedScores); absent
+	// otherwise, where ObjectiveMetric is what the order followed.
+	MeasuredBalancedScore *float64 `json:"measured_balanced_score,omitempty"`
 }
 
 // LogRoutingDecision emits one zerolog Info row with the SPEC-004
@@ -221,6 +225,11 @@ func ProviderToCandidateLogEntry(p pool.Provider, objectiveMetric float64, weigh
 	if v, ok := weights.Measured[p.SortKey()]; ok {
 		source, routed = ThroughputSourceMeasured, v
 	}
+	var measuredBalanced *float64
+	if v, ok := weights.MeasuredBalanced[p.SortKey()]; ok {
+		v = finiteOrZero(v)
+		measuredBalanced = &v
+	}
 	return CandidateLogEntry{
 		ProviderID:          p.ProviderID,
 		AssignedID:          p.AssignedID,
@@ -240,5 +249,6 @@ func ProviderToCandidateLogEntry(p pool.Provider, objectiveMetric float64, weigh
 		ThroughputSource:      source,
 		ThroughputTPSEstimate: finiteOrZero(p.ThroughputTPSEstimate),
 		RoutedThroughputTPS:   finiteOrZero(routed),
+		MeasuredBalancedScore: measuredBalanced,
 	}
 }
