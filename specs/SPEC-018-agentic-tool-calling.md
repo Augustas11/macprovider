@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.17 (2026-11-11, DeepSeek-V4 runtime fidelity rebased on main's tool-calling contract; Related: #2111)
+**Version:** 0.3.18 (2026-11-13, MiniMax M3 tool-call grammar and adaptive `<mm:think>` reasoning split; Related: #2189)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,15 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.18 (2026-11-13, Related: #2189):** §3.1 adds the `minimax` grammar
+  (MiniMax M3 / M3.1, `MiniMaxAI/MiniMax-M3.1-Flash` `chat_template.jinja`):
+  `]<]minimax[>[<tool_call>` wrappers holding `]<]minimax[>[<invoke
+  name="NAME">` calls with namespaced, nested-element arguments, parsed with
+  the GLM v0.3.12/v0.3.13 hardening. The family fallback wins over the
+  template format the runtime infers for it (`json`). Coordinator capability
+  metadata and routing require the exact loaded-model declaration, as for
+  `lfm2`. §3.12 adds the MiniMax adaptive split: a `<mm:think>…</mm:think>`
+  block that opens the reply is reasoning. Other families are unchanged.
 - **v0.3.17 (2026-11-11, Related: #2111):** Rebases the DeepSeek-V4 runtime
   reference (campaign #2151, first drafted as v0.3.12 on 2026-10-28) onto
   v0.3.16. DeepSeek's documented reasoning controls and encoder apply to
@@ -567,6 +576,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object; strings `<|"|>`-delimited at any depth; duplicate keys, trailing text, depth over 32 or a declared-type mismatch fail closed | `GemmaToolCallBridge` (bounded dialect parser) |
 | `dsml` | family fallback `deepseek-v4` (the family has no Jinja template; §3.12) | `<｜DSML｜tool_calls>` holding one or more `<｜DSML｜invoke name="NAME">…</｜DSML｜invoke>`, each a list of `<｜DSML｜parameter name="KEY" string="true\|false">VALUE</｜DSML｜parameter>`; several blocks may follow each other; the last block may end at the end of output without its close when its invokes are complete; whitespace between markup is free. | `<｜DSML｜parameter>` names. A declared non-string type must parse strictly as that type under either string flag. Otherwise, `string="true"` values are literal text; `string="false"` values are typed as GLM values. Duplicate names, a flag other than `true`/`false`, an unclosed parameter or invoke, or a declared-type mismatch fail closed. | `ToolCallParser.parseDSMLCalls` |
 | `lfm2` | template format `lfm2`; family fallback `lfm2.5-24b-a2b` | `<|tool_call_start|>[NAME(key=value, ...), ...]<|tool_call_end|>`; complete nonempty list, ASCII Python identifiers for function names and keyword names; quoted strings and bounded JSON values, plus Python `True`, `False`, `None`; no expressions, positional arguments, duplicate keys, incomplete delimiters or trailing non-whitespace after the envelope. Preserve leading prose. | keyword arguments converted to a strict JSON object without rounding numeric literals; depth32 and existing per-call/per-response byte limits apply. | `LFMToolCallParser` |
+| `minimax` | family `minimax-m3` / `minimax_m3` (v0.3.18), which wins over the template format the runtime infers (`json`); no template format maps to it | `]<]minimax[>[<tool_call>` holding one or more `]<]minimax[>[<invoke name="NAME">…]<]minimax[>[</invoke>`, each a list of `]<]minimax[>[<KEY>VALUE]<]minimax[>[</KEY>`; a mapping value is nested elements and a list value is `]<]minimax[>[<item>` elements; then `]<]minimax[>[</tool_call>`. Whitespace between elements is free. As for `glm` (v0.3.12, v0.3.13, without the repairs): invokes parse one at a time and a failing, undeclared or schema-failing one is dropped while the rest stand; a byte-cap overflow fails the whole output closed; a wrapper whose opener repeats before its close starts at the last opener; a final wrapper without its close keeps only complete invokes and fails closed when it holds a second opener; text outside wrappers is prose; namespaced markup never reaches `content`, streamed or not. Calls inside a §3.12 reasoning block are not calls. | element keys (top level: the `<parameter=…>` charset). Scalars are typed as `glm` values; nested elements become an array when declared `array` (or, undeclared, when every child is `item`), else an object; an empty value is `""`, `[]` or `{}` by declared type. Depth over 32 and duplicate keys fail the call. | `ToolCallParser.parseMiniMaxCalls` |
 | `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
@@ -1059,6 +1069,16 @@ the generated text up to the first `</think>` is reasoning:
   is markup and is removed from the answer; a stream holds back a tail that
   could still become one. Text from the first `<tool_call>` on is parsed as
   in §3.1, so call arguments stay byte-exact.
+- **v0.3.18:** the `minimax` grammar's template leaves no block open and
+  thinks adaptively. When the reply opens (after whitespace) with
+  `<mm:think>`, the text up to the first `</mm:think>` is reasoning, split
+  and streamed as above, and reasoning tokens run through the token
+  completing `</mm:think>`; an unclosed block is all reasoning. A reply that
+  opens with `</mm:think>` carries no reasoning and its answer follows the
+  tag; a reply with neither tag is all answer and carries no
+  `reasoning_content`. A stream releases nothing while the reply's start
+  could still become either tag. Stop strings run over the whole output as on
+  rows without an open `<think>`.
 - The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
   `finish_reason` as before; `reasoning_content` is not part of it in this
   version.
