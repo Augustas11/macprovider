@@ -5530,7 +5530,8 @@ any of the three quantities above, and it MUST NOT enter any routing input.
   `serving_engine` describes the first selection. The value is the provider's
   own report, checked by the coordinator only for consistency with the
   provider's own profile; it is self-reported and unverified. Relay-blind and
-  privacy-class requests write no demand row, so they never carry it.
+  privacy-class requests write no demand row, and the gateway ignores the
+  value on a relay-blind response, so they never carry it.
 - Both columns are added idempotently to fresh and existing tables (a
   duplicate-column error on a concurrent add is tolerated), with no schema
   version change. A CHECK cannot be changed on an already migrated table, so
@@ -5553,9 +5554,9 @@ any of the three quantities above, and it MUST NOT enter any routing input.
   coordinator wrote no value. A streamed request reads the trailer only when
   the gateway reads the stream to its end: on every surface (Chat
   Completions, Responses, Messages) it drains to the end after its terminal
-  event only when the coordinator declared settlement-finality trailers,
-  which it does for a gateway that negotiated them under its service bearer
-  and an account context. Without that declaration, or when the drain stops at
+  event only when the coordinator declared settlement-finality trailers and
+  the attempt has a route snapshot, which it does for a gateway that
+  negotiated them under its service bearer and an account context. Without that declaration, or when the drain stops at
   its 5 s or line-size bound, an incrementally streamed request stores
   absent. A profile change between dispatch and completion can turn a genuine
   report into `unknown`.

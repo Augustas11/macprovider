@@ -13844,12 +13844,11 @@
         "phase4-coordinator/internal/stats/metrics/metrics.go:IncRouteSelection",
         "phase4-coordinator/internal/buyer/served_path.go:servedPathValue",
         "phase4-coordinator/internal/buyer/served_path.go:checkServedPath",
-        "phase4-coordinator/internal/buyer/served_path.go:noteServedPath",
-        "phase4-coordinator/internal/buyer/served_path.go:beginServedPathAttempt",
         "phase4-coordinator/internal/buyer/served_path.go:writeServedPathMetrics",
-        "phase4-coordinator/internal/buyer/phase_timing.go:writePhaseTimingHeaders",
-        "phase4-coordinator/internal/buyer/phase_timing.go:writePhaseTimingTrailers",
-        "phase4-coordinator/internal/ws/shard_groups.go:applyShardGroupAttestation"
+        "phase4-coordinator/internal/ws/shard_groups.go:applyShardGroupAttestation",
+        "phase4-coordinator/internal/buyer/served_path.go:decodeServedPath",
+        "phase4-coordinator/internal/buyer/served_path.go:servedPathFor",
+        "phase4-coordinator/internal/buyer/served_path.go:acceptServedPath"
       ],
       "tests": [
         "phase4-coordinator/internal/routing/phase_test.go:TestRouteTraceHeaderGrammar",
@@ -13861,12 +13860,12 @@
         "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathHeaderAndTrailerFollowTimingRule",
         "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathRequiresGatewayBearer",
         "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathDescribesFailoverProvider",
-        "phase4-coordinator/internal/buyer/served_path_test.go:TestBeginServedPathAttemptDropsEarlierValue",
         "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathLeavesRoutingAndRequestLogUnchanged",
-        "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathNeverOnRelayBlindOrPrivacyForwarders",
         "phase4-coordinator/internal/ws/messages_test.go:TestInferenceResponseEndServedPathDecode",
         "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupAttestationOnTerminalFrame",
-        "test/integration/served_path_integration_test.go:TestServedPathLabelReachesDemandRowNotBuyer"
+        "test/integration/served_path_integration_test.go:TestServedPathLabelReachesDemandRowNotBuyer",
+        "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathOnlyOnAcceptedSuccess",
+        "phase4-coordinator/internal/buyer/served_path_test.go:TestServedPathNeverOnRelayBlindResponse"
       ],
       "journeys": [],
       "evidence": [],
@@ -14921,7 +14920,8 @@
         "phase5-gateway/internal/router/served_path.go:func (t *gatewayPhaseTiming) observeServedPath",
         "phase5-gateway/internal/router/phase_timing.go:func (t *gatewayPhaseTiming) observeCoordinatorTrailers",
         "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) InsertDemandEvent",
-        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) DemandServedPathLatencyPercentiles"
+        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) DemandServedPathLatencyPercentiles",
+        "phase5-gateway/internal/router/served_path.go:func (t *gatewayPhaseTiming) suppressServedPath"
       ],
       "tests": [
         "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingTelemetryFirstDeltasMatchOnEveryBuyerSurface",
@@ -14957,7 +14957,10 @@
         "phase5-gateway/internal/storage/sqlite/demand_served_path_test.go:func TestDemandServedPathColumnsMigrateR028TableIdempotently",
         "phase5-gateway/internal/storage/sqlite/demand_served_path_test.go:func TestDemandServedPathInsertMapping",
         "phase5-gateway/internal/storage/sqlite/demand_served_path_test.go:func TestDemandServedPathColumnChecks",
-        "phase5-gateway/internal/storage/sqlite/demand_served_path_test.go:func TestDemandServedPathLatencyPercentiles"
+        "phase5-gateway/internal/storage/sqlite/demand_served_path_test.go:func TestDemandServedPathLatencyPercentiles",
+        "phase5-gateway/internal/router/served_path_test.go:func TestServedPathUndeclaredTrailerOverRealTransport",
+        "phase5-gateway/internal/router/served_path_test.go:func TestServedPathSuppressedOnRelayBlind",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServedPathRelayBlindResponseStoresNothing"
       ],
       "journeys": [],
       "evidence": [],

@@ -3799,12 +3799,16 @@ else, for example `"served_path":{"path":"continuous_batching","rows":3}`:
 - `rows`, a JSON integer 1..256. For `continuous_batching` and `native_mtp`,
   the mean number of active scheduler rows (prefilling plus decoding, this row
   included) over the request's own decode steps, rounded to the nearest
-  integer and clamped to 1..256. For `serial` it is 1. For `shard_group` it is
-  the head runtime's value by the same rule, or 1 when the head decodes one
-  request at a time.
+  integer and clamped to 1..256. Self-check cohort rows that share a
+  scheduler step with the request count as active rows. A lockstep window
+  that decodes several tokens in one step counts as one step in the mean. A
+  request that finishes with zero decode steps reports `continuous_batching`
+  with `rows` 1. For `serial` it is 1. A shard group head reports `rows` 1:
+  it has no row counters.
 
 A result replayed from a finished row (`non_settling_replay`) carries no
-`served_path`. The provider MUST NOT send `served_path` on any other status,
+`served_path`. Tier-2 sessions that are not privacy-class report it like any
+other plaintext dispatch. The provider MUST NOT send `served_path` on any other status,
 on a relay-blind or privacy-class dispatch, or for a request served by an
 external loopback runtime (SPEC-046-R002 `runtime_source`), which cannot
 observe its upstream's batching. It MUST NOT add `served_path`, a path name or

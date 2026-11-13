@@ -5916,9 +5916,11 @@ like every other member.
 frame of a plaintext-route attempt that ends `complete`; it ignores it on
 any other status and on a buyer cancel. The object is decoded strictly: a
 member outside the two, a missing member, a wrong JSON type, a `path` outside
-the enum, a `rows` outside 1..256, or an encoding longer than 128 bytes makes
-the report **invalid**; the frame itself is never rejected and the request is
-never failed. The report is then checked for consistency with the provider's
+the enum, a `rows` outside 1..256, a duplicate member, a member name that
+differs from `path` or `rows` in any byte (case included), or an encoding
+longer than 128 bytes makes the report **invalid**. A malformed `served_path`
+value never fails the request; a frame that is not valid JSON is rejected as
+before. The report is then checked for consistency with the provider's
 own SPEC-001-R006 profile and shard-group advertisement as recorded at
 dispatch (the pool snapshot that attempt was dispatched to). Those are
 self-reports too, so the check catches contradictions, not lies: the label is
@@ -5950,10 +5952,14 @@ with exactly this grammar and member order:
 `v=1; path=<serial|continuous_batching|native_mtp|shard_group|unknown>; rows=<1..256|unknown>`
 
 `rows` is `unknown` exactly when `path` is `unknown`, and is written in
-decimal without leading zeros. The value describes the attempt that
-completed: a failover writes the value of the provider that served, and any
-value from an earlier attempt is deleted before the next dispatch. It is a
-response header or an HTTP trailer by the same rule as
+decimal without leading zeros. The value is written only once the
+coordinator accepts the attempt as its successful response: after its own
+post-end checks (the Tier-2 output guard, tool-selection validation, the
+tool-call final-close check and settlement stream validation) and after the
+pool-cancel boundary. An error response, and an attempt the coordinator
+rejects, cancels or re-dispatches, carry no value, so after a failover the
+value is that of the provider that served. It is a response header or an
+HTTP trailer by the same rule as
 `X-MacProvider-Timing-Provider-Decode-Ms`: a header while the response is not
 yet committed, a trailer once it is. It is written only when the request
 carries the gateway's internal service bearer, as for negotiated settlement
@@ -5976,7 +5982,8 @@ the value reaches no buyer through it.
 *Known gaps.* Values are absent until providers on a CLI that sends
 `served_path` are serving. A streamed response's trailer reaches the gateway
 only when the gateway reads the stream to its end, which it does when the
-coordinator declared settlement-finality trailers (SPEC-006-R028). A profile
+coordinator declared settlement-finality trailers and the attempt has a
+route snapshot (SPEC-006-R028). A profile
 change between dispatch and completion can turn a genuine report into
 `unknown`.
 
