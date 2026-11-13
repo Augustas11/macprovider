@@ -8081,6 +8081,12 @@ actor CoordinatorClient {
             "requests_served_since_last": snapshot.requestsServedSinceLast,
             "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
             "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
+            // SPEC-001 heartbeat decode telemetry (#2319): per-row decode rate
+            // from the request timelines and native-MTP draft acceptance.
+            // Observability only; the coordinator ignores unknown keys.
+            "decode_tps_since_last": nullableNumber(snapshot.decodeTPSSinceLast),
+            "native_mtp_proposed_tokens_since_last": snapshot.nativeMTPProposedTokensSinceLast,
+            "native_mtp_accepted_tokens_since_last": snapshot.nativeMTPAcceptedTokensSinceLast,
         ]
         if let hardwareSummary {
             payload["hardware_summary"] = hardwareSummary
