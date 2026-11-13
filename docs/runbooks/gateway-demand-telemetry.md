@@ -19,9 +19,20 @@ observation feed, not a buyer support or content-inspection log.
 - requested prompt/output token exposure and served token counts, including
   cached prompt and reasoning tokens when provider usage reports them
 - terminal result, failure reason, provider-existence flag, substitution flag
-- coordinator admission queue latency, time to first token, provider
-  prefill/decode timing, output throughput, total gateway latency, and event
-  timestamp
+- coordinator admission queue latency, provider prefill/decode timing, total
+  gateway latency, and event timestamp
+- the SPEC-006-R028 serving telemetry: `gw_first_reasoning_ms`,
+  `gw_first_answer_ms` and `gw_output_tps_millitokens` (`NULL` when absent,
+  never `0`; recorded only for `incremental` streams), the `streaming_mode`
+  and `serving_engine` labels, and bounded provider-reported timing labels
+  (`provider_reported_queue_ms`, `provider_reported_first_token_ms`,
+  `provider_reported_first_answer_ms`, `provider_reported_decode_ms`)
+- legacy `time_to_first_token_ms` and `output_tps_millitokens`, still written
+  unchanged. They are not defined quantities: the first ends at the first
+  output delta with reasoning included (or sums coordinator phase headers),
+  the second divides the provider-reported completion count by the
+  coordinator's first-byte-to-done header. Use the R028 columns for new
+  reports.
 
 It must not store raw account id, API keys, prompts, messages, completions,
 request bodies, response bodies, or wallet/private-key material.
@@ -82,6 +93,17 @@ because request telemetry has landed.
 7. Publish the dated decision artifact with the raw window, queries,
    exclusions, gaps, and recommendation before pruning or reallocating Llama
    coverage.
+
+## Serving Latency Read
+
+`GET /admin/demand-latency?window=24h|7d|14d` (operator key) returns nearest-
+rank p50 and p95 of the three R028 quantities per requested model and
+`serving_engine`, with sample counts. p50 is null below 5 samples, p95 below
+20; `unknown_model_id` and `invalid_model_id` are excluded. `serving_engine`
+is the first-selected provider's engine family from the route trace, not the
+path the request ran, so a cell does not separate failover, active rows or
+shard groups. These numbers never feed routing; the coordinator's routing
+store is SPEC-002-R005.
 
 ## Reporting Scope
 
