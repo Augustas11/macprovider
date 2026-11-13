@@ -117,10 +117,97 @@ enum ReasoningOutput {
             && promptTail[open.upperBound...].allSatisfy(\.isWhitespace)
     }
 
+    /// MiniMax M3 adaptive reasoning (#2189). The prompt leaves no block
+    /// open: the model starts its reply with `<mm:think>…</mm:think>` when it
+    /// reasons and with `</mm:think>` (or nothing) when it does not, as the
+    /// template renders history and `MiniMaxAI/MiniMax-M3.1-Flash`'s
+    /// reasoning parser reads it. Only a block that opens the reply (after
+    /// whitespace) is reasoning; everything else is answer. Request stops
+    /// and stop tokens run over the whole output as on other rows without an
+    /// open `<think>`, before this split.
+    enum MiniMax {
+        static let openTag = "<mm:think>"
+        static let closeTag = "</mm:think>"
+
+        enum Lead: Equatable {
+            /// Only whitespace, or a proper prefix of a tag after it.
+            case undecided
+            /// Reasoning starts at this index (after `<mm:think>`).
+            case thinking(String.Index)
+            /// `</mm:think>` with nothing before it: the answer follows.
+            case noThinking(String.Index)
+            /// No tag: the whole text is answer.
+            case answer
+        }
+
+        static func lead(_ text: String) -> Lead {
+            let rest = text.drop(while: \.isWhitespace)
+            if rest.hasPrefix(openTag) { return .thinking(text.index(rest.startIndex, offsetBy: openTag.count)) }
+            if rest.hasPrefix(closeTag) { return .noThinking(text.index(rest.startIndex, offsetBy: closeTag.count)) }
+            if rest.isEmpty || openTag.hasPrefix(rest) || closeTag.hasPrefix(rest) { return .undecided }
+            return .answer
+        }
+
+        /// Splits complete (final) output. A block that never closed (for
+        /// example `finish_reason` length) is all reasoning.
+        static func split(_ text: String) -> Split {
+            switch lead(text) {
+            case .thinking(let start):
+                guard let close = text.range(of: closeTag, range: start..<text.endIndex) else {
+                    return Split(reasoning: String(text[start...]), answer: "", closed: false)
+                }
+                return Split(reasoning: String(text[start..<close.lowerBound]),
+                             answer: String(text[close.upperBound...].drop(while: \.isWhitespace)), closed: true)
+            case .noThinking(let start):
+                return Split(reasoning: "", answer: String(text[start...].drop(while: \.isWhitespace)), closed: true)
+            case .undecided, .answer:
+                return Split(reasoning: "", answer: text, closed: true)
+            }
+        }
+
+        /// Splits a streaming prefix: nothing is released while the lead is
+        /// undecided, and open reasoning holds back a suffix that could
+        /// still become `</mm:think>`. Incremental twin:
+        /// `IncrementalMiniMaxReasoningSplit`.
+        static func splitStreamingPrefix(_ text: String) -> Split {
+            switch lead(text) {
+            case .undecided:
+                return Split(reasoning: "", answer: "", closed: false)
+            case .thinking(let start):
+                let split = split(text)
+                guard !split.closed else { return split }
+                return Split(reasoning: withoutPartialTag(String(text[start...]), tag: closeTag), answer: "", closed: false)
+            case .noThinking, .answer:
+                return split(text)
+            }
+        }
+
+        /// True when the final output opened a reasoning block.
+        static func reasoned(_ text: String) -> Bool {
+            if case .thinking = lead(text) { return true }
+            return false
+        }
+
+        /// Tokens up to and including the one that completes `</mm:think>`
+        /// when the reply reasoned; all of them when the block never closed;
+        /// none without a block.
+        static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String) -> Int {
+            guard !tokenIDs.isEmpty, reasoned(decode(tokenIDs)) else { return 0 }
+            // The block opens the reply, so the first `</mm:think>` closes it.
+            return ReasoningOutput.reasoningTokenCount(tokenIDs: tokenIDs, decode: decode, closeTag: closeTag)
+        }
+    }
+
+    /// `text` without a suffix that could still become `tag`.
+    static func withoutPartialTag(_ text: String, tag: String) -> String {
+        let held = (1..<tag.count).last(where: { text.hasSuffix(String(tag.prefix($0))) }) ?? 0
+        return String(text.dropLast(held))
+    }
+
     /// Tokens up to and including the one that completes `</think>`: the
     /// smallest prefix whose decode contains the tag (monotone, so a binary
     /// search). All tokens when the tag never closed.
-    static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String) -> Int {
+    static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String, closeTag: String = ReasoningOutput.closeTag) -> Int {
         guard !tokenIDs.isEmpty, decode(tokenIDs).contains(closeTag) else { return tokenIDs.count }
         var low = 1
         var high = tokenIDs.count

@@ -26,6 +26,13 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     case dsml
     /// LFM2 Pythonic call list inside native tool-call delimiters.
     case lfm2
+    /// MiniMax M3 (`MiniMaxAI/MiniMax-M3.1-Flash` chat template): one
+    /// `]<]minimax[>[<tool_call>` wrapper holding one
+    /// `]<]minimax[>[<invoke name="NAME">` per call, each argument written as
+    /// `]<]minimax[>[<KEY>VALUE]<]minimax[>[</KEY>`, with nested objects and
+    /// arrays (`<item>`) expanded into the same namespaced XML. Parsed by
+    /// `ToolCallParser.parseMiniMaxCalls`.
+    case minimax
 
     /// Catalog-family fallback. Families whose template has no tool support
     /// (Qwen2-VL) return nil, and so does any unknown family.
@@ -43,7 +50,14 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         if id.contains("nemotron-3") || id.contains("nemotron3") { return .qwen }
         if id.contains("deepseek-v4") || id.contains("deepseek_v4") { return .dsml }
         if id.contains("lfm2.5-24b-a2b") { return .lfm2 }
+        if isMiniMaxM3(id) { return .minimax }
         return nil
+    }
+
+    /// MiniMax M3 and M3.1 (`MiniMax-M3.1-Flash`). Earlier MiniMax
+    /// generations use another call grammar and stay unsupported.
+    static func isMiniMaxM3(_ lowercasedID: String) -> Bool {
+        lowercasedID.contains("minimax-m3") || lowercasedID.contains("minimax_m3")
     }
 
     /// LFM templates emit these names as unquoted Python keywords.
@@ -76,6 +90,10 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     public static func resolved(templateFormat: String?, modelID: String) -> ToolCallGrammar? {
         let id = modelID.lowercased()
         if id.contains("qwen2-vl") || id.contains("qwen2vl") { return nil }
+        // The MiniMax M3 template renders `<tool_call>` and `tool_call.name`,
+        // so the fork's inference guesses its generic JSON format; the family
+        // decides (#2189).
+        if isMiniMaxM3(id) { return .minimax }
         return fromTemplateFormat(templateFormat) ?? family(modelID: modelID)
     }
 }

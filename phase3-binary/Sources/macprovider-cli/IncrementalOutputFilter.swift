@@ -816,6 +816,38 @@ struct IncrementalReasoningSplit {
     }
 }
 
+/// Incremental twin of `ReasoningOutput.MiniMax.splitStreamingPrefix`: the
+/// close-tag search covers only the text added since the previous step.
+struct IncrementalMiniMaxReasoningSplit {
+    private var close = IncrementalFirstMatch(needle: ReasoningOutput.MiniMax.closeTag)
+
+    var restartCount: Int { close.restartCount }
+
+    mutating func splitStreamingPrefix(_ text: String) -> ReasoningOutput.Split {
+        var text = text
+        text.makeContiguousUTF8()
+        // Only a reply that opens `<mm:think>` searches for its close; the
+        // first `</mm:think>` in the text then follows the opener.
+        guard case .thinking(let start) = ReasoningOutput.MiniMax.lead(text) else {
+            return ReasoningOutput.MiniMax.splitStreamingPrefix(text)
+        }
+        if let range = close.find(in: text) {
+            let answer = text[range.upperBound...].drop(while: { $0.isWhitespace })
+            return ReasoningOutput.Split(reasoning: String(text[start..<range.lowerBound]), answer: String(answer), closed: true)
+        }
+        return ReasoningOutput.Split(
+            reasoning: ReasoningOutput.withoutPartialTag(String(text[start...]), tag: ReasoningOutput.MiniMax.closeTag),
+            answer: "", closed: false)
+    }
+
+    /// The answer once the lead is decided and any reasoning closed, else
+    /// nil (the tool-stop path reads only the answer).
+    mutating func closedAnswer(_ text: String) -> String? {
+        let split = splitStreamingPrefix(text)
+        return split.closed ? split.answer : nil
+    }
+}
+
 /// Incremental twin of `ReasoningOutput.removingStrayTags(_:streaming: true)`.
 ///
 /// Removing every `<think>` and `</think>` until none is left has one result
@@ -916,14 +948,17 @@ struct IncrementalStrayTagRemoval {
 /// `IncrementalToolText` as the stream emitter reduces it.
 struct IncrementalToolStopText {
     private var reasoningSplit = IncrementalReasoningSplit()
+    private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
+    private let splitsMiniMaxReasoning: Bool
     private var toolText: IncrementalToolText
 
     init(observer: NativeToolCallStreamEmitter) {
         toolText = IncrementalToolText(
             markers: observer.markerTexts, bracesMatter: observer.bareBracesMayOpenCall, qwenBareCalls: observer.bareQwenCallsMayOpen)
+        splitsMiniMaxReasoning = observer.splitsMiniMaxReasoning
     }
 
-    var restartCount: Int { reasoningSplit.restartCount + toolText.restartCount }
+    var restartCount: Int { reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + toolText.restartCount }
     var maxUncommittedUTF8: Int { toolText.maxUncommittedUTF8 }
     /// Bytes the tool-text cut search read (test hook).
     var scannedUTF8: Int { toolText.scannedUTF8 }
@@ -935,6 +970,9 @@ struct IncrementalToolStopText {
         if reasoningOpen {
             guard let answer = reasoningSplit.closedAnswer(text) else { return nil }
             text = String(answer)
+        } else if splitsMiniMaxReasoning {
+            guard let answer = miniMaxReasoningSplit.closedAnswer(text) else { return nil }
+            text = answer
         }
         return toolText.reduce(text).reduced
     }

@@ -12138,6 +12138,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner,
                             reasoningContent: request.outputTraits.reasoningOpen || isHarmonyResponse
+                                || parsed.reasoningContent != nil
                                 ? textEmitter.emittedReasoning : nil,
                             reasoningTokens: parsed.reasoningTokens,
                             stopSequence: isHarmonyResponse
@@ -15444,8 +15445,19 @@ maxTokens: maxTokens,
             }
             // SPEC-018 §3.12: tools, JSON mode and content see only the text
             // after the first `</think>`.
-            let reasoning = request.outputTraits.reasoningOpen ? ReasoningOutput.split(filteredText) : nil
-            var answer = reasoning?.answer ?? filteredText
+            // MiniMax (#2189): only a `<mm:think>` block that opens the reply.
+            // A reply that did not reason carries no reasoning_content.
+            let miniMax = splitsMiniMaxReasoning(request)
+            var reasoning: ReasoningOutput.Split?
+            var answer = filteredText
+            if request.outputTraits.reasoningOpen {
+                reasoning = ReasoningOutput.split(filteredText)
+                answer = reasoning!.answer
+            } else if miniMax {
+                let split = ReasoningOutput.MiniMax.split(filteredText)
+                if ReasoningOutput.MiniMax.reasoned(filteredText) { reasoning = split }
+                answer = split.answer
+            }
             if try stripsStrayThinkTags(request) {
                 answer = ReasoningOutput.removingStrayTags(answer, streaming: false)
             }
@@ -15462,7 +15474,9 @@ maxTokens: maxTokens,
                 output.reasoningContent = reasoning.reasoning
                 output.reasoningTokens = min(
                     defaultCompletionTokens,
-                    ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                    miniMax
+                        ? ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                        : ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                 )
             }
             return output
@@ -15693,6 +15707,10 @@ maxTokens: maxTokens,
             let split = ReasoningOutput.split(text)
             guard split.closed else { return false }
             text = split.answer
+        } else if observer.splitsMiniMaxReasoning {
+            let split = ReasoningOutput.MiniMax.splitStreamingPrefix(text)
+            guard split.closed else { return false }
+            text = split.answer
         }
         _ = observer.observe(text)
         return observer.hasCompletedValidToolCall
@@ -15764,6 +15782,13 @@ maxTokens: maxTokens,
     /// off as reasoning; otherwise the tags may delimit the model's own
     /// reasoning. Guaranteed selection keeps its whole-envelope check on the
     /// generated text.
+    /// MiniMax M3 output (#2189): a leading `<mm:think>…</mm:think>` block is
+    /// reasoning (`ReasoningOutput.MiniMax`). Its prompt never leaves
+    /// `<think>` open, so this never overlaps the §3.12 split.
+    static func splitsMiniMaxReasoning(_ request: ChatCompletionRequest) -> Bool {
+        !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .minimax
+    }
+
     static func stripsStrayThinkTags(_ request: ChatCompletionRequest) throws -> Bool {
         guard request.outputTraits.reasoningOpen, toolGrammar(for: request) == .glm else { return false }
         return try !ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall
@@ -16704,6 +16729,9 @@ struct SerialStreamingTextEmitter {
     private let streamToolsIncrementally: Bool
     private let stopsAfterFirstCompleteToolCall: Bool
     private let reasoningOpen: Bool
+    /// MiniMax rows (#2189): a leading `<mm:think>` block streams as
+    /// `reasoning_content` (`ReasoningOutput.MiniMax`).
+    private let splitsMiniMaxReasoning: Bool
     private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
@@ -16720,12 +16748,13 @@ struct SerialStreamingTextEmitter {
     /// over the text after a committed point. `usesReferenceText` runs the
     /// whole-text functions instead (the differential tests' reference).
     private var reasoningSplit = IncrementalReasoningSplit()
+    private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
     private var strayTagRemoval = IncrementalStrayTagRemoval()
     private var toolText: IncrementalToolText
     private var usesReferenceText = false
 
     var incrementalRestartCount: Int {
-        reasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
+        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
     }
 
     /// The longest text the stray-tag removal or tool-text reduction left
@@ -16756,6 +16785,7 @@ struct SerialStreamingTextEmitter {
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
         reasoningOpen = request.outputTraits.reasoningOpen
+        splitsMiniMaxReasoning = ModelRuntime.splitsMiniMaxReasoning(request)
         stripsStrayThinkTags = (try? ModelRuntime.stripsStrayThinkTags(request)) ?? false
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
@@ -16781,12 +16811,20 @@ struct SerialStreamingTextEmitter {
     ) -> Step {
         var candidate = candidate
         var emittedVisible = false
-        if reasoningOpen {
+        if reasoningOpen || splitsMiniMaxReasoning {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
-            let split = usesReferenceText
-                ? ReasoningOutput.splitStreamingPrefix(candidate.text)
-                : reasoningSplit.splitStreamingPrefix(candidate.text)
+            // MiniMax: the same for a leading `<mm:think>…</mm:think>`.
+            let split: ReasoningOutput.Split
+            if splitsMiniMaxReasoning {
+                split = usesReferenceText
+                    ? ReasoningOutput.MiniMax.splitStreamingPrefix(candidate.text)
+                    : miniMaxReasoningSplit.splitStreamingPrefix(candidate.text)
+            } else {
+                split = usesReferenceText
+                    ? ReasoningOutput.splitStreamingPrefix(candidate.text)
+                    : reasoningSplit.splitStreamingPrefix(candidate.text)
+            }
             // An unclosed prefix holds back cleanup-rewritable text and an
             // incomplete UTF-8 tail, as content does.
             let reasoning = split.closed
@@ -16799,7 +16837,9 @@ struct SerialStreamingTextEmitter {
                 emittedVisible = true
                 onChunk(.reasoning(delta))
             }
-            guard split.closed else { return .more }
+            // MiniMax request stops run over the whole output, reasoning
+            // included, so one can end the row inside it.
+            guard split.closed else { return splitsMiniMaxReasoning && candidate.hitStop ? .requestStop : .more }
             candidate = (split.answer, candidate.hitStop)
         }
         if stripsStrayThinkTags {
@@ -16883,8 +16923,8 @@ struct SerialStreamingTextEmitter {
         onChunk: (StreamChunk) -> Void
     ) throws {
         var finalText = finalText
-        if reasoningOpen {
-            let split = ReasoningOutput.split(finalText)
+        if reasoningOpen || splitsMiniMaxReasoning {
+            let split = splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
             let rest = ModelRuntime.streamDelta(from: emittedReasoning, to: parsed.reasoningContent ?? split.reasoning)
             if !rest.isEmpty {
                 emittedReasoning += rest
@@ -17097,6 +17137,10 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = DeepseekV4Encoding.toolCallsStart
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
             argumentKey = "arguments"
+        case .minimax?:
+            startDelimiter = ToolCallParser.miniMaxCallsStart
+            endDelimiter = ToolCallParser.miniMaxCallsEnd
+            argumentKey = "arguments"
         default:
             startDelimiter = ToolCallParser.toolCallOpen
             endDelimiter = "</tool_call>"
@@ -17120,10 +17164,17 @@ struct NativeToolCallStreamEmitter {
     /// Every marker the visible-prefix and observe paths search for, for
     /// `IncrementalToolText` (a superset is safe).
     var markerTexts: [String] {
-        [startDelimiter, endDelimiter, ToolCallParser.pythonTag, ToolCallParser.functionOpen, ToolCallParser.functionClose,
-         ToolCallParser.qwenBareWrapperOpen]
+        // MiniMax delimiters start with `]`; each holds `miniMaxMarker`,
+        // which starts with `<` as the cut rule requires.
+        (grammar == .minimax ? [ToolCallParser.miniMaxMarker] : [startDelimiter, endDelimiter])
+            + [ToolCallParser.pythonTag, ToolCallParser.functionOpen, ToolCallParser.functionClose,
+               ToolCallParser.qwenBareWrapperOpen]
             + ToolCallParser.glmCallMarkup
     }
+
+    /// MiniMax rows split `<mm:think>` reasoning off the answer
+    /// (`ReasoningOutput.MiniMax`): a call inside it is not a call.
+    var splitsMiniMaxReasoning: Bool { grammar == .minimax }
 
     /// Qwen rows hold an output that opens like a bare call
     /// (`mayOpenQwenBareCalls`).
@@ -17149,6 +17200,9 @@ struct NativeToolCallStreamEmitter {
         }
         if grammar == .glm {
             return ToolCallParser.glmStreamableProse(text)
+        }
+        if grammar == .minimax {
+            return ToolCallParser.miniMaxStreamableProse(text)
         }
         if grammar == .llama3 {
             // A bare JSON call has no opening tag: hold prose from the first
