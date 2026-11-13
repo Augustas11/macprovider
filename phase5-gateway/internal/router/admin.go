@@ -38,6 +38,77 @@ func (s *Server) handleFeedbackSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, buildFeedbackSummary(events, start, end))
 }
 
+// demandLatencyWindows are the SPEC-006-R028 read windows; 14d is the raw
+// demand-row retention.
+var demandLatencyWindows = map[string]time.Duration{
+	"24h": 24 * time.Hour,
+	"7d":  7 * 24 * time.Hour,
+	"14d": 14 * 24 * time.Hour,
+}
+
+type demandLatencyQuantityJSON struct {
+	Samples int64  `json:"samples"`
+	P50     *int64 `json:"p50"`
+	P95     *int64 `json:"p95"`
+}
+
+type demandLatencyCellJSON struct {
+	Model                   string                    `json:"model"`
+	ServingEngine           string                    `json:"serving_engine"`
+	GatewayFirstReasoningMs demandLatencyQuantityJSON `json:"gateway_first_reasoning_ms"`
+	GatewayFirstAnswerMs    demandLatencyQuantityJSON `json:"gateway_first_answer_ms"`
+	GatewayOutputRateMilli  demandLatencyQuantityJSON `json:"gateway_output_rate_millitokens_per_s"`
+}
+
+// handleDemandLatency is the SPEC-006-R028 operator read of p50/p95 per
+// requested model and serving engine. It names no provider and no buyer.
+func (s *Server) handleDemandLatency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	if !s.operatorAuthorized(w, r) {
+		return
+	}
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "24h"
+	}
+	span, ok := demandLatencyWindows[window]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_window", "window must be 24h, 7d or 14d")
+		return
+	}
+	until := s.now().UTC()
+	since := until.Add(-span)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	cells, err := s.readStore().DemandLatencyPercentiles(ctx, since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "demand_latency_failed", "Could not summarize demand latency")
+		return
+	}
+	quantity := func(q storage.DemandLatencyQuantity) demandLatencyQuantityJSON {
+		return demandLatencyQuantityJSON{Samples: q.Samples, P50: q.P50, P95: q.P95}
+	}
+	out := make([]demandLatencyCellJSON, 0, len(cells))
+	for _, cell := range cells {
+		out = append(out, demandLatencyCellJSON{
+			Model:                   cell.RequestedModel,
+			ServingEngine:           cell.ServingEngine,
+			GatewayFirstReasoningMs: quantity(cell.FirstReasoningMs),
+			GatewayFirstAnswerMs:    quantity(cell.FirstAnswerMs),
+			GatewayOutputRateMilli:  quantity(cell.OutputTPSMilliTokens),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window": window,
+		"since":  since.Format(time.RFC3339),
+		"until":  until.Format(time.RFC3339),
+		"cells":  out,
+	})
+}
+
 func (s *Server) handleKillSwitch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")

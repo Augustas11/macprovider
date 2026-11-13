@@ -210,7 +210,7 @@ func TestDemandSummarySeparatesServedUnmetCapacityAndRepeatBuyers(t *testing.T) 
 	if row.RequestedTokens != 135 || row.ServedTokens != 33 {
 		t.Fatalf("summary tokens = requested %d served %d, want 135/33", row.RequestedTokens, row.ServedTokens)
 	}
-	if row.ReasoningTokens != 3 || row.AvgQueueLatencyMs != 5 || row.AvgTimeToFirstTokenMs != 25 || row.AvgTotalLatencyMs != 150 || row.AvgOutputTPSMilliTokens != 15_000 {
+	if row.ReasoningTokens != 3 || row.AvgQueueLatencyMs != 5 || row.LegacyAvgTimeToFirstTokenMs != 25 || row.AvgTotalLatencyMs != 150 || row.LegacyAvgOutputTPSMilliTokens != 15_000 {
 		t.Fatalf("summary timing/reasoning = %+v, want reasoning=3 average queue/ttft/latency/tps=5/25/150/15000", row)
 	}
 	if row.DistinctBuyers != 4 || row.RepeatBuyers != 1 {

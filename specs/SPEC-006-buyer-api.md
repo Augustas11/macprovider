@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.76 (2026-11-11, rollout buyer hold)
+**Version:** 0.9.77 (2026-11-13, gateway serving telemetry quantities)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.77 (2026-11-13, Related: #2320):** Add SPEC-006-R028, the gateway's serving telemetry quantities. For incrementally relayed streams the gateway records the gateway time to first reasoning delta and the gateway time to first answer delta, both from the gateway's request start to the receipt of the first upstream Chat Completions delta of that kind, identically for Chat Completions, Responses and Messages; `content` inside `<think>` tags counts as reasoning. The gateway output rate is the SPEC-002-R005 output estimate of the answer deltas over the gateway's first-to-last answer delta window, clamped at 2000 tokens/s; no provider-reported token count enters it. Whitespace-only text never sets either first-delta instant. Buffered streaming modes and non-streamed requests record all three absent; relay-blind and privacy-class requests write no demand row. Each row carries the validated streaming mode, a serving-engine label taken only from the validated SPEC-002-R007 route trace (the first-selected provider's engine family), and may carry bounded provider-reported timing labels. p50 and p95 per model and serving engine are read by an operator-key admin read; buyers never see them. None of these quantities is the SPEC-002-R005 routing TTFT, decode rate or service rate, and none feeds routing. The pre-existing demand-row `time_to_first_token_ms` and `output_tps_millitokens` stay, unchanged and named legacy. §16.3 points to R028.
 
 **Change log v0.9.76 (2026-11-11):** Add SPEC-006-R027, the rollout buyer hold: an in-memory, operator-toggled gateway mode that answers new buyer requests with `503` `public_api_paused` and `Retry-After: 30`, lets in-flight requests finish, admits the rollout buyer canary by the sha256 of its API key, is read with an operator-key `GET /admin/buyer-hold`, and is reported in `/healthz` as `buyer_hold`. Starts held while the updater's runtime drop-in sets the start variable; no timer. §2.7 points to it.
 
@@ -4228,7 +4230,8 @@ The gateway MUST instrument:
 - 200/4xx/5xx by endpoint.
 - 503 rate by model.
 - 502/504 rate by provider internally.
-- median and p95 time to first token.
+- median and p95 time to first token, as the two SPEC-006-R028 quantities
+  (first reasoning delta, first answer delta) per model.
 - median and p95 total latency.
 
 Provider-specific reliability metrics MUST remain operator-only.
@@ -5412,3 +5415,136 @@ hold as soon as the candidate starts and journals that the live databases are
 kept. A later rollback then keeps row-level data the candidate wrote (ledger,
 billing, reservation, request log). The previous binary reads it, because the
 schema is unchanged.
+
+## SPEC-006-R028 — Gateway serving telemetry quantities
+
+The gateway's demand row (`demand_events`) records how a request was served,
+as the gateway saw it. These are telemetry quantities. They are measured at a
+different place, from a different start, over different deltas than the
+coordinator's routing quantities, so they carry their own names.
+
+Definitions. All times are the gateway's own clock.
+
+- **Gateway request start** is the instant the gateway's chat handler starts
+  for the request, the SPEC-019 v0.2 wall-clock zero point. Request-side
+  surface conversion runs after it; response-side conversion runs after delta
+  receipt and is excluded.
+- An **upstream delta** is one `data:` frame of the coordinator's Chat
+  Completions stream, read by the gateway before any surface conversion. Its
+  receipt instant is when the gateway reads it. The gateway writes each frame
+  to the buyer before it reads the next, so receipt instants include buyer
+  write backpressure.
+- The gateway keeps per-request `<think>` state for each choice's `content`,
+  exactly as the Responses and Messages adapters do: text between `<think>`
+  and `</think>` is reasoning, text outside it is answer. Some model families
+  cannot split their thinking out of `content` (§5.3 `capabilities.reasoning`).
+- A **reasoning delta** has `choices[].delta.reasoning_content` with
+  non-whitespace text, or non-whitespace `content` text inside
+  `<think>`…`</think>`. An empty think block (`<think>\n\n</think>`, as a
+  model with thinking off emits) is not a reasoning delta.
+- An **answer delta** has non-whitespace `choices[].delta.content` text
+  outside `<think>`…`</think>`, a `refusal` or `text` with non-whitespace
+  text, or a `choices[].delta.tool_calls[]` entry or `function_call` with a
+  non-empty function name or arguments. A `tool_calls[]` entry that carries
+  only an index is not. Text before a `</think>` with no opener is outside a
+  think block and counts as answer, as in the adapters. One frame can be both
+  a reasoning and an answer delta. Role-only frames, usage-only frames, SSE
+  comments (decode-progress and keepalive included), terminal error envelopes
+  and relay-blind opaque frames are neither.
+- **Estimated answer tokens** are the bytes of the answer text (`content`
+  outside `<think>`, `refusal`, `text`, each tool call's name once per
+  choice and tool-call index, and tool-call arguments re-encoded as compact
+  JSON with every number in its shortest spelling, or at their raw length when
+  they are not one JSON value), divided by 4 and rounded up: the
+  SPEC-002-R005 output estimate rule applied to answer text only.
+  Whitespace-only visible text adds its bytes only once an answer delta has
+  been seen. The estimate is bounded: choice indexes from 16 on share one
+  think state, and past 64 distinct tool calls, or 1 MiB of held arguments,
+  further tool-call bytes count at their raw length without being held. A
+  stream past these bounds is estimated less exactly, never rejected.
+
+The gateway MUST record, for a request whose coordinator response carries
+`X-MacProvider-Streaming-Mode: incremental`:
+
+- `gateway_first_reasoning_ms`: gateway request start to the receipt of the
+  first reasoning delta. Absent when no reasoning delta arrived.
+- `gateway_first_answer_ms`: gateway request start to the receipt of the
+  first answer delta. Absent when no answer delta arrived.
+- `gateway_output_rate`: estimated answer tokens minus 1, divided by the
+  window from the receipt of the first answer delta to the receipt of the
+  last answer delta, in tokens per second (stored in millitokens), clamped at
+  2000 tokens per second, the coordinator's decode-rate ceiling. Absent when
+  the estimate is below 8 or the window is under 50 ms.
+
+`gateway_output_rate` is an estimate on the same basis for every model
+family. No provider-reported token count enters it: completion token counts
+differ between families (a Harmony model reports its final channel only,
+SPEC-018 AC-60). It is the answer rate the gateway observed, buyer write
+backpressure included. The provider-reported completion and reasoning token
+counts stay on the same row as labels only.
+
+Under any other streaming mode (`buffered_kill_switch`,
+`buffered_provider_downgrade`, `buffered_tool_selection`, SPEC-018 AC-45), or
+without the header, all three are absent: the first delta follows the whole
+generation. A non-streamed request records none of the three for the same
+reason. Relay-blind and privacy-class requests write no demand row. Absent means stored as SQL `NULL`, never `0`,
+so an aggregate cannot mistake a missing sample for a fast one.
+
+The three quantities are the same on Chat Completions, Responses and Messages,
+because all three read the same upstream stream. A Messages request without
+`thinking` still records `gateway_first_reasoning_ms` when the provider
+reasoned, even though the buyer does not see that reasoning.
+
+Labels. A row carries labels. A label describes a sample. It MUST NOT enter
+any of the three quantities above, and it MUST NOT enter any routing input.
+
+- `streaming_mode` is the validated `X-MacProvider-Streaming-Mode` value, or
+  empty when absent or outside the SPEC-018 AC-45 vocabulary.
+- `serving_engine` is the `engine` member of the coordinator's
+  `X-MacProvider-Route-Trace`, taken only after the value passes the exact
+  SPEC-002-R007 grammar check of SPEC-006-R020: `general_mlx`,
+  `continuous_batching`, `native_mtp` or `unknown`. A missing or invalid trace
+  stores `unknown`. It names the engine family of the first-selected
+  provider. It does not describe a coordinator failover target, whether this
+  request actually ran batched or with MTP, the active row count, or a shard
+  group. It differs from the existing `engine_class` column, which records the
+  runtime class the buyer selected with `X-MacProvider-Engine-Select`
+  (SPEC-006-R016) and is empty when the buyer selected none.
+- Provider-reported timing (the provider usage fields
+  `macprovider_queue_ms`, `macprovider_first_token_ms`,
+  `macprovider_first_answer_ms` and `macprovider_decode_ms`), when present in
+  valid provider usage (streamed or not), is stored as a label only when each value is an
+  integer from 0 to 3600000; any other value stores absent. A later usage
+  frame without a field keeps the last value reported for it.
+
+The stored `serving_engine` and `streaming_mode` vocabularies equal the
+validators' vocabularies. The store maps any other value to `unknown` or
+empty, so a value added to a validator alone never loses the row.
+
+Aggregates. p50 and p95 of `gateway_first_reasoning_ms`,
+`gateway_first_answer_ms` and `gateway_output_rate` MUST be available per
+requested model and `serving_engine`, over successful rows in a time window.
+Each is the nearest-rank value over the non-absent values: with `n` samples
+in ascending order, the value at rank `(p × n + 99) / 100` in integer
+arithmetic, with the sample count. p50 is null below 5 samples and p95 below
+20. The `unknown_model_id` and `invalid_model_id` buckets are excluded,
+because they pool different models. They are read with
+`GET /admin/demand-latency?window=24h|7d|14d` (default `24h`), which requires
+the operator key exactly like `/admin/feedback-summary` and reads through the
+gateway's read-only database handle. The response names no provider id and no
+buyer hash. No buyer-facing endpoint serves them.
+
+Legacy fields. The demand-row `time_to_first_token_ms` and
+`output_tps_millitokens` keep their pre-R028 values and are legacy: the first
+ends at the first output delta (reasoning included) or falls back to the sum of
+coordinator phase headers, and the second divides the provider-reported
+completion count by the coordinator's first-byte-to-done header. New reports
+MUST use the R028 quantities.
+
+Non-normative note. These are not the SPEC-002-R005 quantities. Routing TTFT
+starts at provider dispatch start, ends at the first delivered content or tool
+call, and ignores reasoning. The routing decode rate uses the same output
+estimate rule but the coordinator's own delivery clock and output. The R028
+quantities live only in the gateway's demand rows and its operator read.
+Nothing in the gateway sends them to the coordinator, so they never reach the
+routing performance store.

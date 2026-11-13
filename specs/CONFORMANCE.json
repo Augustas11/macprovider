@@ -14849,6 +14849,57 @@
       }
     },
     {
+      "requirement_id": "SPEC-006-R028",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/serving_telemetry.go:func (o *servingDeltaObserver) observe",
+        "phase5-gateway/internal/router/serving_telemetry.go:func (t *gatewayPhaseTiming) servingSnapshot",
+        "phase5-gateway/internal/router/serving_telemetry.go:func servingEngineFromRouteTrace",
+        "phase5-gateway/internal/router/serving_telemetry.go:func providerTimingLabelsFromJSON",
+        "phase5-gateway/internal/router/demand_telemetry.go:func (d *demandTelemetryState) setTiming",
+        "phase5-gateway/internal/router/admin.go:func (s *Server) handleDemandLatency",
+        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) ensureDemandEventsServingTelemetryColumns",
+        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) DemandLatencyPercentiles"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingTelemetryFirstDeltasMatchOnEveryBuyerSurface",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingTelemetryStreamShapes",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingDeltaObserverClassification",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingAnswerEstimateFollowsCoordinatorRule",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingSnapshotRateGates",
+                "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingTelemetryRelayBlindWritesNoRowAndKeepsLogTiming",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingEngineFromRouteTrace",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestProviderTimingLabelsAreBounded",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestAdminDemandLatencyRequiresOperatorKeyAndNamesNoProviderOrBuyer",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandServingTelemetryColumnsMigrateOldTableIdempotently",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandServingTelemetryMapsUnknownLabels",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandLatencyPercentilesNearestRankAndSmallSamples",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingTelemetryRelayBlindDispatchSuppressesDemandRow",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingWhitespaceAndThinkRules",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingToolCallKeyCapBoundsHeldState",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingToolNameCountedOncePerCall",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingHeldArgumentsCapCountsOverflowRaw",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingChoiceIndexesPastBoundShareOneFilter",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingRateMinimumTokenBoundary",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingRejectsNGreaterThanOneBeforeUpstream",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingProviderLabelsNonStreamedAndKeepLastValue",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestServingVocabulariesMatchStoredChecks",
+        "phase5-gateway/internal/router/serving_telemetry_test.go:func TestAdminDemandLatencyWindowAndMethod",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandServingTelemetryChecksMatchVocabularies",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandServingTelemetryMigrationResumesAfterPartialFailure",
+        "phase5-gateway/internal/storage/sqlite/demand_serving_telemetry_test.go:func TestDemandLatencyPercentileSampleBoundaries"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2320",
+        "rationale": "Gateway serving telemetry (first reasoning and first answer delta, estimated answer rate, streaming-mode and serving-engine labels, operator p50/p95 read) is implemented with handler and storage tests; live once the gateway runtime release reaches Pearl and /admin/demand-latency returns cells for served streaming traffic."
+      }
+    },
+    {
       "requirement_id": "SPEC-051-R001",
       "spec_id": "SPEC-051",
       "state": "pending",

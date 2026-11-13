@@ -7,6 +7,10 @@ import "strings"
 type streamThinkFilter struct {
 	thinkPending string
 	thinkInBlock bool
+	// thinkInsideTextChunks counts consumed spans inside <think>...</think>
+	// that carry non-whitespace text; SPEC-006-R028 classifies them as
+	// reasoning. Adapters do not read it.
+	thinkInsideTextChunks int64
 }
 
 func (a *streamThinkFilter) filterThinkContent(s string) string {
@@ -16,11 +20,17 @@ func (a *streamThinkFilter) filterThinkContent(s string) string {
 	for input != "" {
 		if a.thinkInBlock {
 			if end := strings.Index(input, "</think>"); end >= 0 {
+				if strings.TrimSpace(input[:end]) != "" {
+					a.thinkInsideTextChunks++
+				}
 				input = input[end+len("</think>"):]
 				a.thinkInBlock = false
 				continue
 			}
 			a.thinkPending = longestSuffixThatPrefixes(input, "</think>")
+			if strings.TrimSpace(input[:len(input)-len(a.thinkPending)]) != "" {
+				a.thinkInsideTextChunks++
+			}
 			return out.String()
 		}
 		if start := strings.Index(input, "<think>"); start >= 0 {
