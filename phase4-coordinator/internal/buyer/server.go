@@ -1330,6 +1330,7 @@ func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) 
 		downgradeEvictions = s.streamingDowngrade.evictionsForTest()
 	}
 	_, _ = w.Write([]byte(s.streamingTiming.prometheusText(downgradeEvictions)))
+	writeServedPathMetrics(w)
 	_, _ = fmt.Fprintf(w, "# HELP macprovider_buyer_ownership_refusals_total Buyer requests refused by the SPEC-002-R008 ownership fence.\n# TYPE macprovider_buyer_ownership_refusals_total counter\nmacprovider_buyer_ownership_refusals_total{reason=\"lookup_unavailable\"} %d\nmacprovider_buyer_ownership_refusals_total{reason=\"owned_provider\"} %d\n",
 		s.ownershipLookupRefusals.Load(), s.ownedProviderRefusals.Load())
 }
@@ -3628,6 +3629,7 @@ func (s *Server) forwardHTTPSequence(
 			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			providerhttp.SetCoordinatorOrigin(upReq.Header)
+			beginServedPathAttempt(w.Header(), state)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			if doErr == nil && resp != nil {
@@ -4201,6 +4203,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	var relay *providerws.RelayStream
 	var err error
+	beginServedPathAttempt(w.Header(), state)
 	if state != nil {
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}
@@ -4333,6 +4336,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				chunks = nil
 			}
 		case end := <-relay.Done:
+			s.noteServedPath(r, state, provider, end)
 			for chunks != nil {
 				select {
 				case chunk, ok := <-chunks:
@@ -4851,6 +4855,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				return result, progressAttempt("", faultFlag)
 			}
 		case end := <-relay.Done:
+			s.noteServedPath(r, state, provider, end)
 			for chunks != nil {
 				select {
 				case chunk, ok := <-chunks:
@@ -5123,6 +5128,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
+			s.noteServedPath(r, state, provider, end)
 			// The relay can queue its end while response chunks are still buffered.
 			// Drain the already-published tail before deciding a guaranteed outcome.
 			if state != nil && state.toolSelection != nil {
@@ -5380,6 +5386,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			writePhaseTimingTrailers(w.Header(), state, now)
 		}
 	}
+	beginServedPathAttempt(w.Header(), state)
 	if state != nil {
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider)
 	}
