@@ -136,11 +136,11 @@ final class IncrementalOutputFilterTests: XCTestCase {
     }
 
     func testSafePrefixMatchesReferenceOnRandomStreams() {
-        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: false), seed: 2317, streams: 36, length: 400)
+        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: .whole), seed: 2317, streams: 36, length: 400)
     }
 
     func testReasoningSafePrefixMatchesReferenceOnRandomStreams() {
-        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: true), seed: 23_171, streams: 36, length: 400)
+        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: .afterThink), seed: 23_171, streams: 36, length: 400)
     }
 
     func testMiniMaxSafePrefixMatchesReferenceOnRandomStreams() {
@@ -154,10 +154,16 @@ final class IncrementalOutputFilterTests: XCTestCase {
         var restarts = 0
         for streamIndex in 0..<36 {
             var split = IncrementalMiniMaxReasoningSplit()
+            var answerOnly = IncrementalMiniMaxReasoningSplit(keepsReasoning: false)
             for (step, text) in texts(of: randomStream(&rng, count: 400, extra: miniMaxPieces), &rng).enumerated() {
                 let expected = ReasoningOutput.MiniMax.splitStreamingPrefix(text)
                 guard split.splitStreamingPrefix(text) == expected else {
                     return XCTFail("stream \(streamIndex) step \(step) differs for \(text.debugDescription)")
+                }
+                // The tool-stop split keeps the answer and drops the reasoning.
+                let answer = answerOnly.splitStreamingPrefix(text)
+                guard answer.answer == expected.answer, answer.closed == expected.closed, answer.reasoning.isEmpty else {
+                    return XCTFail("answer-only stream \(streamIndex) step \(step) differs for \(text.debugDescription)")
                 }
             }
             restarts += split.restartCount
@@ -173,7 +179,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
     func testLongStreamsMatchReferenceAcrossManyCommits() {
         var rng = SeededGenerator(state: 23_173)
         let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
-            .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true), .outputFilters,
+            .streamingSafePrefix(reasoningOpen: .whole), .streamingSafePrefix(reasoningOpen: .afterThink), .outputFilters,
         ]
         for (index, mode) in modes.enumerated() {
             let stops = index == 1 ? [] : ["never-matches"]
@@ -495,7 +501,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
     func testSerialToolStopWorkPerStepIsBoundedOnALongGLMBody() {
         func perStep(bodyBytes: Int) -> Double {
             var observer = NativeToolCallStreamEmitter(modelID: "zai-org/GLM-5.3", grammar: .glm, allowedFunctionNames: ["read"])
-            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: true)
+            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .afterThink)
             var stopText = IncrementalToolStopText(observer: observer)
             var text = String(repeating: "thinking. ", count: 50) + "</think>" + String(repeating: "Reading now. ", count: 40)
                 + "<tool_call>read<arg_key>path</arg_key><arg_value>"
@@ -505,7 +511,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                 text += unit
                 steps += 1
                 XCTAssertFalse(ModelRuntime.observeSerialToolStop(
-                    &observer, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: true))
+                    &observer, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: .afterThink))
             }
             return Double(stopText.scannedUTF8 + observer.incrementalScannedUTF8) / Double(steps)
         }
@@ -531,7 +537,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     while text.utf8.count < answerBytes {
                         text += unit
                         steps += 1
-                        let observed = stopText.observedText(text, reasoningOpen: true)
+                        let observed = stopText.observedText(text, reasoningOpen: .afterThink)
                         if steps % 997 == 0 { XCTAssertEqual(observed, String(text.dropFirst(head.count))) }
                     }
                     XCTAssertEqual(stopText.restartCount, 0)
@@ -608,7 +614,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         func koreanWork(pieces count: Int) -> Double {
             var rng = SeededGenerator(state: 9_2318)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: ["END"], reasoningOpen: false)
+                stopTokenFilter: stopTokens, requestStops: ["END"], reasoningOpen: .whole)
             let words = [" 안녕하세요", " 반갑습니다", " 오늘은", " 날씨가", " 좋네요"]
             var text = "가"
             for _ in 0..<count {
@@ -640,13 +646,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         let tokens = (0..<250).map { "<|reserved_special_token_\($0)|>" }
             + ["<|begin_of_text|>", "<|end_of_text|>", "<|eot_id|>", "<|eom_id|>", "<|python_tag|>", "<|finetune_right_pad_id|>"]
         let filter = StopTokenFilter(tokens: tokens)
-        let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+        let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: filter, requestStops: [], reasoningOpen: .whole)
         var text = ""
         var wholeText = 0
         for step in 0..<200 {
             text += "<|reserved_special_token_5|>"
             wholeText += text.utf8.count
-            let expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+            let expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: filter, requestStops: [], reasoningOpen: .whole)
             let actual = incremental.update(text)
             guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                 return XCTFail("step \(step)")
@@ -752,7 +758,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
 
     /// Dense stop tokens never commit: the row reports its uncommitted tail.
     func testDenseStopTokensReportTheUncommittedTail() {
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: false)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .whole)
         var text = ""
         for _ in 0..<600 {
             text += "<|eot_id|>"
@@ -784,7 +790,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         for stream in 0..<30 {
             let stops = stream % 2 == 0 ? ["STOP"] : []
             let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
-                .outputFilters, .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true),
+                .outputFilters, .streamingSafePrefix(reasoningOpen: .whole), .streamingSafePrefix(reasoningOpen: .afterThink),
                 .streamingSafePrefix(reasoningOpen: .afterMiniMaxThink),
             ]
             let filters = modes.map { ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: $0) }

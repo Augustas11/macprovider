@@ -135,7 +135,7 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         for prefix in [call, call + #"<tool_call>{"name":"lookup","arguments":{"id":"#] {
             XCTAssertFalse(ModelRuntime.observeSerialToolStop(
                 &observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []),
-                requestStops: [], guaranteedSelection: true
+                requestStops: [], reasoningOpen: .whole, guaranteedSelection: true
             ))
         }
         XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
@@ -155,7 +155,7 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         let auto = try self.request(choice: "auto")
         XCTAssertTrue(ModelRuntime.serialToolStopApplies(auto))
         XCTAssertTrue(ModelRuntime.observeSerialToolStop(
-            &observer, decoded: call, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+            &observer, decoded: call, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole
         ))
     }
 
