@@ -42,58 +42,12 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.61 (#2327) on 3.32.3-macprovider.59: Qwen2-VL and
-# Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype, so an image prefill
-# no longer leaves the language model and its KV cache in float32 (upstream
-# ml-explore/mlx-swift-lm #766); FastVLM image pixels take the patch-embed
-# weight dtype and Mistral3 drops its bfloat16 image-feature cast.
-# 3.32.3-macprovider.59 (#2327) on 3.32.3-macprovider.58: Qwen2-VL post-vision
-# decode uses fused non-traditional RoPE when the three M-RoPE axes share one
-# rope delta; per-row deltas and traditional RoPE stay on the position-id
-# path.
-# 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
-# v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row of a
-# qualifying affine weight takes affine_qmv_mma1, a single-row kernel with
-# qmv_mma's exact reduction order, and rows 2-16 take qmv_mma; a row is
-# bit-identical alone and in a batch because the two kernels are bit-identical
-# (checked on M5 and M3 Ultra GPUs; not on M1, M2 or M4). The switch point is a
-# speed choice (M3 Ultra, Llama 3.1 8B 4-bit, aggregate tok/s: 1 row 93 on
-# qmv_mma1 against 75 on qmv_mma, 2 rows 120 against 146).
-# MLX_METAL_SMALL_M_ROW_INVARIANT, read once per process, keeps that window by
-# default; 0 skips it for the fork's pre-window small-row routing (per-row qmv
-# below the qmm limit), which the provider sets only for a serial-only serve
-# process (SPEC-038 FR-CB9). Decode tok/s for the core change is not yet
-# measured on the merged build.
-# 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound):
-# attention and indexer prefill tiles are evaluated one ahead (asyncEval, at
-# most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
-# 3.32.3-macprovider.49 (#2307) is .48 plus one tests-only commit
-# (GLM-5-Next row-invariance up to the provider decode bound, TF32-derived
-# tolerances); no library code changes.
-# 3.32.3-macprovider.48 (#2111) is .47 plus the DeepSeek V4 campaign commits
-# (reference arithmetic, DSpark drafter, shared MXFP8 multi-row tiles and
-# row-invariant decode kernels).
-# 3.32.3-macprovider.47 (#2256) is .44 (MiniMax) plus the mlx-swift
-# 0.32.3-macprovider.18 pin: core v0.32.4-macprovider.10 sends every small-M
-# affine product whose K is not a multiple of 128 (gpt-oss) to qmv_wide for
-# every row count on gen 15 and 16 GPUs; other shapes and gen 17 keep their
-# routes.
-# 3.32.3-macprovider.44 (#2189, #2284) is .43 (#2230) plus four exact MiniMax M3
-# decode fusions and the seeded fused-norm test (MiniMaxM3.swift and its tests
-# only).
-# 3.32.3-macprovider.43 (#2230) is .42 plus the Mamba2 segsum batch-mask fix
-# and upstream #728, #703, #712, #747 and #754 (#740 left out).
-# 3.32.3-macprovider.42 (#2254, #2255) is .40 plus the GPT-OSS SwiGLU bf16
-# clip and a lab-only gpt-oss per-layer dump (GPTOSS.swift and its tests only).
-# 3.32.3-macprovider.40 (#2231) is .38 plus the LiquidAI LFM3 text model
-# (`lfm3`, upstream #750), its #756 hardening and registry entry.
-# 3.32.3-macprovider.38 (#2265) is .35 (`c9d8a93`) plus two commits: the
-# mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8
-# decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
-# model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
-# maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.61"
-SPEC048_MLX_SWIFT_LM_REVISION = "ef656c59adc2424ddf1f1bcfca0338536befcc25"
+# 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
+# can yield between evaluated tiles so other continuous-batch rows decode
+# while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
+# hook (505f368, DeepseekV4.swift only) onto ef656c59.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.63"
+SPEC048_MLX_SWIFT_LM_REVISION = "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"

@@ -8006,6 +8006,274 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(chunks, [4096])
     }
 
+    /// A reference prefill is still one chunk. While it runs, a row that is
+    /// already decoding receives the tokens the backend yields at tile pauses,
+    /// after its own prefill sample and the one decode step that preceded the
+    /// new row.
+    func testDeepseekV4PrefillPauseDecodesRunningRows() async throws {
+        let script = [11, 22, 33, 44, 55, 66, 77, 88]
+        let backend = PrefillPauseBackend(scripts: ["running": script, "long": [77]])
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
+            maxPrefillTokensPerIteration: 128, maxPromptChunkTokens: 64,
+            referencePrefillStepSize: DeepseekV4ContinuousBatchBackend.prefillChunkTokens,
+            tokenDeliveryBufferLimit: 64,
+            snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            backend: backend, replayAuthority: TestReplayAuthority()
+        )
+        let installed = await scheduler.installLabBatchComposition(["running", "long"])
+        XCTAssertTrue(installed)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: script.count))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .length)
+        XCTAssertEqual(Array(runningResult.outputTokens.prefix(4)), [11, 22, 33, 44])
+        XCTAssertEqual(runningResult.outputTokens, script)
+        XCTAssertEqual(longResult.outputTokens, [77])
+        let runningChunks = await backend.prefillChunks(id: "running")
+        let longChunks = await backend.prefillChunks(id: "long")
+        let pauses = await backend.pauseCallCount()
+        let armed = await backend.armedRequestIDs()
+        XCTAssertEqual(runningChunks, [1])
+        XCTAssertEqual(longChunks, [256])
+        XCTAssertEqual(pauses, 2)
+        XCTAssertEqual(armed, [["running"]])
+    }
+
+    /// A cancel that arrives after a pause token was delivered must not
+    /// receive the next pause token, and the row must leave the armed set.
+    func testDeepseekV4PrefillPauseCancelDropsTheNextToken() async throws {
+        let gate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44, 55, 66, 77, 88], "long": [77]],
+            pauseGate: gate)
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 8
+            ), tokenSink: { recorder.append($0) })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        try await eventually { recorder.events().count >= 3 }
+        await scheduler.cancel(requestID: "running")
+        await gate.open()
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .cancelled)
+        XCTAssertEqual(runningResult.errorCode, "request_cancelled")
+        let delivered = recorder.events().map(\.token)
+        XCTAssertEqual(Array(delivered.prefix(3)), [11, 22, 33])
+        XCTAssertFalse(delivered.contains(44))
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    /// A pause token that already completed the row is a decided length
+    /// result. A later cancel must not rewrite it.
+    func testDeepseekV4PrefillPauseCancelDoesNotRewriteLength() async throws {
+        let gate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44], "long": [77]],
+            pauseGate: gate)
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 3
+            ), tokenSink: { recorder.append($0) })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        try await eventually { recorder.events().count >= 3 }
+        await scheduler.cancel(requestID: "running")
+        await gate.open()
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .length)
+        XCTAssertEqual(runningResult.outputTokens, [11, 22, 33])
+        XCTAssertEqual(recorder.events().map(\.token), [11, 22, 33])
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    /// The length decision stays through `finishTerminal`'s block release.
+    /// Cancelling on that hop must not rewrite the row.
+    func testDeepseekV4PrefillPauseCancelDuringTerminalReleaseKeepsLength() async throws {
+        let gate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44], "long": [77]],
+            pauseGate: gate)
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 3
+            ), tokenSink: { recorder.append($0) })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        try await eventually { recorder.events().count >= 3 }
+        await scheduler.setTestCancelAtTerminalRelease("running")
+        await gate.open()
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .length)
+        XCTAssertEqual(runningResult.outputTokens, [11, 22, 33])
+        XCTAssertEqual(recorder.events().map(\.token), [11, 22, 33])
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    /// A cancel drops the backend row before the buyer sink finishes draining.
+    /// Later pause tiles must not keep the row armed until that drain.
+    func testDeepseekV4PrefillPauseCancelFinishesBackendBeforeDrain() async throws {
+        let pauseGate = AsyncGate()
+        let sinkGate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let finishLog = PrefillPauseFinishLog()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44, 55, 66, 77, 88], "long": [77]],
+            pauseGate: pauseGate,
+            finishLog: finishLog)
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 8
+            ), tokenSink: { event in
+                recorder.append(event)
+                if recorder.events().count >= 3 {
+                    await sinkGate.wait()
+                }
+            })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        try await eventually { recorder.events().count >= 3 }
+        await scheduler.cancel(requestID: "running")
+        await pauseGate.open()
+        try await eventually { finishLog.contains("running") }
+        await sinkGate.open()
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .cancelled)
+        XCTAssertFalse(recorder.events().map(\.token).contains(44))
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    /// Cancel lands after the pause step has begun and before its token is
+    /// delivered. The in-flight step is ended, and that token is not offered.
+    func testDeepseekV4PrefillPauseCancelDuringBeginDropsTheToken() async throws {
+        let recorder = TokenEventRecorder()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44, 55, 66, 77, 88], "long": [77]])
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        await scheduler.setTestCancelDuringPauseExtend("running")
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 8
+            ), tokenSink: { recorder.append($0) })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .cancelled)
+        XCTAssertEqual(runningResult.errorCode, "request_cancelled")
+        XCTAssertEqual(recorder.events().map(\.token), [11, 22])
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    /// A pause step that names a failure retires the row before another token
+    /// is delivered. The prefilling row still completes.
+    func testDeepseekV4PrefillPauseFailureStepRetiresTheRow() async throws {
+        let recorder = TokenEventRecorder()
+        let backend = PrefillPauseBackend(
+            scripts: ["running": [11, 22, 33, 44], "long": [77]],
+            failingRequestIDs: ["running"])
+        let scheduler = try await makePrefillPauseScheduler(backend: backend)
+        let running = Task {
+            try await scheduler.submit(.init(
+                id: "running", conversationKey: "", promptTokens: [1], maxOutputTokens: 8
+            ), tokenSink: { recorder.append($0) })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "",
+                promptTokens: Array(repeating: 3, count: 256), maxOutputTokens: 1))
+        }
+        let runningResult = try await running.value
+        let longResult = try await long.value
+        XCTAssertEqual(runningResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(runningResult.errorCode, "continuous_batching_row_sampling_failed")
+        XCTAssertEqual(recorder.events().map(\.token), [11, 22])
+        XCTAssertEqual(longResult.outputTokens, [77])
+    }
+
+    private func makePrefillPauseScheduler(
+        backend: PrefillPauseBackend
+    ) async throws -> ContinuousBatchScheduler {
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
+            maxPrefillTokensPerIteration: 128, maxPromptChunkTokens: 64,
+            referencePrefillStepSize: DeepseekV4ContinuousBatchBackend.prefillChunkTokens,
+            tokenDeliveryBufferLimit: 64,
+            snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            backend: backend, replayAuthority: TestReplayAuthority()
+        )
+        let installed = await scheduler.installLabBatchComposition(["running", "long"])
+        XCTAssertTrue(installed)
+        return scheduler
+    }
+
+    func testDeepseekV4PrefillPauseStride() {
+        XCTAssertFalse(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 0))
+        XCTAssertFalse(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 1))
+        XCTAssertFalse(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 2))
+        XCTAssertFalse(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 3))
+        XCTAssertTrue(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 4))
+        XCTAssertFalse(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 5))
+        XCTAssertTrue(DeepseekV4ContinuousBatchBackend.prefillTilePauses(tileIndex: 8))
+    }
+
     private static let modelID = "mlx-community/Qwen-Test"
     private static let modelSHA = String(repeating: "a", count: 64)
     private static let tokenizerSHA = String(repeating: "b", count: 64)
@@ -10615,6 +10883,116 @@ private actor SecondDecodeGateBackend: ContinuousBatchSchedulerBackend {
 
     func cancelInFlight() async {}
     func decodeCallCount() -> Int { decodeCalls }
+}
+
+/// Yields two scripted decode steps from inside the long row's prefill.
+/// The running row's script is indexed by generated-token count, the same
+/// cursor the real backend advances across pauses.
+private final class PrefillPauseFinishLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: [String] = []
+
+    func append(_ id: String) {
+        lock.lock()
+        ids.append(id)
+        lock.unlock()
+    }
+
+    func contains(_ id: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ids.contains(id)
+    }
+}
+
+private actor PrefillPauseBackend: ContinuousBatchSchedulerBackend {
+    private let scripts: [String: [Int]]
+    private let pauseGate: AsyncGate?
+    private let failingRequestIDs: Set<String>
+    private let finishLog: PrefillPauseFinishLog?
+    private var armed: [ContinuousBatchPrefillPauseRow] = []
+    private var sink: (@Sendable ([ContinuousBatchPrefillPauseStep]) -> Void)?
+    private var pauseCalls = 0
+    private var armedIDs: [[String]] = []
+    private var prefillLog: [(id: String, tokens: Int)] = []
+
+    init(
+        scripts: [String: [Int]],
+        pauseGate: AsyncGate? = nil,
+        failingRequestIDs: Set<String> = [],
+        finishLog: PrefillPauseFinishLog? = nil
+    ) {
+        self.scripts = scripts
+        self.pauseGate = pauseGate
+        self.failingRequestIDs = failingRequestIDs
+        self.finishLog = finishLog
+    }
+
+    nonisolated func finish(requestID: String) {
+        finishLog?.append(requestID)
+    }
+
+    func armPrefillDecodePause(
+        _ rows: [ContinuousBatchPrefillPauseRow],
+        sink: @escaping @Sendable ([ContinuousBatchPrefillPauseStep]) -> Void
+    ) async {
+        armed = rows
+        self.sink = rows.isEmpty ? nil : sink
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        prefillLog.append(contentsOf: rows.map { ($0.requestID, $0.promptTokens.count) })
+        if let sink, !armed.isEmpty {
+            armedIDs.append(armed.map(\.input.requestID))
+            var current = armed
+            for _ in 0..<2 {
+                let steps = current.map { row -> ContinuousBatchPrefillPauseStep in
+                    if failingRequestIDs.contains(row.input.requestID) {
+                        return ContinuousBatchPrefillPauseStep(
+                            requestID: row.input.requestID, token: 0,
+                            failureCode: "continuous_batching_row_sampling_failed")
+                    }
+                    let script = scripts[row.input.requestID] ?? [0]
+                    let token = script[min(row.input.generatedTokens.count, script.count - 1)]
+                    return ContinuousBatchPrefillPauseStep(requestID: row.input.requestID, token: token)
+                }
+                pauseCalls += 1
+                sink(steps)
+                if pauseCalls == 1, let pauseGate {
+                    await pauseGate.wait()
+                }
+                current = current.compactMap { row -> ContinuousBatchPrefillPauseRow? in
+                    if failingRequestIDs.contains(row.input.requestID) { return nil }
+                    guard row.stepsLeft > 1 else { return nil }
+                    let script = scripts[row.input.requestID] ?? [0]
+                    let token = script[min(row.input.generatedTokens.count, script.count - 1)]
+                    return ContinuousBatchPrefillPauseRow(
+                        input: row.input.advanced(token: token), stepsLeft: row.stepsLeft - 1)
+                }
+                if current.isEmpty { break }
+            }
+        }
+        return rows.map { row in
+            ContinuousBatchPrefillOutput(
+                requestID: row.requestID,
+                sampledToken: row.sampleFirstToken ? (scripts[row.requestID]?.first ?? 0) : nil
+            )
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        rows.map { row in
+            let script = scripts[row.requestID] ?? [0]
+            let token = script[min(row.generatedTokens.count, script.count - 1)]
+            return .output(ContinuousBatchDecodeOutput(requestID: row.requestID, token: token))
+        }
+    }
+
+    func cancelInFlight() async {}
+
+    func pauseCallCount() -> Int { pauseCalls }
+    func armedRequestIDs() -> [[String]] { armedIDs }
+    func prefillChunks(id: String) -> [Int] { prefillLog.filter { $0.id == id }.map(\.tokens) }
 }
 
 private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {

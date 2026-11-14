@@ -12,6 +12,15 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
     static let maxDecodeRows = 8
     static let prefillChunkTokens = DeepseekV4Model.prefillStepSize
     static let nativeMTPDrafterColumnCap = 1_024
+    /// One ordinary decode step of the running rows after this many evaluated
+    /// prefill tiles. The tiles between pauses stay one ahead. The reference
+    /// chunk is not split: a smaller token chunk changes expert and projection
+    /// reductions.
+    static let prefillDecodePauseTileStride = 4
+
+    static func prefillTilePauses(tileIndex: Int) -> Bool {
+        tileIndex > 0 && tileIndex.isMultiple(of: prefillDecodePauseTileStride)
+    }
     private struct Row {
         var caches: [KVCache]
         var tokenCount: Int
@@ -34,6 +43,10 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
     private var rows: [String: Row] = [:]
     private var active: Set<String> = []
     private var cancelled = false
+    private var prefillPauseRows: [ContinuousBatchPrefillPauseRow] = []
+    private var prefillPauseSink: (@Sendable ([ContinuousBatchPrefillPauseStep]) -> Void)?
+    private var prefillPauseTiles = 0
+    private var prefillPauseModel: DeepseekV4Model?
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labRoundObserver: (@Sendable (String, Int, Int) -> Void)?
 
@@ -77,9 +90,23 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         return Row(caches: try model.newCache(parameters: nil), tokenCount: 0)
     }
 
-    private func commit(_ row: Row, id: String) {
+    /// False when the row was already retired. Callers that arm the next
+    /// pause must not put a retired row back.
+    private func commit(_ row: Row, id: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if !cancelled && active.contains(id) { rows[id] = row }
+        guard !cancelled, active.contains(id) else { return false }
+        rows[id] = row
+        return true
+    }
+
+    func armPrefillDecodePause(
+        _ rows: [ContinuousBatchPrefillPauseRow],
+        sink: @escaping @Sendable ([ContinuousBatchPrefillPauseStep]) -> Void
+    ) async {
+        lock.lock()
+        prefillPauseRows = rows
+        prefillPauseSink = rows.isEmpty ? nil : sink
+        lock.unlock()
     }
 
     func prefill(rows inputs: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -88,6 +115,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             guard let model = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }
+            let pauseArmed = self.installPrefillPause(model: model)
+            defer { if pauseArmed { self.clearPrefillPause() } }
             // Keep the reference serial prefill partition for each row.
             var outputs: [ContinuousBatchPrefillOutput] = []
             for input in inputs {
@@ -135,6 +164,126 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             Memory.clearCache()
             return outputs
         }
+    }
+
+    private func installPrefillPause(model: DeepseekV4Model) -> Bool {
+        lock.lock()
+        let armed = prefillPauseSink != nil && !prefillPauseRows.isEmpty
+        lock.unlock()
+        guard armed else { return false }
+        prefillPauseTiles = 0
+        prefillPauseModel = model
+        deepseekV4PrefillShouldPause = { self.prefillTileShouldPause() }
+        deepseekV4PrefillPause = { self.pausePrefillForDecode() }
+        return true
+    }
+
+    private func clearPrefillPause() {
+        deepseekV4PrefillShouldPause = nil
+        deepseekV4PrefillPause = nil
+        prefillPauseModel = nil
+        prefillPauseTiles = 0
+    }
+
+    private func prefillTileShouldPause() -> Bool {
+        prefillPauseTiles += 1
+        return Self.prefillTilePauses(tileIndex: prefillPauseTiles)
+    }
+
+    /// One ordinary decode step on the rows armed before this prefill. Runs
+    /// only after the calling tile has been evaluated, and only on those rows'
+    /// caches. The prefill forward's tokens are unchanged.
+    private func pausePrefillForDecode() {
+        guard let model = prefillPauseModel else { return }
+        lock.lock()
+        let rows = prefillPauseRows
+        let sink = prefillPauseSink
+        lock.unlock()
+        guard let sink, !rows.isEmpty else { return }
+        do {
+            let (steps, remaining) = try sampleOneOrdinaryStep(model: model, rows: rows)
+            lock.lock()
+            prefillPauseRows = remaining.filter { active.contains($0.input.requestID) }
+            lock.unlock()
+            if !steps.isEmpty { sink(steps) }
+        } catch {
+            lock.lock()
+            prefillPauseRows = []
+            prefillPauseSink = nil
+            lock.unlock()
+        }
+    }
+
+    private func sampleOneOrdinaryStep(
+        model: DeepseekV4Model,
+        rows: [ContinuousBatchPrefillPauseRow]
+    ) throws -> (steps: [ContinuousBatchPrefillPauseStep], remaining: [ContinuousBatchPrefillPauseRow]) {
+        guard model.batchesExactly else {
+            throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_hisa_not_batch_exact")
+        }
+        var steps: [ContinuousBatchPrefillPauseStep] = []
+        var eligible: [(ContinuousBatchPrefillPauseRow, Row)] = []
+        for armed in rows where armed.stepsLeft > 0 && !armed.input.captureNativeMTPDrafterColumns
+            && armed.input.grammarConstraint == nil && armed.input.presencePenalty == 0
+            && armed.input.frequencyPenalty == 0 {
+            let input = armed.input
+            let (expectedTarget, overflow) = input.committedKVTokenCount.addingReportingOverflow(1)
+            guard !overflow, input.targetKVTokenCount == expectedTarget,
+                  ContinuousBatchRowSampler.supports(temperature: input.temperature, topP: input.topP),
+                  let row = try? ownedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
+            else {
+                finish(requestID: input.requestID)
+                steps.append(ContinuousBatchPrefillPauseStep(
+                    requestID: input.requestID, token: 0,
+                    failureCode: "continuous_batching_row_sampling_failed"))
+                continue
+            }
+            eligible.append((armed, row))
+        }
+        guard !eligible.isEmpty else { return (steps, []) }
+        let tokens = MLXArray(eligible.map { Int32($0.0.input.currentToken) }).reshaped([eligible.count, 1])
+        let output = model.decodeBatchOutput(
+            tokens, rowCaches: eligible.map(\.1.caches), emitMTPState: false)
+        let sampledArray = ContinuousBatchRowSampler.sample(
+            logits: output.logits[0..., -1, 0...],
+            rows: eligible.map {
+                let input = $0.0.input
+                return .init(
+                    temperature: input.temperature, topP: input.topP, samplerSeed: input.samplerSeed,
+                    samplerStep: input.samplerStep, grammarConstraint: nil)
+            })
+        asyncEval([sampledArray] + eligible.flatMap { $0.1.caches.flatMap(\.state) })
+        let sampled = sampledArray.asArray(Int.self)
+        guard sampled.count == eligible.count else {
+            for item in eligible {
+                finish(requestID: item.0.input.requestID)
+                steps.append(ContinuousBatchPrefillPauseStep(
+                    requestID: item.0.input.requestID, token: 0,
+                    failureCode: "deepseek_v4_prefill_pause_decode_failed"))
+            }
+            return (steps, [])
+        }
+        var remaining: [ContinuousBatchPrefillPauseRow] = []
+        for (index, item) in eligible.enumerated() {
+            let token = sampled[index]
+            let input = item.0.input
+            let history = input.generatedTokens + [token]
+            let stopped = input.stopTokenSequences.contains {
+                !$0.isEmpty && history.suffix($0.count).elementsEqual($0)
+            }
+            if stopped {
+                finish(requestID: input.requestID)
+            } else {
+                var row = item.1
+                row.tokenCount += 1
+                if commit(row, id: input.requestID), item.0.stepsLeft > 1 {
+                    remaining.append(ContinuousBatchPrefillPauseRow(
+                        input: input.advanced(token: token), stepsLeft: item.0.stepsLeft - 1))
+                }
+            }
+            steps.append(ContinuousBatchPrefillPauseStep(requestID: input.requestID, token: token))
+        }
+        return (steps, remaining)
     }
 
     func decode(rows inputs: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -688,6 +837,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         rows.removeValue(forKey: requestID)
         nativeTransactions.removeValue(forKey: requestID)
         active.remove(requestID)
+        prefillPauseRows.removeAll { $0.input.requestID == requestID }
     }
 
     func cancelInFlight() async {

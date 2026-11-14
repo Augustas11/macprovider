@@ -1,11 +1,19 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.53
+Version: v0.3.54
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.54 (2026-11-14, DeepSeek V4 prefill yields between tiles, Related: #2352):**
+While a `deepseek_v4` reference chunk stays one forward, ordinary rows that
+are already decoding may take one decode step between evaluated prefill
+tiles. Those steps are separate decode forwards. The prefill token span is
+unchanged, and decode tokens are not part of that forward. Grammar rows,
+native-MTP rows, and rows with a non-zero presence or frequency penalty do
+not take these steps.
+
 **Change log v0.3.53 (2026-11-14, `probe_shape_unavailable` settles the small-row route, Related: #2325):**
 FR-CB9: `probe_shape_unavailable` (configured rows >= 2 but not even two
 exactness-probe rows fit the served context or the paged-KV pool) now settles
@@ -1213,6 +1221,11 @@ prompt rows in a shared forward, or repartition this row using the generic
 next reference chunk without shortening it; incompatible configured limits
 MUST use serial fallback or a reason-coded refusal. Pooling boundaries are
 part of correctness, so changing this partition requires new exactness proof.
+While that chunk is one forward, ordinary rows already decoding may take one
+decode step between evaluated prefill tiles. Each such step is its own decode
+forward: its tokens are not mixed into the prefill, and the prefill token
+span is unchanged. Grammar rows, native-MTP rows, and rows with a non-zero
+presence or frequency penalty do not take these steps.
 
 DeepSeek decode MUST share model projections across compatible rows while
 each row retains its own absolute token offset, compression-ratio-4 and

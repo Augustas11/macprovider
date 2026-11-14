@@ -1309,6 +1309,31 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// boundary: the rest of the window advances its recurrent state past the
     /// stop, and recurrent state cannot be trimmed (SPEC-038 FR-CB2).
     var stopTokenSequences: [[Int]] = []
+
+    /// The same row one sampled token later. Pause steps carry this forward
+    /// without refreshing the block table: the V4 backend reads row caches,
+    /// and the scheduler extends the reservation when it applies the token.
+    func advanced(token: Int) -> ContinuousBatchDecodeInput {
+        ContinuousBatchDecodeInput(
+            requestID: requestID,
+            currentToken: token,
+            generatedTokens: generatedTokens + [token],
+            promptTokens: promptTokens,
+            samplerSeed: samplerSeed,
+            temperature: temperature,
+            topP: topP,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            binding: binding,
+            blockTable: blockTable,
+            committedKVTokenCount: committedKVTokenCount + 1,
+            targetKVTokenCount: targetKVTokenCount + 1,
+            samplerStep: samplerStep + 1,
+            grammarConstraint: nil,
+            captureNativeMTPDrafterColumns: false,
+            stopTokenSequences: stopTokenSequences
+        )
+    }
 }
 
 struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
@@ -1553,6 +1578,24 @@ struct ContinuousBatchDecodeWindowStep: Sendable, Equatable {
 /// `stepIndex + 1` tokens) and must not record those rows' state.
 typealias ContinuousBatchDecodeWindowStepObserver = @Sendable (ContinuousBatchDecodeWindowStep) -> Bool
 
+/// One ordinary decode token sampled while another row's reference prefill
+/// still holds the model. The scheduler applies it before that prefill returns.
+/// `failureCode` retires the row with no delivery: the backend has already
+/// dropped that row's cache.
+struct ContinuousBatchPrefillPauseStep: Sendable {
+    var requestID: String
+    var token: Int
+    var failureCode: String? = nil
+}
+
+/// A running ordinary row the backend may decode once per prefill-tile pause.
+/// `stepsLeft` is the row's remaining output budget, counted by the backend
+/// so a later pause cannot sample past it before the scheduler runs.
+struct ContinuousBatchPrefillPauseRow: Sendable {
+    var input: ContinuousBatchDecodeInput
+    var stepsLeft: Int
+}
+
 protocol ContinuousBatchSchedulerBackend: Sendable {
     /// Prefill commits the whole prompt. The final chunk samples the first
     /// generated token from its last-position logits so the prompt partition
@@ -1647,6 +1690,14 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     func finish(requestID: String)
     /// Returns only after in-flight calls have stopped accessing row bindings.
     func cancelInFlight() async
+    /// Arm ordinary rows that may take one decode step at a prefill-tile
+    /// boundary inside the next `prefill`. An empty list clears the arm.
+    /// The sink runs on the model thread, once per yielded step, while
+    /// `prefill` is still in progress. The default does nothing.
+    func armPrefillDecodePause(
+        _ rows: [ContinuousBatchPrefillPauseRow],
+        sink: @escaping @Sendable ([ContinuousBatchPrefillPauseStep]) -> Void
+    ) async
     /// Flattened prompt tokens (rows x chunk) one shared prefill forward may
     /// carry, or nil for no bound. A prefill group past it runs each row in
     /// its own forward, back to back, and returns after the last one
@@ -1666,6 +1717,11 @@ protocol ContinuousBatchRetainedCacheBridge: Sendable {
 }
 
 extension ContinuousBatchSchedulerBackend {
+    func armPrefillDecodePause(
+        _ rows: [ContinuousBatchPrefillPauseRow],
+        sink: @escaping @Sendable ([ContinuousBatchPrefillPauseStep]) -> Void
+    ) async {}
+
     var prefillForwardTokenCap: Int? { nil }
 
     func proposeNativeMTPPackedRound(
@@ -2576,11 +2632,27 @@ actor ContinuousBatchScheduler {
     #if DEBUG
     private var testDecodeStepsAreNoOps = false
     func setTestDecodeStepsAreNoOps(_ value: Bool) { testDecodeStepsAreNoOps = value }
+    /// Cancels this request after `beginDecodeStep` of its next pause token
+    /// and before that token is delivered. Tests the in-flight release order.
+    private var testCancelDuringPauseExtendRequestID: String?
+    func setTestCancelDuringPauseExtend(_ requestID: String?) {
+        testCancelDuringPauseExtendRequestID = requestID
+    }
+    /// Cancels this request inside `finishTerminal`, before block release.
+    /// The pause fence must still be up across that await.
+    private var testCancelAtTerminalReleaseRequestID: String?
+    func setTestCancelAtTerminalRelease(_ requestID: String?) {
+        testCancelAtTerminalReleaseRequestID = requestID
+    }
     #endif
     private var nativeMTPRoundByteReservations: [UUID: Int] = [:]
     private var activePrompt: [String: Row] = [:]
     private var promptOrder: [String] = []
     private var activeDecode: [String: Row] = [:]
+    /// Terminal rows produced by a prefill-tile pause. Finished only after
+    /// that prefill returns: completing one here would re-enter the model
+    /// container the prefill still holds.
+    private var prefillPauseCompletions: [(requestID: String, completion: DecodeRowCompletion)] = []
     private var requestWaiters: [String: [Waiter]] = [:]
     private var knownRequests: [String: RequestFingerprint] = [:]
     // Row dictionaries may lose an entry before its awaited native release.
@@ -2848,6 +2920,12 @@ actor ContinuousBatchScheduler {
         // running window has a decided outcome, as it would have had the token
         // been applied at a one-step hop boundary; the window boundary applies it.
         if streamedWindowRows[requestID]?.completion != nil {
+            return
+        }
+        // A pause step that already decided length, stop, or failure is the
+        // same fence. The token was delivered; the terminal is applied when
+        // prefill returns. Recording a cancel here would rewrite it.
+        if prefillPauseCompletions.contains(where: { $0.requestID == requestID }) {
             return
         }
         cancelledIDs.insert(requestID)
@@ -5719,6 +5797,231 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    /// Ordinary rows already decoding, in admission order, capped at the V4
+    /// decode width. Native MTP, grammar, and penalty rows stay on the
+    /// official decode step: a pause samples one ordinary forward only.
+    private func prefillPauseDecodeInputs() async -> [ContinuousBatchPrefillPauseRow] {
+        guard configuration.referencePrefillStepSize != nil else { return [] }
+        let rows = activeDecode.values.filter { row in
+            !row.usesNativeMTP
+                && row.request.grammarConstraint == nil
+                && row.request.presencePenalty == 0
+                && row.request.frequencyPenalty == 0
+                && remainingDecodeOutputTokens(for: row) > 0
+        }.sorted { admissionPrecedes($0.request.id, $1.request.id) }
+        var armed: [ContinuousBatchPrefillPauseRow] = []
+        for row in rows.prefix(DeepseekV4ContinuousBatchBackend.maxDecodeRows) {
+            let committed = row.request.promptTokens.count - 1 + row.generatedTokens.count
+            let (target, overflow) = committed.addingReportingOverflow(1)
+            guard !overflow else { continue }
+            do {
+                let binding = try await allocator.binding(for: row.handle)
+                armed.append(ContinuousBatchPrefillPauseRow(
+                    input: ContinuousBatchDecodeInput(
+                        requestID: row.request.id,
+                        currentToken: row.currentToken,
+                        generatedTokens: row.generatedTokens,
+                        promptTokens: row.request.promptTokens,
+                        samplerSeed: row.request.samplerSeed,
+                        temperature: row.request.temperature,
+                        topP: row.request.topP,
+                        presencePenalty: row.request.presencePenalty,
+                        frequencyPenalty: row.request.frequencyPenalty,
+                        binding: binding,
+                        blockTable: binding.currentTable,
+                        committedKVTokenCount: committed,
+                        targetKVTokenCount: target,
+                        samplerStep: row.generatedTokens.count,
+                        grammarConstraint: nil,
+                        captureNativeMTPDrafterColumns: false,
+                        stopTokenSequences: row.request.stopTokenSequences
+                    ),
+                    stepsLeft: remainingDecodeOutputTokens(for: row)
+                ))
+            } catch {
+                continue
+            }
+        }
+        return armed
+    }
+
+    private func endPrefillDecodePause(
+        _ continuation: AsyncStream<[ContinuousBatchPrefillPauseStep]>.Continuation,
+        consumer: Task<Void, Never>,
+        armed: Bool
+    ) async {
+        continuation.finish()
+        await consumer.value
+        await finishPrefillPauseCompletions()
+        if armed {
+            await backend.armPrefillDecodePause([]) { _ in }
+        }
+    }
+
+    /// Applies tokens the backend sampled between prefill tiles. The block
+    /// extension happens here, after the GPU step, because the pause runs
+    /// inside the model container. A failed extension drops the row: the
+    /// backend cache is already one token ahead and must not be decoded again.
+    /// `extend` and `beginDecodeStep` suspend this actor, so a cancel that
+    /// lands there is read again before the token is delivered. A begun step
+    /// is ended before the row is released.
+    private func applyPrefillPauseSteps(_ steps: [ContinuousBatchPrefillPauseStep]) async {
+        if cleanupFailedClosed || backendCancellationPending { return }
+        var occurrences: [String: Int] = [:]
+        for step in steps {
+            occurrences[step.requestID, default: 0] += 1
+        }
+        let duplicated = Set(occurrences.filter { $0.value > 1 }.map(\.key))
+        for requestID in duplicated.sorted() {
+            await failPrefillPauseRow(requestID, code: "continuous_batching_invalid_decode_token")
+            if cleanupFailedClosed { return }
+        }
+        // One pause yield is one decode hop. Count it the way runDecodeStep
+        // does, and close an open full-width cohort run when this hop is not
+        // the whole cohort, before the new tokens land.
+        let participants = steps.compactMap { step -> Row? in
+            if duplicated.contains(step.requestID) || step.failureCode != nil { return nil }
+            if prefillPauseCompletions.contains(where: { $0.requestID == step.requestID }) { return nil }
+            if cancelledIDs.contains(step.requestID) { return nil }
+            return activeDecode[step.requestID]
+        }
+        if !participants.isEmpty {
+            noteSelfCheckCohortDecodeStep(rows: participants)
+            servedPathDecodeSteps &+= 1
+            servedPathActiveRowSum &+= UInt64(activeDecode.count + activePrompt.count)
+        }
+        for step in steps {
+            if duplicated.contains(step.requestID) { continue }
+            if prefillPauseCompletions.contains(where: { $0.requestID == step.requestID }) { continue }
+            if let code = step.failureCode {
+                await failPrefillPauseRow(step.requestID, code: code)
+                if cleanupFailedClosed { return }
+                continue
+            }
+            switch await prefillPauseInterrupt(step.requestID, stepBegun: false) {
+            case .stop: return
+            case .row: continue
+            case .none: break
+            }
+            guard let row = activeDecode[step.requestID] else { continue }
+            guard (0..<configuration.vocabularySize).contains(step.token) else {
+                await failPrefillPauseRow(step.requestID, code: "continuous_batching_invalid_decode_token")
+                if cleanupFailedClosed { return }
+                continue
+            }
+            do {
+                _ = try await allocator.extend(row.handle, by: 1)
+            } catch {
+                record(.localExtensionFailed)
+                await failPrefillPauseRow(step.requestID, code: "continuous_batching_block_extension_failed")
+                if cleanupFailedClosed { return }
+                continue
+            }
+            switch await prefillPauseInterrupt(step.requestID, stepBegun: false) {
+            case .stop: return
+            case .row: continue
+            case .none: break
+            }
+            guard let begun = activeDecode[step.requestID] else { continue }
+            do {
+                try await allocator.beginDecodeStep(begun.handle)
+            } catch {
+                record(.localPreparationFailed)
+                await failPrefillPauseRow(step.requestID, code: "continuous_batching_decode_prepare_failed")
+                if cleanupFailedClosed { return }
+                continue
+            }
+            #if DEBUG
+            if testCancelDuringPauseExtendRequestID == step.requestID {
+                testCancelDuringPauseExtendRequestID = nil
+                cancel(requestID: step.requestID)
+            }
+            #endif
+            switch await prefillPauseInterrupt(step.requestID, stepBegun: true) {
+            case .stop: return
+            case .row: continue
+            case .none: break
+            }
+            guard let live = activeDecode[step.requestID] else { continue }
+            rowProgressEvents &+= 1
+            let completion = advanceDecodeRow(step.token, requestID: step.requestID)
+            if let completion {
+                prefillPauseCompletions.append((requestID: step.requestID, completion: completion))
+            }
+            guard await endDecodeStep(live.handle) else {
+                prefillPauseCompletions.removeAll { $0.requestID == step.requestID }
+                return
+            }
+            if completion == nil {
+                switch await prefillPauseInterrupt(step.requestID, stepBegun: false) {
+                case .stop: return
+                case .row, .none: break
+                }
+            }
+        }
+    }
+
+    /// A cancel or fail-closed that landed during an allocator await. The
+    /// token is not delivered. `stepBegun` means `beginDecodeStep` succeeded,
+    /// so the in-flight count has to drop before `release`.
+    private func prefillPauseInterrupt(_ requestID: String, stepBegun: Bool) async -> PrefillPauseInterrupt {
+        let closed = cleanupFailedClosed || backendCancellationPending
+        let cancelled = cancelledIDs.contains(requestID)
+        guard let row = activeDecode[requestID] else {
+            if stepBegun {
+                cleanupFailedClosed = true
+                record(.cleanupFailed)
+                return .stop
+            }
+            return closed ? .stop : .row
+        }
+        if !closed && !cancelled { return .none }
+        if stepBegun {
+            guard await endDecodeStep(row.handle) else { return .stop }
+        }
+        if closed { return .stop }
+        await failPrefillPauseRow(requestID, code: "request_cancelled", status: .cancelled)
+        return cleanupFailedClosed ? .stop : .row
+    }
+
+    private enum PrefillPauseInterrupt {
+        case none
+        case row
+        case stop
+    }
+
+    private func finishPrefillPauseCompletions() async {
+        // The id stays in this list until `completeDecodeRow` returns.
+        // `finishTerminal` awaits release; `cancel()` must still see the
+        // fence during that hop, or it rewrites a decided length or stop.
+        while let item = prefillPauseCompletions.first {
+            await completeDecodeRow(item.requestID, item.completion)
+            prefillPauseCompletions.removeAll { $0.requestID == item.requestID }
+            if cleanupFailedClosed { return }
+        }
+    }
+
+    private func failPrefillPauseRow(
+        _ requestID: String,
+        code: String,
+        status: ContinuousBatchSchedulerTerminalStatus = .requestFailed
+    ) async {
+        guard let removed = activeDecode.removeValue(forKey: requestID) else { return }
+        // Drop the backend row before token delivery drains. Otherwise later
+        // prefill tiles keep decoding it. `finish` is lock-only and idempotent
+        // with the terminal delivery's later call.
+        backend.finish(requestID: requestID)
+        let released = await release(removed.handle)
+        if released && status == .cancelled {
+            cancelledIDs.remove(requestID)
+        }
+        finish(
+            removed,
+            status: released ? status : .requestFailed,
+            errorCode: released ? code : "continuous_batching_cleanup_failed"
+        )
+    }
+
     /// Appends one sampled token, applies stop filtering, and delivers the
     /// tokens that became visible. Returns how the row must leave decode, if
     /// it must; the caller performs that release/finish.
@@ -5878,6 +6181,12 @@ actor ContinuousBatchScheduler {
             return
         }
         let serialCache = await materializeSerialConversationCache(for: row)
+        #if DEBUG
+        if testCancelAtTerminalReleaseRequestID == row.request.id {
+            testCancelAtTerminalReleaseRequestID = nil
+            cancel(requestID: row.request.id)
+        }
+        #endif
         let released = await release(row.handle)
         if cancelledIDs.remove(row.request.id) != nil {
             finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
@@ -6404,6 +6713,18 @@ actor ContinuousBatchScheduler {
         guard !prepared.isEmpty else { return false }
 
         prefillCalls += 1
+        let pauseInputs = await prefillPauseDecodeInputs()
+        let (pauseStream, pauseContinuation) = AsyncStream<[ContinuousBatchPrefillPauseStep]>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        if !pauseInputs.isEmpty {
+            await backend.armPrefillDecodePause(pauseInputs) { pauseContinuation.yield($0) }
+        }
+        let pauseConsumer = Task {
+            for await steps in pauseStream {
+                await self.applyPrefillPauseSteps(steps)
+            }
+        }
         let outputs: [ContinuousBatchPrefillOutput]
         do {
             let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
@@ -6411,6 +6732,8 @@ actor ContinuousBatchScheduler {
             CBTrace.log(nil, "hop_prefill rows=\(prepared.count) tokens=\(prepared.reduce(0) { $0 + $1.chunkCount }) ms=\((DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000) decode_rows=\(activeDecode.count)")
             try validatePrefillOutputStructure(outputs, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
+            await endPrefillDecodePause(pauseContinuation, consumer: pauseConsumer, armed: !pauseInputs.isEmpty)
+            if cleanupFailedClosed { return true }
             record(.prefillFailed)
             ContinuousBatchingPolicy.logPrefillFailed(error)
             for item in prepared {
@@ -6422,6 +6745,8 @@ actor ContinuousBatchScheduler {
             }
             return true
         }
+        await endPrefillDecodePause(pauseContinuation, consumer: pauseConsumer, armed: !pauseInputs.isEmpty)
+        if cleanupFailedClosed { return true }
 
         let byID = Dictionary(uniqueKeysWithValues: outputs.map { ($0.requestID, $0) })
         for item in prepared {
