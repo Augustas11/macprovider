@@ -113,6 +113,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend and --apply (or --prefetch --prefetch-receipt), re-tune a stale recommendation over every signed row that fits this Mac and switch only to a strictly better admitted model.")
     var upgrade = false
 
+    @Flag(help: "With --upgrade, run as the provider's unattended check: wait for this provider's stagger offset after a catalog release, and retry the same catalog and binary at most once a day.")
+    var unattended = false
+
     @Flag(help: "With --recommend --check-only, emit model_recommendation_check_event.v1 progress frames before the final recommendation JSON.")
     var progressJSON = false
 
@@ -938,6 +941,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                 throw ValidationError("--upgrade --donor-mode requires --prefetch-receipt")
             }
         }
+        if unattended && (!upgrade || !apply || prefetchReceipt != nil) {
+            throw ValidationError("--unattended requires --upgrade --apply without --prefetch-receipt")
+        }
         if checkOnly && !recommend {
             throw ValidationError("--check-only requires --recommend")
         }
@@ -1127,7 +1133,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 candidateCatalogSHA256: catalogSHA
             )
             let receiptModelIDs = Set(validated.values.map(\.modelID))
-            // SPEC-023-R028: an upgrade benchmarks exactly the receipt's rows.
+            // SPEC-023-R029: an upgrade benchmarks exactly the receipt's rows.
             if upgrade {
                 candidateModelFilter = receiptModelIDs
             }
@@ -1150,7 +1156,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         } else {
             upgradeIncumbentKey = nil
         }
-        // R028 step 6: on every exit after this point, remove what this run
+        // R029 step 6: on every exit after this point, remove what this run
         // downloaded except the incumbent and a switch target.
         var upgradeKeepModelKeys = Set(upgradeIncumbentKey.map { [$0] } ?? [])
         defer {
@@ -1926,7 +1932,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
-    /// SPEC-023-R028 in one process (`malibu-cli update`): freshness, pins,
+    /// SPEC-023-R029 in one process (`malibu-cli update`): freshness, pins,
     /// prefetch while the incumbent serves, idle wait, then the R022-isolated
     /// benchmark and guarded apply over the verified artifacts only.
     private func runModelUpgrade(dependencies: AutotuneRunDependencies) async throws {
@@ -1964,6 +1970,32 @@ struct AutotuneCommand: AsyncParsableCommand {
         let fingerprint = MachineFingerprinter().sample()
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig.providerID)
+        if unattended {
+            let catalogSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes)
+            let now = Date()
+            let gate = AutotuneModelUpgrade.unattendedGate(
+                now: now,
+                catalogGeneratedAt: inputs.candidate.value.generatedAt,
+                catalogSHA256: catalogSHA256,
+                binaryVersion: CoordinatorClient.binaryVersion,
+                providerKey: identity.diversificationID,
+                lastAttempt: AutotuneModelUpgrade.readAttempt()
+            )
+            switch gate {
+            case let .staggered(until):
+                print("model_upgrade: staggered until \(ISO8601DateFormatter.autotuneInternet.string(from: until)); the current model keeps serving")
+                return
+            case let .retryLater(until):
+                print("model_upgrade: already tried this catalog; next try after \(ISO8601DateFormatter.autotuneInternet.string(from: until))")
+                return
+            case .proceed:
+                AutotuneModelUpgrade.writeAttempt(AutotuneModelUpgrade.AttemptRecord(
+                    catalogSHA256: catalogSHA256,
+                    binaryVersion: CoordinatorClient.binaryVersion,
+                    attemptedAt: now
+                ))
+            }
+        }
         let receipt = try await Self.modelUpgradePrefetchReceipt(
             catalog: inputs.candidate,
             demandRank: inputs.demand.value,
@@ -1991,7 +2023,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
-    /// R028 step 3: the live provider is stopped only after it reports zero
+    /// R029 step 3: the live provider is stopped only after it reports zero
     /// in-flight and queued requests; a provider still busy at the ceiling is
     /// left serving (exit 75). The R022 isolation then stops it and restarts
     /// it on every exit of `operation`: success, failure or interrupt.
@@ -2016,7 +2048,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         )
     }
 
-    /// SPEC-023-R028 steps 1-2: plan the incumbent plus every row that fits
+    /// SPEC-023-R029 steps 1-2: plan the incumbent plus every row that fits
     /// this Mac (only the incumbent for a pinned config), prefetch and verify
     /// them while the incumbent serves, and drop rows that fail.
     static func modelUpgradePrefetchReceipt(
@@ -2064,8 +2096,15 @@ struct AutotuneCommand: AsyncParsableCommand {
         FileHandle.standardError.write(Data(
             "model_upgrade: prefetching \(modelIDs.count) signed candidate(s) while the current provider keeps serving\n".utf8
         ))
-        let resolver = benchmarker?.artifactResolver ?? CachedModelArtifactResolver.forConfig(resolvedConfig)
-        let outcome = try await (benchmarker ?? AutotuneRecommendationBenchmarker(artifactResolver: resolver)).prefetchArtifacts(
+        var resolver = benchmarker?.artifactResolver ?? CachedModelArtifactResolver.forConfig(resolvedConfig)
+        let capBytes = AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: hardware.memoryGB)
+        resolver.downloader.runDownloadBudget = RunDownloadBudget(limitBytes: capBytes)
+        FileHandle.standardError.write(Data(
+            "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB\n".utf8
+        ))
+        var prefetcher = benchmarker ?? AutotuneRecommendationBenchmarker()
+        prefetcher.artifactResolver = resolver
+        let outcome = try await prefetcher.prefetchArtifacts(
             candidateCatalog: catalog.value,
             hardware: hardware,
             candidateModelIDs: modelIDs,

@@ -135,7 +135,7 @@ done
 if [ "$command" = "autotune" ] && [ "$subcommand_arg" = "--help" ]; then
   printf 'USAGE: macprovider-cli autotune [--recommend] [--prefetch] [--apply]\n'
   if [ "${FAKE_CLI_SUPPORTS_UPGRADE:-1}" = "1" ]; then
-    printf '  --upgrade   re-tune a stale recommendation (SPEC-023-R028)\n'
+    printf '  --upgrade   re-tune a stale recommendation (SPEC-023-R029)\n'
   fi
   exit 0
 fi
@@ -230,7 +230,7 @@ run_fresh_donor_reuse_case() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || die "fresh donor reuse should not auto-start provider"
 }
 
-# SPEC-023-R028: a stale re-tune prefetches the whole signed catalog for the
+# SPEC-023-R029: a stale re-tune prefetches the whole signed catalog for the
 # Mac (the staged CLI plans the rows), never an incumbent-only allowlist.
 run_upgrade_prefetch_case() {
   : > "$FAKE_CLI_LOG"
@@ -248,7 +248,7 @@ run_upgrade_prefetch_case() {
   fi
 }
 
-# A staged release older than R028 has no --upgrade; keep the incumbent-only
+# A staged release older than R029 has no --upgrade; keep the incumbent-only
 # prefetch instead of failing the install on an unknown flag.
 run_upgrade_prefetch_legacy_cli_case() {
   : > "$FAKE_CLI_LOG"

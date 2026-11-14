@@ -4051,12 +4051,46 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
+        // SPEC-023-R029: the unattended trigger. A serving provider checks
+        // every few hours whether its recommendation went stale (a new signed
+        // catalog, rate card, demand rank or binary). The detached child keeps
+        // the model unless a strictly better one passes admission, honours
+        // this provider's stagger offset, and restarts the provider itself.
+        let modelUpgradeExecutable = serveMarkerStore.resolveCanonicalInstallBinary(
+            launchedExecutableURL: Bundle.main.executableURL
+        ) ?? Bundle.main.executableURL
+        let modelUpgradeTask: Task<Void, Never>? = autotuneCandidate ? nil : Task.detached(priority: .utility) {
+            [providerStatus, resolved] in
+            try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedFirstCheckDelaySeconds * 1_000_000_000)
+            while !Task.isCancelled {
+                let suppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
+                    donorMode: resolved.donorMode,
+                    poolModelID: resolved.poolModelID,
+                    autotuneCandidate: false,
+                    operatorPaused: await providerStatus.operatorPauseFence
+                )
+                if let suppression {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=\(suppression)\n".utf8))
+                } else if let modelUpgradeExecutable {
+                    let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/macprovider", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+                    AutotuneModelUpgrade.spawnDetachedUnattendedUpgrade(
+                        executable: modelUpgradeExecutable,
+                        configPath: resolved.configPath,
+                        logPath: logDirectory.appendingPathComponent("model-upgrade.log").path
+                    )
+                }
+                try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedCheckIntervalSeconds * 1_000_000_000)
+            }
+        }
         let terminationHandlers = installTerminationHandlers(
             coordinatorClient: coordinatorClient, controlSocket: controlSocket,
             idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
             cbSelfCheckTask: cbSelfCheckTask
         )
         defer {
+            modelUpgradeTask?.cancel()
             Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
                 await controlSocket?.stop()
@@ -4886,7 +4920,7 @@ struct UpdateCommand: AsyncParsableCommand {
             )
         } else {
             try await updater.run(checkOnly: check)
-            // SPEC-023-R028: after a successful update the installed (now
+            // SPEC-023-R029: after a successful update the installed (now
             // updated) binary runs its own freshness check, because staleness
             // is bound to the binary version this process no longer matches.
             // A stale or missing recommendation re-tunes; the upgrade keeps the

@@ -13455,6 +13455,36 @@
       }
     },
     {
+      "requirement_id": "SPEC-023-R029",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:enum AutotuneModelUpgrade",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:private func runModelUpgrade(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func modelUpgradePrefetchReceipt(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func passesPreBenchmarkGates(",
+        "phase3-binary/dist/install.sh:prefetch_upgrade_autotune_model",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:final class RunDownloadBudget",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func unattendedGate(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func spawnDetachedUnattendedUpgrade(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func unattendedTriggerSuppression("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneModelUpgradeTests.swift:final class AutotuneModelUpgradeTests",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_case",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_legacy_cli_case",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_ignores_fresh_bounds_case"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2367",
+        "rationale": "SPEC-023 v0.22.43 registers the stale-recommendation model upgrade, with a per-run download cap of twice memory and an unattended serve trigger staggered per provider over 48 hours: autotune --recommend --upgrade plans every signed row that fits the Mac, prefetches and verifies while the incumbent serves, waits for zero in-flight requests, benchmarks only verified artifacts under R022 residency, and switches only to a strictly better admitted row; donor-mode, pool-model and unsigned-identity configs keep their model. The installer stale re-tune and malibu-cli update call it. CPU-only decision, pin, prefetch-planning, drain and installer-argument tests are mapped; conformance stays pending until a signed CLI release carries the change and a live provider is observed moving to a better catalog row."
+      }
+    },
+    {
       "requirement_id": "SPEC-042-R015",
       "spec_id": "SPEC-042",
       "state": "pending",

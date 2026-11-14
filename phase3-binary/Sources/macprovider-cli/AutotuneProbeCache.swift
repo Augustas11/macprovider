@@ -101,7 +101,7 @@ struct AutotuneProbeCacheStore {
         return benchmark
     }
 
-    /// SPEC-023-R028 planning: every cached probe that is still admitted for
+    /// SPEC-023-R029 planning: every cached probe that is still admitted for
     /// this Mac, catalog row and binary, whether or not its artifact is on
     /// disk. The upgrade uses these only to order and skip downloads, never as
     /// benchmark evidence.

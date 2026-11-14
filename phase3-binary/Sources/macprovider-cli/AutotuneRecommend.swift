@@ -11,6 +11,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     case candidateProbeFailed(modelKey: String, reason: String)
     case noHMACSecret
     case insufficientDiskSpace(modelID: String, requiredBytes: Int64, availableBytes: Int64)
+    case downloadBudgetExceeded(modelID: String, requiredBytes: Int64, remainingBytes: Int64)
 
     var description: String {
         switch self {
@@ -27,6 +28,9 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
         case .insufficientDiskSpace(let modelID, let requiredBytes, let availableBytes):
             let gb = { (bytes: Int64) in String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
             return "not enough free disk space to download \(modelID): need \(gb(requiredBytes)), \(gb(availableBytes)) available"
+        case .downloadBudgetExceeded(let modelID, let requiredBytes, let remainingBytes):
+            let gb = { (bytes: Int64) in String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
+            return "run download cap reached before \(modelID): need \(gb(requiredBytes)), \(gb(remainingBytes)) left in this run"
         }
     }
 
@@ -35,7 +39,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     var perCandidateSkipReason: String? {
         switch self {
         case .invalidArtifact(let message): return message
-        case .insufficientDiskSpace: return description
+        case .insufficientDiskSpace, .downloadBudgetExceeded: return description
         default: return nil
         }
     }
@@ -2999,7 +3003,7 @@ struct AutotuneRecommendEngine {
 
     /// The §5 paid gates that need no benchmark, the same checks `isEligible`
     /// applies before it reads the benchmark. Keep the two in step. The
-    /// SPEC-023-R028 upgrade plans its prefetch set with this predicate.
+    /// SPEC-023-R029 upgrade plans its prefetch set with this predicate.
     static func passesPreBenchmarkGates(
         candidate: CandidateCatalog.Row,
         demand: DemandRank.Row,
@@ -3880,6 +3884,47 @@ final class ProbeSafetySampleBuffer: @unchecked Sendable {
     }
 }
 
+/// SPEC-023-R029: the byte budget of one model-upgrade run. A snapshot's whole
+/// advertised size is charged before its first byte is fetched; a refused
+/// snapshot charges nothing, and a charged download that later fails keeps its
+/// charge, so the budget bounds what a run can pull, not what it keeps.
+final class RunDownloadBudget: @unchecked Sendable {
+    let limitBytes: Int64
+    private var spentBytes: Int64 = 0
+    private let lock = NSLock()
+
+    init(limitBytes: Int64) {
+        self.limitBytes = max(0, limitBytes)
+    }
+
+    var remainingBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return limitBytes - spentBytes
+    }
+
+    static func total(_ sizes: [Int64]) -> Int64 {
+        sizes.reduce(Int64(0)) { sum, size in
+            let next = sum.addingReportingOverflow(max(size, 0))
+            return next.overflow ? .max : next.partialValue
+        }
+    }
+
+    func reserve(bytes: Int64, modelID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = limitBytes - spentBytes
+        guard bytes <= remaining else {
+            throw AutotuneRecommendError.downloadBudgetExceeded(
+                modelID: modelID,
+                requiredBytes: bytes,
+                remainingBytes: remaining
+            )
+        }
+        spentBytes += bytes
+    }
+}
+
 struct HuggingFaceSnapshotDownloader {
     struct ModelInfo: Decodable {
         var siblings: [Sibling]
@@ -3898,6 +3943,10 @@ struct HuggingFaceSnapshotDownloader {
     /// nil disables the check, for callers that enforce their own disk
     /// budget (SPEC-044 `models prepare`).
     var freeSpaceReserveBytes: Int64? = HuggingFaceSnapshotDownloader.downloadFreeSpaceReserveBytes
+
+    /// SPEC-023-R029: total bytes one model-upgrade run may download, shared
+    /// by every snapshot that run fetches. nil means no per-run cap.
+    var runDownloadBudget: RunDownloadBudget? = nil
 
     /// Bytes available for important use (APFS purgeable space included, as
     /// in `quarantineHasRoom`) on the volume holding `url`, or nil when it
@@ -4365,6 +4414,10 @@ struct HuggingFaceSnapshotDownloader {
         if case .insufficientDiskSpace? = error as? AutotuneRecommendError {
             return true
         }
+        // Every source draws on the same per-run download budget.
+        if case .downloadBudgetExceeded? = error as? AutotuneRecommendError {
+            return true
+        }
         if let calibration = error as? AutotuneContextCalibrationError, calibration == .deadlineExceeded {
             return true
         }
@@ -4517,7 +4570,10 @@ struct HuggingFaceSnapshotDownloader {
     /// Refuses a download that would leave less than `freeSpaceReserveBytes`
     /// free on either the URLSession temporary volume or final destination.
     func requireDiskSpace(bytes sizes: [Int64], modelID: String, destination: URL) throws {
-        guard let reserve = freeSpaceReserveBytes else { return }
+        guard let reserve = freeSpaceReserveBytes else {
+            try runDownloadBudget?.reserve(bytes: RunDownloadBudget.total(sizes), modelID: modelID)
+            return
+        }
         guard !sizes.isEmpty else {
             throw AutotuneRecommendError.invalidArtifact("missing advertised download size for \(modelID)")
         }
@@ -4550,6 +4606,7 @@ struct HuggingFaceSnapshotDownloader {
                 )
             }
         }
+        try runDownloadBudget?.reserve(bytes: total, modelID: modelID)
     }
 
     private func populateStaging(
@@ -4970,6 +5027,7 @@ struct CachedModelArtifactResolver {
                         throw error
                     }
                     if case .insufficientDiskSpace? = error as? AutotuneRecommendError { throw error }
+                    if case .downloadBudgetExceeded? = error as? AutotuneRecommendError { throw error }
                     throw AutotuneRecommendError.invalidArtifact(
                         message + "; automatic repair failed: " + String(describing: error)
                     )
@@ -5098,6 +5156,7 @@ struct CachedModelArtifactResolver {
             )
         } catch {
             if case .insufficientDiskSpace? = error as? AutotuneRecommendError { throw error }
+            if case .downloadBudgetExceeded? = error as? AutotuneRecommendError { throw error }
             throw AutotuneRecommendError.invalidArtifact(
                 "isolated artifact prefetch failed: " + String(describing: error)
             )
@@ -5339,7 +5398,7 @@ struct PrefetchedModelArtifact: Codable, Equatable {
     let candidateRowIdentity: String
     let path: String
     let sha256: String
-    /// SPEC-023-R028: true when this run downloaded the artifact (no copy
+    /// SPEC-023-R029: true when this run downloaded the artifact (no copy
     /// existed before) and it now sits at its durable content-addressed path,
     /// so the upgrade can remove it exactly if it is not selected.
     /// Absent in older receipts, which never authorize a removal.
