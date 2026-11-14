@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/auth"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 const requestScope = "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays"

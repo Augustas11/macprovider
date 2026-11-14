@@ -20,7 +20,7 @@ import native_mtp_postcut_evidence as consumer
 import privacy_class_beta_journey_evidence as privacy
 
 REPO = consumer.REPOSITORY
-WORKFLOW = 'promote-signed-native-mtp-serving-journey.yml'
+WORKFLOW = 'signed-journey.yml'
 WORKFLOW_PATH = '.github/workflows/' + WORKFLOW
 STATE_SCHEMA = 'macprovider.native-mtp-postcut-upload.v1'
 
@@ -297,7 +297,7 @@ def upload(args):
     # runs only discover the exact fingerprint; they never duplicate dispatch.
     atomic_state(args.state_dir,state)
     require_ops_lock(args.root)
-    gh(f'repos/{REPO}/actions/workflows/{WORKFLOW}/dispatches',method='POST',payload=dict(ref='main',inputs=dict(source_sha=m['source_sha'],redacted_evidence_path=redacted,evidence_confirmed='true',postcut_asset_id=str(asset['id']),postcut_asset_sha256=digest,postcut_release_id=str(release['id']))))
+    gh(f'repos/{REPO}/actions/workflows/{WORKFLOW}/dispatches',method='POST',payload=dict(ref='main',inputs=dict(journey='native-mtp-serving',source_sha=m['source_sha'],redacted_evidence_path=redacted,evidence_confirmed='true',postcut_asset_id=str(asset['id']),postcut_asset_sha256=digest,postcut_release_id=str(release['id']))))
     return report(state,args.root)
 
 

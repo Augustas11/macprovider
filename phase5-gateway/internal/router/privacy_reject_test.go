@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // captureSlog routes the default slog logger to a buffer for one test.

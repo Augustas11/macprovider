@@ -73,7 +73,7 @@ func TestKeyRecordEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestGoldenVector(t *testing.T) {
-	raw, err := os.ReadFile("../../../test/fixtures/relay-blind/golden-v1.json")
+	raw, err := os.ReadFile("../test/fixtures/relay-blind/golden-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}

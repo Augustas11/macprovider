@@ -274,7 +274,7 @@ enum SmallMRoute: String, Sendable, Equatable {
 /// window, Metal identity), so it cannot be computed that early; the startup
 /// identity covers every input that key and the self-check ladder are derived
 /// from (model bytes, binary, OS, hardware, signed policy, slot and context
-/// configuration). The verdict is still read from the self-check store under
+/// configuration, paged-KV block size and pool). The verdict is still read from the self-check store under
 /// that key, so a pruned or re-measuring record is never trusted. A private
 /// (0600, owner-only, no symlinks) JSON file next to `cb-self-check.json`.
 struct SmallMRouteVerdictStore: Sendable {
@@ -334,14 +334,23 @@ struct SmallMRouteVerdictStore: Sendable {
     }
 
     /// One-row reasons that settle the key: measured with no gain, a row
-    /// divergence or leak, a crash, or a configured single row (the slot
-    /// configuration is in the startup identity). Any other one-row reason
-    /// (`serial_baseline_unavailable`, `probe_shape_unmet_at_<k>`,
-    /// `probe_shape_unavailable`) re-runs on bound growth, which only a
+    /// divergence or leak, a crash, a configured single row, or
+    /// `probe_shape_unavailable` (not even two exactness-probe rows fit).
+    /// The last two are fixed by quantities the startup identity keys: the
+    /// slot configuration, served context and paged-KV pool. Any change to
+    /// them is a new identity that starts row-invariant and re-measures. Any
+    /// other one-row reason (`serial_baseline_unavailable`,
+    /// `probe_shape_unmet_at_<k>`) re-runs on bound growth, which only a
     /// row-invariant process can do, so it keeps that route.
     static func decidesOneRow(reason: String) -> Bool {
-        reason == "no_net_gain" || reason == "single_row"
+        reason == "no_net_gain" || reason == "single_row" || reason == "probe_shape_unavailable"
             || reason.hasPrefix("row_divergence_at_") || reason.hasPrefix("crashed_at_")
+    }
+
+    /// The resolved paged-KV pool for the startup identity, as
+    /// `<block size tokens>x<physical blocks>`.
+    static func pagedKVPool(_ config: PagedKVConfig) -> String {
+        "\(config.blockSizeTokens)x\(config.maxPhysicalBlocks)"
     }
 
     func verdict(startupIdentity: String, selfCheckStore: ContinuousBatchingSelfCheckStore) -> SmallMRoute.SelfCheckVerdict {

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 	"testing"
 )
 

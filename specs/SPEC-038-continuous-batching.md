@@ -1,11 +1,20 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.52
+Version: v0.3.53
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.53 (2026-11-14, `probe_shape_unavailable` settles the small-row route, Related: #2325):**
+FR-CB9: `probe_shape_unavailable` (configured rows >= 2 but not even two
+exactness-probe rows fit the served context or the paged-KV pool) now settles
+the key, so a Mac that records it, such as an 8 GB Mac on its default
+configuration, takes the serial route from its next start and serves one row.
+The startup identity now also keys the resolved paged-KV block size and pool,
+the last input to that bound it did not cover. Stored verdicts re-key once:
+the next start reads no verdict, runs the invariant route and re-measures.
+
 **Change log v0.3.52 (2026-11-14, FR-CB14 MSB-03 bar for per-row prefill backends, Related: #2331):**
 FR-CB14: on a backend whose prefill group runs one forward per row (its
 flattened-token cap is below the group's tokens, as FR-CB2 v0.3.49 names it),
@@ -1734,16 +1743,17 @@ these hold:
    environment or CLI (the emergency override, which no signed policy,
    self-check or warm swap lifts), or the FR-CB10 store holds a decided
    verdict serving one row that settles the key (`no_net_gain`, a row
-   divergence or leak, a crash, or `single_row` for a configured single row)
-   on the self-check key this startup identity resolved to, with no
+   divergence or leak, a crash, `single_row` for a configured single row, or
+   `probe_shape_unavailable`, whose probe shape is fixed by the startup
+   identity) on the self-check key this startup identity resolved to, with no
    unfinished step and no re-measurement scheduled. A one-row decision that
    re-runs when the ladder bound grows (`serial_baseline_unavailable`,
-   `probe_shape_unmet_at_<k>`, `probe_shape_unavailable`) keeps the
-   invariant route, the only one on which the self-check can run. The startup
-   identity covers the inputs the key and the ladder bound derive from: model
-   bytes, CLI version, decode-path digest, MLX pins, OS build, chip and memory,
-   signed CB policy, rows, owner pin, queue limit, context, `kv_bits`, prefill
-   chunk, cached turns, paged-KV setting and native-MTP mode;
+   `probe_shape_unmet_at_<k>`) keeps the invariant route, the only one on
+   which the self-check can run. The startup identity covers the inputs the
+   key and the ladder bound derive from: model bytes, CLI version, decode-path
+   digest, MLX pins, OS build, chip and memory, signed CB policy, rows, owner
+   pin, queue limit, context, `kv_bits`, prefill chunk, cached turns, paged-KV
+   setting, paged-KV block size and pool, and native-MTP mode;
 3. no draft model, no shard-group role, no other warm-swap target (it would
    be served without its own self-check), and not an autotune child (a child
    measures candidate configurations that may batch for the incumbent, which

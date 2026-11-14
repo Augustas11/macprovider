@@ -172,6 +172,7 @@ test-dist-release:
 	bash scripts/test-signed-trusted-pool-model-journey-workflow.sh
 	bash scripts/test-signed-privacy-class-beta-journey-workflow.sh
 	bash scripts/test-signed-pool-promotion-transition-workflow.sh
+	bash scripts/test-signed-journey-export.sh
 	bash scripts/test-spec043-production-release-key-provision.sh
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh

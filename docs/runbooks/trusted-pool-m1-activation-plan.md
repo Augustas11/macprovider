@@ -906,7 +906,7 @@ JOURNEY-BUYER-PAID-PATH pattern:
   completions, keys, tokens or account secrets; request ids, digests,
   counts, labels only);
 - payload built by `scripts/build-<journey>-journey-result.py`, signed in CI
-  by `.github/workflows/promote-signed-<journey>-journey.yml`
+  by `.github/workflows/signed-journey.yml` with the journey input
   (`production-release` environment, `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`,
   key id `macprovider-acceptance-p256-v1`), envelope
   `macprovider.journey-result-envelope.v1`, validated by
@@ -931,7 +931,7 @@ has zero `held_reservations`, zero `missing_trailer_log_count`, and
 match by counts and `held_rows_sha256`.
 `scripts/build-trusted-pool-external-runtime-journey-result.py capture` checks
 every pass criterion above and writes the redacted evidence;
-`.github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml`
+`.github/workflows/signed-journey.yml (journey=trusted-pool-external-runtime)`
 builds (`payload`), signs and promotes it. Capture into an operator-local
 directory in that layout:
 
@@ -1029,7 +1029,7 @@ deliveries; retry once they finish.
 | B3 | PARTIALLY RESOLVED by #1754: generator and both consumers implement the v0.16.0 GGUF tuple, the source contains `gguf-q4-k-m`, and all 17 MLX `size_bytes` are measured. No artifact feed is in production; the already-published current `release_id` cannot be enriched, so the remaining block is an operator-owned signed activation cut with a new `release_id`, then the Pearl config/nginx deployment. | operator (signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret); admission by repository policy (SPEC-002-R004), no Pearl edit | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
-| B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
+| B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `signed-journey.yml (journey=trusted-pool-external-runtime)`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
 | B7 | RESOLVED: reviewed offline signer `coordinator-cli trust-pool-admin keygen` / `sign-root` / `sign-manifest` with explicit key ids, environment, custody disclosure and class, signer-set version and attestation tier (§4.1, §4.3) | repo | done; build it from `main` (not in `v1.8.200`) |
 | B8 | Trusted pools disabled on coordinator and gateway | Pearl actor | §4.3 step 0 |
 | B9 | `catalog_priced` decision is dual-control on Pearl | two operator key holders | §3.4 |

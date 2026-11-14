@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // SPEC-041-R003/R004: the reference client derives requires from the inner

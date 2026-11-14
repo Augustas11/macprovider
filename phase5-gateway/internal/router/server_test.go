@@ -5441,14 +5441,16 @@ func TestQuotaExhaustedReturns429Not500(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), "quota_exhausted") {
 		t.Fatalf("body missing quota_exhausted: %s", resp.Body.String())
 	}
-	// Round-2 sweep (H-R2 rate_limit_exceeded-family extension): this path
-	// ships X-RateLimit-Reset (a reset header, not a literal Retry-After —
-	// the sweep's rule treats the two as equivalent temporal signals) via
-	// setRateLimitHeaders, so quota_exhausted must be retryable=true.
+	// #2362: the daily quota refills only at the reset, so the code is
+	// retryable=false (as at the coordinator). X-RateLimit-Reset names the
+	// refill; no Retry-After, which agent clients would sleep on for hours.
 	if got := resp.Header().Get("X-RateLimit-Reset"); got == "" {
 		t.Fatalf("X-RateLimit-Reset missing on quota_exhausted 429")
 	}
-	assertBodyRetryable(t, resp.Body.String(), true)
+	if got := resp.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After=%q on quota_exhausted 429, want none", got)
+	}
+	assertBodyRetryable(t, resp.Body.String(), false)
 }
 
 func TestQuotaAdmittedOpaqueErrorRefundsBefore500(t *testing.T) {
@@ -7525,7 +7527,7 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		// true (signup_rate_limited moved to permanent in item 20 — no
 		// header, outside the chat-path clamp).
 		"account_request_rate_exceeded", "account_concurrency_exceeded",
-		"demo_concurrency_exceeded", "quota_exhausted",
+		"demo_concurrency_exceeded",
 		"relay_blind_metadata_rate_limited", "relay_blind_key_expired",
 		"relay_blind_decrypt_failed", "relay_blind_provider_unsupported",
 		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
@@ -7551,6 +7553,9 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"relay_blind_downgrade_rejected", "relay_blind_endpoint_unsupported",
 		"relay_blind_ciphertext_invalid",
 		"relay_blind_committed_failed",
+		// #2362: the daily quota refills only at the next UTC day; agrees
+		// with the coordinator. X-RateLimit-Reset names the refill.
+		"quota_exhausted",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {

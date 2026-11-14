@@ -45,7 +45,7 @@ Phase 4B adds the promotion primitives for this evidence class:
   `specs/CONFORMANCE.json` while those rows remain pending;
 - `scripts/build-local-consumer-endpoint-journey-result.py` validates one
   committed redacted evidence source before signing;
-- `.github/workflows/promote-signed-local-consumer-endpoint-journey.yml`
+- `.github/workflows/signed-journey.yml (journey=local-consumer-endpoint)`
   builds a short-lived signed promotion artifact from the protected
   `production-release` environment;
 - `scripts/tests/test_local_consumer_endpoint_journey_result.py` and
