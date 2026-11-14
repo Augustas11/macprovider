@@ -189,6 +189,30 @@ struct MSB03Evidence: Codable, Sendable, Equatable {
     let aggregatePass: Bool
     let ttftPass: Bool
     let pass: Bool
+    /// How the backend prefills a group (SPEC-038 v0.3.52 FR-CB14).
+    let prefillKind: MSB03PrefillKind
+    /// The makespan ratio `aggregatePass` must exceed for that backend.
+    let makespanBar: Double
+}
+
+/// SPEC-038 v0.3.52 FR-CB14: `perRow` when the backend's flattened prefill
+/// cap is below any two-row group of the run's chunks, so every grouped row
+/// prefills in its own forward and batching cannot shorten prefill.
+enum MSB03PrefillKind: String, Codable, Sendable, Equatable {
+    case perRow = "per_row"
+    case shared
+}
+
+func msb03PrefillKind(prefillForwardTokenCap: Int?, promptChunkTokens: Int) -> MSB03PrefillKind {
+    guard let cap = prefillForwardTokenCap else { return .shared }
+    let (tokens, overflow) = max(1, promptChunkTokens).multipliedReportingOverflow(by: 2)
+    return overflow || tokens > cap ? .perRow : .shared
+}
+
+/// Batching must not lose on a per-row-prefill backend; a backend that shares
+/// the prefill forward keeps the above-1.2x bar.
+func msb03MakespanBar(prefill: MSB03PrefillKind) -> Double {
+    prefill == .perRow ? 1.0 : 1.2
 }
 
 struct MSBLeftoversEvidence: Codable, Sendable, Equatable {
@@ -207,9 +231,10 @@ func msb03PromptLengths() -> [Int] {
 }
 
 /// MSB-03 aggregate gate. Since SPEC-038 v0.3.37 the ratio is the makespan
-/// aggregate against the serial makespan aggregate (`msb03MakespanVsSerial`).
-func msb03AggregatePass(aggregateVsSerial: Double) -> Bool {
-    aggregateVsSerial > 1.2
+/// aggregate against the serial makespan aggregate (`msb03MakespanVsSerial`);
+/// since v0.3.52 the bar depends on the backend's prefill kind.
+func msb03AggregatePass(aggregateVsSerial: Double, prefill: MSB03PrefillKind = .shared) -> Bool {
+    aggregateVsSerial > msb03MakespanBar(prefill: prefill)
 }
 
 /// Batched makespan aggregate over serial makespan aggregate. With the same
@@ -258,6 +283,13 @@ func msbTokenSequenceSHA256(_ tokens: [Int]) -> String {
         withUnsafeBytes(of: &value) { bytes.append(contentsOf: $0) }
     }
     return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+}
+
+/// Completion tokens one msb03 row is asked for and billed: the prefill's
+/// sampled token plus `decodeTokens` timed decode steps (the scheduler run's
+/// `maxOutputTokens`, and the serial run's `maxTokens`).
+func msb03ExpectedCompletionTokens(decodeTokens: Int) -> Int {
+    decodeTokens + 1
 }
 
 func msbUsageAttributionPass(
