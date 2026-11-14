@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.78 (2026-11-13, served-path labels on demand rows)
+**Version:** 0.9.79 (2026-11-14, agent-client terminal and retry shapes)
 **Depends on:** SPEC-001 v1.9.56, SPEC-002 v1.6.33, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.79 (2026-11-14, Related: #2360, #2362, #2363):** Three agent-client fixes. (1) `/v1/responses` streaming: an upstream stream that closes with neither `[DONE]` nor a `finish_reason` ends in `response.failed` with `error.code` `invalid_provider_response` (retryable), never `response.completed`, as `/v1/messages` already refused it; settlement is unchanged. (2) `quota_exhausted` is `retryable: false` at the gateway, as at the coordinator: the daily quota refills only at the next UTC day. `X-RateLimit-Reset` names the refill and no `Retry-After` is sent: agent clients such as Codex sleep until a `Retry-After` deadline without a cap, so a day-long one would hang them instead of stopping them. The relay-blind `quota_exhausted` refusal now carries the `X-RateLimit-*` headers too. (3) `/v1/responses` forwards `reasoning.effort` `max` as `reasoning_effort` `max` (the SPEC-018 §3.12 set) instead of dropping it.
 
 **Change log v0.9.78 (2026-11-13, Related: #2341):** SPEC-006-R028 adds two labels to the demand row, `served_path` and `served_rows`, read only from the coordinator's internal `X-MacProvider-Internal-Served-Path` (SPEC-002-R007) after an exact grammar check, as a response header or trailer. Unlike `serving_engine` they describe the provider that served after a failover and the path and rows it reported for that request; the value is self-reported and unverified. Both are nullable; absent means no valid value arrived. The gateway, not the column, enforces the path vocabulary. The value never reaches a buyer: the gateway's `X-MacProvider-*` response strip removes it, the gateway forwards no coordinator trailer, and a buyer-supplied copy is stripped at ingress. `GET /admin/demand-latency` keeps `cells` unchanged and adds `served_path_cells`, p50 and p95 per requested model, served path and row band. The labels never enter the R028 quantities or any routing input, and `served_path_cells` are not qualification or campaign goal-metric evidence.
 
@@ -99,7 +101,7 @@ the SPEC-002 C2 relations (Pearl: 3660 s), and
 
 **Change log v0.9.63 (2026-10-22, #2107 — agentic coding clients):**
 - §5.4a `/v1/messages`: `anthropic-beta` headers and unknown top-level keys are accepted and ignored (never forwarded); a case variant of a known key stays a 400. `thinking` is accepted: `enabled` maps to `reasoning_effort` (`budget_tokens` < 4096 `low`, < 16384 `medium`, else `high`), `disabled` to `low`, `adaptive` to the template default. With thinking enabled, provider `reasoning_content` becomes a leading `thinking` block (streamed as `thinking_delta`, closed with an empty `signature_delta`); without it reasoning is dropped. Assistant-history `thinking`/`redacted_thinking` blocks are accepted and dropped; `cache_control` is accepted on `tool_use`/`tool_result` blocks. `tool_choice: {"type":"any"}` maps to `required`.
-- `/v1/responses`: `custom` tools (also inside `namespace`) are served as a function with one string argument `input` (a declared grammar is shown in the description, not enforced); `custom_tool_call`/`custom_tool_call_output` history round-trips; a call to a custom tool is returned as a `custom_tool_call` item (streamed whole). `local_shell` and `local_shell_call` items are refused with 400 `unsupported_tool_type`. OpenAI-hosted tools (`web_search`, `file_search`, `code_interpreter`, `image_generation`, `mcp`, …) are not offered to the model and are named in the `X-Malibu-Unserved-Tools` response header. Prior `reasoning` items are dropped; other unknown input items are a 400. `reasoning.effort` is forwarded as `reasoning_effort`.
+- `/v1/responses`: `custom` tools (also inside `namespace`) are served as a function with one string argument `input` (a declared grammar is shown in the description, not enforced); `custom_tool_call`/`custom_tool_call_output` history round-trips; a call to a custom tool is returned as a `custom_tool_call` item (streamed whole). `local_shell` and `local_shell_call` items are refused with 400 `unsupported_tool_type`. OpenAI-hosted tools (`web_search`, `file_search`, `code_interpreter`, `image_generation`, `mcp`, …) are not offered to the model and are named in the `X-Malibu-Unserved-Tools` response header. Prior `reasoning` items are dropped; other unknown input items are a 400. `reasoning.effort` is forwarded as `reasoning_effort` for every value of the SPEC-018 §3.12 set, `max` included (v0.9.79).
 - §5.3 `/v1/models`: each model entry carries `capabilities` (`tools`, `tool_choice` modes, `reasoning`, `response_format`, `vision`, `context_length`) and `supported_parameters`, derived from the predicates the coordinator and provider enforce (SPEC-018 §3.1/§3.11/§3.12). `tool_choice` lists `auto` plus the modes an eligible provider declares; `tools` for a family an older provider did not parse, and `reasoning`, need a provider CLI at 1.8.262 or later, so metadata never runs ahead of the fleet. The gateway re-emits both after type-checking and drops malformed values.
 - `/v1/responses` named `tool_choice` may select a `custom` tool (`{"type":"custom","name":…}`).
 - §17: a post-commit provider failure terminal SSE frame carries `error.reason`, the provider's bounded snake_case end status (or `provider_disconnected`), and names it in the message, so a buyer can tell a context overflow from a crash. The code (`upstream_provider_error` at the gateway) and settlement are unchanged.
@@ -1561,7 +1563,7 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 **Retryable (`true`) — the same request may succeed later without changes, grouped by why:**
 
 - Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage`, `invalid_provider_response` (gateway-generated provider response-shape defects). `request_timeout` (v0.9.67, SPEC-006-R024) is permanent (`false`): the stream reached its ceiling while the provider was still producing, the identical request runs into the same limit, and an automatic retry re-bills the partial output.
-- Temporal 429s that ship a machine-readable backoff signal — a `Retry-After` or `X-RateLimit-Reset*` header the buyer can act on: `provisional_quota_exceeded`, `rate_limited` (coordinator); `account_request_rate_exceeded`, `account_concurrency_exceeded`, `demo_concurrency_exceeded`, `quota_exhausted` (gateway).
+- Temporal 429s that ship a machine-readable backoff signal — a `Retry-After` or `X-RateLimit-Reset*` header the buyer can act on: `provisional_quota_exceeded`, `rate_limited` (coordinator); `account_request_rate_exceeded`, `account_concurrency_exceeded`, `demo_concurrency_exceeded` (gateway). `quota_exhausted` and `allowance_exhausted` are permanent (`false`) on both services (v0.9.79): the daily quota refills only at the next UTC day, so an automatic retry cannot succeed; `X-RateLimit-Reset` names that instant.
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
 - Route-snapshot durable-store availability: `route_snapshot_failed` — a pre-dispatch store write failure; a retry can succeed once storage recovers.
@@ -3398,7 +3400,8 @@ The error code SHOULD be:
 quota_exhausted
 ```
 
-The response MUST include `X-RateLimit-Reset`.
+The response MUST include `X-RateLimit-Reset`. `retryable` is `false` and no
+`Retry-After` is sent, since the refill can be a day away (v0.9.79).
 
 When an account's SPEC-050 allowance cannot cover a request and its overage
 setting is off, the gateway returns `429 rate_limit_exceeded` with code
@@ -5274,7 +5277,10 @@ item before the first message or call item opens. Reasoning that arrives
 after a message or call item opened is not returned (it would follow the
 output it did not lead to). A stream that ends or fails during reasoning
 closes the item before its terminal event (`response.completed`,
-`response.incomplete` or `response.failed`). Inline `<think>` text in
+`response.incomplete` or `response.failed`). A stream whose upstream closes with
+neither `[DONE]` nor a `finish_reason` MUST end in `response.failed` with
+`error.code` `invalid_provider_response` and MUST NOT emit
+`response.completed` (v0.9.79). Inline `<think>` text in
 `content` remains stripped from the message and is not converted.
 `usage.output_tokens_details.reasoning_tokens` MUST equal the provider's
 `completion_tokens_details.reasoning_tokens` when it lies in

@@ -1213,8 +1213,7 @@ func (s *Server) writeWalletAdmissionError(w http.ResponseWriter, err error, dec
 	case errors.Is(err, storage.ErrWalletSessionCapExceeded):
 		writeError(w, http.StatusPaymentRequired, "billing_error", "wallet_session_exhausted", "Wallet-session total cap exceeded")
 	case errors.Is(err, storage.ErrQuotaExceeded):
-		setRateLimitHeaders(w, decision.AccountQuota.LimitTokens, decision.AccountQuota.RemainingTokens, decision.AccountQuota.ResetUnix)
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision.AccountQuota)
 	case errors.Is(err, storage.ErrRateLimit):
 		setConcurrencyRateLimitHeaders(w, s.cfg.Auth.WalletSessions.MetadataRequestsPerMinute, 0, 60, s.now().UTC())
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "wallet_session_rate_limited", "Wallet-session rate limit exceeded")

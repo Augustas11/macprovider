@@ -1607,7 +1607,6 @@ var gatewayRetryableByCode = map[string]bool{
 	"account_request_rate_exceeded":     true,
 	"account_concurrency_exceeded":      true,
 	"demo_concurrency_exceeded":         true,
-	"quota_exhausted":                   true,
 	"wallet_session_rate_limited":       true,
 	"wallet_session_storage_conflict":   true,
 	"relay_blind_metadata_rate_limited": true,
@@ -1632,6 +1631,10 @@ var gatewayRetryableByCode = map[string]bool{
 // code must be explicitly triaged into one set or the other rather than
 // silently defaulting to false.
 var gatewayPermanentCodes = map[string]bool{
+	// #2362: the daily token quota refills only at X-RateLimit-Reset (the
+	// next UTC day), so an automatic retry cannot succeed now. Agrees with
+	// the coordinator's table.
+	"quota_exhausted":         true,
 	"invalid_buyer_hold":      true,
 	"context_length_exceeded": true,
 	"method_not_allowed":      true, "invalid_window": true, "invalid_kill_switch": true,
@@ -2148,6 +2151,16 @@ func setRateLimitHeaders(w http.ResponseWriter, limit, remaining, reset int64) {
 	w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
 	w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+}
+
+// writeQuotaExhausted answers a spent daily token quota (SPEC-006 §7.7):
+// 429 quota_exhausted, retryable false, with the X-RateLimit-* headers that
+// name the reset (#2362). It sends no Retry-After: the reset is up to a day
+// away and agent clients (Codex) sleep until a Retry-After deadline without a
+// cap, so the header would hang them instead of stopping them.
+func writeQuotaExhausted(w http.ResponseWriter, decision storage.QuotaDecision) {
+	setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
+	writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
 }
 
 // Issue #190: per-account concurrency rate-limit headers, distinct

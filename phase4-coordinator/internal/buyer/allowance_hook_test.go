@@ -107,8 +107,14 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 	// Paid quota exhausted and the allowance cannot cover the bound: refused
 	// before any provider runs, even with overage on.
 	rec = allowanceChat(h, "acct_allow", "ext-big", allowanceHeaders("900000000", true))
-	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "quota_exhausted") {
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "quota_exhausted") ||
+		!strings.Contains(rec.Body.String(), `"retryable":false`) {
 		t.Fatalf("required status %d body %s", rec.Code, rec.Body.String())
+	}
+	// #2362: retryable false; X-RateLimit-Reset names the refill, and no
+	// Retry-After (a day-long one makes agent clients sleep instead of stop).
+	if rec.Header().Get("X-RateLimit-Reset") == "" || rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("quota_exhausted headers %v", rec.Header())
 	}
 	if n := ledgerRowsFor(t, h, "acct_allow", "ext-big"); n != 0 {
 		t.Fatalf("refused request dispatched %d attempts", n)

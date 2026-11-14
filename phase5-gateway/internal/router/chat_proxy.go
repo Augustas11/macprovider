@@ -586,9 +586,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil && decision.Admitted {
@@ -597,9 +596,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Belt-and-suspenders: if the store returned an unexpected error but the
 	// decision already shows quota exceeded, surface 429 rather than 500.
 	if err != nil && !decision.Admitted && decision.RemainingTokens == 0 && decision.LimitTokens > 0 {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil {
