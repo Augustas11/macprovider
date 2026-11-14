@@ -2195,6 +2195,29 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 	}
+	// #2360: a Responses stream that closed with neither [DONE] nor a
+	// finish_reason is truncated. Fail it, settle it as
+	// invalid_provider_response and keep it out of the dedupe cache, as the
+	// Messages branch above does.
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamTerminal {
+		adapter.drainPendingStreamLine()
+		if adapter.emitTruncatedStreamFailed() {
+			if sw, ok := unwrapStatusWriter(w); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+				sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			if adapter.writeErr != nil {
+				slog.Warn("responses stream truncated-response write failed", "request_id", requestID(r), "error", adapter.writeErr)
+				settleCancelled()
+				return
+			}
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+			return
+		}
+	}
 	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil && privacyStream.Complete() != nil {
 		refusePrivacyStream()
 		return

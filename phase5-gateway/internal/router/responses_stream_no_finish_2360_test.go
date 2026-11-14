@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -64,5 +65,43 @@ func TestResponsesStreamingFinishReasonEndingsUnchanged(t *testing.T) {
 		if !strings.Contains(body, want) || strings.Contains(body, "event: response.failed") {
 			t.Fatalf("finish_reason %s: want %q, got:\n%s", reason, want, body)
 		}
+	}
+}
+
+// #2360 audit: through the full handler, a truncated stream is failed before
+// settlement, so it is not cached for id-less replay: an identical retry is
+// dispatched again instead of replaying the failure.
+func TestResponsesTruncatedStreamIsNotReplayedByIdlessDedupe(t *testing.T) {
+	var hits atomic.Int32
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl_trunc_dedupe","model":"llama","choices":[{"delta":{"content":"partial"}}]}`,
+		``,
+	}, "\n\n")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_trunc_dedupe")
+	body := `{"model":"llama","input":"hi","stream":true,"max_output_tokens":20,"store":false}`
+
+	first := postResponses(t, h, key, body, nil)
+	second := postResponses(t, h, key, body, nil)
+
+	for i, resp := range []*httptest.ResponseRecorder{first, second} {
+		got := resp.Body.String()
+		if !strings.Contains(got, "event: response.failed") || !strings.Contains(got, `"code":"invalid_provider_response"`) ||
+			strings.Contains(got, "event: response.completed") {
+			t.Fatalf("attempt %d: want response.failed only:\n%s", i+1, got)
+		}
+		if strings.Count(got, "event: response.failed") != 1 {
+			t.Fatalf("attempt %d: response.failed emitted %d times:\n%s", i+1, strings.Count(got, "event: response.failed"), got)
+		}
+	}
+	if got := second.Header().Get(idlessDedupeHeader); got == idlessDedupeHeaderValue {
+		t.Fatalf("truncated stream was replayed from the dedupe cache")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream dispatches=%d want 2 (no replay of a failed stream)", got)
 	}
 }

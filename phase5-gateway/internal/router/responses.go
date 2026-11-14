@@ -236,23 +236,11 @@ func (a *responsesAdapter) finish() {
 			_, _ = a.writeFinalBytes(a.body.Bytes())
 			return
 		}
-		if a.lineBuf.Len() > 0 && a.status == http.StatusOK {
-			a.handleChatStreamLine(a.lineBuf.String())
-			a.lineBuf.Reset()
-		}
+		a.drainPendingStreamLine()
 		if a.status == http.StatusOK && !a.streamTerminal {
-			// #2360: the upstream closed with neither [DONE] nor a
-			// finish_reason, so the answer is truncated. Report it as
-			// failed, as the Messages adapter does (validateStreamComplete).
-			// Settlement already ran inside handleChatCompletions; this
-			// changes only the client-facing terminal event.
-			if strings.TrimSpace(a.finishReason) == "" {
-				a.emitStreamFailed(&responsesStreamError{
-					Message:   "Upstream provider stream ended without finish_reason",
-					Type:      "api_error",
-					Code:      "invalid_provider_response",
-					Retryable: true,
-				})
+			// Normally handleChatCompletions already failed a truncated
+			// stream (#2360); this covers any path that returns before it.
+			if a.emitTruncatedStreamFailed() {
 				return
 			}
 			a.emitStreamDone()
@@ -1368,6 +1356,33 @@ func (a *responsesAdapter) emitToolCallDelta(index int, id, name, arguments stri
 			"delta": arguments, "sequence_number": a.nextSeq(),
 		})
 	}
+}
+
+// drainPendingStreamLine handles a final upstream line that arrived without
+// its trailing newline.
+func (a *responsesAdapter) drainPendingStreamLine() {
+	if a.lineBuf.Len() > 0 && a.status == http.StatusOK {
+		a.handleChatStreamLine(a.lineBuf.String())
+		a.lineBuf.Reset()
+	}
+}
+
+// emitTruncatedStreamFailed ends a stream whose upstream closed with neither
+// [DONE] nor a finish_reason (#2360): the answer is truncated, so the client
+// gets response.failed, as the Messages adapter does
+// (validateStreamComplete). It reports whether it emitted.
+func (a *responsesAdapter) emitTruncatedStreamFailed() bool {
+	if a.streamTerminal || strings.TrimSpace(a.finishReason) != "" {
+		return false
+	}
+	a.streamOutcome = "invalid_provider_response"
+	a.emitStreamFailed(&responsesStreamError{
+		Message:   "Upstream provider stream ended without finish_reason",
+		Type:      "api_error",
+		Code:      "invalid_provider_response",
+		Retryable: true,
+	})
+	return true
 }
 
 func (a *responsesAdapter) emitStreamDone() {
