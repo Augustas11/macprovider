@@ -2006,6 +2006,27 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    /// Equal-length rows at Gemma 4 12B's full-attention shape (16 query
+    /// heads, 1 KV head, head dim 512): the 64-token prompt chunk after a
+    /// 1024-key history. Attended alone, MLX core folds the query heads into
+    /// the `scores @ V` GEMM rows and takes split-K; one call for both rows
+    /// keeps two batches and the plain GEMM, so a single unpadded call gave
+    /// each row other bits than its lone call (#2328). Every row must match
+    /// its lone call bit for bit.
+    func testSingleKVHeadPromptChunkMatchesLoneBitsForEqualLengthRows() throws {
+        try requireMetal()
+        MLXRandom.seed(2328)
+        XCTAssertTrue(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 64, kvHeads: 1))
+        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 1, queryTokens: 64, kvHeads: 1))
+        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 8, kvHeads: 1))
+        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 64, kvHeads: 2))
+        try assertBatchCacheAttentionMatchesLoneBits([
+            BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024]),
+            BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024], ragged: true),
+            BatchAttentionCase(label: "prefill", queryTokens: 32, histories: [700, 700, 700]),
+        ], heads: [(16, 1, 512)])
+    }
+
     /// SPEC-038 FR-CB2 decode and packed MTP verification isolation, through
     /// the shared decode batch cache, at the served attention shapes. Decode
     /// histories straddle the one-pass / two-pass switch (1024 keys) and the
@@ -2086,9 +2107,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// must hold exactly its history plus its own new tokens (verification
     /// stages and commits nothing). Prints, without asserting, the rows that
     /// a single padded call would have given other bits (device dependent).
-    private func assertBatchCacheAttentionMatchesLoneBits(_ cases: [BatchAttentionCase]) throws {
+    private func assertBatchCacheAttentionMatchesLoneBits(
+        _ cases: [BatchAttentionCase],
+        heads: [(queryHeads: Int, kvHeads: Int, headDim: Int)] = [(16, 2, 256), (24, 4, 256), (16, 2, 128)]
+    ) throws {
         var paddedRouteDifferences: [String] = []
-        for (queryHeads, kvHeads, headDim) in [(16, 2, 256), (24, 4, 256), (16, 2, 128)] {
+        for (queryHeads, kvHeads, headDim) in heads {
             let scale = 1 / Float(headDim).squareRoot()
             for testCase in cases {
                 let rows = testCase.histories.count

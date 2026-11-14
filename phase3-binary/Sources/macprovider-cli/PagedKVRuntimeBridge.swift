@@ -5108,6 +5108,24 @@ enum PagedKVVectorAttentionRoute {
 }
 
 enum PagedKVRowAttention {
+    /// Whether MLX core reduces a row attended alone in another order than
+    /// the same row inside one batched call of equal-length rows, so each row
+    /// needs its own call. That holds for a prompt call (more than 8 query
+    /// tokens, the unfused path for head dims 192/256/512 on non-NAX GPUs)
+    /// over a single KV head. Alone, the fallback's `scores @ V` product has
+    /// one batch after `collapse_batches`, its query heads fold into the GEMM
+    /// rows (fork core `matmul.cpp` batch collapse), and with few rows and a
+    /// long history it takes split-K (`steel_gemm_splitk_axpby`, batch size 1
+    /// only), which sums K in partitions. In a batch of two the product keeps
+    /// two batches and runs the plain GEMM. Gemma 4 12B's full-attention
+    /// layers (16 query heads, 1 KV head, head dim 512) hit this on the
+    /// 64-token prompt chunk after a 1024-key history (M = 1024, N = 512,
+    /// K = 1088): logits up to 0.5 apart and a flipped greedy token (#2328).
+    /// The decode vector kernels are batch-invariant and keep one call.
+    static func loneCallReducesDifferently(rows: Int, queryTokens: Int, kvHeads: Int) -> Bool {
+        rows > 1 && queryTokens > 8 && kvHeads == 1
+    }
+
     /// Per-row extents when one batched SDPA call would not give every row
     /// its lone bits, else nil (one call is exact). Rows whose keys or query
     /// columns are padded to a longer neighbour need their own call:
@@ -5588,8 +5606,41 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             offsetsBefore: extentOffsets,
             packedRows: packedRows
         ) else {
-            // No row is padded: the one call is each row's lone call.
-            return batched()
+            // No row is padded: the one call is each row's lone call, except
+            // where MLX core reduces a lone row in another order
+            // (`PagedKVRowAttention.loneCallReducesDifferently`).
+            guard PagedKVRowAttention.loneCallReducesDifferently(
+                rows: queries.dim(0), queryTokens: queryTokens, kvHeads: keys.dim(1)
+            ), packedRows == nil, !windowed,
+                queries.dim(0) == rowCaches.count, keys.dim(0) == rowCaches.count
+            else {
+                return batched()
+            }
+            var loneMask = mask
+            if case .array(let array) = mask {
+                if PagedKVBatchLayerCache.maskIsPlainCacheMask(mask) {
+                    // Padding and causality only, and no row is padded: the
+                    // lone call's own causal mask.
+                    loneMask = .causal
+                } else if array.ndim != 4 || (array.dim(0) != 1 && array.dim(0) != rowCaches.count) {
+                    attendedOutsideCachePath = true
+                    return batched()
+                }
+            }
+            return concatenated((0 ..< rowCaches.count).map { row in
+                var rowMask = loneMask
+                if case .array(let array) = loneMask, array.dim(0) != 1 {
+                    rowMask = .array(array[row ..< row + 1, 0..., 0..., 0...])
+                }
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries[row ..< row + 1, 0..., 0..., 0...],
+                    keys: keys[row ..< row + 1, 0..., 0..., 0...],
+                    values: values[row ..< row + 1, 0..., 0..., 0...],
+                    scale: scale,
+                    mask: rowMask,
+                    sinks: sinks
+                )
+            }, axis: 0)
         }
         func notIsolatable() -> MLXArray {
             attendedOutsideCachePath = true
