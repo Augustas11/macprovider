@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	privacyFixtureRel = "../../../test/fixtures/relay-blind/privacy-response-v1.json"
-	goldenFixtureRel  = "../../../test/fixtures/relay-blind/golden-v1.json"
+	privacyFixtureRel = "../test/fixtures/relay-blind/privacy-response-v1.json"
+	goldenFixtureRel  = "../test/fixtures/relay-blind/golden-v1.json"
 	fixtureCDHash     = "0123456789abcdef0123456789abcdef01234567"
 	fixtureBinary     = "0.0.0-fixture"
 	fixtureTeamID     = "AB12CD34EF"

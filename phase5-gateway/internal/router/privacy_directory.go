@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 const (

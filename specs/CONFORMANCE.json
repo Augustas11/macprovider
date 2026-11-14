@@ -2023,7 +2023,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Commit evidence 6a2278f4f678abcc91361d0d6f008649e63b6fc3 no longer matches the current CoordinatorClient.swift:sendHeartbeat declaration fragment (the heartbeat path has since gained F5 supervisor telemetry, warm-swap runtime identity, and catalog wire model id handling), so the consumed 2026-07-27 signed JOURNEY-PROVIDER-PREBETA-ADMISSION envelope no longer pins the code it attested and this row cannot stay conformant. Implementation, test, and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-PROVIDER-PREBETA-ADMISSION promotion produced by the protected main workflow .github/workflows/promote-signed-provider-prebeta-journey.yml, whose repository.commit rematches every live mapped implementation and test selector fragment for this row, including sendHeartbeat."
+        "rationale": "Commit evidence 6a2278f4f678abcc91361d0d6f008649e63b6fc3 no longer matches the current CoordinatorClient.swift:sendHeartbeat declaration fragment (the heartbeat path has since gained F5 supervisor telemetry, warm-swap runtime identity, and catalog wire model id handling), so the consumed 2026-07-27 signed JOURNEY-PROVIDER-PREBETA-ADMISSION envelope no longer pins the code it attested and this row cannot stay conformant. Implementation, test, and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-PROVIDER-PREBETA-ADMISSION promotion produced by the protected main workflow .github/workflows/signed-journey.yml (journey=provider-prebeta), whose repository.commit rematches every live mapped implementation and test selector fragment for this row, including sendHeartbeat."
       }
     },
     {
@@ -6663,7 +6663,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1043",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-CRASH-RECOVERY envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-crash-recovery-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. This demote is not a paid-path recapture."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-CRASH-RECOVERY envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-crash-recovery) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. This demote is not a paid-path recapture."
       }
     },
     {
@@ -7374,7 +7374,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-paid-path) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
       }
     },
     {
@@ -7659,7 +7659,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-paid-path) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
       }
     },
     {
@@ -7768,7 +7768,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-enforce-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-enforce) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
       }
     },
     {
@@ -7832,7 +7832,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-enforce-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-enforce) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
       }
     },
     {
@@ -7886,7 +7886,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-enforce-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
+        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-26, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected signed-journey.yml (journey=buyer-enforce) workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
       }
     },
     {
@@ -8248,7 +8248,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The previously consumed signed SPEC-016-R002 journey evidence (spec016-r002-payout-address-20260805T054857Z) expired on 2026-09-05, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION envelope is produced by the protected promote-signed-payout-journey.yml workflow on main and consumed into CONFORMANCE."
+        "rationale": "The previously consumed signed SPEC-016-R002 journey evidence (spec016-r002-payout-address-20260805T054857Z) expired on 2026-09-05, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION envelope is produced by the protected signed-journey.yml (journey=payout) workflow on main and consumed into CONFORMANCE."
       }
     },
     {
@@ -8420,12 +8420,12 @@
         "phase4-coordinator/internal/relayblind/authority.go:AcceptProviderKeys",
         "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:AcceptPrivacyKeysWithClaim",
-        "phase5-gateway/internal/relayblind/directory.go:PinForRecord"
+        "relayblind/directory.go:PinForRecord"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/store_test.go:TestAuthenticatedEmptyAdvertisementRevokesOutstandingReservation",
-        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution",
-        "phase5-gateway/internal/relayblind/directory_test.go:TestIdentityDirectoryPinForRecord"
+        "relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution",
+        "relayblind/directory_test.go:TestIdentityDirectoryPinForRecord"
       ],
       "journeys": [],
       "evidence": [],
@@ -8445,7 +8445,7 @@
         "phase5-gateway/internal/router/relay_blind.go:relayBlindEnvelopeMetadataValid",
         "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindReplay",
         "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay",
-        "phase5-gateway/internal/relayblind/crypto.go:Encrypt",
+        "relayblind/crypto.go:Encrypt",
         "phase5-gateway/cmd/relay-blind-client/main.go:run"
       ],
       "tests": [
@@ -8453,8 +8453,8 @@
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayReturnsRelayBlindReplay",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindChatEnvelopeRejectsAPIAndDemoTokenCapViolations",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindMalformedSentinelFieldsFailClosedBeforeDispatchOrQuota",
-        "phase5-gateway/internal/relayblind/crypto_test.go:TestGoldenVector",
-        "phase5-gateway/internal/relayblind/crypto_test.go:TestClosedJSONAndCanonicalEncoding",
+        "relayblind/crypto_test.go:TestGoldenVector",
+        "relayblind/crypto_test.go:TestClosedJSONAndCanonicalEncoding",
         "phase3-binary/Tests/macprovider-cliTests/RelayBlindProviderTests.swift:testSharedGoldenVectorMatchesGoAndDecrypts"
       ],
       "journeys": [],
@@ -10052,7 +10052,7 @@
         "scripts/sign-pool-promotion-transition.py:main",
         "scripts/pool_promotion_transition.py:public_key_reuses_acceptance_candidate",
         "scripts/pool_promotion_transition.py:public_keys_match",
-        ".github/workflows/build-signed-pool-promotion-transition.yml:scripts/register-spec043-production-release-key.py --check"
+        ".github/workflows/signed-journey.yml:scripts/register-spec043-production-release-key.py --check"
       ],
       "tests": [
         "scripts/tests/test_pool_promotion_transition.py:class PoolPromotionTransitionTests",
@@ -10979,8 +10979,8 @@
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
         "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload",
-        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
-        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:python3 scripts/preflight-signed-journey-promotion.py --source-sha \"$SOURCE_SHA\" --evidence-sha \"$EVIDENCE_SHA\" --requirement-ids \"$REQUIREMENT_IDS\" --journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+        ".github/workflows/signed-journey.yml:printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
+        ".github/workflows/signed-journey.yml:python3 scripts/preflight-signed-journey-promotion.py --source-sha \"$SOURCE_SHA\" --evidence-sha \"$EVIDENCE_SHA\" --requirement-ids \"$REQUIREMENT_IDS\" --journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
@@ -12285,8 +12285,8 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/relayblind/privacy.go:PostureStatement",
-        "phase4-coordinator/internal/relayblind/privacy.go:ParsePostureStatement",
+        "relayblind/privacy.go:PostureStatement",
+        "relayblind/privacy.go:ParsePostureStatement",
         "phase3-binary/Sources/macprovider-cli/PrivacyClass.swift:PrivacyPostureStatement"
       ],
       "tests": [
@@ -12316,7 +12316,7 @@
         "phase4-coordinator/internal/relayblind/privacy_authority.go:resolveKeys"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
+        "relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo",
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestOperatorPinsOverrideEnrollment",
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassAutomaticEnrollmentConfig"
@@ -12423,11 +12423,11 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:AcceptPrivacyKeys",
-        "phase4-coordinator/internal/relayblind/privacy.go:PrivacyKeyAttestation",
+        "relayblind/privacy.go:PrivacyKeyAttestation",
         "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:RelayBlindKeyManager"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
+        "relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationNeverSelectsRelayBlindKey",
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestReplacedSessionHeartbeatDoesNotRevokePrivacyKeys",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
@@ -12587,14 +12587,11 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/relayblind/privacy.go:SealFrame",
-        "phase4-coordinator/internal/relayblind/privacy.go:OpenFrame",
-        "phase5-gateway/internal/relayblind/privacy.go:SealFrame",
-        "phase5-gateway/internal/relayblind/privacy.go:OpenFrame"
+        "relayblind/privacy.go:SealFrame",
+        "relayblind/privacy.go:OpenFrame"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate",
-        "phase5-gateway/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate"
+        "relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -12867,7 +12864,7 @@
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
         "phase4-coordinator/internal/relayblind/store_enrollment.go:EnrollPrivacyIdentity",
-        "phase4-coordinator/internal/relayblind/directory.go:ParsePrivacyEnrollmentClaim",
+        "relayblind/directory.go:ParsePrivacyEnrollmentClaim",
         "phase4-coordinator/internal/ws/messages.go:parsePrivacyEnrollment"
       ],
       "tests": [
@@ -12942,15 +12939,15 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/relayblind/directory.go:SignIdentityDirectory",
+        "relayblind/directory.go:SignIdentityDirectory",
         "phase4-coordinator/internal/relayblind/directory_service.go:BuildIdentityDirectory",
         "phase4-coordinator/internal/relayblind/directory_service.go:LoadIdentityDirectorySigningKey",
         "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyDirectory",
         "phase5-gateway/internal/router/privacy_directory.go:handlePrivacyDirectory",
-        "phase5-gateway/internal/relayblind/directory.go:VerifyIdentityDirectory"
+        "relayblind/directory.go:VerifyIdentityDirectory"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/directory_test.go:TestIdentityDirectoryRejectsWrongKeyTamperAndStaleness",
+        "relayblind/directory_test.go:TestIdentityDirectoryRejectsWrongKeyTamperAndStaleness",
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectoryBuildPublishesEnrollmentAndRevocation",
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectorySigningKeyCustody",
         "phase4-coordinator/internal/buyer/privacy_directory_test.go:TestPrivacyDirectoryRoute",
@@ -13015,18 +13012,17 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
+        "relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:EligibilityReason",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:AdvertisementRejection",
         "phase4-coordinator/internal/buyer/privacy_reject.go:notePrivacyRouteRejection",
         "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
         "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyRouteRejection",
-        "phase5-gateway/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
         "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection",
         "phase4-coordinator/internal/buyer/privacy_reject.go:closerPrivacyReject"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/privacy_reject_test.go:TestPrivacyRejectReasonsAreClosed",
+        "relayblind/privacy_reject_test.go:TestPrivacyRejectReasonsAreClosed",
         "phase4-coordinator/internal/relayblind/privacy_route_reason_test.go:TestPrivacyEligibilityReasonSplitsNotEnrolled",
         "phase4-coordinator/internal/relayblind/privacy_route_reason_test.go:TestPrivacyAdvertisementRejectionIsRemembered",
         "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyReservationRecordsRealRejectReason",
@@ -13109,7 +13105,7 @@
         "phase4-coordinator/internal/buyer/privacy_pool.go:bindPrivacyPoolRoute",
         "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
         "phase4-coordinator/internal/relayblind/store.go:CreateReservation",
-        "phase4-coordinator/internal/relayblind/types.go:ParseReservationResponse",
+        "relayblind/types.go:ParseReservationResponse",
         "phase5-gateway/internal/router/privacy_class.go:resolvePrivacyPool",
         "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadata",
         "phase5-gateway/internal/router/privacy_mode.go:setPoolScopedPrivacyModeHeaders",
@@ -13182,7 +13178,7 @@
         "phase4-coordinator/internal/buyer/privacy_class.go:privacyGateExplain",
         "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation",
         "phase4-coordinator/internal/relayblind/store.go:CreateReservation",
-        "phase4-coordinator/internal/relayblind/privacy.go:PrivacyAssuranceKnown",
+        "relayblind/privacy.go:PrivacyAssuranceKnown",
         "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceRequested",
         "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceEcho",
         "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadataFor",
@@ -13194,7 +13190,7 @@
         "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundRequirementReservesOnlyCodeBoundSessions",
         "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundReservationLapsesBeforeDispatch",
         "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementIsClosed",
-        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyReservationVersionClosed",
+        "relayblind/privacy_test.go:TestPrivacyReservationVersionClosed",
         "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyCodeBoundStringsArePinned",
         "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementForwardedOnReservationOnly",
         "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyChatDisclosureFollowsTheEchoedLabel",

@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 func privacyClosedFrame(t *testing.T, seq uint64, final bool) string {

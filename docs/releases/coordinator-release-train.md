@@ -827,7 +827,7 @@ To bundle when merged:
 - [ ] CB/MTP self-check bundle (branch `cli/auto-cb-slots`) — coordinator side of the native-MTP canary.
 
 Configuration riding the same restart:
-- [ ] `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256` from #1943 in the coordinator launch environment, then sign and upsert the on-call readiness record (`build-signed-oncall-readiness.yml`, `coordinator-cli trust-pool-oncall upsert`).
+- [ ] `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256` from #1943 in the coordinator launch environment, then sign and upsert the on-call readiness record (`signed-journey.yml (journey=oncall-readiness)`, `coordinator-cli trust-pool-oncall upsert`).
 - Not in this train: `production_activation` (#1880 step 4). Both active candidate pools were retired on 2026-10-10, but activation waits for a hardware-backed production pool root key; the custody disclosure must state real custody, and `software` is rejected.
 
 Not in this train: #1909 settlement-evidence retention (own train when ready).

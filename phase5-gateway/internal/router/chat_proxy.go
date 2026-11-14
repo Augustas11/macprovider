@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 type chatRequest struct {

@@ -379,9 +379,9 @@ LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS = frozenset(
     {
         "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload",
-        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:"
+        ".github/workflows/signed-journey.yml:"
         "printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
-        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:"
+        ".github/workflows/signed-journey.yml:"
         'python3 scripts/preflight-signed-journey-promotion.py --source-sha "$SOURCE_SHA" '
         '--evidence-sha "$EVIDENCE_SHA" --requirement-ids "$REQUIREMENT_IDS" '
         "--journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT",

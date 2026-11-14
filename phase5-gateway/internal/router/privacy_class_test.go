@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 func privacyReservationFixture(t *testing.T, stream bool, families ...string) relayblind.ReservationResponse {

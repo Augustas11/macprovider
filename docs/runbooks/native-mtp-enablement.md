@@ -108,7 +108,7 @@ config load may make the tuple selectable before that promotion.
    placeholders.
 4. **Final serving confirmation.** Run JOURNEY-NATIVE-MTP-SERVING on the final
    signed candidate with the release-bound sidecar from step 3, then sign and
-   promote it on main (`promote-signed-native-mtp-serving-journey.yml`). This is
+   promote it on main (`signed-journey.yml (journey=native-mtp-serving)`). This is
    the post-cut confirmation that the actual release tuple, source commit,
    provider revision, CDHash, R015 policy and revocation behavior were tested.
    It is required before any network native-MTP enablement.
@@ -122,7 +122,7 @@ config load may make the tuple selectable before that promotion.
    `verify`. The release binds `native-mtp-admission.json` as its seventh feed
    (ledger v4).
 7. **Release journey.** Run JOURNEY-NATIVE-MTP-RELEASE on the final signed
-   candidate and sign it (`promote-signed-native-mtp-release-journey.yml`).
+   candidate and sign it (`signed-journey.yml (journey=native-mtp-release)`).
    Only that result promotes SPEC-048-R014. Wait until R014 is promoted
    conformant before the first production config load that can make the tuple
    selectable.

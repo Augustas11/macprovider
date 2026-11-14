@@ -131,7 +131,7 @@ journeys/evidence/native-mtp-serving-*.redacted.json
 **Authenticated post-cut delivery.** Evidence that can exist only after the
 reviewed campaign merge and signed CLI cut MAY be delivered as a redacted
 draft-release ZIP asset to the existing protected
-`.github/workflows/promote-signed-native-mtp-serving-journey.yml`, using its
+`.github/workflows/signed-journey.yml (journey=native-mtp-serving)`, using its
 `postcut_asset_id`, `postcut_asset_sha256` and `postcut_release_id` inputs.
 The ZIP's closed `postcut-manifest.json`
 (`macprovider.native-mtp-postcut-evidence.v1`) MUST bind the repository, exact

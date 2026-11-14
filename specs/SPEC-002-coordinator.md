@@ -4683,7 +4683,7 @@ A mock Phase 3 binary connects via WebSocket, exchanges hello/hello_ack,
 sends 5 heartbeats at the configured interval, receives a drain command
 on coordinator shutdown, sends drain_status, and closes cleanly.
 
-Run by: `phase4-coordinator/scripts/test-provider-lifecycle.sh`
+Run by: `phase4-coordinator/scripts/test-provider-lifecycle.sh` (The named script is not in the tree.)
 
 **AC-2. Cooperative batch through coordinator.**
 The buyer harness (`beta/harness.py`) with `tunnel_url` pointing at the
@@ -4696,6 +4696,8 @@ Run by:
 cd beta && python harness.py --config config-coord-test.yaml \
   --batch cooperative --verbose
 ```
+
+The named script is not in the tree.
 
 The build session creates `config-coord-test.yaml` pointing
 `tunnel_url` at the coordinator.
@@ -4714,13 +4716,15 @@ cd beta && python harness.py --config config-coord-test.yaml \
   --batch adversarial --verbose
 ```
 
+The named script is not in the tree.
+
 **AC-4. Provider disconnect mid-buyer-request.**
 During an in-flight streaming buyer request, the serving provider's
 WebSocket disconnects. The coordinator returns a clean error SSE event
 to the buyer and closes the stream (not a hang, not a silent retry).
 The coordinator remains healthy.
 
-Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh`
+Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh` (The named script is not in the tree.)
 
 **AC-5. Auth flow.**
 1. Issue a token via `coordinator-cli issue-token --provider-id <provider_id>`.
@@ -4732,7 +4736,7 @@ Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh`
    while sending the original provider's `hello.provider_id` — rejected
    with WS close 4005 `invalid_token`.
 
-Run by: `phase4-coordinator/scripts/test-auth-flow.sh`
+Run by: `phase4-coordinator/scripts/test-auth-flow.sh` (The named script is not in the tree.)
 
 **AC-6. Graceful SIGTERM drain.**
 With 3 in-flight buyer requests (streaming), sending SIGTERM to the
@@ -4748,6 +4752,7 @@ Run by: `phase4-coordinator/scripts/test-sigterm-drain.sh` — script the
 build session must produce as part of AC delivery. Fires 3 streaming
 requests, captures PID, sends SIGTERM, asserts all 3 complete and
 process exits 0 within 35s.
+(The named script is not in the tree.)
 
 **AC-7. 502 degraded recovery.**
 1. Mock provider is serving traffic normally.
@@ -4757,7 +4762,7 @@ process exits 0 within 35s.
    accepts.
 5. Coordinator marks provider as `ready`, resumes routing.
 
-Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh`
+Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh` (The named script is not in the tree.)
 
 **AC-8. 530 reconnection.**
 1. Mock provider is serving traffic normally.
@@ -4768,7 +4773,7 @@ Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh`
 6. After grace period (second test): coordinator removes provider
    from pool.
 
-Run by: `phase4-coordinator/scripts/test-reconnection.sh`
+Run by: `phase4-coordinator/scripts/test-reconnection.sh` (The named script is not in the tree.)
 
 **AC-8b. Warm-up dispatch on wake.**
 1. Mock provider connects, runs normally for 2 minutes (heartbeats every 30s).
@@ -4786,7 +4791,7 @@ Run by: `phase4-coordinator/scripts/test-reconnection.sh`
    receives 503 `no_provider_available` until this provider exits
    degraded state.
 
-Run by: `phase4-coordinator/scripts/test-warmup-dispatch.sh`
+Run by: `phase4-coordinator/scripts/test-warmup-dispatch.sh` (The named script is not in the tree.)
 
 **AC-9. Capacity preference routing.**
 Pool has 2 mock providers:
@@ -4799,7 +4804,7 @@ Both serve the same model ID for testing purposes.
 2. Request with `X-MacProvider-Pref: accurate` routes to Provider B.
 3. Request with no preference routes per utilization (FR-R1).
 
-Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
+Run by: `phase4-coordinator/scripts/test-routing-preference.sh` (The named script is not in the tree.)
 
 **AC-10. Operator endpoints.**
 1. `GET /healthz` returns 200 with pool size.
@@ -4818,7 +4823,7 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
      and the entry disappears from `/poolz` entirely.
 6. POSTing `/admin/blacklist` with an unknown `provider_id` returns 404.
 
-Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
+Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh` (The named script is not in the tree.)
 
 **AC-FR-B9-MULTI. request_log permits one row per provider attempt.**
 A deterministic fixture sends one logical request through two SPEC-004 retry attempts (single account). The assertion is two `request_log` rows sharing the same `(account_id, request_id)` group, with distinct auto-increment `id` values, provider attribution per attempt, and row order within that group defined by `id ASC` under SQLite `IS` clustering (so legacy NULL-`account_id` fixtures cluster identically). No uniqueness constraint may reject the repeated `request_id` within an account.
@@ -4847,21 +4852,21 @@ containing `tier: "provisional"`. `GET /poolz` shows the provider with
 `tier: "provisional"`. Buyer requests are routed to it (with reduced
 weight).
 
-Run by: `phase4-coordinator/scripts/test-provisional.sh`
+Run by: `phase4-coordinator/scripts/test-provisional.sh` (The named script is not in the tree.)
 
 **AC-12. Provisional rate limit.**
 Configure `admission.provisional_admission_rate_per_hour: 10`. Connect 11
 provisional providers within 60 seconds. First 10 get `hello_ack`.
 11th gets WS close code 4008.
 
-Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh` (The named script is not in the tree.)
 
 **AC-13. admin/promote.**
 Connect a provisional provider. `POST /admin/promote/{provider_id}`.
 Provider's tier changes to pinned in `/poolz`. Routing weight upgrades
 to 1.0 immediately.
 
-Run by: `phase4-coordinator/scripts/test-promote.sh`
+Run by: `phase4-coordinator/scripts/test-promote.sh` (The named script is not in the tree.)
 
 **AC-13a. Rewards-trusted quota elevation.**
 Given a provider with durable rewards trust
@@ -4892,7 +4897,7 @@ Connect a provisional provider. `POST /admin/reject/{provider_id}`.
 Provider receives drain. WS closes. `provider_id` in
 `rejected_providers`. Subsequent hello → WS close 4009.
 
-Run by: `phase4-coordinator/scripts/test-reject.sh`
+Run by: `phase4-coordinator/scripts/test-reject.sh` (The named script is not in the tree.)
 
 **AC-15. Routing-mode fallback on nak.**
 Coordinator dispatches `inference_request` to a mock provider that
@@ -4901,7 +4906,7 @@ routing mode `http_forwarding_only`, returns HTTP 503 to buyer.
 Subsequent requests to that provider's model are NOT dispatched via
 § 6.6 for the remainder of the WS session.
 
-Run by: `phase4-coordinator/scripts/test-nak-fallback.sh`
+Run by: `phase4-coordinator/scripts/test-nak-fallback.sh` (The named script is not in the tree.)
 
 **AC-X1 (PG-1). Public-launch provider token gate.**
 Deploy the coordinator with `auth.require_provider_tokens=true`.
@@ -4941,7 +4946,7 @@ With `admission.provisional_admission_rate_per_hour=10`, the 11th new
 provisional provider admission in one hour MUST be rejected with WS
 close 4008 `provisional_rate_limited`.
 
-Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh` (The named script is not in the tree.)
 
 Expected result: first 10 unknown provider IDs get `hello_ack`; the
 11th gets close code 4008.
@@ -4956,6 +4961,8 @@ Run by:
 phase4-coordinator/scripts/test-provisional.sh \
   --pinned-only --expect-close-code 4009 --expect-no-record
 ```
+
+The named script is not in the tree.
 
 Expected result: close code 4009 and no new row in the provisional
 provider listing.
@@ -4972,6 +4979,8 @@ phase4-coordinator/scripts/test-rate-limit.sh --count 6 --limit 10
 journalctl -u macprovider-coordinator --since -10m \
   | grep 'provisional_admission_pressure'
 ```
+
+The named script is not in the tree.
 
 Expected result: a WARN-level log line containing
 `provisional_admission_pressure`, `rolling_10m_count`, `limit_per_hour`,

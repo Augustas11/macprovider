@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 const relayBlindValidatedHeader = "X-MacProvider-Relay-Blind-Validated"

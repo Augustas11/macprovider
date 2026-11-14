@@ -164,7 +164,7 @@ func TestRequiresIsBoundIntoEnvelopeAAD(t *testing.T) {
 }
 
 func TestRequiresGoldenVector(t *testing.T) {
-	raw, err := os.ReadFile("../../../test/fixtures/relay-blind/golden-v1.json")
+	raw, err := os.ReadFile("../test/fixtures/relay-blind/golden-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestRequiresGoldenVector(t *testing.T) {
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	rawVector, err := os.ReadFile("../../../test/fixtures/relay-blind/golden-v1-requires.json")
+	rawVector, err := os.ReadFile("../test/fixtures/relay-blind/golden-v1-requires.json")
 	if err != nil {
 		t.Fatal(err)
 	}

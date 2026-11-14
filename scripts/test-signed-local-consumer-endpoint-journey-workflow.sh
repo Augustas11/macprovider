@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-workflow="$root/.github/workflows/promote-signed-local-consumer-endpoint-journey.yml"
+workflow="$root/.github/workflows/signed-journey.yml"
 builder="$root/scripts/build-local-consumer-endpoint-journey-result.py"
 preflight="$root/scripts/preflight-signed-journey-promotion.py"
 
@@ -21,16 +21,38 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+full_workflow = workflow
+
+def _signed_job_slice(text, job_id):
+    marker = "\n  %s:\n" % job_id
+    start = text.find(marker)
+    if start < 0:
+        raise SystemExit("missing job %s" % job_id)
+    rest = text[start + 1 :]
+    nxt = re.search(r"\n  [A-Za-z0-9_]+:\n", rest)
+    end = (start + 1 + nxt.start()) if nxt else len(text)
+    return text[start:end]
+
+_header_at = full_workflow.find("\njobs:\n")
+if _header_at < 0:
+    raise SystemExit("missing jobs")
+_parts = [full_workflow[: _header_at + len("\njobs:\n")]]
+for _job_id in ('local_consumer_transport', 'local_consumer_promote',):
+    _parts.append(_signed_job_slice(full_workflow, _job_id))
+_root = pathlib.Path(sys.argv[1]).resolve().parents[2]
+for _rel in ():
+    _parts.append((_root / _rel).read_text(encoding="utf-8"))
+workflow = "\n".join(_parts)
 builder = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 
 required_workflow = [
     "\n  workflow_dispatch:\n",
     "environment: production-release",
     "contents: read",
-    "verify_transport_matrix:",
+    "local_consumer_transport:",
     "runs-on: macos-26\n",
     "sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer",
-    "needs: verify_transport_matrix",
+    "needs: [gate, local_consumer_transport]",
     "Execute exact-source trusted transport matrix",
     "ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed",
     "executed transport report bytes do not match reviewed redacted evidence",
@@ -78,10 +100,10 @@ for value in required_workflow:
     if value not in workflow:
         raise SystemExit(f"workflow contract is missing: {value}")
 
-if "\n  push:" in workflow or "\n  pull_request:" in workflow:
+if "\n  push:" in full_workflow or "\n  pull_request:" in full_workflow:
     raise SystemExit("workflow must be manual dispatch only")
 for forbidden in ("contents: write", "pull-requests: write", "git push", "gh pr create", "gh pr merge", "gh release"):
-    if forbidden in workflow:
+    if forbidden in full_workflow:
         raise SystemExit(f"workflow contains an unnecessary write/publication capability: {forbidden}")
 if "cat \"$MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM\"" in workflow:
     raise SystemExit("workflow must not print private key material")
