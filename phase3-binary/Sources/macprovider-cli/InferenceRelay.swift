@@ -465,6 +465,13 @@ actor InferenceRelay {
                 throw error
             }
         }
+        // Issue #2364: the request waits for its first token under the stall watchdog.
+        let stallTimeline = state.timeline
+        FirstTokenStallWatchdog.shared.register(
+            id: requestID,
+            promptTokens: FirstTokenStallPolicy.estimatedPromptTokens(bodyBytes: body.utf8.count),
+            firstTokenObserved: { stallTimeline.isMarked(.firstToken) }
+        )
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
             await Self.process(
                 requestID: requestID,
@@ -490,6 +497,7 @@ actor InferenceRelay {
                 relayBlindRuntime: relayBlindRuntime,
                 sendFrame: releasingSendFrame
             )
+            FirstTokenStallWatchdog.shared.finish(id: requestID)
             await self?.removeActive(requestID, state: state)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
@@ -1087,6 +1095,12 @@ actor InferenceRelay {
             failed: failed,
             requestID: requestID
         )
+        if let completionResult, let prefillMs = state.timeline.snapshot().prefillWallMs {
+            FirstTokenStallWatchdog.shared.recordPrefillSample(
+                uncachedPromptTokens: completionResult.promptTokens - completionResult.cachedPromptTokens,
+                prefillSeconds: Double(prefillMs) / 1000
+            )
+        }
         if relayBlindOpened == nil, !failed, !state.isCancelled, let completionResult {
             KVCacheTelemetry.emitRequestCompleted(
                 providerID: receiptProviderID,

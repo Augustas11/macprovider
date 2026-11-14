@@ -489,6 +489,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
                 case .token(let token, _):
                     guard !output.stopped else { continue }
                     timeline.markFirstToken()
+                    ModelLivenessTracker.shared.recordProgress()
                     completionTokens += 1
                     deliver(output.append(token))
                     if output.stopped { engine.cancel(requestID) }

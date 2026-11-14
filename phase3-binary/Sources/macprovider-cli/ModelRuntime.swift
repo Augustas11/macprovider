@@ -8966,7 +8966,13 @@ maxTokens: 1,
     /// is the row's first sampled token, or, for a waiter that attached to a
     /// row already in flight, its first replayed delivery.
     static func noteContinuousBatchTokenEvent(_ event: ContinuousBatchSchedulerTokenEvent, on timeline: RequestTimeline) {
-        if event.replayTokens != nil { timeline.markReplayAttach() }
+        if event.replayTokens != nil {
+            timeline.markReplayAttach()
+        } else {
+            // A sampled batched token is model forward progress (SPEC-025
+            // §5.2); the issue #2364 stall watchdog reads it.
+            ModelLivenessTracker.shared.recordProgress()
+        }
         timeline.markFirstToken()
     }
 
