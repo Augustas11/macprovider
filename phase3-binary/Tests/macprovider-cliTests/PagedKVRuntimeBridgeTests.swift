@@ -1324,6 +1324,96 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    /// #2328: a drafter that keeps nothing from the prompt
+    /// (`requiresPromptPrefill` false; the Gemma 4 assistant) has no packed
+    /// advance without a verified round's target K/V. A chunked prompt
+    /// leaves it as single-pass seeding does, fresh state and no seed, and
+    /// never calls the packed advance, which threw
+    /// `MTPPackedDrafterError.incompatibleState(row: 0)` on the first chunk.
+    func testChunkedPromptPrefillLeavesAPromptFreeDrafterLikeSinglePass() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13], emitsMTPState: true)
+        let drafter = RuntimeBridgePromptFreePackedMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        let prompt = [10, 11, 12]
+
+        func prefill(_ id: String, chunks: [Int]) async throws -> [ContinuousBatchPrefillOutput] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            var outputs: [ContinuousBatchPrefillOutput] = []
+            var offset = 0
+            for size in chunks {
+                let end = offset + size
+                _ = try await allocator.extend(handle, by: size)
+                outputs += try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: Array(prompt[offset ..< end]),
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: offset,
+                    committedKVTokenCount: offset,
+                    targetKVTokenCount: end,
+                    isFinalChunk: end == prompt.count,
+                    nativeMTPPromptPrefill: true,
+                    nativeMTPNextPromptToken: end < prompt.count ? prompt[end] : nil
+                )])
+                offset = end
+            }
+            return outputs
+        }
+
+        let single = try await prefill("single", chunks: [3])
+        let chunked = try await prefill("chunked", chunks: [2, 1])
+        XCTAssertEqual(single, [ContinuousBatchPrefillOutput(requestID: "single", sampledToken: 13)])
+        XCTAssertEqual(chunked, [
+            ContinuousBatchPrefillOutput(requestID: "chunked", sampledToken: nil),
+            ContinuousBatchPrefillOutput(requestID: "chunked", sampledToken: 13),
+        ])
+        XCTAssertEqual(drafter.packedAdvanceCount(), 0)
+        let reference = backend.nativeMTPDrafterSnapshotForTest(requestID: "single")
+        let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: "chunked")
+        let referenceState = try XCTUnwrap(reference.state)
+        let candidateState = try XCTUnwrap(candidate.state)
+        XCTAssertTrue(candidateState.cache.isEmpty)
+        XCTAssertEqual(candidateState.nextPosition, referenceState.nextPosition)
+        XCTAssertEqual(candidateState.proposalAppended, referenceState.proposalAppended)
+        XCTAssertNil(candidate.seedToken)
+        XCTAssertEqual(candidate.seedToken, reference.seedToken)
+        XCTAssertEqual(candidate.pendingColumns, 0)
+    }
+
+    func testPackedDrafterFailureReasonNamesTheCaseAndItsValues() {
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureTelemetryLine(MTPPackedDrafterError.incompatibleState(row: 0)),
+            "event=batching_prefill_failed action=fail_closed reason=mtp_packed_drafter_incompatiblestate_row_0\n"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(
+                MTPPackedDrafterError.invalidTargetHidden(row: 1, shape: [1, 512, 3840])
+            ),
+            "mtp_packed_drafter_invalidtargethidden_row_1_shape_1_512_3840"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(
+                MTPPackedDrafterError.positionMismatch(row: 0, nextPosition: -2, cacheOffset: 1)
+            ),
+            "mtp_packed_drafter_positionmismatch_row_0_nextposition_-2_cacheoffset_1"
+        )
+    }
+
     /// SPEC-048-R007 / SPEC-038 FR-CB2: a native row in an equal-length
     /// prefill group shares the group's one `[B, L]` target forward; its
     /// drafter is seeded from its own `[1, L]` slice of that forward's hidden
@@ -7311,6 +7401,70 @@ private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafter
         lock.lock()
         defer { lock.unlock() }
         return hiddenWidths
+    }
+}
+
+/// A drafter like the Gemma 4 assistant: no prompt prefill, no own cache,
+/// and a packed advance that needs the target K/V of a verified round
+/// (`Gemma4AssistantDraftModel.packedRowInput`).
+private final class RuntimeBridgePromptFreePackedMTPDrafter: Module, MTPPackedStatefulDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresGreedySampling = true
+    private let lock = NSLock()
+    private var packedAdvances = 0
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func advanceAndProposePacked(
+        target: any LanguageModel,
+        rows: [MTPPackedDrafterAdvanceRow],
+        sampler: any LogitSampler
+    ) throws -> MTPPackedDrafterAdvanceResult {
+        lock.lock()
+        packedAdvances += 1
+        lock.unlock()
+        for (index, row) in rows.enumerated() where row.sharedKV == nil || row.sharedKVOffset == nil {
+            throw MTPPackedDrafterError.incompatibleState(row: index)
+        }
+        return MTPPackedDrafterAdvanceResult(
+            states: rows.map { _ in makeState(parameters: nil) },
+            proposals: MLXArray.zeros([rows.count, 1], dtype: .int32)
+        )
+    }
+
+    func packedAdvanceCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return packedAdvances
     }
 }
 

@@ -512,6 +512,9 @@ enum ContinuousBatchingPolicy {
             return "mtp_packed_\(String(describing: error))"
         case let error as MTPPackedMambaCacheError:
             return "mtp_recurrent_\(String(describing: error))"
+        case let error as MTPPackedDrafterError:
+            // Case and row index, shapes and counts only: no token ids.
+            return "mtp_packed_drafter_\(String(describing: error))"
         default:
             return String(describing: type(of: error))
         }

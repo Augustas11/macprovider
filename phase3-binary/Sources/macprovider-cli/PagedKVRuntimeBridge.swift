@@ -3281,6 +3281,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws {
         try requireTargetLockHeld("advance_drafter_prompt_chunk")
         guard let drafterContainer else { return }
+        // A drafter that keeps nothing from the prompt (the Gemma 4
+        // assistant attends over the target's K/V) is left by single-pass
+        // seeding with its fresh state and no seed; every chunk leaves the
+        // same. Its packed advance needs the target K/V of a verified round,
+        // which a prompt chunk has not got (#2328).
+        if let promptFreeState = try await Self.promptFreeDrafterState(drafterContainer) {
+            storeNativeMTPDrafterAdvance(
+                requestIDs: [input.requestID],
+                states: [promptFreeState],
+                seedTokens: [nil]
+            )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            try labRecordNativeMTPCommittedPrefix(
+                requestID: input.requestID,
+                tokens: input.promptTokens,
+                hidden: try Self.labHiddenColumns(targetHidden, count: input.promptTokens.count),
+                positionDeltas: positionDeltas,
+                targetBonusToken: tailToken,
+                startsFresh: input.promptTokenOffset == 0
+            )
+            #endif
+            return
+        }
         let chunkCount = input.promptTokens.count
         guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
@@ -3366,6 +3389,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         max(0, windowStart - promptTokenOffset)
     }
 
+    /// The fresh state of a drafter that keeps nothing from committed
+    /// columns (`requiresPromptPrefill` false: it attends over the target's
+    /// K/V, like the Gemma 4 assistant), or nil for a drafter that must
+    /// consume them.
+    private static func promptFreeDrafterState(_ drafterContainer: MTPDrafterContainer) async throws -> MTPDrafterState? {
+        try await drafterContainer.perform(nonSendable: ()) { drafterContext, _ in
+            guard let drafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            return drafter.requiresPromptPrefill ? nil : drafter.makeState(parameters: nil)
+        }
+    }
+
     /// Row `row`'s last-position hidden state as a `[1, 1, hidden]` array
     /// with its own buffer. A slice would share the whole `[B, T, hidden]`
     /// batch output, so a buffered column would pin every row's state; a
@@ -3433,6 +3469,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws {
         try requireTargetLockHeld("flush_drafter_columns")
         guard let drafterContainer, !requestIDs.isEmpty else { return }
+        // A prompt-free drafter consumes no columns: its state after them is
+        // its fresh state, and the next native round proposes nothing and
+        // verifies one column, whose finalize carries the target K/V.
+        if let promptFreeState = try await Self.promptFreeDrafterState(drafterContainer) {
+            let (flushIDs, _) = try pendingNativeMTPDrafterAdvanceRows(
+                requestIDs: requestIDs,
+                minimumColumns: minimumColumns
+            )
+            lock.lock()
+            for requestID in flushIDs {
+                nativeMTPDrafterStates[requestID] = promptFreeState
+                nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
+                nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
+            }
+            lock.unlock()
+            return
+        }
         let (flushIDs, advanceRows) = try pendingNativeMTPDrafterAdvanceRows(
             requestIDs: requestIDs,
             minimumColumns: minimumColumns
