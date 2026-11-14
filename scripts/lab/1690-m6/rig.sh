@@ -119,20 +119,13 @@ prep_src() {
 }
 static_swift() {
   cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
-  # #1690 e2e: the CLI's signed-static loader (AutotuneRecommend.swift
-  # loadSignedStatic) GETs https://coordinator.malibu.tech/v1/<name>{,.sig}
-  # on every serve preflight, a hardcoded production URL. Point the lab build
-  # at a closed lab loopback port so the fetch fails fast and the baked lab
-  # release is used, and no lab process contacts production.
-  python3 - "$SRC/Sources/macprovider-cli/AutotuneRecommend.swift" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-old = 'URL(string: "https://coordinator.malibu.tech/v1/\\(name)'
-assert s.count(old) == 2, f"static feed URL sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, 'URL(string: "http://127.0.0.1:19108/v1/\\(name)'))
-PY
 }
+# The lab CLIs build with MACPROVIDER_LAB_HARNESS so StaticFeedOrigin honours
+# the MACPROVIDER_LAB_STATIC_FEED_* override cli.sh exports: every signed
+# static feed resolves against a closed lab loopback port, the fetch fails
+# fast, the baked lab release (signed by the lab static key) is used, and no
+# lab process contacts production.
+lab_swift_build() { (cd "$SRC" && swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS); }
 wait_http() { for _ in $(seq 1 60); do curl -fs "$1" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "timeout waiting for $1" >&2; return 1; }
 
 cmd_model() {
@@ -152,7 +145,7 @@ cmd_build() {
   cmd_static
   # The lab CLI is the branch CLI (HEAD) with the lab static release compiled in.
   static_swift
-  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  lab_swift_build
   cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab"
   cp "$METALLIB" "$LAB/bin/mlx.metallib"
   echo "build ok"
@@ -181,7 +174,7 @@ new = """        if let spoof = ProcessInfo.processInfo.environment["LAB_SPOOF_R
 assert s.count(old) == 1, "auth runtime_source block not found"
 open(p, "w").write(s.replace(old, new))
 PY
-  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  lab_swift_build
   cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab-spoof"
   echo "spoof build ok"
 }
@@ -206,7 +199,7 @@ new = """        if ProcessInfo.processInfo.environment["LAB_NATIVE_CATALOG_PREF
 assert s.count(old) == 1, "relaxesJoinAdmissionForLab body not found"
 open(p, "w").write(s.replace(old, new))
 PY
-  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  lab_swift_build
   cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab-native"
   echo "native build ok"
 }
