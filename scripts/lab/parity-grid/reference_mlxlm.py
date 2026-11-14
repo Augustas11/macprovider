@@ -104,8 +104,15 @@ def main(argv=None):
     load_s = round(time.perf_counter() - t, 2)
     sampler = make_sampler(temp=0.0)
 
+    # The provider renders a request that does not ask for reasoning with
+    # thinking off. A template that has the switch gets the same here, or the
+    # two sides decode different prompts.
+    template = getattr(tokenizer, "chat_template", None) or ""
+    template_kwargs = {"enable_thinking": False} if "enable_thinking" in str(template) else {}
+
     def encode(messages):
-        return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, **template_kwargs)
 
     # Warm up on a prompt that no measured cell uses.
     run_one(model, tokenizer, stream_generate, sampler,
