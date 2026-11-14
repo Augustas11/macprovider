@@ -1235,6 +1235,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 self.labCaptureTargetLogits(
                                     requestID: input.requestID, position: input.samplerStep,
                                     tokenIDs: [sampledToken], logits: output.logits[0..., -1, 0...])
+                                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                                if NativeMTPLabTokenTrace.enabled, input.samplerStep < NativeMTPLabTokenTrace.limit {
+                                    let top = NativeMTPLabTokenTrace.topTwo(output.logits[0..., -1, 0...])[0]
+                                    NativeMTPLabTokenTrace.write(requestID: input.requestID, path: "prefill", [.init(
+                                        index: input.samplerStep, column: 0, width: input.promptTokens.count,
+                                        source: "target", token: sampledToken, top1: top.top1, top2: top.top2,
+                                        margin: top.margin, kvBefore: input.committedKVTokenCount,
+                                        kvAfter: input.targetKVTokenCount
+                                    )])
+                                }
+                                #endif
                             }
                         } else {
                             sampledToken = nil
@@ -1757,6 +1768,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         requestID: input.requestID, position: input.samplerStep, tokenIDs: tokens,
                         logits: concatenated([row.proposalLogits, row.bonusLogits], axis: 0), speculative: true)
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                if NativeMTPLabTokenTrace.enabled, input.samplerStep < NativeMTPLabTokenTrace.limit {
+                    let columns = row.proposalLogits.ndim == 2 && row.proposalLogits.dim(0) > 0
+                        ? concatenated([row.proposalLogits, row.bonusLogits], axis: 0)
+                        : row.bonusLogits
+                    NativeMTPLabTokenTrace.write(
+                        requestID: input.requestID, path: "verify",
+                        NativeMTPLabTokenTrace.verifyEntries(
+                            samplerStep: input.samplerStep,
+                            proposals: input.proposalTokens,
+                            targets: tokens,
+                            tops: NativeMTPLabTokenTrace.topTwo(columns),
+                            kvBefore: input.committedKVTokenCount
+                        )
+                    )
+                }
+                #endif
             }
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
@@ -2690,6 +2718,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         position: supportedInputs[index].samplerStep + stepIndex,
                         tokenIDs: [stepSampled[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                if NativeMTPLabTokenTrace.enabled {
+                    for (index, input) in supportedInputs.enumerated()
+                    where input.samplerStep + stepIndex < NativeMTPLabTokenTrace.limit {
+                        let top = NativeMTPLabTokenTrace.topTwo(logits[index, -1, 0...].reshaped(1, -1))[0]
+                        let kvBefore = input.committedKVTokenCount + stepIndex
+                        NativeMTPLabTokenTrace.write(requestID: input.requestID, path: "decode", [.init(
+                            index: input.samplerStep + stepIndex, column: 0, width: 1, source: "target",
+                            token: stepSampled[index], top1: top.top1, top2: top.top2, margin: top.margin,
+                            kvBefore: kvBefore, kvAfter: kvBefore + 1
+                        )])
+                    }
+                }
+                #endif
                 if !captureIndices.isEmpty {
                     guard let hidden = state?[mtpLastHiddenStatesKey],
                           hidden.ndim == 3,

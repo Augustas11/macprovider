@@ -1395,6 +1395,35 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(candidate.pendingColumns, 0)
     }
 
+    /// #2328 lab token trace: a verify commits its accepted proposals as
+    /// `draft` and the target's pick at the first mismatch as `target`; the
+    /// top-2 margin is per column; steps past the limit are not traced.
+    func testNativeMTPLabTokenTraceEntriesAndTopTwo() throws {
+        try requireMetal()
+        let tops = NativeMTPLabTokenTrace.topTwo(MLXArray(
+            [Float(0), 3, 1, 3, 0.5, 2, 0.25, 0], [2, 4]
+        ))
+        XCTAssertEqual(tops.map(\.top1), [1, 1])
+        XCTAssertEqual(tops.map(\.top2), [3, 0])
+        XCTAssertEqual(tops.map(\.margin), [0, 1.5])
+        let accepted = NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 5, proposals: [1], targets: [1, 2], tops: tops, kvBefore: 1540)
+        XCTAssertEqual(accepted.map(\.source), ["draft", "target"])
+        XCTAssertEqual(accepted.map(\.index), [5, 6])
+        XCTAssertEqual(accepted.map(\.kvAfter), [1542, 1542])
+        let rejected = NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 5, proposals: [7], targets: [1, 2], tops: tops, kvBefore: 1540)
+        XCTAssertEqual(rejected, [NativeMTPLabTokenTrace.Entry(
+            index: 5, column: 0, width: 2, source: "target", token: 1, top1: 1, top2: 3, margin: 0,
+            kvBefore: 1540, kvAfter: 1541)])
+        XCTAssertEqual(
+            NativeMTPLabTokenTrace.line(requestID: "r", path: "verify", rejected[0]),
+            "[mtp-token] req=r path=verify idx=5 col=0 width=2 src=target token=1 top1=1 top2=3 margin=0.0 kv=1540->1541\n"
+        )
+        XCTAssertEqual(NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 63, proposals: [1], targets: [1, 2], tops: tops, kvBefore: 0).map(\.index), [63])
+    }
+
     func testPackedDrafterFailureReasonNamesTheCaseAndItsValues() {
         XCTAssertEqual(
             ContinuousBatchingPolicy.prefillFailureTelemetryLine(MTPPackedDrafterError.incompatibleState(row: 0)),
