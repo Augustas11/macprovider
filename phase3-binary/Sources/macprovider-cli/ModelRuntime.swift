@@ -2125,6 +2125,9 @@ actor ModelRuntime: ModelRuntimeServing {
     // warm-swaps). Used to gate the catalog-id alias so the alias only applies
     // while the configured model is the one currently loaded.
     private let modelID: String?
+    /// SPEC-001-R018: this runtime's turn on the process GPU. Registered while
+    /// a model is loaded; every decode step and prefill chunk is bracketed by it.
+    nonisolated let gpuTurnParticipant: GPUTurnParticipant
     private let configuredModelLoadPath: String?
     // Coordinator-advertised catalog id (e.g. mlx-community/…) accepted as an
     // alias for the configured served model. nil when unset. See BUILD_SPEC
@@ -4014,6 +4017,10 @@ maxTokens: 1,
             && generatedTokenIDs.last.map(isHarmonyTerminalToken) == true
     }
 
+    deinit {
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
+    }
+
     init(
         modelID: String?,
         modelLoadPath: String? = nil,
@@ -4083,6 +4090,7 @@ maxTokens: 1,
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
+        self.gpuTurnParticipant = GPUTurnArbiter.shared.register(modelID: modelID ?? "unloaded")
         self.configuredModelLoadPath = Self.nonEmpty(modelLoadPath)
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -4446,7 +4454,8 @@ maxTokens: 1,
             prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
-            cachedTurns: self.effectiveContinuousBatchingCachedTurns
+            cachedTurns: self.effectiveContinuousBatchingCachedTurns,
+            gpuTurnParticipant: self.gpuTurnParticipant
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -4596,6 +4605,7 @@ maxTokens: 1,
             durableAvailable: continuousBatchingDurableReplayAuthorityAvailable
         )
         self.modelID = modelID
+        self.gpuTurnParticipant = GPUTurnArbiter.shared.register(modelID: modelID ?? "unloaded")
         self.configuredModelLoadPath = nil
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -5730,6 +5740,7 @@ maxTokens: 1,
         currentDraftContainer = nil
         currentContainer = nil
         self.currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
         // Creative inference inherits the process budget, not the unloaded LFM cap.
@@ -5878,6 +5889,7 @@ maxTokens: 1,
         currentDraftContainer = nil
         currentContainer = nil
         currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
         finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: testLoader == nil)
@@ -7345,7 +7357,8 @@ maxTokens: 1,
             prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
-            cachedTurns: effectiveContinuousBatchingCachedTurns
+            cachedTurns: effectiveContinuousBatchingCachedTurns,
+            gpuTurnParticipant: gpuTurnParticipant
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -7637,6 +7650,7 @@ maxTokens: 1,
                 kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: try? Self.localModelDirectory(for: modelID)))
         }
         currentModelID = modelID
+        GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(
             artifactSHA256: modelHash,
@@ -10660,6 +10674,7 @@ maxTokens: boundedMaxTokens,
             serialQuantizedConversation: coldContext?.eligible != true
         )
         let inferenceGate = inferenceGate
+        let gpuTurnParticipant = gpuTurnParticipant
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
@@ -10757,7 +10772,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 shouldCancel: shouldCancel,
                                 drainCancelled: drainCancelled,
                                 prefillScope: prefillScope,
-                                blockingInferenceExecutor: blockingInferenceExecutor
+                                blockingInferenceExecutor: blockingInferenceExecutor,
+                                gpuTurnParticipant: gpuTurnParticipant
                             )
                         } catch let error as DrainCancelledError {
                             throw error
@@ -10809,6 +10825,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         ))
                     }
                         do {
+                            // SPEC-001-R018: this request's GPU turns, one per prefill chunk
+                            // and one per decode token step.
+                            let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                            gpuTurn.open()
+                            defer { gpuTurn.close() }
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             var kvCache: [KVCache]
                             var iteratorInput: LMInput
@@ -10837,7 +10858,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 context: generationContext, prefillStepSize: prefillStepSize,
                                 modelID: snapshot.modelID, state: iteratorState,
-                                isCancelled: { Task.isCancelled || shouldCancel() })
+                                isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                             iteratorState = recurrent.state
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10848,7 +10869,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
                                 context: generationContext, prefillStepSize: prefillStepSize,
                                 modelID: snapshot.modelID, state: iteratorState,
-                                isCancelled: { Task.isCancelled || shouldCancel() })
+                                isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                             iteratorState = promptSnapshot.state
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10872,6 +10893,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
+                                    gpuTurn.yield(.prefillChunk(tokens: range.count))
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
                                     iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                     eval(kvCache)
@@ -10884,16 +10906,25 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             kvCache = try Self.providerOwnedConversationCache(
                                 kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
                                 groupSize: parameters.kvGroupSize)
-                            let generation = Self.serveGenerationConfiguration(
+                            var generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                     cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            // SPEC-001-R018: the iterator's own prefill yields the turn after
+                            // every chunk it queues; its final forward and the first decode
+                            // step run in the turn taken here.
+                            generation.parameters.prefill.progress = { processed, total in
+                                let remaining = total - processed
+                                if remaining > 0 { gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, remaining))) }
+                            }
+                            gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
+                            gpuTurn.end()
                             Self.clearMLXBufferCacheAfterPrefill()
                             try prefillScope.markPrefillDone()
                             var serialToolObserver = NativeToolCallStreamEmitter(
@@ -10936,7 +10967,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             )
                             var serialToolStopText = IncrementalToolStopText(observer: serialToolObserver)
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
-                                BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                // One turn per token step: `next()` builds and queues step N+1 and
+                                // reads step N; the callback (detokenize, stream) runs outside it.
+                                gpuTurn.begin(.decodeStep(rows: 1))
+                                defer { gpuTurn.end() }
+                                return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                    gpuTurn.end()
                                     let disposition: GenerateDisposition = {
                                         if !tokens.isEmpty {
                                             timeline.markFirstToken()
@@ -11000,10 +11036,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         return GenerateDisposition.more
                                     }()
                                     stoppedByDecodeCallback = disposition == .stop
+                                    if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
                                     return disposition
                                 })
                             }
                             timeline.markEnded()
+                            gpuTurn.close()
                             Self.logIncrementalOutputFallbacks(
                                 path: "serial",
                                 decodeFallbacks: requestStopObserver.incrementalFallbacks.decode
@@ -11206,7 +11244,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
         prefillScope: PrefillCancelScope,
-        blockingInferenceExecutor: BlockingInferenceExecutor
+        blockingInferenceExecutor: BlockingInferenceExecutor,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async throws -> CompletionResult {
         let generated = try await collectSpeculativeText(
             input: input,
@@ -11219,7 +11258,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled,
             prefillScope: prefillScope,
-            blockingInferenceExecutor: blockingInferenceExecutor
+            blockingInferenceExecutor: blockingInferenceExecutor,
+            gpuTurnParticipant: gpuTurnParticipant
         )
         try drainCancelled.check()
         try Task.checkCancellation()
@@ -11296,11 +11336,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
         prefillScope: PrefillCancelScope,
-        blockingInferenceExecutor: BlockingInferenceExecutor
+        blockingInferenceExecutor: BlockingInferenceExecutor,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async throws -> SpeculativeTextResult {
         do {
             return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
                 let (input, targetContext, cache) = values
+                // SPEC-001-R018: the whole prompt prefill (target and draft) is
+                // one turn; each `next()` (one draft-and-verify round, or a
+                // buffered token) is one turn after it.
+                let gpuTurn = gpuTurnParticipant.map(GPUTurnScope.init)
+                gpuTurn?.open()
+                defer { gpuTurn?.close() }
+                gpuTurn?.begin(.prefillChunk(tokens: input.text.tokens.size))
                 // SPEC-001 FR-26: build the iterator (its prompt prefill) in the
                 // request task, where the model's chunked prefill sees a buyer
                 // cancel through task cancellation; the executor thread cannot.
@@ -11314,9 +11362,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     parameters: parameters,
                     numDraftTokens: numDraftTokens
                 )
+                gpuTurn?.end()
                 Self.clearMLXBufferCacheAfterPrefill()
                 try prefillScope.markPrefillDone()
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
+                    defer { gpuTurn?.end() }
                     let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
                     var tokenIDs: [Int] = []
                     var output = ""
@@ -11324,7 +11374,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     var stopStringFilter = GenerationConfigStopStringFilter(
                         stopStrings: targetContext.configuration.effectiveStopStrings
                     )
+                    gpuTurn?.begin(.decodeStep(rows: 1))
                     while let token = iterator.next() {
+                        gpuTurn?.end()
                         try drainCancelled.check()
                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
                             throw CancellationError()
@@ -11346,8 +11398,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 break
                             }
                         }
+                        gpuTurn?.begin(.decodeStep(rows: 1))
                     }
                     timeline.markEnded()
+                    gpuTurn?.end()
                     if let text = stopStringFilter.finish() {
                         output += text
                     }
@@ -11637,6 +11691,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             serialQuantizedConversation: coldContext?.eligible != true
         )
         let inferenceGate = inferenceGate
+        let gpuTurnParticipant = gpuTurnParticipant
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
@@ -11863,6 +11918,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
                     do {
+                        // SPEC-001-R018: this request's GPU turns, one per prefill chunk
+                        // and one per decode token step.
+                        let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                        gpuTurn.open()
+                        defer { gpuTurn.close() }
                         var kvCache: [KVCache]
                         var iteratorInput: LMInput
                         let forceSimpleKV = Self.forceSimpleKVCache(
@@ -11887,7 +11947,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             context: generationContext, prefillStepSize: prefillStepSize,
                             modelID: snapshot.modelID, state: iteratorState,
-                            isCancelled: { Task.isCancelled || shouldCancel() })
+                            isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                         iteratorState = recurrent.state
                         if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -11898,7 +11958,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             start: promptTokenIds.count - iteratorInput.text.tokens.size,
                             context: generationContext, prefillStepSize: prefillStepSize,
                             modelID: snapshot.modelID, state: iteratorState,
-                            isCancelled: { Task.isCancelled || shouldCancel() })
+                            isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                         iteratorState = promptSnapshot.state
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -11922,6 +11982,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
+                                gpuTurn.yield(.prefillChunk(tokens: range.count))
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
                                 iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                 eval(kvCache)
@@ -11965,16 +12026,25 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvCache = try Self.providerOwnedConversationCache(
                             kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
                             groupSize: parameters.kvGroupSize)
-                        let generation = Self.serveGenerationConfiguration(
+                        var generation = Self.serveGenerationConfiguration(
                             parameters: Self.serveIteratorParameters(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                 cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                        // SPEC-001-R018: the iterator's own prefill yields the turn after
+                        // every chunk it queues; its final forward and the first decode
+                        // step run in the turn taken here.
+                        generation.parameters.prefill.progress = { processed, total in
+                            let remaining = total - processed
+                            if remaining > 0 { gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, remaining))) }
+                        }
+                        gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
+                        gpuTurn.end()
                         Self.clearMLXBufferCacheAfterPrefill()
                         try prefillScope.markPrefillDone()
                         // #2317: the decode and output filter of every token so
@@ -11990,7 +12060,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let labFilter = IncrementalStreamFilter(
                             stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
-                            BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                            // One turn per token step: `next()` builds and queues step N+1 and
+                            // reads step N; the callback (detokenize, stream) runs outside it.
+                            gpuTurn.begin(.decodeStep(rows: 1))
+                            defer { gpuTurn.end() }
+                            return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                gpuTurn.end()
                                 let disposition: GenerateDisposition = {
                                     EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
                                     // Round-2 code LOW: only start the decode timer
@@ -12084,9 +12159,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     }
                                 }()
                                 stoppedByDecodeCallback = disposition == .stop
+                                if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
                                 return disposition
                             })
                         }
+                        gpuTurn.close()
                         // Warm-decode wall-time: from the first decoded token
                         // (any channel) to the generate result. Reported to the
                         // client as `macprovider_generation_ms` so the autotune
@@ -15113,7 +15190,8 @@ maxTokens: maxTokens,
         prefillStepSize: Int,
         modelID: String? = nil,
         state: LMOutput.State? = nil,
-        isCancelled: () -> Bool = { Task.isCancelled }
+        isCancelled: () -> Bool = { Task.isCancelled },
+        gpuTurn: GPUTurnScope? = nil
     ) throws -> SerialPromptSnapshot {
         let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard lease != nil,
@@ -15135,6 +15213,7 @@ maxTokens: maxTokens,
         while cursor < target {
             if isCancelled() { throw CancellationError() }
             let end = min(cursor + step, target)
+            gpuTurn?.yield(.prefillChunk(tokens: end - cursor))
             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
             currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
             eval(cache)
@@ -15164,7 +15243,8 @@ maxTokens: maxTokens,
         prefillStepSize: Int,
         modelID: String? = nil,
         state: LMOutput.State? = nil,
-        isCancelled: () -> Bool = { Task.isCancelled }
+        isCancelled: () -> Bool = { Task.isCancelled },
+        gpuTurn: GPUTurnScope? = nil
     ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
         // A role boundary would split an LFM reference, Qwen legacy or GLM
         // serial chunk and change its numerics. Snapshot only whole strides.
@@ -15194,6 +15274,7 @@ maxTokens: maxTokens,
             while start < position {
                 if isCancelled() { throw CancellationError() }
                 let end = min(start + max(1, prefillStepSize), position)
+                gpuTurn?.yield(.prefillChunk(tokens: end - start))
                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
                 currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
                 asyncEval(cache)

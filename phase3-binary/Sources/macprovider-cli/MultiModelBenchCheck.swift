@@ -63,6 +63,19 @@ extension MultiModelBenchCommand {
         let firstFamily = ModelRuntime.localModelFamily(modelA)
         let appliedBudgetMB = firstFamily.flatMap { ModelRuntime.applyMLXCommandBufferBudget(modelFamily: $0) }
         let basePrompt = Self.promptText(promptTokens: promptTokens)
+        // SPEC-001-R018: the lab selects the GPU turn policy both runtimes
+        // share; an invalid flag or env value fails the check before any load.
+        let gpuTurnSelection: (policy: any GPUTurnPolicy, source: String)
+        do {
+            gpuTurnSelection = try GPUTurnPolicyRegistry.labSelection(
+                flag: gpuTurnPolicy, environment: ProcessInfo.processInfo.environment
+            ) ?? (GPUTurnPolicyRegistry.compiledDefault, "default")
+        } catch {
+            MultiModelCheck.emit("CHECK error reason=gpu_turn_policy_invalid detail=\"\(error)\"")
+            throw ExitCode(1)
+        }
+        GPUTurnArbiter.shared.setPolicy(gpuTurnSelection.policy)
+        MultiModelBenchCommand.log("gpu_turn_policy name=\(gpuTurnSelection.policy.name) parameters=\(gpuTurnSelection.policy.parameters.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")) source=\(gpuTurnSelection.source)")
         let config = MultiModelCheckConfig(
             modelA: modelA,
             modelB: modelB,
@@ -84,7 +97,12 @@ extension MultiModelBenchCommand {
             temperature: 0,
             topP: 1,
             stream: true,
-            tokenCapturePath: capturePath
+            tokenCapturePath: capturePath,
+            gpuTurnPolicy: MultiModelCheckGPUTurnPolicy(
+                name: gpuTurnSelection.policy.name,
+                parameters: gpuTurnSelection.policy.parameters,
+                source: gpuTurnSelection.source
+            )
         )
         let report = MultiModelCheckReport(
             schema: MultiModelCheck.schema,
@@ -139,6 +157,8 @@ struct MultiModelCheckRunner: Sendable {
     let nonce: String
     let box: MultiModelCheckReportBox
     let monitor: MultiModelBenchMonitor
+    /// SPEC-001-R018: arbiter statistics per phase, by slot.
+    let gpuTurns = MultiModelCheckGPUTurnWindow()
 
     func run() async throws {
         for (slot, path) in [(MultiModelBenchSlot.a, config.modelA), (.b, config.modelB)] {
@@ -147,6 +167,7 @@ struct MultiModelCheckRunner: Sendable {
         var runtimes: [MultiModelBenchSlot: ModelRuntime] = [:]
         for slot in MultiModelBenchSlot.allCases {
             runtimes[slot] = try await load(slot)
+            gpuTurns.bind(slot: slot, participantID: runtimes[slot]!.gpuTurnParticipant.id)
         }
         var requests: [MultiModelBenchSlot: [ChatCompletionRequest]] = [:]
         for slot in MultiModelBenchSlot.allCases {
@@ -549,6 +570,7 @@ struct MultiModelCheckRunner: Sendable {
 
     private func beginPhase(_ phase: MultiModelCheckPhase, seconds: Double) -> UInt64 {
         Memory.peakMemory = 0 // setter resets MLX's peak counter
+        gpuTurns.begin()
         monitor.phaseBegan(phase.rawValue)
         box.update { $0.phases.append(MultiModelCheckPhaseResult(phase: phase.rawValue, durationSeconds: seconds)) }
         box.write()
@@ -564,6 +586,7 @@ struct MultiModelCheckRunner: Sendable {
             report.phases[index].error = String(describing: error)
             report.phases[index].physFootprintMaxBytes = footprint
             report.phases[index].mlxPeakBytes = peak
+            report.phases[index].gpuTurns = gpuTurns.finish()
         }
         box.write()
         MultiModelBenchCommand.log("phase \(phase.rawValue) failed: \(error)")
@@ -574,6 +597,12 @@ struct MultiModelCheckRunner: Sendable {
         result.wallSeconds = MultiModelCheck.seconds(MultiModelCheck.now(), since: started)
         result.physFootprintMaxBytes = monitor.phaseEnded()
         result.mlxPeakBytes = Memory.peakMemory
+        result.gpuTurns = gpuTurns.finish()
+        if let stats = result.gpuTurns {
+            for participant in stats.participants {
+                MultiModelBenchCommand.log("  \(phase.rawValue) gpu_turns model=\(participant.model ?? "unbound") participant=\(participant.arbiter.id) turns=\(participant.arbiter.turns) decode_steps=\(participant.arbiter.decodeSteps) prefill_chunks=\(participant.arbiter.prefillChunks) busy_s=\(String(format: "%.3f", participant.arbiter.busySeconds)) wait_s=\(String(format: "%.3f", participant.arbiter.waitSeconds)) max_wait_s=\(String(format: "%.4f", participant.arbiter.maxWaitSeconds))")
+            }
+        }
         result.requests = records
         result.completed = true
         return result
@@ -1084,6 +1113,61 @@ struct MultiModelCheckConfig: Encodable, Sendable {
     let topP: Double
     let stream: Bool
     let tokenCapturePath: String
+    /// SPEC-001-R018: the GPU turn policy both runtimes ran under.
+    let gpuTurnPolicy: MultiModelCheckGPUTurnPolicy
+}
+
+struct MultiModelCheckGPUTurnPolicy: Encodable, Sendable {
+    let name: String
+    let parameters: [String: String]
+    /// `flag`, `env` or `default`.
+    let source: String
+}
+
+/// One phase's arbiter statistics: counters accumulated during the phase and
+/// the longest single wait inside it, per participant, labelled by slot.
+struct MultiModelCheckGPUTurnStats: Encodable, Sendable {
+    let policy: String
+    let policyParameters: [String: String]
+    let participants: [MultiModelCheckGPUTurnParticipant]
+}
+
+struct MultiModelCheckGPUTurnParticipant: Encodable, Sendable {
+    /// `a` or `b`; nil for a participant that is not one of the two runtimes.
+    let model: String?
+    let arbiter: GPUTurnParticipantSnapshot
+}
+
+final class MultiModelCheckGPUTurnWindow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var slots: [Int: MultiModelBenchSlot] = [:]
+    private var baseline: GPUTurnArbiterSnapshot?
+
+    func bind(slot: MultiModelBenchSlot, participantID: Int) {
+        lock.lock(); defer { lock.unlock() }
+        slots[participantID] = slot
+    }
+
+    func begin() {
+        let snapshot = GPUTurnArbiter.shared.snapshot(resettingMaxWait: true)
+        lock.lock(); defer { lock.unlock() }
+        baseline = snapshot
+    }
+
+    func finish() -> MultiModelCheckGPUTurnStats? {
+        let current = GPUTurnArbiter.shared.snapshot(resettingMaxWait: true)
+        lock.lock(); defer { lock.unlock() }
+        guard let baseline else { return nil }
+        self.baseline = nil
+        let delta = current.delta(since: baseline)
+        return MultiModelCheckGPUTurnStats(
+            policy: delta.policy,
+            policyParameters: delta.policyParameters,
+            participants: delta.participants.map {
+                MultiModelCheckGPUTurnParticipant(model: slots[$0.id]?.rawValue, arbiter: $0)
+            }
+        )
+    }
 }
 
 /// What the runtime actually does with concurrent requests, as reported by
@@ -1228,6 +1312,8 @@ struct MultiModelCheckPhaseResult: Encodable, Sendable {
     var measurementSegments: [[Double]] = []
     /// Contended/soak: share of the interval with a request of each model in flight.
     var overlapFraction: Double?
+    /// SPEC-001-R018: GPU turn arbiter statistics for this phase.
+    var gpuTurns: MultiModelCheckGPUTurnStats?
     var a: MultiModelCheckModelPhaseStats?
     var b: MultiModelCheckModelPhaseStats?
     var requests: [MultiModelCheckRequestRecord] = []

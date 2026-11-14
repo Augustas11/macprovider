@@ -1708,6 +1708,9 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// its own forward, back to back, and returns after the last one
     /// (`glm5_next` pagedMLA: 8 tokens, so every grouped row prefills alone).
     var prefillForwardTokenCap: Int? { get }
+    /// SPEC-001-R018: the owning runtime's GPU turn participant. The scheduler
+    /// marks its pump as pending work on it; the backend brackets each forward.
+    var gpuTurnParticipant: GPUTurnParticipant? { get }
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws
     func recordLabNativeMTPStateDigest(phase: NativeMTPStateDigestPhase, requestIDs: [String]) async throws
@@ -1728,6 +1731,7 @@ extension ContinuousBatchSchedulerBackend {
     ) async {}
 
     var prefillForwardTokenCap: Int? { nil }
+    var gpuTurnParticipant: GPUTurnParticipant? { nil }
 
     func proposeNativeMTPPackedRound(
         rows: [ContinuousBatchNativeMTPProposalInput]
@@ -3648,6 +3652,10 @@ actor ContinuousBatchScheduler {
     }
 
     private func pumpUntilIdle() async {
+        // SPEC-001-R018: while the pump runs, this model has GPU work pending.
+        let gpuTurnParticipant = backend.gpuTurnParticipant
+        gpuTurnParticipant?.beginWork()
+        defer { gpuTurnParticipant?.endWork() }
         defer {
             pumpRunning = false
             if pumpRestartRequested {

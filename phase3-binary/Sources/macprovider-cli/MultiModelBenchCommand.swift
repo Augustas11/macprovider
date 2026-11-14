@@ -102,7 +102,17 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("config"), help: "--check: provider config.yaml (a lab copy), resolved by serve's ConfigLoader; its paged_kv, queue, prefill, cache-limit, context, cached-turns and native_mtp_mode settings build both runtimes. CB mode stays --cb-x.")
     var configPath: String?
 
+    @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in passthrough. Recorded in the check JSON.")
+    var gpuTurnPolicy: String?
+
     mutating func validate() throws {
+        if let gpuTurnPolicy {
+            do {
+                _ = try GPUTurnPolicyRegistry.make(gpuTurnPolicy)
+            } catch {
+                throw ValidationError("--gpu-turn-policy: \(error)")
+            }
+        }
         if check {
             guard rowsA > 0, rowsB > 0 else { throw ValidationError("--rows-a and --rows-b must be > 0") }
             guard maxTokensA > 0, maxTokensB > 0 else { throw ValidationError("--max-tokens-a and --max-tokens-b must be > 0") }

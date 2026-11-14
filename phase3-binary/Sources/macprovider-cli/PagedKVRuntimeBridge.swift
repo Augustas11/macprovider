@@ -747,6 +747,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
     /// contiguous KV. Tests keep the default off so fake models are not traced.
     let compiledDecode: Bool
+    /// SPEC-001-R018: the owning runtime's GPU turn; nil outside a runtime.
+    let gpuTurnParticipant: GPUTurnParticipant?
     private let lock = NSLock()
     /// Holders of this backend's target `container.perform` (exclusive, so
     /// at most one). Every MLX evaluation of the native-MTP round runs
@@ -977,9 +979,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         drafterContainer: MTPDrafterContainer? = nil,
         nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
-        maxVerifyTokensPerForward: Int? = nil
+        maxVerifyTokensPerForward: Int? = nil,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) {
         self.container = container
+        self.gpuTurnParticipant = gpuTurnParticipant
         self.drafterContainer = drafterContainer
         self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
             familyAdapter: nativeMTPFamilyAdapter
@@ -1022,7 +1026,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         drafterContainer: MTPDrafterContainer? = nil,
         nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
-        maxVerifyTokensPerForward: Int? = nil
+        maxVerifyTokensPerForward: Int? = nil,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) {
         self.init(
             container: container,
@@ -1037,7 +1042,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             drafterContainer: drafterContainer,
             nativeMTPFamilyAdapter: nativeMTPFamilyAdapter,
             nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap,
-            maxVerifyTokensPerForward: maxVerifyTokensPerForward
+            maxVerifyTokensPerForward: maxVerifyTokensPerForward,
+            gpuTurnParticipant: gpuTurnParticipant
         )
     }
 
@@ -1052,6 +1058,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
         let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            // SPEC-001-R018: one GPU turn per scheduler prefill group (one chunk per row).
+            self.gpuTurnParticipant?.beginTurn(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count })); defer { self.gpuTurnParticipant?.endTurn() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(
                 inputs,
@@ -1577,6 +1585,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if !pendingIDs.isEmpty {
             try await container.perform { context in
                 self.enterTargetLock(); defer { self.exitTargetLock() }
+                // SPEC-001-R018: the drafter catch-up forward is one GPU turn.
+                self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: pendingIDs.count)); defer { self.gpuTurnParticipant?.endTurn() }
                 try await self.flushNativeMTPDrafterColumns(
                     targetModel: context.model,
                     requestIDs: pendingIDs,
@@ -1672,6 +1682,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws -> [NativeMTPVerifiedRow] {
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            // SPEC-001-R018: one GPU turn per packed verify round.
+            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
@@ -1779,6 +1791,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            // SPEC-001-R018: one GPU turn for the round's commit forward.
+            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
                 // Proposal never mutates drafter state, so an aborted round
                 // only drops its staged target transactions.
@@ -2578,6 +2592,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             )
         }
         let cachesAsKV = batchedCaches.map(\.cache)
+        // SPEC-001-R018: one GPU turn per decode step of the window, released
+        // before each step's tokens go to the observer.
+        let gpuTurn = gpuTurnParticipant.map(GPUTurnScope.init)
+        defer { gpuTurn?.close() }
+        let decodeTurn = GPUWorkKind.decodeStep(rows: supportedInputs.count)
         let canCompile = compiledDecode
             && !hasBatchedState
             && captureIndices.isEmpty
@@ -2622,6 +2641,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             eval(current)
             var collected: [[Int]] = supportedInputs.map { _ in [] }
             for stepIndex in 0 ..< decodeSteps {
+                gpuTurn?.begin(decodeTurn)
                 let logits = step.step(current)
                 current = ContinuousBatchRowSampler.sample(
                     logits: logits[0..., -1, 0...],
@@ -2643,6 +2663,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     collected[index].append(stepTokens[index])
                 }
                 try throwIfCancelRequested()
+                gpuTurn?.end()
                 // The compiled writeback assumes every target step ran, so
                 // this path streams but never ends the window early.
                 _ = onStep?(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepTokens))
@@ -2732,6 +2753,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 currentTokens = stepSampled
                 try throwIfCancelRequested()
+                gpuTurn?.end()
                 if let onStep, !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepSampled)) {
                     endedEarly = stepIndex + 1 < decodeSteps
                     return false
@@ -2740,6 +2762,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             var stopped = false
             for stepIndex in 0 ..< decodeSteps {
+                gpuTurn?.begin(decodeTurn)
                 let tokenInput = deviceTokens
                     ?? MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
@@ -2815,6 +2838,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     stopped = true
                     break
                 }
+                gpuTurn?.end()
             }
             if !stopped, let last = pendingStep {
                 _ = try readStep(last.index, sampled: last.sampled, logits: last.logits, state: last.state)
