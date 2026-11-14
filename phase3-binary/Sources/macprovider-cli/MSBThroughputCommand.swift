@@ -183,6 +183,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "msb-throughput")
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
             FileHandle.standardError.write(Data(

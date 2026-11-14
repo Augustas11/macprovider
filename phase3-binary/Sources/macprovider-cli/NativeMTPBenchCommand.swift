@@ -84,6 +84,7 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "native-mtp-bench")
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))

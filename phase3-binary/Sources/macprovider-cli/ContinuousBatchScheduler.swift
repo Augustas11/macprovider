@@ -2662,6 +2662,11 @@ actor ContinuousBatchScheduler {
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) {
+        // SPEC-038 FR-CB9: the one place every batching path passes through.
+        // Serve and the lab commands refuse earlier with a clean error; this
+        // stops any other caller from batching rows on the serial-only route.
+        let refusal = SmallMRoute.batchingRefusal(route: SmallMRoute.processRoute, entry: "ContinuousBatchScheduler")
+        precondition(refusal == nil, refusal ?? "")
         self.configuration = configuration
         self.tokenDeliveryCapacity = ContinuousBatchTokenDeliveryCapacity(
             limit: configuration.tokenDeliveryTaskLimit

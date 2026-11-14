@@ -843,6 +843,41 @@ enum NativeMTPAdmissionSidecar {
         )
     }
 
+    /// SPEC-038 FR-CB9 (#2335): whether the signed set names an entry the
+    /// loader could select for this model. The loader's broadest match is
+    /// `matchesModel` (`model_key` and `artifact_hash`); a same-architecture
+    /// variant carries its own signed entry (SPEC-048-R013 0.1.81), so no
+    /// other entry can apply. An entry without both strings counts as a
+    /// match. Throws when the set cannot be read or its signature fails.
+    static func namesEntry(
+        sidecarURL: URL,
+        signatureURL: URL,
+        trustedKeyring: TrustedKeyring,
+        modelID: String,
+        modelRevision: String
+    ) throws -> Bool {
+        let bytes = try readBoundedRegularFile(sidecarURL, maxBytes: maxSidecarBytes, tooLargeName: admissionSidecarFileName)
+        let signatureBytes = try readBoundedRegularFile(
+            signatureURL,
+            maxBytes: maxSignatureBytes,
+            tooLargeName: admissionSignatureFileName
+        )
+        _ = try verifyDetachedSignature(payload: bytes, signatureData: signatureBytes, trustedKeyring: trustedKeyring)
+        guard let text = String(data: bytes, encoding: .utf8),
+              case .object(let root) = try NativeMTPSidecarJSONParser.parse(text),
+              case .array(let entries)? = root["entries"]
+        else {
+            throw NativeMTPAdmissionSidecarError.wrongType("$.entries")
+        }
+        return entries.contains { entry in
+            guard case .object(let object) = entry,
+                  case .string(let modelKey)? = object["model_key"],
+                  case .string(let artifactHash)? = object["artifact_hash"]
+            else { return true }
+            return modelKey == modelID && artifactHash == modelRevision
+        }
+    }
+
     static func load(
         sidecarData: Data,
         signatureData: Data,

@@ -664,6 +664,34 @@ struct ServeCommand: AsyncParsableCommand {
         return authorities
     }
 
+    /// SPEC-038 FR-CB9: the native-MTP admission state of the startup model,
+    /// read from the set the startup loader would read (the feed-resolved
+    /// sidecar, else `native-mtp-admission.json` beside or in the model
+    /// directory) and matched on the model id and verified artifact digest
+    /// the loader is given.
+    static func nativeMTPAdmission(
+        feedSidecarPath: String?,
+        loadPath: String?,
+        modelID: String?,
+        modelArtifactSHA256: String?
+    ) -> SmallMRoute.NativeMTPAdmission {
+        // The startup loader runs only with a verified artifact digest and a
+        // local model directory.
+        guard let modelID, let modelArtifactSHA256, !modelArtifactSHA256.isEmpty, let loadPath,
+              let directory = try? ModelRuntime.localModelDirectory(for: loadPath)
+        else { return .none }
+        let sidecarURL: URL
+        if let feedSidecarPath {
+            sidecarURL = URL(fileURLWithPath: (feedSidecarPath as NSString).expandingTildeInPath)
+        } else {
+            let bundled = directory.deletingLastPathComponent().appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)
+            sidecarURL = FileManager.default.fileExists(atPath: bundled.path)
+                ? bundled
+                : directory.appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)
+        }
+        return SmallMRoute.nativeMTPAdmission(sidecarURL: sidecarURL, modelID: modelID, modelRevision: modelArtifactSHA256)
+    }
+
     static func localRuntimeTargetModelIDs(
         supportedModels: [String]?,
         authorities: [String: ModelRuntimeTargetAuthority]
@@ -2976,6 +3004,81 @@ struct ServeCommand: AsyncParsableCommand {
             supportedModels: resolved.supportedModels,
             authorities: targetAuthorities
         )
+        // SPEC-038 FR-CB9 (#2335): decided from resolved state before any
+        // model load, so the MLX core reads the small-row route this process
+        // keeps for its whole life.
+        let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
+        let smallMRouteVerdictStore = SmallMRouteVerdictStore(selfCheckStore: cbSelfCheckStore)
+        let startupLoadPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model
+        let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+        let smallMRouteStartupIdentity: String? = startupLoadSHA256.flatMap { sha in
+            guard !sha.isEmpty, autoServedSlots != nil else { return nil }
+            let machine = MachineFingerprinter().sample()
+            return SmallMRouteVerdictStore.startupIdentity([
+                "model": resolved.model ?? "",
+                "load_path": startupLoadPath ?? "",
+                "load_sha256": sha,
+                "binary_version": CoordinatorClient.binaryVersion,
+                "decode_path_digest": DecodePathIdentity.digest,
+                "runtime_build": ContinuousBatchingSelfCheckKey.currentRuntimeBuild,
+                "os_build": ContinuousBatchingSelfCheckKey.currentOSBuild,
+                "chip": machine.chip,
+                "ram_gb": String(machine.ramGB),
+                "cb_policy": "\(continuousBatchingPolicy.status.rawValue)/\(continuousBatchingPolicy.policySHA256 ?? "none")",
+                "cb_mode": "\(resolved.continuousBatching.rawValue)/\(resolved.continuousBatchingExplicitlyConfigured)",
+                "rows": String(ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)),
+                "owner_pinned": autoServedSlots?.ownerPinned.map(String.init) ?? "none",
+                "queue_limit": resolved.continuousBatchQueueLimit.map(String.init) ?? "none",
+                "max_context": resolved.maxContextOverride.map(String.init) ?? "none",
+                "kv_bits": resolved.kvBitsOverride.map(String.init) ?? "none",
+                "prefill_step_size": String(resolved.prefillStepSize),
+                "cached_turns": String(resolved.continuousBatchingCachedTurns),
+                "paged_kv": String(resolved.pagedKV.enabled),
+                "native_mtp_mode": resolved.nativeMTPMode.rawValue,
+            ])
+        }
+        let startupModelIDs = Set([resolved.model, catalogModelIDAlias, resolved.modelCatalogKey].compactMap { $0?.lowercased() })
+        let smallMRouteInputs = SmallMRoute.Inputs(
+            continuousBatching: resolved.continuousBatching,
+            continuousBatchingExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
+            nativeMTPMode: resolved.nativeMTPMode,
+            nativeMTPAdmission: resolved.nativeMTPMode == .off ? .none : Self.nativeMTPAdmission(
+                feedSidecarPath: startupPreflight.runtimeBinding?.nativeMTPAdmissionSidecarPath,
+                loadPath: startupLoadPath,
+                modelID: resolved.model,
+                modelArtifactSHA256: resolved.modelArtifactSHA256
+            ),
+            draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+            shardGroupRole: shardHeadConfig != nil || shardMemberConfig != nil,
+            autotuneCandidate: autotuneCandidate,
+            otherSwitchTargets: authorizedSwitchModelIDs.contains { !startupModelIDs.contains($0.lowercased()) },
+            selfCheckVerdict: smallMRouteStartupIdentity.map {
+                smallMRouteVerdictStore.verdict(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
+            } ?? .absent
+        )
+        let smallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        let appliedSmallMRoute = SmallMRoute.apply(smallMRoute.route, reason: smallMRoute.reason)
+        FileHandle.standardError.write(Data(SmallMRoute.event(
+            SmallMRoute.Decision(
+                route: appliedSmallMRoute,
+                reason: appliedSmallMRoute == smallMRoute.route ? smallMRoute.reason : "already_applied"
+            ),
+            fields: smallMRouteInputs.logFields
+        ).utf8))
+        // A one-row verdict this row-invariant process applies moves the next
+        // start of the same configuration to the serial route.
+        let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
+            guard appliedSmallMRoute == .rowInvariant,
+                  let identity = smallMRouteStartupIdentity,
+                  SmallMRoute.verdictDecidesNextStart(smallMRouteInputs)
+            else { return nil }
+            return SmallMRouteVerdictRecorder(
+                store: smallMRouteVerdictStore,
+                selfCheckStore: cbSelfCheckStore,
+                startupIdentity: identity,
+                log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
+            )
+        }()
         _ = try lifecycleStateStore.transition(
             to: .loadingModel,
             reasonCode: "catalog_preflight_passed",
@@ -3180,7 +3283,6 @@ struct ServeCommand: AsyncParsableCommand {
         // probe and the first capacity advertisement: a stored self-check
         // decision for this tuple, else the plan's initial count, else one
         // slot when this tuple cannot batch at all.
-        let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
         var cbProvisional: ContinuousBatchingSelfCheckDriver.Provisional?
         if let plan = autoServedSlots, let mlxRuntime = modelRuntime as? ModelRuntime {
             // The startup bound may have lowered the rows below the plan.
@@ -3226,6 +3328,9 @@ struct ServeCommand: AsyncParsableCommand {
                ) {
                 served = resolution.servedSlots
                 source = "self_check_\(resolution.report.decision)"
+                if let decision = cbSelfCheckStore.decision(for: target.key) {
+                    smallMRouteVerdictRecorder?.applied(key: target.key, decision: decision)
+                }
                 await mlxRuntime.applyContinuousBatchingSelfCheck(resolution.state, servedSlots: served)
                 await mlxRuntime.setContinuousBatchingSelfCheckReport(resolution.report)
             } else {
@@ -3235,6 +3340,27 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data(
                 "event=served_slots action=applied slots=\(served) rows=\(rows) reason=\(source)\n".utf8
             ))
+        }
+        // SPEC-038 FR-CB9: a serial-only process never applies a self-check
+        // (it has no target), so it reports the stored one-row decision as
+        // refused instead of pending forever.
+        if appliedSmallMRoute == .serialOnly, let mlxRuntime = modelRuntime as? ModelRuntime {
+            let stored = smallMRouteStartupIdentity.flatMap {
+                smallMRouteVerdictStore.oneRowDecision(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
+            }
+            let servedNow = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+            if let served = await mlxRuntime.applySerialOnlySelfCheck(
+                stored: stored?.decision,
+                key: stored?.key,
+                servedSlots: SmallMRoute.serialOnlyServedSlots(
+                    stored: stored?.decision, ownerPinned: autoServedSlots?.ownerPinned, servedNow: servedNow
+                )
+            ), served != servedNow {
+                resolved.maxConcurrencyOverride = served
+                FileHandle.standardError.write(Data(
+                    "event=served_slots action=applied slots=\(served) reason=small_m_route_serial_only\n".utf8
+                ))
+            }
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to
@@ -3367,6 +3493,14 @@ struct ServeCommand: AsyncParsableCommand {
         let cbSelfCheckTask: Task<Void, Never>? = {
             guard let plan = autoServedSlots, plan.selfChecked,
                   let mlxRuntime = modelRuntime as? ModelRuntime else { return nil }
+            // SPEC-038 FR-CB9: a serial-only process never runs a self-check;
+            // a re-check waits for a start on the row-invariant route.
+            if appliedSmallMRoute == .serialOnly {
+                FileHandle.standardError.write(Data(
+                    "event=cb_self_check action=deferred reason=small_m_route_serial_only next=restart\n".utf8
+                ))
+                return nil
+            }
             let driver = ContinuousBatchingSelfCheckDriver(
                 runtime: mlxRuntime,
                 providerStatus: providerStatus,
@@ -3380,6 +3514,7 @@ struct ServeCommand: AsyncParsableCommand {
                     guard case .valid(let lease) = lifecycleLeaseStore.inspect() else { return nil }
                     return lease.kind.rawValue
                 },
+                verdictRecorder: smallMRouteVerdictRecorder,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }
@@ -4631,6 +4766,7 @@ struct SelfTestCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        try SmallMRoute.requireRowInvariant(entry: "self-test")
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )

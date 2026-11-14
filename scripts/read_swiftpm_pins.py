@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 8f0ac45b the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 26ac6153 (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 0f93fa38 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 0f26baba (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,6 +42,19 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
+# v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row of a
+# qualifying affine weight takes affine_qmv_mma1, a single-row kernel with
+# qmv_mma's exact reduction order, and rows 2-16 take qmv_mma; a row is
+# bit-identical alone and in a batch because the two kernels are bit-identical
+# (checked on M5 and M3 Ultra GPUs; not on M1, M2 or M4). The switch point is a
+# speed choice (M3 Ultra, Llama 3.1 8B 4-bit, aggregate tok/s: 1 row 93 on
+# qmv_mma1 against 75 on qmv_mma, 2 rows 120 against 146).
+# MLX_METAL_SMALL_M_ROW_INVARIANT, read once per process, keeps that window by
+# default; 0 skips it for the fork's pre-window small-row routing (per-row qmv
+# below the qmm limit), which the provider sets only for a serial-only serve
+# process (SPEC-038 FR-CB9). Decode tok/s for the core change is not yet
+# measured on the merged build.
 # 3.32.3-macprovider.56 (#2305) is .49 plus four DeepSeek V4-only prefill commits (tile pipelining, grouped MoE expert launches, grouped gather_qmm, expert-batch memory bound):
 # attention and indexer prefill tiles are evaluated one ahead (asyncEval, at
 # most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop.
@@ -70,24 +83,24 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
 # model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
 # maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.56"
-SPEC048_MLX_SWIFT_LM_REVISION = "e7a256000dda3278260667e8c3c9c7b48c4dbd38"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.58"
+SPEC048_MLX_SWIFT_LM_REVISION = "a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.18"
-# Fork tag 0.32.3-macprovider.18: upstream mlx-swift 0.32.3 with the MLX core
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
+# Fork tag 0.32.3-macprovider.22: upstream mlx-swift 0.32.3 with the MLX core
 # submodule on the core fork below.
-SPEC048_MLX_SWIFT_REVISION = "8f0ac45bc7483b59b1776a8405fa13944e559e06"
+SPEC048_MLX_SWIFT_REVISION = "0f93fa380369a1abd1e17757a465cf42a72d8f69"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.10, three commits on v0.32.4-macprovider.7
+# Fork tag v0.32.4-macprovider.14, seven commits on v0.32.4-macprovider.7
 # (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.10"
-SPEC048_MLX_CORE_REVISION = "26ac615332af3eedc4def073947efb13b0a3e66d"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.14"
+SPEC048_MLX_CORE_REVISION = "0f26baba0d1c1a10d74e7133614e0dc7f409ff80"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"
