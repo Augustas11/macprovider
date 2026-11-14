@@ -116,7 +116,7 @@ What the tools do that changes what a cell means:
 ## Reference
 
 - One pinned Python reference per family: mlx-lm by default; mlx-vlm for vision-language families and where mlx-lm lacks the architecture or a needed fix. The GLM-5.3-Flash and DeepSeek V4 lanes use mlx-vlm (`glm53_bench_vlm.py`, `dsv4_reference_bench.py`), and #2189 records a released mlx-lm that lacked a GLM fix. Past cells: mlx-lm for gpt-oss (#2300) and Ripple-65B (#2279), mlx-vlm for MiniMax M3.1-Flash (#2224). LFM3, a text family, used mlx-vlm (#2290).
-- If neither loads the model, say so in the cell. Bonsai used its model pack's own runtime (#2201). Nemotron 3.5 Bolt has no reference yet (#2329).
+- If neither loads the model, say so in the cell. Bonsai used its model pack's own runtime (#2201). Nemotron 3.5 Bolt has no mlx-lm or mlx-vlm support; its reference is NVIDIA's own model code from `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16` @ `e09a4ced` in PyTorch bf16 with two corrections: prefill carries the Mamba state across 128-token chunks as single-step decode does, and dt has no 0.001 floor (the trained GPU path has none). `scripts/lab/nemotron-bolt/README.md` records both and the self-check (#2329).
 - Record the `mlx` and `mlx-lm` or `mlx-vlm` versions with every cell.
 - Run the reference on the same machine, back to back with the native cell.
 - The GPU must be otherwise idle: stop the provider on that Mac for the measurement. #2335 measured Llama-3.2-3B 4-bit on an M1 8 GB Mac with the provider stopped: the Python reference ran 28.1 to 29.6 tok/s (its reference used a pipelined `async_eval` loop on a different prompt), the 11 November lab build and CLI 1.8.287 13.6 to 15.5, and the October builds 25.2 to 25.6. #2290 had recorded about 0.65x for that model on an M1 8 GB Air. A cell taken under other load says so (#2201 phase B, #2300).
@@ -162,6 +162,7 @@ Each cell links the thread that holds the measurement. Numbers are not copied he
 | LFM3 1.7B | measured: #2290 | not measured (serves serial: #2290) | measured: #2290 | measured to 3.6K: #2290 | measured: #2290 | not measured | measured, methods differ: #2290 | #2325, #2335 |
 | Ternary Bonsai 2B | measured, prompts differ: #2201 | measured, 2 and 3 rows: #2163 | measured: #2201, #2163, #2303 | TTFT only: #2163, #2303 | measured: #2303 | not measured | measured, methods differ: #2201, #2163 | |
 | Nemotron 3 Nano | measured: #2207, #2201, #2236 | not measured | measured: #2207 | TTFT only: #2207 | measured: #2207 | not measured | native only: #2201 | |
+| Nemotron 3.5 Bolt | native only: #2329 | measured: #2329 | measured: #2329 | TTFT only, 8K: #2329 | measured, NVIDIA code: #2329 (batched vs serial fails: #2329) | not measured | measured, 2 GB cache limit: #2329 | #2329 |
 | Nemotron 3.5 Lightning | native only: #2236, #2313 | measured: #2236, #2313 | not measured | not measured | measured: #2236 | not measured | measured, unbounded cache: #2236 | |
 | Qwen3.6/3.8-27B | not measured | not measured | R015 cells only: #2222 | not measured | not measured | measured: #2222 | not measured | |
 | Qwen3-8B | not measured (vs serial: #2202) | measured: #2202, #2310 | not measured | not measured | not measured (batched vs serial: #2202) | not measured | not measured | |
@@ -170,7 +171,7 @@ Each cell links the thread that holds the measurement. Numbers are not copied he
 | Qwen2-VL-2B | measured, text and image: #2207 | not measured | measured: #2207 | TTFT only, 8K text: #2207 | measured, text: #2207 | not measured | not measured | #2327 |
 | GLM-4.5-Air | measured: #2201 | not measured | measured: #2201 | measured to 8K: #2201 | measured: #2201 | not measured | measured, methods differ, unbounded cache: #2201 | |
 
-Open issues for families without a row here: #2328 (Gemma-4-12B native MTP) and #2329 (Nemotron 3.5 Bolt). Bolt has native-only cells in #2236.
+Open issues for families without a row here: #2328 (Gemma-4-12B native MTP).
 
 ## How to report a cell
 

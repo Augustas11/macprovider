@@ -14,6 +14,7 @@ template and to parse the tool calls those templates render (SPEC-018 §3.1,
 | `llama-3.2-3b-instruct.jinja` | `mlx-community/Llama-3.2-3B-Instruct-4bit` | `7f0dc925e0d0afb0322d96f9255cfddf2ba5636e` | `tokenizer_config.json` `chat_template` |
 | `nemotron-3-nano-30b-a3b.jinja` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | `832f602eba5d22436c258c1462bdedc5afddb42b` | `chat_template.jinja` |
 | `nemotron-3.5-lightning-30b-a3b.jinja` | `mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit` | `55ac8c89261109b36c04371cd3f479a4594208c8` | `chat_template.jinja` |
+| `nemotron-3.5-bolt-74b-a9b.jinja` | `rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` | `cbfda6be4e9ff9e8d3acf0c0a57c54c1a496ef81` | `chat_template.jinja` |
 | `gemma-4-26b-a4b-it.jinja` | `mlx-community/gemma-4-26b-a4b-it-4bit` | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | `chat_template.jinja` |
 | `qwen3-8b.jinja` | `mlx-community/Qwen3-8B-4bit` | `545dc4251c05440727734bcd94334791f6ab0192` | `tokenizer_config.json` `chat_template` |
 | `qwen3-coder-30b-a3b-instruct.jinja` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | `6e302ea604ad9ab206367e2c501d1571023e7b6d` | `chat_template.jinja` |

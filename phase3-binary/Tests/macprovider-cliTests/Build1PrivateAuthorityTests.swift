@@ -61,6 +61,12 @@ final class Build1PrivateAuthorityTests: XCTestCase {
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
         }
+        // Nemotron 3.5 Bolt was staged after this authority's historical
+        // catalog stamp (#2329).
+        if let start = json.range(of: "\"nvidia/nemotron-3.5-bolt-74b-a9b\":"),
+           let next = json.range(of: "\"nvidia/nemotron-3.5-lightning-30b-a3b\":", range: start.upperBound..<json.endIndex) {
+            json.removeSubrange(start.lowerBound..<next.lowerBound)
+        }
         // Nemotron 3.5 Lightning was staged after this authority's historical
         // catalog stamp (#2236).
         if let start = json.range(of: "\"nvidia/nemotron-3.5-lightning-30b-a3b\":"),

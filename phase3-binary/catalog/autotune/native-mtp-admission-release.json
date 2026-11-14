@@ -2,16 +2,16 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "challenge_bank_sha256": "a4f001a589d851c61e5ca052a825eb9e08c6b8470e8742bae34a3121abc70b72",
+    "challenge_bank_sha256": "de44bee8e37f4c47ec8358241104c40c8c369fcecf83a86118498fdfffa8b0c0",
     "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
     "provider_revision": "ec252246fbf91fbef8d218213e7bb465c0100771",
     "reproducible_build_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
     "source_commit": "ec252246fbf91fbef8d218213e7bb465c0100771"
   },
-  "expires_at": "2027-02-10T13:30:00Z",
-  "issued_at": "2026-11-13T13:30:00Z",
+  "expires_at": "2027-02-11T06:40:00Z",
+  "issued_at": "2026-11-14T06:40:00Z",
   "provider_decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
-  "release_id": "published-2026-11-13-minimax-m3.1-flash-recommendable-v287",
+  "release_id": "published-2026-11-14-nemotron-3.5-bolt-listed-v287",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"

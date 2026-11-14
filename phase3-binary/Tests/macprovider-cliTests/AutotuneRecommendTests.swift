@@ -6555,6 +6555,11 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "832f602eba5d22436c258c1462bdedc5afddb42b",
             json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#
         ),
+        // No num_hidden_layers: the nemotron_h_puzzle stack is layers_block_type (#2329).
+        "nvidia/nemotron-3.5-bolt-74b-a9b": (
+            revision: "cbfda6be4e9ff9e8d3acf0c0a57c54c1a496ef81",
+            json: #"{"max_position_embeddings":262144,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128,"layers_block_type":["mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe"]}"#
+        ),
         "nvidia/nemotron-3.5-lightning-30b-a3b": (
             revision: "55ac8c89261109b36c04371cd3f479a4594208c8",
             json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#

@@ -702,6 +702,11 @@ enum AutotuneModelContextCap {
         if let kvLoraRank = firstInt(in: root, paths: [["kv_lora_rank"], ["text_config", "kv_lora_rank"]]) {
             return latentKVCacheBytesPerToken(in: root, kvLoraRank: kvLoraRank)
         }
+        // nemotron_h_puzzle configs (Nemotron 3.5 Bolt, #2329) declare no
+        // layer count; their stack is `layers_block_type`. Every entry counts
+        // as a KV layer, the same overestimate the declared count gives the
+        // other nemotron_h rows.
+        let blockTypeCount = (root["layers_block_type"] as? [Any])?.count
         guard let declaredLayers = firstInt(in: root, paths: [
             ["num_hidden_layers"],
             ["n_layer"],
@@ -709,7 +714,7 @@ enum AutotuneModelContextCap {
             ["text_config", "num_hidden_layers"],
             ["text_config", "n_layer"],
             ["text_config", "num_layers"]
-        ]),
+        ]) ?? blockTypeCount,
             let hiddenSize = firstInt(in: root, paths: [
                 ["hidden_size"],
                 ["n_embd"],

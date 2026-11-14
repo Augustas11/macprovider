@@ -566,3 +566,18 @@ func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) 
 		}
 	}
 }
+
+// #2329: the Nemotron 3.5 Bolt catalog key and served artifact id are
+// recorded as themselves, never folded into another Nemotron row.
+func TestDemandTelemetryKnowsNemotron35BoltIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"nvidia/nemotron-3.5-bolt-74b-a9b", "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"nvidia/nemotron-3.5-bolt-74b-a9bx", "rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx-4bit"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}

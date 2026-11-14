@@ -173,6 +173,7 @@ Test-only, no binary change: `30fdbe2cf` (deterministic head-prompt budget and r
 ### Open, not in the cut until merged (2026-11-14)
 
 - `campaign/2327-vl-dtype` (Related: #2327): mlx-swift-lm `3.32.3-macprovider.61`, Qwen2-VL and Qwen2.5-VL M-RoPE terms take the hidden-state dtype so an image prefill no longer leaves the language model in float32. Branch pushed, not measured, no PR yet.
+- `campaign/2329-nemotron-bolt` (Related: #2329): `listed` catalog row `nvidia/nemotron-3.5-bolt-74b-a9b` (`rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` @ `cbfda6be`), unsigned staging of catalog release `published-2026-11-14-nemotron-3.5-bolt-listed-v287` on `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`; `class-120b-moe` class rate, `min_ram_gb` 84, serial (4-row batched output does not match serial, no CB entry). CLI content: autotune reads the KV layer count of a config with no `num_hidden_layers` from `layers_block_type`. Live steps after merge: sign the feeds and the Tier-2 pin, the next CLI cut through `scripts/ops/cli-release.sh`, then `scripts/ops/catalog-activate.sh status` and `next --run`, then a live probe on a 96 GB or larger provider.
 - [#2348](https://github.com/Augustas11/macprovider/pull/2348) (Related: #2328): native MTP `gemma4_mtp_v1` adapter for Gemma 4 12B (mlx-swift-lm `3.32.3-macprovider.60`). Open draft PR.
 
 ## CLI release — 1.8.287 (published 2026-11-13; tracked from 2026-11-10)

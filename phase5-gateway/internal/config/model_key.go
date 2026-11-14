@@ -37,6 +37,7 @@ var exactModelKeyAliases = map[string]string{
 	"solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
 	"frogggias/ripple-65b-preview-mlx":                      "ricursiveai/ripple-65b-preview",
 	"liquidai/lfm3-1.7b-mlx":                                "liquidai/lfm3-1.7b",
+	"rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx":        "nemotron-3.5-bolt-74b-a9b",
 	"minimax-m3.1-flash-oq3e-mtp":                           "minimaxai/minimax-m3.1-flash",
 	"minimax/minimax-m3.1-flash":                            "minimaxai/minimax-m3.1-flash",
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx":           "deepseek/deepseek-v4-flash",

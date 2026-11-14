@@ -86,6 +86,16 @@
       "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
       "from_row": "default",
       "to_row": "nemotron-3.5-lightning-30b-a3b"
+    },
+    {
+      "model": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
+      "from_row": "default",
+      "to_row": "nemotron-3.5-bolt-74b-a9b"
+    },
+    {
+      "model": "nvidia/nemotron-3.5-bolt-74b-a9b",
+      "from_row": "default",
+      "to_row": "nemotron-3.5-bolt-74b-a9b"
     }
   ]
 }

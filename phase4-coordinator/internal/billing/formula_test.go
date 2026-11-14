@@ -129,8 +129,8 @@ func TestRateFor_NormalizesGLM53FlashAliasesExactly(t *testing.T) {
 
 // The alias table holds whole normalized keys for GLM-5.3-Flash, its
 // abliterated and uncensored builds (#2189, #2244), Ripple-65B Preview's
-// served artifact (#2270), LFM3 1.7B's MLX artifacts (#2231) and
-// DeepSeek-V4-Flash only, so no other model's
+// served artifact (#2270), LFM3 1.7B's MLX artifacts (#2231), Nemotron 3.5
+// Bolt's served artifact (#2329) and DeepSeek-V4-Flash only, so no other model's
 // normalization can change through it.
 func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 	want := map[string]string{
@@ -142,6 +142,7 @@ func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 		"solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
 		"frogggias/ripple-65b-preview-mlx":                      "ricursiveai/ripple-65b-preview",
 		"liquidai/lfm3-1.7b-mlx":                                "liquidai/lfm3-1.7b",
+		"rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx":        "nemotron-3.5-bolt-74b-a9b",
 		"minimax-m3.1-flash-oq3e-mtp":                           "minimaxai/minimax-m3.1-flash",
 		"minimax/minimax-m3.1-flash":                            "minimaxai/minimax-m3.1-flash",
 		"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx":           "deepseek/deepseek-v4-flash",

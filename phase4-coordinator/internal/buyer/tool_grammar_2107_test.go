@@ -29,6 +29,7 @@ func TestToolGrammarFamilyCoversEveryCatalogFamily(t *testing.T) {
 		"google-gemma-4-26b-a4b-it":                   toolGrammarGemma4,
 		"nvidia/nemotron-3-nano-30b-a3b":              toolGrammarQwen,
 		"nvidia/nemotron-3.5-lightning-30b-a3b":       toolGrammarQwen,
+		"nvidia/nemotron-3.5-bolt-74b-a9b":            toolGrammarQwen,
 		"qwen3-8b":                                    toolGrammarQwen,
 		"qwen3-coder-30b-a3b-instruct":                toolGrammarQwen,
 		"qwen2.5-coder-32b-instruct":                  toolGrammarQwen,

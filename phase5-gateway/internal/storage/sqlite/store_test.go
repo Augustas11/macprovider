@@ -1924,3 +1924,17 @@ func TestValidDemandModelIDKnowsNemotron35LightningIdentitiesExactly(t *testing.
 		}
 	}
 }
+
+// #2329: the stored allowlist matches the router's for Nemotron 3.5 Bolt.
+func TestValidDemandModelIDKnowsNemotron35BoltIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"nvidia/nemotron-3.5-bolt-74b-a9b", "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"} {
+		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
+			t.Errorf("%q must be a known demand model id", model)
+		}
+	}
+	for _, model := range []string{"nvidia/nemotron-3.5-bolt-74b-a9bx", "rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx-4bit"} {
+		if validDemandModelID(model) {
+			t.Errorf("%q must not be a known demand model id", model)
+		}
+	}
+}
