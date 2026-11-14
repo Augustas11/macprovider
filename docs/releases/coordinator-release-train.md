@@ -22,6 +22,15 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Relay-blind retry message and LFM tool feed (SPEC-041-R007, SPEC-018) — merged 2026-11-14, rides the next Pearl runtime
+
+PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
+
+- Gateway: a retryable relay-blind refusal (`relay_blind_provider_unsupported`, `key_expired`, `decrypt_failed`, `metadata_rate_limited`) tells the buyer to retry with a new reservation and envelope; permanent codes keep "do not reuse its envelope". Status, `retryable`, `Retry-After` and `retry_action` are unchanged.
+- Gateway: the OpenRouter model feed advertises `tools` for `lfm2.5-24b-a2b`, matching the coordinator's tool-grammar family.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
+
 ## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — merged 2026-11-14, rides the next Pearl runtime
 
 PR #2374 (`cdf46f633`), issue #2371. Not live: v1.8.288 does not carry it.
