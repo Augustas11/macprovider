@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -98,5 +99,34 @@ func TestAnthropicUsageFromChatReportsCacheRead(t *testing.T) {
 		if got := anthropicUsageFromChat(tc.usage); got != tc.want {
 			t.Errorf("%s: got %+v want %+v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// #2365: the cache-read split reaches the /v1/messages response body.
+func TestMessagesResponseReportsCacheReadInputTokens(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":false}}`), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":50,"completion_tokens":9,"total_tokens":59,"prompt_tokens_details":{"cached_tokens":40}},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_messages_cache_read_2365")
+	resp := postAnthropicMessages(t, h, key, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var got struct {
+		Usage map[string]float64 `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, resp.Body.String())
+	}
+	if got.Usage["input_tokens"] != 10 || got.Usage["cache_read_input_tokens"] != 40 || got.Usage["output_tokens"] != 9 {
+		t.Fatalf("usage=%v want input 10, cache_read 40, output 9\nbody=%s", got.Usage, resp.Body.String())
 	}
 }
