@@ -886,12 +886,13 @@ func responsesCustomToolNames(tools []map[string]any) map[string]bool {
 }
 
 // responsesReasoningEffort passes `reasoning.effort` through as the chat
-// `reasoning_effort` (SPEC-018 §3.12).
+// `reasoning_effort` (SPEC-018 §3.12). The accepted set is the chat path's
+// set, `max` included (#2363).
 func responsesReasoningEffort(reasoning any) string {
 	object, _ := reasoning.(map[string]any)
 	effort, _ := object["effort"].(string)
 	switch effort {
-	case "none", "minimal", "low", "medium", "high", "xhigh":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
 		return effort
 	default:
 		return ""
