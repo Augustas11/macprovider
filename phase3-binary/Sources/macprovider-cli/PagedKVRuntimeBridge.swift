@@ -5013,6 +5013,43 @@ enum PagedKVVectorAttentionRoute {
         return ((value + 31) / 32) * 32
     }()
 
+    /// Core's `MLX_SDPA_D512_MIN_KL` (default 1024; 0 lifts the head dim
+    /// 512 defaults).
+    static let d512MinimumKeyTokens: Int = {
+        guard let raw = ProcessInfo.processInfo.environment["MLX_SDPA_D512_MIN_KL"],
+              let value = Int(raw)
+        else { return 1024 }
+        return value
+    }()
+
+    /// Whether core attends a call of at most 8 query tokens with a vector
+    /// kernel (fork core `has_fused_kernel` and `use_fallback`,
+    /// scaled_dot_product_attention.cpp). Any other call takes the
+    /// composite fallback, whose matmuls depend on the batch: no shared
+    /// call is exact for it.
+    static func takesVectorKernel(
+        keyTokens n: Int,
+        queryTokens: Int,
+        gqaFactor: Int,
+        headDim: Int,
+        valueDim: Int,
+        hasArrayMask: Bool,
+        d512MinimumKeyTokens: Int = d512MinimumKeyTokens
+    ) -> Bool {
+        guard queryTokens <= n, queryTokens * gqaFactor <= 32 else { return false }
+        // 192/192 has a vector kernel, but `use_fallback` prefers the
+        // composite for it.
+        let supported = (headDim == valueDim && [64, 96, 128, 256, 512].contains(headDim))
+            || (headDim == 192 && valueDim == 128)
+            || (headDim == 96 && valueDim == 64)
+        guard supported else { return false }
+        guard headDim == 512 else { return true }
+        if d512MinimumKeyTokens != 0, queryTokens != 1 || gqaFactor != 8 || hasArrayMask {
+            return false
+        }
+        return n >= d512MinimumKeyTokens
+    }
+
     static func route(
         keyTokens n: Int,
         queryTokens: Int,
@@ -5025,6 +5062,10 @@ enum PagedKVVectorAttentionRoute {
         partitionOverride: Int?
     ) -> Route? {
         guard queryTokens >= 1, queryTokens <= 8, kvHeads > 0, queryHeads % kvHeads == 0,
+              takesVectorKernel(
+                  keyTokens: n, queryTokens: queryTokens, gqaFactor: queryHeads / kvHeads,
+                  headDim: headDim, valueDim: valueDim, hasArrayMask: hasArrayMask
+              ),
               let device = architecture.last
         else { return nil }
         let large = device == "d" || device == "s"
@@ -5107,23 +5148,148 @@ enum PagedKVVectorAttentionRoute {
     }
 }
 
+/// Diagnostic only (off unless a probe turns it on): exact bit
+/// fingerprints of one row's inputs and output at every paged attention
+/// call, in call order, so a lone run and a shared run of the same row can
+/// be compared call by call (#2328).
+enum PagedKVAttentionTrace {
+    struct Entry: Equatable {
+        /// Forward index in the run: prompt chunks first, then decode steps.
+        let forward: Int
+        /// Order of the row's layer cache among the caches the run attended.
+        let layer: Int
+        let queryTokens: Int
+        let keyTokens: Int
+        let kvHeads: Int
+        let windowed: Bool
+        let queries: [Int64]
+        let keys: [Int64]
+        let values: [Int64]
+        let output: [Int64]
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var enabled = false
+    nonisolated(unsafe) private static var layers: [ObjectIdentifier: Int] = [:]
+    nonisolated(unsafe) private static var layerCounts: [Int: Int] = [:]
+    nonisolated(unsafe) private static var forwards: [Int: Int] = [:]
+    nonisolated(unsafe) private static var entries: [Int: [Entry]] = [:]
+
+    /// Starts recording every row of every paged attention call.
+    static func begin() {
+        lock.lock()
+        defer { lock.unlock() }
+        enabled = true
+        layers = [:]
+        layerCounts = [:]
+        forwards = [:]
+        entries = [:]
+    }
+
+    /// Stops recording; the entries of each batch row index, in call order.
+    static func end() -> [Int: [Entry]] {
+        lock.lock()
+        defer { lock.unlock() }
+        enabled = false
+        let recorded = entries
+        entries = [:]
+        layers = [:]
+        return recorded
+    }
+
+    static func record(rowCaches: [PagedKVCache], queries: MLXArray, keys: MLXArray, values: MLXArray, output: MLXArray) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled else { return }
+        let rows = min(rowCaches.count, queries.dim(0), keys.dim(0), values.dim(0), output.dim(0))
+        for row in 0 ..< rows {
+            let id = ObjectIdentifier(rowCaches[row])
+            let layer: Int
+            if let known = layers[id] {
+                layer = known
+            } else {
+                layer = layerCounts[row, default: 0]
+                layerCounts[row] = layer + 1
+                layers[id] = layer
+            }
+            if layer == 0 { forwards[row, default: -1] += 1 }
+            func own(_ array: MLXArray) -> [Int64] {
+                fingerprint(array[row ..< row + 1, 0..., 0..., 0...])
+            }
+            entries[row, default: []].append(Entry(
+                forward: forwards[row, default: 0],
+                layer: layer,
+                queryTokens: queries.dim(2),
+                keyTokens: rowCaches[row].offset,
+                kvHeads: keys.dim(1),
+                windowed: rowCaches[row].attentionWindowTokens != nil,
+                queries: own(queries),
+                keys: own(keys),
+                values: own(values),
+                output: own(output)
+            ))
+        }
+    }
+
+    /// Two exact integer sums over the array's raw bits (plain and
+    /// position-weighted): equal arrays give equal sums, and any changed
+    /// element changes them.
+    static func fingerprint(_ array: MLXArray) -> [Int64] {
+        let raw: MLXArray
+        switch array.itemSize {
+        case 2: raw = array.view(dtype: .uint16)
+        case 4: raw = array.view(dtype: .uint32)
+        default: raw = array.asType(.float32).view(dtype: .uint32)
+        }
+        let flat = raw.asType(.int64).reshaped([-1])
+        let weights = (MLXArray.arange(flat.dim(0), dtype: .int64) % 65_521) + 1
+        let sums = stacked([flat.sum(), (flat * weights).sum()])
+        eval(sums)
+        return sums.asArray(Int64.self)
+    }
+}
+
 enum PagedKVRowAttention {
     /// Whether MLX core reduces a row attended alone in another order than
     /// the same row inside one batched call of equal-length rows, so each row
-    /// needs its own call. That holds for a prompt call (more than 8 query
-    /// tokens, the unfused path for head dims 192/256/512 on non-NAX GPUs)
-    /// over a single KV head. Alone, the fallback's `scores @ V` product has
-    /// one batch after `collapse_batches`, its query heads fold into the GEMM
+    /// needs its own call. That holds for a call over a single KV head that
+    /// core attends with its composite fallback: every prompt call (more than
+    /// 8 query tokens) and every short call no vector kernel takes
+    /// (`PagedKVVectorAttentionRoute.route` is nil), such as head dim 512 at
+    /// a GQA factor other than 8. Alone, the fallback's two matmuls have one
+    /// batch after `collapse_batches`: the query heads fold into the GEMM
     /// rows (fork core `matmul.cpp` batch collapse), and with few rows and a
-    /// long history it takes split-K (`steel_gemm_splitk_axpby`, batch size 1
-    /// only), which sums K in partitions. In a batch of two the product keeps
-    /// two batches and runs the plain GEMM. Gemma 4 12B's full-attention
-    /// layers (16 query heads, 1 KV head, head dim 512) hit this on the
-    /// 64-token prompt chunk after a 1024-key history (M = 1024, N = 512,
-    /// K = 1088): logits up to 0.5 apart and a flipped greedy token (#2328).
-    /// The decode vector kernels are batch-invariant and keep one call.
-    static func loneCallReducesDifferently(rows: Int, queryTokens: Int, kvHeads: Int) -> Bool {
-        rows > 1 && queryTokens > 8 && kvHeads == 1
+    /// long history `scores @ V` takes split-K (`steel_gemm_splitk_axpby`,
+    /// batch size 1 only), which sums keys in partitions. In a batch of two
+    /// each row keeps its own batches: the plain GEMM for a prompt chunk,
+    /// GEMV for one decode token. Gemma 4 12B's full-attention layers (16
+    /// query heads, 1 KV head, head dim 512) hit this on the 64-token chunk
+    /// after 1024 keys (M = 16 x 64, N = 512, K = 1088) and at every decode
+    /// step (M = 16, N = 512, K = keys) (#2328). Vector kernels attend each
+    /// (row, head) alone and keep one call.
+    static func loneCallReducesDifferently(
+        rows: Int,
+        queryTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        keyTokens: Int,
+        loneCallHasArrayMask: Bool,
+        architecture: String = PagedKVVectorAttentionRoute.deviceArchitecture
+    ) -> Bool {
+        guard rows > 1, kvHeads == 1 else { return false }
+        return queryTokens > 8 || PagedKVVectorAttentionRoute.route(
+            keyTokens: keyTokens,
+            queryTokens: queryTokens,
+            queryHeads: queryHeads,
+            kvHeads: kvHeads,
+            headDim: headDim,
+            valueDim: valueDim,
+            hasArrayMask: loneCallHasArrayMask,
+            architecture: architecture,
+            partitionOverride: nil
+        ) == nil
     }
 
     /// Per-row extents when one batched SDPA call would not give every row
@@ -5559,7 +5725,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
+        )
+        return output
     }
 
     /// GPT-OSS attention with per-head sinks takes the same per-row route:
@@ -5572,7 +5742,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         sinks: MLXArray
     ) -> MLXArray {
-        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
+        )
+        return output
     }
 
     private func attendRows(
@@ -5609,19 +5783,35 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             // No row is padded: the one call is each row's lone call, except
             // where MLX core reduces a lone row in another order
             // (`PagedKVRowAttention.loneCallReducesDifferently`).
+            let unpaddedPlainMask = PagedKVBatchLayerCache.maskIsPlainCacheMask(mask)
+            var loneCallHasArrayMask = false
+            // Packed verification rows take their slice of the packed mask,
+            // as the split path gives them.
+            if case .array = mask, !unpaddedPlainMask || packedRows != nil { loneCallHasArrayMask = true }
             guard PagedKVRowAttention.loneCallReducesDifferently(
-                rows: queries.dim(0), queryTokens: queryTokens, kvHeads: keys.dim(1)
-            ), packedRows == nil, !windowed,
+                rows: queries.dim(0),
+                queryTokens: queryTokens,
+                queryHeads: queries.dim(1),
+                kvHeads: keys.dim(1),
+                headDim: queries.dim(3),
+                valueDim: values.dim(3),
+                keyTokens: keys.dim(2),
+                loneCallHasArrayMask: loneCallHasArrayMask
+            ), !windowed,
                 queries.dim(0) == rowCaches.count, keys.dim(0) == rowCaches.count
             else {
                 return batched()
             }
+            if packedRows != nil, !loneCallHasArrayMask {
+                attendedOutsideCachePath = true
+                return batched()
+            }
             var loneMask = mask
             if case .array(let array) = mask {
-                if PagedKVBatchLayerCache.maskIsPlainCacheMask(mask) {
+                if unpaddedPlainMask, packedRows == nil {
                     // Padding and causality only, and no row is padded: the
-                    // lone call's own causal mask.
-                    loneMask = .causal
+                    // mask the lone call takes (none for one decode token).
+                    loneMask = queryTokens > 1 ? .causal : .none
                 } else if array.ndim != 4 || (array.dim(0) != 1 && array.dim(0) != rowCaches.count) {
                     attendedOutsideCachePath = true
                     return batched()

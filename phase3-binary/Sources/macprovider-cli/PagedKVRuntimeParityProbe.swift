@@ -681,6 +681,49 @@ enum PagedKVRuntimeParityProbe {
             } else if oneRowB["shared-parity-b"] == twoRow["shared-parity-b"] {
                 PagedKVRuntimeDiagnostics.log("shared-parity one-row row=b equals two-row row=b")
             }
+            // The failing comparison itself: row b through the paged path
+            // alone versus as row 1 of the two-row run, both fed the same
+            // tokens up to the divergence, compared call by call.
+            if let oneRowTokens = oneRowB["shared-parity-b"], let twoRowTokens = twoRow["shared-parity-b"] {
+                let common = min(oneRowTokens.count, twoRowTokens.count)
+                let divergence = (0 ..< common).first { oneRowTokens[$0] != twoRowTokens[$0] } ?? common
+                defer { _ = PagedKVAttentionTrace.end() }
+                PagedKVAttentionTrace.begin()
+                let tracedLone = try await sharedForwardGeneratedTokens(
+                    container: container, blockSizeTokens: blockSizeTokens, maxPhysicalBlocks: maxPhysicalBlocks,
+                    poolEpoch: poolEpoch, layerCount: layerCount, cacheKinds: cacheKinds,
+                    recurrentStateLayout: recurrentStateLayout,
+                    rows: [("shared-parity-b", promptB)], nNew: nNew
+                )
+                let loneTrace = PagedKVAttentionTrace.end()[0] ?? []
+                PagedKVAttentionTrace.begin()
+                let tracedPair = try await sharedForwardGeneratedTokens(
+                    container: container, blockSizeTokens: blockSizeTokens, maxPhysicalBlocks: maxPhysicalBlocks,
+                    poolEpoch: poolEpoch, layerCount: layerCount, cacheKinds: cacheKinds,
+                    recurrentStateLayout: recurrentStateLayout,
+                    rows: [("shared-parity-a", promptA), ("shared-parity-b", promptB)], nNew: nNew
+                )
+                // Row b's own batch row: the one whose first call (prompt
+                // chunk 0, layer 0) has the lone run's query bits.
+                let pairTraces = PagedKVAttentionTrace.end()
+                let pairTrace = pairTraces.keys.sorted()
+                    .compactMap { pairTraces[$0] }
+                    .first { $0.first?.queries == loneTrace.first?.queries } ?? []
+                let margin = try await container.perform { context in
+                    try Self.loneTopTwoMargin(
+                        model: context.model, prompt: promptB, tokens: oneRowTokens, token: divergence,
+                        makeCache: { try context.model.newCache(parameters: nil) }
+                    )
+                }
+                Self.logPagedBitDivergence(
+                    lone: loneTrace, pair: pairTrace,
+                    prefillChunks: Self.prefillChunkForwards(promptTokens: promptB.count) + 1,
+                    divergence: divergence,
+                    reproduced: tracedLone["shared-parity-b"] == oneRowTokens
+                        && tracedPair["shared-parity-b"] == twoRowTokens,
+                    loneMargin: margin
+                )
+            }
             // Both rows through the stock serial caches in one [2, L]
             // forward: no paged code, no ring presentation, only the model's
             // own batch-of-two numerics. Row b leaving its lone serial result
@@ -699,6 +742,10 @@ enum PagedKVRuntimeParityProbe {
                 Self.logParityDivergence(stage: "serial-batch-of-two", row: "b", serial: serialB, shared: serialPair.last)
                 if serialPair.last == twoRow["shared-parity-b"] {
                     PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b equals two-row row=b")
+                } else if serialPair.last == serialB {
+                    PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b matches serial")
+                }
+                if serialPair.last != serialB {
                     let common = min(serialB.count, serialPair.last?.count ?? 0)
                     let divergence = (0 ..< common).first { serialB[$0] != serialPair.last?[$0] } ?? common
                     try await container.perform { context in
@@ -710,8 +757,6 @@ enum PagedKVRuntimeParityProbe {
                             makeCache: { try context.model.newCache(parameters: nil) }
                         )
                     }
-                } else if serialPair.last == serialB {
-                    PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b matches serial")
                 }
             }
         }
@@ -1058,6 +1103,88 @@ enum PagedKVRuntimeParityProbe {
             }
         }
         PagedKVRuntimeDiagnostics.log("batch-bits done chunks=\(chunk) decode_steps=\(throughStep) reported=\(reported)")
+    }
+
+    /// Row b's top-2 logit margin for generated token `token`, teacher-forced
+    /// with its lone tokens on the stock serial caches (diagnostic only).
+    private static func loneTopTwoMargin(
+        model: any LanguageModel,
+        prompt: [Int],
+        tokens: [Int],
+        token: Int,
+        prefillStepSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
+        makeCache: () throws -> [KVCache]
+    ) throws -> Float? {
+        guard !prompt.isEmpty, token >= 0, token <= tokens.count else { return nil }
+        let cache = try makeCache()
+        var state: LMOutput.State?
+        let chunkSize = max(1, prefillStepSize)
+        var offset = 0
+        while prompt.count - offset > chunkSize {
+            let chunk = MLXArray(prompt[offset ..< offset + chunkSize].map { Int32($0) }).reshaped([1, chunkSize])
+            let output = model(LMInput.Text(tokens: chunk), cache: cache, state: state)
+            state = output.state
+            eval(cache.flatMap { $0.state })
+            offset += chunkSize
+        }
+        var y = MLXArray(prompt[offset...].map { Int32($0) }).reshaped([1, prompt.count - offset])
+        for step in 0 ... token {
+            let output = model(LMInput.Text(tokens: y), cache: cache, state: state)
+            state = output.state
+            if step == token {
+                let logits = output.logits
+                let row = sorted(logits[0, logits.dim(1) - 1, 0...].asType(.float32), axis: -1)
+                let n = row.dim(0)
+                return (row[n - 1] - row[n - 2]).item(Float.self)
+            }
+            eval(cache.flatMap { $0.state })
+            y = MLXArray([Int32(tokens[step])]).reshaped([1, 1])
+        }
+        return nil
+    }
+
+    /// Logs the first paged attention call whose row-b bits differ between
+    /// the lone and the two-row run: the forward (prompt chunk or decode
+    /// step), the layer, which of its inputs (queries, keys, values: the
+    /// layer's norm and projections of the residual stream) and output
+    /// differ, and whether the previous call's output still matched. Inputs
+    /// differing after an equal previous output put the cause between the
+    /// two calls (output projection, norms, MLP, residual, the next layer's
+    /// projections and rotary); equal inputs with a differing output put it
+    /// in the attention call. Always logs one line.
+    private static func logPagedBitDivergence(
+        lone: [PagedKVAttentionTrace.Entry],
+        pair: [PagedKVAttentionTrace.Entry],
+        prefillChunks: Int,
+        divergence: Int,
+        reproduced: Bool,
+        loneMargin: Float?
+    ) {
+        func stage(_ forward: Int) -> String {
+            forward < prefillChunks
+                ? "prefill_chunk=\(forward)"
+                : "decode_step=\(forward - prefillChunks) yields_token=\(forward - prefillChunks + 1)"
+        }
+        let marginText = loneMargin.map { "\($0)" } ?? "nil"
+        let head = "paged-bits token_divergence=\(divergence) reproduced=\(reproduced) calls_lone=\(lone.count) calls_pair=\(pair.count) lone_margin_at_divergence=\(marginText)"
+        guard !lone.isEmpty, !pair.isEmpty else {
+            PagedKVRuntimeDiagnostics.log("\(head) first_diff=no_trace")
+            return
+        }
+        guard let index = (0 ..< min(lone.count, pair.count)).first(where: { lone[$0] != pair[$0] }) else {
+            PagedKVRuntimeDiagnostics.log("\(head) first_diff=none")
+            return
+        }
+        let one = lone[index]
+        let two = pair[index]
+        guard one.forward == two.forward, one.layer == two.layer, one.queryTokens == two.queryTokens else {
+            PagedKVRuntimeDiagnostics.log(
+                "\(head) first_diff=call_sequence index=\(index) lone=(\(stage(one.forward)) layer=\(one.layer) q=\(one.queryTokens)) pair=(\(stage(two.forward)) layer=\(two.layer) q=\(two.queryTokens))")
+            return
+        }
+        let previousOutputEqual = index == 0 ? true : lone[index - 1].output == pair[index - 1].output
+        PagedKVRuntimeDiagnostics.log(
+            "\(head) first_diff=\(stage(one.forward)) layer=\(one.layer) windowed=\(one.windowed) kv_heads=\(one.kvHeads) query_tokens=\(one.queryTokens) keys_before=\(one.keyTokens - one.queryTokens) queries_equal=\(one.queries == two.queries) keys_equal=\(one.keys == two.keys) values_equal=\(one.values == two.values) output_equal=\(one.output == two.output) previous_output_equal=\(previousOutputEqual) cause=\(one.queries == two.queries && one.keys == two.keys && one.values == two.values ? "attention_call" : "between_calls")")
     }
 
     private static func lastTokenArgmax(_ logits: MLXArray) -> Int32 {

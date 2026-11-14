@@ -2006,24 +2006,45 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
-    /// Equal-length rows at Gemma 4 12B's full-attention shape (16 query
-    /// heads, 1 KV head, head dim 512): the 64-token prompt chunk after a
-    /// 1024-key history. Attended alone, MLX core folds the query heads into
-    /// the `scores @ V` GEMM rows and takes split-K; one call for both rows
-    /// keeps two batches and the plain GEMM, so a single unpadded call gave
-    /// each row other bits than its lone call (#2328). Every row must match
-    /// its lone call bit for bit.
-    func testSingleKVHeadPromptChunkMatchesLoneBitsForEqualLengthRows() throws {
+    /// Rows at Gemma 4 12B's full-attention shape (16 query heads, 1 KV
+    /// head, head dim 512). Core attends these with its composite fallback
+    /// (no vector kernel: head dim 512 needs GQA factor 8), and a lone row
+    /// folds its query heads into the matmul rows and may take split-K,
+    /// while one call for several rows keeps a batch per row (plain GEMM for
+    /// the 64-token chunk after 1024 keys, GEMV for a decode token). A single
+    /// call gave each row other bits than its lone call (#2328). Every row,
+    /// equal-length or padded, must match its lone call bit for bit.
+    func testSingleKVHeadFallbackAttentionMatchesLoneBits() throws {
         try requireMetal()
         MLXRandom.seed(2328)
-        XCTAssertTrue(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 64, kvHeads: 1))
-        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 1, queryTokens: 64, kvHeads: 1))
-        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 8, kvHeads: 1))
-        XCTAssertFalse(PagedKVRowAttention.loneCallReducesDifferently(rows: 2, queryTokens: 64, kvHeads: 2))
+        func splits(
+            rows: Int = 2, queries: Int, heads: Int = 16, kvHeads: Int = 1, dim: Int = 512,
+            keys: Int, mask: Bool = false
+        ) -> Bool {
+            PagedKVRowAttention.loneCallReducesDifferently(
+                rows: rows, queryTokens: queries, queryHeads: heads, kvHeads: kvHeads,
+                headDim: dim, valueDim: dim, keyTokens: keys, loneCallHasArrayMask: mask,
+                architecture: "applegpu_g15d"
+            )
+        }
+        XCTAssertTrue(splits(queries: 64, keys: 1088), "Gemma prompt chunk")
+        XCTAssertTrue(splits(queries: 1, keys: 1089), "Gemma decode: GQA 16 at head dim 512 has no vector kernel")
+        XCTAssertTrue(splits(queries: 3, keys: 1091, mask: true), "Gemma packed verification")
+        XCTAssertFalse(splits(rows: 1, queries: 64, keys: 1088))
+        XCTAssertFalse(splits(queries: 1, heads: 8, keys: 1089), "vector kernel: batch-invariant")
+        XCTAssertFalse(splits(queries: 1, dim: 128, keys: 1089), "vector kernel: batch-invariant")
+        XCTAssertFalse(splits(queries: 64, kvHeads: 2, keys: 1088), "more than one KV head keeps a batch per head")
+        XCTAssertNil(PagedKVVectorAttentionRoute.route(
+            keyTokens: 1089, queryTokens: 1, queryHeads: 16, kvHeads: 1, headDim: 512, valueDim: 512,
+            hasArrayMask: false, architecture: "applegpu_g15d", partitionOverride: nil
+        ), "a fallback call has no vector route, so padded rows never share it")
         try assertBatchCacheAttentionMatchesLoneBits([
             BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024]),
             BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024], ragged: true),
             BatchAttentionCase(label: "prefill", queryTokens: 32, histories: [700, 700, 700]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1088, 1088]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1100, 1100, 1100]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1088, 1130]),
         ], heads: [(16, 1, 512)])
     }
 
