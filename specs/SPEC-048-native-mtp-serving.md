@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.98
+**Version:** 0.1.99
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.98",
+  "version": "0.1.99",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,21 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.61` | `ef656c59adc2424ddf1f1bcfca0338536befcc25` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.63` | `8f8821668c1a2dbb23ce33e43f31ed00d45f924f` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.61` is on `3.32.3-macprovider.59`
+The mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
+(`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
+`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`: DeepSeek V4 prefill can yield
+between evaluated tiles so other continuous-batch rows decode while a
+reference prefill is in flight. Commit `8f88216` is the
+`3.32.3-macprovider.62` pause hook (`505f368`, `DeepseekV4.swift` only)
+cherry-picked onto `ef656c59`, so the Qwen VL dtype fix in `.61` stays.
+The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.61` is on `3.32.3-macprovider.59`
 (`7ee1b3f73d719726c86b39da11a715be5d1c197e`) (#2327), at
 `ef656c59adc2424ddf1f1bcfca0338536befcc25`: Qwen2-VL and Qwen2.5-VL M-RoPE
 cos/sin take the hidden-state dtype, so an image prefill no longer leaves the
@@ -2622,6 +2631,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.99 (2026-11-14, Related: #2352)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.63` (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) on
+  `3.32.3-macprovider.61`: DeepSeek V4 prefill can yield between evaluated
+  tiles so other continuous-batch rows decode while a reference prefill is in
+  flight. `8f88216` cherry-picks the `.62` pause hook (`505f368`,
+  `DeepseekV4.swift` only) onto `ef656c59`. Other model sources and the Swift,
+  core and C rows are unchanged.
 - **0.1.98 (2026-11-14, Related: #2327)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.61` (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) on
   `3.32.3-macprovider.59`: Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype,
