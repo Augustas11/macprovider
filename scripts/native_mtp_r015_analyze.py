@@ -151,6 +151,7 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
+ADMITTED_QUANTIZATIONS = ("4bit", "8bit")
 # SPEC-048 0.1.71 gate set, the only one the bench accepts for new runs. The
 # decode-throughput gate passes when the corrected lower bound is strictly
 # greater than 0 (a draw at or below the threshold counts against the gate).
@@ -247,9 +248,11 @@ def _policy_contract_violations(policy: dict) -> list[str]:
             violations.append(f"methodology_not_frozen:{key}")
     # Match the implemented tuple families without widening the existing
     # affine GLM/Qwen depth-one contract. DSpark's mixed-MX tuple supports
-    # depths 1...5; all numerical thresholds remain frozen below.
+    # depths 1...5; all numerical thresholds remain frozen below. The affine
+    # width is 4bit, or 8bit for gemma4_mtp_v1 (SPEC-048 0.1.98); the bench
+    # binds it to the fixture family.
     quantization = policy.get("quantization")
-    if quantization not in ("4bit", "mlx_mxfp4_mxfp8"):
+    if quantization not in ADMITTED_QUANTIZATIONS + ("mlx_mxfp4_mxfp8",):
         violations.append("methodology_not_frozen:quantization")
     depth = policy.get("proposal_depth")
     maximum_depth = 5 if quantization == "mlx_mxfp4_mxfp8" else 1

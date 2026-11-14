@@ -210,15 +210,129 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertFalse(supported(depth: 2, kinds: [.pagedAttention]))
     }
 
+    /// SPEC-048 0.1.98: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
+    /// drafts 1...3 tokens from one position whatever its decoder depth, owns
+    /// no drafter cache, and admits only the exact SPEC-039 v0.1.34 `gemma4`
+    /// mixed class with the runtime caches in its config layout.
+    func testGemma4NativeMTPAdmissionGate() throws {
+        let gemma4 = PagedKVRuntimeModelCapabilities(
+            modelFamily: "gemma4", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: false
+        )
+        let layerTypes: [String] = (0 ..< 48).map {
+            ($0 + 1).isMultiple(of: 6) ? "full_attention" : "sliding_attention"
+        }
+        let admitted = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "google/gemma-4-12b-it",
+            configJSONData: try JSONSerialization.data(withJSONObject: [
+                "model_type": "gemma4_unified",
+                "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+                "text_config": [
+                    "model_type": "gemma4_unified_text", "num_hidden_layers": 48, "layer_types": layerTypes,
+                    "sliding_window": 1024, "num_kv_shared_layers": 0,
+                ] as [String: Any],
+            ])
+        )
+        let admittedKinds = try XCTUnwrap(admitted.slidingWindowAttention?.expectedCacheKinds)
+        func supported(
+            _ capability: NativeMTPAdmissionCapability,
+            modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+            cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil,
+            drafterPresent: Bool = true
+        ) -> Bool {
+            ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                capability,
+                canonicalCacheClass: "paged_kv",
+                modelCapabilities: modelCapabilities ?? gemma4,
+                cacheKinds: cacheKinds,
+                drafterPresent: drafterPresent
+            )
+        }
+        func capability(
+            sourceLayout: String = "checkpoint_mtp",
+            predictionLayerCount: Int = 4,
+            maxProposalDepth: Int = 1
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                familyAdapter: "gemma4_mtp_v1",
+                sourceLayout: sourceLayout,
+                predictionLayerCount: predictionLayerCount,
+                maxProposalDepth: maxProposalDepth,
+                completeWindowBytesByDepth: Array(repeating: 8, count: maxProposalDepth + 1),
+                stateClass: "stageable_rewindable",
+                maxNativeActiveRows: 1
+            )
+        }
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains("gemma4"))
+        // The exact mixed class with its config-layout caches is admitted.
+        for depth in 1...3 {
+            XCTAssertTrue(supported(capability(maxProposalDepth: depth), modelCapabilities: admitted, cacheKinds: admittedKinds))
+        }
+        XCTAssertFalse(supported(capability(), modelCapabilities: admitted, cacheKinds: admittedKinds, drafterPresent: false))
+        // Sliding-window layers are not recurrent, so the hybrid state class is refused.
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(
+            familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp", predictionLayerCount: 4,
+            maxProposalDepth: 1, completeWindowBytesByDepth: [8, 8], stateClass: "hybrid_stageable_rewindable",
+            maxNativeActiveRows: 1
+        ), modelCapabilities: admitted, cacheKinds: admittedKinds))
+        // Missing, reordered or unverified topology fails closed.
+        var reordered = admittedKinds
+        reordered.swapAt(4, 5)
+        XCTAssertFalse(supported(capability(), modelCapabilities: admitted, cacheKinds: nil))
+        XCTAssertFalse(supported(capability(), modelCapabilities: admitted, cacheKinds: reordered))
+        XCTAssertFalse(supported(capability(), modelCapabilities: admitted, cacheKinds: Array(admittedKinds.dropLast(8))))
+        for depth in 1...3 {
+            XCTAssertFalse(supported(capability(maxProposalDepth: depth), cacheKinds: admittedKinds))
+        }
+        XCTAssertFalse(supported(capability(sourceLayout: "separate_artifact"), modelCapabilities: admitted, cacheKinds: admittedKinds))
+        XCTAssertFalse(supported(capability(), modelCapabilities: PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: false
+        )))
+
+        XCTAssertEqual(ModelRuntime.gemma4NativeMTPMaximumProposalDepth, 3)
+        for depth in 1...3 {
+            XCTAssertTrue(ModelRuntime.nativeMTPProposalDepthSupported(
+                familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: depth
+            ))
+        }
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: 0
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: 4
+        ))
+        // Qwen and GLM keep one drafted token per prediction layer.
+        XCTAssertTrue(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "glm5_next_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 1
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "qwen3_5_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 2
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "unknown_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 1
+        ))
+
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4
+        ), 0)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "glm5_next_mtp_v1", predictionLayerCount: 1
+        ), 1)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "qwen3_5_mtp_v1", predictionLayerCount: 1
+        ), 1)
+    }
+
     func testNativeMTPDrafterSourceFollowsTheAdapter() {
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_5_mtp_v1"), .separateArtifact)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "glm5_next_mtp_v1"), .targetEmbedded)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "deepseek_v4_dspark_v1"), .targetEmbedded)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "gemma4_mtp_v1"), .targetEmbeddedAssistant)
         XCTAssertNil(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_mtp_v1"))
         XCTAssertEqual(ModelRuntime.nativeMTPSupportedAdapterLayouts, [
             .init(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
             .init(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
             .init(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
+            .init(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
         ])
         // Each adapter's admitted layout is the one the sidecar derives from it.
         for layout in ModelRuntime.nativeMTPSupportedAdapterLayouts {
@@ -264,6 +378,57 @@ final class ModelRuntimeSwapTests: XCTestCase {
         } catch let error as NativeMTPDrafterLoadError {
             XCTAssertEqual(error, .unsupportedAdapter("glm5_next_mtp_v1"))
         }
+    }
+
+    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1`: the 8-bit target and bf16
+    /// assistant pair is recomputed from the observed artifact and matched
+    /// field by field; no exceptions are admissible.
+    func testGemma4EmbeddedAssistantObservationMustMatchSignedCapability() throws {
+        func observation(
+            target: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 8, groupSize: 64),
+            mtp: NativeMTPObservedArtifactFormat = .unquantized(dtype: "bf16"),
+            layers: Int = 4,
+            embedded: Bool = true
+        ) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(format: target, mtpPredictionLayerCount: layers, tensorPairs: []),
+                mtp: NativeMTPArtifactObservation(format: mtp, mtpPredictionLayerCount: layers, tensorPairs: []),
+                embedded: embedded
+            )
+        }
+        let representation = try NativeMTPArtifactObserver.embeddedAssistantRepresentation(for: observation())
+        func capability(
+            manifest: String? = nil, groupSize: Int? = 64, perLayer: [String] = [], unquantized: [String] = []
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                familyAdapter: "gemma4_mtp_v1",
+                sourceLayout: "checkpoint_mtp",
+                predictionLayerCount: 4,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_8bit",
+                    mtp: "bf16",
+                    blockSizeElements: groupSize,
+                    representationManifestSHA256: manifest ?? representation.manifestSHA256,
+                    unquantizedExceptions: unquantized,
+                    perLayerExceptions: perLayer
+                )
+            )
+        }
+        func matches(_ observation: NativeMTPArtifactPairObservation, _ capability: NativeMTPAdmissionCapability) -> Bool {
+            ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(observation, admissionCapability: capability)
+        }
+        XCTAssertTrue(matches(observation(), capability()))
+        XCTAssertFalse(matches(observation(), capability(manifest: String(repeating: "f", count: 64))))
+        XCTAssertFalse(matches(observation(), capability(groupSize: 32)))
+        XCTAssertFalse(matches(observation(), capability(perLayer: ["target/language_model.model.layers.0.mlp.down_proj"])))
+        XCTAssertFalse(matches(observation(), capability(unquantized: ["mtp/language_model.mtp.model.norm"])))
+        XCTAssertFalse(matches(observation(target: .mlxAffine4(bits: 4, groupSize: 64)), capability()))
+        XCTAssertFalse(matches(observation(mtp: .unquantized(dtype: "f16")), capability()))
+        XCTAssertFalse(matches(observation(layers: 2), capability()))
+        XCTAssertFalse(matches(observation(embedded: false), capability()))
+        XCTAssertThrowsError(try NativeMTPArtifactObserver.embeddedAssistantRepresentation(
+            for: observation(target: .mlxAffine4(bits: 4, groupSize: 64))
+        ))
     }
 
     func testNativeMTPArtifactObservationMustMatchSignedCapability() {

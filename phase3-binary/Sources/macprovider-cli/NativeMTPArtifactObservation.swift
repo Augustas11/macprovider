@@ -53,8 +53,9 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
         switch self {
         case .unquantized(let dtype):
             return dtype
-        case .mlxAffine4:
-            return "mlx_affine_4bit"
+        case .mlxAffine4(let bits, _):
+            // 8 is the `gemma4_mtp_v1` target width (SPEC-048-R002 0.1.98).
+            return bits == 8 ? "mlx_affine_8bit" : "mlx_affine_4bit"
         case .mlxMXFP8:
             return "mlx_mxfp8"
         case .mlxMXFP4MXFP8:
@@ -204,6 +205,9 @@ enum NativeMTPArtifactObserver {
         fileManager: FileManager = .default
     ) throws -> NativeMTPArtifactPairObservation {
         let config = try loadConfig(directory: targetDirectory)
+        if config["model_type"] as? String == "gemma4_unified" {
+            return try observeGemma4Embedded(targetDirectory: targetDirectory, config: config, fileManager: fileManager)
+        }
         let isDSpark = config["model_type"] as? String == "deepseek_v4"
         let hiddenLayers = try isDSpark ? deepseekV4HiddenLayerCount(in: config) : glm5NextHiddenLayerCount(in: config)
         // `GLM5NextConfiguration` decodes `text_config.hidden_size` with this
@@ -281,6 +285,133 @@ enum NativeMTPArtifactObserver {
         )
     }
 
+    /// The file `Gemma4AssistantDraftModel.loadEmbedded` reads the assistant
+    /// from, beside the target's own shards.
+    static let gemma4AssistantWeightFileName = "model-mtp.safetensors"
+    private static let gemma4AssistantTensorPrefix = "language_model.mtp."
+
+    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` / `checkpoint_mtp`: one target
+    /// directory holds an MLX affine 8-bit target and the unquantized
+    /// bfloat16 assistant in `model-mtp.safetensors`. The two are observed
+    /// separately (they do not share a format), and the pair is embedded.
+    private static func observeGemma4Embedded(
+        targetDirectory: URL,
+        config: [String: Any],
+        fileManager: FileManager
+    ) throws -> NativeMTPArtifactPairObservation {
+        let layerCount = try gemma4AssistantLayerCount(in: config)
+        let headers = try loadSafetensorsHeaders(directory: targetDirectory, fileManager: fileManager)
+        let assistantURL = targetDirectory.appendingPathComponent(gemma4AssistantWeightFileName).standardizedFileURL
+        let isAssistant = { (header: SafetensorsHeader) in header.url.standardizedFileURL.path == assistantURL.path }
+        let assistantHeaders = headers.filter(isAssistant)
+        let targetHeaders = headers.filter { !isAssistant($0) }
+        guard assistantHeaders.count == 1, !targetHeaders.isEmpty else {
+            throw NativeMTPArtifactObservationError.missingSafetensors
+        }
+
+        // Target: the text loader's view of every other shard.
+        let targetTensors = try loaderConsumedTensors(targetHeaders, policy: .gemma4)
+        guard let quantization = try quantizationMetadata(in: config) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("gemma4 target requires mlx affine 8-bit")
+        }
+        let representation = representationManifest(quantization: quantization, config: config)
+        // The admitted layout has no per-module overrides or `false` entries;
+        // this adapter records none, so any present fails closed.
+        guard try affineModuleOverrides(in: quantization).isEmpty,
+              representation.configUnquantizedModules.isEmpty else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("gemma4 target module exceptions are not admissible")
+        }
+        let target = try observeQuantizedFormat(
+            quantization: quantization,
+            representation: representation,
+            tensors: targetTensors,
+            policy: .gemma4,
+            admittedGlobalBits: [8]
+        )
+        guard target.tensorPairs.allSatisfy({ $0.scaleDType == "BF16" }) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("gemma4 target requires bfloat16 scales")
+        }
+
+        // Assistant: unquantized bfloat16 under `language_model.mtp.` only.
+        let assistantTensors = assistantHeaders.flatMap(\.tensors)
+        for tensor in assistantTensors {
+            guard tensor.name.hasPrefix(gemma4AssistantTensorPrefix),
+                  !isScaleTensorName(tensor.name),
+                  !isBiasTensorName(tensor.name) else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("gemma4 assistant tensor namespace \(tensor.name)")
+            }
+        }
+        try validateUnquantizedHeaders(dtype: "bf16", tensors: assistantTensors)
+
+        return NativeMTPArtifactPairObservation(
+            target: NativeMTPArtifactObservation(
+                format: target.format,
+                mtpPredictionLayerCount: layerCount,
+                tensorPairs: target.tensorPairs
+            ),
+            mtp: NativeMTPArtifactObservation(format: .unquantized(dtype: "bf16"), mtpPredictionLayerCount: layerCount, tensorPairs: []),
+            embedded: true
+        )
+    }
+
+    /// The exact Gemma 4 config identity SPEC-048-R002 admits, returning
+    /// `text_config.mtp_num_hidden_layers`, which must equal the assistant's
+    /// decoder depth.
+    private static func gemma4AssistantLayerCount(in config: [String: Any]) throws -> Int {
+        guard config["model_type"] as? String == "gemma4_unified",
+              let architectures = config["architectures"] as? [Any],
+              architectures.count == 1,
+              architectures.first as? String == "Gemma4UnifiedForConditionalGeneration",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "gemma4_unified_text",
+              let assistant = text["mtp_assistant_config"] as? [String: Any],
+              assistant["model_type"] as? String == "gemma4_unified_assistant",
+              stringValue(assistant["dtype"]).map(canonicalDType) == "bf16",
+              let assistantText = assistant["text_config"] as? [String: Any] else {
+            throw NativeMTPArtifactObservationError.malformedConfig("gemma4_unified identity")
+        }
+        guard let count = intValue(text["mtp_num_hidden_layers"]) else {
+            throw NativeMTPArtifactObservationError.missingMTPPredictionLayerCount
+        }
+        guard (1...64).contains(count), intValue(assistantText["num_hidden_layers"]) == count else {
+            throw NativeMTPArtifactObservationError.invalidMTPPredictionLayerCount
+        }
+        return count
+    }
+
+    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` representation: an MLX affine
+    /// 8-bit target with bfloat16 scales and no exceptions, and the
+    /// unquantized bfloat16 assistant. The manifest's `target` object is the
+    /// affine form and its `mtp` object the `base` form.
+    static func embeddedAssistantRepresentation(
+        for observation: NativeMTPArtifactPairObservation
+    ) throws -> NativeMTPAffineRepresentation {
+        guard observation.embedded,
+              case .mlxAffine4(8, let groupSize) = observation.target.format,
+              [32, 64, 128].contains(groupSize),
+              observation.target.affineModuleOverrides.isEmpty,
+              observation.target.unquantizedModules.isEmpty,
+              observation.target.tensorPairs.allSatisfy({ $0.scaleDType == "BF16" }),
+              observation.mtp.format == .unquantized(dtype: "bf16"),
+              observation.mtp.affineModuleOverrides.isEmpty,
+              observation.mtp.unquantizedModules.isEmpty else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("embedded assistant representation requires an 8-bit target and a bf16 assistant")
+        }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema": .rawString("macprovider.native-mtp-representation.v1"),
+            "target": try affineManifestValue(for: observation.target, admittedGlobalBits: [8]),
+            "mtp": .object(["dtype": .rawString("bfloat16")]),
+        ]))
+        let bytes = Data(canonical.utf8)
+        return NativeMTPAffineRepresentation(
+            manifestBytes: bytes,
+            manifestSHA256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            perLayerExceptions: [],
+            unquantizedExceptions: [],
+            groupSize: groupSize
+        )
+    }
+
     /// The exact GLM-5-Next config identity SPEC-048-R002 admits, returning
     /// `text_config.num_hidden_layers`.
     private static func glm5NextHiddenLayerCount(in config: [String: Any]) throws -> Int {
@@ -304,6 +435,9 @@ enum NativeMTPArtifactObserver {
     static func affineRepresentation(
         for observation: NativeMTPArtifactPairObservation
     ) throws -> NativeMTPAffineRepresentation {
+        if observation.embedded, observation.mtp.format == .unquantized(dtype: "bf16") {
+            return try embeddedAssistantRepresentation(for: observation)
+        }
         guard case .mlxAffine4(let targetBits, let targetGroupSize) = observation.target.format,
               case .mlxAffine4(let mtpBits, let mtpGroupSize) = observation.mtp.format,
               targetBits == 4,
@@ -383,10 +517,11 @@ enum NativeMTPArtifactObserver {
     }
 
     private static func affineManifestValue(
-        for observation: NativeMTPArtifactObservation
+        for observation: NativeMTPArtifactObservation,
+        admittedGlobalBits: Set<Int> = [4]
     ) throws -> RFC8785JCS.Value {
         guard case .mlxAffine4(let bits, let groupSize) = observation.format,
-              bits == 4,
+              admittedGlobalBits.contains(bits),
               [32, 64, 128].contains(groupSize) else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("invalid affine manifest global format")
         }
@@ -604,7 +739,8 @@ enum NativeMTPArtifactObserver {
         quantization: [String: Any],
         representation: RepresentationManifest,
         tensors: [SafetensorsTensor],
-        policy: TensorNamePolicy
+        policy: TensorNamePolicy,
+        admittedGlobalBits: Set<Int> = [4]
     ) throws -> (
         format: NativeMTPObservedArtifactFormat,
         tensorPairs: [NativeMTPObservedTensorPair],
@@ -623,8 +759,8 @@ enum NativeMTPArtifactObserver {
 
         switch mode {
         case "affine":
-            guard bits == 4 else {
-                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine requires bits=4")
+            guard admittedGlobalBits.contains(bits) else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine requires bits=\(admittedGlobalBits.sorted().map(String.init).joined(separator: "|"))")
             }
             guard [32, 64, 128].contains(groupSize) else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine unsupported group_size")
@@ -639,11 +775,11 @@ enum NativeMTPArtifactObserver {
             let pairs = try validatePackedHeaders(
                 tensors,
                 policy: policy,
-                quantizationName: "mlx_affine_4bit",
+                quantizationName: "mlx_affine_\(bits)bit",
                 groupSize: groupSize,
                 bitsPerValue: bits,
                 requiredPackedDType: "U32",
-                valuesPerPackedElement: 8,
+                valuesPerPackedElement: 32 / bits,
                 requiresBias: true,
                 representation: representation,
                 moduleOverrides: moduleOverrides
@@ -966,6 +1102,10 @@ enum NativeMTPArtifactObserver {
             // mapping needs the whole tensor set (expert stacking, conv
             // concatenation), so it is not a per-name rewrite.
             return name
+        case .gemma4:
+            // Only post-sanitize checkpoints are admitted (validateTensorName),
+            // on which the family sanitizer is the identity.
+            return name
         }
     }
 
@@ -1086,6 +1226,21 @@ enum NativeMTPArtifactObserver {
         }
         var consumed: [SafetensorsTensor] = []
         for tensor in headers.flatMap(\.tensors) {
+            if policy == .gemma4 {
+                // `Gemma4Model.sanitize` strips a leading `model.` and drops
+                // keys starting with these roots; only the dotted namespaces
+                // are dropped here, and a look-alike fails closed.
+                let stripped = tensor.name.hasPrefix("model.") ? String(tensor.name.dropFirst("model.".count)) : tensor.name
+                if gemma4DiscardedRoots.contains(where: { stripped.hasPrefix($0) }) {
+                    guard gemma4DiscardedRoots.contains(where: { stripped.hasPrefix($0 + ".") }) else {
+                        throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("gemma4 target tensor namespace \(tensor.name)")
+                    }
+                    continue
+                }
+                try validateTensorName(tensor.name, policy: policy)
+                consumed.append(tensor)
+                continue
+            }
             if policy != .mtp, isTargetLoaderDiscarded(tensor.name) {
                 guard tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.") else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
@@ -1111,7 +1266,22 @@ enum NativeMTPArtifactObserver {
         /// `text_config.hidden_size` for a quantized router gate.
         case glm5Next(hiddenLayers: Int, hiddenSize: Int)
         case deepseekV4(hiddenLayers: Int)
+        /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1` target shards.
+        case gemma4
     }
+
+    /// Roots the pinned `Gemma4Model.sanitize` discards (vision, audio and
+    /// the encoder-free `vision_embedder`).
+    private static let gemma4DiscardedRoots = [
+        "vision_tower", "multi_modal_projector", "audio_tower", "embed_audio", "embed_vision", "vision_embedder",
+    ]
+
+    /// Substrings `Gemma4TextModel.sanitize` silently drops (rotary caches,
+    /// activation ranges, the assistant namespace). A target shard tensor
+    /// carrying one fails closed instead.
+    private static let gemma4SilentlyDroppedMarkers = [
+        "mtp.", "self_attn.rotary_emb", "input_max", "input_min", "output_max", "output_min",
+    ]
 
     private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
 
@@ -1413,6 +1583,12 @@ enum NativeMTPArtifactObserver {
             // GLM5Next names are checked on their loader keys
             // (glm5NextLoaderConsumedTensors); this is the identity case.
             try validateGLM5NextTensorName(name, reportedAs: name, hiddenLayers: hiddenLayers)
+        case .gemma4:
+            // Tied embeddings: every kept key is under `language_model.model.`.
+            guard name.hasPrefix("language_model.model."),
+                  !gemma4SilentlyDroppedMarkers.contains(where: { name.contains($0) }) else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("gemma4 target tensor namespace \(name)")
+            }
         case .mtp:
             // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
             // standaloneCheckpoint) matches the exact, case-sensitive `mtp.`
@@ -1665,7 +1841,7 @@ enum NativeMTPArtifactObserver {
                 ))
             }
             try validateNonOverlappingOffsets(tensors, fileName: url.lastPathComponent)
-            return SafetensorsHeader(fileName: url.lastPathComponent, headerByteCount: headerByteCount, tensors: tensors)
+            return SafetensorsHeader(url: url, fileName: url.lastPathComponent, headerByteCount: headerByteCount, tensors: tensors)
         } catch let error as NativeMTPArtifactObservationError {
             throw error
         } catch {
@@ -1712,6 +1888,7 @@ enum NativeMTPArtifactObserver {
     }
 
     private struct SafetensorsHeader {
+        let url: URL
         let fileName: String
         let headerByteCount: Int
         let tensors: [SafetensorsTensor]

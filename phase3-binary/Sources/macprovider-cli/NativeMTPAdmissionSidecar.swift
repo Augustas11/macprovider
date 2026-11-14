@@ -517,13 +517,24 @@ enum NativeMTPAdmissionSidecar {
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
     static let deepseekDSparkFamilyAdapter = "deepseek_v4_dspark_v1"
-    static let embeddedMTPFamilyAdapters: Set<String> = [embeddedMTPFamilyAdapter, deepseekDSparkFamilyAdapter]
+    /// SPEC-048-R002 `gemma4_mtp_v1`: the Gemma 4 assistant ships inside the
+    /// target artifact (`model-mtp.safetensors`), so it is `checkpoint_mtp` too.
+    static let gemma4MTPFamilyAdapter = "gemma4_mtp_v1"
+    static let embeddedMTPFamilyAdapters: Set<String> = [
+        embeddedMTPFamilyAdapter, deepseekDSparkFamilyAdapter, gemma4MTPFamilyAdapter,
+    ]
 
     /// Implementation ceiling, not a qualification: an increased signed bound
     /// still needs exact parity and R015 qualification at that bound. Existing
-    /// GLM policy remains one; other families retain the generic 1...8 range.
+    /// GLM policy remains one; the Gemma 4 assistant runs one row per drafter
+    /// forward and is bounded to one native row; other families retain the
+    /// generic 1...8 range.
     static func maxNativeActiveRowsBound(familyAdapter: String) -> Int? {
-        familyAdapter == embeddedMTPFamilyAdapter ? 4 : nil
+        switch familyAdapter {
+        case embeddedMTPFamilyAdapter: 4
+        case gemma4MTPFamilyAdapter: 1
+        default: nil
+        }
     }
 
     /// DSpark is qualified for greedy requests only. GLM and Qwen preserve
@@ -533,8 +544,9 @@ enum NativeMTPAdmissionSidecar {
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
-    /// the adapter decides it. GLM and DeepSeek DSpark share their target
-    /// artifact; other adapters keep the separate-artifact layout.
+    /// the adapter decides it. GLM, DeepSeek DSpark and Gemma 4 ship their
+    /// MTP weights in the target artifact; other adapters keep the
+    /// separate-artifact layout.
     static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
         embeddedMTPFamilyAdapters.contains(familyAdapter) ? "checkpoint_mtp" : "separate_artifact"
     }
@@ -1604,9 +1616,12 @@ enum NativeMTPAdmissionSidecar {
         guard decreaseThreshold < increaseThreshold else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).increase_threshold_ppm")
         }
+        var quantizationFamilyAdapter: String?
+        if case .string(let adapter)? = object["mtp_family_adapter"] { quantizationFamilyAdapter = adapter }
         let quantization = try parseReleaseQuantization(
             try requireObject(object, "quantization", path: path),
-            path: "\(path).quantization"
+            path: "\(path).quantization",
+            familyAdapter: quantizationFamilyAdapter
         )
         if case .string(let adapter)? = object["mtp_family_adapter"], adapter == deepseekDSparkFamilyAdapter {
             guard try requireInt(object, "mtp_head_count", path: path, range: 1...16) == 3,
@@ -1678,7 +1693,8 @@ enum NativeMTPAdmissionSidecar {
 
     private static func parseReleaseQuantization(
         _ object: [String: NativeMTPSidecarJSON],
-        path: String
+        path: String,
+        familyAdapter: String? = nil
     ) throws -> Quantization {
         try rejectUnknown(object, allowed: [
             "kind", "packed_data_dtype", "packed_layout", "scale_dtype",
@@ -1737,9 +1753,13 @@ enum NativeMTPAdmissionSidecar {
                   paddingRule == "none" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
+            // SPEC-048-R002 (0.1.98): a `gemma4_mtp_v1` affine tuple is an
+            // 8-bit target with the unquantized bfloat16 assistant; the
+            // representation digest binds both.
+            let gemma4 = familyAdapter == gemma4MTPFamilyAdapter
             return Quantization(
-                target: "mlx_affine_4bit",
-                mtp: "mlx_affine_4bit",
+                target: gemma4 ? "mlx_affine_8bit" : "mlx_affine_4bit",
+                mtp: gemma4 ? "bf16" : "mlx_affine_4bit",
                 blockSizeElements: blockSize,
                 representationManifestSHA256: representationManifestSHA256,
                 unquantizedExceptions: unquantizedExceptions,

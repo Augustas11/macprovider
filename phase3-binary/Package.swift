@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.60 (#2328) on 3.32.3-macprovider.58: the
+        // Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision decode
+        // uses fused non-traditional RoPE when the three M-RoPE axes share
+        // one rope delta) and the Gemma 4 commits b2a45b0 (packed assistant
+        // drafter, embedded assistant loader, target hidden-state and
+        // shared-K/V emission) and e198b9b (Gemma 4 layers attend through a
+        // cache that owns attention, so batched rows attend only over their
+        // own keys), which the provider's gemma4_mtp_v1 adapter needs.
         // Tag 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
         // v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row
         // of a qualifying affine weight takes affine_qmv_mma1, a single-row
@@ -151,7 +159,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e"
+            revision: "a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
