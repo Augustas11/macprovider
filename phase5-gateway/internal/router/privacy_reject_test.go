@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -140,6 +141,74 @@ func TestRelayBlindGatewayRefusalIsNotPrivacyEvent(t *testing.T) {
 	}
 	if events := privacyRouteEvents(t, logs); len(events) != 0 {
 		t.Fatalf("relay-blind refusal logged as privacy: %v", events)
+	}
+}
+
+// SPEC-041-R007 (#2355): a reservation the coordinator refuses with the
+// retryable relay_blind_provider_unsupported 503 (for example a MiniMax model
+// with no declaring provider) reaches the buyer as retryable, with a
+// Retry-After and a new-reservation retry action. A permanent relay-blind
+// code stays non-retryable and keeps its do-not-reuse message.
+func TestRelayBlindProviderUnsupportedReachesBuyerAsRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		code       string
+		status     int
+		retryable  bool
+		retryAfter string
+		message    string
+	}{
+		{"relay_blind_provider_unsupported", http.StatusServiceUnavailable, true, "1", "Relay-blind transaction rejected; retry with a new reservation and envelope"},
+		{"relay_blind_replay", http.StatusConflict, false, "", "Relay-blind transaction rejected; do not reuse its envelope"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			res, _ := pilotReservationFixture(t, false)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				io.WriteString(w, `{"error":{"code":"`+tc.code+`","message":"upstream detail","retryable":`+strconv.FormatBool(tc.retryable)+`}}`)
+			}))
+			defer upstream.Close()
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+				enablePrivacy(c)
+				c.Coordinator.BuyerURL = upstream.URL
+			})
+			key := createAccountAndKey(t, store, cfg, "relay-blind-"+tc.code)
+			body := privacyReservationBody(t, relayblind.ReservationResponse{Model: res.Model, Stream: res.Stream, MaxOutputTokens: res.MaxOutputTokens, InputTokenUpperBound: res.InputTokenUpperBound})
+			resp := postPrivacy(h, key, "/v1/relay-blind/route-reservations", body, nil)
+			if resp.Code != tc.status {
+				t.Fatalf("status %d, want %d: %s", resp.Code, tc.status, resp.Body.String())
+			}
+			var got struct {
+				Error struct {
+					Code        string `json:"code"`
+					Message     string `json:"message"`
+					Retryable   bool   `json:"retryable"`
+					Macprovider *struct {
+						RetryAction string `json:"retry_action"`
+					} `json:"macprovider"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body %s: %v", resp.Body.String(), err)
+			}
+			if got.Error.Code != tc.code || got.Error.Retryable != tc.retryable || got.Error.Message != tc.message {
+				t.Fatalf("error %+v, want code %q retryable %v message %q", got.Error, tc.code, tc.retryable, tc.message)
+			}
+			if strings.Contains(resp.Body.String(), "upstream detail") {
+				t.Fatalf("upstream message leaked: %s", resp.Body.String())
+			}
+			if resp.Header().Get("Retry-After") != tc.retryAfter {
+				t.Fatalf("Retry-After %q, want %q", resp.Header().Get("Retry-After"), tc.retryAfter)
+			}
+			if got.Error.Macprovider != nil {
+				want := "do_not_resubmit"
+				if tc.retryable {
+					want = "new_reservation_and_envelope"
+				}
+				if got.Error.Macprovider.RetryAction != want {
+					t.Fatalf("retry_action %q, want %q", got.Error.Macprovider.RetryAction, want)
+				}
+			}
+		})
 	}
 }
 
