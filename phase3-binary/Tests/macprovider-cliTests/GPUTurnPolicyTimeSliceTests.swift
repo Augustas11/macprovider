@@ -4,7 +4,7 @@ import XCTest
 
 final class GPUTurnPolicyTimeSliceTests: XCTestCase {
     private let ms: UInt64 = 1_000_000
-    private let policy = TimeSliceGPUTurnPolicy(quantumMilliseconds: 100, maxWaitMilliseconds: 250)
+    private let policy = TimeSliceGPUTurnPolicy(quantumMilliseconds: 100)
 
     private func participant(_ id: Int, pendingWork: Int = 1, inTurn: Bool = false) -> GPUTurnParticipantState {
         var state = GPUTurnParticipantState(id: id, modelID: "m\(id)")
@@ -76,16 +76,17 @@ final class GPUTurnPolicyTimeSliceTests: XCTestCase {
         let request = GPUTurnRequest(participantID: 1, kind: .decodeStep(rows: 1), waitingSince: 110 * ms)
         var peer = participant(2)
         let busy = GPUTurnArbiterState(now: 120 * ms, participants: [participant(1), peer], lastTurnParticipantID: 2)
-        XCTAssertEqual(policy.decide(request, state: busy), .wait(maxNanoseconds: TimeSliceGPUTurnPolicy.pollNanoseconds))
+        // Sleeps to the slice boundary (200 ms), no 2 ms re-poll.
+        XCTAssertEqual(policy.decide(request, state: busy), .wait(maxNanoseconds: 80 * ms))
         peer.pendingWork = 0
         let idle = GPUTurnArbiterState(now: 121 * ms, participants: [participant(1), peer], lastTurnParticipantID: 2)
         XCTAssertEqual(policy.decide(request, state: idle), .proceed)
     }
 
-    func testStalledPeerDelaysWaiterAtMostMaxWait() {
-        // Long quantum so only max_wait can release the waiter; the peer wants a
-        // turn but never asks or runs.
-        let slow = TimeSliceGPUTurnPolicy(quantumMilliseconds: 10_000, maxWaitMilliseconds: 250)
+    func testStalledPeerDelaysWaiterAtMostTheStallBound() {
+        // Long quantum so only the arbiter's stall bound can release the
+        // waiter; the peer wants a turn but never asks or runs.
+        let slow = TimeSliceGPUTurnPolicy(quantumMilliseconds: 10_000, stallMilliseconds: 250)
         let start = 10_000 * ms // slice 1: participant 2's
         let request = GPUTurnRequest(participantID: 1, kind: .decodeStep(rows: 1), waitingSince: start)
         var waitedMilliseconds: UInt64 = 0
@@ -94,10 +95,18 @@ final class GPUTurnPolicyTimeSliceTests: XCTestCase {
                 now: start + waitedMilliseconds * ms,
                 participants: [participant(1), participant(2)],
                 lastTurnParticipantID: 2)
-            if slow.decide(request, state: state) == .proceed { break }
+            if GPUTurnArbiter.admit(request, state: state, policy: slow) != .wait(maxNanoseconds: (250 - waitedMilliseconds) * ms) { break }
             waitedMilliseconds += 1
         }
         XCTAssertEqual(waitedMilliseconds, 250)
+        // A peer holding a live turn in the waiter's own slice is waited for, not bypassed.
+        let mine = TimeSliceGPUTurnPolicy(quantumMilliseconds: 100)
+        var holder = participant(2, inTurn: true)
+        holder.turnStartedAt = 0
+        let ownSlice = GPUTurnArbiterState(now: 20 * ms, participants: [participant(1), holder], lastTurnParticipantID: 2)
+        let early = GPUTurnRequest(participantID: 1, kind: .decodeStep(rows: 1), waitingSince: 0)
+        XCTAssertEqual(mine.decide(early, state: GPUTurnArbiterState(now: 20 * ms, participants: [participant(1), participant(2)], lastTurnParticipantID: 2)), .proceed)
+        XCTAssertEqual(GPUTurnArbiter.admit(early, state: ownSlice, policy: mine), .wait(maxNanoseconds: 10_000 * ms - 20 * ms))
     }
 
     func testWaitsAreTimed() {
@@ -105,14 +114,16 @@ final class GPUTurnPolicyTimeSliceTests: XCTestCase {
         let state = GPUTurnArbiterState(now: 120 * ms, participants: [participant(1), participant(2, inTurn: true)], lastTurnParticipantID: 2)
         guard case .wait(let max) = policy.decide(request, state: state) else { return XCTFail("expected wait") }
         XCTAssertNotNil(max)
-        XCTAssertLessThanOrEqual(max ?? .max, 10 * ms)
+        XCTAssertLessThanOrEqual(max ?? .max, 100 * ms)
     }
 
     func testFactoryParametersAndRejection() throws {
-        let made = try GPUTurnPolicyRegistry.make("timeslice:quantum_ms=40,max_wait_ms=90")
+        let made = try GPUTurnPolicyRegistry.make("timeslice:quantum_ms=40,stall_ms=90")
         XCTAssertEqual(made.name, "timeslice")
-        XCTAssertEqual(made.parameters, ["quantum_ms": "40", "max_wait_ms": "90"])
-        XCTAssertEqual(try GPUTurnPolicyRegistry.make("timeslice").parameters, ["quantum_ms": "100", "max_wait_ms": "250"])
+        XCTAssertEqual(made.parameters, ["quantum_ms": "40", "stall_ms": "90"])
+        XCTAssertEqual(made.stallNanoseconds, 90 * ms)
+        XCTAssertEqual(try GPUTurnPolicyRegistry.make("timeslice").parameters, ["quantum_ms": "100", "stall_ms": "10000"])
+        XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("timeslice:max_wait_ms=250"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("timeslice:bogus=1"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("timeslice:quantum_ms=0"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("timeslice:quantum_ms=abc"))

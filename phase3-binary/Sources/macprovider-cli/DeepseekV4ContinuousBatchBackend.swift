@@ -126,8 +126,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             for input in inputs {
                 do {
                     // SPEC-001-R018: one GPU turn per row's reference prefill chunk.
-                    self.gpuTurnParticipant?.beginTurn(.prefillChunk(tokens: input.promptTokens.count))
-                    defer { self.gpuTurnParticipant?.endTurn() }
+                    let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.prefillChunk(tokens: input.promptTokens.count)) ?? false
+                    defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
                     guard (!input.nativeMTPPromptPrefill || self.nativeMTPDrafterContainer != nil),
                           !input.promptTokens.isEmpty,
                           input.promptTokens.count <= Self.prefillChunkTokens,
@@ -545,7 +545,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         guard !inputs.isEmpty else { return [:] }
         return try await container.perform(nonSendable: inputs) { context, inputs in
             // SPEC-001-R018: one GPU turn for this native-MTP round phase.
-            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let target = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }
@@ -640,7 +640,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         else { throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_invalid_verification_width") }
         return try await container.perform(nonSendable: inputs) { context, inputs in
             // SPEC-001-R018: one GPU turn for this native-MTP round phase.
-            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let model = context.model as? DeepseekV4Model, model.batchesExactly else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_exact_model_required")
             }
@@ -724,7 +724,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         guard !inputs.isEmpty else { return }
         try await container.perform(nonSendable: inputs) { context, inputs in
             // SPEC-001-R018: one GPU turn for this native-MTP round phase.
-            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let target = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }

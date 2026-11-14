@@ -64,16 +64,22 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
     func testFactoryParametersAndRejections() throws {
         let defaults = try policy()
         XCTAssertEqual(defaults.name, "alternate")
-        XCTAssertEqual(defaults.parameters, ["burst": "1", "max_wait_ms": "250"])
+        XCTAssertEqual(defaults.parameters, ["burst": "1", "stall_ms": "10000"])
         XCTAssertFalse(defaults.alwaysProceeds)
-        XCTAssertEqual(try policy("alternate:burst=3,max_wait_ms=40").parameters, ["burst": "3", "max_wait_ms": "40"])
+        XCTAssertEqual(try policy("alternate:burst=3,stall_ms=40").parameters, ["burst": "3", "stall_ms": "40"])
+        XCTAssertEqual(try policy("alternate:stall_ms=40").stallNanoseconds, 40_000_000)
+        // Round 1's escape is gone, not renamed.
+        XCTAssertThrowsError(try policy("alternate:max_wait_ms=40")) { error in
+            XCTAssertEqual(error as? GPUTurnPolicyError, .unknownParameters(policy: "alternate", names: ["max_wait_ms"]))
+        }
         XCTAssertThrowsError(try policy("alternate:ratio=1:2"))
         XCTAssertThrowsError(try policy("alternate:bogus=1")) { error in
             XCTAssertEqual(error as? GPUTurnPolicyError, .unknownParameters(policy: "alternate", names: ["bogus"]))
         }
         XCTAssertThrowsError(try policy("alternate:burst=0"))
         XCTAssertThrowsError(try policy("alternate:burst=x"))
-        XCTAssertThrowsError(try policy("alternate:max_wait_ms=-5"))
+        XCTAssertThrowsError(try policy("alternate:stall_ms=-5"))
+        XCTAssertThrowsError(try policy("alternate:stall_ms=0"))
     }
 
     func testLoneParticipantNeverWaits() throws {
@@ -93,19 +99,24 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
         let p = try policy()
         var ran = participant(1, pending: 1, turns: 3)
         ran.lastTurnBeganAt = 900
-        let peers = [ran, participant(2, pending: 1, turns: 2)]
-        XCTAssertTrue(isWait(decide(p, id: 1, last: 1, peers)))
-        XCTAssertEqual(decide(p, id: 2, last: 1, peers), .proceed)
+        // A waiting peer: wait for it (its turn's end wakes us).
+        let peers = [ran, participant(2, pending: 1, waitingSince: 900, turns: 2)]
+        XCTAssertEqual(decide(p, id: 1, last: 1, peers), .wait(maxNanoseconds: nil))
+        XCTAssertEqual(decide(p, id: 2, waitingSince: 900, last: 1, peers), .proceed)
         // Peer went idle: no wait.
         XCTAssertEqual(decide(p, id: 1, last: 1, [participant(1, pending: 1, turns: 3), participant(2, turns: 2)]), .proceed)
-        // Peer waiting (no pending interval) also counts as wanting.
-        XCTAssertTrue(isWait(decide(p, id: 1, last: 1, [participant(1, pending: 1, turns: 3), participant(2, waitingSince: 900, turns: 2)])))
+        // A peer inside a work interval that just ended a turn: wait out its grace only.
+        var between = participant(2, pending: 1, turns: 2)
+        between.lastTurnEndedAt = 990
+        XCTAssertEqual(decide(p, id: 1, waitingSince: 900, last: 1, [ran, between]), .wait(maxNanoseconds: AlternateGPUTurnPolicy.graceNanoseconds - 10))
+        // Its grace is over: it is not about to come, proceed.
+        XCTAssertEqual(decide(p, id: 1, waitingSince: 1_000, now: 1_000 + AlternateGPUTurnPolicy.graceNanoseconds, last: 1, [ran, between]), .proceed)
     }
 
     func testBurstTwoAllowsTwoTurnsThenYields() throws {
         let p = try policy("alternate:burst=2")
         func peers(_ mine: Int) -> [GPUTurnParticipantState] {
-            [participant(1, pending: 1, turns: mine), participant(2, pending: 1, turns: 4)]
+            [participant(1, pending: 1, turns: mine), participant(2, pending: 1, waitingSince: 900, turns: 4)]
         }
         XCTAssertEqual(decide(p, id: 1, last: 1, peers(3)), .proceed) // one of two taken
         XCTAssertTrue(isWait(decide(p, id: 1, last: 1, peers(4)))) // two taken
@@ -117,18 +128,20 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
         XCTAssertTrue(isWait(decide(p, id: 1, last: 2, busy)))
     }
 
-    func testWaitsAreTimedAndBoundedByMaxWait() throws {
-        let p = try policy("alternate:max_wait_ms=10")
+    func testWaitsAreBoundedByGraceNotPolling() throws {
+        let p = try policy()
+        // A peer with work open that has not asked yet: one grace from when we
+        // began waiting, then proceed; no 2 ms re-polls.
         let peers = [participant(1, pending: 1, turns: 1), participant(2, pending: 1)]
-        guard case .wait(let ns?) = decide(p, id: 1, waitingSince: 1_000, now: 1_000, last: 1, peers) else {
-            return XCTFail("expected a timed wait")
-        }
-        XCTAssertGreaterThan(ns, 0)
-        XCTAssertLessThanOrEqual(ns, 5_000_000)
-        // 9.999 ms in: the remaining wait is clipped to 1 us.
-        XCTAssertEqual(decide(p, id: 1, waitingSince: 1_000, now: 10_000_999, last: 1, peers), .wait(maxNanoseconds: 1))
-        // 10 ms in: proceed.
-        XCTAssertEqual(decide(p, id: 1, waitingSince: 1_000, now: 10_001_000, last: 1, peers), .proceed)
+        XCTAssertEqual(decide(p, id: 1, waitingSince: 1_000, now: 1_000, last: 1, peers),
+                       .wait(maxNanoseconds: AlternateGPUTurnPolicy.graceNanoseconds))
+        XCTAssertEqual(decide(p, id: 1, waitingSince: 1_000, now: 1_000 + AlternateGPUTurnPolicy.graceNanoseconds, last: 1, peers), .proceed)
+        // The arbiter's stall bound caps even a state-change-only wait.
+        let state = GPUTurnArbiterState(
+            now: 1_000 + 40_000_000, participants: [participant(1, pending: 1, waitingSince: 1_000, turns: 1), participant(2, pending: 1, waitingSince: 500)],
+            lastTurnParticipantID: 1)
+        let short = try policy("alternate:stall_ms=40")
+        XCTAssertEqual(GPUTurnArbiter.admit(GPUTurnRequest(participantID: 1, kind: .decodeStep(rows: 1), waitingSince: 1_000), state: state, policy: short), .proceedStalled)
     }
 
     func testThreeParticipantsRotateByLongestWaiter() throws {
@@ -175,13 +188,13 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
         }
     }
 
-    func testWaiterIsReleasedWhenThePeerGoesIdleMidWait() {
-        let arbiter = GPUTurnArbiter(policy: try! policy("alternate:max_wait_ms=5000"))
+    func testWaiterIsReleasedWhenThePeerEndsItsTurn() {
+        let arbiter = GPUTurnArbiter(policy: try! policy("alternate:stall_ms=5000"))
         let a = arbiter.register(modelID: "a")
         let b = arbiter.register(modelID: "b")
         b.beginWork()
-        a.withTurn(.decodeStep(rows: 1)) {}
-        let released = expectation(description: "A second turn")
+        b.beginTurn(.decodeStep(rows: 1)) // B holds a live turn.
+        let released = expectation(description: "A's turn")
         Thread.detachNewThread {
             a.withTurn(.decodeStep(rows: 1)) {}
             released.fulfill()
@@ -191,14 +204,18 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.002)
         }
         XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.isWaiting, true)
-        let idleAt = Date()
+        let endedAt = Date()
+        b.endTurn()
         b.endWork()
         wait(for: [released], timeout: 2)
-        XCTAssertLessThan(Date().timeIntervalSince(idleAt), 1)
+        XCTAssertLessThan(Date().timeIntervalSince(endedAt), 1)
+        XCTAssertEqual(arbiter.snapshot().participants.first { $0.id == a.id }?.stallOverrides, 0)
     }
 
-    func testStalledPeerDelaysWaiterByAtMostMaxWait() {
-        let arbiter = GPUTurnArbiter(policy: try! policy("alternate:max_wait_ms=60"))
+    /// A peer with work open that never asks for a turn costs one grace, not
+    /// a stall bound and not round 1's 250 ms.
+    func testIdlePeerInsideWorkDelaysTheWaiterAtMostOneGrace() {
+        let arbiter = GPUTurnArbiter(policy: try! policy())
         let a = arbiter.register(modelID: "a")
         let b = arbiter.register(modelID: "b")
         b.beginWork() // pending work, never asks for a turn
@@ -206,11 +223,11 @@ final class GPUTurnPolicyAlternateTests: XCTestCase {
         let started = Date()
         a.withTurn(.decodeStep(rows: 1)) {}
         let elapsed = Date().timeIntervalSince(started)
-        XCTAssertGreaterThanOrEqual(elapsed, 0.055)
-        XCTAssertLessThan(elapsed, 0.5)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.025)
+        XCTAssertLessThan(elapsed, 0.2)
         let stats = arbiter.snapshot().participants.first { $0.id == a.id }!
         XCTAssertEqual(stats.turns, 2)
         XCTAssertEqual(stats.waitedTurns, 1)
-        XCTAssertLessThan(stats.maxWaitSeconds, 0.5)
+        XCTAssertEqual(stats.stallOverrides, 0)
     }
 }

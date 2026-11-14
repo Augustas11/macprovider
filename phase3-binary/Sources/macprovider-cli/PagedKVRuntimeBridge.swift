@@ -1594,7 +1594,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             try await container.perform { context in
                 self.enterTargetLock(); defer { self.exitTargetLock() }
                 // SPEC-001-R018: the drafter catch-up forward is one GPU turn.
-                self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: pendingIDs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+                let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: pendingIDs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
                 try await self.flushNativeMTPDrafterColumns(
                     targetModel: context.model,
                     requestIDs: pendingIDs,
@@ -1692,7 +1692,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
             // SPEC-001-R018: one GPU turn per packed verify round.
-            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
@@ -1801,7 +1801,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
             // SPEC-001-R018: one GPU turn for the round's commit forward.
-            self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)); defer { self.gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
                 // Proposal never mutates drafter state, so an aborted round
                 // only drops its staged target transactions.
@@ -3446,8 +3446,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard !dueIDs.isEmpty else { return (inputs, []) }
         do {
             // SPEC-001-R018: the catch-up before a decode window is its own GPU turn.
-            gpuTurnParticipant?.beginTurn(.decodeStep(rows: dueIDs.count))
-            defer { gpuTurnParticipant?.endTurn() }
+            let gpuTurnHeld = gpuTurnParticipant?.beginTurn(.decodeStep(rows: dueIDs.count)) ?? false
+            defer { if gpuTurnHeld { gpuTurnParticipant?.endTurn() } }
             try await flushNativeMTPDrafterColumns(
                 targetModel: targetModel,
                 requestIDs: dueIDs,

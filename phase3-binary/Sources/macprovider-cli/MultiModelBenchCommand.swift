@@ -60,13 +60,22 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("load-order"), help: "Load order: a,b or b,a. Default a,b.")
     var loadOrder: String = "a,b"
 
-    @Option(name: .customLong("watchdog-seconds"), help: "Seconds without a chunk during a phase before the run is declared hung (exit 3). Default 120.")
+    @Option(name: .customLong("watchdog-seconds"), help: "Seconds without a chunk during a phase before the run is declared hung (exit 3). With --check, per model: each model with a request in flight must produce a chunk within this time. Default 120.")
     var watchdogSeconds: Double = 120
 
     @Option(help: "JSON output path. Partial results are written here after every phase and on a hang.")
     var out: String?
 
-    @Flag(help: "Swarm check mode (#2338): fixed-duration solo-a, solo-b, contended and optional soak phases; prints GATE and GOAL lines. See MultiModelBenchCheck.swift.")
+    @Flag(help: """
+        Swarm check mode (#2338): fixed-duration solo-a, solo-b, then per GPU turn policy a contended and optional soak phase; \
+        prints POLICY, SOAK, GATE and GOAL lines. GOAL share = sum of contended decode tok/s over sum of solo decode tok/s \
+        (decode tokens only). GOAL work_share credits prefill too: for each model, solo-equivalent seconds = \
+        decode_tokens/solo_decode_rate + prefill_tokens/solo_prefill_rate, where in the solo phase prefill time is the \
+        part of the interval with a prompt prefilling (request start to first chunk), decode time the rest, \
+        solo_prefill_rate = solo prefilled prompt tokens / prefill time and solo_decode_rate = solo decode tokens / decode time \
+        (so a solo phase scores exactly 1.0 against itself). work_share = (solo-equivalent seconds of A + of B) / interval \
+        seconds: 1.0 means no loss from sharing one GPU, 2.0 perfect parallelism. See MultiModelBenchCheck.swift.
+        """)
     var check = false
 
     @Option(name: .customLong("rows-a"), help: "--check: concurrent lanes on model A. Default 1.")
@@ -84,8 +93,14 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("phase-seconds"), help: "--check: duration of solo-a, solo-b and contended. Must exceed the 10 s ramp. Default 60.")
     var phaseSeconds: Double = 60
 
-    @Option(name: .customLong("soak-seconds"), help: "--check: contended soak after the contended phase; 0 skips it. Default 0.")
+    @Option(name: .customLong("soak-seconds"), help: "--check: contended soak after each policy's contended phase, printed as a SOAK line; when it runs, GOAL uses the soak numbers. 0 skips it. Default 0.")
     var soakSeconds: Double = 0
+
+    @Option(name: .customLong("prompt-tokens-a"), help: "--check: approximate prompt length for model A. Default --prompt-tokens.")
+    var promptTokensA: Int?
+
+    @Option(name: .customLong("prompt-tokens-b"), help: "--check: approximate prompt length for model B. Default --prompt-tokens.")
+    var promptTokensB: Int?
 
     @Option(name: .customLong("cb-a"), help: "--check: continuous-batching mode for model A, explicitly configured as `serve --continuous-batching` does: off, canary or on. Default on.")
     var cbA: String = ContinuousBatchingMode.on.rawValue
@@ -105,7 +120,7 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in passthrough. Recorded in the check JSON.")
     var gpuTurnPolicy: String?
 
-    @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase (--soak-seconds applies to the last). Prints one POLICY line per policy; the final GATE/GOAL lines are the last policy's.")
+    @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase and, with --soak-seconds, its own soak. Prints one POLICY (and SOAK) line per policy; the final GATE/GOAL lines are the last policy's.")
     var gpuTurnPolicies: String?
 
     /// `--gpu-turn-policies` split into trimmed, validated specs.
@@ -150,6 +165,11 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
             guard soakSeconds == 0 || soakSeconds > MultiModelCheck.rampSeconds else {
                 throw ValidationError("--soak-seconds must be 0 or exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
             }
+        }
+        for (flag, value) in [("--prompt-tokens-a", promptTokensA), ("--prompt-tokens-b", promptTokensB)] {
+            guard let value else { continue }
+            guard check else { throw ValidationError("\(flag) requires --check") }
+            guard value > 0 else { throw ValidationError("\(flag) must be > 0") }
         }
         guard maxTokens > 0 else { throw ValidationError("--max-tokens must be > 0") }
         guard promptTokens > 0 else { throw ValidationError("--prompt-tokens must be > 0") }
@@ -650,12 +670,25 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
     private var stopped = false
     private var thread: Thread?
     /// Check mode owns its report; on a hang the monitor calls this with
-    /// (phase, seconds since last chunk, phase footprint max) and exits 3.
-    private let hangHandler: (@Sendable (String, Double, UInt64) -> Void)?
+    /// (phase, stalled model or nil, seconds since its last chunk, phase
+    /// footprint max) and exits 3.
+    private let hangHandler: (@Sendable (String, String?, Double, UInt64) -> Void)?
+    /// Check mode: per-model liveness. Called with a limit in seconds, returns
+    /// the model with a request in flight that has gone longest without a
+    /// chunk, when that is at least the limit. Replaces the one global
+    /// last-chunk timer, so one streaming model cannot mask a stalled sibling.
+    private let stallProbe: (@Sendable (Double) -> MultiModelBenchStall?)?
+    private var warnedStallModel: String?
 
-    init(outPath: String?, watchdogSeconds: Double, hangHandler: (@Sendable (String, Double, UInt64) -> Void)? = nil) {
+    init(
+        outPath: String?,
+        watchdogSeconds: Double,
+        stallProbe: (@Sendable (Double) -> MultiModelBenchStall?)? = nil,
+        hangHandler: (@Sendable (String, String?, Double, UInt64) -> Void)? = nil
+    ) {
         self.outPath = outPath
         self.watchdogSeconds = watchdogSeconds
+        self.stallProbe = stallProbe
         self.hangHandler = hangHandler
     }
 
@@ -710,12 +743,37 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
         while true {
             Thread.sleep(forTimeInterval: 0.25)
             let footprint = Self.physFootprintBytes()
+            // The probe takes the report box's lock; call it outside ours.
+            let stall = stallProbe?(watchdogSeconds)
+            let nearStall = stall == nil ? stallProbe?(watchdogSeconds / 2) : nil
             lock.lock()
             if stopped {
                 lock.unlock()
                 return
             }
             if activePhase != nil, let footprint { phaseFootprintMax = max(phaseFootprintMax, footprint) }
+            if stallProbe != nil {
+                guard let phase = activePhase else {
+                    lock.unlock()
+                    continue
+                }
+                if let nearStall, warnedStallModel != nearStall.model {
+                    warnedStallModel = nearStall.model
+                    FileHandle.standardError.write(Data("multi-model-bench: WATCHDOG warn phase=\(phase) model=\(nearStall.model) seconds_since_last_chunk=\(Int(nearStall.idleSeconds)) pid=\(getpid())\n".utf8))
+                } else if nearStall == nil, stall == nil {
+                    warnedStallModel = nil
+                }
+                guard let stall else {
+                    lock.unlock()
+                    continue
+                }
+                let footprintMax = phaseFootprintMax
+                lock.unlock()
+                hangHandler?(phase, stall.model, stall.idleSeconds, footprintMax)
+                FileHandle.standardError.write(Data("multi-model-bench: HANG phase=\(phase) model=\(stall.model) seconds_since_last_chunk=\(Int(stall.idleSeconds)); exiting 3\n".utf8))
+                // _exit: see below.
+                _exit(3)
+            }
             let idle = Date().timeIntervalSince(lastChunkAt)
             // Half-way warning, once per stall, so an operator or script can
             // `sample` the process before the watchdog exits it.
@@ -730,7 +788,7 @@ final class MultiModelBenchMonitor: @unchecked Sendable {
             let footprintMax = phaseFootprintMax
             if let hangHandler {
                 lock.unlock()
-                hangHandler(phase, idle, footprintMax)
+                hangHandler(phase, nil, idle, footprintMax)
                 // _exit: exit() runs C++ static destructors under the MLX
                 // threads still encoding, which segfaulted (rc 139) in the smoke.
                 _exit(3)
@@ -963,5 +1021,13 @@ struct MultiModelBenchParity: Encodable, Sendable {
 struct MultiModelBenchHang: Encodable, Sendable {
     let phase: String
     let secondsSinceLastChunk: Double
+    /// Check mode: the model whose in-flight request stopped producing chunks.
+    var model: String? = nil
+}
+
+/// A model with a request in flight and no chunk for `idleSeconds`.
+struct MultiModelBenchStall: Sendable, Equatable {
+    let model: String
+    let idleSeconds: Double
 }
 #endif

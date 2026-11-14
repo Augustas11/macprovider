@@ -8,8 +8,21 @@ import Foundation
 // owed only after the others had `(1 - prefill_share) / prefill_share` of its
 // last chunk, so each chunk is repaid with their decode time before the next.
 // The most overdue owed waiter goes next; with nobody owed, the participant in
-// the middle of its run keeps the GPU. Turns are exclusive: nobody starts while
-// another participant holds a turn, so busy time is GPU time.
+// the middle of its run keeps the GPU.
+//
+// Exclusivity is the arbiter's: this policy is asked only while nobody holds a
+// turn, and nobody starts beside a turn shorter than `stall_ms`. There is no
+// "waited long enough" escape; a waiter goes past the rule only when the peer
+// is stalled (the arbiter's stall bound). Busy time is therefore GPU time, and
+// a turn includes the drain of the work it queued (the arbiter's), so a
+// pipelined serial loop pays for its own queued step.
+//
+// While another participant is active, the arbiter sizes this participant's
+// prefill chunks to about `prefill_chunk_ms` of GPU time (measured rate, at
+// least `prefill_min_tokens`), so a decoding sibling waits about one step per
+// chunk instead of a whole 1.2 s chunk. `prefill_chunk_ms=0` keeps full-size
+// chunks; the repayment rule then still holds the prefill share, because a
+// prefill quantum is no longer capped at `window_ms`.
 //
 // The arbiter state has no busy counter for a sliding window and no start time
 // of a participant's work interval or prefill run, so a true windowed deficit
@@ -20,30 +33,28 @@ import Foundation
 // contends, so an idle participant banks nothing, and the clamp bounds what an
 // old contention can still tilt. A last turn older than `window_ms` counts as
 // no turn, so a participant back from idle is not held back for old usage.
-// Every wait is timed and a waiter proceeds after `max_wait_ms` in total.
 
 struct FairShareGPUTurnPolicy: GPUTurnPolicy {
     static let name = "fairshare"
     static let defaultWindowMilliseconds: UInt64 = 500
     static let defaultToleranceMilliseconds: UInt64 = 30
     static let defaultPrefillShare = 0.5
-    static let defaultMaxWaitMilliseconds: UInt64 = 250
+    static let defaultStallMilliseconds = GPUTurnPolicyDefaults.stallMilliseconds
+    static let defaultPrefillTargetMilliseconds = GPUTurnPolicyDefaults.prefillChunkTargetMilliseconds
+    static let defaultPrefillMinimumTokens = GPUTurnPolicyDefaults.prefillChunkMinimumTokens
 
     static let factory = GPUTurnPolicyFactory(
         name: name,
-        summary: "Equal GPU busy time per contender, prefill chunks repaid with decode time (window_ms=500, tolerance_ms=30, prefill_share=0.5, max_wait_ms=250)."
+        summary: "Equal GPU busy time per contender with exclusive turns; prefill chunks sized to a target while a sibling is active and repaid with decode time (window_ms=500, tolerance_ms=30, prefill_share=0.5, stall_ms=10000, prefill_chunk_ms=150 [0 = full chunks], prefill_min_tokens=256)."
     ) { parameters in
         var rest = parameters
-        func milliseconds(_ key: String, default fallback: UInt64) throws -> UInt64 {
-            guard let raw = rest.removeValue(forKey: key) else { return fallback }
-            guard let value = UInt64(raw), value > 0, value <= 60_000 else {
-                throw GPUTurnPolicyError.invalidParameter(policy: name, name: key, value: raw)
-            }
-            return value
-        }
-        let window = try milliseconds("window_ms", default: defaultWindowMilliseconds)
-        let tolerance = try milliseconds("tolerance_ms", default: defaultToleranceMilliseconds)
-        let maxWait = try milliseconds("max_wait_ms", default: defaultMaxWaitMilliseconds)
+        let window = try GPUTurnPolicyParameters.milliseconds(&rest, "window_ms", policy: name, default: defaultWindowMilliseconds)
+        let tolerance = try GPUTurnPolicyParameters.milliseconds(&rest, "tolerance_ms", policy: name, default: defaultToleranceMilliseconds)
+        let stall = try GPUTurnPolicyParameters.milliseconds(&rest, "stall_ms", policy: name, default: defaultStallMilliseconds)
+        let target = try GPUTurnPolicyParameters.milliseconds(
+            &rest, "prefill_chunk_ms", policy: name, default: defaultPrefillTargetMilliseconds, minimum: 0)
+        let minimumTokens = try GPUTurnPolicyParameters.integer(
+            &rest, "prefill_min_tokens", policy: name, default: defaultPrefillMinimumTokens, maximum: 1 << 20)
         var share = defaultPrefillShare
         if let raw = rest.removeValue(forKey: "prefill_share") {
             guard let value = Double(raw), value.isFinite, value > 0, value <= 1 else {
@@ -55,25 +66,31 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
             throw GPUTurnPolicyError.unknownParameters(policy: name, names: rest.keys.sorted())
         }
         return FairShareGPUTurnPolicy(
-            windowMilliseconds: window, toleranceMilliseconds: tolerance,
-            prefillShare: share, maxWaitMilliseconds: maxWait)
+            windowMilliseconds: window, toleranceMilliseconds: tolerance, prefillShare: share,
+            stallMilliseconds: stall, prefillTargetMilliseconds: target, prefillMinimumTokens: minimumTokens)
     }
 
     let windowMilliseconds: UInt64
     let toleranceMilliseconds: UInt64
     let prefillShare: Double
-    let maxWaitMilliseconds: UInt64
+    let stallMilliseconds: UInt64
+    let prefillTargetMilliseconds: UInt64
+    let prefillMinimumTokens: Int
 
     init(
         windowMilliseconds: UInt64 = defaultWindowMilliseconds,
         toleranceMilliseconds: UInt64 = defaultToleranceMilliseconds,
         prefillShare: Double = defaultPrefillShare,
-        maxWaitMilliseconds: UInt64 = defaultMaxWaitMilliseconds
+        stallMilliseconds: UInt64 = defaultStallMilliseconds,
+        prefillTargetMilliseconds: UInt64 = defaultPrefillTargetMilliseconds,
+        prefillMinimumTokens: Int = defaultPrefillMinimumTokens
     ) {
         self.windowMilliseconds = windowMilliseconds
         self.toleranceMilliseconds = toleranceMilliseconds
         self.prefillShare = prefillShare
-        self.maxWaitMilliseconds = maxWaitMilliseconds
+        self.stallMilliseconds = stallMilliseconds
+        self.prefillTargetMilliseconds = prefillTargetMilliseconds
+        self.prefillMinimumTokens = prefillMinimumTokens
     }
 
     var name: String { Self.name }
@@ -82,22 +99,30 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
             "window_ms": String(windowMilliseconds),
             "tolerance_ms": String(toleranceMilliseconds),
             "prefill_share": String(prefillShare),
-            "max_wait_ms": String(maxWaitMilliseconds),
+            "stall_ms": String(stallMilliseconds),
+            "prefill_chunk_ms": String(prefillTargetMilliseconds),
+            "prefill_min_tokens": String(prefillMinimumTokens),
         ]
     }
+    var stallNanoseconds: UInt64 { stallMilliseconds &* 1_000_000 }
+    var prefillChunkTargetNanoseconds: UInt64? {
+        prefillTargetMilliseconds == 0 ? nil : prefillTargetMilliseconds &* 1_000_000
+    }
+    var prefillChunkMinimumTokens: Int { prefillMinimumTokens }
 
     private var window: Double { Double(windowMilliseconds) * 1e6 }
     private var tolerance: Double { Double(toleranceMilliseconds) * 1e6 }
+    private var toleranceNanoseconds: UInt64 { toleranceMilliseconds &* 1_000_000 }
+    /// Longest prefill quantum (and repayment) the rule honours: half a stall
+    /// bound, so repayment alone never reaches the stall escape.
+    private var prefillCap: Double { Double(stallNanoseconds) / 2 }
 
     func decide(_ request: GPUTurnRequest, state: GPUTurnArbiterState) -> GPUTurnDecision {
         let contenders = state.others(than: request.participantID).filter { $0.wantsTurn || $0.inTurn }
         if contenders.isEmpty { return .proceed }
-        let waited = state.now &- request.waitingSince
-        let maxWait = maxWaitMilliseconds &* 1_000_000
-        if waited >= maxWait { return .proceed }
-        // Re-ask at least every tolerance: owed-ness grows with time alone.
-        let poll = min(maxWait - waited, toleranceMilliseconds &* 1_000_000)
-        if contenders.contains(where: \.inTurn) { return .wait(maxNanoseconds: poll) }
+        // The arbiter never asks while a live turn is held; a stalled holder is
+        // its call too. Wait for the turn to end.
+        if contenders.contains(where: \.inTurn) { return .wait(maxNanoseconds: nil) }
 
         var me = state.participant(request.participantID)
             ?? GPUTurnParticipantState(id: request.participantID, modelID: "")
@@ -106,24 +131,39 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
             me.waitingKind = request.kind
         }
         let mine = claim(me, state: state)
+        // Owed-ness grows with time alone: re-ask exactly when this caller
+        // becomes owed (not earlier), or at a state change.
+        let untilOwed: UInt64? = mine.owed || !mine.repaying ? nil : UInt64(max(-mine.overdue, 1))
 
         for other in contenders where other.isWaiting {
             let theirs = claim(other, state: state)
             guard theirs.owed else { continue }
             if !mine.owed || outranks(other, theirs.overdue, me, mine.overdue) {
-                return .wait(maxNanoseconds: poll)
+                // The other goes; its turn's end wakes this caller.
+                return .wait(maxNanoseconds: untilOwed.map { min($0, toleranceNanoseconds) } ?? toleranceNanoseconds)
             }
         }
         guard !mine.owed else { return .proceed }
 
-        // Nobody is owed: the participant in the middle of its run keeps the GPU.
+        // Nobody is owed. A prefill run never keeps the GPU by recency against
+        // a waiting decoder: its next chunk goes only once owed (repaid), so
+        // chunks cannot chain past the repayment.
+        let iAmRepayingPrefill = repaysPrefill(me, state: state)
+        if iAmRepayingPrefill, contenders.contains(where: { $0.isWaiting && isDecoding($0) }) {
+            return .wait(maxNanoseconds: untilOwed)
+        }
+
+        // Otherwise the participant in the middle of its run keeps the GPU.
         for other in contenders {
+            // A waiting prefill run that must first be repaid does not hold back a decoder.
+            if other.isWaiting, isDecoding(me), repaysPrefill(other, state: state) { continue }
             if !other.isWaiting {
                 // Between two turns of its run: give it up to one tolerance to come back.
                 if let ended = other.lastTurnEndedAt, state.now >= ended {
                     let age = state.now - ended
                     if Double(age) < tolerance {
-                        return .wait(maxNanoseconds: min(poll, toleranceMilliseconds &* 1_000_000 - age))
+                        let comeBack = toleranceNanoseconds - age
+                        return .wait(maxNanoseconds: untilOwed.map { min($0, comeBack) } ?? comeBack)
                     }
                 }
                 continue
@@ -132,33 +172,33 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
             let recencyMe = me.lastTurnBeganAt ?? 0
             if recencyOther > recencyMe
                 || (recencyOther == recencyMe && outranks(other, 0, me, 0)) {
-                return .wait(maxNanoseconds: poll)
+                return .wait(maxNanoseconds: untilOwed)
             }
         }
         return .proceed
     }
 
     /// Whether a waiting participant is owed a turn, and by how much (ns).
-    private func claim(_ waiter: GPUTurnParticipantState, state: GPUTurnArbiterState) -> (owed: Bool, overdue: Double) {
-        guard let since = waiter.waitingSince else { return (false, 0) }
+    /// `repaying` is false when nobody else finished a turn since it began
+    /// waiting: then only a state change (another turn's end) can make it owed.
+    private func claim(_ waiter: GPUTurnParticipantState, state: GPUTurnArbiterState) -> (owed: Bool, overdue: Double, repaying: Bool) {
+        guard let since = waiter.waitingSince else { return (false, 0, false) }
         let others = state.others(than: waiter.id)
         // Nobody else has finished a turn since it began waiting: nothing to repay.
         guard others.contains(where: { ($0.lastTurnEndedAt ?? 0) >= since && $0.lastTurnEndedAt != nil }) else {
-            return (false, 0)
+            return (false, 0, false)
         }
         let served = Double(state.now &- since)
         let ownQuantum = quantum(waiter, reference: since)
         let otherContenders = others.filter { $0.wantsTurn || $0.inTurn }
         var threshold: Double
         var repayingPrefill = false
-        if case .prefillChunk = waiter.waitingKind, case .prefillChunk = waiter.lastTurnKind,
-           otherContenders.contains(where: isDecoding) {
-            threshold = ownQuantum * (1 - prefillShare) / prefillShare
+        if repaysPrefill(waiter, state: state) {
+            threshold = min(ownQuantum * (1 - prefillShare) / prefillShare, prefillCap)
             repayingPrefill = true
         } else {
-            threshold = Double(max(otherContenders.count, 1)) * ownQuantum
+            threshold = min(Double(max(otherContenders.count, 1)) * ownQuantum, max(window, ownQuantum))
         }
-        threshold = min(threshold, window)
         // The runner whose next step is in question: the latest to begin a turn.
         let runner = others.filter { $0.lastTurnBeganAt != nil }.max { ($0.lastTurnBeganAt ?? 0) < ($1.lastTurnBeganAt ?? 0) }
         var halfStep = 0.0
@@ -171,22 +211,32 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
             carry = min(max(lead, -cap), cap)
         }
         let overdue = served + halfStep - (threshold - carry)
-        return (overdue > 0, overdue)
+        return (overdue > 0, overdue, true)
     }
 
     /// The participant's last turn in ns; 0 when it never had one or it ended
-    /// more than a window before `reference`.
+    /// more than a window before `reference`. A decode quantum is capped at the
+    /// window; a prefill quantum at half the stall bound, so a whole 1.2 s
+    /// chunk is repaid, not just one window of it.
     private func quantum(_ participant: GPUTurnParticipantState, reference: UInt64) -> Double {
         guard let began = participant.lastTurnBeganAt, let ended = participant.lastTurnEndedAt, ended >= began else {
             return 0
         }
         if reference > ended, Double(reference - ended) > window { return 0 }
-        return min(Double(ended - began), window)
+        let cap = participant.lastTurnKind?.prefillTokens != nil ? prefillCap : window
+        return min(Double(ended - began), cap)
     }
 
     private func waitTotal(_ participant: GPUTurnParticipantState, now: UInt64) -> Double {
         let current = participant.waitingSince.map { now &- $0 } ?? 0
         return Double(participant.counters.waitNanoseconds) + Double(current)
+    }
+
+    /// A waiter in the middle of a prefill run (asks for a chunk after a
+    /// chunk) while another contender decodes: its chunks are repaid.
+    private func repaysPrefill(_ waiter: GPUTurnParticipantState, state: GPUTurnArbiterState) -> Bool {
+        guard waiter.waitingKind?.prefillTokens != nil, waiter.lastTurnKind?.prefillTokens != nil else { return false }
+        return state.participants.contains { $0.id != waiter.id && ($0.wantsTurn || $0.inTurn) && isDecoding($0) }
     }
 
     private func isDecoding(_ participant: GPUTurnParticipantState) -> Bool {

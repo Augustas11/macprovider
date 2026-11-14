@@ -4369,7 +4369,8 @@ maxTokens: 1,
         let loadedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory)
         await SharedModelMemoryBudget.shared.registerLoaded(
             memberID: self.gpuTurnParticipant.id, label: modelID, modelFamily: modelCapabilities.modelFamily,
-            kvBytesPerToken: loadedKVBytesPerToken)
+            kvBytesPerToken: loadedKVBytesPerToken,
+            weightBytes: await SharedModelMemoryRules.weightBytes(of: container))
         MLXMemoryLimit.apply(stage: "model_loaded", kvBytesPerToken: loadedKVBytesPerToken)
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
@@ -7669,12 +7670,13 @@ maxTokens: 1,
         currentContainer = container
         // SPEC-001-R017: the shared budget re-derives the wired limit for the
         // swapped-in weights; a fixture swap (no container) holds none.
-        if container != nil {
+        if let container {
             let swappedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(
                 modelDirectory: try? Self.localModelDirectory(for: modelID))
             await SharedModelMemoryBudget.shared.registerLoaded(
                 memberID: memoryBudgetMemberID, label: modelID, modelFamily: modelCapabilities.modelFamily,
-                kvBytesPerToken: swappedKVBytesPerToken)
+                kvBytesPerToken: swappedKVBytesPerToken,
+                weightBytes: await SharedModelMemoryRules.weightBytes(of: container))
             MLXMemoryLimit.apply(stage: "model_swapped", kvBytesPerToken: swappedKVBytesPerToken)
         } else {
             await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
@@ -10699,6 +10701,7 @@ maxTokens: boundedMaxTokens,
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
         configureConversationCacheMemoryBudget()
+        let memoryBudgetMemberID = memoryBudgetMemberID
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
             configured: serialKVBits,
@@ -10773,6 +10776,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-001-R017: the serial row's worst-case KV is charged to the
+                    // shared budget for the row's lifetime and released on every exit.
+                    let serialKVCharge = SharedModelMemoryBudget.shared.chargeSerialRow(
+                        memberID: memoryBudgetMemberID,
+                        tokens: SharedModelMemoryRules.serialRowTokens(
+                            promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
+                            maxContextTokens: maxContextTokens))
+                    defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
                     if Self.speculativeRoute(
                         for: request,
                         draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
@@ -10919,7 +10930,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 // both request origins so a cache hit preserves forward shapes.
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
-                                    tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                    // SPEC-001-R018: beside an active sibling a keyless prompt takes the
+                                    // arbiter's short chunk; a reference plan below ignores it.
+                                    tokenCount: promptTokenIds.count, from: start,
+                                    stepSize: lease == nil ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize,
                                     referenceStepSize: lfmReferenceStep
                                         ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                         ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
@@ -10944,11 +10958,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                     cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            // SPEC-001-R018: beside an active sibling a keyless text prompt on a
+                            // model with no fixed prefill plan takes the arbiter's short chunk;
+                            // alone or under passthrough the hint is the full step (unchanged).
+                            let iteratorPrefillStep = lease == nil && lfmReferenceStep == nil
+                                && !(generationContext.model is DeepseekV4Model) && !request.containsNonTextMessageContentPart
+                                ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize
+                            if iteratorPrefillStep != prefillStepSize { generation.parameters.prefill.stepSize = iteratorPrefillStep }
                             // SPEC-001-R018: the iterator's own prefill yields the turn after
                             // every chunk it queues; its final forward and the first decode
                             // step run in the turn taken here.
-                            generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
-                            gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
+                            generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
+                            gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
@@ -10999,11 +11020,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 // One turn per token step: `next()` builds and queues step N+1 and
                                 // reads step N; the callback (detokenize, stream) runs outside it.
+                                // Under a sharing policy the turn's end realises step N+1, so the
+                                // step is charged here, not to the sibling's next turn. A cancelled
+                                // request leaves a turn wait at once (this thread has no task).
+                                gpuTurn.isCancelled = { inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 gpuTurn.begin(.decodeStep(rows: 1))
                                 defer { gpuTurn.end() }
                                 return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     gpuTurn.end()
-                                    let disposition: GenerateDisposition = {
+                                    var disposition: GenerateDisposition = {
                                         if !tokens.isEmpty {
                                             timeline.markFirstToken()
                                             ModelLivenessTracker.shared.recordProgress()
@@ -11065,8 +11090,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         }
                                         return GenerateDisposition.more
                                     }()
+                                    // A turn wait left on cancellation holds no turn: stop like a cancel.
+                                    if disposition == .more, !gpuTurn.begin(.decodeStep(rows: 1)) { disposition = .stop }
                                     stoppedByDecodeCallback = disposition == .stop
-                                    if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
                                     return disposition
                                 })
                             }
@@ -11713,6 +11739,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         configureConversationCacheMemoryBudget()
+        let memoryBudgetMemberID = memoryBudgetMemberID
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
             configured: serialKVBits,
@@ -11795,6 +11822,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-001-R017: the serial row's worst-case KV is charged to the
+                    // shared budget for the row's lifetime and released on every exit.
+                    let serialKVCharge = SharedModelMemoryBudget.shared.chargeSerialRow(
+                        memberID: memoryBudgetMemberID,
+                        tokens: SharedModelMemoryRules.serialRowTokens(
+                            promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
+                            maxContextTokens: maxContextTokens))
+                    defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
                     // Autotune throughput probe: measure warm-decode
                     // wall-time on the provider so the client can derive an
                     // honest decode rate even for reasoning models whose
@@ -12005,7 +12040,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // both request origins so a cache hit preserves forward shapes.
                             let start = promptTokenIds.count - iteratorInput.text.tokens.size
                             let resumeAt = try Self.cancellableLocalPrefill(
-                                tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                // SPEC-001-R018: beside an active sibling a keyless prompt takes the
+                                // arbiter's short chunk; a reference plan below ignores it.
+                                tokenCount: promptTokenIds.count, from: start,
+                                stepSize: lease == nil ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize,
                                 referenceStepSize: lfmReferenceStep
                                     ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                     ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
@@ -12061,11 +12099,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                 cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                        // SPEC-001-R018: beside an active sibling a keyless text prompt on a
+                        // model with no fixed prefill plan takes the arbiter's short chunk;
+                        // alone or under passthrough the hint is the full step (unchanged).
+                        let iteratorPrefillStep = lease == nil && lfmReferenceStep == nil
+                            && !(generationContext.model is DeepseekV4Model) && !request.containsNonTextMessageContentPart
+                            ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize
+                        if iteratorPrefillStep != prefillStepSize { generation.parameters.prefill.stepSize = iteratorPrefillStep }
                         // SPEC-001-R018: the iterator's own prefill yields the turn after
                         // every chunk it queues; its final forward and the first decode
                         // step run in the turn taken here.
-                        generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
-                        gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
+                        generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
+                        gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
@@ -12089,11 +12134,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             // One turn per token step: `next()` builds and queues step N+1 and
                             // reads step N; the callback (detokenize, stream) runs outside it.
+                            // Under a sharing policy the turn's end realises step N+1, so the
+                            // step is charged here, not to the sibling's next turn. A cancelled
+                            // request leaves a turn wait at once (this thread has no task).
+                            gpuTurn.isCancelled = {
+                                inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired
+                            }
                             gpuTurn.begin(.decodeStep(rows: 1))
                             defer { gpuTurn.end() }
                             return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 gpuTurn.end()
-                                let disposition: GenerateDisposition = {
+                                var disposition: GenerateDisposition = {
                                     EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
                                     // Round-2 code LOW: only start the decode timer
                                     // on a callback that actually carries a token.
@@ -12185,8 +12236,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         return .stop
                                     }
                                 }()
+                                // A turn wait left on cancellation holds no turn: stop like a cancel.
+                                if disposition == .more, !gpuTurn.begin(.decodeStep(rows: 1)) { disposition = .stop }
                                 stoppedByDecodeCallback = disposition == .stop
-                                if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
                                 return disposition
                             })
                         }

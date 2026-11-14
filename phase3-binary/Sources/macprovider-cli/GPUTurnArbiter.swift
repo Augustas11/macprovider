@@ -1,13 +1,22 @@
 import Foundation
+import MLX
 
 // SPEC-001-R018 (#2338): one process-wide arbiter for the GPU turns of every
 // warm model. Each `ModelRuntime` registers one participant; its decode and
 // prefill loops bracket every unit of GPU work (one decode step, one prefill
 // chunk) with `beginTurn` / `endTurn`. A `GPUTurnPolicy` decides, before each
 // unit, whether the caller proceeds or waits until another participant has had
-// its turn. The arbiter orders submission only: MLX still runs whatever was
-// submitted on the process GPU stream, so a turn ends when its work is queued
-// and read back, not when the GPU has drained it.
+// its turn.
+//
+// Under a sharing policy (anything but passthrough, with two or more
+// participants registered) turns are exclusive: nobody starts while another
+// participant holds a turn, unless that turn has run past the policy's stall
+// bound (a hung peer never deadlocks its sibling). A turn there also ends only
+// once the GPU work it queued has been realised (`drainQueuedWork`), so work a
+// loop pipelined with `asyncEval` is charged to the loop that queued it, not
+// absorbed by the peer's next turn. With one participant, or under
+// passthrough, every call proceeds at once, nothing drains and prefill chunks
+// keep their full size: asyncEval pipelining is untouched.
 //
 // The compiled-in policy is `PassthroughGPUTurnPolicy` (always proceed), so
 // serving behaviour is unchanged. Lab builds (`DEBUG || MACPROVIDER_LAB_HARNESS`)
@@ -24,6 +33,11 @@ enum GPUWorkKind: Sendable, Equatable {
         if case .decodeStep = self { return true }
         return false
     }
+
+    var prefillTokens: Int? {
+        if case .prefillChunk(let tokens) = self { return tokens }
+        return nil
+    }
 }
 
 /// A registered model runtime. Handles are stable for a runtime's lifetime and
@@ -39,17 +53,29 @@ final class GPUTurnParticipant: Sendable, Hashable {
     }
 
     /// Blocks until the policy lets this participant run one unit of `kind`.
-    func beginTurn(_ kind: GPUWorkKind) { arbiter.beginTurn(self, kind: kind) }
+    /// Returns false, holding no turn, when `isCancelled` turns true while it
+    /// waits; the caller then must not call `endTurn` for this unit.
+    @discardableResult
+    func beginTurn(_ kind: GPUWorkKind, isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
+        arbiter.beginTurn(self, kind: kind, isCancelled: isCancelled)
+    }
+
     func endTurn() { arbiter.endTurn(self) }
+
     func withTurn<R>(_ kind: GPUWorkKind, _ body: () throws -> R) rethrows -> R {
-        beginTurn(kind)
-        defer { endTurn() }
+        let held = beginTurn(kind)
+        defer { if held { endTurn() } }
         return try body()
     }
+
     /// Marks an interval in which this participant has work pending and will
     /// ask for turns (a serial request, a scheduler pump with rows).
     func beginWork() { arbiter.beginWork(self) }
     func endWork() { arbiter.endWork(self) }
+
+    /// Tokens for this participant's next prefill chunk: `fullSize` unless a
+    /// sharing policy wants short chunks while another participant is active.
+    func prefillChunkTokens(fullSize: Int) -> Int { arbiter.prefillChunkTokens(self, fullSize: fullSize) }
 
     static func == (lhs: GPUTurnParticipant, rhs: GPUTurnParticipant) -> Bool { lhs === rhs }
     func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
@@ -63,7 +89,8 @@ struct GPUTurnParticipantCounters: Sendable, Equatable {
     var decodeRows = 0
     var prefillChunks = 0
     var prefillTokens = 0
-    /// Wall time inside turns (overlapping turns of one participant count once).
+    /// Wall time inside turns (overlapping turns of one participant count
+    /// once), including the drain of the work a turn queued.
     var busyNanoseconds: UInt64 = 0
     /// Wall time spent blocked in `beginTurn` waiting for the policy.
     var waitNanoseconds: UInt64 = 0
@@ -71,6 +98,12 @@ struct GPUTurnParticipantCounters: Sendable, Equatable {
     var waitedTurns = 0
     /// Longest single wait since the last `snapshot(resettingMaxWait: true)`.
     var maxWaitNanoseconds: UInt64 = 0
+    /// Turns that started beside another participant's turn held past the
+    /// stall bound, or after the policy alone kept the caller waiting a whole
+    /// stall bound. Zero in a healthy run: every other turn is exclusive.
+    var stallOverrides = 0
+    /// Waits the caller left because it was cancelled (no turn taken).
+    var cancelledWaits = 0
 }
 
 /// What a policy sees about one participant.
@@ -89,6 +122,9 @@ struct GPUTurnParticipantState: Sendable, Equatable {
     var lastTurnBeganAt: UInt64?
     var lastTurnEndedAt: UInt64?
     var lastTurnKind: GPUWorkKind?
+    /// GPU nanoseconds per prefill token, measured on drained (exclusive)
+    /// prefill turns; nil until one was measured.
+    var prefillNanosecondsPerToken: Double?
     var counters = GPUTurnParticipantCounters()
 
     var isWaiting: Bool { waitingSince != nil }
@@ -124,28 +160,89 @@ struct GPUTurnRequest: Sendable, Equatable {
 enum GPUTurnDecision: Sendable, Equatable {
     case proceed
     /// Wait until the arbiter state changes (a turn ends, a participant
-    /// registers, unregisters or ends its work) or `maxNanoseconds` pass,
-    /// whichever comes first, then ask again. `nil` waits for a state change
-    /// only.
+    /// registers, unregisters, starts waiting or ends its work) or
+    /// `maxNanoseconds` pass, whichever comes first, then ask again. `nil`
+    /// waits for a state change only (the arbiter still bounds every wait by
+    /// the policy's stall bound).
     case wait(maxNanoseconds: UInt64?)
+}
+
+/// What the arbiter does with one waiting caller: the policy's decision behind
+/// the exclusivity and stall rules every sharing policy gets.
+enum GPUTurnAdmission: Sendable, Equatable {
+    case proceed
+    /// Proceeds although the turn is not exclusive or the policy said wait:
+    /// another participant's turn ran past the stall bound, or the policy kept
+    /// the caller waiting for a whole stall bound with nobody holding a turn.
+    case proceedStalled
+    /// Wait at most this long (or until a state change), then ask again.
+    case wait(maxNanoseconds: UInt64)
 }
 
 /// A pure decision object: no MLX calls, no clocks of its own, no mutable
 /// state. The arbiter calls `decide` under its lock for every turn a caller
-/// asks for while at least two participants are registered, and again after
-/// every state change while the caller waits.
+/// asks for while at least two participants are registered and nobody else
+/// holds a turn, and again after every state change while the caller waits.
 protocol GPUTurnPolicy: Sendable {
     var name: String { get }
     var parameters: [String: String] { get }
     /// True only for a policy that proceeds unconditionally; the arbiter then
-    /// never calls `decide`.
+    /// never calls `decide`, never waits and never drains.
     var alwaysProceeds: Bool { get }
+    /// A turn held this long is stalled: a waiter then proceeds beside it.
+    /// Also the longest the policy alone can keep a caller waiting while
+    /// nobody holds a turn. Well above any legitimate turn.
+    var stallNanoseconds: UInt64 { get }
+    /// While another participant is active, a prefill chunk is sized to take
+    /// about this long on the GPU; nil keeps full-size chunks.
+    var prefillChunkTargetNanoseconds: UInt64? { get }
+    /// Smallest hinted prefill chunk, so prefill throughput survives the split.
+    var prefillChunkMinimumTokens: Int { get }
     func decide(_ request: GPUTurnRequest, state: GPUTurnArbiterState) -> GPUTurnDecision
 }
 
 extension GPUTurnPolicy {
     var alwaysProceeds: Bool { false }
     var parameters: [String: String] { [:] }
+    var stallNanoseconds: UInt64 { GPUTurnPolicyDefaults.stallMilliseconds * 1_000_000 }
+    var prefillChunkTargetNanoseconds: UInt64? { nil }
+    var prefillChunkMinimumTokens: Int { GPUTurnPolicyDefaults.prefillChunkMinimumTokens }
+}
+
+enum GPUTurnPolicyDefaults {
+    /// Real turns on the M3 Ultra: decode steps 26-75 ms, prefill chunks about
+    /// 1.2 s; a turn ten seconds long is a hang, not work.
+    static let stallMilliseconds: UInt64 = 10_000
+    /// About one sibling decode step (59-75 ms for a 2-row 27B worker) plus
+    /// headroom, so a decoding sibling waits at most about this long per chunk.
+    static let prefillChunkTargetMilliseconds: UInt64 = 150
+    static let prefillChunkMinimumTokens = 256
+}
+
+/// Shared parsing of policy parameters.
+enum GPUTurnPolicyParameters {
+    /// Removes `key` from `rest`; whole milliseconds in `minimum...60_000`.
+    static func milliseconds(
+        _ rest: inout [String: String], _ key: String, policy: String, default fallback: UInt64, minimum: UInt64 = 1
+    ) throws -> UInt64 {
+        guard let raw = rest.removeValue(forKey: key) else { return fallback }
+        guard let value = UInt64(raw), value >= minimum, value <= 60_000 else {
+            throw GPUTurnPolicyError.invalidParameter(policy: policy, name: key, value: raw)
+        }
+        return value
+    }
+
+    /// Removes `key` from `rest`; an integer in `minimum...maximum`.
+    static func integer(
+        _ rest: inout [String: String], _ key: String, policy: String, default fallback: Int,
+        minimum: Int = 1, maximum: Int = Int.max
+    ) throws -> Int {
+        guard let raw = rest.removeValue(forKey: key) else { return fallback }
+        guard let value = Int(raw), value >= minimum, value <= maximum else {
+            throw GPUTurnPolicyError.invalidParameter(policy: policy, name: key, value: raw)
+        }
+        return value
+    }
 }
 
 /// Default: every caller proceeds at once (today's behaviour).
@@ -153,7 +250,7 @@ struct PassthroughGPUTurnPolicy: GPUTurnPolicy {
     static let name = "passthrough"
     static let factory = GPUTurnPolicyFactory(
         name: name,
-        summary: "Always proceed; the GPU is shared as MLX submission order leaves it."
+        summary: "Always proceed; the GPU is shared as MLX submission order leaves it. No waits, no drains, full prefill chunks."
     ) { parameters in
         guard parameters.isEmpty else {
             throw GPUTurnPolicyError.unknownParameters(policy: name, names: parameters.keys.sorted())
@@ -281,6 +378,8 @@ struct GPUTurnParticipantSnapshot: Sendable, Equatable, Encodable {
     let waitSeconds: Double
     let waitedTurns: Int
     let maxWaitSeconds: Double
+    let stallOverrides: Int
+    let cancelledWaits: Int
 }
 
 struct GPUTurnArbiterSnapshot: Sendable, Equatable, Encodable {
@@ -309,6 +408,8 @@ struct GPUTurnArbiterSnapshot: Sendable, Equatable, Encodable {
             d.waitNanoseconds = now.waitNanoseconds &- before.waitNanoseconds
             d.waitedTurns = now.waitedTurns - before.waitedTurns
             d.maxWaitNanoseconds = now.maxWaitNanoseconds
+            d.stallOverrides = now.stallOverrides - before.stallOverrides
+            d.cancelledWaits = now.cancelledWaits - before.cancelledWaits
             deltaCounters[current.id] = d
             return GPUTurnArbiterSnapshot.row(id: current.id, modelID: current.modelID, d)
         }
@@ -320,19 +421,35 @@ struct GPUTurnArbiterSnapshot: Sendable, Equatable, Encodable {
             id: id, modelID: modelID, turns: c.turns, decodeSteps: c.decodeSteps, decodeRows: c.decodeRows,
             prefillChunks: c.prefillChunks, prefillTokens: c.prefillTokens,
             busySeconds: Double(c.busyNanoseconds) / 1e9, waitSeconds: Double(c.waitNanoseconds) / 1e9,
-            waitedTurns: c.waitedTurns, maxWaitSeconds: Double(c.maxWaitNanoseconds) / 1e9)
+            waitedTurns: c.waitedTurns, maxWaitSeconds: Double(c.maxWaitNanoseconds) / 1e9,
+            stallOverrides: c.stallOverrides, cancelledWaits: c.cancelledWaits)
     }
 }
 
 /// Process-wide GPU turn arbiter. Thread-safe; every call is synchronous.
 /// `beginTurn` may block the calling thread while the policy says wait, so it
-/// is called from the inference threads that already block on MLX evaluation,
-/// never while holding a lock another participant's turn needs.
+/// is called from the inference threads that already block on MLX evaluation.
+/// Every wait is bounded by the policy's stall bound and leaves early when the
+/// caller is cancelled.
 final class GPUTurnArbiter: @unchecked Sendable {
-    static let shared = GPUTurnArbiter(policy: GPUTurnPolicyRegistry.processDefault())
+    /// Under a sharing policy a turn realises the GPU work it queued before it
+    /// ends, so the next participant's turn starts on an idle GPU.
+    static let shared = GPUTurnArbiter(
+        policy: GPUTurnPolicyRegistry.processDefault(),
+        drainQueuedWork: { MLX.Stream.defaultStream.synchronize() })
+
+    /// How often a waiter checks its caller's cancellation flag. Only a
+    /// backstop: every state change wakes waiters at once.
+    static let cancellationCheckNanoseconds: UInt64 = 20_000_000
+    /// Prefill turns shorter than this many tokens (a final remainder forward)
+    /// do not update the measured prefill rate.
+    static let prefillRateMinimumTokens = 32
+    /// Hinted prefill chunks are rounded down to a multiple of this.
+    static let prefillChunkAlignment = 64
 
     private let condition = NSCondition()
     private let clock: @Sendable () -> UInt64
+    private let drainQueuedWork: @Sendable () -> Void
     private var policy: any GPUTurnPolicy
     private var participants: [GPUTurnParticipantState] = []
     private var lastTurnParticipantID: Int?
@@ -341,10 +458,77 @@ final class GPUTurnArbiter: @unchecked Sendable {
 
     init(
         policy: any GPUTurnPolicy = GPUTurnPolicyRegistry.compiledDefault,
-        clock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+        clock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        drainQueuedWork: @escaping @Sendable () -> Void = {}
     ) {
         self.policy = policy
         self.clock = clock
+        self.drainQueuedWork = drainQueuedWork
+    }
+
+    // MARK: Pure rules (shared with the test simulator)
+
+    /// The arbiter's rule for one waiting caller. Turns are exclusive: while
+    /// another participant holds a turn that has not run past the stall bound,
+    /// the caller waits for it to end, whatever the policy says. A holder past
+    /// the stall bound is stalled and the caller proceeds beside it. With no
+    /// holder the policy decides, but never keeps the caller waiting longer
+    /// than one stall bound in total.
+    static func admit(_ request: GPUTurnRequest, state: GPUTurnArbiterState, policy: any GPUTurnPolicy) -> GPUTurnAdmission {
+        if policy.alwaysProceeds { return .proceed }
+        let stall = max(policy.stallNanoseconds, 1)
+        var liveHolderRemaining: UInt64?
+        var stalledHolder = false
+        for other in state.participants where other.id != request.participantID && other.inTurn {
+            let started = other.turnStartedAt ?? state.now
+            let held = state.now >= started ? state.now - started : 0
+            if held < stall {
+                liveHolderRemaining = min(liveHolderRemaining ?? .max, stall - held)
+            } else {
+                stalledHolder = true
+            }
+        }
+        if let liveHolderRemaining { return .wait(maxNanoseconds: liveHolderRemaining) }
+        if stalledHolder { return .proceedStalled }
+        let waited = state.now >= request.waitingSince ? state.now - request.waitingSince : 0
+        if waited >= stall { return .proceedStalled }
+        switch policy.decide(request, state: state) {
+        case .proceed:
+            return .proceed
+        case .wait(let maxNanoseconds):
+            return .wait(maxNanoseconds: max(1, min(maxNanoseconds ?? .max, stall - waited)))
+        }
+    }
+
+    /// Prefill chunk tokens for `participantID`: `fullSize` with one
+    /// participant, under a policy without a chunk target, or while no other
+    /// participant is active. Otherwise the tokens the participant's measured
+    /// prefill rate fits in the policy's target (the minimum before a rate is
+    /// measured), never below the policy's minimum and never above `fullSize`.
+    static func prefillChunkTokens(
+        participantID: Int, fullSize: Int, state: GPUTurnArbiterState, policy: any GPUTurnPolicy
+    ) -> Int {
+        guard fullSize > 1, !policy.alwaysProceeds, state.participants.count > 1,
+              let target = policy.prefillChunkTargetNanoseconds, target > 0,
+              let me = state.participant(participantID),
+              state.participants.contains(where: { $0.id != participantID && ($0.wantsTurn || $0.inTurn) })
+        else { return fullSize }
+        let floor = min(fullSize, max(1, policy.prefillChunkMinimumTokens))
+        guard let perToken = me.prefillNanosecondsPerToken, perToken > 0 else { return floor }
+        let fitting = Double(target) / perToken
+        guard fitting < Double(fullSize) else { return fullSize }
+        var tokens = Int(fitting)
+        if tokens > prefillChunkAlignment { tokens -= tokens % prefillChunkAlignment }
+        return min(fullSize, max(floor, tokens))
+    }
+
+    /// The prefill rate after one drained prefill turn of `tokens` that took
+    /// `nanoseconds`: an even blend of the old rate and the new sample.
+    static func updatedPrefillRate(_ previous: Double?, tokens: Int, nanoseconds: UInt64) -> Double? {
+        guard tokens >= prefillRateMinimumTokens, nanoseconds > 0 else { return previous }
+        let sample = Double(nanoseconds) / Double(tokens)
+        guard let previous else { return sample }
+        return 0.5 * previous + 0.5 * sample
     }
 
     // MARK: Registration
@@ -440,46 +624,57 @@ final class GPUTurnArbiter: @unchecked Sendable {
 
     // MARK: Turns
 
-    func beginTurn(_ participant: GPUTurnParticipant, kind: GPUWorkKind) {
+    /// Returns false, holding no turn, only when `isCancelled` reported true
+    /// while the caller waited. An unregistered handle proceeds untracked.
+    @discardableResult
+    func beginTurn(_ participant: GPUTurnParticipant, kind: GPUWorkKind, isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
         condition.lock()
         defer { condition.unlock() }
-        guard var index = indexLocked(participant.id) else { return }
+        guard var index = indexLocked(participant.id) else { return true }
         // Fast path: a single participant, or a policy that always proceeds,
         // never consults the policy and never waits. A participant already
         // inside a turn (a nested bracket, or a second loop of the same
         // runtime) never waits either: it would wait on itself.
-        if !policy.alwaysProceeds && participants.count > 1 && participants[index].turnsHeld == 0 {
+        if sharingLocked && participants[index].turnsHeld == 0 {
             let waitStart = clock()
             participants[index].waitingSince = waitStart
             participants[index].waitingKind = kind
+            // A new waiter can change the decisions of the others.
+            wakeWaitersLocked()
             let request = GPUTurnRequest(participantID: participant.id, kind: kind, waitingSince: waitStart)
             var waited = false
+            var stalled = false
             while true {
-                let decision = policy.decide(request, state: GPUTurnArbiterState(
-                    now: clock(), participants: participants, lastTurnParticipantID: lastTurnParticipantID))
-                guard case .wait(let maxNanoseconds) = decision else { break }
+                let admission = Self.admit(request, state: GPUTurnArbiterState(
+                    now: clock(), participants: participants, lastTurnParticipantID: lastTurnParticipantID), policy: policy)
+                if admission == .proceedStalled { stalled = true; break }
+                guard case .wait(let maxNanoseconds) = admission else { break }
                 waited = true
                 waiters += 1
-                if let maxNanoseconds {
-                    _ = condition.wait(until: Date(timeIntervalSinceNow: Double(maxNanoseconds) / 1e9))
-                } else {
-                    condition.wait()
-                }
+                let slice = min(maxNanoseconds, Self.cancellationCheckNanoseconds)
+                _ = condition.wait(until: Date(timeIntervalSinceNow: Double(slice) / 1e9))
                 waiters -= 1
                 // Unregistered while waiting: nothing left to account to.
-                guard let current = indexLocked(participant.id) else { return }
+                guard let current = indexLocked(participant.id) else { return true }
                 index = current
-                // A single participant left: nobody to share with.
-                if policy.alwaysProceeds || participants.count < 2 { break }
+                // A single participant left, or passthrough: nobody to share with.
+                if !sharingLocked { break }
+                // The caller's flag may take its own locks: read it unlocked.
+                // The loop re-asks with fresh state, so a wake-up here is not lost.
+                condition.unlock()
+                let cancelled = isCancelled()
+                condition.lock()
+                guard let afterCheck = indexLocked(participant.id) else { return true }
+                index = afterCheck
+                if cancelled {
+                    recordWaitLocked(index, since: waitStart, waited: true)
+                    participants[index].counters.cancelledWaits += 1
+                    wakeWaitersLocked()
+                    return false
+                }
             }
-            let waitedFor = clock() &- waitStart
-            participants[index].waitingSince = nil
-            participants[index].waitingKind = nil
-            if waited {
-                participants[index].counters.waitNanoseconds &+= waitedFor
-                participants[index].counters.waitedTurns += 1
-                participants[index].counters.maxWaitNanoseconds = max(participants[index].counters.maxWaitNanoseconds, waitedFor)
-            }
+            recordWaitLocked(index, since: waitStart, waited: waited)
+            if stalled { participants[index].counters.stallOverrides += 1 }
         }
         let now = clock()
         if participants[index].turnsHeld == 0 { participants[index].turnStartedAt = now }
@@ -496,9 +691,22 @@ final class GPUTurnArbiter: @unchecked Sendable {
             participants[index].counters.prefillTokens += tokens
         }
         lastTurnParticipantID = participant.id
+        return true
     }
 
     func endTurn(_ participant: GPUTurnParticipant) {
+        condition.lock()
+        guard let first = indexLocked(participant.id), participants[first].turnsHeld > 0 else {
+            condition.unlock()
+            return
+        }
+        // Under a sharing policy the last turn held realises its queued GPU
+        // work before it ends: the drain is busy time of the participant that
+        // queued it, and the next turn starts on an idle GPU. It runs outside
+        // the lock, with the turn still held, so nobody starts beside it.
+        let drains = participants[first].turnsHeld == 1 && sharingLocked
+        condition.unlock()
+        if drains { drainQueuedWork() }
         condition.lock()
         defer { condition.unlock() }
         guard let index = indexLocked(participant.id), participants[index].turnsHeld > 0 else { return }
@@ -506,12 +714,28 @@ final class GPUTurnArbiter: @unchecked Sendable {
         if participants[index].turnsHeld == 0 {
             let now = clock()
             if let started = participants[index].turnStartedAt {
-                participants[index].counters.busyNanoseconds &+= now &- started
+                let held = now &- started
+                participants[index].counters.busyNanoseconds &+= held
+                if drains, let tokens = participants[index].lastTurnKind?.prefillTokens {
+                    participants[index].prefillNanosecondsPerToken = Self.updatedPrefillRate(
+                        participants[index].prefillNanosecondsPerToken, tokens: tokens, nanoseconds: held)
+                }
             }
             participants[index].turnStartedAt = nil
             participants[index].lastTurnEndedAt = now
         }
         wakeWaitersLocked()
+    }
+
+    /// See `GPUTurnParticipant.prefillChunkTokens(fullSize:)`.
+    func prefillChunkTokens(_ participant: GPUTurnParticipant, fullSize: Int) -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        guard sharingLocked, indexLocked(participant.id) != nil else { return fullSize }
+        return Self.prefillChunkTokens(
+            participantID: participant.id, fullSize: fullSize,
+            state: GPUTurnArbiterState(now: clock(), participants: participants, lastTurnParticipantID: lastTurnParticipantID),
+            policy: policy)
     }
 
     // MARK: Statistics
@@ -540,6 +764,22 @@ final class GPUTurnArbiter: @unchecked Sendable {
         return GPUTurnArbiterState(now: clock(), participants: participants, lastTurnParticipantID: lastTurnParticipantID)
     }
 
+    /// Two or more participants under a policy that may wait.
+    private var sharingLocked: Bool {
+        !policy.alwaysProceeds && participants.count > 1
+    }
+
+    private func recordWaitLocked(_ index: Int, since waitStart: UInt64, waited: Bool) {
+        let waitedFor = clock() &- waitStart
+        participants[index].waitingSince = nil
+        participants[index].waitingKind = nil
+        if waited {
+            participants[index].counters.waitNanoseconds &+= waitedFor
+            participants[index].counters.waitedTurns += 1
+            participants[index].counters.maxWaitNanoseconds = max(participants[index].counters.maxWaitNanoseconds, waitedFor)
+        }
+    }
+
     private func indexLocked(_ id: Int) -> Int? {
         participants.firstIndex { $0.id == id }
     }
@@ -559,6 +799,10 @@ final class GPUTurnScope: @unchecked Sendable {
     private var holding = false
     private var working = false
     private var closed = false
+    /// Read while a `begin` waits; true leaves the wait without a turn. Unset,
+    /// the calling task's cancellation is used (a plain inference thread has
+    /// none, so loops on one set the request's own flag here).
+    var isCancelled: (() -> Bool)?
 
     init(_ participant: GPUTurnParticipant) {
         self.participant = participant
@@ -571,10 +815,14 @@ final class GPUTurnScope: @unchecked Sendable {
         participant.beginWork()
     }
 
-    func begin(_ kind: GPUWorkKind) {
-        guard !holding, !closed else { return }
-        participant.beginTurn(kind)
-        holding = true
+    /// Takes a turn unless one is held. False when the scope is closed or the
+    /// wait was cancelled; no turn is held then.
+    @discardableResult
+    func begin(_ kind: GPUWorkKind) -> Bool {
+        guard !closed else { return false }
+        guard !holding else { return true }
+        holding = participant.beginTurn(kind, isCancelled: isCancelled ?? { Task.isCancelled })
+        return holding
     }
 
     func end() {
@@ -584,9 +832,15 @@ final class GPUTurnScope: @unchecked Sendable {
     }
 
     /// Ends the current turn and asks for the next one.
-    func yield(_ kind: GPUWorkKind) {
+    @discardableResult
+    func yield(_ kind: GPUWorkKind) -> Bool {
         end()
-        begin(kind)
+        return begin(kind)
+    }
+
+    /// See `GPUTurnParticipant.prefillChunkTokens(fullSize:)`.
+    func prefillChunkTokens(fullSize: Int) -> Int {
+        participant.prefillChunkTokens(fullSize: fullSize)
     }
 
     /// `PrefillParameters.progress` for a chunked prefill whose first chunk

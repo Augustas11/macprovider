@@ -395,4 +395,243 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertEqual(counters.prefillTokens, total)
         XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.turnsHeld, 0)
     }
+
+    // MARK: Round 2: exclusivity, stall bound, cancellation, drain, chunk hint
+
+    /// Judge point 1: a waiter is never let in beside a live turn because it
+    /// waited 250 ms. B holds a 400 ms turn; A starts only after B's ends.
+    func testLiveTurnIsNeverBypassedByWaitingLong() {
+        let arbiter = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(stallMilliseconds: 5_000))
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        let times = TurnTimes()
+        a.beginWork()
+        b.beginWork()
+        b.beginTurn(.prefillChunk(tokens: 8192))
+        let started = Date()
+        let done = onThread("A's turn") {
+            a.withTurn(.decodeStep(rows: 1)) { times.set(aBegan: Date()) }
+        }
+        XCTAssertTrue(waitUntil { arbiter.stateForTest().participant(a.id)?.isWaiting == true })
+        Thread.sleep(forTimeInterval: 0.4)
+        times.set(bEnded: Date())
+        b.endTurn()
+        wait(for: [done], timeout: 5)
+        XCTAssertGreaterThanOrEqual(times.aBegan!, times.bEnded!)
+        XCTAssertGreaterThanOrEqual(times.aBegan!.timeIntervalSince(started), 0.39)
+        let stats = arbiter.snapshot().participants.first { $0.id == a.id }!
+        XCTAssertEqual(stats.stallOverrides, 0)
+        a.endWork()
+        b.endWork()
+    }
+
+    /// A peer that holds its turn and never returns: the waiter goes in beside
+    /// it once the turn is older than `stall_ms`, and the override is counted.
+    func testStalledHolderReleasesTheWaiterAfterTheStallBound() {
+        let arbiter = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(stallMilliseconds: 100))
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        b.beginWork()
+        b.beginTurn(.decodeStep(rows: 2)) // B holds its turn and never comes back.
+        a.beginWork()
+        let started = Date()
+        let done = onThread("A's turn") {
+            a.withTurn(.decodeStep(rows: 1)) {}
+        }
+        wait(for: [done], timeout: 5)
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.09)
+        XCTAssertLessThan(elapsed, 1.0)
+        XCTAssertEqual(arbiter.snapshot().participants.first { $0.id == a.id }?.stallOverrides, 1)
+        b.endTurn()
+        b.endWork()
+        a.endWork()
+    }
+
+    /// Judge point 4: a cancelled caller leaves the wait promptly, takes no
+    /// turn and leaves no waiting state; the participant stays usable.
+    func testCancelledWaiterLeavesPromptlyWithoutATurn() {
+        let arbiter = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(stallMilliseconds: 30_000))
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        b.beginWork()
+        b.beginTurn(.decodeStep(rows: 2))
+        let flag = CancelFlag()
+        let result = ResultBox()
+        let done = onThread("A's cancelled wait") {
+            result.set(a.beginTurn(.decodeStep(rows: 1), isCancelled: { flag.isSet }))
+        }
+        XCTAssertTrue(waitUntil { arbiter.stateForTest().participant(a.id)?.isWaiting == true })
+        let cancelledAt = Date()
+        flag.set()
+        wait(for: [done], timeout: 5)
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 0.5)
+        XCTAssertEqual(result.value, false)
+        let state = arbiter.stateForTest().participant(a.id)!
+        XCTAssertEqual(state.turnsHeld, 0)
+        XCTAssertNil(state.waitingSince)
+        XCTAssertEqual(state.counters.turns, 0)
+        XCTAssertEqual(state.counters.cancelledWaits, 1)
+        // B's turn is untouched; after it ends A takes turns normally.
+        XCTAssertEqual(arbiter.stateForTest().participant(b.id)?.turnsHeld, 1)
+        b.endTurn()
+        b.endWork()
+        XCTAssertTrue(a.beginTurn(.decodeStep(rows: 1)))
+        a.endTurn()
+        XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.turnsHeld, 0)
+    }
+
+    /// A scope whose wait is cancelled holds nothing; `end`/`close` are safe.
+    func testCancelledScopeHoldsNoTurnAndClosesCleanly() {
+        let arbiter = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(stallMilliseconds: 30_000))
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        b.beginWork()
+        b.beginTurn(.decodeStep(rows: 2))
+        let scope = GPUTurnScope(a)
+        scope.open()
+        scope.isCancelled = { true }
+        let started = Date()
+        XCTAssertFalse(scope.begin(.decodeStep(rows: 1)))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        scope.end()
+        scope.close()
+        let state = arbiter.stateForTest().participant(a.id)!
+        XCTAssertEqual(state.turnsHeld, 0)
+        XCTAssertEqual(state.pendingWork, 0)
+        XCTAssertNil(state.waitingSince)
+        b.endTurn()
+        b.endWork()
+    }
+
+    /// Judge point 3: under a sharing policy a turn drains the work it queued
+    /// before it ends, and the drain is its own busy time. One participant or
+    /// passthrough never drains (asyncEval pipelining untouched).
+    func testSharingTurnDrainsQueuedWorkAndChargesItToItsOwner() {
+        let clock = ManualClock()
+        let drains = Counter()
+        let drain: @Sendable () -> Void = { drains.increment(); clock.advance(7_000_000) }
+
+        let lone = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(), clock: { clock.now() }, drainQueuedWork: drain)
+        let only = lone.register(modelID: "only")
+        only.withTurn(.decodeStep(rows: 1)) { clock.advance(1_000_000) }
+        XCTAssertEqual(drains.value, 0)
+
+        let pass = GPUTurnArbiter(policy: PassthroughGPUTurnPolicy(), clock: { clock.now() }, drainQueuedWork: drain)
+        let p1 = pass.register(modelID: "p1")
+        _ = pass.register(modelID: "p2")
+        p1.withTurn(.decodeStep(rows: 1)) {}
+        XCTAssertEqual(drains.value, 0)
+
+        let arbiter = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(), clock: { clock.now() }, drainQueuedWork: drain)
+        let a = arbiter.register(modelID: "a")
+        _ = arbiter.register(modelID: "b")
+        a.withTurn(.decodeStep(rows: 1)) { clock.advance(26_000_000) }
+        XCTAssertEqual(drains.value, 1)
+        XCTAssertEqual(arbiter.snapshot().participants.first { $0.id == a.id }!.busySeconds, 0.033, accuracy: 1e-9)
+        // A nested turn drains once, at the outer end.
+        a.beginTurn(.decodeStep(rows: 1))
+        a.beginTurn(.prefillChunk(tokens: 8))
+        a.endTurn()
+        XCTAssertEqual(drains.value, 1)
+        a.endTurn()
+        XCTAssertEqual(drains.value, 2)
+    }
+
+    /// Judge point 2: the chunk hint. Full size with one participant, under
+    /// passthrough, or with an idle sibling; the floor before a rate is
+    /// measured; then about `prefill_chunk_ms` of the measured rate.
+    func testPrefillChunkHintFollowsTheMeasuredRateOnlyBesideAnActiveSibling() {
+        let clock = ManualClock()
+        let fullSize = 8192
+
+        let lone = GPUTurnArbiter(policy: FairShareGPUTurnPolicy(), clock: { clock.now() })
+        let only = lone.register(modelID: "only")
+        only.beginWork()
+        XCTAssertEqual(only.prefillChunkTokens(fullSize: fullSize), fullSize)
+
+        let pass = GPUTurnArbiter(policy: PassthroughGPUTurnPolicy(), clock: { clock.now() })
+        let p1 = pass.register(modelID: "p1")
+        pass.register(modelID: "p2").beginWork()
+        XCTAssertEqual(p1.prefillChunkTokens(fullSize: fullSize), fullSize)
+
+        let arbiter = GPUTurnArbiter(
+            policy: FairShareGPUTurnPolicy(), clock: { clock.now() }, drainQueuedWork: { clock.advance(7_000_000) })
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        a.beginWork()
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize, "idle sibling")
+        b.beginWork()
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), 256, "no rate yet: the floor")
+        // One drained chunk: 512 tokens in 63 ms + 7 ms drain = 136,718.75 ns/token,
+        // so 150 ms fits 1097 tokens, aligned down to 1088.
+        b.endWork()
+        a.withTurn(.prefillChunk(tokens: 512)) { clock.advance(63_000_000) }
+        b.beginWork()
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), 1088)
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: 600), 600, "never above the full size")
+        b.endWork()
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize, "sibling idle again")
+        // prefill_chunk_ms=0 turns the hint off.
+        arbiter.setPolicy(FairShareGPUTurnPolicy(prefillTargetMilliseconds: 0))
+        b.beginWork()
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize)
+        // Single participant left: the hint is the full size again.
+        arbiter.setPolicy(FairShareGPUTurnPolicy())
+        arbiter.unregister(b)
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize)
+    }
+
+    /// A single participant under every registered policy: never waits, never
+    /// drains, full chunks, even beside an unregistered handle.
+    func testSingleParticipantIsPassthroughUnderEveryPolicy() throws {
+        for name in GPUTurnPolicyRegistry.names {
+            let drains = Counter()
+            let arbiter = GPUTurnArbiter(policy: try GPUTurnPolicyRegistry.make(name), drainQueuedWork: { drains.increment() })
+            let only = arbiter.register(modelID: "only")
+            let scope = GPUTurnScope(only)
+            scope.open()
+            for _ in 0..<20 {
+                XCTAssertEqual(scope.prefillChunkTokens(fullSize: 2048), 2048, name)
+                XCTAssertTrue(scope.yield(.prefillChunk(tokens: 2048)), name)
+                XCTAssertTrue(scope.yield(.decodeStep(rows: 1)), name)
+            }
+            scope.close()
+            let stats = arbiter.snapshot().participants[0]
+            XCTAssertEqual(stats.waitedTurns, 0, name)
+            XCTAssertEqual(stats.stallOverrides, 0, name)
+            XCTAssertEqual(drains.value, 0, name)
+        }
+    }
+}
+
+private final class TurnTimes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var began: Date?
+    private var ended: Date?
+    func set(aBegan date: Date) { lock.lock(); began = date; lock.unlock() }
+    func set(bEnded date: Date) { lock.lock(); ended = date; lock.unlock() }
+    var aBegan: Date? { lock.lock(); defer { lock.unlock() }; return began }
+    var bEnded: Date? { lock.lock(); defer { lock.unlock() }; return ended }
+}
+
+private final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.lock(); flag = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+}
+
+private final class ResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Bool?
+    func set(_ value: Bool) { lock.lock(); stored = value; lock.unlock() }
+    var value: Bool? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }

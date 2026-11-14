@@ -263,4 +263,193 @@ final class SharedModelMemoryBudgetTests: XCTestCase {
             at: snapshot.appendingPathComponent("model-1.safetensors"), withDestinationURL: blobs.appendingPathComponent("a"))
         XCTAssertEqual(SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: snapshot), 1024)
     }
+
+    // MARK: Round-2 verifier findings
+
+    private let mib = 1024 * 1024
+
+    /// Two members registered on a fresh budget: `main` (100 GiB alone) and
+    /// `worker` (16 GiB of parameters), both at 1 MiB of KV per token.
+    private func twoMemberBudget() -> SharedModelMemoryBudget {
+        let budget = SharedModelMemoryBudget()
+        _ = budget.recordLoaded(memberID: 1, label: "main", modelFamily: "glm", wires: false,
+                                activeBytes: 100 * gib, weightBytes: 100 * gib, kvBytesPerToken: mib, pinned: true)
+        _ = budget.recordLoaded(memberID: 2, label: "worker", modelFamily: "qwen", wires: false,
+                                activeBytes: 116 * gib, weightBytes: 16 * gib, kvBytesPerToken: mib, pinned: true)
+        return budget
+    }
+
+    /// Finding 1: a serial-path row's KV is charged, so the sibling's row
+    /// waits for it instead of over-admitting, and the charge is released
+    /// (once) when the serial row ends.
+    func testSerialRowKVIsChargedAgainstSibling() {
+        let budget = twoMemberBudget()
+        let limit = 200 * gib
+        func workerRow() -> SharedModelMemoryRules.RowDecision {
+            budget.admitRow(memberID: 2, legacyAdmits: true, limitBytes: limit, committedTokens: 0, rowTokens: 4096)
+        }
+        XCTAssertTrue(workerRow().admitted, "116 GiB weights + 1 GiB margins + a 4 GiB row fit 200 GiB")
+
+        // main runs one serial row: 80K tokens of worst-case KV (80 GiB).
+        let charge = budget.chargeSerialRow(memberID: 1, tokens: 80 * 1024, limitBytes: limit)
+        XCTAssertNotNil(charge)
+        let held = workerRow()
+        XCTAssertFalse(held.admitted, "the serial row's KV is charged")
+        XCTAssertTrue(held.overSharedBudget)
+        XCTAssertTrue(held.holdWhenIdle, "the serial row will free its KV")
+        XCTAssertFalse(held.neverFits)
+
+        budget.releaseSerialRow(charge)
+        XCTAssertTrue(workerRow().admitted, "a finished, cancelled or failed serial row frees its charge")
+        // A second release, a nil charge and an unknown member change nothing.
+        budget.releaseSerialRow(charge)
+        budget.releaseSerialRow(nil)
+        XCTAssertNil(budget.chargeSerialRow(memberID: 9, tokens: 10, limitBytes: limit))
+        XCTAssertTrue(workerRow().admitted)
+
+        // Two serial rows release independently.
+        let first = budget.chargeSerialRow(memberID: 1, tokens: 40 * 1024, limitBytes: limit)
+        let second = budget.chargeSerialRow(memberID: 1, tokens: 40 * 1024, limitBytes: limit)
+        XCTAssertFalse(workerRow().admitted)
+        budget.releaseSerialRow(first)
+        XCTAssertTrue(workerRow().admitted)
+        budget.releaseSerialRow(second)
+
+        // An unregistered member's charges go with it.
+        let orphan = budget.chargeSerialRow(memberID: 1, tokens: 80 * 1024, limitBytes: limit)
+        XCTAssertTrue(budget.forget(memberID: 1))
+        budget.releaseSerialRow(orphan)
+    }
+
+    /// The serial row's KV bound: prompt plus output bound, the remaining
+    /// context when the request sets none, never past the served context.
+    func testSerialRowTokens() {
+        XCTAssertEqual(SharedModelMemoryRules.serialRowTokens(promptTokens: 1000, maxOutputTokens: 500, maxContextTokens: 8192), 1500)
+        XCTAssertEqual(SharedModelMemoryRules.serialRowTokens(promptTokens: 1000, maxOutputTokens: nil, maxContextTokens: 8192), 8192)
+        XCTAssertEqual(SharedModelMemoryRules.serialRowTokens(promptTokens: 8000, maxOutputTokens: 4000, maxContextTokens: 8192), 8192)
+        XCTAssertEqual(SharedModelMemoryRules.serialRowTokens(promptTokens: 10, maxOutputTokens: Int.max, maxContextTokens: 8192), 8192)
+    }
+
+    /// Finding 2: a row over the budget even with every member's rows
+    /// finished is never held (it would starve to its queue timeout); a row
+    /// that fits once the sibling's rows finish still waits.
+    func testNeverFittingRowIsRefusedNotHeld() {
+        let limit = 200 * gib
+        let members = [
+            1: member("glm", resident: 172 * gib, committed: 6 * gib, inFlight: 2),
+            2: member("qwen", resident: 16 * gib),
+        ]
+        // 172 + 16 + 1 GiB margins + 20 = 209 GiB > 200 with glm idle.
+        let never = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: limit, members: members, requesterID: 2,
+            requesterCommittedBytes: 0, rowBytes: 20 * gib)
+        XCTAssertFalse(never.admitted)
+        XCTAssertTrue(never.neverFits)
+        XCTAssertFalse(never.holdWhenIdle)
+        // A serial charge on glm does not turn it into a wait either.
+        var serialBusy = members
+        serialBusy[1]!.committedKVBytes = 0
+        serialBusy[1]!.serialKVBytes = 6 * gib
+        let neverSerial = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: limit, members: serialBusy, requesterID: 2,
+            requesterCommittedBytes: 0, rowBytes: 20 * gib)
+        XCTAssertTrue(neverSerial.neverFits)
+        XCTAssertFalse(neverSerial.holdWhenIdle)
+
+        // 172 + 16 + 1 + 10 = 199 GiB fits once glm's 6 GiB finish: it waits.
+        let later = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: limit, members: members, requesterID: 2,
+            requesterCommittedBytes: 0, rowBytes: 10 * gib)
+        XCTAssertFalse(later.admitted)
+        XCTAssertFalse(later.neverFits)
+        XCTAssertTrue(later.holdWhenIdle)
+        // The requester's own rows finish too: they never make a row never-fit.
+        let ownRows = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: limit, members: members, requesterID: 2,
+            requesterCommittedBytes: 30 * gib, rowBytes: 10 * gib)
+        XCTAssertFalse(ownRows.neverFits)
+    }
+
+    /// Finding 3: a model loaded while a sibling serves is charged its own
+    /// weights, not the sibling's live KV, whatever the sibling is doing.
+    func testResidentBytesExcludeSiblingLiveKV() {
+        var busy = member("main", resident: 100 * gib, committed: 30 * gib)
+        busy.serialKVBytes = 10 * gib
+        let idle = member("main", resident: 100 * gib)
+        // MLX active memory at registration: main's weights + its live KV + worker's 16 GiB.
+        XCTAssertEqual(SharedModelMemoryRules.residentBytes(
+            activeBytes: 156 * gib, siblings: [busy], weightBytes: 16 * gib), 16 * gib)
+        XCTAssertEqual(SharedModelMemoryRules.residentBytes(
+            activeBytes: 116 * gib, siblings: [idle], weightBytes: 16 * gib), 16 * gib)
+        // Without parameter bytes the sibling's weights and row charges are
+        // taken out of active memory.
+        XCTAssertEqual(SharedModelMemoryRules.residentBytes(
+            activeBytes: 156 * gib, siblings: [busy], weightBytes: nil), 16 * gib)
+
+        // Through the budget: the same figure with the sibling busy or idle.
+        let quiet = twoMemberBudget()
+        let loud = SharedModelMemoryBudget()
+        _ = loud.recordLoaded(memberID: 1, label: "main", modelFamily: "glm", wires: false,
+                              activeBytes: 100 * gib, weightBytes: 100 * gib, kvBytesPerToken: mib, pinned: true)
+        _ = loud.chargeSerialRow(memberID: 1, tokens: 40 * 1024, limitBytes: 200 * gib)
+        let (worker, count) = loud.recordLoaded(memberID: 2, label: "worker", modelFamily: "qwen", wires: false,
+                                                activeBytes: 156 * gib, weightBytes: 16 * gib, kvBytesPerToken: mib, pinned: true)
+        XCTAssertEqual(worker.residentBytes, 16 * gib)
+        XCTAssertEqual(count, 2)
+        let quietWorker = quiet.recordLoaded(memberID: 2, label: "worker", modelFamily: "qwen", wires: false,
+                                             activeBytes: 116 * gib, weightBytes: 16 * gib, kvBytesPerToken: mib, pinned: true).0
+        XCTAssertEqual(quietWorker.residentBytes, worker.residentBytes)
+    }
+
+    /// Load admission and eviction see serial and batched live KV: a member
+    /// with only a serial row is busy (never evicted) and its live KV counts
+    /// when larger than one minimum row.
+    func testLoadDecisionCountsLiveRowKV() {
+        let rowTokens = SharedModelMemoryRules.minimumRowTokens
+        var serving = member("glm", resident: 150 * gib, perToken: mib, pinned: true)
+        serving.serialKVBytes = 35 * gib
+        let decision = SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: [1: serving], estimatedResidentBytes: 16 * gib, newMinimumRowKVBytes: gib)
+        XCTAssertEqual(decision.requiredBytes, 150 * gib + 16 * gib + 35 * gib + gib + 2 * margin)
+        XCTAssertFalse(decision.admitted, "the serving row's KV is not free memory")
+        // Idle: one minimum row, as before.
+        let idle = SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: [1: member("glm", resident: 150 * gib, perToken: mib, pinned: true)],
+            estimatedResidentBytes: 16 * gib, newMinimumRowKVBytes: gib)
+        XCTAssertEqual(idle.requiredBytes, 150 * gib + 16 * gib + rowTokens * mib + gib + 2 * margin)
+
+        var serialOnly = member("old", resident: 40 * gib, pinned: false)
+        serialOnly.serialKVBytes = gib
+        let members = [1: member("glm", resident: 150 * gib, pinned: true), 2: serialOnly]
+        XCTAssertEqual(SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: members, estimatedResidentBytes: 16 * gib, newMinimumRowKVBytes: gib).reason,
+            "insufficient_memory", "a member serving a serial row is not evicted")
+    }
+
+    /// One registered runtime behaves as before every change here: no hold,
+    /// no never-fit refusal, the legacy decision, and the resident figure is
+    /// MLX's active memory even with parameter bytes given.
+    func testSingleRuntimeUnchangedBySerialChargesAndWeightBytes() {
+        let budget = SharedModelMemoryBudget()
+        let (lone, count) = budget.recordLoaded(
+            memberID: 1, label: "main", modelFamily: "glm", wires: true,
+            activeBytes: 101 * gib, weightBytes: 100 * gib, kvBytesPerToken: mib, pinned: true)
+        XCTAssertEqual(lone.residentBytes, 101 * gib, "alone: the single-runtime active-memory figure")
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(SharedModelMemoryRules.wiredLimitBytes(members: [1: lone], workingSetBytes: 239 * gib), 101 * gib)
+        XCTAssertEqual(SharedModelMemoryRules.residentBytes(
+            activeBytes: 101 * gib, siblings: [member("loading", loaded: false, resident: 9 * gib)], weightBytes: 100 * gib),
+            101 * gib)
+
+        // A huge serial row and a row that would never fit a shared budget.
+        let charge = budget.chargeSerialRow(memberID: 1, tokens: 500 * 1024, limitBytes: gib)
+        XCTAssertNotNil(charge)
+        for legacy in [true, false] {
+            let decision = budget.admitRow(
+                memberID: 1, legacyAdmits: legacy, limitBytes: gib, committedTokens: 1 << 20, rowTokens: 1 << 20)
+            XCTAssertEqual(decision, .init(admitted: legacy, holdWhenIdle: false, overSharedBudget: false, requiredBytes: 0))
+            XCTAssertFalse(decision.neverFits)
+        }
+        budget.releaseSerialRow(charge)
+    }
 }

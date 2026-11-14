@@ -6314,6 +6314,22 @@ actor ContinuousBatchScheduler {
             // An idle scheduler still admits it: MLX's limit then paces its
             // evaluation, as before, and continuous batching stays on.
             if !draining, let refusal = mlxMemoryAdmissionRefusal(for: request) {
+                // SPEC-001-R017: a row over the shared budget even with every
+                // runtime's rows finished can never be admitted; it is refused
+                // now, as a row the pool can never hold is, instead of waiting
+                // out its queue timeout.
+                if let shared = refusal.shared, shared.neverFits {
+                    let line = request.ingestProvenance.mayPersistRequestDerivedState
+                        ? "event=shared_memory_row_refused reason=insufficient_memory request_id=\(request.id) required_bytes=\(shared.requiredBytes) limit_bytes=\(refusal.sample.limitBytes)\n"
+                        : "event=shared_memory_row_refused reason=insufficient_memory limit_bytes=\(refusal.sample.limitBytes)\n"
+                    try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
+                    await finishQueued(
+                        request,
+                        status: .rejected,
+                        errorCode: "continuous_batching_pool_capacity_exhausted"
+                    )
+                    continue
+                }
                 // SPEC-001-R017: an idle scheduler still waits while a sibling
                 // runtime's rows hold the shared budget.
                 let idle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
