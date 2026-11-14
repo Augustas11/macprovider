@@ -60,6 +60,27 @@ changes. The gateway adds nullable `demand_events` columns at startup in
 | [#2339](https://github.com/Augustas11/macprovider/pull/2339) (`ba2732c4c`) | [Measured decode reorder and routed-throughput floor](#measured-decode-reorder-and-routed-throughput-floor-spec-002-r005--pending-runtime-inclusion-2026-11-13). The measured decode signal comes from the coordinator's own request phase timing. It does not come from the heartbeat. | none | none (wiring in `cmd/coordinator/main.go` only) | `/poolz` rows carry `routed_throughput_source` |
 | [#2342](https://github.com/Augustas11/macprovider/pull/2342) (`423f49ded`) | [Serving-path label](#serving-path-label-on-the-internal-gateway-hop-spec-002-r007-spec-006-r028--pending-runtime-inclusion-2026-11-14). The coordinator adds `served_path` (raw JSON, `omitempty`) to `InferenceResponseEnd` and checks it. An absent report gives no header. | Gateway `demand_events`: `served_path`, `served_rows` | none | `served_path_cells` entry in `/admin/demand-latency?window=24h` once providers run the next CLI |
 | [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`) | MiniMax M3 tool grammar `minimax` in the coordinator. Every MiniMax M3 request, plain chat included, goes only to providers that serve its model output (`providerServesModelOutput`). The same gate covers relay-blind and privacy-class reservations. The gateway's OpenRouter tool-family list adds `minimax-m3` / `minimax_m3`. | none | none | Per the CLI train row: a MiniMax request served by a provider on the next CLI. A provider on 1.8.287 gets no MiniMax traffic once this runtime is live (retryable 503 `tool_grammar_provider_unavailable`). |
+|## Agent-client terminal and retry shapes (SPEC-006 v0.9.79, SPEC-040 v0.1.10) — pending runtime inclusion (2026-11-14)
+
+Related: #2360, #2361, #2362, #2363. PR #2368 merged as `0f25e99cd`.
+- `/v1/responses` stream that closes with neither `[DONE]` nor a
+  `finish_reason`: `response.failed` (`invalid_provider_response`), settled
+  as `invalid_provider_response`, kept out of the id-less dedupe cache.
+- `quota_exhausted`: `retryable: false` at the gateway, as at the
+  coordinator; `X-RateLimit-Reset` names the refill, no `Retry-After`.
+- Wallet session cap spent by settled usage on default-mode
+  `/v1/responses`: 400 `budget_reached` (Codex stops on it); in-flight-only
+  blocks and other endpoints keep 402 `wallet_session_exhausted`.
+- `/v1/responses` forwards `reasoning.effort` `max`.
+
+Audit: four lanes, gate met after one fix round. Conformance: SPEC-006-R002
+is `pending` until its commit evidence is renewed from `0f25e99cd`.
+
+Live step: the next Pearl runtime release, through
+`scripts/ops/pearl-runtime.sh status`, then `next --run`. Gateway source
+changes, so the buyer-hold path applies. No schema change.
+
+ [#2368](https://github.com/Augustas11/macprovider/pull/2368) (`0f25e99cd`) | [Agent-client terminal and retry shapes](#agent-client-terminal-and-retry-shapes-spec-006-v0979-spec-040-v0110--pending-runtime-inclusion-2026-11-14). Gateway: Responses truncated stream fails, `quota_exhausted` permanent, wallet cap `budget_reached` on `/v1/responses`, `reasoning.effort` `max`. Coordinator: test only. | none | none | one `/v1/responses` request with `reasoning.effort: "max"` reaches the provider as `reasoning_effort: "max"` (provider request log) |
 
 ## Serving-path label on the internal gateway hop (SPEC-002-R007, SPEC-006-R028) — pending runtime inclusion (2026-11-14)
 
