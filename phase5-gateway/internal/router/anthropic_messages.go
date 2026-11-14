@@ -32,7 +32,8 @@ type anthropicMessagesAdapter struct {
 	guaranteedToolSelection bool
 	// promptCacheKey is metadata.user_id, which partitions the auto-prefix
 	// conversation key like an OpenAI prompt_cache_key (#2365). Agents such as
-	// Claude Code send one per session; it is never forwarded.
+	// Claude Code send one per session; an app that sends one per end user
+	// gets one partition per user. It is never forwarded.
 	promptCacheKey string
 
 	status      int
@@ -121,8 +122,24 @@ type anthropicStreamToolCall struct {
 }
 
 type anthropicUsage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens          int64 `json:"input_tokens"`
+	CacheReadInputTokens int64 `json:"cache_read_input_tokens"`
+	OutputTokens         int64 `json:"output_tokens"`
+}
+
+// anthropicUsageFromChat maps chat usage to the Anthropic shape, where
+// input_tokens excludes prompt tokens read from cache and
+// cache_read_input_tokens reports them (#2365). The cached count is the
+// same observed value /v1/chat/completions reports (SPEC-006-R013).
+func anthropicUsageFromChat(u tokenUsage) anthropicUsage {
+	cached := u.observedCachedTokens()
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > u.PromptTokens {
+		cached = u.PromptTokens
+	}
+	return anthropicUsage{InputTokens: u.PromptTokens - cached, CacheReadInputTokens: cached, OutputTokens: u.CompletionTokens}
 }
 
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -1178,10 +1195,7 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		"model":         model,
 		"stop_reason":   stopReason,
 		"stop_sequence": anthropicStopSequence(finishReason, stopSequence),
-		"usage": anthropicUsage{
-			InputTokens:  chat.Usage.PromptTokens,
-			OutputTokens: chat.Usage.CompletionTokens,
-		},
+		"usage":         anthropicUsageFromChat(chat.Usage),
 	}
 	return json.Marshal(resp)
 }
@@ -1264,7 +1278,8 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 	if len(bytes.TrimSpace(chunk.Usage)) > 0 && !anthropicRawIsNull(chunk.Usage) {
 		var usage tokenUsage
 		if err := json.Unmarshal(chunk.Usage, &usage); err == nil {
-			a.streamUsage = &anthropicUsage{InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens}
+			mapped := anthropicUsageFromChat(usage)
+			a.streamUsage = &mapped
 		}
 	}
 	if len(chunk.Choices) == 0 {

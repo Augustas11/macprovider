@@ -3841,7 +3841,8 @@ func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (s
 	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
 }
 
-// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key that partitions the
+// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key (or /v1/messages
+// metadata.user_id) that partitions the
 // auto-prefix tag. Longer or non-string values are ignored, not rejected, so
 // clients that send one keep working with the unpartitioned scaffold key.
 const maxPromptCacheKeyBytes = 256
@@ -3900,7 +3901,8 @@ func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
 //     skips applySticky/stickyStore). Demo MUST NOT receive a key.
 //
-// promptCacheKey is the buyer's OpenAI prompt_cache_key, already bounded by
+// promptCacheKey is the buyer's OpenAI prompt_cache_key or /v1/messages
+// metadata.user_id, already bounded by
 // promptCacheKeyString. When present it partitions the auto-prefix tag
 // (SPEC-006-R014): agent clients send one key per session, and sessions that
 // share a scaffold must not share one provider conversation, which serializes
