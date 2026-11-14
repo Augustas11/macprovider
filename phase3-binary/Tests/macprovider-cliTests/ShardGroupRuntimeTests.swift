@@ -273,6 +273,43 @@ final class ShardGroupRuntimeTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// The MiniMax refusal (#2344) against model IDs whose answer is written
+    /// down here, not derived from `ToolCallGrammar.family`: every MiniMax
+    /// M3 spelling is refused, and nothing else is refused for its model.
+    func testMiniMaxShardRefusalMatchesAnIndependentList() async throws {
+        let (runtime, _) = try await fakeRuntime()
+        let refused = [
+            "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+            "minimaxai/minimax-m3.1-flash",
+            "minimax/minimax-m3.1-flash",
+            "MINIMAXAI/MINIMAX-M3-PREVIEW",
+            "local/minimax_m3_vl-text",
+        ]
+        let allowed = [
+            "MiniMaxAI/MiniMax-M2.5",
+            "MiniMaxAI/MiniMax-Text-01",
+            "mlx-community/Qwen3-30B-A3B-4bit",
+            "zai-org/glm-5.3-flash",
+            "liquidai/lfm2.5-24b-a2b",
+        ]
+        for model in refused {
+            do {
+                _ = try await runtime.prepare(try request("x", extra: ["model": model]))
+                XCTFail("\(model): expected shard_group_model_unsupported")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "shard_group_model_unsupported", model)
+            }
+        }
+        for model in allowed {
+            do {
+                _ = try await runtime.prepare(try request("x", extra: ["model": model]))
+            } catch let error as APIError {
+                XCTAssertNotEqual(error.code, "shard_group_model_unsupported", model)
+            }
+        }
+        await runtime.stop()
+    }
+
     /// SPEC-018 §3.12 on a shard group: with an open `<think>` the output up to
     /// `</think>` is reasoning, stop sequences apply only after it, and the
     /// answer's leading whitespace is dropped.

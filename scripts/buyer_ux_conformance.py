@@ -623,6 +623,8 @@ GUARANTEED_SELECTION_MODELS = {
 
 
 def tool_grammar_family(model: str) -> str:
+    """SPEC-018 §3.1 family; testdata/tool-grammar-families.json keeps this
+    copy in step with the provider, coordinator and gateway (#2355)."""
     m = model.lower()
     if "qwen2-vl" in m or "qwen2vl" in m:
         return ""
@@ -640,6 +642,8 @@ def tool_grammar_family(model: str) -> str:
         return "qwen"
     if "deepseek-v4" in m or "deepseek_v4" in m:
         return "dsml"
+    if "lfm2.5-24b-a2b" in m:
+        return "lfm2"
     if "minimax-m3" in m or "minimax_m3" in m:
         return "minimax"
     return ""

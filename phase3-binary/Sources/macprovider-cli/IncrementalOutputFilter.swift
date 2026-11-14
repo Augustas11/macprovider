@@ -843,12 +843,21 @@ struct IncrementalReasoningSplit {
 struct IncrementalMiniMaxReasoningSplit {
     private typealias MiniMax = ReasoningOutput.MiniMax
     private var previous = ""
+    private let keepsReasoning: Bool
     /// The split of the text before UTF-8 offset `settled`.
-    private var state = MiniMax.Scan()
+    private var state: MiniMax.Scan
     private var settled = 0
     /// No tag starts in `settled..<searched`.
     private var searched = 0
     private(set) var restartCount = 0
+
+    /// `keepsReasoning: false` gives the same `answer` and `closed` with an
+    /// empty `reasoning`, so a long `<mm:think>` block costs no copy per
+    /// step (the tool-stop path reads only the answer).
+    init(keepsReasoning: Bool = true) {
+        self.keepsReasoning = keepsReasoning
+        state = MiniMax.Scan(keepsReasoning: keepsReasoning)
+    }
 
     mutating func splitStreamingPrefix(_ text: String) -> ReasoningOutput.Split {
         var text = text
@@ -858,7 +867,7 @@ struct IncrementalMiniMaxReasoningSplit {
         let verified = searched > settled ? min(previous.utf8.count, searched + MiniMax.closeTag.utf8.count + 8) : settled
         if verified > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: verified) {
             restartCount += 1
-            state = MiniMax.Scan()
+            state = MiniMax.Scan(keepsReasoning: keepsReasoning)
             settled = 0
             searched = 0
         }
@@ -1005,7 +1014,7 @@ struct IncrementalStrayTagRemoval {
 /// `IncrementalToolText` as the stream emitter reduces it.
 struct IncrementalToolStopText {
     private var reasoningSplit = IncrementalReasoningSplit()
-    private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
+    private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit(keepsReasoning: false)
     private var toolText: IncrementalToolText
 
     init(observer: NativeToolCallStreamEmitter) {
