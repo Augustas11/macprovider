@@ -133,11 +133,10 @@ type anthropicUsage struct {
 // same observed value /v1/chat/completions reports (SPEC-006-R013).
 func anthropicUsageFromChat(u tokenUsage) anthropicUsage {
 	cached := u.observedCachedTokens()
-	if cached < 0 {
+	if cached < 0 || cached > u.PromptTokens {
+		// Out of range is reported as no cache read, as sanitizedCachedPromptTokens
+		// does for /v1/chat/completions.
 		cached = 0
-	}
-	if cached > u.PromptTokens {
-		cached = u.PromptTokens
 	}
 	return anthropicUsage{InputTokens: u.PromptTokens - cached, CacheReadInputTokens: cached, OutputTokens: u.CompletionTokens}
 }

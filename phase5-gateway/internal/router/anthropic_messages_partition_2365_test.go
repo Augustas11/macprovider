@@ -48,13 +48,14 @@ func TestMessagesAutoPrefixKeyPartitionsByMetadataUserID(t *testing.T) {
 		messages(`"metadata":{"user_id":""},`, "turn one"),
 		messages(`"metadata":null,`, "turn one"),
 		messages(`"metadata":{"user_id":"`+strings.Repeat("k", maxPromptCacheKeyBytes)+`"},`, "turn one"),
+		messages(`"metadata":{"user_id":"  `+strings.Repeat("k", maxPromptCacheKeyBytes)+`  "},`, "turn two"),
 	} {
 		if resp := postAnthropicMessages(t, h, key, body, nil); resp.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 		}
 	}
-	if len(captured) != 11 {
-		t.Fatalf("captured %d upstream requests, want 11", len(captured))
+	if len(captured) != 12 {
+		t.Fatalf("captured %d upstream requests, want 12", len(captured))
 	}
 	for i, got := range captured {
 		if got == "" {
@@ -77,6 +78,9 @@ func TestMessagesAutoPrefixKeyPartitionsByMetadataUserID(t *testing.T) {
 	if captured[10] == unpartitioned || captured[10] == sessionA {
 		t.Fatalf("a %d-byte user_id must partition; got %q", maxPromptCacheKeyBytes, captured[10])
 	}
+	if captured[11] != captured[10] {
+		t.Fatalf("padded %d-byte user_id must trim then partition like the bare key; got %q want %q", maxPromptCacheKeyBytes, captured[11], captured[10])
+	}
 	if captured[7] != sessionA {
 		t.Fatalf("padded user_id = %q, want trimmed session-a key %q", captured[7], sessionA)
 	}
@@ -93,7 +97,7 @@ func TestAnthropicUsageFromChatReportsCacheRead(t *testing.T) {
 		{"nested cached", tokenUsage{PromptTokens: 2584, CompletionTokens: 9, PromptTokensDetails: promptTokensDetails{CachedTokens: 2556}}, anthropicUsage{InputTokens: 28, CacheReadInputTokens: 2556, OutputTokens: 9}},
 		{"flat cached", tokenUsage{PromptTokens: 100, CachedPromptTokens: 40, CompletionTokens: 1}, anthropicUsage{InputTokens: 60, CacheReadInputTokens: 40, OutputTokens: 1}},
 		{"no cache", tokenUsage{PromptTokens: 5, CompletionTokens: 7}, anthropicUsage{InputTokens: 5, OutputTokens: 7}},
-		{"cached above prompt", tokenUsage{PromptTokens: 10, PromptTokensDetails: promptTokensDetails{CachedTokens: 50}}, anthropicUsage{InputTokens: 0, CacheReadInputTokens: 10}},
+		{"cached above prompt", tokenUsage{PromptTokens: 10, PromptTokensDetails: promptTokensDetails{CachedTokens: 50}}, anthropicUsage{InputTokens: 10}},
 		{"negative cached", tokenUsage{PromptTokens: 10, PromptTokensDetails: promptTokensDetails{CachedTokens: -3}}, anthropicUsage{InputTokens: 10}},
 	} {
 		if got := anthropicUsageFromChat(tc.usage); got != tc.want {
@@ -128,5 +132,33 @@ func TestMessagesResponseReportsCacheReadInputTokens(t *testing.T) {
 	}
 	if got.Usage["input_tokens"] != 10 || got.Usage["cache_read_input_tokens"] != 40 || got.Usage["output_tokens"] != 9 {
 		t.Fatalf("usage=%v want input 10, cache_read 40, output 9\nbody=%s", got.Usage, resp.Body.String())
+	}
+}
+
+// #2365: the cache-read split reaches the streaming message_delta usage.
+func TestMessagesStreamReportsCacheReadInputTokens(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_1","choices":[{"delta":{"role":"assistant","content":"ok"}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl_1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"chatcmpl_1","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":9,"total_tokens":59,"prompt_tokens_details":{"cached_tokens":40}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":false}}`), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_messages_stream_cache_read_2365")
+	resp := postAnthropicMessages(t, h, key, `{"model":"llama","max_tokens":20,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	delta := anthropicStreamPayloadForEvent(t, resp.Body.String(), "message_delta")
+	usage, _ := delta["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) || usage["cache_read_input_tokens"] != float64(40) || usage["output_tokens"] != float64(9) {
+		t.Fatalf("message_delta usage=%v want input 10, cache_read 40, output 9\n%s", usage, resp.Body.String())
 	}
 }
