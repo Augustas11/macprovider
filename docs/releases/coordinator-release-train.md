@@ -22,6 +22,37 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Next Pearl runtime v1.8.288 — contents (tracked 2026-11-14)
+
+Live on 2026-11-14 (`scripts/ops/pearl-runtime.sh status`): coordinator and
+gateway `v1.8.286`, `code_changed_vs_live` true, gateway buyer hold off. Next
+step `signed_tag`: `v1.8.288` is the next unused tag on origin (see the
+Consumed identities row in `cli-release-train.md`).
+
+The table lists every merge on `main` since tag `v1.8.286` that touches
+`phase4-coordinator/`, `phase5-gateway/` or `phase7-verify/`
+(`git log v1.8.286..origin/main`), in merge order. #2151 and #2316 are in
+CLI tag `v1.8.287` but not in any runtime tag, so they are not live on Pearl.
+No change touches `phase7-verify/`.
+
+Schema: `scripts/pearl-database-schema-fingerprint.py` gives `e8cb7479…` at
+`v1.8.286` and `11d078bf…` at `30fdbe2cf`. Per
+`docs/runbooks/pearl-coordinator-rollout.md`, a different fingerprint means
+buyers are held with 503 until all serving gates pass, up to about 25 minutes.
+State that figure before the apply. No numbered migration or `.sql` file
+changes. The gateway adds nullable `demand_events` columns at startup in
+`phase5-gateway/internal/storage/sqlite/migrate.go`.
+
+| PR | Runtime-side change | DB / schema | Config keys / nginx | Live probe |
+|---|---|---|---|---|
+| [#2151](https://github.com/Augustas11/macprovider/pull/2151) (`2a07d60d5`) | Test only: `phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh` pins its catalog fixture to the commit of the published `release.json`. No coordinator or gateway code. | none | none | none |
+| [#2316](https://github.com/Augustas11/macprovider/pull/2316) (`6df6ac945`) | Checked-in config templates only: `latest_binary_version` 1.8.281 to 1.8.283 in `phase4-coordinator/coordinator.yaml.example`, `dist/coordinator.yaml` and `dist/coordinator.yaml.example`. No code. Live already recommends 1.8.287 (`cli-release.sh status`). | none | template value only | none |
+| [#2334](https://github.com/Augustas11/macprovider/pull/2334) (`d3b136de1`) | Coordinator verifies an optional signed catalog release manifest (`release.json.sig`, SPEC-023 §3.8) and serves `GET /v1/catalog-release` and `/v1/catalog-release.sig`. A manifest rejected at boot is logged and treated as absent; a SIGHUP reload rejects it. `deploy-pearl-vps.sh` stages the signature when the tag carries one. | none | nginx: two `location =` blocks for `/v1/catalog-release` (+ `.sig`) in `dist/nginx-coordinator.malibu.tech.conf` | Per the CLI train row: a provider on the next CLI verifies a feed through the signed manifest. That needs a catalog release that carries `release.json.sig`. No tracked file has that name on `main` at `30fdbe2cf`. |
+| [#2340](https://github.com/Augustas11/macprovider/pull/2340) (`af2d17d7a`) | [Gateway serving telemetry](#gateway-serving-telemetry-spec-006-r028--pending-runtime-inclusion-2026-11-13). The gateway also reads the provider usage fields `macprovider_queue_ms`, `macprovider_first_token_ms`, `macprovider_first_answer_ms` and `macprovider_decode_ms` (from #2332). | Gateway `demand_events`: `gw_first_reasoning_ms`, `gw_first_answer_ms`, `gw_output_tps_millitokens`, `streaming_mode`, `serving_engine`, `provider_reported_queue_ms`, `provider_reported_first_token_ms`, `provider_reported_first_answer_ms`, `provider_reported_decode_ms` | none | `/admin/demand-latency?window=24h` shows a sample for the model of one streamed request |
+| [#2339](https://github.com/Augustas11/macprovider/pull/2339) (`ba2732c4c`) | [Measured decode reorder and routed-throughput floor](#measured-decode-reorder-and-routed-throughput-floor-spec-002-r005--pending-runtime-inclusion-2026-11-13). The measured decode signal comes from the coordinator's own request phase timing. It does not come from the heartbeat. | none | none (wiring in `cmd/coordinator/main.go` only) | `/poolz` rows carry `routed_throughput_source` |
+| [#2342](https://github.com/Augustas11/macprovider/pull/2342) (`423f49ded`) | [Serving-path label](#serving-path-label-on-the-internal-gateway-hop-spec-002-r007-spec-006-r028--pending-runtime-inclusion-2026-11-14). The coordinator adds `served_path` (raw JSON, `omitempty`) to `InferenceResponseEnd` and checks it. An absent report gives no header. | Gateway `demand_events`: `served_path`, `served_rows` | none | `served_path_cells` entry in `/admin/demand-latency?window=24h` once providers run the next CLI |
+| [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`) | MiniMax M3 tool grammar `minimax` in the coordinator. Every MiniMax M3 request, plain chat included, goes only to providers that serve its model output (`providerServesModelOutput`). The same gate covers relay-blind and privacy-class reservations. The gateway's OpenRouter tool-family list adds `minimax-m3` / `minimax_m3`. | none | none | Per the CLI train row: a MiniMax request served by a provider on the next CLI. A provider on 1.8.287 gets no MiniMax traffic once this runtime is live (retryable 503 `tool_grammar_provider_unavailable`). |
+
 ## Serving-path label on the internal gateway hop (SPEC-002-R007, SPEC-006-R028) — pending runtime inclusion (2026-11-14)
 
 Related: #2341. PR #2342 merged as `423f49ded`. A provider may report
@@ -119,7 +150,9 @@ Live step, in this order:
    (`PEARL_RUNTIME_TASK=updater-bundle`). From the next apply on, the new
    rollback rule and the stated buyer-visible downtime are in effect.
 
-## Gateway releases orphaned reservations at startup — pending runtime inclusion (2026-11-10)
+## Gateway releases orphaned reservations at startup — live in v1.8.285 (merged 2026-11-10)
+
+#2274 merged as `7a793fe1b`, an ancestor of runtime tag `v1.8.285`.
 
 Related: #2268. The gateway now expires, before it listens, the active quota
 reservations without a settlement hold and the active concurrency reservations
@@ -130,7 +163,9 @@ it merges (`status`, `next`, `next --run`; state the downtime first). The apply
 that installs it still drains under the old binary, so a row orphaned before
 then is cleared only by the first restart of the new gateway.
 
-## On-request reasoning capability and Messages `disabled` to `none` — pending runtime inclusion (2026-11-10)
+## On-request reasoning capability and Messages `disabled` to `none` — live in v1.8.285 (merged 2026-11-10)
+
+#2275 merged as `189ed310c`, the commit runtime tag `v1.8.285` points at.
 
 Related: #2269. The coordinator advertises `capabilities.reasoning` for
 Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 when an eligible native provider runs
@@ -180,7 +215,7 @@ Not in this runtime: the #2236 gateway demand-telemetry change (waits on its
 lab memory measurement) and the #2244 / #2236 `coordinator.yaml` rows, which go
 through `scripts/ops/catalog-activate.sh`.
 
-## Provider WebSocket read-fail reason names the peer close code — pending runtime inclusion (2026-11-08)
+## Provider WebSocket read-fail reason names the peer close code — live in v1.8.282 (merged 2026-11-08)
 
 | PR | Issue | Coordinator change | Status |
 |---|---|---|---|
@@ -190,7 +225,7 @@ Deploy: include `13a24a45e` in the next reviewed Pearl runtime through
 `scripts/ops/pearl-runtime.sh status`, `next`, `next --run` (state the
 downtime first). Log-only; no routing or billing change.
 
-## C2P frames sealed and queued in sequence order — pending runtime inclusion (2026-11-08)
+## C2P frames sealed and queued in sequence order — live in v1.8.282 (merged 2026-11-08)
 
 | PR | Issue | Coordinator change | Status |
 |---|---|---|---|
@@ -204,7 +239,9 @@ the downtime first). Coordinator-only; no CLI cut needed.
 Live acceptance: zero `tier2_aead_decrypt_failed` provider closes following
 `aead_rekey_committed` across a day of encrypted-leg traffic.
 
-## SPEC-036 FR-26 reference scorers — pending runtime inclusion (2026-11-07)
+## SPEC-036 FR-26 reference scorers — live in v1.8.282 (2026-11-07)
+
+#2248 merged as `d30d591dc`, an ancestor of runtime tag `v1.8.282`.
 
 | PR | Issue | Coordinator change | Status |
 |---|---|---|---|
@@ -433,6 +470,8 @@ v1.8.246; #2023 (#1355) in v1.8.246; #2024 (#1911/#2017) in v1.8.247.
 ## How to track the next coordinator release
 
 The table below is the net change against the **live** Pearl coordinator/gateway.
+The current one is "Next Pearl runtime v1.8.288 — contents" at the top of this
+file (live `v1.8.286` per `scripts/ops/pearl-runtime.sh status` on 2026-11-14).
 
 1. A PR that changes what Pearl runs **merges**. Add one row the same day,
    with status `merged`. That covers:
@@ -459,8 +498,9 @@ coordinator release (see "Which lane" below).
   - Record it here and in the CLI train, so the two trains never reuse a tag.
   - Check with `git tag -l 'v1.8.*' | sort -V | tail`, and read both train files.
 - **A coordinator release never changes the provider binary recommendation.**
-  `recommended_binary_version` stays at the promoted CLI stable (`1.8.123`)
-  until the CLI train promotes.
+  `recommended_binary_version` stays at the promoted CLI stable (live
+  1.8.287 per `scripts/ops/cli-release.sh status` on 2026-11-14) until the CLI
+  train promotes.
 - **One cut of current `main`.**
   - Do not dual-dispatch `pearl-runtime-release.yml` from two sessions.
   - Record owner, payload and tag here before and after apply.
@@ -500,6 +540,11 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 - `regression`: aborts unless `CATALOG_REGRESSION_OVERRIDE_REASON` is set (the override is logged).
 
 ## Live on Pearl
+
+Current state, 2026-11-14 (`scripts/ops/pearl-runtime.sh status`): coordinator
+and gateway **v1.8.286** (release run 43170001669), `/healthz` 200, gateway
+buyer hold off, `code_changed_vs_live` true. The rollout narratives and the
+v1.8.236 table below are historical.
 
 ### Runtime rollout — 2026-10-06
 
@@ -580,7 +625,7 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 ### Recent coordinator releases
 
-This table stops at v1.8.259. Later releases (for example v1.8.284 and v1.8.285) are recorded in the dated entries above it.
+This table stops at v1.8.259. Later runtime tags, from the Release Pearl runtime runs: v1.8.278 (`b872fb48a`), v1.8.279 (`ecd6ecbeb`), v1.8.282 (`201a4b2e8`), v1.8.284 (`9cbdbf3a5`), v1.8.285 (`189ed310c`, run 42777723025) and v1.8.286 (`745d82fb3`, run 43170001669). Dated entries above record their contents.
 
 | Tag | Commit | Head PR |
 |---|---|---|
@@ -701,7 +746,9 @@ renewal has since been retired (#1938); a restamp is on demand
 - After the apply: `/v1/providers/app-attest/challenge` answers 401 without a provider token; three `hash_required_provider_excluded` lines at reconnect (pre-existing, none after 08:33Z).
 - Pending live checks: the first nightly retention run on the drain code (03:00 UTC), then the one-time `retention-vacuum-conversion` task once a run reports `backlog_drained=true`; >1 enrolled provider serving private traffic (#1967).
 
-## Tool selection — merged, awaiting runtime rollout (2026-10-15)
+## Tool selection — in runtime v1.8.246 and later (merged 2026-10-15)
+
+`33b6a3238` is an ancestor of tags `v1.8.246` and `v1.8.247`, not of `v1.8.245`.
 
 | Payload | State |
 |---|---|
@@ -758,7 +805,7 @@ open until hardware and authorized signed-candidate live acceptance pass.
 
 Merged, waiting for this train:
 - [x] #2314 (Related: #2312) — live in runtime v1.8.286 (2026-11-12); canonical JSON: whole numbers at or above 2^63 no longer overflow to 2^63−1; exact int64 guard in coordinator `jcs` and `computeintegrity` and in the `phase7-verify` canonicalizer (merge `e2e9f0be3`). Live step: the next coordinator runtime update through `scripts/ops/pearl-runtime.sh status` then `next --run`; the verifier change ships with the next phase7-verify build. In-range output is unchanged, so no stored digest changes.
-- [ ] #1983 privacy reject reasons (SPEC-049-R030) and in-band identity key rotation (R031), coordinator and gateway side.
+- [x] #1983 privacy reject reasons (SPEC-049-R030) and in-band identity key rotation (R031), coordinator and gateway side: merge `723ea9c5f` is an ancestor of runtime tag `v1.8.247`.
 
 ## Earlier plan: net changes vs v1.8.236 (shipped in v1.8.237 / v1.8.239 / v1.8.241)
 
