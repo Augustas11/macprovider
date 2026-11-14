@@ -659,7 +659,30 @@ enum PagedKVRuntimeParityProbe {
         )
         Self.logParityDivergence(stage: "two-row", row: "a", serial: serialA, shared: twoRow["shared-parity-a"])
         Self.logParityDivergence(stage: "two-row", row: "b", serial: serialB, shared: twoRow["shared-parity-b"])
-        return twoRow["shared-parity-a"] == serialA && twoRow["shared-parity-b"] == serialB
+        let proven = twoRow["shared-parity-a"] == serialA && twoRow["shared-parity-b"] == serialB
+        if !proven, twoRow["shared-parity-b"] != serialB {
+            // Diagnostic only, after the verdict: whether row b also leaves
+            // its serial reference alone (paged numerics) or only beside a
+            // peer (batching).
+            let oneRowB = try await sharedForwardGeneratedTokens(
+                container: container,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                poolEpoch: poolEpoch,
+                layerCount: layerCount,
+                cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout,
+                rows: [("shared-parity-b", promptB)],
+                nNew: nNew
+            )
+            Self.logParityDivergence(stage: "one-row", row: "b", serial: serialB, shared: oneRowB["shared-parity-b"])
+            if oneRowB["shared-parity-b"] == serialB {
+                PagedKVRuntimeDiagnostics.log("shared-parity one-row row=b matches serial")
+            } else if oneRowB["shared-parity-b"] == twoRow["shared-parity-b"] {
+                PagedKVRuntimeDiagnostics.log("shared-parity one-row row=b equals two-row row=b")
+            }
+        }
+        return proven
     }
 
     /// Names where a shared-forward row first left its serial reference
