@@ -1058,8 +1058,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
         let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
-            // SPEC-001-R018: one GPU turn per scheduler prefill group (one chunk per row).
-            self.gpuTurnParticipant?.beginTurn(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count })); defer { self.gpuTurnParticipant?.endTurn() }
+            // SPEC-001-R018: a shared [B, L] forward (one chunk per row) is one
+            // GPU turn; the per-row path below takes one turn per row's chunk.
+            let gpuTurn = self.gpuTurnParticipant.map(GPUTurnScope.init)
+            defer { gpuTurn?.close() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(
                 inputs,
@@ -1067,6 +1069,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             ),
                self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
                !raggedOffsets || self.supportsRaggedPrefillOffsets {
+                gpuTurn?.begin(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count }))
                 let rowStates = inputs.map {
                     self.rowState(
                         for: $0.requestID,
@@ -1215,6 +1218,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                     var sampledToken: Int?
                     if !input.promptTokens.isEmpty {
+                        gpuTurn?.yield(.prefillChunk(tokens: input.promptTokens.count))
                         let prompt = MLXArray(input.promptTokens.map(Int32.init))
                             .reshaped([1, input.promptTokens.count])
                         let text = LMInput.Text(tokens: prompt)
@@ -3415,6 +3419,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         guard !dueIDs.isEmpty else { return (inputs, []) }
         do {
+            // SPEC-001-R018: the catch-up before a decode window is its own GPU turn.
+            gpuTurnParticipant?.beginTurn(.decodeStep(rows: dueIDs.count))
+            defer { gpuTurnParticipant?.endTurn() }
             try await flushNativeMTPDrafterColumns(
                 targetModel: targetModel,
                 requestIDs: dueIDs,

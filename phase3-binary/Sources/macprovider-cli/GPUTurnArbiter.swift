@@ -349,6 +349,19 @@ final class GPUTurnArbiter: @unchecked Sendable {
 
     // MARK: Registration
 
+    /// A handle that is not registered yet: turn calls on it proceed at once
+    /// and record nothing until `register(_:modelID:)`. A runtime takes one
+    /// while it is constructed and registers it only once its initializer can
+    /// no longer throw, so a failed construction never leaves a participant
+    /// behind (Swift runs no `deinit` for a partially initialized object).
+    func makeParticipant() -> GPUTurnParticipant {
+        condition.lock()
+        defer { condition.unlock() }
+        let participant = GPUTurnParticipant(id: nextID, arbiter: self)
+        nextID += 1
+        return participant
+    }
+
     func register(modelID: String) -> GPUTurnParticipant {
         condition.lock()
         let participant = GPUTurnParticipant(id: nextID, arbiter: self)
@@ -574,6 +587,18 @@ final class GPUTurnScope: @unchecked Sendable {
     func yield(_ kind: GPUWorkKind) {
         end()
         begin(kind)
+    }
+
+    /// `PrefillParameters.progress` for a chunked prefill whose first chunk
+    /// runs in the turn the caller took: after each chunk is queued the turn
+    /// passes to the next one (at most `stepSize` tokens, the last being the
+    /// iterator's own first forward); the terminal `(total, total)` report
+    /// takes no turn.
+    func prefillProgress(stepSize: Int) -> @Sendable (Int, Int) -> Void {
+        { processed, total in
+            let remaining = total - processed
+            if remaining > 0 { self.yield(.prefillChunk(tokens: min(stepSize, remaining))) }
+        }
     }
 
     /// Ends any turn and the work interval; later calls do nothing.

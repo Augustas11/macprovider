@@ -1,4 +1,5 @@
 import Foundation
+import MLXLMCommon
 import XCTest
 @testable import macprovider_cli
 
@@ -321,5 +322,73 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertEqual(try GPUTurnPolicyRegistry.labSelection(flag: nil, environment: [key: "passthrough"])?.source, "env")
         XCTAssertEqual(try GPUTurnPolicyRegistry.labSelection(flag: "passthrough", environment: [key: "bogus"])?.source, "flag")
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.labSelection(flag: nil, environment: [key: "bogus"]))
+    }
+
+    func testUnregisteredHandleProceedsAndRecordsNothingUntilRegistered() {
+        let arbiter = GPUTurnArbiter(policy: AlwaysWaitTestPolicy())
+        let other = arbiter.register(modelID: "other")
+        let pending = arbiter.makeParticipant()
+        XCTAssertFalse(arbiter.isRegistered(pending))
+        // Not registered: no wait even under an always-wait policy, and the
+        // other participant keeps its single-participant fast path.
+        pending.withTurn(.prefillChunk(tokens: 8)) {}
+        other.withTurn(.decodeStep(rows: 1)) {}
+        XCTAssertEqual(arbiter.snapshot().participants.map(\.id), [other.id])
+        arbiter.register(pending, modelID: "pending")
+        XCTAssertTrue(arbiter.isRegistered(pending))
+        XCTAssertNotEqual(pending.id, other.id)
+    }
+
+    /// A runtime whose initializer throws before every property is set runs
+    /// no deinit; it must leave no participant in the process arbiter.
+    func testRuntimeInitThatThrowsLeavesNoParticipant() async {
+        let modelID = "mlx-community/gpt-oss-20b-gpu-turn-leak-test"
+        do {
+            // Explicit kv_bits on gpt-oss is refused before any load.
+            _ = try await ModelRuntime(modelID: modelID, kvBitsOverride: 4)
+            XCTFail("expected the quantized-KV refusal")
+        } catch {
+            XCTAssertTrue(error is ModelRuntimeLoadError, "\(error)")
+        }
+        XCTAssertFalse(GPUTurnArbiter.shared.stateForTest().participants.contains { $0.modelID == modelID })
+    }
+
+    /// The serial prefill seam: the caller's turn covers the first chunk, the
+    /// progress report after each chunk passes the turn on, and the iterator's
+    /// final forward (the remainder) runs in the last one. A 16-token prompt at
+    /// step 4 under the legacy remainder plan is four forwards in four turns.
+    func testChunkedPrefillTakesOneTurnPerChunk() throws {
+        let arbiter = GPUTurnArbiter(policy: PassthroughGPUTurnPolicy())
+        let a = arbiter.register(modelID: "a")
+        let scope = GPUTurnScope(a)
+        scope.open()
+        let stepSize = 4
+        let total = 16
+        var prefill = PrefillParameters.legacyRemainder(stepSize: stepSize)
+        prefill.progress = scope.prefillProgress(stepSize: stepSize)
+        var turnAtForward: [Int] = []
+        func fakeForward(_ tokens: Int) {
+            let state = arbiter.stateForTest().participant(a.id)!
+            XCTAssertEqual(state.turnsHeld, 1)
+            XCTAssertEqual(state.lastTurnKind, .prefillChunk(tokens: tokens))
+            turnAtForward.append(state.counters.turns)
+        }
+
+        scope.begin(.prefillChunk(tokens: min(stepSize, total)))
+        // `LLMModel.prepare` under `.remainder` reserves one step for the iterator.
+        let processed = try prefill.forEachChunk(total: total, reserving: stepSize) { range in
+            fakeForward(range.count)
+        }
+        fakeForward(total - processed)
+        prefill.progress?(total, total)
+        scope.end()
+        scope.close()
+
+        XCTAssertEqual(processed, 12)
+        XCTAssertEqual(turnAtForward, [1, 2, 3, 4])
+        let counters = arbiter.stateForTest().participant(a.id)!.counters
+        XCTAssertEqual(counters.prefillChunks, 4)
+        XCTAssertEqual(counters.prefillTokens, total)
+        XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.turnsHeld, 0)
     }
 }

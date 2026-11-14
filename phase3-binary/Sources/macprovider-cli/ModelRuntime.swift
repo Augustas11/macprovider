@@ -4090,7 +4090,11 @@ maxTokens: 1,
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
-        self.gpuTurnParticipant = GPUTurnArbiter.shared.register(modelID: modelID ?? "unloaded")
+        // SPEC-001-R018: registered at the end of this initializer, once it can
+        // no longer throw: a throw before every property is set runs no deinit,
+        // and a registered handle would leak and end the single-participant
+        // fast path for the process.
+        self.gpuTurnParticipant = GPUTurnArbiter.shared.makeParticipant()
         self.configuredModelLoadPath = Self.nonEmpty(modelLoadPath)
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -4239,6 +4243,7 @@ maxTokens: 1,
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
+            // No model loaded: the GPU turn participant registers on the first load.
             return
         }
         try Self.refuseQuantizedKV(explicit: kvBitsOverride, modelIDs: [modelID, modelLoadPath, catalogModelIDAlias])
@@ -4516,6 +4521,7 @@ maxTokens: 1,
             self.currentDraftTargetModelID = modelID
             self.currentDraftContainer = draftContainer
         }
+        GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
     }
 
     init(
@@ -10914,10 +10920,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // SPEC-001-R018: the iterator's own prefill yields the turn after
                             // every chunk it queues; its final forward and the first decode
                             // step run in the turn taken here.
-                            generation.parameters.prefill.progress = { processed, total in
-                                let remaining = total - processed
-                                if remaining > 0 { gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, remaining))) }
-                            }
+                            generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
                             gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -12034,10 +12037,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // SPEC-001-R018: the iterator's own prefill yields the turn after
                         // every chunk it queues; its final forward and the first decode
                         // step run in the turn taken here.
-                        generation.parameters.prefill.progress = { processed, total in
-                            let remaining = total - processed
-                            if remaining > 0 { gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, remaining))) }
-                        }
+                        generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
                         gpuTurn.yield(.prefillChunk(tokens: min(prefillStepSize, iteratorInput.text.tokens.size)))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -12695,6 +12695,7 @@ maxTokens: 1,
             let kvBitsOverride = runtime.serialKVBits
             let prefillStepSize = runtime.prefillStepSize
             let blockingInferenceExecutor = runtime.blockingInferenceExecutor
+            let gpuTurnParticipant = runtime.gpuTurnParticipant
             var tokens = 0
             var seconds = 0.0
             var decodeTokens = 0
@@ -12704,7 +12705,7 @@ maxTokens: 1,
                 let start = Date()
                 let result: BlockingGenerateResult = try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
-                    let parameters = try Self.makeServeGenerateParameters(
+                    var parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
                         maxTokens: maxTokens,
                         promptTokens: prompt.count,
@@ -12714,11 +12715,23 @@ maxTokens: 1,
                         temperature: 0.0,
                         topP: 1.0
                     )
-                    return try await blockingInferenceExecutor.run { cancellation in
+                    // SPEC-001-R018: the probe may run while another model serves,
+                    // so it takes turns like a request: one per prefill chunk and
+                    // one per decode step.
+                    let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                    gpuTurn.open()
+                    defer { gpuTurn.close() }
+                    parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
+                    return try await blockingInferenceExecutor.run { [parameters] cancellation in
+                        gpuTurn.begin(.prefillChunk(tokens: min(prefillStepSize, prompt.count)))
+                        defer { gpuTurn.end() }
                         // Yield to a buyer at once: the driver cancels this
                         // task when a request arrives.
-                        BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                            cancellation.isCancelled ? GenerateDisposition.stop : GenerateDisposition.more
+                        return BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                            gpuTurn.end()
+                            let disposition = cancellation.isCancelled ? GenerateDisposition.stop : GenerateDisposition.more
+                            if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
+                            return disposition
                         })
                     }
                 }
