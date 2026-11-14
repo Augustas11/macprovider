@@ -36,6 +36,12 @@ import MacProviderCore
 ///
 /// stdout ends with `GATE pass|fail ...` then `GOAL share=...`. Exit codes:
 /// 0 pass, 2 gate fail, 3 hang, 1 when the check cannot run.
+///
+/// `--gpu-turn-policies a;b;...`: load, warmup, solo and reference phases
+/// run once under passthrough; each listed policy then runs its own
+/// contended phase (the last also the soak) and prints one `POLICY` line;
+/// the final `GATE`/`GOAL` lines are the last policy's. Exit 2 when any
+/// policy fails its gate.
 enum MultiModelCheck {
     static let rampSeconds: Double = 10
     static let minimumOverlap = 0.95
@@ -66,10 +72,21 @@ extension MultiModelBenchCommand {
         // SPEC-001-R018: the lab selects the GPU turn policy both runtimes
         // share; an invalid flag or env value fails the check before any load.
         let gpuTurnSelection: (policy: any GPUTurnPolicy, source: String)
+        // --gpu-turn-policies: everything before the first policy's contended
+        // phase runs under passthrough; the list replaces the env selection.
+        var policyList: [MultiModelCheckPolicySpec]?
         do {
-            gpuTurnSelection = try GPUTurnPolicyRegistry.labSelection(
-                flag: gpuTurnPolicy, environment: ProcessInfo.processInfo.environment
-            ) ?? (GPUTurnPolicyRegistry.compiledDefault, "default")
+            if let gpuTurnPolicies {
+                policyList = try Self.parsePolicyList(gpuTurnPolicies).map { spec in
+                    let policy = try GPUTurnPolicyRegistry.make(spec)
+                    return MultiModelCheckPolicySpec(spec: spec, name: policy.name, parameters: policy.parameters)
+                }
+                gpuTurnSelection = (try GPUTurnPolicyRegistry.make("passthrough"), "policies_list_prepass")
+            } else {
+                gpuTurnSelection = try GPUTurnPolicyRegistry.labSelection(
+                    flag: gpuTurnPolicy, environment: ProcessInfo.processInfo.environment
+                ) ?? (GPUTurnPolicyRegistry.compiledDefault, "default")
+            }
         } catch {
             MultiModelCheck.emit("CHECK error reason=gpu_turn_policy_invalid detail=\"\(error)\"")
             throw ExitCode(1)
@@ -102,7 +119,8 @@ extension MultiModelBenchCommand {
                 name: gpuTurnSelection.policy.name,
                 parameters: gpuTurnSelection.policy.parameters,
                 source: gpuTurnSelection.source
-            )
+            ),
+            gpuTurnPolicies: policyList
         )
         let report = MultiModelCheckReport(
             schema: MultiModelCheck.schema,
@@ -214,19 +232,18 @@ struct MultiModelCheckRunner: Sendable {
         }
         box.write()
 
+        if let policies = config.gpuTurnPolicies {
+            try await runPolicies(policies, soloA: soloA, soloB: soloB, references: references, lanes: lanes)
+            return
+        }
+
         let contended = try await runPhase(.contended, seconds: config.phaseSeconds, lanes: lanes)
         var checked = [contended]
         if config.soakSeconds > 0 {
             checked.append(try await runPhase(.soak, seconds: config.soakSeconds, lanes: lanes))
         }
 
-        for slot in MultiModelBenchSlot.allCases {
-            let snapshot = await runtimes[slot]!.currentSnapshot()
-            box.update { report in
-                guard let index = report.runtimes.firstIndex(where: { $0.model == slot.rawValue }) else { return }
-                report.runtimes[index].recordEnd(snapshot)
-            }
-        }
+        await recordRuntimeEnds(runtimes)
 
         let gate = Self.gate(checked: checked, references: references, report: box.snapshot())
         let goal = try Self.goal(soloA: soloA, soloB: soloB, contended: contended)
@@ -242,6 +259,126 @@ struct MultiModelCheckRunner: Sendable {
         MultiModelCheck.emit(gate.line)
         MultiModelCheck.emit(goal.line)
         if !gate.reasons.isEmpty { throw ExitCode(2) }
+    }
+
+    /// `--gpu-turn-policies`: one contended phase per policy (the last also
+    /// runs the soak), each judged against the shared solo references and
+    /// solo denominators. A phase returns only after every lane's in-flight
+    /// request finished, so no request crosses into the next policy. A policy
+    /// whose phase cannot be measured (e.g. a starved model completes
+    /// nothing) fails its gate and the run goes on to the next policy.
+    private func runPolicies(
+        _ policies: [MultiModelCheckPolicySpec],
+        soloA: MultiModelCheckPhaseResult,
+        soloB: MultiModelCheckPhaseResult,
+        references: [MultiModelBenchSlot: [Int: MultiModelCheckRequestRecord]],
+        lanes: MultiModelCheckLanes
+    ) async throws {
+        func fmt(_ value: Double?, _ format: String) -> String { value.map { String(format: format, $0) } ?? "n/a" }
+        let sharedPhases = box.snapshot().phases
+        var anyFailed = false
+        var lastGateLine = ""
+        var lastGoalLine = ""
+        for (index, entry) in policies.enumerated() {
+            let policy = try GPUTurnPolicyRegistry.make(entry.spec)
+            GPUTurnArbiter.shared.setPolicy(policy)
+            MultiModelBenchCommand.log("gpu_turn_policy index=\(index) spec=\(entry.spec) name=\(policy.name) source=policies_list")
+            let firstPhaseIndex = box.snapshot().phases.count
+            var failure: String?
+            do {
+                _ = try await runPhase(.contended, seconds: config.phaseSeconds, lanes: lanes, policy: (index, entry.spec))
+                if index == policies.count - 1, config.soakSeconds > 0 {
+                    _ = try await runPhase(.soak, seconds: config.soakSeconds, lanes: lanes, policy: (index, entry.spec))
+                }
+            } catch let exit as ExitCode {
+                throw exit
+            } catch let check as MultiModelCheckFailure {
+                failure = check.reason
+            } catch {
+                failure = "error detail=\(String(describing: error).replacingOccurrences(of: "\n", with: " "))"
+            }
+            let policyPhases = Array(box.snapshot().phases[firstPhaseIndex...])
+            // A phase that failed its post-run checks still recorded its stats.
+            let measured = policyPhases.filter(\.completed)
+            var outcome = Self.gate(checked: measured, references: references, report: box.snapshot(), memoryPhases: sharedPhases + policyPhases)
+            if let failure { outcome.reasons.insert("check_error \(failure)", at: 0) }
+            let contended = measured.first { $0.phase == MultiModelCheckPhase.contended.rawValue }
+            var goal: MultiModelCheckGoal?
+            if let contended {
+                do {
+                    goal = try Self.goal(soloA: soloA, soloB: soloB, contended: contended)
+                } catch let check as MultiModelCheckFailure {
+                    outcome.reasons.append("goal_unavailable \(check.reason)")
+                }
+            } else {
+                outcome.reasons.append("goal_unavailable no_contended_phase")
+            }
+            if let first = outcome.reasons.first {
+                let more = outcome.reasons.count > 1 ? " (+\(outcome.reasons.count - 1) more in JSON)" : ""
+                outcome.line = "GATE fail reason=\(first)\(more)"
+            }
+            let pass = outcome.reasons.isEmpty
+            if !pass { anyFailed = true }
+            let waits = Dictionary(
+                (contended?.gpuTurns?.participants ?? []).compactMap { p in p.model.map { ($0, p.arbiter.waitSeconds) } },
+                uniquingKeysWith: +)
+            let minFrac = goal.map { min($0.aFrac, $0.bFrac) }
+            let line = "POLICY \(entry.spec) \(outcome.line.dropFirst("GATE ".count))"
+                + " share=\(fmt(goal?.share, "%.4f")) a_frac=\(fmt(goal?.aFrac, "%.4f")) b_frac=\(fmt(goal?.bFrac, "%.4f")) min_frac=\(fmt(minFrac, "%.4f"))"
+                + " main_ttft_ms=\(fmt(contended?.a?.ttftMsMedian, "%.0f")) main_ttft_p95_ms=\(fmt(contended?.a?.ttftMsP95, "%.0f")) worker_ttft_ms=\(fmt(contended?.b?.ttftMsMedian, "%.0f"))"
+                + " a_tps=\(fmt(contended?.a?.decodeTokensPerSecond, "%.2f")) b_tps=\(fmt(contended?.b?.decodeTokensPerSecond, "%.2f"))"
+                + " a_wait_s=\(fmt(waits["a"], "%.3f")) b_wait_s=\(fmt(waits["b"], "%.3f"))"
+            let result = MultiModelCheckPolicyResult(
+                spec: entry.spec,
+                policy: policy.name,
+                policyParameters: policy.parameters,
+                phases: policyPhases.map(\.phase),
+                gate: MultiModelCheckGate(pass: pass, reasons: outcome.reasons, line: outcome.line),
+                goal: goal,
+                minFrac: minFrac,
+                mainTtftMsP95: contended?.a?.ttftMsP95,
+                workerTtftMsMedian: contended?.b?.ttftMsMedian,
+                aWaitSeconds: waits["a"],
+                bWaitSeconds: waits["b"],
+                parityChecked: outcome.checked,
+                parityMismatches: outcome.mismatches,
+                gpuTurns: policyPhases.compactMap(\.gpuTurns),
+                memoryBudget: policyPhases.compactMap(\.memoryBudget),
+                line: line
+            )
+            box.update { report in
+                report.policies.append(result)
+                report.outputComparison = outcome.outputComparison
+            }
+            box.write()
+            MultiModelCheck.emit(line)
+            lastGateLine = outcome.line
+            lastGoalLine = goal?.line ?? "GOAL unavailable"
+            if index == policies.count - 1 {
+                box.update { report in
+                    report.parityChecked = outcome.checked
+                    report.parityMismatches = outcome.mismatches
+                    report.gate = result.gate
+                    report.goal = goal
+                }
+            }
+        }
+        await recordRuntimeEnds(lanes.runtimes)
+        box.update { $0.complete = true }
+        box.write()
+        MultiModelCheck.emit(lastGateLine)
+        MultiModelCheck.emit(lastGoalLine)
+        if anyFailed { throw ExitCode(2) }
+    }
+
+    private func recordRuntimeEnds(_ runtimes: [MultiModelBenchSlot: ModelRuntime]) async {
+        for slot in MultiModelBenchSlot.allCases {
+            let snapshot = await runtimes[slot]!.currentSnapshot()
+            box.update { report in
+                guard let index = report.runtimes.firstIndex(where: { $0.model == slot.rawValue }) else { return }
+                report.runtimes[index].recordEnd(snapshot)
+            }
+        }
     }
 
     /// A value that names a local path must exist as a directory; anything
@@ -437,8 +574,11 @@ struct MultiModelCheckRunner: Sendable {
 
     private func rows(_ slot: MultiModelBenchSlot) -> Int { slot == .a ? config.rowsA : config.rowsB }
 
-    private func runPhase(_ phase: MultiModelCheckPhase, seconds: Double, lanes: MultiModelCheckLanes) async throws -> MultiModelCheckPhaseResult {
-        let started = beginPhase(phase, seconds: seconds)
+    /// `policy`: the `--gpu-turn-policies` entry this phase runs under; its
+    /// index tags request ids so phases of different policies never share one.
+    private func runPhase(_ phase: MultiModelCheckPhase, seconds: Double, lanes: MultiModelCheckLanes, policy: (index: Int, spec: String)? = nil) async throws -> MultiModelCheckPhaseResult {
+        let started = beginPhase(phase, seconds: seconds, policySpec: policy?.spec)
+        let tag = policy.map { "-p\($0.index)" } ?? ""
         let deadline = started + UInt64(seconds * 1e9)
         let rowCounts = Dictionary(uniqueKeysWithValues: phase.slots.map { ($0, rows($0)) })
         var records: [MultiModelCheckRequestRecord] = []
@@ -449,7 +589,7 @@ struct MultiModelCheckRunner: Sendable {
                     for lane in 0..<count {
                         let offset = (lane * lanes.promptCount) / count
                         group.addTask {
-                            try await lanes.runLane(phase: phase, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
+                            try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
                         }
                     }
                 }
@@ -464,6 +604,7 @@ struct MultiModelCheckRunner: Sendable {
         lanes.attachOutputs(&records)
         records.sort { ($0.startSeconds, $0.model, $0.lane) < ($1.startSeconds, $1.model, $1.lane) }
         var result = finishPhase(phase, seconds: seconds, records: records, started: started)
+        result.gpuTurnPolicy = policy?.spec
         let window = (MultiModelCheck.rampSeconds, seconds)
         let intervalSeconds = window.1 - window.0
         result.measurementSegments = [[window.0, window.1]]
@@ -590,12 +731,17 @@ struct MultiModelCheckRunner: Sendable {
         return result
     }
 
-    private func beginPhase(_ phase: MultiModelCheckPhase, seconds: Double) -> UInt64 {
+    private func beginPhase(_ phase: MultiModelCheckPhase, seconds: Double, policySpec: String? = nil) -> UInt64 {
         Memory.peakMemory = 0 // setter resets MLX's peak counter
         gpuTurns.begin()
         memoryBudget.begin()
-        monitor.phaseBegan(phase.rawValue)
-        box.update { $0.phases.append(MultiModelCheckPhaseResult(phase: phase.rawValue, durationSeconds: seconds)) }
+        // The watchdog's phase label names the policy, so a hang line does too.
+        monitor.phaseBegan(policySpec.map { "\(phase.rawValue)[\($0)]" } ?? phase.rawValue)
+        box.update { report in
+            var result = MultiModelCheckPhaseResult(phase: phase.rawValue, durationSeconds: seconds)
+            result.gpuTurnPolicy = policySpec
+            report.phases.append(result)
+        }
         box.write()
         MultiModelBenchCommand.log("phase start \(phase.rawValue) seconds=\(seconds)")
         return MultiModelCheck.now()
@@ -649,8 +795,10 @@ struct MultiModelCheckRunner: Sendable {
     static func gate(
         checked phases: [MultiModelCheckPhaseResult],
         references: [MultiModelBenchSlot: [Int: MultiModelCheckRequestRecord]],
-        report: MultiModelCheckReport
+        report: MultiModelCheckReport,
+        memoryPhases: [MultiModelCheckPhaseResult]? = nil
     ) -> GateOutcome {
+        let memoryPhases = memoryPhases ?? report.phases
         var outcome = GateOutcome()
         for slot in MultiModelBenchSlot.allCases {
             let all = (references[slot]!.values.map { $0 }) + phases.flatMap(\.requests).filter { $0.model == slot.rawValue }
@@ -699,13 +847,13 @@ struct MultiModelCheckRunner: Sendable {
             }
         }
         let memoryLimit = report.loads.last?.mlxMemoryLimitBytes ?? 0
-        for phase in report.phases {
+        for phase in memoryPhases {
             guard let footprint = phase.physFootprintMaxBytes, memoryLimit > 0, footprint > UInt64(memoryLimit) else { continue }
             outcome.reasons.append("memory_over_limit phase=\(phase.phase) footprint_max_bytes=\(footprint) mlx_memory_limit_bytes=\(memoryLimit)")
         }
         // SPEC-001-R017: the process stays under the one shared limit and no
         // row is admitted past the shared budget.
-        for phase in report.phases {
+        for phase in memoryPhases {
             guard let budget = phase.memoryBudget else { continue }
             if let limit = budget.limitBytes, limit > 0, let footprint = phase.physFootprintMaxBytes, footprint > UInt64(limit) {
                 outcome.reasons.append("memory_over_shared_limit phase=\(phase.phase) footprint_max_bytes=\(footprint) shared_limit_bytes=\(limit)")
@@ -784,20 +932,20 @@ struct MultiModelCheckLanes: Sendable {
 
     var promptCount: Int { requests[.a]!.count }
 
-    func runLane(phase: MultiModelCheckPhase, slot: MultiModelBenchSlot, lane: Int, offset: Int, phaseStart: UInt64, deadline: UInt64) async throws -> [MultiModelCheckRequestRecord] {
+    func runLane(phase: MultiModelCheckPhase, tag: String = "", slot: MultiModelBenchSlot, lane: Int, offset: Int, phaseStart: UInt64, deadline: UInt64) async throws -> [MultiModelCheckRequestRecord] {
         var records: [MultiModelCheckRequestRecord] = []
         var sequence = 0
         while MultiModelCheck.now() < deadline {
             let promptIndex = (offset + sequence) % promptCount
-            records.append(try await serve(phase: phase, slot: slot, lane: lane, sequence: sequence, promptIndex: promptIndex, phaseStart: phaseStart))
+            records.append(try await serve(phase: phase, tag: tag, slot: slot, lane: lane, sequence: sequence, promptIndex: promptIndex, phaseStart: phaseStart))
             sequence += 1
         }
         return records
     }
 
-    func serve(phase: MultiModelCheckPhase, slot: MultiModelBenchSlot, lane: Int, sequence: Int, promptIndex: Int, phaseStart: UInt64) async throws -> MultiModelCheckRequestRecord {
+    func serve(phase: MultiModelCheckPhase, tag: String = "", slot: MultiModelBenchSlot, lane: Int, sequence: Int, promptIndex: Int, phaseStart: UInt64) async throws -> MultiModelCheckRequestRecord {
         let runtime = runtimes[slot]!
-        let request = requests[slot]![promptIndex].withRequestID("mmc-\(nonce)-\(phase.rawValue)-\(slot.rawValue)-l\(lane)-r\(sequence)")
+        let request = requests[slot]![promptIndex].withRequestID("mmc-\(nonce)-\(phase.rawValue)\(tag)-\(slot.rawValue)-l\(lane)-r\(sequence)")
         let chunks = MultiModelCheckChunkLog()
         let monitor = monitor
         monitor.chunkArrived()
@@ -995,12 +1143,18 @@ final class MultiModelCheckReportBox: @unchecked Sendable {
             report.inFlightAtHang = inFlight.values
                 .sorted { ($0.model, $0.lane) < ($1.model, $1.lane) }
                 .map { $0.state(now: now) }
-            if let index = report.phases.lastIndex(where: { $0.phase == phase }) {
+            let bare = phase.split(separator: "[", maxSplits: 1).first.map(String.init) ?? phase
+            if let index = report.phases.lastIndex(where: { $0.phase == bare }) {
                 report.phases[index].physFootprintMaxBytes = footprintMax
             }
             report.gate = MultiModelCheckGate(pass: false, reasons: [String(line.dropFirst("GATE fail reason=".count))], line: line)
         }
         write()
+        // --gpu-turn-policies: the hung policy gets its POLICY line too.
+        if let open = phase.firstIndex(of: "["), phase.hasSuffix("]") {
+            let spec = phase[phase.index(after: open)..<phase.index(before: phase.endIndex)]
+            MultiModelCheck.emit("POLICY \(spec) GATE fail reason=hang seconds_since_last_chunk=\(Int(secondsSinceLastChunk))")
+        }
         MultiModelCheck.emit(line)
     }
 
@@ -1034,6 +1188,8 @@ struct MultiModelCheckReport: Encodable, Sendable {
     var parityMismatches: [MultiModelCheckMismatch] = []
     var gate: MultiModelCheckGate?
     var goal: MultiModelCheckGoal?
+    /// `--gpu-turn-policies`: one entry per policy, in run order.
+    var policies: [MultiModelCheckPolicyResult] = []
     var hang: MultiModelBenchHang?
     /// Requests in flight when the watchdog fired.
     var inFlightAtHang: [MultiModelCheckInFlightState] = []
@@ -1154,8 +1310,38 @@ struct MultiModelCheckConfig: Encodable, Sendable {
     let topP: Double
     let stream: Bool
     let tokenCapturePath: String
-    /// SPEC-001-R018: the GPU turn policy both runtimes ran under.
+    /// SPEC-001-R018: the GPU turn policy both runtimes ran under (with
+    /// `--gpu-turn-policies`: the passthrough of the shared pre-pass phases).
     let gpuTurnPolicy: MultiModelCheckGPUTurnPolicy
+    /// `--gpu-turn-policies`, in run order; nil for a single-policy check.
+    let gpuTurnPolicies: [MultiModelCheckPolicySpec]?
+}
+
+struct MultiModelCheckPolicySpec: Encodable, Sendable {
+    let spec: String
+    let name: String
+    let parameters: [String: String]
+}
+
+/// One `--gpu-turn-policies` entry: its contended (and, for the last, soak)
+/// phases, judged against the shared solo references.
+struct MultiModelCheckPolicyResult: Encodable, Sendable {
+    let spec: String
+    let policy: String
+    let policyParameters: [String: String]
+    let phases: [String]
+    var gate: MultiModelCheckGate
+    var goal: MultiModelCheckGoal?
+    var minFrac: Double?
+    var mainTtftMsP95: Double?
+    var workerTtftMsMedian: Double?
+    var aWaitSeconds: Double?
+    var bWaitSeconds: Double?
+    var parityChecked = 0
+    var parityMismatches: [MultiModelCheckMismatch] = []
+    var gpuTurns: [MultiModelCheckGPUTurnStats] = []
+    var memoryBudget: [MultiModelCheckMemoryBudgetStats] = []
+    var line: String
 }
 
 struct MultiModelCheckGPUTurnPolicy: Encodable, Sendable {
@@ -1442,6 +1628,8 @@ struct MultiModelCheckPhaseResult: Encodable, Sendable {
     var measurementSegments: [[Double]] = []
     /// Contended/soak: share of the interval with a request of each model in flight.
     var overlapFraction: Double?
+    /// `--gpu-turn-policies`: the policy spec this phase ran under.
+    var gpuTurnPolicy: String?
     /// SPEC-001-R018: GPU turn arbiter statistics for this phase.
     var gpuTurns: MultiModelCheckGPUTurnStats?
     /// SPEC-001-R017: the shared memory budget over this phase.

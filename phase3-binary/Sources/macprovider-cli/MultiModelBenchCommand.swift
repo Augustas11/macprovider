@@ -105,6 +105,26 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in passthrough. Recorded in the check JSON.")
     var gpuTurnPolicy: String?
 
+    @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase (--soak-seconds applies to the last). Prints one POLICY line per policy; the final GATE/GOAL lines are the last policy's.")
+    var gpuTurnPolicies: String?
+
+    /// `--gpu-turn-policies` split into trimmed, validated specs.
+    static func parsePolicyList(_ value: String) throws -> [String] {
+        let specs = value.split(separator: ";", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !specs.isEmpty, !specs.contains(where: \.isEmpty) else {
+            throw ValidationError("--gpu-turn-policies must list policies separated by ';' with no empty entry")
+        }
+        for spec in specs {
+            do {
+                _ = try GPUTurnPolicyRegistry.make(spec)
+            } catch {
+                throw ValidationError("--gpu-turn-policies '\(spec)': \(error)")
+            }
+        }
+        return specs
+    }
+
     mutating func validate() throws {
         if let gpuTurnPolicy {
             do {
@@ -112,6 +132,11 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
             } catch {
                 throw ValidationError("--gpu-turn-policy: \(error)")
             }
+        }
+        if let gpuTurnPolicies {
+            guard check else { throw ValidationError("--gpu-turn-policies requires --check") }
+            guard gpuTurnPolicy == nil else { throw ValidationError("--gpu-turn-policies and --gpu-turn-policy are exclusive") }
+            _ = try Self.parsePolicyList(gpuTurnPolicies)
         }
         if check {
             guard rowsA > 0, rowsB > 0 else { throw ValidationError("--rows-a and --rows-b must be > 0") }

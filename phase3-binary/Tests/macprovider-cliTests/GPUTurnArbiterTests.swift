@@ -307,7 +307,11 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertEqual(parsed.name, "fair")
         XCTAssertEqual(parsed.parameters, ["share": "0.5", "chunk": "256"])
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("no-such-policy")) { error in
-            XCTAssertEqual(error as? GPUTurnPolicyError, .unknownPolicy("no-such-policy", known: ["passthrough"]))
+            guard case .unknownPolicy(let name, let known)? = error as? GPUTurnPolicyError else {
+                return XCTFail("expected unknownPolicy, got \(error)")
+            }
+            XCTAssertEqual(name, "no-such-policy")
+            XCTAssertTrue(Set(known).isSuperset(of: ["passthrough", "alternate", "timeslice", "fairshare"]), "\(known)")
         }
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("passthrough:k=v"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.parse("x:novalue"))

@@ -4104,7 +4104,13 @@ maxTokens: 1,
         // no longer throw: a throw before every property is set runs no deinit,
         // and a registered handle would leak and end the single-participant
         // fast path for the process.
-        self.gpuTurnParticipant = GPUTurnArbiter.shared.makeParticipant()
+        let participant = GPUTurnArbiter.shared.makeParticipant()
+        self.gpuTurnParticipant = participant
+        // SPEC-001-R017: a throw after the cache limit below is recorded would
+        // otherwise leave this id's limit in the shared budget (no deinit runs
+        // on a partial init). `forget` is a no-op for an absent id.
+        var initialized = false
+        defer { if !initialized { SharedModelMemoryBudget.shared.forget(memberID: participant.id) } }
         self.configuredModelLoadPath = Self.nonEmpty(modelLoadPath)
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -4254,6 +4260,7 @@ maxTokens: 1,
                 throw SpecDecodeStartupError.targetRequired
             }
             // No model loaded: the GPU turn participant registers on the first load.
+            initialized = true
             return
         }
         try Self.refuseQuantizedKV(explicit: kvBitsOverride, modelIDs: [modelID, modelLoadPath, catalogModelIDAlias])
@@ -4535,6 +4542,7 @@ maxTokens: 1,
             self.currentDraftTargetModelID = modelID
             self.currentDraftContainer = draftContainer
         }
+        initialized = true
         GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
     }
 
