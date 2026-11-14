@@ -22,6 +22,15 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, rides the next Pearl runtime
+
+PR #2377 (`589fd8d24`), issue #2365. Not live: v1.8.288 does not carry it.
+
+- Gateway: `/v1/messages` partitions the auto-prefix conversation-cache key by `metadata.user_id` (trimmed, 1–256 bytes), as Chat and Responses partition by `prompt_cache_key`. Lab, GLM, 16 sessions on one system prompt: follow-up first-token median 138.4 s to 34.6 s, conversation-cache hits 0 to 48.
+- Gateway: `/v1/messages` usage reports observed cached prompt tokens as `cache_read_input_tokens`; `input_tokens` excludes them. Billing is unchanged.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: two `/v1/messages` turns with the same `metadata.user_id` and a shared system prompt; the second reports a non-zero `cache_read_input_tokens`.
+
 ## Relay-blind retry message and LFM tool feed (SPEC-041-R007, SPEC-018) — merged 2026-11-14, rides the next Pearl runtime
 
 PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
