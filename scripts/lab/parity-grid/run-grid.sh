@@ -6,7 +6,13 @@
 #                    --python PY [--port 18340] [--cb off|on|canary|auto]
 #                    [--serve-env "K=V K2=V2"] [--rows 1,4] [--trials 3]
 #                    [--max-context N] [--floor 0.03] [--skip-reference]
-#                    [--text-fallback-reason TEXT]
+#                    [--text-fallback-reason TEXT] [--no-autotune-candidate]
+#                    [--serve-arg ARG]... [--sample-seconds N]
+#
+# --no-autotune-candidate drops the lab autotune flag from the serve command;
+# with --cb off (and native MTP off for a model that has an admission entry)
+# the provider then takes its serial-only small-row route. Check
+# serve/status.json continuous_batching.small_m_route to see which route ran.
 #
 # --python is an interpreter with mlx_lm installed (reference only); the client
 # and compare run under the system python3 -I. The script refuses to start when
@@ -24,6 +30,9 @@ MAX_CONTEXT=""
 FLOOR=0.03
 SKIP_REF=0
 FALLBACK=""
+AUTOTUNE=1
+SAMPLE_SECS=0
+SERVE_ARGS=()
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -41,6 +50,9 @@ while [ $# -gt 0 ]; do
     --max-context) MAX_CONTEXT="$2"; shift 2 ;;
     --floor) FLOOR="$2"; shift 2 ;;
     --skip-reference) SKIP_REF=1; shift ;;
+    --no-autotune-candidate) AUTOTUNE=0; shift ;;
+    --serve-arg) SERVE_ARGS+=("$2"); shift 2 ;;
+    --sample-seconds) SAMPLE_SECS="$2"; shift 2 ;;
     --text-fallback-reason) FALLBACK="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
@@ -92,9 +104,11 @@ CB_ARGS=()
 [ "$CB" = auto ] || CB_ARGS=(--continuous-batching "$CB")
 read -r -a ENV_ARGS <<< "${SERVE_ENV:-PARITY_GRID_NOOP=1}"
 
+AT_ARGS=()
+if [ "$AUTOTUNE" = 1 ]; then AT_ARGS=(--autotune-candidate); fi
 echo "== provider $(date +%T) cb=$CB port=$PORT"
 (cd "$BIN_DIR" && exec env "${ENV_ARGS[@]}" "$BIN_DIR/macprovider-cli" serve --config "$D/config.yaml" \
-  --no-join --autotune-candidate ${CB_ARGS[@]+"${CB_ARGS[@]}"} >"$D/serve.out" 2> "$D/serve.err" < /dev/null) &
+  --no-join ${AT_ARGS[@]+"${AT_ARGS[@]}"} ${CB_ARGS[@]+"${CB_ARGS[@]}"} ${SERVE_ARGS[@]+"${SERVE_ARGS[@]}"} >"$D/serve.out" 2> "$D/serve.err" < /dev/null) &
 SP=$!
 stop_serve() {
   if kill -0 "$SP" 2>/dev/null; then
@@ -119,6 +133,11 @@ curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status.json"
 
 echo "== client $(date +%T)"
 client_rc=0
+if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
+  # One stack sample of the serve process while the client runs, to split
+  # host work from GPU wait. The first cells are the short-context ones.
+  (sleep 8; sample "$SP" "$SAMPLE_SECS" -file "$OUT_DIR/serve-sample.txt" >/dev/null 2>&1 || true) &
+fi
 /usr/bin/python3 -I "$HERE/provider_client.py" --port "$PORT" --model "$MODEL_PATH" --out "$OURS" \
   "${COMMON[@]}" || client_rc=$?
 stop_serve
