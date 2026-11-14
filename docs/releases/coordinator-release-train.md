@@ -22,6 +22,16 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — merged 2026-11-14, rides the next Pearl runtime
+
+PR #2374 (`cdf46f633`), issue #2371. Not live: v1.8.288 does not carry it.
+
+- Stats routability: a provider that is in service (routable, busy on every slot, or in a thermal or queue-full hold) is `online`; models are `redundant`, `operational`, `unknown` or `offline`; models and the network are never `degraded`.
+- Coordinator `/healthz` gains `pool_busy`; `/poolz` gains `in_service`; `/v1/pool/check` reports busy as `busy`.
+- Gateway `/v1/status` gains `pool.busy`; an all-busy network is `up` and an all-busy model is `no_free_slots`. A wallet-session allowlist naming an all-busy model is accepted (it was refused with 403).
+
+Live step: cut and apply the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run`. Gateway source changes; no schema change, so about 1-2 minutes. Live probe: with every slot of a model's providers busy, `GET /v1/stats/routability` reports the model `operational` or `redundant` with `slots_free: 0`, `/v1/status` reports `up` and `pool.busy`, `/healthz` reports `pool_busy`.
+
 ## Pearl runtime v1.8.288 (2026-11-14)
 
 Live. Signed tag `v1.8.288` on `e955d0761`, [runtime release run 43580106254](https://github.com/Augustas11/macprovider/actions/runs/43580106254), applied with `scripts/ops/pearl-runtime.sh` (`status`, then `next --run` per step).
