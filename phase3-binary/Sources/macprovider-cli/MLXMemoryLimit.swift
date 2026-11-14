@@ -72,6 +72,12 @@ enum MLXMemoryLimit {
         return limit
     }
 
+    /// The limit last applied to MLX for this process, nil before any.
+    static func appliedLimitBytes() -> Int? {
+        state.lock.lock(); defer { state.lock.unlock() }
+        return state.limitBytes
+    }
+
     static func admissionSample() -> MLXMemoryAdmissionSample? {
         state.lock.lock()
         let limit = state.limitBytes

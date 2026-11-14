@@ -168,7 +168,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID, failureCode: "continuous_batching_prefill_failed"))
                 }
             }
-            Memory.clearCache()
+            // SPEC-001-R017: through the shared budget (a plain clear with one runtime).
+            SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: self.gpuTurnParticipant?.id)
             return outputs
         }
     }

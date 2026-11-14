@@ -159,6 +159,8 @@ struct MultiModelCheckRunner: Sendable {
     let monitor: MultiModelBenchMonitor
     /// SPEC-001-R018: arbiter statistics per phase, by slot.
     let gpuTurns = MultiModelCheckGPUTurnWindow()
+    /// SPEC-001-R017: shared memory budget per phase, by slot.
+    let memoryBudget = MultiModelCheckMemoryBudgetWindow()
 
     func run() async throws {
         for (slot, path) in [(MultiModelBenchSlot.a, config.modelA), (.b, config.modelB)] {
@@ -168,6 +170,7 @@ struct MultiModelCheckRunner: Sendable {
         for slot in MultiModelBenchSlot.allCases {
             runtimes[slot] = try await load(slot)
             gpuTurns.bind(slot: slot, participantID: runtimes[slot]!.gpuTurnParticipant.id)
+            memoryBudget.bind(slot: slot, memberID: runtimes[slot]!.memoryBudgetMemberID)
         }
         var requests: [MultiModelBenchSlot: [ChatCompletionRequest]] = [:]
         for slot in MultiModelBenchSlot.allCases {
@@ -288,6 +291,15 @@ struct MultiModelCheckRunner: Sendable {
         } else {
             artifactSHA256 = nil
         }
+        // SPEC-001-R017 *Load*: the shared budget decides before any weights
+        // are read, from the snapshot's safetensors sizes.
+        let loadDecision = Self.loadDecision(slot: slot, loadValue: loadValue, maxContextOverride: serve.maxContextOverride)
+        box.update { $0.loadDecisions.append(loadDecision) }
+        box.write()
+        MultiModelBenchCommand.log("load_decision model=\(slot.rawValue) admitted=\(loadDecision.decision.admitted) reason=\(loadDecision.decision.reason) required_bytes=\(loadDecision.decision.requiredBytes) limit_bytes=\(loadDecision.decision.limitBytes.map(String.init) ?? "nil")")
+        guard loadDecision.decision.admitted else {
+            throw MultiModelCheckFailure(reason: "insufficient_memory model=\(slot.rawValue) required_bytes=\(loadDecision.decision.requiredBytes) limit_bytes=\(loadDecision.decision.limitBytes.map(String.init) ?? "nil")")
+        }
         let runtime: ModelRuntime
         do {
             runtime = try await ModelRuntime(
@@ -351,6 +363,16 @@ struct MultiModelCheckRunner: Sendable {
             throw MultiModelCheckFailure(reason: "engine_mismatch model=\(slot.rawValue) rows=\(rows) engine=\(state.engine) served_slots=\(state.servedSlots) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_unsupported=\(state.continuousBatchingUnsupportedReason ?? "nil") paged_kv=\(state.pagedKvDecision ?? "nil")")
         }
         return runtime
+    }
+
+    static func loadDecision(slot: MultiModelBenchSlot, loadValue: String, maxContextOverride: Int?) -> MultiModelCheckLoadDecision {
+        let directory = try? ModelRuntime.localModelDirectory(for: loadValue)
+        let estimated = directory.map { SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: $0) } ?? 0
+        let perToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory) ?? 0
+        let rowKV = MLXMemoryBudget.kvBytes(tokens: SharedModelMemoryRules.minimumRowTokens, bytesPerToken: perToken)
+        return MultiModelCheckLoadDecision(
+            model: slot.rawValue,
+            decision: SharedModelMemoryBudget.shared.canLoad(estimatedResidentBytes: estimated, minimumRowKVBytes: rowKV))
     }
 
     /// Serve's default-on path: under default-on coverage the runtime serves
@@ -571,6 +593,7 @@ struct MultiModelCheckRunner: Sendable {
     private func beginPhase(_ phase: MultiModelCheckPhase, seconds: Double) -> UInt64 {
         Memory.peakMemory = 0 // setter resets MLX's peak counter
         gpuTurns.begin()
+        memoryBudget.begin()
         monitor.phaseBegan(phase.rawValue)
         box.update { $0.phases.append(MultiModelCheckPhaseResult(phase: phase.rawValue, durationSeconds: seconds)) }
         box.write()
@@ -587,6 +610,7 @@ struct MultiModelCheckRunner: Sendable {
             report.phases[index].physFootprintMaxBytes = footprint
             report.phases[index].mlxPeakBytes = peak
             report.phases[index].gpuTurns = gpuTurns.finish()
+            report.phases[index].memoryBudget = memoryBudget.finish()
         }
         box.write()
         MultiModelBenchCommand.log("phase \(phase.rawValue) failed: \(error)")
@@ -598,6 +622,10 @@ struct MultiModelCheckRunner: Sendable {
         result.physFootprintMaxBytes = monitor.phaseEnded()
         result.mlxPeakBytes = Memory.peakMemory
         result.gpuTurns = gpuTurns.finish()
+        result.memoryBudget = memoryBudget.finish()
+        if let budget = result.memoryBudget {
+            MultiModelBenchCommand.log("  \(phase.rawValue) memory_budget limit_bytes=\(budget.limitBytes.map(String.init) ?? "nil") wired_limit_bytes=\(budget.wiredLimitBytes.map(String.init) ?? "nil") cache_limit_bytes=\(budget.cacheLimitBytes) headroom_min_bytes=\(budget.headroomMinBytes.map(String.init) ?? "nil") refusals=\(budget.admissionRefusals) admitted_past_budget=\(budget.rowsAdmittedPastBudget) cache_clears_performed=\(budget.cacheClearsPerformed) cache_clears_skipped=\(budget.cacheClearsSkipped) \(budget.runtimes.map { "\($0.model ?? "unbound"):resident=\($0.residentBytes),committed_kv_peak=\($0.committedKVPeakBytes)" }.joined(separator: " "))")
+        }
         if let stats = result.gpuTurns {
             for participant in stats.participants {
                 MultiModelBenchCommand.log("  \(phase.rawValue) gpu_turns model=\(participant.model ?? "unbound") participant=\(participant.arbiter.id) turns=\(participant.arbiter.turns) decode_steps=\(participant.arbiter.decodeSteps) prefill_chunks=\(participant.arbiter.prefillChunks) busy_s=\(String(format: "%.3f", participant.arbiter.busySeconds)) wait_s=\(String(format: "%.3f", participant.arbiter.waitSeconds)) max_wait_s=\(String(format: "%.4f", participant.arbiter.maxWaitSeconds))")
@@ -674,6 +702,17 @@ struct MultiModelCheckRunner: Sendable {
         for phase in report.phases {
             guard let footprint = phase.physFootprintMaxBytes, memoryLimit > 0, footprint > UInt64(memoryLimit) else { continue }
             outcome.reasons.append("memory_over_limit phase=\(phase.phase) footprint_max_bytes=\(footprint) mlx_memory_limit_bytes=\(memoryLimit)")
+        }
+        // SPEC-001-R017: the process stays under the one shared limit and no
+        // row is admitted past the shared budget.
+        for phase in report.phases {
+            guard let budget = phase.memoryBudget else { continue }
+            if let limit = budget.limitBytes, limit > 0, let footprint = phase.physFootprintMaxBytes, footprint > UInt64(limit) {
+                outcome.reasons.append("memory_over_shared_limit phase=\(phase.phase) footprint_max_bytes=\(footprint) shared_limit_bytes=\(limit)")
+            }
+            if budget.rowsAdmittedPastBudget > 0 {
+                outcome.reasons.append("row_admitted_past_shared_budget phase=\(phase.phase) rows=\(budget.rowsAdmittedPastBudget)")
+            }
         }
         if let first = outcome.reasons.first {
             let more = outcome.reasons.count > 1 ? " (+\(outcome.reasons.count - 1) more in JSON)" : ""
@@ -983,6 +1022,8 @@ struct MultiModelCheckReport: Encodable, Sendable {
     let config: MultiModelCheckConfig
     let processEnvironment: MultiModelBenchProcessEnvironment
     var loads: [MultiModelBenchLoad] = []
+    /// SPEC-001-R017: the shared budget's load decision before each load.
+    var loadDecisions: [MultiModelCheckLoadDecision] = []
     var runtimes: [MultiModelCheckRuntimeState] = []
     /// Canonical snapshot-manifest hash passed as the verified artifact identity.
     var modelArtifactSha256: [String: String] = [:]
@@ -1170,6 +1211,95 @@ final class MultiModelCheckGPUTurnWindow: @unchecked Sendable {
     }
 }
 
+struct MultiModelCheckLoadDecision: Encodable, Sendable {
+    let model: String
+    let decision: SharedModelMemoryRules.LoadDecision
+}
+
+struct MultiModelCheckMemoryBudgetRuntime: Encodable, Sendable {
+    /// `a` or `b`; nil for a member that is not one of the two runtimes.
+    let model: String?
+    let memberID: Int
+    let residentBytes: Int
+    let kvBytesPerToken: Int
+    /// Highest worst-case KV committed to this runtime's admitted rows.
+    let committedKVPeakBytes: Int
+    let rowsAdmitted: Int
+    let rowsRefused: Int
+    let rowsAdmittedPastBudget: Int
+}
+
+/// One phase of the shared budget: the limits at phase end, counters
+/// accumulated during the phase, and the lowest headroom (limit less every
+/// runtime's weights, peak committed row KV and margin).
+struct MultiModelCheckMemoryBudgetStats: Encodable, Sendable {
+    let limitBytes: Int?
+    let wiredLimitBytes: Int?
+    let cacheLimitBytes: Int
+    let headroomMinBytes: Int?
+    let admissionRefusals: Int
+    let rowsAdmittedPastBudget: Int
+    let cacheClearsPerformed: Int
+    let cacheClearsSkipped: Int
+    let commandBufferBudgetSetBy: String?
+    let commandBufferBudgetMb: Int?
+    let commandBufferConflicts: [String]
+    let runtimes: [MultiModelCheckMemoryBudgetRuntime]
+}
+
+final class MultiModelCheckMemoryBudgetWindow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var slots: [Int: MultiModelBenchSlot] = [:]
+    private var baseline: SharedModelMemoryBudget.Snapshot?
+
+    func bind(slot: MultiModelBenchSlot, memberID: Int) {
+        lock.lock(); defer { lock.unlock() }
+        slots[memberID] = slot
+    }
+
+    func begin() {
+        SharedModelMemoryBudget.shared.resetPeaks()
+        let snapshot = SharedModelMemoryBudget.shared.snapshot()
+        lock.lock(); defer { lock.unlock() }
+        baseline = snapshot
+    }
+
+    func finish() -> MultiModelCheckMemoryBudgetStats? {
+        let end = SharedModelMemoryBudget.shared.snapshot()
+        lock.lock(); defer { lock.unlock() }
+        guard let start = baseline else { return nil }
+        baseline = nil
+        let before = Dictionary(uniqueKeysWithValues: start.members.map { ($0.memberID, $0) })
+        let runtimes = end.members.map { member in
+            let earlier = before[member.memberID]
+            return MultiModelCheckMemoryBudgetRuntime(
+                model: slots[member.memberID]?.rawValue,
+                memberID: member.memberID,
+                residentBytes: member.residentBytes,
+                kvBytesPerToken: member.kvBytesPerToken,
+                committedKVPeakBytes: member.peakCommittedKVBytes,
+                rowsAdmitted: member.rowsAdmitted - (earlier?.rowsAdmitted ?? 0),
+                rowsRefused: member.rowsRefused - (earlier?.rowsRefused ?? 0),
+                rowsAdmittedPastBudget: member.rowsAdmittedPastBudget - (earlier?.rowsAdmittedPastBudget ?? 0)
+            )
+        }
+        return MultiModelCheckMemoryBudgetStats(
+            limitBytes: end.limitBytes,
+            wiredLimitBytes: end.wiredLimitBytes,
+            cacheLimitBytes: end.cacheLimitBytes,
+            headroomMinBytes: end.limitBytes.map { $0 - end.peakChargedBytes },
+            admissionRefusals: runtimes.reduce(0) { $0 + $1.rowsRefused },
+            rowsAdmittedPastBudget: runtimes.reduce(0) { $0 + $1.rowsAdmittedPastBudget },
+            cacheClearsPerformed: end.cacheClearsPerformed - start.cacheClearsPerformed,
+            cacheClearsSkipped: end.cacheClearsSkipped - start.cacheClearsSkipped,
+            commandBufferBudgetSetBy: end.commandBufferBudgetSetBy,
+            commandBufferBudgetMb: end.commandBufferBudgetMb,
+            commandBufferConflicts: end.commandBufferConflicts,
+            runtimes: runtimes
+        )
+    }
+}
+
 /// What the runtime actually does with concurrent requests, as reported by
 /// its own snapshot after the serve-shaped construction in `load`.
 struct MultiModelCheckRuntimeState: Encodable, Sendable {
@@ -1314,6 +1444,8 @@ struct MultiModelCheckPhaseResult: Encodable, Sendable {
     var overlapFraction: Double?
     /// SPEC-001-R018: GPU turn arbiter statistics for this phase.
     var gpuTurns: MultiModelCheckGPUTurnStats?
+    /// SPEC-001-R017: the shared memory budget over this phase.
+    var memoryBudget: MultiModelCheckMemoryBudgetStats?
     var a: MultiModelCheckModelPhaseStats?
     var b: MultiModelCheckModelPhaseStats?
     var requests: [MultiModelCheckRequestRecord] = []

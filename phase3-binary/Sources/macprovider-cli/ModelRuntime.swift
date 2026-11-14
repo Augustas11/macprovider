@@ -2128,6 +2128,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-001-R018: this runtime's turn on the process GPU. Registered while
     /// a model is loaded; every decode step and prefill chunk is bracketed by it.
     nonisolated let gpuTurnParticipant: GPUTurnParticipant
+    /// SPEC-001-R017: this runtime's key in `SharedModelMemoryBudget`.
+    nonisolated var memoryBudgetMemberID: Int { gpuTurnParticipant.id }
     private let configuredModelLoadPath: String?
     // Coordinator-advertised catalog id (e.g. mlx-community/…) accepted as an
     // alias for the configured served model. nil when unset. See BUILD_SPEC
@@ -2150,9 +2152,6 @@ actor ModelRuntime: ModelRuntimeServing {
         let modelCapabilities: PagedKVRuntimeModelCapabilities
     }
     private var creativeServingState: CreativeServingState?
-    /// Keeps the loaded model's weights in MLX's residency sets; see
-    /// `startResidentWeightsTicket(modelFamily:)`.
-    private var residentWeightsTicket: WiredMemoryTicket?
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
@@ -3342,12 +3341,18 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Bounds MLX's buffer cache. Must run before the model loads; see
     /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
     /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
-    /// Returns the applied byte limit.
+    /// Returns the applied byte limit. With `memberID` the value goes through
+    /// the process's shared budget (SPEC-001-R017), which applies the
+    /// smallest limit any loaded runtime asks for.
     @discardableResult
-    nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
+    nonisolated static func applyMLXCacheLimit(megabytes: Int?, memberID: Int? = nil) -> Int? {
         guard let megabytes, isValidMLXCacheLimitMB(megabytes) else { return nil }
         let bytes = megabytes * 1024 * 1024
-        Memory.cacheLimit = bytes
+        if let memberID {
+            SharedModelMemoryBudget.shared.applyCacheLimit(memberID: memberID, label: nil, bytes: bytes)
+        } else {
+            Memory.cacheLimit = bytes
+        }
         return bytes
     }
 
@@ -3400,19 +3405,22 @@ actor ModelRuntime: ModelRuntimeServing {
             .contains(where: Self.lfm25MLXCacheModelIDs.contains)
         let configuredBytes = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 }
         let applied: Int?
+        // SPEC-001-R017: this runtime's cache limit, read and set through the
+        // shared budget so a sibling's value is never saved or restored here.
+        let budget = SharedModelMemoryBudget.shared
         if requiresLFMCap {
-            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = Memory.cacheLimit }
-            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? Memory.cacheLimit
+            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = budget.cacheLimit(for: memoryBudgetMemberID) }
+            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? budget.cacheLimit(for: memoryBudgetMemberID)
             let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: lfmID, baselineBytes: baseline)
-            Memory.cacheLimit = bytes
+            budget.applyCacheLimit(memberID: memoryBudgetMemberID, label: target, bytes: bytes)
             applied = bytes
         } else if let previous = mlxCacheLimitBeforeLFM25 {
             let bytes = configuredBytes ?? previous
-            Memory.cacheLimit = bytes
+            budget.applyCacheLimit(memberID: memoryBudgetMemberID, label: target, bytes: bytes)
             mlxCacheLimitBeforeLFM25 = nil
             applied = bytes
         } else {
-            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading, memberID: memoryBudgetMemberID)
         }
         if let applied {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
@@ -3516,6 +3524,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: modelFamily, configured: ProcessInfo.processInfo.environment[key])
         else { return nil }
         setenv(key, String(mb), 0)
+        SharedModelMemoryBudget.shared.recordCommandBufferBudget(modelFamily: modelFamily, megabytes: mb)
         return mb
     }
 
@@ -3529,7 +3538,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated static func clearMLXBufferCacheAfterPrefill(
         isFinalChunk: Bool = true,
-        using clear: () -> Void = { Memory.clearCache() }
+        using clear: () -> Void = { SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: nil) }
     ) {
         guard isFinalChunk else { return }
         clear()
@@ -4019,6 +4028,7 @@ maxTokens: 1,
 
     deinit {
         GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
+        SharedModelMemoryBudget.shared.forget(memberID: gpuTurnParticipant.id)
     }
 
     init(
@@ -4254,15 +4264,16 @@ maxTokens: 1,
             target: modelID, configuredModelID: modelID,
             verifiedCatalogModelID: verifiedCatalogModelID)
         let initialCacheLimit: Int?
+        // SPEC-001-R017: through the shared budget (one cache limit per process).
         if let cacheModelID, Self.lfm25MLXCacheModelIDs.contains(cacheModelID.lowercased()) {
-            let previous = Memory.cacheLimit
+            let previous = SharedModelMemoryBudget.shared.cacheLimit(for: self.gpuTurnParticipant.id)
             self.mlxCacheLimitBeforeLFM25 = previous
             let baseline = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 } ?? previous
             let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: cacheModelID, baselineBytes: baseline)
-            Memory.cacheLimit = bytes
+            SharedModelMemoryBudget.shared.applyCacheLimit(memberID: self.gpuTurnParticipant.id, label: modelID, bytes: bytes)
             initialCacheLimit = bytes
         } else {
-            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading, memberID: self.gpuTurnParticipant.id)
         }
         if let initialCacheLimit {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
@@ -4346,10 +4357,13 @@ maxTokens: 1,
             try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
         self.currentContainer = container
-        self.residentWeightsTicket = await Self.startResidentWeightsTicket(
-            modelFamily: modelCapabilities.modelFamily)
-        MLXMemoryLimit.apply(
-            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory))
+        // SPEC-001-R017: the shared budget records the weights and owns the
+        // one wired limit (the sum over wiring runtimes, not the last load's).
+        let loadedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory)
+        await SharedModelMemoryBudget.shared.registerLoaded(
+            memberID: self.gpuTurnParticipant.id, label: modelID, modelFamily: modelCapabilities.modelFamily,
+            kvBytesPerToken: loadedKVBytesPerToken)
+        MLXMemoryLimit.apply(stage: "model_loaded", kvBytesPerToken: loadedKVBytesPerToken)
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -5752,7 +5766,7 @@ maxTokens: 1,
         // Creative inference inherits the process budget, not the unloaded LFM cap.
         finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: hadMLXModel)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
-        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         // Fixture runtimes own no MLX allocations and must not initialize a GPU.
         if hadMLXModel { Memory.clearCache() }
     }
@@ -5900,7 +5914,7 @@ maxTokens: 1,
         currentDraftTargetModelID = nil
         finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: testLoader == nil)
         await conversationCache.purgeAllHot()
-        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
         state = .ready
         targetModelID = nil
@@ -7645,15 +7659,17 @@ maxTokens: 1,
         await conversationCache.purgeAllHot()
         conversationCache.memoryBudget.resetGeometryForModelChange()
         currentContainer = container
-        if let previous = residentWeightsTicket {
-            residentWeightsTicket = nil
-            _ = await previous.end()
-        }
-        residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
+        // SPEC-001-R017: the shared budget re-derives the wired limit for the
+        // swapped-in weights; a fixture swap (no container) holds none.
         if container != nil {
-            MLXMemoryLimit.apply(
-                stage: "model_swapped",
-                kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: try? Self.localModelDirectory(for: modelID)))
+            let swappedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(
+                modelDirectory: try? Self.localModelDirectory(for: modelID))
+            await SharedModelMemoryBudget.shared.registerLoaded(
+                memberID: memoryBudgetMemberID, label: modelID, modelFamily: modelCapabilities.modelFamily,
+                kvBytesPerToken: swappedKVBytesPerToken)
+            MLXMemoryLimit.apply(stage: "model_swapped", kvBytesPerToken: swappedKVBytesPerToken)
+        } else {
+            await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         }
         currentModelID = modelID
         GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
@@ -7923,18 +7939,21 @@ maxTokens: 1,
         nextInFlightID += 1
         let id = nextInFlightID
         inFlightCancellations[id] = cancel
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, inFlightCancellations.count)
         return id
     }
 
     func unregisterInFlight(_ id: Int) {
         inFlightCancellations.removeValue(forKey: id)
         localRegistrationIDs.remove(id)
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, inFlightCancellations.count)
     }
 
     private func cancelAllInFlightForDrainTimeout() {
         let cancels = Array(inFlightCancellations.values)
         inFlightCancellations.removeAll()
         localRegistrationIDs.removeAll()
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, 0)
         for cancel in cancels {
             cancel()
         }

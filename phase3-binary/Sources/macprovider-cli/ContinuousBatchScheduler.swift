@@ -3657,6 +3657,7 @@ actor ContinuousBatchScheduler {
         gpuTurnParticipant?.beginWork()
         defer { gpuTurnParticipant?.endWork() }
         defer {
+            reportSharedMemoryCommitment()
             pumpRunning = false
             if pumpRestartRequested {
                 pumpRestartRequested = false
@@ -3690,6 +3691,8 @@ actor ContinuousBatchScheduler {
             }
             await processCancellations()
             if await failClosedIfNeeded() { break }
+            // SPEC-001-R017: finished rows release their shared-budget charge.
+            reportSharedMemoryCommitment()
             var madeProgress = false
             let holdCohortDecode = admissionOrPrefillProgressed && selfCheckCohortDecodeHeld
             admissionOrPrefillProgressed = false
@@ -6311,7 +6314,13 @@ actor ContinuousBatchScheduler {
             // An idle scheduler still admits it: MLX's limit then paces its
             // evaluation, as before, and continuous batching stays on.
             if !draining, let refusal = mlxMemoryAdmissionRefusal(for: request) {
+                // SPEC-001-R017: an idle scheduler still waits while a sibling
+                // runtime's rows hold the shared budget.
                 let idle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
+                    && refusal.shared?.holdWhenIdle != true
+                if idle, refusal.shared?.overSharedBudget == true, let memberID = sharedMemoryMemberID {
+                    SharedModelMemoryBudget.shared.recordAdmittedPastBudget(memberID: memberID)
+                }
                 // A deferred head logs once, not once per pump pass.
                 if idle || lastMemoryDeferredRequestID != request.id {
                     lastMemoryDeferredRequestID = idle ? nil : request.id
@@ -7698,9 +7707,14 @@ actor ContinuousBatchScheduler {
     /// remaining initial footprint counts on top of MLX's active memory.
     private func mlxMemoryAdmissionRefusal(
         for request: ContinuousBatchSchedulerRequest
-    ) -> (sample: MLXMemoryAdmissionSample, requestedBytes: Int, pendingBytes: Int, pendingIncludesPrivacyRow: Bool)? {
+    ) -> (sample: MLXMemoryAdmissionSample, requestedBytes: Int, pendingBytes: Int, pendingIncludesPrivacyRow: Bool,
+          shared: SharedModelMemoryRules.RowDecision?)? {
         guard let sample = configuration.mlxMemoryAdmissionProbe.sample() else { return nil }
-        let perToken = sample.kvBytesPerToken
+        // SPEC-001-R017: with several runtimes loaded, this model's own KV
+        // bytes per token (the process sample holds the last-loaded model's).
+        let memberID = sharedMemoryMemberID
+        let perToken = memberID.flatMap { SharedModelMemoryBudget.shared.kvBytesPerTokenOverride(memberID: $0) }
+            ?? sample.kvBytesPerToken
         let requestedTokens = ((try? initialReservation(for: request))?.initialCapacityTokens ?? 0)
             - request.cachedPromptTokens
         let requested = MLXMemoryBudget.kvBytes(tokens: requestedTokens, bytesPerToken: perToken)
@@ -7714,12 +7728,45 @@ actor ContinuousBatchScheduler {
             pending = overflow ? Int.max : sum
         }
         let (total, overflow) = requested.addingReportingOverflow(pending)
-        if MLXMemoryBudget.admits(
-            activeBytes: sample.activeBytes, requestedBytes: overflow ? Int.max : total, limitBytes: sample.limitBytes
-        ) {
-            return nil
+        let legacyAdmits = MLXMemoryBudget.admits(
+            activeBytes: sample.activeBytes, requestedBytes: overflow ? Int.max : total, limitBytes: sample.limitBytes)
+        // SPEC-001-R017: the shared budget decides; with one runtime loaded
+        // its decision is `legacyAdmits`.
+        guard let memberID else {
+            return legacyAdmits ? nil : (sample, requested, pending, pendingIncludesPrivacyRow, nil)
         }
-        return (sample, requested, pending, pendingIncludesPrivacyRow)
+        let shared = SharedModelMemoryBudget.shared.admitRow(
+            memberID: memberID, legacyAdmits: legacyAdmits, limitBytes: sample.limitBytes,
+            committedTokens: sharedMemoryCommittedTokens(), rowTokens: sharedMemoryRowTokens(request))
+        return shared.admitted ? nil : (sample, requested, pending, pendingIncludesPrivacyRow, shared)
+    }
+
+    /// SPEC-001-R017: this scheduler's key in `SharedModelMemoryBudget`, the
+    /// runtime's GPU turn participant. Nil for an injected memory probe
+    /// (tests) and for backends without a participant.
+    private var sharedMemoryMemberID: Int? {
+        guard configuration.mlxMemoryAdmissionProbe == .system else { return nil }
+        return backend.gpuTurnParticipant?.id
+    }
+
+    /// A row's KV growth bound: prompt plus output-token bound, at most the
+    /// served context.
+    private func sharedMemoryRowTokens(_ request: ContinuousBatchSchedulerRequest) -> Int {
+        let (bound, overflow) = request.promptTokens.count.addingReportingOverflow(max(0, request.maxOutputTokens))
+        return min(overflow ? Int.max : bound, configuration.maxRequestTokens)
+    }
+
+    /// The KV growth bound of every admitted row (prefilling or decoding).
+    private func sharedMemoryCommittedTokens() -> Int {
+        var total = 0
+        for row in activePrompt.values { total = SharedModelMemoryRules.saturatingAdd(total, sharedMemoryRowTokens(row.request)) }
+        for row in activeDecode.values { total = SharedModelMemoryRules.saturatingAdd(total, sharedMemoryRowTokens(row.request)) }
+        return total
+    }
+
+    private func reportSharedMemoryCommitment() {
+        guard let memberID = sharedMemoryMemberID else { return }
+        SharedModelMemoryBudget.shared.reportCommitted(memberID: memberID, tokens: sharedMemoryCommittedTokens())
     }
 
     /// SPEC-038 FR-CB2 (v0.3.36): every outstanding native-MTP round
