@@ -843,21 +843,28 @@ func (p Provider) ListingEligible() bool {
 	return p.shardMemberAdmissible()
 }
 
-// AtCapacity reports a provider that is not RoutingEligible only because it
-// is full: every slot is in flight, or the provider refused a route with
-// error_queue_full (a seat is about to free, #1906). Every other routing gate
-// still applies, so a thermal hold, compute-integrity suspension, pending
-// catalog recheck or handshake ack, or an unavailable shard group is not at
-// capacity. Public health surfaces show an at-capacity provider as healthy
-// (#2371).
+// AtCapacity reports a provider that is not RoutingEligible only because of
+// capacity: every slot is in flight, or a capacity hold (thermal pressure or an
+// error_queue_full refusal, #1906) blocks routing while it keeps streaming its
+// in-flight work. Every other routing gate still applies, so compute-integrity
+// suspension, a pending catalog recheck or handshake ack, or an unavailable
+// shard group is not at capacity. A provider with no slots is never full.
 func (p Provider) AtCapacity() bool {
-	if p.RoutingEligible() {
+	if p.SlotsTotal <= 0 || p.RoutingEligible() {
 		return false
 	}
-	if p.queueFullHold {
-		p.capacitySafetyHold = false
-	}
-	return p.ListingEligible()
+	p.SlotsFree = p.SlotsTotal
+	p.capacitySafetyHold = false
+	p.queueFullHold = false
+	return p.RoutingEligible()
+}
+
+// InService is the one definition of a provider serving buyers for public
+// health surfaces (#2371): routable now, or at capacity. A busy provider is in
+// service; free capacity is reported separately. Buyer routing keeps
+// RoutingEligible.
+func (p Provider) InService() bool {
+	return p.RoutingEligible() || p.AtCapacity()
 }
 
 // ShardGroupMemberView is one non-head member or spare of an available

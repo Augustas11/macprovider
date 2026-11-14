@@ -2,13 +2,18 @@
 
 **Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
 
-**Change log v1.6.35 (2026-11-14, Related: #2371):** A provider that is
-busy serving is not degraded. FR-B1 per-model `degraded` (which the SPEC-006
-§5.6 gateway status applies) counts `busy` providers as serving and drops the
-"all `slots_free` equal 0" rule: a model whose providers are all serving on
-every slot is not degraded, and zero free slots is reported by availability.
-FR-O1 `/healthz` adds `pool_busy` and stops counting `busy` providers in
-`pool_degraded`, which now counts only the pool `degraded` state.
+**Change log v1.6.35 (2026-11-14, PR #2374, Related: #2371):** A provider
+that is busy serving is not degraded. FR-B1 defines **in service**
+(`pool.Provider.InService`: routable, or blocked only by capacity: every slot
+in flight, or a thermal or queue-full hold; a provider with no slots is never
+in service), the one definition SPEC-006 §5.6 and SPEC-017 §5.2c count.
+FR-B1 per-model `degraded` counts providers in service and drops the "all
+`slots_free` equal 0" rule. FR-O2 `/poolz` rows gain `in_service` (that
+predicate under the same public gates as `routing_eligible`) and the summary
+gains `in_service`; `serving_eligible` keeps its v1.6.17 meaning because the
+gateway's served-context grant and decode-idle timeout read it. FR-O1
+`/healthz` on both ports adds `pool_busy`; `pool_degraded` counts only the
+pool `degraded` state.
 
 **Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
 `tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
@@ -2078,11 +2083,15 @@ answered by routing (slot queue, 429 or 503), not by `/v1/models`.
 A model is `degraded: true` if any of:
 
 - all providers for this model are state `unavailable` or `draining`.
-- fewer than 50% of registered providers for this model are serving
-  (state `ready` or `busy`).
+- fewer than 50% of registered providers for this model are in service.
 
-A model whose providers are all serving with no free slot is not degraded
-(v1.6.35): free capacity is not degradation.
+A provider is **in service** (v1.6.35, `pool.Provider.InService`) when it is
+routing-eligible, or when it passes every routing gate except capacity:
+every slot is in flight, or a capacity hold (thermal pressure or an
+`error_queue_full` refusal) blocks new routes while it keeps streaming. A
+provider with no slots is not in service. `/poolz` reports it per row as
+`in_service`. A model whose providers are all in service with no free slot
+is not degraded: free capacity is not degradation.
 
 Otherwise the model is `degraded: false`. SPEC-006 v0.3 gateway status
 aggregation MUST use these same rules.
@@ -2450,6 +2459,9 @@ Response:
       "binary_version": "0.1.0",
       "endpoint_url": "https://m4.malibu.tech",
       "auth_state": "bearer_validated",
+      "routing_eligible": true,
+      "serving_eligible": true,
+      "in_service": true,
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
         "pubkey": "<base64-32-byte-ed25519>",
@@ -2461,6 +2473,7 @@ Response:
   "summary": {
     "total_providers": 2,
     "ready": 2,
+    "in_service": 2,
     "draining": 0,
     "unavailable": 0,
     "total_slots": 4,

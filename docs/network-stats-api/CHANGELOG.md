@@ -10,13 +10,16 @@ for a partner-facing announcement.
 `/v1/stats/providers` no longer report busy capacity as degradation.
 A model whose providers are serving on every slot is `redundant` (two
 or more) or `operational` (one); free capacity stays in `slots_free`,
-`slots_total` and `routable_provider_count`. A provider serving on
-every slot is `online`. Models are never `degraded`, and
-`summary.models_degraded` is always `0` (kept for compatibility).
-Provider `degraded` now means a real fault hold only. No field added
-or removed.
+`slots_total` and `routable_provider_count`. A provider busy on every
+slot or under a thermal or queue-full hold is `online`; one waiting on
+a catalog recheck or handshake acknowledgement is `unknown`. Provider
+`degraded` now means only a compute-integrity suspension or an
+unavailable shard group. Models and the network summary are never
+`degraded`; `summary.models_degraded` is always `0` (kept for
+compatibility). No field added or removed.
 
-Related: Augustas11/macprovider#2371.
+Delivered in PR [Augustas11/macprovider#2374][pr2374]. Related:
+Augustas11/macprovider#2371.
 
 ## v0.1.9 — 2026-07-29
 
@@ -82,3 +85,4 @@ Structured log event taxonomy: `stats_request_served`,
 
 [pr173]: https://github.com/Augustas11/macprovider/pull/173
 [pr805]: https://github.com/Augustas11/macprovider/pull/805
+[pr2374]: https://github.com/Augustas11/macprovider/pull/2374

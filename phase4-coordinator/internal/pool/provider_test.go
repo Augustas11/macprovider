@@ -3613,7 +3613,9 @@ func TestAtCapacitySeparatesFullFromFaults(t *testing.T) {
 		{"routable", ready, false},
 		{"every slot in flight", full, true},
 		{"queue-full refusal", queueFull, true},
-		{"thermal hold", thermal, false},
+		{"thermal hold", thermal, true},
+		{"no slots", Provider{State: StateReady, SlotsFree: 0, SlotsTotal: 0}, false},
+		{"shard member", Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2, ShardMemberV1: true}, false},
 		{"integrity suspended", suspended, false},
 		{"catalog recheck pending", recheck, false},
 		{"breaker tripped", tripped, false},
@@ -3622,5 +3624,11 @@ func TestAtCapacitySeparatesFullFromFaults(t *testing.T) {
 		if got := c.p.AtCapacity(); got != c.want {
 			t.Errorf("%s: AtCapacity()=%t want %t", c.name, got, c.want)
 		}
+		if got, want := c.p.InService(), c.want || c.p.RoutingEligible(); got != want {
+			t.Errorf("%s: InService()=%t want %t", c.name, got, want)
+		}
+	}
+	if !ready.InService() {
+		t.Errorf("routable provider must be in service")
 	}
 }

@@ -1561,9 +1561,12 @@ type compatibilitySetPendingClose struct {
 // current-prod impact (single provider, canary disabled). See DECISION_CRITERIA
 // Entry 180 / SPEC-031 §14.
 func (s *Server) canaryBuyerServing(p pool.Provider) bool {
-	if !p.RoutingEligible() {
-		return false
-	}
+	return p.RoutingEligible() && s.buyerServingGates(p)
+}
+
+// buyerServingGates is canaryBuyerServing without the pool RoutingEligible
+// predicate: the transport, context, Tier-2 warm-up and version-floor gates.
+func (s *Server) buyerServingGates(p pool.Provider) bool {
 	// Transport reachability, matching dispatch. A WS-tunneled peer is dispatchable
 	// only via a live, open STORED session — dispatch returns ErrRelayClosed otherwise,
 	// e.g. during the registration/disconnect windows where IsWSTunneled holds but
@@ -1685,13 +1688,29 @@ func (s *Server) providerMeetsDispatchThroughputFloor(p pool.Provider) bool {
 // gate. FR-CAN22 last-provider protection uses canaryBuyerServing without
 // either so a below-floor admitted session is not canary-degraded.
 func (s *Server) publicRoutingEligible(p pool.Provider) bool {
-	if !s.canaryBuyerServing(p) || !s.providerMeetsDispatchThroughputFloor(p) {
+	return s.canaryBuyerServing(p) && s.publicDispatchGates(p)
+}
+
+// publicDispatchGates are the public-projection gates beyond canaryBuyerServing:
+// the optional dispatch throughput floor and the catalog-material gate.
+func (s *Server) publicDispatchGates(p pool.Provider) bool {
+	if !s.providerMeetsDispatchThroughputFloor(p) {
 		return false
 	}
 	if gate := s.catalogMaterialRoutingGate.Load(); gate != nil && (*gate)(p) {
 		return false
 	}
 	return true
+}
+
+// publicInService is the /poolz.in_service predicate (#2371): the same gates
+// as publicRoutingEligible with pool.Provider.InService in place of
+// RoutingEligible, so a provider that is busy on every slot or under a
+// capacity hold is in service. Public status and health surfaces count it;
+// buyer routing keeps routing_eligible, and serving_eligible keeps its #1570
+// meaning for the gateway's served-context grant.
+func (s *Server) publicInService(p pool.Provider) bool {
+	return p.InService() && s.buyerServingGates(p) && s.publicDispatchGates(p)
 }
 
 // publicServingEligible is the /poolz.serving_eligible predicate (#1570):
@@ -7630,6 +7649,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		UptimeS                  int64  `json:"uptime_s"`
 		PoolSize                 int    `json:"pool_size"`
 		PoolReady                int    `json:"pool_ready"`
+		PoolBusy                 int    `json:"pool_busy"`
 		PoolDegraded             int    `json:"pool_degraded"`
 		PoolDraining             int    `json:"pool_draining"`
 		PoolUnavailable          int    `json:"pool_unavailable"`
@@ -7722,6 +7742,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			if s.providerTier2PolicyEligible(p, s.tier2Config()) {
 				resp.PoolPolicyReady++
 			}
+		case pool.StateBusy:
+			resp.PoolBusy++
 		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -7762,6 +7784,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	summary := struct {
 		TotalProviders int      `json:"total_providers"`
 		Ready          int      `json:"ready"`
+		InService      int      `json:"in_service"`
 		PolicyReady    int      `json:"policy_ready"`
 		TotalSlots     int      `json:"total_slots"`
 		FreeSlots      int      `json:"free_slots"`
@@ -7781,6 +7804,9 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		if providerPublishedReady(p) {
 			summary.Ready++
 			summary.FreeSlots += p.SlotsFree
+		}
+		if s.publicInService(p) {
+			summary.InService++
 		}
 		if s.providerTier2PolicyEligible(p, cfg) {
 			summary.PolicyReady++
@@ -7802,6 +7828,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		pool.Provider
 		RoutingEligible   bool                    `json:"routing_eligible"`
 		ServingEligible   bool                    `json:"serving_eligible"`
+		InService         bool                    `json:"in_service"`
 		CanaryFailCount   int                     `json:"canary_fail_count"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
@@ -7828,6 +7855,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			Provider:          provider,
 			RoutingEligible:   s.publicRoutingEligible(provider),
 			ServingEligible:   s.publicServingEligible(provider),
+			InService:         s.publicInService(provider),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,

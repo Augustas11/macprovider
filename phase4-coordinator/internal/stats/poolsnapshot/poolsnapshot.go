@@ -142,6 +142,7 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 	models := make(map[string]*modelRollup, len(providers))
 	out := statsrollup.RoutabilitySnapshot{At: now}
 
+	availableShardMembers := availableShardGroupMembers(providers)
 	for _, prov := range providers {
 		if !publicRoutabilityAdmission(prov) {
 			continue
@@ -149,6 +150,7 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 		out.Summary.ProvidersTotal++
 		routable := prov.RoutingEligible()
 		serving := prov.ServingCapable()
+		state := publicProviderState(prov, serving, availableShardMembers[shardMemberKey(prov.ProviderID, prov.AssignedID)], now)
 		if routable {
 			out.Summary.ProvidersRoutable++
 		}
@@ -166,8 +168,11 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 			if serving {
 				m.servingCapableProviderCount++
 			}
-			if routable || prov.AtCapacity() {
+			if prov.InService() && !heartbeatStale(prov, now) {
 				m.inServiceProviderCount++
+			}
+			if state == "unknown" {
+				m.unknownProviderCount++
 			}
 			if prov.SlotsFree > 0 {
 				m.slotsFree += prov.SlotsFree
@@ -194,7 +199,7 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 
 		out.Providers = append(out.Providers, statsrollup.ProviderRoutability{
 			ModelID:                 modelID,
-			State:                   publicProviderState(prov, routable, serving, now),
+			State:                   state,
 			Routable:                routable,
 			ServingCapable:          serving,
 			RoutabilityScore:        publicRoutabilityScore(prov, routable, serving, now),
@@ -254,6 +259,7 @@ type modelRollup struct {
 	routableProviderCount        int
 	servingCapableProviderCount  int
 	inServiceProviderCount       int
+	unknownProviderCount         int
 	slotsFree                    int
 	slotsTotal                   int
 	maxContextTokens             int
@@ -334,16 +340,19 @@ func publicProviderLess(a, b statsrollup.ProviderRoutability) bool {
 	return false
 }
 
-// publicModelState counts providers in service (routable, or full with every
-// other gate passed), not momentarily free slots: a model whose providers are
+// publicModelState counts providers in service (pool.Provider.InService with
+// a fresh heartbeat), not momentarily free slots: a model whose providers are
 // all busy serving is healthy, and free capacity is reported separately in
-// slots_free and routable_provider_count (SPEC-017 §5.2c, #2371).
+// slots_free and routable_provider_count. A model is never degraded (SPEC-017
+// §5.2c, #2371).
 func publicModelState(m *modelRollup) string {
 	switch {
 	case m.inServiceProviderCount >= 2:
 		return "redundant"
 	case m.inServiceProviderCount == 1:
 		return "operational"
+	case m.unknownProviderCount > 0:
+		return "unknown"
 	case m.providerCount > 0:
 		return "offline"
 	case m.declaredOnly:
@@ -353,17 +362,13 @@ func publicModelState(m *modelRollup) string {
 	}
 }
 
+// networkState derives from the model states only; it is never degraded.
 func networkState(s statsrollup.RoutabilitySummary) string {
 	switch {
 	case s.ModelsRedundant > 0:
 		return "redundant"
 	case s.ModelsOperational > 0:
 		return "operational"
-	case s.ProvidersServingCapable > 0:
-		// Serving-capable providers exist but none is in service for any
-		// model: each is held by a real fault (thermal hold, compute-integrity
-		// suspension, pending recheck). Busy providers never reach here.
-		return "degraded"
 	case s.ModelsUnknown > 0:
 		return "unknown"
 	default:
@@ -371,19 +376,48 @@ func networkState(s statsrollup.RoutabilitySummary) string {
 	}
 }
 
-func publicProviderState(prov pool.Provider, routable, serving bool, now time.Time) string {
-	if heartbeatStale(prov, now) && serving {
+// publicProviderState maps the pool gates to the SPEC-017 §5.2c provider
+// words. Busy and capacity-held (thermal, queue-full) providers are online;
+// transient checks are unknown; degraded is kept for a compute-integrity
+// suspension and an unavailable shard group.
+func publicProviderState(prov pool.Provider, serving, inAvailableShardGroup bool, now time.Time) string {
+	switch {
+	case !serving:
+		return "offline"
+	case heartbeatStale(prov, now):
 		return "unknown"
-	}
-	if routable || prov.AtCapacity() {
+	case prov.InService():
 		return "online"
-	}
-	if serving {
-		// Serving-capable but neither routable nor merely full: a real fault
-		// such as a thermal hold or compute-integrity suspension.
+	case prov.ShardMemberV1 && inAvailableShardGroup && prov.ShardMemberAdmissible():
+		// A member never routes on its own (SPEC-051-R016); it is healthy
+		// while its group is available.
+		return "online"
+	case prov.CatalogRecheckPending || prov.HandshakeAckPending || prov.SlotsTotal <= 0:
+		return "unknown"
+	default:
 		return "degraded"
 	}
-	return "offline"
+}
+
+func shardMemberKey(providerID, assignedID string) string {
+	return providerID + "/" + assignedID
+}
+
+// availableShardGroupMembers lists the member sessions of every available
+// SPEC-051 group, read from the group heads.
+func availableShardGroupMembers(providers []pool.Provider) map[string]bool {
+	out := map[string]bool{}
+	for _, p := range providers {
+		if !p.ShardGroupHeadV1 || !p.ShardGroupAvailable {
+			continue
+		}
+		for _, m := range p.ShardGroupMembers {
+			if !m.Spare && m.AssignedID != "" {
+				out[shardMemberKey(m.ProviderID, m.AssignedID)] = true
+			}
+		}
+	}
+	return out
 }
 
 func publicRoutabilityScore(prov pool.Provider, routable, serving bool, now time.Time) int {

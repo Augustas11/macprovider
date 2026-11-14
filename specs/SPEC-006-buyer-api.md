@@ -3,7 +3,7 @@
 **Version:** 0.9.80 (2026-11-14, busy providers are not idle or degraded)
 **Depends on:** SPEC-001 v1.9.56, SPEC-002 v1.6.33, SPEC-003 v0.7, SPEC-004 v0.3.2
 
-**Change log v0.9.80 (2026-11-14, Related: #2371):** §5.6 `/v1/status` decides `idle` and `degraded` by serving providers (state `ready` or `busy`, including one busy with every slot in flight), so a network whose providers are all busy serving is `up`, not `idle` or `degraded`. `pool.busy` counts `busy` providers, which no longer count in `pool.degraded`. Per-model `degraded` follows SPEC-002 v1.6.35 FR-B1.
+**Change log v0.9.80 (2026-11-14, PR #2374, Related: #2371):** §5.6 `/v1/status` counts providers **in service** (SPEC-002 v1.6.35 FR-B1, `/poolz` `in_service`; routable, or busy on every slot or under a capacity hold). `idle` and `degraded` are decided by that count, so a network whose providers are all busy is `up`. A provider in service but full is counted in `total_providers` and `pool.busy` and lists its model. `availability` is `no_awake_provider` only when no provider for the model is in service; a model whose providers are all busy is `no_free_slots`, never "warming up". `pool.degraded` counts only the `degraded` state. Per-model `degraded` follows FR-B1.
 
 **Change log v0.9.79 (2026-11-14, Related: #2360, #2362, #2363):** Three agent-client fixes. (1) `/v1/responses` streaming: an upstream stream that closes with neither `[DONE]` nor a `finish_reason` ends in `response.failed` with `error.code` `invalid_provider_response` (retryable), never `response.completed`, as `/v1/messages` already refused it. Like `/v1/messages`, the request settles with outcome `invalid_provider_response` and the stream is kept out of the id-less dedupe cache, so a retry is dispatched again. (2) `quota_exhausted` is `retryable: false` at the gateway, as at the coordinator: the daily quota refills only at the next UTC day. `X-RateLimit-Reset` names the refill and no `Retry-After` is sent: agent clients such as Codex sleep until a `Retry-After` deadline without a cap, so a day-long one would hang them instead of stopping them. The relay-blind `quota_exhausted` refusal now carries the `X-RateLimit-*` headers too. (3) `/v1/responses` forwards `reasoning.effort` `max` as `reasoning_effort` `max` (the SPEC-018 §3.12 set) instead of dropping it.
 
@@ -2812,13 +2812,13 @@ Allowed top-level `status` values:
 
 `down` is reserved for coordinator/control-plane unreachability: `/poolz` is unreachable, returns a non-2xx response, or cannot be decoded. A reachable coordinator with zero ready providers MUST NOT produce `down`.
 
-A provider is **serving** when it passes every buyer-routing gate except free-slot capacity and is in state `ready` or `busy` (`/poolz` `serving_eligible`); a provider busy with every slot in flight is serving (v0.9.80).
+A provider is **in service** as SPEC-002 v1.6.35 FR-B1 defines it: in state `ready` or `busy` and reported `in_service` on `/poolz` (routing-eligible, or blocked only by capacity: every slot in flight, or a thermal or queue-full hold). Against a coordinator without `in_service` the gateway uses `serving_eligible`, then `routing_eligible`. A summary-only `/poolz` reply uses `summary.in_service` (v0.9.80).
 
-`idle` means the coordinator is reachable but no provider is serving. This is a normal sleep-tolerant capacity state and MUST be rendered by front doors as non-alarming "no providers awake right now" copy.
+`idle` means the coordinator is reachable but no provider is in service. This is a normal sleep-tolerant capacity state and MUST be rendered by front doors as non-alarming "no providers awake right now" copy.
 
-`degraded` means the coordinator is reachable and at least one provider is serving, but serving providers are below the configured threshold. Busy providers are never a reason for `idle` or `degraded`.
+`degraded` means the coordinator is reachable and at least one provider is in service, but providers in service are below the configured threshold. Busy providers are never a reason for `idle` or `degraded`.
 
-`pool.busy` counts providers in state `busy`; `pool.degraded` counts only providers in state `degraded`.
+`pool` counts every routing-eligible or in-service provider once by state; `ready`, `busy`, `degraded`, `draining` and `unavailable` sum to `total_providers`. `pool.busy` counts state `busy`; `pool.degraded` counts only state `degraded`.
 
 The network-wide degraded flag MUST be true only for the `degraded` status. It MUST be false for `up`, `idle`, and `down`.
 
@@ -2827,10 +2827,10 @@ Per-model `degraded` is defined normatively in SPEC-002 v1.1.4 § 4, FR-B1. The 
 Per-model rows MUST include:
 
 - `ready_provider_count`: ready providers currently serving that model.
-- `available`: true only when at least one ready provider has an immediately routable free slot.
+- `available`: true only when at least one routing-eligible provider (`ready` or `busy`) has an immediately routable free slot.
 - `availability`: one of `available`, `no_awake_provider`, or `no_free_slots`.
 
-A model with `availability: "no_awake_provider"` is known to the coordinator but currently has no awake ready provider. A model with `availability: "no_free_slots"` has at least one ready provider but no immediate free slot. Front doors MUST use these fields rather than deriving availability from top-level status alone.
+A model with `availability: "no_awake_provider"` is known to the coordinator but has no provider in service. A model with `availability: "no_free_slots"` has at least one provider in service but no immediate free slot, including a model whose providers are all busy on every slot (v0.9.80); front doors MUST render it as busy, not as warming up or a fault. Front doors MUST use these fields rather than deriving availability from top-level status alone.
 
 Per-model `tool_choice_modes` (v0.9.58, SPEC-006-R021) projects the union
 of compatible modes from eligible providers currently serving that model.

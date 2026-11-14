@@ -1742,23 +1742,70 @@ func TestAggregateStatusNoFreeSlotsIsModelUnavailableNotSystemIdle(t *testing.T)
 }
 
 // #2371: two providers serving on every slot (routing_eligible false,
-// serving_eligible true) are up, not idle or degraded, even below threshold 2.
+// in_service true) are up, counted as busy, and their model is listed as
+// no_free_slots, not degraded or warming up, even below threshold 2.
 func TestAggregateStatusAllProvidersBusyServingIsUp(t *testing.T) {
+	for _, field := range []string{`"in_service":true`, `"serving_eligible":true`} {
+		out := aggregateStatus(decodePoolz(t, `{
+			"pool":[
+				{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,`+field+`},
+				{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,`+field+`}
+			],
+			"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":0}
+		}`), 2, fixedNow())
+
+		if out.Status != "up" || out.Degraded || out.Pool.Busy != 2 || out.Pool.TotalProviders != 2 || out.Pool.Degraded != 0 {
+			t.Fatalf("%s: status=%q degraded=%t pool=%+v, want up with 2 busy of 2", field, out.Status, out.Degraded, out.Pool)
+		}
+		if len(out.Models) != 1 {
+			t.Fatalf("%s: models=%+v, want one model", field, out.Models)
+		}
+		m := out.Models[0]
+		if m.Degraded || m.Available || m.Availability != "no_free_slots" || m.ProviderCount != 2 || m.TotalSlots != 4 {
+			t.Fatalf("%s: model=%+v, want not degraded, no_free_slots, 2 providers, 4 slots", field, m)
+		}
+	}
+}
+
+// #2371: the five pool counters sum to total_providers across a mixed pool,
+// and a row that is neither routable nor in service is skipped.
+func TestAggregateStatusPoolCountersSumToTotal(t *testing.T) {
 	out := aggregateStatus(decodePoolz(t, `{
 		"pool":[
-			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,"serving_eligible":true},
-			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,"serving_eligible":true}
+			{"model_id":"a","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":true,"in_service":true},
+			{"model_id":"a","state":"busy","slots_free":0,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"b","state":"degraded","slots_free":0,"slots_total":1},
+			{"model_id":"b","state":"draining","slots_free":0,"slots_total":1},
+			{"model_id":"b","state":"unavailable","slots_free":0,"slots_total":1},
+			{"model_id":"c","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":false,"in_service":false}
 		],
-		"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":0}
-	}`), 2, fixedNow())
+		"summary":{"total_providers":6,"ready":1,"total_slots":7,"free_slots":1}
+	}`), 1, fixedNow())
 
-	if out.Status != "up" || out.Degraded || out.Pool.Degraded != 0 {
-		t.Fatalf("status=%q degraded=%t pool=%+v, want up with no degraded providers", out.Status, out.Degraded, out.Pool)
+	p := out.Pool
+	if p.TotalProviders != 5 || p.Ready+p.Busy+p.Degraded+p.Draining+p.Unavailable != p.TotalProviders || p.Busy != 1 || p.Ready != 1 {
+		t.Fatalf("pool=%+v, want 5 counted providers whose counters sum to the total", p)
 	}
 	for _, m := range out.Models {
-		if m.Degraded {
-			t.Fatalf("model %+v must not be degraded for busy providers", m)
+		if m.ID == "c" {
+			t.Fatalf("a non-routable, not-in-service row must not list its model: %+v", m)
 		}
+		if m.ID == "a" && (!m.Available || m.Degraded) {
+			t.Fatalf("model a=%+v, want available and not degraded", m)
+		}
+		if m.ID == "b" && (m.Availability != "no_awake_provider" || !m.Degraded) {
+			t.Fatalf("model b=%+v, want no_awake_provider and degraded (every provider faulted)", m)
+		}
+	}
+}
+
+// #2371: a summary-only payload whose providers are all busy is not idle.
+func TestAggregateStatusSummaryOnlyAllBusyIsNotIdle(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"summary":{"total_providers":2,"ready":0,"in_service":2,"total_slots":4,"free_slots":0}
+	}`), 1, fixedNow())
+	if out.Status != "up" || out.Degraded {
+		t.Fatalf("status=%q degraded=%t, want up", out.Status, out.Degraded)
 	}
 }
 

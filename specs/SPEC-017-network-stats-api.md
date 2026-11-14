@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
 **Version:** 0.2.2 (2026-11-14 — routability states: busy is not degraded, Related: #2371). v0.2.1 (2026-09-11 — BYOM v0.2 slice 5 (#1453): adopts the SPEC-023 §16.2(a) `unmatched_model_request_count` field contract by amendment and adds the partner-keyed catalog-intake read model `GET /v1/stats/intake` (§5.2b). v0.2.0 (2026-08-19, issue #1063) added the public routability read models. v0.1.9 remains the last locked baseline.)
-**Status:** normative v0.2.1 — LOCKED 2026-09-11 after the #1453 slice 5 SPEC audit reached 0 C / 0 H / 0 M (three codex rounds, an independent cold-context review, three codex closure passes; records in `audits/2026-09-11-byom-v02-slice5/`). `CONFORMANCE.json` records this version, which is what SPEC-023 §16.7 keys the buyer-demand signal on; the v0.2.0 routability read models remain implemented and deployed under it. v0.2.1 adds one partner-keyed endpoint, one rollup component, one request-path-readable table, and an in-process buyer-request aggregator whose only output is that table. It changes no public projection, no buyer routing behavior, and no operator-only `/poolz` semantics.
+**Status:** normative v0.2.2 — v0.2.2 (2026-11-14, PR #2374) narrows the §5.2c routability state rules and adds no field; v0.2.1 LOCKED 2026-09-11 after the #1453 slice 5 SPEC audit reached 0 C / 0 H / 0 M (three codex rounds, an independent cold-context review, three codex closure passes; records in `audits/2026-09-11-byom-v02-slice5/`). `CONFORMANCE.json` records this version, which is what SPEC-023 §16.7 keys the buyer-demand signal on; the v0.2.0 routability read models remain implemented and deployed under it. v0.2.1 adds one partner-keyed endpoint, one rollup component, one request-path-readable table, and an in-process buyer-request aggregator whose only output is that table. It changes no public projection, no buyer routing behavior, and no operator-only `/poolz` semantics.
 **Depends on:** SPEC-023 v0.10.4 (§16.2(a) `unmatched_model_request_count` field contract, items 1–10 and S1–S5, adopted by v0.2.1 §5.2b at THAT version — a later SPEC-023 edit binds this SPEC only through an explicit SPEC-017 amendment; §16.4 `INTAKE_K_ANONYMITY_MIN`), SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -14,18 +14,17 @@ entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
 
-**v0.2.2 (2026-11-14, Related: #2371 — routability states: busy is not
-degraded):** §5.2c state rules. A model's state counts providers in
-service (routable, or passing every routing gate but out of free slots),
-not momentarily free slots: two or more is `redundant`, one is
-`operational`. A model is never `degraded`; `summary.models_degraded`
-stays in the wire shape (removal is a §8.3 breaking change) and is
-always `0`. A provider that is serving on every slot is `online`;
-`degraded` is kept only for a serving-capable provider held by a real
-fault. The network summary is `degraded` only when serving-capable
-providers exist and none is in service. No field is added or removed;
-`slots_free`, `slots_total`, and `routable_provider_count` keep their
-meaning and carry free capacity.
+**v0.2.2 (2026-11-14, PR #2374, Related: #2371 — routability states:
+busy is not degraded):** §5.2c defines "in service"
+(`pool.Provider.InService`: routable, or blocked only by capacity) and
+rewrites the state rules as a table. A model counts providers in
+service, not free slots: two or more is `redundant`, one is
+`operational`, else `unknown` or `offline`. Providers busy on every slot
+or under a thermal or queue-full hold are `online`; pending catalog
+recheck or handshake acknowledgement is `unknown`; `degraded` is kept
+for compute-integrity suspension and an unavailable SPEC-051 group. No
+model and no network summary is ever `degraded`; `models_degraded`
+stays in the wire shape at `0` (§8.3). No field is added or removed.
 
 **v0.2.1 (2026-09-11, locked — BYOM v0.2 slice 5, catalog-intake read model):**
 Adopts, verbatim and by reference, the SPEC-023 **v0.10.4** §16.2(a)
@@ -1075,29 +1074,34 @@ admission evidence, or sandbox gates MUST NOT contribute to these
 public read models. Supported-model declarations MUST contribute only
 when the provider explicitly publishes supported models. A provider
 is **in service** when it is routable, or when it passes every routing
-gate except free capacity: every slot is in flight, or it refused a
-route as queue-full (v0.2.2). Model states
-are `redundant` when at least two providers are in service,
-`operational` when exactly one provider is in service,
-`unknown` when the model is only declared in supported-model metadata,
-and `offline` when no provider for the model is in service in this
-projection. Free capacity is not a model state: it is reported by
-`slots_free`, `slots_total`, and `routable_provider_count`. A model is
-never `degraded`; `summary.models_degraded` is kept for wire
-compatibility (§8.3) and is always `0`. Provider states are `online`
-for providers in service (including a provider serving on every slot),
-`degraded` for serving-capable providers that are not in service because
-a routing gate other than capacity holds them (thermal hold,
-compute-integrity suspension, pending catalog recheck or handshake
-acknowledgement, unavailable shard group), `unknown` for live
-serving-capable providers whose most recent heartbeat is beyond the
-freshness target but within the 503 budget, and `offline` for
-unavailable or draining live sessions and for sessions in the pool
-`degraded` state (breaker or canary recovery hold, warm-up gate). The summary
-`state` is `redundant` when any model is `redundant`, else
-`operational` when any model is `operational`, else `degraded` when at
-least one provider is serving-capable but none is in service, else
-`unknown` when any model is `unknown`, else `offline`.
+gate except capacity: every slot is in flight, or a capacity hold
+(thermal pressure or a queue-full refusal) blocks new routes while it
+keeps streaming. This is `pool.Provider.InService` (SPEC-002 FR-B1, the
+same definition SPEC-006 §5.6 counts). A provider with no reported slots
+is not in service. A provider whose heartbeat is beyond the freshness
+target does not count as in service here (v0.2.2).
+
+Provider states (v0.2.2):
+
+| Provider condition (first match) | `state` |
+|---|---|
+| not serving-capable: `unavailable`, `draining`, or pool `degraded` (breaker or canary recovery hold, warm-up gate) | `offline` |
+| heartbeat beyond the freshness target, within the 503 budget | `unknown` |
+| in service (routable, busy on every slot, thermal or queue-full hold) | `online` |
+| SPEC-051 member of an available group | `online` |
+| catalog recheck or handshake acknowledgement pending, or no slots reported | `unknown` |
+| compute-integrity suspension, SPEC-051 group unavailable | `degraded` |
+
+Model states: `redundant` when at least two of its providers are in
+service, `operational` when exactly one is, else `unknown` when any of
+its providers is `unknown` or the model is only declared in
+supported-model metadata, else `offline`. Free capacity is not a model
+state: `slots_free`, `slots_total`, and `routable_provider_count` carry
+it. A model is never `degraded`; `summary.models_degraded` is always
+`0` (§8.3). The summary `state` derives from the model states only:
+`redundant` when any model is `redundant`, else `operational` when any
+is `operational`, else `unknown` when any is `unknown`, else `offline`.
+It is never `degraded`.
 
 **Response headers.** Public projection only:
 `Cache-Control: public, max-age=30, s-maxage=30,
@@ -2739,6 +2743,14 @@ window-vocabulary changes MUST ship behind `/v2/*` with a minimum
 **6-month** overlap window during which `/v1/*` continues to serve the
 prior shape, and a `Deprecation` header per RFC 9745 on every `/v1/*`
 response during overlap.
+
+**Note (v0.2.2).** `summary.models_degraded` in `/v1/stats/routability`
+stays in the `/v1` shape for compatibility, with a changed meaning: since
+v0.2.2 no model is `degraded`, so the field is always `0`. Removing it is
+a field removal under this section and is not done in `/v1`. The v0.2.2
+state-rule change (§5.2c) is an operator decision recorded in PR #2374:
+busy capacity was misreported as degradation, and the narrowed states
+use only existing state words.
 
 ### 8.4 Sunset header
 
