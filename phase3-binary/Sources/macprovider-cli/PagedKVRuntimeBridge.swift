@@ -5465,8 +5465,7 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol,
-    KVCacheAttentionReturningStateProtocol, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, KVCacheAttentionReturningStateProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int

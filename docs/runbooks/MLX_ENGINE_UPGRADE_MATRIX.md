@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.60` | `a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.64` | `5e6c86449e26a1818efbe94804e6d37fd1c1cf57` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,13 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-15 the LM row is `3.32.3-macprovider.64` (`5e6c864`), on
+`3.32.3-macprovider.60` (#2328): one Gemma 4 commit. The two K/V-read layers
+attend through a cache that owns attention and get its keys and values back,
+so the provider's native MTP verify columns attend exactly as the decode step
+at their position. Other model families and the Swift, core and C rows are
+unchanged.
 
 As of 2026-11-14 the LM row is `3.32.3-macprovider.60` (`a4b4b53`), on
 `3.32.3-macprovider.58` (#2328): the Qwen2-VL commit of 3.32.3-macprovider.59

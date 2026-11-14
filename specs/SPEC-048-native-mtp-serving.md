@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.99
+**Version:** 0.1.100
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.99",
+  "version": "0.1.100",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -644,12 +644,19 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.60` | `a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.64` | `5e6c86449e26a1818efbe94804e6d37fd1c1cf57` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.60` is on `3.32.3-macprovider.58`
+The mlx-swift-lm row `3.32.3-macprovider.64` is on `3.32.3-macprovider.60`
+(`a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b`) (#2328), at
+`5e6c86449e26a1818efbe94804e6d37fd1c1cf57`: one Gemma 4 commit. The two K/V-read layers
+attend through a cache that owns attention and get its keys and values back,
+so native MTP verify columns attend exactly as the decode step at their
+position. Other model families and the Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.60` is on `3.32.3-macprovider.58`
 (`a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e`) (#2328), at
 `a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b`: the Qwen2-VL commit of
 3.32.3-macprovider.59 (#2327: post-vision decode uses fused non-traditional
@@ -2677,6 +2684,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.100 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.64` (`5e6c86449e26a1818efbe94804e6d37fd1c1cf57`) on
+  `3.32.3-macprovider.60`: one Gemma 4 commit. The two K/V-read layers attend
+  through a cache that owns attention and get its keys and values back, so
+  native MTP verify columns attend exactly as the decode step at their
+  position. Other model sources and the Swift, core and C rows are unchanged.
 - **0.1.99 (2026-11-14, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.60` (`a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b`) on
   `3.32.3-macprovider.58`: the Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision

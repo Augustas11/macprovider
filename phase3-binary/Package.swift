@@ -157,7 +157,7 @@ let package = Package(
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage. 10.10 batches GLM MTP indexer projections and
         // compatible per-column attention while retaining row-owned caches.
-        // Revision 5e6c8644 (branch campaign/2328-gemma4-column-exact, on
+        // 3.32.3-macprovider.64 (5e6c8644, branch campaign/2328-gemma4-column-exact, on
         // 3.32.3-macprovider.60 a4b4b536) lets Gemma 4's K/V-read layers attend
         // through a cache that owns attention (#2328 column-exact verification).
         .package(

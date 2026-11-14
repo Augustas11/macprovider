@@ -42,6 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.64 (#2328) on 3.32.3-macprovider.60 (a4b4b536): one
+# Gemma 4 commit. The two K/V-read layers attend through a cache that owns
+# attention and get its keys and values back, so the provider's native MTP
+# verify columns attend exactly as the decode step at their position. Other
+# model families are unchanged.
 # 3.32.3-macprovider.60 (#2328) on 3.32.3-macprovider.58: the Qwen2-VL commit
 # of 3.32.3-macprovider.59 (#2327: post-vision decode uses fused
 # non-traditional RoPE when the three M-RoPE axes share one rope delta) and
@@ -90,8 +95,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
 # model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
 # maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.60"
-SPEC048_MLX_SWIFT_LM_REVISION = "a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.64"
+SPEC048_MLX_SWIFT_LM_REVISION = "5e6c86449e26a1818efbe94804e6d37fd1c1cf57"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
