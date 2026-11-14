@@ -483,9 +483,11 @@ struct ProviderSnapshot: Sendable {
     var localUsage = LocalUsageSnapshot()
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
     var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
+    /// Issue #2364: the first-token stall hold keeps the provider out of routing.
+    var firstTokenStallHeld = false
 
     var slotsFree: Int {
-        if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true { return 0 }
+        if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true || firstTokenStallHeld { return 0 }
         return max(0, capacity.maxConcurrency - requestsInFlight)
     }
 
@@ -644,6 +646,10 @@ actor ProviderStatus {
     /// yet finished (SPEC-038 FR-CB10 item 3, v0.3.36): the drain does not
     /// wait for them.
     private var cbAdmissionHoldArrivals: [Date] = []
+    /// Issue #2364: set by `FirstTokenStallMonitor` while admitted requests
+    /// get no first token and the model makes no progress; cleared only after
+    /// a one-token recovery forward succeeds. Overlays ready/busy as degraded.
+    private var firstTokenStallHold = false
     private let thermalGate: ThermalGate?
     private let memoryPressureProvider: MemoryPressureProviding
     private let workloadTelemetryProvider: ProviderWorkloadTelemetryProviding
@@ -865,6 +871,26 @@ actor ProviderStatus {
     }
 
     func selfCheckAdmissionHoldStatus() -> ContinuousBatchingAdmissionHoldStatus { cbAdmissionHold }
+
+    /// Issue #2364: whether the first-token stall watchdog should count time
+    /// now (a loaded, unpaused provider that is ready or busy).
+    func isServingForFirstTokenStallWatch() -> Bool {
+        !operatorPauseFence && modelLoaded && (status == .ready || status == .busy)
+    }
+
+    /// Issue #2364: sets or clears the first-token stall hold. While held the
+    /// provider reports `degraded` with no free slot; capacity transitions
+    /// are not published until it clears.
+    func setFirstTokenStallHold(_ held: Bool) async {
+        guard firstTokenStallHold != held else { return }
+        firstTokenStallHold = held
+        transitionID = UUID().uuidString.lowercased()
+        transitionAt = Date()
+        transitionReason = held ? "first_token_stall" : "first_token_stall_recovered"
+        if !held { await refreshAvailabilityState() }
+    }
+
+    func firstTokenStallHeld() -> Bool { firstTokenStallHold }
 
     /// Whether a held self-check may keep running: no operator pause, and the
     /// provider is still ready/busy (not draining, unavailable or degraded).
@@ -1155,7 +1181,12 @@ actor ProviderStatus {
         let specAcceptanceRate = specDecodeWindowDraftedTokens > 0
             ? Double(specDecodeWindowAcceptedTokens) / Double(specDecodeWindowDraftedTokens)
             : nil
-        let effectiveStatus: ProviderHealthState = ((throttled || cbAdmissionHold.active) && (status == .ready || status == .busy)) ? .busy : status
+        let effectiveStatus: ProviderHealthState
+        if firstTokenStallHold, status == .ready || status == .busy {
+            effectiveStatus = .degraded
+        } else {
+            effectiveStatus = ((throttled || cbAdmissionHold.active) && (status == .ready || status == .busy)) ? .busy : status
+        }
         var snapshot = ProviderSnapshot(
             status: effectiveStatus,
             modelID: modelID,
@@ -1216,6 +1247,7 @@ actor ProviderStatus {
             cbSelfCheckAdmissionHold: cbAdmissionHold
         )
         snapshot.localUsage = currentLocalUsage()
+        snapshot.firstTokenStallHeld = firstTokenStallHold
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0
@@ -1466,7 +1498,7 @@ actor ProviderStatus {
             return
         }
         await refreshThermalObservation()
-        guard status == .ready || status == .busy else {
+        guard status == .ready || status == .busy, !firstTokenStallHold else {
             return
         }
         let held = cbAdmissionHold.active
