@@ -30,6 +30,10 @@ type anthropicMessagesAdapter struct {
 	model                   string
 	stream                  bool
 	guaranteedToolSelection bool
+	// promptCacheKey is metadata.user_id, which partitions the auto-prefix
+	// conversation key like an OpenAI prompt_cache_key (#2365). Agents such as
+	// Claude Code send one per session; it is never forwarded.
+	promptCacheKey string
 
 	status      int
 	wroteHeader bool
@@ -480,6 +484,7 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	}
 	a.model = req.Model
 	a.stream = req.Stream
+	a.promptCacheKey = anthropicMetadataUserID(raw["metadata"])
 	a.stopSequences = anthropicNonEmptyStopSequences(req.StopSequences)
 	a.maxStopSequenceLen = anthropicMaxStopSequenceLen(a.stopSequences)
 	return translated, nil
@@ -2344,4 +2349,14 @@ func anthropicIDSuffix(id string) string {
 		return out[len(out)-48:]
 	}
 	return out
+}
+
+// anthropicMetadataUserID returns metadata.user_id when it is a string the
+// prompt_cache_key bound accepts, else "" (#2365).
+func anthropicMetadataUserID(metadata json.RawMessage) string {
+	var object map[string]json.RawMessage
+	if len(bytes.TrimSpace(metadata)) == 0 || json.Unmarshal(metadata, &object) != nil {
+		return ""
+	}
+	return promptCacheKeyString(object["user_id"])
 }

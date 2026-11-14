@@ -707,6 +707,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
 			cacheKey = adapter.promptCacheKey
 		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
+			cacheKey = adapter.promptCacheKey
+		}
 		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools, cacheKey)
 	}
 	if invalidConvTag {
