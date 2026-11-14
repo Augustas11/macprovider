@@ -7368,19 +7368,21 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testBudgetGoesToTheHeadPromptFirstAcrossFourK8K16KArrivals() async throws {
         let ids = ["running", "4k", "8k", "16k"]
         let lengths = ["running": 1, "4k": 8, "8k": 16, "16k": 32]
+        // One delivery offer per visible token. ScriptedBackend does not
+        // suspend, so the no-op sink's drain Task can stay unscheduled until
+        // every offer has landed. The buffer has to hold that whole burst:
+        // the 16-event default returned deliveryBackpressure whenever the
+        // Task was late.
+        let runningOutputTokens = 80
         var scripts: [String: [Int]] = ["4k": [2], "8k": [3], "16k": [4]]
         // The running row decodes through every prompt's prefill.
-        scripts["running"] = Array(repeating: 1, count: 80)
+        scripts["running"] = Array(repeating: 1, count: runningOutputTokens)
         let backend = ScriptedBackend(scripts: scripts)
         let scheduler = try await makeScheduler(
             descriptor: Self.descriptor(maxPhysicalBlocks: 64),
             maxActiveRows: 4,
             maxPromptChunkTokens: 2,
-            // The running row streams 80 tokens to the default no-op sink in
-            // microseconds of backend time. The sink drains on its own Task,
-            // so a 16-event buffer overflows (a deliveryBackpressure failure)
-            // whenever that Task is scheduled late. Bound it above the output.
-            tokenDeliveryBufferLimit: 128,
+            tokenDeliveryBufferLimit: runningOutputTokens,
             maxDecodeStepsWhilePrefilling: 2,
             maxPrefillRowsPerIteration: 4,
             maxPrefillTokensPerIteration: 8,
@@ -7398,7 +7400,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             tasks.append(Task {
                 try await scheduler.submit(.init(
                     id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!),
-                    maxOutputTokens: id == "running" ? 80 : 1
+                    maxOutputTokens: id == "running" ? runningOutputTokens : 1
                 ))
             })
             // The last row completes the composition and may be admitted at once.

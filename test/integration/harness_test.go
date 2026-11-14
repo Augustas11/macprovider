@@ -72,6 +72,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -2545,43 +2546,55 @@ func (p *fakeProvider) stop() {
 	})
 }
 
-func (p *fakeProvider) runWS(ctx context.Context) {
-	defer p.stop()
-	// gobwas/ws client dial. The pinned provider needs to send its
-	// Bearer token on the HTTP upgrade request so the coordinator's
-	// validateProviderToken returns auth.validated=true (a pinned
-	// provider with auth.validated=false is closed with invalid_token
-	// at prepareProviderAdmission, ws/server.go:949).
-	header := http.Header{}
-	if p.providerToken != "" {
-		header.Set("Authorization", "Bearer "+p.providerToken)
+// transientProviderHandshakeErr reports a socket that died before the
+// coordinator wrote hello_ack or auth_challenge. The next dial inside the
+// same deadline can succeed. A decoded frame is not retried: that is a
+// rejection, and retrying it would hide the failure.
+func transientProviderHandshakeErr(err error) bool {
+	if err == nil {
+		return false
 	}
-	dialer := gobwas.Dialer{
-		Timeout: 5 * time.Second,
-		Header:  gobwas.HandshakeHeaderHTTP(header),
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNREFUSED) {
+		return true
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	var conn net.Conn
-	for time.Now().Before(deadline) {
-		c, _, _, err := dialer.Dial(ctx, p.wsURL)
-		if err == nil {
-			conn = c
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if conn == nil {
-		p.t.Errorf("fake provider WS dial failed within deadline")
-		return
-	}
-	defer conn.Close()
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
-	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
+func TestTransientProviderHandshakeErr(t *testing.T) {
+	if transientProviderHandshakeErr(nil) {
+		t.Fatal("nil error is not a torn socket")
+	}
+	if !transientProviderHandshakeErr(fmt.Errorf("read hello_ack: %w", io.EOF)) {
+		t.Fatal("wrapped EOF must be retried")
+	}
+	if !transientProviderHandshakeErr(io.ErrUnexpectedEOF) {
+		t.Fatal("unexpected EOF must be retried")
+	}
+	if !transientProviderHandshakeErr(fmt.Errorf("dial: %w", syscall.ECONNRESET)) {
+		t.Fatal("connection reset must be retried")
+	}
+	if transientProviderHandshakeErr(errors.New("auth_response = rejected")) {
+		t.Fatal("decoded rejection must not be retried")
+	}
+	if transientProviderHandshakeErr(fmt.Errorf("decode auth_challenge: %w", errors.New("invalid character"))) {
+		t.Fatal("decode failure must not be retried")
+	}
+}
+
+// handshake sends v1 hello or the v2 auth exchange on an already dialed
+// connection. Errors are returned so a torn socket can be redialed; callers
+// report the error once retries are exhausted.
+func (p *fakeProvider) handshake(conn net.Conn, endpointURL string) error {
 	if p.receiptEnabled || p.settlementEnabled {
 		providerECDH := make([]byte, 32)
 		if _, err := rand.Read(providerECDH); err != nil {
-			p.t.Errorf("provider ecdh key: %v", err)
-			return
+			return fmt.Errorf("provider ecdh key: %w", err)
 		}
 		initial := map[string]any{
 			"type":                        "auth_request",
@@ -2632,20 +2645,17 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			initial["catalog_row_identity"] = staticLlama32CandidateRowID
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {
-			p.t.Errorf("auth initial write: %v", err)
-			return
+			return fmt.Errorf("auth initial write: %w", err)
 		}
 		challengePayload, _, err := wsutil.ReadServerData(conn)
 		if err != nil {
-			p.t.Errorf("read auth_challenge: %v", err)
-			return
+			return fmt.Errorf("read auth_challenge: %w", err)
 		}
 		var challenge struct {
 			AuthAttemptID string `json:"auth_attempt_id"`
 		}
 		if err := json.Unmarshal(challengePayload, &challenge); err != nil {
-			p.t.Errorf("decode auth_challenge: %v", err)
-			return
+			return fmt.Errorf("decode auth_challenge: %w", err)
 		}
 		proof := map[string]any{
 			"type":                       "auth_request",
@@ -2662,18 +2672,15 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			// over the canonical initial transcript.
 			initialWire, err := json.Marshal(initial)
 			if err != nil {
-				p.t.Errorf("marshal initial: %v", err)
-				return
+				return fmt.Errorf("marshal initial: %w", err)
 			}
 			var initialDecoded map[string]any
 			if err := json.Unmarshal(initialWire, &initialDecoded); err != nil {
-				p.t.Errorf("decode initial: %v", err)
-				return
+				return fmt.Errorf("decode initial: %w", err)
 			}
 			initialCanonical, err := spec015CanonicalJSON(initialDecoded)
 			if err != nil {
-				p.t.Errorf("canonical initial transcript: %v", err)
-				return
+				return fmt.Errorf("canonical initial transcript: %w", err)
 			}
 			transcript := sha256.Sum256(initialCanonical)
 			transcriptB64 := base64.StdEncoding.EncodeToString(transcript[:])
@@ -2685,35 +2692,33 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"transcript_sha256":        transcriptB64,
 			})
 			if err != nil {
-				p.t.Errorf("canonical identity tuple: %v", err)
-				return
+				return fmt.Errorf("canonical identity tuple: %w", err)
 			}
 			proof["identity_signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(p.admissionPriv, tuple))
 			proof["identity_signature_transcript_sha256"] = transcriptB64
 		}
 		if err := writeJSONFrame(conn, proof); err != nil {
-			p.t.Errorf("auth proof write: %v", err)
-			return
+			return fmt.Errorf("auth proof write: %w", err)
 		}
 		responsePayload, _, err := wsutil.ReadServerData(conn)
 		if err != nil {
-			p.t.Errorf("read auth_response: %v", err)
-			return
+			return fmt.Errorf("read auth_response: %w", err)
 		}
 		var response struct {
 			Status string `json:"status"`
 		}
-		if err := json.Unmarshal(responsePayload, &response); err != nil || response.Status != "accepted" {
-			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
-			return
+		if err := json.Unmarshal(responsePayload, &response); err != nil {
+			return fmt.Errorf("auth_response: %w", err)
+		}
+		if response.Status != "accepted" {
+			return fmt.Errorf("auth_response = %s", string(responsePayload))
 		}
 		ready := readyStateUpdate(p.modelID, p.modelHash)
 		ready["metrics_snapshot"].(map[string]any)["max_context_tokens"] = p.maxContextTokensOrDefault()
 		p.canonicalIdentity(ready["metrics_snapshot"].(map[string]any))
 		p.addWeightsManifest(ready["metrics_snapshot"].(map[string]any))
 		if err := p.writeFrame(conn, ready); err != nil {
-			p.t.Errorf("state_update write: %v", err)
-			return
+			return fmt.Errorf("state_update write: %w", err)
 		}
 	} else {
 		binaryVersion := "1.0.0-fake"
@@ -2737,18 +2742,68 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"endpoint_url":            endpointURL,
 		}
 		if err := writeJSONFrame(conn, hello); err != nil {
-			p.t.Errorf("hello write: %v", err)
-			return
+			return fmt.Errorf("hello write: %w", err)
 		}
 
 		// Read hello_ack — once we get it the coordinator considers the
 		// provider admitted. We don't need to validate the ack contents;
 		// the /poolz wait loop on the test side is the source of truth.
 		if _, _, err := wsutil.ReadServerData(conn); err != nil {
-			p.t.Errorf("read hello_ack: %v", err)
-			return
+			return fmt.Errorf("read hello_ack: %w", err)
 		}
 	}
+
+	return nil
+}
+
+func (p *fakeProvider) runWS(ctx context.Context) {
+	defer p.stop()
+	// gobwas/ws client dial. The pinned provider needs to send its
+	// Bearer token on the HTTP upgrade request so the coordinator's
+	// validateProviderToken returns auth.validated=true (a pinned
+	// provider with auth.validated=false is closed with invalid_token
+	// at prepareProviderAdmission, ws/server.go:949).
+	header := http.Header{}
+	if p.providerToken != "" {
+		header.Set("Authorization", "Bearer "+p.providerToken)
+	}
+	dialer := gobwas.Dialer{
+		Timeout: 5 * time.Second,
+		Header:  gobwas.HandshakeHeaderHTTP(header),
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
+	var conn net.Conn
+	var lastErr error
+	for time.Now().Before(deadline) {
+		c, _, _, err := dialer.Dial(ctx, p.wsURL)
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if err := p.handshake(c, endpointURL); err != nil {
+			_ = c.Close()
+			lastErr = err
+			if !transientProviderHandshakeErr(err) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		conn = c
+		lastErr = nil
+		break
+	}
+	if conn == nil {
+		if lastErr != nil {
+			p.t.Errorf("fake provider handshake: %v", lastErr)
+		} else {
+			p.t.Errorf("fake provider WS dial failed within deadline")
+		}
+		return
+	}
+	defer conn.Close()
 
 	// Start heartbeat loop + inbound message reader. The reader has
 	// to drain inbound frames or the WS buffer eventually backpressures
