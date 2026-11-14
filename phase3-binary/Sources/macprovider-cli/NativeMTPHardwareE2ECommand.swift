@@ -451,7 +451,7 @@ final class NativeMTPHardwareE2ERunner {
             ("block_size_elements", representation.map { "\($0.groupSize)" } ?? "unavailable",
              quantization.blockSizeElements.map(String.init) ?? "null"),
             ("representation_manifest_sha256", representation?.manifestSHA256 ?? "unavailable",
-             quantization.representationManifestSHA256),
+             quantization.representationManifestSHA256 ?? "null"),
             ("per_layer_exceptions", representation.map { "\($0.perLayerExceptions)" } ?? "unavailable",
              "\(quantization.perLayerExceptions)"),
             ("unquantized_exceptions", representation.map { "\($0.unquantizedExceptions)" } ?? "unavailable",
