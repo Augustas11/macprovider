@@ -6932,7 +6932,7 @@
     {
       "requirement_id": "SPEC-006-R002",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/server.go:gatewayRetryable",
         "phase5-gateway/internal/router/server.go:writeError"
@@ -6946,21 +6946,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2362",
+        "rationale": "#2362 moves quota_exhausted from the retryable to the permanent class (agreeing with the coordinator), which changes TestGatewayRetryableByCodeClassification. The 2026-09-18 commit evidence no longer matches that selector; renew it with commit evidence from the merged change."
+      }
     },
     {
       "requirement_id": "SPEC-006-R003",
