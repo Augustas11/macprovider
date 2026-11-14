@@ -843,6 +843,42 @@ func (p Provider) ListingEligible() bool {
 	return p.shardMemberAdmissible()
 }
 
+// AtCapacity reports a provider that is not RoutingEligible only because of
+// capacity: every slot is in flight, or a capacity hold (thermal pressure or an
+// error_queue_full refusal, #1906) blocks routing while it keeps streaming its
+// in-flight work. Every other routing gate still applies, so compute-integrity
+// suspension, a pending catalog recheck or handshake ack, or an unavailable
+// shard group is not at capacity. A provider with no slots is never full.
+func (p Provider) AtCapacity() bool {
+	if p.SlotsTotal <= 0 || p.RoutingEligible() {
+		return false
+	}
+	p.SlotsFree = p.SlotsTotal
+	p.capacitySafetyHold = false
+	p.queueFullHold = false
+	return p.RoutingEligible()
+}
+
+// ShardMemberInService reports a SPEC-051 member session that passes every
+// member gate apart from capacity, as AtCapacity does for a routable session:
+// a thermal or queue-full hold does not make a member unhealthy.
+func (p Provider) ShardMemberInService() bool {
+	if !p.ShardMemberV1 {
+		return false
+	}
+	p.capacitySafetyHold = false
+	p.queueFullHold = false
+	return p.shardMemberAdmissible()
+}
+
+// InService is the one definition of a provider serving buyers for public
+// health surfaces (#2371): routable now, or at capacity. A busy provider is in
+// service; free capacity is reported separately. Buyer routing keeps
+// RoutingEligible.
+func (p Provider) InService() bool {
+	return p.RoutingEligible() || p.AtCapacity()
+}
+
 // ShardGroupMemberView is one non-head member or spare of an available
 // SPEC-051 group, as the routing gates of SPEC-051-R028 read it.
 type ShardGroupMemberView struct {

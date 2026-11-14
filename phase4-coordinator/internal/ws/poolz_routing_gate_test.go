@@ -108,3 +108,41 @@ func TestPublicServingEligibleIgnoresOnlyFreeSlots(t *testing.T) {
 		t.Fatal("an unavailable provider must not be serving-eligible")
 	}
 }
+
+// #2371: /poolz.in_service counts a provider that is full as in service, with
+// every other public gate still applied.
+func TestPublicInServiceCountsFullProvider(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	p := routingGateProvider(t, registry)
+	if !s.publicInService(p) {
+		t.Fatal("a routable provider must be in service")
+	}
+	full := p
+	full.State = pool.StateBusy
+	full.SlotsFree = 0
+	if !s.publicInService(full) || s.publicRoutingEligible(full) {
+		t.Fatal("a full provider must be in service but not routing-eligible")
+	}
+	noSlots := p
+	noSlots.SlotsFree = 0
+	noSlots.SlotsTotal = 0
+	if s.publicInService(noSlots) {
+		t.Fatal("a provider with no slots is not in service")
+	}
+	s.SetCatalogMaterialRoutingGate(func(pool.Provider) bool { return true })
+	if s.publicInService(full) {
+		t.Fatal("in_service must keep the catalog-material gate")
+	}
+	s.SetCatalogMaterialRoutingGate(nil)
+	suspended := full
+	suspended.ComputeIntegritySuspended = true
+	if s.publicInService(suspended) {
+		t.Fatal("a compute-integrity suspended provider is not in service")
+	}
+	gone := full
+	gone.State = pool.StateUnavailable
+	if s.publicInService(gone) {
+		t.Fatal("an unavailable provider is not in service")
+	}
+}

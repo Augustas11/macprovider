@@ -616,11 +616,16 @@ func TestOpenRouterModelsHandlerKeepsContextWhenOnlyProviderIsFull(t *testing.T)
 	if row.IsReady {
 		t.Fatalf("is_ready must stay false with no free ready slot")
 	}
-	// /v1/status keeps excluding the non-routable providers.
+	// #2371: /v1/status lists the full provider's model as busy (no free
+	// slots), not degraded; the serving-ineligible row stays excluded.
 	statusResp := httptest.NewRecorder()
 	h.ServeHTTP(statusResp, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
-	if strings.Contains(statusResp.Body.String(), "Qwen3.6") {
-		t.Fatalf("/v1/status gained a non-routable model row: %s", statusResp.Body.String())
+	var status statusResponse
+	if err := json.Unmarshal(statusResp.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(status.Models) != 1 || status.Models[0].ProviderCount != 1 || status.Models[0].Degraded || status.Models[0].Availability != "no_free_slots" || status.Pool.Busy != 1 {
+		t.Fatalf("/v1/status = %s, want one busy no_free_slots model row", statusResp.Body.String())
 	}
 }
 

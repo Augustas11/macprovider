@@ -1,6 +1,21 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.34 (2026-11-14, every MiniMax M3 request needs the exact-model declaration)
+**Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
+
+**Change log v1.6.35 (2026-11-14, PR #2374, Related: #2371):** A provider
+that is busy serving is not degraded. FR-B1 defines **in service**
+(`pool.Provider.InService`: routable, or blocked only by capacity: every slot
+in flight, or a thermal or queue-full hold; a provider with no slots is never
+in service), the one definition SPEC-006 §5.6 and SPEC-017 §5.2c count.
+FR-B1 per-model `degraded` counts providers in service and drops the "all
+`slots_free` equal 0" rule. FR-O2 `/poolz` rows gain `in_service` (that
+predicate under the same public gates as `routing_eligible`) and the summary
+gains `in_service`; `serving_eligible` keeps its v1.6.17 meaning because the
+gateway's served-context grant and decode-idle timeout read it. FR-O1
+`/healthz` on both ports adds `pool_busy` (state `busy` and in service); a busy
+provider that is not in service counts in `pool_degraded`, with the pool
+`degraded` state. `GET /v1/pool/check` reports `busy` as `busy`, no longer
+as `degraded`.
 
 **Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
 `tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
@@ -2070,8 +2085,15 @@ answered by routing (slot queue, 429 or 503), not by `/v1/models`.
 A model is `degraded: true` if any of:
 
 - all providers for this model are state `unavailable` or `draining`.
-- fewer than 50% of registered providers for this model are `ready`.
-- all providers' `slots_free` for this model equal 0.
+- fewer than 50% of registered providers for this model are in service.
+
+A provider is **in service** (v1.6.35, `pool.Provider.InService`) when it is
+routing-eligible, or when it passes every routing gate except capacity:
+every slot is in flight, or a capacity hold (thermal pressure or an
+`error_queue_full` refusal) blocks new routes while it keeps streaming. A
+provider with no slots is not in service. `/poolz` reports it per row as
+`in_service`. A model whose providers are all in service with no free slot
+is not degraded: free capacity is not degradation.
 
 Otherwise the model is `degraded: false`. SPEC-006 v0.3 gateway status
 aggregation MUST use these same rules.
@@ -2386,6 +2408,7 @@ match buyer trust requirements to provider attestation levels.
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -2394,6 +2417,10 @@ match buyer trust requirements to provider attestation levels.
   "version": "0.1.0"
 }
 ```
+
+`pool_busy` counts providers in state `busy` that are in service (FR-B1);
+`pool_degraded` counts providers in state `degraded` and busy providers that
+are not in service, such as a compute-integrity suspension (v1.6.35).
 
 Returns HTTP 200 if the coordinator is running. Returns HTTP 503 if
 the coordinator is draining (SIGTERM received).
@@ -2435,6 +2462,9 @@ Response:
       "binary_version": "0.1.0",
       "endpoint_url": "https://m4.malibu.tech",
       "auth_state": "bearer_validated",
+      "routing_eligible": true,
+      "serving_eligible": true,
+      "in_service": true,
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
         "pubkey": "<base64-32-byte-ed25519>",
@@ -2446,6 +2476,7 @@ Response:
   "summary": {
     "total_providers": 2,
     "ready": 2,
+    "in_service": 2,
     "draining": 0,
     "unavailable": 0,
     "total_slots": 4,
@@ -3576,6 +3607,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -3592,6 +3624,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 0,
   "pool_ready": 0,
+  "pool_busy": 0,
   "pool_degraded": 0,
   "pool_draining": 3,
   "pool_unavailable": 0,
@@ -3628,8 +3661,9 @@ not a buyer API surface.
 ```
 
 `tier` MUST be `"pinned"`, `"trusted"`, or `"provisional"`. `state`
-MUST be one of `"ready"`, `"draining"`, `"unavailable"`, or
-`"unknown"`.
+MUST be one of `"ready"`, `"busy"`, `"degraded"`, `"draining"`,
+`"unavailable"`, or `"unknown"`. `busy` is a provider serving with no free
+slot; it is reported as `busy`, never as `degraded` (v1.6.35).
 
 Unknown providers return the same 200 shape with `"state": "unknown"`.
 

@@ -26,7 +26,7 @@ coordinator runtime deployment or sampled GLM admission.
 
 Live. Signed tag `v1.8.288` on `e955d0761`, [runtime release run 43580106254](https://github.com/Augustas11/macprovider/actions/runs/43580106254), applied with `scripts/ops/pearl-runtime.sh` (`status`, then `next --run` per step).
 
-Measured from the updater audit log (UTC): gateway stop 09:29:03 to gateway start 09:30:37, apply downtime 94 s; buyer hold 09:28:57 to release 09:30:53, buyer-visible downtime 116 s. The candidate changed the schema fingerprint, so buyers were held until the serving gates passed; the stated bound was about 25 minutes. Rollback-point verification ran afterwards with services up and ended 09:37:50.
+Measured from the updater audit log (UTC): gateway stop 09:29:03 to gateway start 09:30:37, apply downtime 94 s; buyer hold 09:28:57 to release 09:30:53, buyer-visible downtime 116 s. The candidate changed the schema fingerprint, so buyers were held until the serving gates passed. Rollback-point verification ran afterwards with services up and ended 09:37:50.
 
 After the apply: coordinator and gateway `/healthz` report `v1.8.288`, `buyer_hold` false; a buyer chat completion through the gateway returned HTTP 200; `demand_events` carries the new serving-telemetry and serving-path columns (#2340, #2342). The provider-reported timing fields and the serving-path label fill once providers run the next CLI. `/v1/catalog-release` answers 404 until a catalog release ships a signed manifest (#2334).
 
@@ -55,8 +55,9 @@ No change touches `phase7-verify/`.
 Schema: `scripts/pearl-database-schema-fingerprint.py` gives `e8cb7479…` at
 `v1.8.286` and `11d078bf…` at `30fdbe2cf`. Per
 `docs/runbooks/pearl-coordinator-rollout.md`, a different fingerprint means
-buyers are held with 503 until all serving gates pass, up to about 25 minutes.
-State that figure before the apply. No numbered migration or `.sql` file
+buyers are held with 503, typically about 1-2 minutes (last measured:
+v1.8.286 80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers stay held
+until the serving gates pass. State that before the apply. No numbered migration or `.sql` file
 changes. The gateway adds nullable `demand_events` columns at startup in
 `phase5-gateway/internal/storage/sqlite/migrate.go`.
 
@@ -104,7 +105,7 @@ Audit: four lanes, gate met.
 
 Live step: the same Pearl runtime release as the two entries below, through
 `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source
-changes, so the buyer-hold path applies: "up to about 25 minutes"). Labels
+changes, so the buyer-hold path applies: typically about 1-2 minutes). Labels
 stay NULL until providers run a CLI that carries the provider side (next
 CLI cut, see `cli-release-train.md`). After both: one streamed request
 through the gateway, then `/admin/demand-latency?window=24h` shows a
@@ -151,8 +152,9 @@ Live step: the next Pearl runtime release through
 `scripts/ops/pearl-runtime.sh status`, then `next --run`. This changes
 `phase5-gateway/` source, so the database schema fingerprint changes; per
 `docs/runbooks/pearl-coordinator-rollout.md` that is the path where buyers
-are held with 503 until all serving gates pass, up to about 25 minutes.
-State that figure to the operator before the apply. The added columns are
+are held with 503, typically about 1-2 minutes (last measured: v1.8.286
+80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers stay held until the
+serving gates pass. State that to the operator before the apply. The added columns are
 nullable, so a rollback to the previous binary keeps working. After the
 apply: one streamed request through the gateway, then
 `/admin/demand-latency?window=24h` shows a sample for its model.

@@ -1770,6 +1770,21 @@ func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	}
 }
 
+// #2371: a busy provider is counted as busy, never as degraded.
+func TestHealthzCountsBusyProviderAsBusyNotDegraded(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_busy":1`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_degraded":0`)) {
+		t.Fatalf("busy provider must count as pool_busy, not pool_degraded; body=%s", rr.Body.String())
+	}
+}
+
 func TestHealthzExcludesPendingReceiptCandidateFromReadyCapacity(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerPendingReceiptCandidate(t, registry, "p1", "session-1", "model-a")
@@ -1845,6 +1860,20 @@ func TestHealthzReportsInjectedVersion(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"version":"v1.3.0-7-gabcdef0"`)) {
 		t.Fatalf("/healthz did not surface injected version; body = %s", rr.Body.String())
+	}
+}
+
+// #2371: /v1/pool/check reports a busy provider as busy, not degraded.
+func TestPoolCheckReportsBusyNotDegraded(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.3:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte(`"state":"busy"`)) {
+		t.Fatalf("status=%d body=%s, want state busy", rr.Code, rr.Body.String())
 	}
 }
 

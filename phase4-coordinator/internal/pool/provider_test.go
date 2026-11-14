@@ -3595,3 +3595,59 @@ func TestSetCBSelfCheckStoresACopyAndClears(t *testing.T) {
 	}
 	registry.SetCBSelfCheck("unknown", in)
 }
+
+// #2371: AtCapacity separates "full" from real faults for public health.
+func TestAtCapacitySeparatesFullFromFaults(t *testing.T) {
+	ready := Provider{State: StateReady, SlotsFree: 1, SlotsTotal: 2}
+	full := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2}
+	queueFull := Provider{State: StateBusy, SlotsFree: 1, SlotsTotal: 2, capacitySafetyHold: true, queueFullHold: true}
+	thermal := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2, capacitySafetyHold: true}
+	suspended := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2, ComputeIntegritySuspended: true}
+	recheck := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2, CatalogRecheckPending: true}
+	tripped := Provider{State: StateDegraded, SlotsFree: 0, SlotsTotal: 2}
+	cases := []struct {
+		name string
+		p    Provider
+		want bool
+	}{
+		{"routable", ready, false},
+		{"every slot in flight", full, true},
+		{"queue-full refusal", queueFull, true},
+		{"thermal hold", thermal, true},
+		{"no slots", Provider{State: StateReady, SlotsFree: 0, SlotsTotal: 0}, false},
+		{"shard member", Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 2, ShardMemberV1: true}, false},
+		{"integrity suspended", suspended, false},
+		{"catalog recheck pending", recheck, false},
+		{"breaker tripped", tripped, false},
+	}
+	for _, c := range cases {
+		if got := c.p.AtCapacity(); got != c.want {
+			t.Errorf("%s: AtCapacity()=%t want %t", c.name, got, c.want)
+		}
+		if got, want := c.p.InService(), c.want || c.p.RoutingEligible(); got != want {
+			t.Errorf("%s: InService()=%t want %t", c.name, got, want)
+		}
+	}
+	if !ready.InService() {
+		t.Errorf("routable provider must be in service")
+	}
+}
+
+// #2371 re-check: a shard member under a thermal hold is still in service.
+func TestShardMemberInServiceIgnoresCapacityHolds(t *testing.T) {
+	member := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 1, ShardMemberV1: true, capacitySafetyHold: true}
+	if !member.ShardMemberInService() {
+		t.Fatal("a thermally held member must be in service")
+	}
+	if member.ShardMemberAdmissible() {
+		t.Fatal("ShardMemberAdmissible keeps the hold for group availability")
+	}
+	suspended := member
+	suspended.ComputeIntegritySuspended = true
+	if suspended.ShardMemberInService() {
+		t.Fatal("a suspended member is not in service")
+	}
+	if (Provider{State: StateReady, SlotsTotal: 1}).ShardMemberInService() {
+		t.Fatal("a non-member is not a member in service")
+	}
+}

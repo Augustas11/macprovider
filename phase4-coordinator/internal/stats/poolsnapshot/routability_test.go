@@ -86,8 +86,14 @@ func TestRoutabilitySnapshotAggregatesAndRedacts(t *testing.T) {
 	if got := byModel["llama-3.1-8b"]; got != "redundant" {
 		t.Fatalf("llama state=%q want redundant", got)
 	}
-	if got := byModel["busy-model"]; got != "degraded" {
-		t.Fatalf("busy-model state=%q want degraded", got)
+	// #2371: a provider serving on every slot keeps its model operational.
+	if got := byModel["busy-model"]; got != "operational" {
+		t.Fatalf("busy-model state=%q want operational", got)
+	}
+	for _, prov := range snap.Providers {
+		if prov.ModelID == "busy-model" && prov.State != "online" {
+			t.Fatalf("busy-model provider state=%q want online", prov.State)
+		}
 	}
 	if got := byModel["declared-only"]; got != "unknown" {
 		t.Fatalf("declared-only state=%q want unknown", got)
@@ -178,8 +184,8 @@ func TestRoutabilitySnapshotFiltersPrivateAdmissionAndSupportedModelOptIn(t *tes
 	if got := modelStates["visible-active"]; got != "operational" {
 		t.Fatalf("visible-active state=%q want operational", got)
 	}
-	if got := modelStates["visible-published-active"]; got != "degraded" {
-		t.Fatalf("visible-published-active state=%q want degraded", got)
+	if got := modelStates["visible-published-active"]; got != "operational" {
+		t.Fatalf("visible-published-active state=%q want operational", got)
 	}
 	if got := modelStates["visible-supported"]; got != "unknown" {
 		t.Fatalf("visible-supported state=%q want unknown", got)
@@ -211,5 +217,66 @@ func TestRoutabilitySnapshotExcludesReferenceScorer(t *testing.T) {
 	}
 	if got := newFixed(fakeSrc(providers)).OverviewSnapshot(); got.NodesOnline != 1 {
 		t.Fatalf("overview NodesOnline=%d want 1", got.NodesOnline)
+	}
+}
+
+// #2371: two healthy providers each serving on every slot are a redundant
+// model with no free capacity, not a degraded one. A provider held by a real
+// fault keeps a non-healthy state.
+func TestRoutabilitySnapshotBusyProvidersAreNotDegraded(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	successAt := now.Add(-time.Minute)
+	busy := func(id string) pool.Provider {
+		return pool.Provider{ProviderID: id, ModelID: "full-model", State: pool.StateBusy, SlotsFree: 0, SlotsTotal: 2,
+			LastHeartbeatAt: now.Add(-3 * time.Second), LastBuyerSuccessAt: &successAt, ReceiptPubkey: []byte("r-" + id)}
+	}
+	held := pool.Provider{ProviderID: "held", ModelID: "held-model", State: pool.StateReady, SlotsFree: 2, SlotsTotal: 2,
+		LastHeartbeatAt: now.Add(-3 * time.Second), ReceiptPubkey: []byte("r-held"), ComputeIntegritySuspended: true}
+	checking := pool.Provider{ProviderID: "checking", ModelID: "checking-model", State: pool.StateReady, SlotsFree: 2, SlotsTotal: 2,
+		LastHeartbeatAt: now.Add(-3 * time.Second), ReceiptPubkey: []byte("r-checking"), CatalogRecheckPending: true}
+	head := pool.Provider{ProviderID: "head", AssignedID: "head-s", ModelID: "shard-model", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+		LastHeartbeatAt: now.Add(-3 * time.Second), ReceiptPubkey: []byte("r-head"), ShardGroupHeadV1: true, ShardGroupAvailable: true,
+		ShardGroupMembers: []pool.ShardGroupMemberView{{ProviderID: "member", AssignedID: "member-s"}}}
+	member := pool.Provider{ProviderID: "member", AssignedID: "member-s", ModelID: "shard-model", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+		LastHeartbeatAt: now.Add(-3 * time.Second), ReceiptPubkey: []byte("r-member"), ShardMemberV1: true}
+	p := New(routabilityFakeSource{providers: []pool.Provider{busy("a"), busy("b"), held, checking, head, member}})
+	p.now = func() time.Time { return now }
+	snap := p.RoutabilitySnapshot()
+
+	if snap.Summary.State != "redundant" || snap.Summary.ModelsDegraded != 0 || snap.Summary.ModelsRedundant != 1 ||
+		snap.Summary.ModelsOffline != 1 || snap.Summary.ModelsUnknown != 1 || snap.Summary.ModelsOperational != 1 {
+		t.Fatalf("summary=%+v want redundant: 1 redundant, 1 operational, 1 unknown, 1 offline, 0 degraded", snap.Summary)
+	}
+	for _, m := range snap.Models {
+		switch m.ModelID {
+		case "full-model":
+			if m.State != "redundant" || m.RoutableProviderCount != 0 || m.SlotsFree != 0 || m.SlotsTotal != 4 || m.ServingCapableProviderCount != 2 {
+				t.Fatalf("full-model=%+v want redundant with 0 routable, 0/4 slots", m)
+			}
+		case "held-model":
+			if m.State != "offline" {
+				t.Fatalf("held-model=%+v want offline", m)
+			}
+		case "checking-model":
+			if m.State != "unknown" {
+				t.Fatalf("checking-model=%+v want unknown", m)
+			}
+		case "shard-model":
+			if m.State != "operational" {
+				t.Fatalf("shard-model=%+v want operational (the head carries the group)", m)
+			}
+		}
+	}
+	for _, prov := range snap.Providers {
+		want := "online"
+		switch prov.ModelID {
+		case "held-model":
+			want = "degraded"
+		case "checking-model":
+			want = "unknown"
+		}
+		if prov.State != want {
+			t.Fatalf("provider %+v state want %q", prov, want)
+		}
 	}
 }
