@@ -40,9 +40,12 @@ for spec in "${MODELS[@]}"; do
   routes="${routes:-default,serial}"; rows="${rows:-1,4}"
   M="$OUT/$name"; mkdir -p "$M/ref"
   echo "#### $name reference $(date +%T)"
+  # bash 3.2 cannot parse a case statement inside $( ).
+  ref_rows=1
+  if [[ ",$routes," == *,cb,* ]]; then ref_rows="$rows"; fi
   if ! "$PY" "$HERE/reference_mlxlm.py" --model-path "$path" --model-name "$name" \
       --out "$M/ref/reference.jsonl" --grid "$HERE/grid.json" --trials "$TRIALS" \
-      --rows "$( case ",$routes," in *,cb,*) echo "$rows" ;; *) echo 1 ;; esac )" \
+      --rows "$ref_rows" \
       > "$M/ref/reference.log" 2>&1; then
     echo "REF_FAILED $name"; tail -5 "$M/ref/reference.log"; failed=1; continue
   fi
