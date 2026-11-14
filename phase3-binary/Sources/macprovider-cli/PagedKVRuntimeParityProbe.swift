@@ -681,6 +681,28 @@ enum PagedKVRuntimeParityProbe {
             } else if oneRowB["shared-parity-b"] == twoRow["shared-parity-b"] {
                 PagedKVRuntimeDiagnostics.log("shared-parity one-row row=b equals two-row row=b")
             }
+            // Both rows through the stock serial caches in one [2, L]
+            // forward: no paged code, no ring presentation, only the model's
+            // own batch-of-two numerics. Row b leaving its lone serial result
+            // here puts the cause in a batch-size-dependent op, not the
+            // paged batch layer cache.
+            if promptA.count == promptB.count {
+                let serialPair = try await container.perform { context in
+                    try Self.greedyGenerateEqualLengthBatch(
+                        model: context.model,
+                        prompts: [promptA, promptB],
+                        nNew: nNew,
+                        makeCache: { try context.model.newCache(parameters: nil) }
+                    )
+                }
+                Self.logParityDivergence(stage: "serial-batch-of-two", row: "a", serial: serialA, shared: serialPair.first)
+                Self.logParityDivergence(stage: "serial-batch-of-two", row: "b", serial: serialB, shared: serialPair.last)
+                if serialPair.last == twoRow["shared-parity-b"] {
+                    PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b equals two-row row=b")
+                } else if serialPair.last == serialB {
+                    PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b matches serial")
+                }
+            }
         }
         return proven
     }
@@ -878,6 +900,49 @@ enum PagedKVRuntimeParityProbe {
             eval(cache.flatMap { $0.state })
             out.append(Int(next))
             y = MLXArray([next]).reshaped([1, 1])
+        }
+        return out
+    }
+
+    /// `greedyGenerate` for equal-length prompts decoded as one batch on the
+    /// stock serial caches, chunked the same way (diagnostic only).
+    private static func greedyGenerateEqualLengthBatch(
+        model: any LanguageModel,
+        prompts: [[Int]],
+        nNew: Int,
+        prefillStepSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
+        makeCache: () throws -> [KVCache]
+    ) throws -> [[Int]] {
+        let rows = prompts.count
+        guard rows > 0, let length = prompts.first?.count, length > 0,
+              prompts.allSatisfy({ $0.count == length })
+        else { return [] }
+        let cache = try makeCache()
+        var out = [[Int]](repeating: [], count: rows)
+        let chunkSize = max(1, prefillStepSize)
+        var promptOffset = 0
+        var state: LMOutput.State?
+        func batch(_ range: Range<Int>) -> MLXArray {
+            MLXArray(prompts.flatMap { $0[range].map { Int32($0) } }).reshaped([rows, range.count])
+        }
+        while length - promptOffset > chunkSize {
+            let end = promptOffset + chunkSize
+            let output = model(LMInput.Text(tokens: batch(promptOffset ..< end)), cache: cache, state: state)
+            state = output.state
+            eval(cache.flatMap { $0.state })
+            promptOffset = end
+        }
+        var y = batch(promptOffset ..< length)
+        for _ in 0 ..< nNew {
+            let output = model(LMInput.Text(tokens: y), cache: cache, state: state)
+            state = output.state
+            let logits = output.logits
+            let last = logits[0..., logits.dim(1) - 1, 0...]
+            let next = argMax(last, axis: -1).asType(.int32)
+            eval(cache.flatMap { $0.state })
+            let tokens = next.asArray(Int32.self)
+            for row in 0 ..< rows { out[row].append(Int(tokens[row])) }
+            y = next.reshaped([rows, 1])
         }
         return out
     }
