@@ -2975,6 +2975,7 @@ func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.Wal
 		SessionUsed: sessionUsed, SessionReserved: sessionReserved, SessionRemaining: max64(0, remainingSession),
 	}
 	if req.RequestedTokens > remainingSession {
+		decision.SessionSettledExhausted = req.RequestedTokens > session.TotalTokenCap-sessionUsed
 		return decision, storage.ErrWalletSessionCapExceeded
 	}
 	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)

@@ -7554,7 +7554,7 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"relay_blind_ciphertext_invalid",
 		"relay_blind_committed_failed",
 		// #2362: the daily quota refills only at the next UTC day; agrees
-		// with the coordinator (Retry-After names the reset).
+		// with the coordinator. X-RateLimit-Reset names the refill.
 		"quota_exhausted",
 	}
 	for _, code := range permanent {
