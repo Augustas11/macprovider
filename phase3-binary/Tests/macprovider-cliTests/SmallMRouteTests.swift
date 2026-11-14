@@ -83,6 +83,14 @@ final class SmallMRouteTests: XCTestCase {
             (inputs(explicit: false, verdict: .recheckPending), .rowInvariant, "self_check_recheck_pending"),
             (inputs(explicit: false, verdict: .grantsBatching), .rowInvariant, "self_check_grants_batching"),
             (inputs(mode: .on, verdict: .grantsNoBatching), .serialOnly, "self_check_no_batching"),
+            // An 8 GB Mac whose probe shape does not fit (#2325): default
+            // config, stored `probe_shape_unavailable`.
+            (
+                inputs(explicit: false, nativeMTP: .auto, verdict: SmallMRouteVerdictStore.verdict(record: Self.record(
+                    Self.key(), decision: .init(slots: 1, reason: "probe_shape_unavailable", verifiedSlots: 1)
+                ))),
+                .serialOnly, "self_check_no_batching"
+            ),
             (inputs(mode: .canary, verdict: .absent), .rowInvariant, "self_check_verdict_absent"),
             (inputs(draft: true), .rowInvariant, "draft_model"),
             (inputs(shard: true), .rowInvariant, "shard_group"),
@@ -238,7 +246,8 @@ final class SmallMRouteTests: XCTestCase {
             ("single_row", .grantsNoBatching),
             ("serial_baseline_unavailable", .recheckPending),
             ("probe_shape_unmet_at_2", .recheckPending),
-            ("probe_shape_unavailable", .recheckPending),
+            // Its bound is fixed by identity-keyed quantities (#2325).
+            ("probe_shape_unavailable", .grantsNoBatching),
             ("kept_prior_grant_no_net_gain", .recheckPending),
         ]
         for (reason, expected) in table {
@@ -345,6 +354,31 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: noGain, ownerPinned: 4, servedNow: 4), 3)
         XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: nil, ownerPinned: 4, servedNow: 4), 4)
         XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: nil, ownerPinned: nil, servedNow: 1), 1)
+        // Configured slots >= 2 but no probe shape fits: one row, as the
+        // invariant route serves it, whatever the owner pin.
+        let unavailable = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "probe_shape_unavailable", verifiedSlots: 1)
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: unavailable, ownerPinned: 4, servedNow: 4), 1)
+        XCTAssertEqual(SmallMRoute.serialOnlyServedSlots(stored: unavailable, ownerPinned: nil, servedNow: 2), 1)
+    }
+
+    /// The paged-KV pool bounds the exactness probe, so a changed pool is a
+    /// new startup identity that re-measures (#2325).
+    func testPagedKVPoolKeysTheStartupIdentity() {
+        let base = PagedKVConfig(enabled: true)
+        let explicitPool = PagedKVConfig(enabled: true, maxPhysicalBlocks: 64, maxPhysicalBlocksExplicit: true)
+        let explicitBlock = PagedKVConfig(enabled: true, blockSizeTokens: 32, blockSizeTokensExplicit: true)
+        XCTAssertEqual(SmallMRouteVerdictStore.pagedKVPool(base), "16x1024")
+        XCTAssertEqual(SmallMRouteVerdictStore.pagedKVPool(explicitPool), "16x64")
+        XCTAssertEqual(SmallMRouteVerdictStore.pagedKVPool(base.withFamilyDefaults(modelFamily: "glm5_next")), "256x1024")
+        func identity(_ config: PagedKVConfig) -> String {
+            SmallMRouteVerdictStore.startupIdentity([
+                "model": "m", "paged_kv": "true", "paged_kv_pool": SmallMRouteVerdictStore.pagedKVPool(config),
+            ])
+        }
+        XCTAssertEqual(identity(base), identity(PagedKVConfig(enabled: true)))
+        XCTAssertNotEqual(identity(base), identity(explicitPool))
+        XCTAssertNotEqual(identity(base), identity(explicitBlock))
+        XCTAssertNotEqual(identity(base), identity(base.sizedToCover(contextTokens: 32_768)))
     }
 
     func testSerialOnlyProcessRefusesEveryBatchingEntry() {
