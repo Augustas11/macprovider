@@ -1,6 +1,23 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.33 (2026-11-13, served-path label from the provider that served the request)
+**Version:** 1.6.34 (2026-11-14, every MiniMax M3 request needs the exact-model declaration)
+
+**Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
+`tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
+history. For a family whose reasoning the provider must split off the answer
+(MiniMax M3, SPEC-018 §3.12), every request, plain chat included, reaches
+only a native provider that declares the family for its exact loaded model,
+on selection, sticky and provider pins, queued reconnects, and relay-blind
+and privacy-class reservations alike. On plaintext routes, with none it fails
+503 `tool_grammar_provider_unavailable`, retryable, with the same settlement
+as the tool-request case (SPEC-006 §17.9). A request without tools gets the
+message "No provider serving this model supports its output format yet";
+tool requests keep the tool-grammar message. Encrypted reservations keep
+their closed inventories and fail before any quota hold: a relay-blind
+reservation skips the provider and gets the retryable SPEC-041-R007
+`relay_blind_provider_unsupported`, and a privacy-class reservation gets the
+SPEC-049-R013 pre-consume `privacy_class_unavailable`, which names no
+per-provider cause. External runtimes and other families are unchanged.
 
 **Change log v1.6.33 (2026-11-13, Related: #2341):** `SPEC-002-R007` adds the
 served-path label. A provider's `status: "complete"` `inference_response_end`

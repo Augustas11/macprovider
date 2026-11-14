@@ -127,6 +127,9 @@ type privacyHarnessConfig struct {
 	// trustPools wires a SPEC-042 registry and marks the provider as
 	// advertising trusted_pool_v1 (SPEC-049-R032 tests).
 	trustPools *trustpool.Registry
+	// model is the provider's loaded model and its keys' model (default
+	// model-a).
+	model string
 }
 
 func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
@@ -136,6 +139,9 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	}
 	if cfg.ttl == 0 {
 		cfg.ttl = 600
+	}
+	if cfg.model == "" {
+		cfg.model = "model-a"
 	}
 	now := time.Unix(1_800_000_000, 0).UTC()
 	clock := &privacyClock{at: now}
@@ -158,7 +164,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	h := &privacyHarness{store: store, clock: clock, identity: identityPrivate, seKey: seKey, seRaw: seRaw}
 	if cfg.privacyKey || cfg.privacyEnabled {
 		if cfg.privacyKey {
-			h.privacyPrivate, h.privacyKey = privacyTestKey(t, identityPrivate, now)
+			h.privacyPrivate, h.privacyKey = privacyTestKeyFor(t, identityPrivate, now, cfg.model)
 		}
 		privacyCfg := config.PrivacyClassConfig{
 			Enabled:              true,
@@ -192,7 +198,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.relayKey, err = relayblind.NewSignedKeyRecord(h.relayPrivate.PublicKey().Bytes(), identityPrivate, []string{"model-a"}, relayblind.MaxEncryptedRequestBytes, now.Add(-time.Minute), now.Add(time.Hour))
+		h.relayKey, err = relayblind.NewSignedKeyRecord(h.relayPrivate.PublicKey().Bytes(), identityPrivate, []string{cfg.model}, relayblind.MaxEncryptedRequestBytes, now.Add(-time.Minute), now.Add(time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -206,7 +212,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	}
 	registry := pool.NewRegistry(nil)
 	h.provider = pool.Provider{
-		ProviderID: "provider-a", AssignedID: "session-a", ModelID: "model-a", MaxContextTokens: 4096,
+		ProviderID: "provider-a", AssignedID: "session-a", ModelID: cfg.model, MaxContextTokens: 4096,
 		MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, State: pool.StateReady, AuthState: pool.AuthBearerValidated,
 		InferencePath: pool.InferencePathWSTunneled,
 	}
@@ -255,11 +261,16 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 
 func privacyTestKey(t *testing.T, identity ed25519.PrivateKey, now time.Time) (*ecdh.PrivateKey, relayblind.KeyRecord) {
 	t.Helper()
+	return privacyTestKeyFor(t, identity, now, "model-a")
+}
+
+func privacyTestKeyFor(t *testing.T, identity ed25519.PrivateKey, now time.Time, model string) (*ecdh.PrivateKey, relayblind.KeyRecord) {
+	t.Helper()
 	private, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := relayblind.NewSignedKeyRecord(private.PublicKey().Bytes(), identity, []string{"model-a"}, relayblind.MaxEncryptedRequestBytes, now, now.Add(time.Duration(relayblind.MaxPrivacyKeyLifetimeSeconds)*time.Second))
+	record, err := relayblind.NewSignedKeyRecord(private.PublicKey().Bytes(), identity, []string{model}, relayblind.MaxEncryptedRequestBytes, now, now.Add(time.Duration(relayblind.MaxPrivacyKeyLifetimeSeconds)*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

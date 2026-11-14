@@ -296,26 +296,32 @@ gateway. #2189 closes when both checks pass. The served id is
 `minimax/minimax-m3.1-flash` resolves to the same row, but conformance
 records are indexed by the served id.
 
-**Known gaps (as of `745d82fb3`). They decide the outcome, so read them
-before running anything.** The served template (byte-identical to
-`MiniMaxAI/MiniMax-M3.1-Flash`) uses its own markers, and no layer handles
-them:
+**Serving behaviour (SPEC-018 v0.3.18). Read it before running anything.**
+The served template (byte-identical to `MiniMaxAI/MiniMax-M3.1-Flash`) uses
+its own markers. Providers on the CLI cut that carries the #2189 parser fixes
+handle them; an older provider does not, so check the provider's CLI version
+first.
 
-- Reasoning is wrapped in `<mm:think>…</mm:think>`, with adaptive thinking.
-  `ReasoningOutput.swift` splits only on `<think>`, so reasoning comes back
-  inside `content`. The suite's leak check, `_leaks_reasoning` in
-  `scripts/buyer_ux_conformance.py`, also matches only `<think>`. It would
-  pass a leaking reply.
-- Tool calls use `]<]minimax[>[<tool_call>` / `<invoke name=…>`. Neither
-  `ToolCallGrammar.family` (Swift) nor `toolGrammarFamily` (coordinator, the
-  suite) has a MiniMax family. `ToolCallGrammar.fromTemplateFormat` has no
-  case for the fork's `minimax_m2` format, and that format's signature
-  (`<minimax:tool_call>`) does not match this template anyway. So tools are
-  not advertised, and the coordinator returns `tools_unsupported_for_model`.
+- Reasoning: the model thinks adaptively. A reply that opens with
+  `<mm:think>` has the text up to `</mm:think>` split into
+  `reasoning_content`, streamed or not. A reply that opens with
+  `</mm:think>`, or has no tag, is all answer. The suite's leak check,
+  `_leaks_reasoning` in `scripts/buyer_ux_conformance.py`, now fails a reply
+  whose content carries `<mm:think>` or `</mm:think>`. The coordinator does
+  not list MiniMax as a reasoning family, so `reasoning` is not advertised.
+- Tools: the `minimax` grammar parses `]<]minimax[>[<tool_call>` wrappers of
+  `<invoke name=…>` calls in the provider (`ToolCallGrammar.family`,
+  `ToolCallParser`), the coordinator (`toolGrammarFamily`) and the suite. The
+  coordinator advertises and routes tools only from a provider that declares
+  the exact loaded model with `required` and `named` modes, as for LFM. A
+  provider without the family declares only `auto` and `none`, and the
+  coordinator answers tool requests for it with `tools_unsupported_for_model`.
 
-As a result, the derived advertised set is `response_format`, `messages` and
-`responses` without tools or reasoning. `json_object` fails whenever the model
-chooses to think, because the reply then starts with `<mm:think>`.
+While the release's conformance record is owed (§2a), the coordinator
+advertises the base set only: no tools, `tool_choice`, reasoning or
+`response_format`. Once the suite passes and the record is installed, the
+expected set is tools with `tool_choice`, `response_format`, `messages` and
+`responses`, without reasoning.
 
 **Preflight (one request, before the suite).** It checks the id is listed,
 the request is served and what the reply carries:
@@ -332,9 +338,9 @@ curl -sS -K <(printf 'header = "Authorization: Bearer %s"\n' "$(cat $KEY)") \
 ```
 
 Pass: the id is listed; `finish` is `stop`; `mm_think_in_content` is false;
-the answer is 391. If `mm_think_in_content` is true, the reasoning gap above
-is live. Fix it in a provider PR before the suite and the quality run.
-Neither can pass on leaking output.
+the answer is 391. If `mm_think_in_content` is true, the serving provider
+predates the reasoning split above. Move it to the CLI cut that carries the
+fix before the suite and the quality run. Neither can pass on leaking output.
 
 **Check 1: #2107 buyer-API conformance.** This is the §2a suite against the
 served id (`run` exits 0 = all checks pass, 1 = a check failed, 3 =
