@@ -202,6 +202,7 @@ enum GPUTurnPolicyRegistry {
         PassthroughGPUTurnPolicy.factory,
         AlternateGPUTurnPolicy.factory,
         TimeSliceGPUTurnPolicy.factory,
+        FairShareGPUTurnPolicy.factory,
     ]
 
     /// The policy every build serves with.
