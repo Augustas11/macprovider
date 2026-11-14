@@ -42,6 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.61 (#2327) on 3.32.3-macprovider.59: Qwen2-VL and
+# Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype, so an image prefill
+# no longer leaves the language model and its KV cache in float32 (upstream
+# ml-explore/mlx-swift-lm #766); FastVLM image pixels take the patch-embed
+# weight dtype and Mistral3 drops its bfloat16 image-feature cast.
 # 3.32.3-macprovider.59 (#2327) on 3.32.3-macprovider.58: Qwen2-VL post-vision
 # decode uses fused non-traditional RoPE when the three M-RoPE axes share one
 # rope delta; per-row deltas and traditional RoPE stay on the position-id
@@ -87,8 +92,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
 # model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
 # maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.59"
-SPEC048_MLX_SWIFT_LM_REVISION = "7ee1b3f73d719726c86b39da11a715be5d1c197e"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.61"
+SPEC048_MLX_SWIFT_LM_REVISION = "ef656c59adc2424ddf1f1bcfca0338536befcc25"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
