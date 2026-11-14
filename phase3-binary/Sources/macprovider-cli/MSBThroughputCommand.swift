@@ -551,6 +551,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let backendWindowSeconds: Double
         let backendWindowCalls: Int
         let results: [ContinuousBatchSchedulerResult]
+        let prefillForwardTokenCap: Int?
     }
 
     private struct SerialRunDetail {
@@ -863,7 +864,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             rowTimings: indexed.map(\.2),
             backendWindowSeconds: elapsed,
             backendWindowCalls: snapshot.windowCalls,
-            results: results
+            results: results,
+            prefillForwardTokenCap: backend.prefillForwardTokenCap
         )
     }
 
@@ -1218,6 +1220,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var shortBatchedTTFT: [Double] = []
         var makespanRunTPS: [Double] = []
         var usageRows: [MSBUsageRow] = []
+        var prefillForwardTokenCap: Int?
         _ = try await runSchedulerDecode(
             container: container,
             prompts: [shortPrompt],
@@ -1275,6 +1278,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 shortBatchedTTFT.append(shortTTFT)
             }
             usageRows = batched.usage
+            prefillForwardTokenCap = batched.prefillForwardTokenCap
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
@@ -1289,12 +1293,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let makespanP50 = decodeBenchPercentileTPS(makespanRunTPS, p: 0.5)
         let serialMakespanP50 = decodeBenchPercentileTPS(serialMakespanTPS, p: 0.5)
         let makespanVsSerial = serialMakespanP50 > 0 ? makespanP50 / serialMakespanP50 : 0
-        let aggregatePass = msb03AggregatePass(aggregateVsSerial: makespanVsSerial)
+        let prefillKind = msb03PrefillKind(
+            prefillForwardTokenCap: prefillForwardTokenCap, promptChunkTokens: 512
+        )
+        let makespanBar = msb03MakespanBar(prefill: prefillKind)
+        let aggregatePass = msb03AggregatePass(aggregateVsSerial: makespanVsSerial, prefill: prefillKind)
         let ttftPass = msb03ShortRequestTTFTPass(ratio: ttftRatio)
         let usagePass = msbUsageAttributionPass(
             rows: usageRows,
             expectedPromptTokens: lengths,
-            expectedCompletionTokens: decodeTokens
+            expectedCompletionTokens: msb03ExpectedCompletionTokens(decodeTokens: decodeTokens)
         )
         let msb03 = MSB03Evidence(
             promptTokenLengths: lengths,
@@ -1307,7 +1315,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             shortRequestTTFTRatio: ttftRatio,
             aggregatePass: aggregatePass,
             ttftPass: ttftPass,
-            pass: aggregatePass && ttftPass && usagePass
+            pass: aggregatePass && ttftPass && usagePass,
+            prefillKind: prefillKind,
+            makespanBar: makespanBar
         )
         try emitLeftoverReport(
             modelID: modelID,
@@ -1331,7 +1341,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 replay: nil,
                 drain: nil
             ),
-            summary: "msb03 makespan_vs_serial=\(String(format: "%.2fx", makespanVsSerial)) decode_interval_aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) short_ttft_ratio=\(String(format: "%.2fx", ttftRatio)) pass=\(msb03.pass)",
+            summary: "msb03 makespan_vs_serial=\(String(format: "%.2fx", makespanVsSerial)) decode_interval_aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) short_ttft_ratio=\(String(format: "%.2fx", ttftRatio)) makespan_bar=\(String(format: "%.1fx", makespanBar)) prefill=\(prefillKind.rawValue) pass=\(msb03.pass)",
             fileLabel: "msb03"
         )
     }

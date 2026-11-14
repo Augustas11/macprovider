@@ -113,6 +113,58 @@ final class MSB03MakespanAggregateTests: XCTestCase {
         XCTAssertFalse(msb03AggregatePass(aggregateVsSerial: ratio))
     }
 
+    /// SPEC-038 v0.3.52: msb03's makespan and TTFT gates together.
+    private func msb03Passes(makespan: Double, ttftRatio: Double, prefill: MSB03PrefillKind) -> Bool {
+        msb03AggregatePass(aggregateVsSerial: makespan, prefill: prefill)
+            && msb03ShortRequestTTFTPass(ratio: ttftRatio)
+    }
+
+    func testPrefillKindFollowsTheBackendsFlattenedPrefillCap() {
+        // `glm5_next` pagedMLA: an 8-token cap against 512-token chunks.
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 8, promptChunkTokens: 512), .perRow)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: nil, promptChunkTokens: 512), .shared)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 1024, promptChunkTokens: 512), .shared)
+        XCTAssertEqual(msb03PrefillKind(prefillForwardTokenCap: 1023, promptChunkTokens: 512), .perRow)
+        XCTAssertEqual(msb03MakespanBar(prefill: .perRow), 1.0)
+        XCTAssertEqual(msb03MakespanBar(prefill: .shared), 1.2)
+    }
+
+    func testPerRowPrefillBackendPassesAboveSerialMakespan() {
+        // GLM-5.3-Flash on the M3 Ultra: 1.19x, the lower edge of a 1.19x-1.22x ceiling.
+        XCTAssertTrue(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .perRow))
+        XCTAssertFalse(msb03Passes(makespan: 0.99, ttftRatio: 1.0, prefill: .perRow))
+        XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 2.5, prefill: .perRow))
+    }
+
+    func testSharedForwardBackendKeepsTheAbove1point2Bar() {
+        XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .shared))
+        XCTAssertTrue(msb03Passes(makespan: 1.21, ttftRatio: 1.0, prefill: .shared))
+    }
+
+    /// GLM-5.3-Flash msb03 lab rows (#2331): `--decode-tokens 128` asks for
+    /// 129 output tokens, the prefill's sampled token plus 128 decode steps.
+    func testUsageExpectsThePrefillTokenPlusTheDecodeSteps() {
+        let rows = zip([512, 1024, 1536, 2048], 0...).map { prompt, index in
+            MSBUsageRow(
+                requestID: "msb-sched-\(index)",
+                promptTokens: prompt,
+                completionTokens: 129,
+                emittedTokens: 129,
+                cachedPromptTokens: 0,
+                terminalStatus: ContinuousBatchSchedulerTerminalStatus.length.rawValue,
+                settlementDisposition: ContinuousBatchSettlementDisposition.eligibleOwner.rawValue
+            )
+        }
+        let expected = msb03ExpectedCompletionTokens(decodeTokens: 128)
+        XCTAssertEqual(expected, 129)
+        XCTAssertTrue(msbUsageAttributionPass(
+            rows: rows, expectedPromptTokens: msb03PromptLengths(), expectedCompletionTokens: expected
+        ))
+        XCTAssertFalse(msbUsageAttributionPass(
+            rows: rows, expectedPromptTokens: msb03PromptLengths(), expectedCompletionTokens: 128
+        ))
+    }
+
     func testMakespanSampleRejectsARowThatEndsBeforeItArrives() {
         let row = MSBSchedulerRowTiming(submittedAt: t0, firstTokenAt: t0, completedAt: t0)
         XCTAssertThrowsError(try row.makespanSample(outputTokens: 2))
