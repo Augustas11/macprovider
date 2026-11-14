@@ -28,6 +28,15 @@
     {"model": "local/minimax_m3_vl-text", "family": "minimax"},
     {"model": "MiniMaxAI/MiniMax-M2.5", "family": ""},
     {"model": "MiniMaxAI/MiniMax-Text-01", "family": ""},
+    {"model": "local/qwen2vl-7b", "family": ""},
+    {"model": "mlx-community/GLM-4.6-4bit", "family": "glm"},
+    {"model": "mlx-community/GLM-4.7-4bit", "family": "glm"},
+    {"model": "local/llama3.1-8b", "family": "llama3"},
+    {"model": "local/llama3.2-3b", "family": "llama3"},
+    {"model": "local/llama3.3-70b", "family": "llama3"},
+    {"model": "google/gemma4-12b", "family": "gemma4"},
+    {"model": "local/nemotron3-nano", "family": "qwen"},
+    {"model": "local/deepseek_v4_flash", "family": "dsml"},
     {"model": "mistralai/Mistral-Small-3.2-24B-Instruct", "family": ""}
   ]
 }
