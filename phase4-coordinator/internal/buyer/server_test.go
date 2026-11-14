@@ -1770,6 +1770,21 @@ func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	}
 }
 
+// #2371: a busy provider is counted as busy, never as degraded.
+func TestHealthzCountsBusyProviderAsBusyNotDegraded(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_busy":1`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_degraded":0`)) {
+		t.Fatalf("busy provider must count as pool_busy, not pool_degraded; body=%s", rr.Body.String())
+	}
+}
+
 func TestHealthzExcludesPendingReceiptCandidateFromReadyCapacity(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerPendingReceiptCandidate(t, registry, "p1", "session-1", "model-a")

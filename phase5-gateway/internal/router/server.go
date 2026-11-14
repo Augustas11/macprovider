@@ -1182,6 +1182,7 @@ type coordinatorStatus struct {
 type statusPool struct {
 	TotalProviders int `json:"total_providers"`
 	Ready          int `json:"ready"`
+	Busy           int `json:"busy"`
 	Degraded       int `json:"degraded"`
 	Draining       int `json:"draining"`
 	Unavailable    int `json:"unavailable"`
@@ -1330,7 +1331,13 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Status:      "up",
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
+	// servingProviders counts providers serving buyers, including one that is
+	// busy with every slot in flight (routing_eligible false, #2371).
+	servingProviders := 0
 	for _, p := range poolz.Pool {
+		if poolzProviderServesContext(p) {
+			servingProviders++
+		}
 		if poolzProviderServesContext(p) && p.ModelID != "" {
 			if out.ServingToolChoiceModes == nil {
 				out.ServingToolChoiceModes = map[string][]string{}
@@ -1357,7 +1364,9 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		switch p.State {
 		case "ready":
 			out.Pool.Ready++
-		case "degraded", "busy":
+		case "busy":
+			out.Pool.Busy++
+		case "degraded":
 			out.Pool.Degraded++
 		case "draining":
 			out.Pool.Draining++
@@ -1391,10 +1400,12 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		}
 		st := stats[p.ModelID]
 		st.TotalProviders++
-		st.SlotsFreeTotal += p.SlotsFree
 		if p.State == "ready" {
 			st.Ready++
 			st.ReadySlotsFree += p.SlotsFree
+		}
+		if p.State == "ready" || p.State == "busy" {
+			st.Serving++
 		}
 		if p.State == "unavailable" || p.State == "draining" {
 			st.UnavailableOrDraining++
@@ -1414,10 +1425,15 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		out.Pool.TotalProviders = poolz.Summary.TotalProviders
 		out.Pool.Ready = poolz.Summary.Ready
 	}
-	if out.Pool.Ready == 0 {
+	// SPEC-006 §5.6: idle and degraded are decided by serving providers, so
+	// a pool whose providers are all busy serving is up, not idle or degraded.
+	if out.Pool.Ready > servingProviders {
+		servingProviders = out.Pool.Ready
+	}
+	if servingProviders == 0 {
 		out.Status = "idle"
 		out.Degraded = false
-	} else if out.Pool.Ready < readyThreshold {
+	} else if servingProviders < readyThreshold {
 		out.Status = "degraded"
 		out.Degraded = true
 	}
@@ -1471,7 +1487,7 @@ type poolzModelStats struct {
 	TotalProviders        int
 	UnavailableOrDraining int
 	Ready                 int
-	SlotsFreeTotal        int
+	Serving               int
 	ReadySlotsFree        int
 }
 
@@ -1482,13 +1498,9 @@ func computeDegraded(modelStats poolzModelStats) bool {
 	if modelStats.UnavailableOrDraining == modelStats.TotalProviders {
 		return true
 	}
-	if (2 * modelStats.Ready) < modelStats.TotalProviders {
-		return true
-	}
-	if modelStats.SlotsFreeTotal == 0 {
-		return true
-	}
-	return false
+	// SPEC-002 FR-B1: busy providers are serving, and zero free slots is
+	// capacity (reported by availability), not degradation (#2371).
+	return (2 * modelStats.Serving) < modelStats.TotalProviders
 }
 
 func computeAvailability(modelStats poolzModelStats) (bool, string) {

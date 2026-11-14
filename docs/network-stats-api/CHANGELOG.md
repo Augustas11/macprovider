@@ -4,6 +4,20 @@ Per SPEC-017 §8.5. Each entry cites the PR(s) that landed the
 delta, the SPEC version delivered, and a one-line summary suitable
 for a partner-facing announcement.
 
+## v0.2.2 — 2026-11-14
+
+`GET /v1/stats/routability`, `/v1/stats/models` and
+`/v1/stats/providers` no longer report busy capacity as degradation.
+A model whose providers are serving on every slot is `redundant` (two
+or more) or `operational` (one); free capacity stays in `slots_free`,
+`slots_total` and `routable_provider_count`. A provider serving on
+every slot is `online`. Models are never `degraded`, and
+`summary.models_degraded` is always `0` (kept for compatibility).
+Provider `degraded` now means a real fault hold only. No field added
+or removed.
+
+Related: Augustas11/macprovider#2371.
+
 ## v0.1.9 — 2026-07-29
 
 Adds `network.capacity_estimate_sources` to

@@ -1741,6 +1741,46 @@ func TestAggregateStatusNoFreeSlotsIsModelUnavailableNotSystemIdle(t *testing.T)
 	}
 }
 
+// #2371: two providers serving on every slot (routing_eligible false,
+// serving_eligible true) are up, not idle or degraded, even below threshold 2.
+func TestAggregateStatusAllProvidersBusyServingIsUp(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,"serving_eligible":true},
+			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,"serving_eligible":true}
+		],
+		"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":0}
+	}`), 2, fixedNow())
+
+	if out.Status != "up" || out.Degraded || out.Pool.Degraded != 0 {
+		t.Fatalf("status=%q degraded=%t pool=%+v, want up with no degraded providers", out.Status, out.Degraded, out.Pool)
+	}
+	for _, m := range out.Models {
+		if m.Degraded {
+			t.Fatalf("model %+v must not be degraded for busy providers", m)
+		}
+	}
+}
+
+// #2371: a busy provider with a free slot counts as busy and keeps its model
+// out of degraded.
+func TestAggregateStatusBusyProviderCountsAsBusyNotDegraded(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"busy","slots_free":1,"slots_total":2,"max_context_tokens":4096,"routing_eligible":true,"serving_eligible":true},
+			{"model_id":"llama","state":"busy","slots_free":1,"slots_total":2,"max_context_tokens":4096,"routing_eligible":true,"serving_eligible":true}
+		],
+		"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":2}
+	}`), 1, fixedNow())
+
+	if out.Status != "up" || out.Pool.Busy != 2 || out.Pool.Degraded != 0 {
+		t.Fatalf("status=%q pool=%+v, want up with 2 busy", out.Status, out.Pool)
+	}
+	if len(out.Models) != 1 || out.Models[0].Degraded {
+		t.Fatalf("models=%+v, want one non-degraded model", out.Models)
+	}
+}
+
 func TestAggregateStatusL1ByteIdenticalWhenNoProviderPublishes(t *testing.T) {
 	out := aggregateStatus(decodePoolz(t, `{
 		"pool":[
@@ -2042,10 +2082,12 @@ func TestDegradedCalculationMatchesFRB1(t *testing.T) {
 		want  bool
 	}{
 		{name: "no providers", stats: poolzModelStats{}, want: true},
-		{name: "all unavailable", stats: poolzModelStats{TotalProviders: 2, UnavailableOrDraining: 2, Ready: 0, SlotsFreeTotal: 2}, want: true},
-		{name: "less than half ready", stats: poolzModelStats{TotalProviders: 3, UnavailableOrDraining: 1, Ready: 1, SlotsFreeTotal: 2}, want: true},
-		{name: "no free slots", stats: poolzModelStats{TotalProviders: 2, Ready: 2, SlotsFreeTotal: 0}, want: true},
-		{name: "healthy", stats: poolzModelStats{TotalProviders: 2, Ready: 1, SlotsFreeTotal: 1}, want: false},
+		{name: "all unavailable", stats: poolzModelStats{TotalProviders: 2, UnavailableOrDraining: 2}, want: true},
+		{name: "less than half serving", stats: poolzModelStats{TotalProviders: 3, UnavailableOrDraining: 1, Ready: 1, Serving: 1}, want: true},
+		// #2371: zero free slots is capacity, not degradation.
+		{name: "no free slots", stats: poolzModelStats{TotalProviders: 2, Ready: 2, Serving: 2}, want: false},
+		{name: "all busy serving", stats: poolzModelStats{TotalProviders: 2, Serving: 2}, want: false},
+		{name: "healthy", stats: poolzModelStats{TotalProviders: 2, Ready: 1, Serving: 1}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

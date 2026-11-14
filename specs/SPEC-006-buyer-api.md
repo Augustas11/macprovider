@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.79 (2026-11-14, agent-client terminal and retry shapes)
+**Version:** 0.9.80 (2026-11-14, busy providers are not idle or degraded)
 **Depends on:** SPEC-001 v1.9.56, SPEC-002 v1.6.33, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.80 (2026-11-14, Related: #2371):** §5.6 `/v1/status` decides `idle` and `degraded` by serving providers (state `ready` or `busy`, including one busy with every slot in flight), so a network whose providers are all busy serving is `up`, not `idle` or `degraded`. `pool.busy` counts `busy` providers, which no longer count in `pool.degraded`. Per-model `degraded` follows SPEC-002 v1.6.35 FR-B1.
 
 **Change log v0.9.79 (2026-11-14, Related: #2360, #2362, #2363):** Three agent-client fixes. (1) `/v1/responses` streaming: an upstream stream that closes with neither `[DONE]` nor a `finish_reason` ends in `response.failed` with `error.code` `invalid_provider_response` (retryable), never `response.completed`, as `/v1/messages` already refused it. Like `/v1/messages`, the request settles with outcome `invalid_provider_response` and the stream is kept out of the id-less dedupe cache, so a retry is dispatched again. (2) `quota_exhausted` is `retryable: false` at the gateway, as at the coordinator: the daily quota refills only at the next UTC day. `X-RateLimit-Reset` names the refill and no `Retry-After` is sent: agent clients such as Codex sleep until a `Retry-After` deadline without a cap, so a day-long one would hang them instead of stopping them. The relay-blind `quota_exhausted` refusal now carries the `X-RateLimit-*` headers too. (3) `/v1/responses` forwards `reasoning.effort` `max` as `reasoning_effort` `max` (the SPEC-018 §3.12 set) instead of dropping it.
 
@@ -2780,6 +2782,8 @@ Response shape:
   "pool": {
     "total_providers": 4,
     "ready": 3,
+    "busy": 0,
+    "degraded": 0,
     "draining": 0,
     "unavailable": 1
   },
@@ -2808,9 +2812,13 @@ Allowed top-level `status` values:
 
 `down` is reserved for coordinator/control-plane unreachability: `/poolz` is unreachable, returns a non-2xx response, or cannot be decoded. A reachable coordinator with zero ready providers MUST NOT produce `down`.
 
-`idle` means the coordinator is reachable but no provider is currently ready for buyer routing. This is a normal sleep-tolerant capacity state and MUST be rendered by front doors as non-alarming "no providers awake right now" copy.
+A provider is **serving** when it passes every buyer-routing gate except free-slot capacity and is in state `ready` or `busy` (`/poolz` `serving_eligible`); a provider busy with every slot in flight is serving (v0.9.80).
 
-`degraded` means the coordinator is reachable and at least one provider is ready, but ready providers are below the configured threshold.
+`idle` means the coordinator is reachable but no provider is serving. This is a normal sleep-tolerant capacity state and MUST be rendered by front doors as non-alarming "no providers awake right now" copy.
+
+`degraded` means the coordinator is reachable and at least one provider is serving, but serving providers are below the configured threshold. Busy providers are never a reason for `idle` or `degraded`.
+
+`pool.busy` counts providers in state `busy`; `pool.degraded` counts only providers in state `degraded`.
 
 The network-wide degraded flag MUST be true only for the `degraded` status. It MUST be false for `up`, `idle`, and `down`.
 

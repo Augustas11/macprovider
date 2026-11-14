@@ -59,9 +59,13 @@ func TestPublicModelAndNetworkState(t *testing.T) {
 		m    modelRollup
 		want string
 	}{
-		{modelRollup{routableProviderCount: 2}, "redundant"},
-		{modelRollup{routableProviderCount: 1}, "operational"},
-		{modelRollup{servingCapableProviderCount: 1, providerCount: 1}, "degraded"},
+		{modelRollup{inServiceProviderCount: 2, routableProviderCount: 2}, "redundant"},
+		{modelRollup{inServiceProviderCount: 1, routableProviderCount: 1}, "operational"},
+		// #2371: two providers serving on every slot (none routable) stay redundant.
+		{modelRollup{providerCount: 2, servingCapableProviderCount: 2, inServiceProviderCount: 2}, "redundant"},
+		{modelRollup{providerCount: 1, servingCapableProviderCount: 1, inServiceProviderCount: 1}, "operational"},
+		// Serving-capable but held by a fault: no provider can take its traffic.
+		{modelRollup{servingCapableProviderCount: 1, providerCount: 1}, "offline"},
 		{modelRollup{providerCount: 1}, "offline"},
 		{modelRollup{declaredOnly: true}, "unknown"},
 		{modelRollup{}, "offline"},
@@ -77,8 +81,10 @@ func TestPublicModelAndNetworkState(t *testing.T) {
 	}{
 		{statsrollup.RoutabilitySummary{ModelsRedundant: 1, ModelsOperational: 1}, "redundant"},
 		{statsrollup.RoutabilitySummary{ModelsOperational: 1}, "operational"},
-		{statsrollup.RoutabilitySummary{ModelsDegraded: 1}, "degraded"},
-		{statsrollup.RoutabilitySummary{ProvidersServingCapable: 1}, "degraded"},
+		{statsrollup.RoutabilitySummary{ModelsOperational: 1, ProvidersServingCapable: 1, ProvidersRoutable: 0}, "operational"},
+		{statsrollup.RoutabilitySummary{ModelsRedundant: 1, ProvidersServingCapable: 2, ProvidersRoutable: 0}, "redundant"},
+		// Serving-capable providers but no model in service: every one is fault-held.
+		{statsrollup.RoutabilitySummary{ModelsOffline: 1, ProvidersServingCapable: 1}, "degraded"},
 		{statsrollup.RoutabilitySummary{ModelsUnknown: 1}, "unknown"},
 		{statsrollup.RoutabilitySummary{}, "offline"},
 	}
@@ -108,7 +114,12 @@ func TestProviderStateAndScore(t *testing.T) {
 		{"routable healthy", pool.Provider{LastHeartbeatAt: fresh, ReceiptPubkey: withReceipt}, true, true, "online", 100},
 		{"routable no receipt", pool.Provider{LastHeartbeatAt: fresh}, true, true, "online", 75},
 		{"routable stale no receipt", pool.Provider{LastHeartbeatAt: stale}, true, false, "online", 50},
-		{"serving fresh", pool.Provider{LastHeartbeatAt: fresh}, false, true, "degraded", 50},
+		{"full fresh", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateBusy, SlotsTotal: 2}, false, true, "online", 50},
+		{"integrity suspended", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2, ComputeIntegritySuspended: true}, false, true, "degraded", 50},
+		{"catalog recheck pending", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2, CatalogRecheckPending: true}, false, true, "degraded", 50},
+		{"handshake ack pending", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2, HandshakeAckPending: true}, false, true, "degraded", 50},
+		{"shard group unavailable", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2, ShardGroupHeadV1: true}, false, true, "degraded", 50},
+		{"stale full", pool.Provider{LastHeartbeatAt: stale, State: pool.StateBusy, SlotsTotal: 2}, false, true, "unknown", 50},
 		{"degraded state", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateDegraded}, false, false, "offline", 25},
 		{"offline", pool.Provider{LastHeartbeatAt: fresh}, false, false, "offline", 0},
 	}

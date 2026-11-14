@@ -1764,6 +1764,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		UptimeS         int64  `json:"uptime_s"`
 		PoolSize        int    `json:"pool_size"`
 		PoolReady       int    `json:"pool_ready"`
+		PoolBusy        int    `json:"pool_busy"`
 		PoolDegraded    int    `json:"pool_degraded"`
 		PoolDraining    int    `json:"pool_draining"`
 		PoolUnavailable int    `json:"pool_unavailable"`
@@ -1782,7 +1783,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			if p.CapacityEligible() {
 				resp.PoolReady++
 			}
-		case pool.StateDegraded, pool.StateBusy:
+		case pool.StateBusy:
+			// A busy provider is serving, not degraded (#2371).
+			resp.PoolBusy++
+		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:
 			resp.PoolDraining++

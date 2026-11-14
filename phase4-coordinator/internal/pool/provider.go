@@ -843,6 +843,23 @@ func (p Provider) ListingEligible() bool {
 	return p.shardMemberAdmissible()
 }
 
+// AtCapacity reports a provider that is not RoutingEligible only because it
+// is full: every slot is in flight, or the provider refused a route with
+// error_queue_full (a seat is about to free, #1906). Every other routing gate
+// still applies, so a thermal hold, compute-integrity suspension, pending
+// catalog recheck or handshake ack, or an unavailable shard group is not at
+// capacity. Public health surfaces show an at-capacity provider as healthy
+// (#2371).
+func (p Provider) AtCapacity() bool {
+	if p.RoutingEligible() {
+		return false
+	}
+	if p.queueFullHold {
+		p.capacitySafetyHold = false
+	}
+	return p.ListingEligible()
+}
+
 // ShardGroupMemberView is one non-head member or spare of an available
 // SPEC-051 group, as the routing gates of SPEC-051-R028 read it.
 type ShardGroupMemberView struct {

@@ -166,6 +166,9 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 			if serving {
 				m.servingCapableProviderCount++
 			}
+			if routable || prov.AtCapacity() {
+				m.inServiceProviderCount++
+			}
 			if prov.SlotsFree > 0 {
 				m.slotsFree += prov.SlotsFree
 			}
@@ -231,8 +234,6 @@ func (p *Provider) RoutabilitySnapshot() statsrollup.RoutabilitySnapshot {
 			out.Summary.ModelsRedundant++
 		case "operational":
 			out.Summary.ModelsOperational++
-		case "degraded":
-			out.Summary.ModelsDegraded++
 		case "unknown":
 			out.Summary.ModelsUnknown++
 		case "offline":
@@ -252,6 +253,7 @@ type modelRollup struct {
 	providerCount                int
 	routableProviderCount        int
 	servingCapableProviderCount  int
+	inServiceProviderCount       int
 	slotsFree                    int
 	slotsTotal                   int
 	maxContextTokens             int
@@ -332,14 +334,16 @@ func publicProviderLess(a, b statsrollup.ProviderRoutability) bool {
 	return false
 }
 
+// publicModelState counts providers in service (routable, or full with every
+// other gate passed), not momentarily free slots: a model whose providers are
+// all busy serving is healthy, and free capacity is reported separately in
+// slots_free and routable_provider_count (SPEC-017 §5.2c, #2371).
 func publicModelState(m *modelRollup) string {
 	switch {
-	case m.routableProviderCount >= 2:
+	case m.inServiceProviderCount >= 2:
 		return "redundant"
-	case m.routableProviderCount == 1:
+	case m.inServiceProviderCount == 1:
 		return "operational"
-	case m.servingCapableProviderCount > 0:
-		return "degraded"
 	case m.providerCount > 0:
 		return "offline"
 	case m.declaredOnly:
@@ -355,7 +359,10 @@ func networkState(s statsrollup.RoutabilitySummary) string {
 		return "redundant"
 	case s.ModelsOperational > 0:
 		return "operational"
-	case s.ModelsDegraded > 0 || s.ProvidersServingCapable > 0:
+	case s.ProvidersServingCapable > 0:
+		// Serving-capable providers exist but none is in service for any
+		// model: each is held by a real fault (thermal hold, compute-integrity
+		// suspension, pending recheck). Busy providers never reach here.
 		return "degraded"
 	case s.ModelsUnknown > 0:
 		return "unknown"
@@ -368,10 +375,12 @@ func publicProviderState(prov pool.Provider, routable, serving bool, now time.Ti
 	if heartbeatStale(prov, now) && serving {
 		return "unknown"
 	}
-	if routable {
+	if routable || prov.AtCapacity() {
 		return "online"
 	}
 	if serving {
+		// Serving-capable but neither routable nor merely full: a real fault
+		// such as a thermal hold or compute-integrity suspension.
 		return "degraded"
 	}
 	return "offline"

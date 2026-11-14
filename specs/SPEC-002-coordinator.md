@@ -1,6 +1,14 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.34 (2026-11-14, every MiniMax M3 request needs the exact-model declaration)
+**Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
+
+**Change log v1.6.35 (2026-11-14, Related: #2371):** A provider that is
+busy serving is not degraded. FR-B1 per-model `degraded` (which the SPEC-006
+§5.6 gateway status applies) counts `busy` providers as serving and drops the
+"all `slots_free` equal 0" rule: a model whose providers are all serving on
+every slot is not degraded, and zero free slots is reported by availability.
+FR-O1 `/healthz` adds `pool_busy` and stops counting `busy` providers in
+`pool_degraded`, which now counts only the pool `degraded` state.
 
 **Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
 `tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
@@ -2070,8 +2078,11 @@ answered by routing (slot queue, 429 or 503), not by `/v1/models`.
 A model is `degraded: true` if any of:
 
 - all providers for this model are state `unavailable` or `draining`.
-- fewer than 50% of registered providers for this model are `ready`.
-- all providers' `slots_free` for this model equal 0.
+- fewer than 50% of registered providers for this model are serving
+  (state `ready` or `busy`).
+
+A model whose providers are all serving with no free slot is not degraded
+(v1.6.35): free capacity is not degradation.
 
 Otherwise the model is `degraded: false`. SPEC-006 v0.3 gateway status
 aggregation MUST use these same rules.
@@ -2386,6 +2397,7 @@ match buyer trust requirements to provider attestation levels.
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -2394,6 +2406,9 @@ match buyer trust requirements to provider attestation levels.
   "version": "0.1.0"
 }
 ```
+
+`pool_busy` counts providers in state `busy` (serving); `pool_degraded`
+counts only providers in state `degraded` (v1.6.35).
 
 Returns HTTP 200 if the coordinator is running. Returns HTTP 503 if
 the coordinator is draining (SIGTERM received).
@@ -3576,6 +3591,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -3592,6 +3608,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 0,
   "pool_ready": 0,
+  "pool_busy": 0,
   "pool_degraded": 0,
   "pool_draining": 3,
   "pool_unavailable": 0,
