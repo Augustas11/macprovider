@@ -29,6 +29,14 @@ gateway `v1.8.286`, `code_changed_vs_live` true, gateway buyer hold off. Next
 step `signed_tag`: `v1.8.288` is the next unused tag on origin (see the
 Consumed identities row in `cli-release-train.md`).
 
+Order agreed on 2026-11-14: Pearl runtime `v1.8.288` first, then the catalog
+activation of the MiniMax M3.1-Flash release, then the provider CLI cut. The
+live coordinator accepts the next CLI's new fields and the next coordinator
+works with 1.8.287 providers, so the order is free for everything except
+MiniMax: the #2344 routing gate sends MiniMax only to providers on the next
+CLI, and MiniMax is not served yet, so putting the runtime first opens no gap.
+This also keeps the ops order (catalog activation before the CLI cut).
+
 The table lists every merge on `main` since tag `v1.8.286` that touches
 `phase4-coordinator/`, `phase5-gateway/` or `phase7-verify/`
 (`git log v1.8.286..origin/main`), in merge order. #2151 and #2316 are in
