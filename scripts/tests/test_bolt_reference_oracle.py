@@ -115,19 +115,48 @@ class SelfCheckVerdictTests(unittest.TestCase):
         self.assertTrue(v["pass"])
         self.assertAlmostEqual(v["max_abs_logit_diff"], 0.01)
 
-    def test_divergence_on_a_tie_within_measured_noise_passes(self):
+    def test_divergence_on_a_tie_within_tolerance_passes(self):
         v = tool.self_check_verdict([1, 2, 3], self.REF, [1, 9, 3], [[5.1, 4.0], [2.9, 3.0], [6.0, 1.0]])
         self.assertEqual(v["first_divergence"], 1)
-        self.assertTrue(v["pass"])  # gap 0.05 < 0.1 measured at step 0
+        self.assertTrue(v["pass"])  # gap 0.05 <= 0.05 * 6.0
 
     def test_divergence_on_a_clear_winner_fails(self):
         v = tool.self_check_verdict([1, 2, 3], self.REF, [1, 2, 9], [[5.0, 4.0], [3.0, 2.95], [1.0, 6.0]])
         self.assertEqual(v["first_divergence"], 2)
         self.assertFalse(v["pass"])
 
+    def test_tie_beyond_float32_tolerance_fails(self):
+        v = tool.self_check_verdict([1, 2, 3], self.REF, [1, 9, 3], [[5.0, 4.0], [2.95, 3.0], [6.0, 1.0]], "float32")
+        self.assertFalse(v["pass"])  # gap 0.05 > 1e-4 * 6.0
+
     def test_divergence_at_step_zero_fails(self):
         v = tool.self_check_verdict([1, 2], self.REF[:2], [9, 2], [[4.0, 5.0], [3.0, 2.95]])
         self.assertFalse(v["pass"])
+
+    def test_tolerance_scales_with_weight_dtype(self):
+        near = [[5.01, 4.0], [3.0, 2.95], [6.0, 1.0]]  # 0.01 off, largest top-1 logit 6.0
+        self.assertTrue(tool.self_check_verdict([1, 2, 3], self.REF, [1, 2, 3], near, "bfloat16")["pass"])
+        strict = tool.self_check_verdict([1, 2, 3], self.REF, [1, 2, 3], near, "float32")
+        self.assertAlmostEqual(strict["tolerance"], 6.0 * tool.SELF_CHECK_REL_TOL["float32"])
+        self.assertFalse(strict["pass"])
+
+    def test_same_tokens_with_drift_beyond_tolerance_fail(self):
+        far = [[5.0, 4.0], [3.0, 2.95], [7.0, 1.0]]  # 1.0 off > 0.05 * 6.0
+        v = tool.self_check_verdict([1, 2, 3], self.REF, [1, 2, 3], far, "bfloat16")
+        self.assertTrue(v["greedy_match"])
+        self.assertFalse(v["pass"])
+
+
+class DtFloorTests(unittest.TestCase):
+    def test_fractions_per_layer_and_total(self):
+        s = tool.dt_floor_summary({0: [1, 10], 4: [0, 30]})
+        self.assertEqual(s["dt_floor"], 1e-3)
+        self.assertEqual((s["below"], s["values"]), (1, 40))
+        self.assertAlmostEqual(s["fraction"], 0.025)
+        self.assertEqual(s["per_layer"], {"0": 0.1, "4": 0.0})
+
+    def test_no_values_has_no_fraction(self):
+        self.assertIsNone(tool.dt_floor_summary({})["fraction"])
 
 
 if __name__ == "__main__":

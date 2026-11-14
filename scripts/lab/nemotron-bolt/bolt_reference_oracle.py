@@ -30,10 +30,23 @@ What this script adds around NVIDIA's code, and nothing else:
   stored last `conv_kernel - 1` inputs and the SSD starts from the stored SSM state, so a
   prompt can prefill in `--prefill-segment` pieces. The file's prefill materialises
   chunks x 128^4 floats per Mamba layer, about 69 GB at 8K in one piece; 1024-token
-  segments keep it near 9 GB. Single-token input (decode) runs the file unchanged.
+  segments keep it near 9 GB. Single-token input (decode) runs the file's code.
   Before any oracle is written, a self-check prefills the first `--self-check-tokens`
-  prompt ids two ways, chunked and through the file's own decode recurrence one token
-  at a time, and requires the same 16 greedy tokens.
+  (384) prompt ids through the file's own decode recurrence one token at a time, and
+  chunked as one piece, in 160-token pieces (the second piece holds two SSD chunks and
+  starts from carried state, as the 1024-token pieces at 8K do) and in 96-token pieces.
+  Each must give the same 16 greedy tokens (or diverge only where the recurrence's top-2
+  gap is within the tolerance) with logits within a weight-dtype tolerance
+  (`SELF_CHECK_REL_TOL`).
+- No dt floor. The fallback clamps softplus(dt + dt_bias) at `time_step_min` (0.001;
+  lines 595 and 643); NVIDIA's CUDA path passes `dt_limit=time_step_limit=(0, inf)`, and
+  the MLX ports clip to that limit. The chunked prefill omits the clamp, and each loaded
+  mixer's `time_step_min` is set to 0 so the file's single-token branches clamp at 0, a
+  no-op on softplus output. Each oracle's prefill logs the fraction of values below
+  0.001, per Mamba layer and in total (`dt_floor_fraction` in `oracle_<N>.meta.json`).
+- Compute dtype: the weights are bf16 and the file computes in bf16, except the RMSNorms,
+  the router, the prefill SSD scan and the cached SSM state update (float32). Logits come from the bf16 `lm_head` and are
+  upcast to float32 by the file (`.float()`), so they carry bf16 rounding.
 - The Mamba cache holds conv and SSM state in `llm_config.mamba_ssm_cache_dtype`
   (float32) unless `--ssm-cache-dtype model` (NVIDIA's `generate()` uses the model dtype).
 
@@ -88,6 +101,16 @@ UNIT = (
     "    def get(self, key, default=None):\n        return self.store.get(key, default)\n\n"
 )
 LOGIT_STEPS = 16
+# The PyTorch fallback's dt floor (`time_step_min`); the oracle does not apply it.
+DT_FLOOR = 1e-3
+# Per Mamba layer [values below DT_FLOOR, values] of softplus(dt + dt_bias) seen by
+# chunked prefill while collecting; None when not collecting.
+DT_FLOOR_STATS = None
+# Self-check logit tolerance relative to the largest |top-1 logit|, by weight dtype.
+# bf16 keeps 8 significant bits (spacing 2^-7 relative); chunked and stepped prefill
+# round in different orders, so a few spacings of drift are expected there; float32
+# keeps 24 bits.
+SELF_CHECK_REL_TOL = {"bfloat16": 5e-2, "float32": 1e-4}
 TOP_K = 16
 
 
@@ -121,27 +144,43 @@ def oracle_doc(source_name, source_bytes, prompt, greedy, top_idx, top_logit):
     }
 
 
-def self_check_verdict(ref_tokens, ref_logits, tokens, logits):
+def self_check_verdict(ref_tokens, ref_logits, tokens, logits, dtype="bfloat16"):
     """Chunked prefill against the token-by-token recurrence over the same steps.
 
     `ref_logits[s]` are the recurrence's top-16 logits (descending) and `logits[s]` this
-    run's logits at the same ids. Passes when the greedy tokens match, or when they first
-    differ at a step whose recurrence top-2 gap is below the largest logit difference
-    measured on the matching steps before it (a tie within the measured noise).
+    run's logits at the same ids. The tolerance is `SELF_CHECK_REL_TOL[dtype]` times the
+    largest |top-1 logit| (at least 1.0), the rounding the weight dtype allows. Both
+    conditions are required:
+    - the greedy tokens match, or they first differ at a step whose recurrence top-2 gap
+      is within the tolerance (a tie the dtype cannot resolve);
+    - the largest logit difference on the matching steps is within the tolerance.
     """
     diffs = [max(abs(a - b) for a, b in zip(mine, theirs)) for mine, theirs in zip(logits, ref_logits)]
     first = next((i for i, (a, b) in enumerate(zip(tokens, ref_tokens)) if a != b), None)
     matched = diffs[:first] if first is not None else diffs
     noise = max(matched) if matched else 0.0
+    scale = max([abs(row[0]) for row in ref_logits] + [1.0])
+    tol = SELF_CHECK_REL_TOL[dtype] * scale
     verdict = {"greedy_match": first is None and len(tokens) == len(ref_tokens),
-               "first_divergence": first, "max_abs_logit_diff": round(noise, 5)}
+               "first_divergence": first, "max_abs_logit_diff": round(noise, 6),
+               "tolerance": round(tol, 6), "dtype": dtype}
     if first is None:
-        verdict["pass"] = verdict["greedy_match"]
+        tokens_ok = verdict["greedy_match"]
     else:
         gap = ref_logits[first][0] - ref_logits[first][1] if first < len(ref_logits) else None
         verdict["top2_gap_at_divergence"] = gap
-        verdict["pass"] = gap is not None and gap < noise
+        tokens_ok = gap is not None and gap <= tol
+    verdict["pass"] = tokens_ok and noise <= tol
     return verdict
+
+
+def dt_floor_summary(stats):
+    """Fractions of softplus(dt + dt_bias) below DT_FLOOR: total and per Mamba layer."""
+    below = sum(b for b, _ in stats.values())
+    total = sum(t for _, t in stats.values())
+    return {"dt_floor": DT_FLOOR, "values": total, "below": below,
+            "fraction": below / total if total else None,
+            "per_layer": {str(k): (b / t if t else None) for k, (b, t) in sorted(stats.items())}}
 
 
 def snapshot_problems(snapshot, revision=PINNED_REVISION, pinned=PINNED_SHA256):
@@ -285,7 +324,11 @@ def chunked_prefill_forward(self, input_states, cache_params, attention_mask=Non
                         self.n_groups * self.ssm_state_size], dim=-1)
     A = -torch.exp(self.A_log.float())
     dt = nn.functional.softplus(dt + self.dt_bias)
-    dt = torch.clamp(dt, self.time_step_min)
+    # No `torch.clamp(dt, self.time_step_min)`: the CUDA path NVIDIA runs passes
+    # dt_limit=time_step_limit=(0, inf), so trained semantics have no 0.001 floor.
+    if DT_FLOOR_STATS is not None:
+        below, total = DT_FLOOR_STATS.setdefault(self.layer_idx, [0, 0])
+        DT_FLOOR_STATS[self.layer_idx] = [below + int((dt < DT_FLOOR).sum().item()), total + dt.numel()]
     hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
     B = B.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
     C = C.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
@@ -323,6 +366,18 @@ def chunked_prefill_forward(self, input_states, cache_params, attention_mask=Non
     y = y.reshape(batch_size, seq_len, -1)
     cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
     return self.out_proj(self.norm(y, gate).to(dtype))
+
+
+def remove_dt_floor(model, nh):
+    """Set each mixer's `time_step_min` to 0 on the loaded instance (not the file).
+
+    The file's single-token branches clamp softplus output with it (lines 595 and 643);
+    softplus is never negative, so clamping at 0 is the identity: the CUDA dt_limit (0, inf).
+    """
+    mixers = [m for m in model.modules() if isinstance(m, nh.NemotronHMamba2Mixer)]
+    for mixer in mixers:
+        mixer.time_step_min = 0.0
+    return len(mixers)
 
 
 def install_chunked_prefill(nh):
@@ -478,6 +533,7 @@ def run_context(torch, ref, model, ids, segment, steps, ssm_dtype, device, gathe
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
+    global DT_FLOOR_STATS
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("snapshot")
     ap.add_argument("out_dir")
@@ -489,8 +545,9 @@ def main(argv=None):
     ap.add_argument("--ssm-cache-dtype", choices=["config", "model"], default="config")
     ap.add_argument("--prefill-segment", type=int, default=1024,
                     help="Prefill piece size; pass the same value to glm-parity --prefill-step-size.")
-    ap.add_argument("--self-check-tokens", type=int, default=256,
-                    help="Prompt ids prefilled both chunked and token by token before any oracle (>= 2 SSD chunks).")
+    ap.add_argument("--self-check-tokens", type=int, default=384,
+                    help="Prompt ids prefilled both chunked and token by token before any oracle. The 160-token "
+                         "variant needs > 288 so that a 2-chunk piece starts from carried state.")
     ap.add_argument("--skip-existing", action="store_true")
     args = ap.parse_args(argv)
 
@@ -523,12 +580,14 @@ def main(argv=None):
     load_info = load_weights(torch, model, snapshot, args.device)
     _sync(torch, args.device)
     load_s = round(time.perf_counter() - t0, 1)
+    mixers = remove_dt_floor(model, ref.nh)
     ssm_dtype = getattr(torch, cfg.mamba_ssm_cache_dtype) if args.ssm_cache_dtype == "config" else dtype
     tok = AutoTokenizer.from_pretrained(str(snapshot), trust_remote_code=False)
     footprint, rss = _peak_memory()
     env = {
         "repo": REPO_ID, "revision": PINNED_REVISION, "device": args.device, "dtype": args.dtype,
-        "attn": args.attn, "ssm_cache_dtype": str(ssm_dtype).replace("torch.", ""), "construct": construct,
+        "attn": args.attn, "mamba_mixers": mixers, "dt_floor_applied": False,
+        "logits": "lm_head in the weight dtype, upcast to float32 by the file", "ssm_cache_dtype": str(ssm_dtype).replace("torch.", ""), "construct": construct,
         "weights_gb": round(weight_bytes / 1e9, 1), "load_s": load_s, **load_info,
         "torch": torch.__version__, "transformers": transformers.__version__, "numpy": np.__version__,
         "tokenizer": type(tok).__name__, "python": sys.version.split()[0],
@@ -545,9 +604,11 @@ def main(argv=None):
         check_ids = build_prompt_ids(encode, args.self_check_tokens)
         base = run_context(torch, ref, model, check_ids, 1, LOGIT_STEPS, ssm_dtype, args.device)
         self_check = {"tokens": len(check_ids), "recurrence_prefill_s": base[3]["prefill_s"], "variants": {}}
-        for seg in (len(check_ids), 96):
+        # 160: with 384 ids the second piece holds 2 SSD chunks and starts from carried
+        # state, the case of the 1024-token pieces at 8K.
+        for seg in (len(check_ids), 160, 96):
             got = run_context(torch, ref, model, check_ids, seg, LOGIT_STEPS, ssm_dtype, args.device, gather=base[1])
-            self_check["variants"][str(seg)] = self_check_verdict(base[0], base[2], got[0], got[2])
+            self_check["variants"][str(seg)] = self_check_verdict(base[0], base[2], got[0], got[2], args.dtype)
         self_check["pass"] = all(v["pass"] for v in self_check["variants"].values())
         (out / "self_check.json").write_text(json.dumps(self_check, indent=1))
         print(json.dumps({"event": "self_check", **self_check}), flush=True)
@@ -560,7 +621,10 @@ def main(argv=None):
             continue
         ids = build_prompt_ids(encode, n)
         segment = args.prefill_segment
+        DT_FLOOR_STATS = {}  # decode is single-token and does not count; prefill does
         tokens, top_idx, top_logit, timing = run_context(torch, ref, model, ids, segment, args.steps, ssm_dtype, args.device)
+        dt_floor = dt_floor_summary(DT_FLOOR_STATS)
+        DT_FLOOR_STATS = None
         np.savez(npz_path, prompt=np.array(ids, dtype=np.int32), greedy=np.array(tokens, dtype=np.int32),
                  top_idx=np.array(top_idx, dtype=np.int32), top_logit=np.array(top_logit, dtype=np.float32))
         stored = np.load(npz_path, allow_pickle=False)
@@ -573,13 +637,17 @@ def main(argv=None):
         meta = {**env, "context": n, "prompt_tokens": len(ids), "steps": args.steps, "prefill_segment": segment,
                 "prompt_sha256": hashlib.sha256(np.array(ids, dtype="<i4").tobytes()).hexdigest(),
                 **timing, "min_top2_margin_16": round(min(margins), 4),
+                "dt_floor_statement": f"dt_floor_fraction={dt_floor['fraction']} of softplus(dt + dt_bias) in this "
+                                      f"prefill is below {DT_FLOOR}; the oracle applies no floor (CUDA dt_limit 0..inf)",
+                "dt_floor": dt_floor,
                 "peak_footprint_gb": _gb(footprint), "peak_rss_gb": _gb(rss),
                 "mps_driver_gb": _gb(torch.mps.driver_allocated_memory()) if args.device == "mps" else None,
                 "self_check": self_check, "greedy_head": tok.decode(tokens[:40])}
         (out / f"oracle_{n}.meta.json").write_text(json.dumps(meta, indent=1))
         print(json.dumps({"event": "oracle", **{k: meta[k] for k in (
             "context", "device", "prefill_segment", "prefill_tps", "decode_tps", "min_top2_margin_16",
-            "peak_footprint_gb", "peak_rss_gb", "mps_driver_gb")}, "self_check": self_check}), flush=True)
+            "peak_footprint_gb", "peak_rss_gb", "mps_driver_gb")}, "dt_floor_fraction": dt_floor["fraction"],
+            "dt_floor_per_layer": dt_floor["per_layer"], "self_check": self_check}), flush=True)
         if args.device == "mps":
             torch.mps.empty_cache()
     print(json.dumps({"event": "ALL DONE"}), flush=True)

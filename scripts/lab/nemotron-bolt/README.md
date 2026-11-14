@@ -33,13 +33,36 @@ The module docstring lists each change and why. In short:
    The copy also takes the stored conv inputs and SSM state, so 8K prompts prefill in
    1024-token pieces (one piece at 8K needs about 69 GB per Mamba layer). Decode runs the
    file unchanged.
-3. Before writing any oracle, a self-check prefills 256 prompt ids two ways: chunked,
-   and through the file's own decode recurrence one token at a time. The 16 greedy
-   tokens must match. The only accepted difference is a top-2 tie within the logit
-   noise measured on the earlier steps. The result goes to `self_check.json`.
+3. No dt floor. The fallback clamps softplus(dt + dt_bias) at `time_step_min` (0.001,
+   lines 595 and 643). NVIDIA's CUDA path clips to `time_step_limit` (0, inf) instead, and
+   so do the MLX ports. The chunked prefill omits the clamp. Each loaded mixer's
+   `time_step_min` is set to 0, so the file's single-token decode branches clamp at 0,
+   which does nothing to softplus output. NVIDIA's files on disk are not changed. Each
+   oracle prefill counts the values below 0.001, per Mamba layer and in total. The count
+   goes to `oracle_<N>.meta.json` as `dt_floor_statement` and `dt_floor`, and to the
+   log's oracle event as `dt_floor_fraction`.
+4. Before writing any oracle, a self-check prefills 384 prompt ids through the file's own
+   decode recurrence, one token at a time, and then chunked three ways:
+   - as one piece;
+   - in 160-token pieces (the second piece spans two SSD chunks and starts from carried
+     state, as the 1024-token pieces at 8K do);
+   - in 96-token pieces.
 
-The Mamba cache keeps state in float32 (`llm_config.mamba_ssm_cache_dtype`). Attention
-is NVIDIA's `eager_attention_forward`.
+   Every variant runs under the same no-floor rule. The tolerance depends on the dtype:
+   5e-2 (bf16) or 1e-4 (float32) times the largest |top-1 logit|. Each variant must meet
+   two conditions:
+   - its logits on the matching steps are within the tolerance;
+   - its 16 greedy tokens match, or the first difference falls where the recurrence's
+     top-2 gap is within the tolerance (a tie the dtype cannot resolve).
+
+   The result goes to `self_check.json`. The extra prefills add a few minutes before
+   the 1K oracle.
+
+Compute dtype: the weights are bf16 and the file computes in bf16. The RMSNorms, the MoE
+router, the prefill SSD scan and the cached SSM state update run in float32. The oracle
+logits come from the bf16 `lm_head` and are upcast to float32 (`.float()` in the file),
+so they carry bf16 rounding. The Mamba cache keeps state in float32
+(`llm_config.mamba_ssm_cache_dtype`). Attention is NVIDIA's `eager_attention_forward`.
 
 ## Prompt and output
 
