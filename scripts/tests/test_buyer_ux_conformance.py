@@ -284,6 +284,14 @@ class BuyerUXConformanceTests(unittest.TestCase):
             self.assertEqual((minimax["tools"], minimax["tool_choice"], minimax["reasoning"]), (True, ["auto", "none"], False))
         self.assertEqual(bux.tool_grammar_family("MiniMaxAI/MiniMax-M2.5"), "")
 
+    def test_tool_grammar_family_matches_the_shared_fixture(self):
+        """#2355: one fixture for the Swift, Go, gateway and Python copies."""
+        fixture = json.loads((ROOT / "testdata" / "tool-grammar-families.json").read_text())
+        self.assertEqual(fixture["schema"], "macprovider.tool-grammar-families.v1")
+        self.assertTrue(fixture["cases"])
+        for case in fixture["cases"]:
+            self.assertEqual(bux.tool_grammar_family(case["model"]), case["family"], case["model"])
+
     def test_minimax_reasoning_markup_is_a_leak(self):
         """#2189: <mm:think> in content is a leak, whole or split across deltas."""
         for content in ("<mm:think>2+2 is 4.</mm:think>4", "2+2 is 4.</mm:think>4", "<mm:think>still thinking"):
