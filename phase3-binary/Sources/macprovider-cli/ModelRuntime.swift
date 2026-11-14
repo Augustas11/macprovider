@@ -15481,26 +15481,14 @@ maxTokens: maxTokens,
 
     private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
         guard !text.isEmpty, !candidates.isEmpty else { return 0 }
-        // Runs once per streamed token. Only the last characters of `text`
-        // can matter, and a suffix can only match a candidate's prefix when
-        // it starts with that candidate's first character, so compare on
-        // that and skip the per-length String copies.
-        let longestCandidate = candidates.map(\.count).max() ?? 0
-        let tail = Array(text.suffix(longestCandidate))
-        guard !tail.isEmpty else { return 0 }
+        let maxLength = min(text.count, candidates.map(\.count).max() ?? 0)
+        guard maxLength > 0 else { return 0 }
 
         var longest = 0
-        for candidate in candidates {
-            let prefix = Array(candidate.prefix(tail.count))
-            guard let first = prefix.first else { continue }
-            var length = prefix.count
-            while length > longest {
-                let start = tail.count - length
-                if tail[start] == first, tail[start...].elementsEqual(prefix[..<length]) {
-                    longest = length
-                    break
-                }
-                length -= 1
+        for length in 1 ... maxLength {
+            let suffix = String(text.suffix(length))
+            if candidates.contains(where: { $0.hasPrefix(suffix) }) {
+                longest = length
             }
         }
         return longest
