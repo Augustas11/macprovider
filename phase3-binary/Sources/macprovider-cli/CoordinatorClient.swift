@@ -1518,6 +1518,14 @@ actor CoordinatorClient {
         next.resume()
     }
 
+    /// Issue #2364: publish the first-token stall hold at once instead of at
+    /// the next heartbeat. The state sent is the status snapshot's (degraded
+    /// while held), so a paused provider stays paused.
+    func publishFirstTokenStallState(held: Bool) async {
+        guard coordinatorSessionAccepted, !stopped, !operatorPaused else { return }
+        try? await sendStateUpdate(state: nil, reason: held ? "first_token_stall" : "first_token_stall_recovered")
+    }
+
     func sendIdlePrewarmEvent(event rawEvent: String, reason: String?) async {
         guard coordinatorSessionAccepted else {
             return

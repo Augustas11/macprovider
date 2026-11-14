@@ -3870,6 +3870,23 @@ struct ServeCommand: AsyncParsableCommand {
             config: IdlePrewarmConfig(appConfig: resolved),
             logger: idlePrewarmLogger
         )
+        // Issue #2364: a provider whose admitted requests get no first token
+        // within a prompt-sized bound leaves routing until a one-token forward
+        // on the loaded model succeeds. Loopback runtimes have no local model.
+        let firstTokenStallMonitor: FirstTokenStallMonitor? = (modelRuntime as? ModelRuntime).map { mlxRuntime in
+            FirstTokenStallMonitor(
+                isEligible: { await providerStatus.isServingForFirstTokenStallWatch() },
+                setHeld: { held in
+                    await providerStatus.setFirstTokenStallHold(held)
+                    await coordinatorClient?.publishFirstTokenStallState(held: held)
+                },
+                probe: { isCancelled in
+                    let result = try await mlxRuntime.runInternalWarmup(maxTokens: 1, prompt: "Hi", shouldCancel: isCancelled)
+                    guard result.tokensGenerated > 0 else { throw CancellationError() }
+                    return result.firstTokenElapsedMS
+                }
+            )
+        }
         let controlSocket: ControlSocketServer?
         let receiptRotator: (@Sendable () async throws -> Void)?
         if resolved.enableReceipts,
@@ -3999,6 +4016,7 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
         await idlePrewarmer.start()
+        await firstTokenStallMonitor?.start()
         let lifecycleProviderID = resolved.providerID
         let lifecycleModelID = resolved.model
         let lifecycleCompatibilitySetID = installedCompatibilityManifest?.compatibilitySetID
@@ -4059,6 +4077,7 @@ struct ServeCommand: AsyncParsableCommand {
         defer {
             Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
+                await firstTokenStallMonitor?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
                 // M-A: flush queued cold writes + release the namespace lock on the
