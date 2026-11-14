@@ -5815,13 +5815,19 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func msb03MakespanVsSerial",
         "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func makespanSample",
+        "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func msb03PrefillKind",
+        "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func msb03MakespanBar",
         "phase3-binary/Sources/macprovider-cli/MSBThroughputCommand.swift:private func runMSB03"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testServingTheShortRowSoonerKeepsTheMakespanAggregate",
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testSerialMakespanIsTheWholeBackToBackInterval",
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testALongerBatchedMakespanStillFailsTheGate",
-        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testMakespanSampleRejectsARowThatEndsBeforeItArrives"
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testMakespanSampleRejectsARowThatEndsBeforeItArrives",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testPrefillKindFollowsTheBackendsFlattenedPrefillCap",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testPerRowPrefillBackendPassesAboveSerialMakespan",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testSharedForwardBackendKeepsTheAbove1point2Bar",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testUsageExpectsThePrefillTokenPlusTheDecodeSteps"
       ],
       "journeys": [],
       "evidence": [],
