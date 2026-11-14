@@ -639,7 +639,10 @@ enum PagedKVRuntimeParityProbe {
             rows: [("shared-parity-a", promptA)],
             nNew: nNew
         )
-        guard oneRow["shared-parity-a"] == serialA else { return false }
+        guard oneRow["shared-parity-a"] == serialA else {
+            Self.logParityDivergence(stage: "one-row", row: "a", serial: serialA, shared: oneRow["shared-parity-a"])
+            return false
+        }
         let twoRow = try await sharedForwardGeneratedTokens(
             container: container,
             blockSizeTokens: blockSizeTokens,
@@ -654,7 +657,23 @@ enum PagedKVRuntimeParityProbe {
             ],
             nNew: nNew
         )
+        Self.logParityDivergence(stage: "two-row", row: "a", serial: serialA, shared: twoRow["shared-parity-a"])
+        Self.logParityDivergence(stage: "two-row", row: "b", serial: serialB, shared: twoRow["shared-parity-b"])
         return twoRow["shared-parity-a"] == serialA && twoRow["shared-parity-b"] == serialB
+    }
+
+    /// Names where a shared-forward row first left its serial reference
+    /// (diagnostic text only; logs nothing when the row matches).
+    private static func logParityDivergence(stage: String, row: String, serial: [Int], shared: [Int]?) {
+        guard shared != serial else { return }
+        guard let shared else {
+            PagedKVRuntimeDiagnostics.log("shared-parity \(stage) row=\(row) produced no tokens")
+            return
+        }
+        let common = min(serial.count, shared.count)
+        let first = (0 ..< common).first { serial[$0] != shared[$0] } ?? common
+        PagedKVRuntimeDiagnostics.log(
+            "shared-parity \(stage) row=\(row) first_divergence=\(first) serial_len=\(serial.count) shared_len=\(shared.count) serial=\(Array(serial.prefix(first + 2).suffix(4))) shared=\(Array(shared.prefix(first + 2).suffix(4)))")
     }
 
     private static func sharedForwardGeneratedTokens(
