@@ -75,7 +75,6 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     )
 
     var maximumProposalDepth: Int { self == .deepseekV4 ? 5 : (self == .glm5Next ? 2 : 1) }
-    var predictionLayerCount: Int { self == .deepseekV4 ? 3 : 1 }
     /// The cache/state class the lab tuple signs: `hybrid_` marks recurrent
     /// state (`ModelRuntime.nativeMTPExpectedStateClass`).
     var stateClass: String {
@@ -434,6 +433,32 @@ final class NativeMTPHardwareE2ERunner {
 
     private var mtpDirectory: URL {
         root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+    }
+
+    /// The observed-versus-admitted fields the artifact matcher compares,
+    /// listing only those that differ (diagnostic text, never a decision).
+    static func artifactAdmissionMismatch(
+        _ observation: NativeMTPArtifactPairObservation,
+        _ admission: NativeMTPAdmissionCapability
+    ) -> String {
+        let quantization = admission.quantization
+        let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation)
+        let fields: [(String, String, String)] = [
+            ("quantization.target", observation.target.format.sidecarQuantizationLabel, quantization.target),
+            ("quantization.mtp", observation.mtp.format.sidecarQuantizationLabel, quantization.mtp),
+            ("target.prediction_layer_count", "\(observation.target.mtpPredictionLayerCount)", "\(admission.predictionLayerCount)"),
+            ("mtp.prediction_layer_count", "\(observation.mtp.mtpPredictionLayerCount)", "\(admission.predictionLayerCount)"),
+            ("block_size_elements", representation.map { "\($0.groupSize)" } ?? "unavailable",
+             quantization.blockSizeElements.map(String.init) ?? "null"),
+            ("representation_manifest_sha256", representation?.manifestSHA256 ?? "unavailable",
+             quantization.representationManifestSHA256),
+            ("per_layer_exceptions", representation.map { "\($0.perLayerExceptions)" } ?? "unavailable",
+             "\(quantization.perLayerExceptions)"),
+            ("unquantized_exceptions", representation.map { "\($0.unquantizedExceptions)" } ?? "unavailable",
+             "\(quantization.unquantizedExceptions)"),
+        ]
+        let differing = fields.filter { $0.1 != $0.2 }.map { "\($0.0) observed=\($0.1) admitted=\($0.2)" }
+        return differing.isEmpty ? "no listed field differs" : differing.joined(separator: "; ")
     }
 
     private func observeArtifacts(targetDirectory: URL) throws -> NativeMTPArtifactPairObservation {
@@ -799,7 +824,8 @@ final class NativeMTPHardwareE2ERunner {
                 artifactObservation,
                 admissionCapability: nativeAdmissionCapability
             ),
-            "artifact observation does not match admission"
+            "artifact observation does not match admission: "
+                + Self.artifactAdmissionMismatch(artifactObservation, nativeAdmissionCapability)
         )
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
@@ -1296,7 +1322,11 @@ final class NativeMTPHardwareE2ERunner {
             artifactManifestSHA: sha256Hex(projectionData),
             challengeBankSHA: sha256Hex(selfTestBankData),
             signerKeyID: keyID,
-            affineRepresentation: affineRepresentation
+            affineRepresentation: affineRepresentation,
+            // The observer's count, as production compares it: Gemma 4's
+            // assistant depth (`mtp_num_hidden_layers`, SPEC-048-R002 0.1.98)
+            // is not its proposal depth.
+            predictionLayerCount: artifactObservation.target.mtpPredictionLayerCount
         )
         // The lab envelope beside the projection: its quantization block is
         // what the production artifact observer computed for this pair, the
@@ -1413,7 +1443,8 @@ final class NativeMTPHardwareE2ERunner {
         artifactManifestSHA: String,
         challengeBankSHA: String,
         signerKeyID: String,
-        affineRepresentation: NativeMTPAffineRepresentation
+        affineRepresentation: NativeMTPAffineRepresentation,
+        predictionLayerCount: Int
     ) throws -> Data {
         let entry: [String: Any] = [
             "model_key": modelID,
@@ -1426,7 +1457,7 @@ final class NativeMTPHardwareE2ERunner {
             "mtp_manifest_sha256": manifestSHA,
             "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": family.stateClass,
-            "mtp_head_count": family.predictionLayerCount,
+            "mtp_head_count": predictionLayerCount,
             "proposal_depth": proposalDepth,
             "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
             "runtime_revision": Self.upstreamRevision,
