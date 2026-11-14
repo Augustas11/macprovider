@@ -1196,6 +1196,24 @@ func (s *Server) writeWalletSessionStoreError(w http.ResponseWriter, err error) 
 	}
 }
 
+// responsesBudgetReachedCode is the spend-cap code coding agents on the
+// Responses API stop on: Codex maps HTTP 400 with error.code budget_reached
+// to a terminal session-budget error and retries any other 4xx with backoff
+// (SPEC-040 §error table, #2361).
+const responsesBudgetReachedCode = "budget_reached"
+
+// writeWalletInferenceAdmissionError answers a refused wallet-session
+// inference admission. An exhausted session cap on /v1/responses gets the
+// terminal 400 budget_reached shape; every other refusal, and every other
+// endpoint, keeps its SPEC-040 code and status.
+func (s *Server) writeWalletInferenceAdmissionError(w http.ResponseWriter, r *http.Request, err error, decision storage.WalletSessionAdmissionDecision) {
+	if errors.Is(err, storage.ErrWalletSessionCapExceeded) && responsesAdapterFromContext(r.Context()) != nil {
+		writeError(w, http.StatusBadRequest, "billing_error", responsesBudgetReachedCode, "Wallet-session total cap exceeded (wallet_session_exhausted)")
+		return
+	}
+	s.writeWalletAdmissionError(w, err, decision)
+}
+
 func (s *Server) writeWalletAdmissionError(w http.ResponseWriter, err error, decision storage.WalletSessionAdmissionDecision) {
 	switch {
 	case errors.Is(err, storage.ErrWalletSessionReplayMismatch):

@@ -1634,7 +1634,10 @@ var gatewayPermanentCodes = map[string]bool{
 	// #2362: the daily token quota refills only at X-RateLimit-Reset (the
 	// next UTC day), so an automatic retry cannot succeed now. Agrees with
 	// the coordinator's table.
-	"quota_exhausted":         true,
+	"quota_exhausted": true,
+	// #2361: the /v1/responses form of wallet_session_exhausted; the session
+	// cap never refills, and Codex stops only on this code.
+	"budget_reached":          true,
 	"invalid_buyer_hold":      true,
 	"context_length_exceeded": true,
 	"method_not_allowed":      true, "invalid_window": true, "invalid_kill_switch": true,

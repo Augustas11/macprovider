@@ -1,6 +1,6 @@
 # SPEC-040 - Wallet-Native Buyer Sessions
 
-**Version:** 0.1.9
+**Version:** 0.1.10
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/930
@@ -10,7 +10,7 @@ Audit history: SPEC audit round 1 found blocking account-binding, replay, settle
 {
   "spec_id": "SPEC-040",
   "title": "Wallet-Native Buyer Sessions",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "path": "specs/SPEC-040-wallet-native-buyer-sessions.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -296,6 +296,10 @@ Session failures MUST use the SPEC-006 error envelope with stable machine-readab
 
 Audit events MUST be emitted for challenge creation, session creation, rejection, revocation, expiry, replay rejection, cap exhaustion, and settlement reconciliation failure. Audit payloads MUST include reason codes and identifiers sufficient for operator reconciliation without logging bearer secrets, raw wallet signatures, prompts, outputs, or raw public keys.
 
+**Terminal shape for coding agents (v0.1.10, Related: #2361).** An exhausted total session cap never refills, so an agent must stop rather than retry. On `POST /v1/responses` the gateway MUST answer it with HTTP 400, `type` `billing_error`, `code` `budget_reached`, `retryable` `false`, and a message naming `wallet_session_exhausted`. That is the code and status Codex (`rust-v0.168.0`, `codex-api/src/error.rs`) maps to a terminal session-budget error; Codex retries any other 4xx with backoff until its retry budget is spent. Every other refusal on `/v1/responses`, and the same refusal on `POST /v1/chat/completions`, `POST /v1/messages` and the challenge/registration routes, keeps the table row above (402 `wallet_session_exhausted`). The refusal is at admission, so nothing runs and nothing is charged. The session audit event and its `reason` are the same for both shapes.
+
+Existing consumers of `wallet_session_exhausted` (v0.1.10): the gateway admission writer (`phase5-gateway/internal/router/wallet_sessions.go`, challenge/registration and inference admission), the gateway retryable table (`server.go`, permanent), and the gateway tests (`wallet_sessions_test.go`, `server_test.go`). No coordinator, provider, SDK or published doc in this repository reads the code.
+
 `wallet_session_rate_limited` MUST include either positive `Retry-After` seconds or `X-RateLimit-Reset` epoch seconds, and the SPEC-006 envelope retry metadata MUST agree with that header.
 
 Wallet fingerprints in audit and status surfaces MUST be keyed pseudonyms: HMAC over `(wallet_namespace, wallet_public_key)` using `auth.wallet_sessions.wallet_fingerprint_secret`, a stable dedicated secret distinct from bearer-hash and other operator secrets. Fingerprint-secret rotation is forbidden in v0.1. Raw wallet public keys MAY be stored only in restricted gateway storage for verification and MUST NOT appear in buyer-visible responses unless a later privacy review allows it.
@@ -448,6 +452,7 @@ This amendment does not promote SPEC-040 or SPEC-041, change wallet settlement o
 
 ## 9. Changelog and history
 
+- 0.1.10 - `POST /v1/responses` answers an exhausted session cap with the terminal 400 `budget_reached` shape coding agents stop on; other endpoints keep 402 `wallet_session_exhausted`. Lists the code's consumers (Related: #2361).
 - 0.1.9 - Bound wallet signatures and trusted internal session context to the SPEC-041 pilot while preserving replay/cap/revocation semantics and preventing double consumption.
 - 0.1.8 - Split active-session cap errors from budget exhaustion and aligned wallet identity conflict remediation with cross-account binding semantics.
 - 0.1.7 - Clarified rollback evidence boundaries: local implementation validates disabled and additive-migration behavior, while released-old-binary rollback rehearsal remains a release acceptance gate.

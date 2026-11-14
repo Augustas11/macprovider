@@ -620,7 +620,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          walletSessionAdmissionAuditReason(err),
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 		// Defensive cleanup: if the reservation INSERT committed before the
@@ -832,7 +832,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          "dispatch_fence",
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 	}
