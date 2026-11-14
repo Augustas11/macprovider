@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -157,6 +158,41 @@ class DtFloorTests(unittest.TestCase):
 
     def test_no_values_has_no_fraction(self):
         self.assertIsNone(tool.dt_floor_summary({})["fraction"])
+
+
+class PinnedImportTests(unittest.TestCase):
+    FILES = {
+        "__init__.py": b"",
+        "configuration_nemotron_h.py": b"X = 1\n",
+        "configuration_nemotron_h_puzzle.py": b"from .configuration_nemotron_h import X\nY = X + 1\n",
+        "modeling_nemotron_h.py": b"Z = 3\n",
+        "modeling_nemotron_h_puzzle.py": b"from . import modeling_nemotron_h as m\nW = m.Z\n",
+    }
+
+    def setUp(self):
+        self.saved_pins = dict(tool.PINNED_SHA256)
+        self.saved_meta_path = list(sys.meta_path)
+        self.addCleanup(self.restore)
+        tool.PINNED_SHA256.update({k: hashlib.sha256(v).hexdigest() for k, v in self.FILES.items()})
+        self.dir = Path(tempfile.mkdtemp())
+        for name, data in self.FILES.items():
+            (self.dir / name).write_bytes(data)
+
+    def restore(self):
+        tool.PINNED_SHA256.clear()
+        tool.PINNED_SHA256.update(self.saved_pins)
+        sys.meta_path[:] = self.saved_meta_path
+        for name in [m for m in sys.modules if m == tool.PACKAGE or m.startswith(tool.PACKAGE + ".")]:
+            del sys.modules[name]
+
+    def test_pinned_bytes_import_with_relative_imports(self):
+        ref = tool.import_reference(self.dir)
+        self.assertEqual((ref.cfg.Y, ref.puzzle.W), (2, 3))
+
+    def test_a_changed_file_is_refused(self):
+        (self.dir / "modeling_nemotron_h.py").write_bytes(b"Z = 4\n")
+        with self.assertRaises(ImportError):
+            tool.import_reference(self.dir)
 
 
 if __name__ == "__main__":

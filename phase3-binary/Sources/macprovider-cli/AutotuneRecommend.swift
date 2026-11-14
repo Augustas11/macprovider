@@ -702,19 +702,21 @@ enum AutotuneModelContextCap {
         if let kvLoraRank = firstInt(in: root, paths: [["kv_lora_rank"], ["text_config", "kv_lora_rank"]]) {
             return latentKVCacheBytesPerToken(in: root, kvLoraRank: kvLoraRank)
         }
-        // nemotron_h_puzzle configs (Nemotron 3.5 Bolt, #2329) declare no
-        // layer count; their stack is `layers_block_type`. Every entry counts
-        // as a KV layer, the same overestimate the declared count gives the
-        // other nemotron_h rows.
-        let blockTypeCount = (root["layers_block_type"] as? [Any])?.count
-        guard let declaredLayers = firstInt(in: root, paths: [
+        let declaredCount = firstInt(in: root, paths: [
             ["num_hidden_layers"],
             ["n_layer"],
             ["num_layers"],
             ["text_config", "num_hidden_layers"],
             ["text_config", "n_layer"],
             ["text_config", "num_layers"]
-        ]) ?? blockTypeCount,
+        ])
+        // nemotron_h_puzzle configs (Nemotron 3.5 Bolt, #2329) declare no
+        // layer count; their stack is `layers_block_type`, and only its
+        // `attention` entries hold a KV cache. A declared count still wins.
+        let blockTypes = declaredCount == nil
+            ? (root["layers_block_type"] as? [Any])?.compactMap { $0 as? String }
+            : nil
+        guard let declaredLayers = declaredCount ?? blockTypes?.count,
             let hiddenSize = firstInt(in: root, paths: [
                 ["hidden_size"],
                 ["n_embd"],
@@ -756,9 +758,14 @@ enum AutotuneModelContextCap {
         // per-token KV bytes (SPEC-023-R018 item 5).
         let layerTypes = ((root["layer_types"] ?? (root["text_config"] as? [String: Any])?["layer_types"]) as? [Any])?
             .compactMap { $0 as? String }
-        let layers = layerTypes?.count == declaredLayers
-            ? layerTypes?.filter { $0 == "full_attention" }.count ?? 0
-            : declaredLayers
+        let layers: Int
+        if let blockTypes {
+            layers = blockTypes.filter { $0 == "attention" }.count
+        } else {
+            layers = layerTypes?.count == declaredLayers
+                ? layerTypes?.filter { $0 == "full_attention" }.count ?? 0
+                : declaredLayers
+        }
         guard headDim > 0 else {
             return nil
         }

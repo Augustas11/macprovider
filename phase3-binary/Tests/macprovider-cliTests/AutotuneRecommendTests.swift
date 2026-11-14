@@ -1421,6 +1421,20 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: configURL), unreadable)
     }
 
+    /// #2329: a nemotron_h_puzzle config (Nemotron 3.5 Bolt) has no layer
+    /// count, only `layers_block_type`; its 8 `attention` entries of 88 hold
+    /// KV. A declared count still wins, and an empty stack stays unreadable.
+    func testLayersBlockTypeCountsOnlyAttentionWhenNoLayerCountIsDeclared() throws {
+        let geometry = try XCTUnwrap(Self.signedCandidateConfigGeometry["nvidia/nemotron-3.5-bolt-74b-a9b"])
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: Data(geometry.json.utf8)), 8 * 2 * 128 * 2 * 2)
+        let declared = Data(#"{"num_hidden_layers": 4, "hidden_size": 1024, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 128, "layers_block_type": ["mamba", "attention", "moe", "mamba"]}"#.utf8)
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: declared), 4 * 2 * 128 * 2 * 2)
+        let empty = Data(#"{"hidden_size": 1024, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 128, "layers_block_type": []}"#.utf8)
+        XCTAssertNil(AutotuneModelContextCap.kvCacheBytesPerToken(configData: empty))
+        let notList = Data(#"{"hidden_size": 1024, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 128, "layers_block_type": "attention"}"#.utf8)
+        XCTAssertNil(AutotuneModelContextCap.kvCacheBytesPerToken(configData: notList))
+    }
+
     func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {
         // SPEC-023-R018 item 5: a complete layer_types stack counts only its
         // full_attention layers. Zero of them means no per-token KV cache, so
@@ -6555,7 +6569,7 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "832f602eba5d22436c258c1462bdedc5afddb42b",
             json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#
         ),
-        // No num_hidden_layers: the nemotron_h_puzzle stack is layers_block_type (#2329).
+        // No num_hidden_layers: the nemotron_h_puzzle stack is layers_block_type, 8 of 88 attention (#2329).
         "nvidia/nemotron-3.5-bolt-74b-a9b": (
             revision: "cbfda6be4e9ff9e8d3acf0c0a57c54c1a496ef81",
             json: #"{"max_position_embeddings":262144,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128,"layers_block_type":["mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","attention","moe","mamba","moe","mamba","moe","mamba","moe","mamba","moe"]}"#

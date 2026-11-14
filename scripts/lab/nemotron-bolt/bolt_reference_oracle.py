@@ -68,6 +68,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib
+import importlib.abc
 import importlib.machinery
 import importlib.util
 import json
@@ -275,14 +276,45 @@ def install_mamba_ssm_stub(torch):
     return rmsnorm_fn
 
 
+class _PinnedSnapshotImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Imports `bolt_reference[.x]` from the snapshot: each file is read once, its bytes are
+    checked against PINNED_SHA256, and those same bytes are executed (no re-read)."""
+
+    def __init__(self, snapshot):
+        self.snapshot = Path(snapshot)
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == PACKAGE:
+            name, is_pkg = "__init__.py", True
+        elif fullname.startswith(PACKAGE + ".") and "." not in fullname[len(PACKAGE) + 1:]:
+            name, is_pkg = fullname[len(PACKAGE) + 1:] + ".py", False
+        else:
+            return None
+        if name not in PINNED_SHA256:
+            raise ImportError(f"{fullname}: {name} is not a pinned snapshot file")
+        spec = importlib.util.spec_from_loader(fullname, self, origin=str(self.snapshot / name), is_package=is_pkg)
+        if is_pkg:
+            spec.submodule_search_locations = [str(self.snapshot)]
+        return spec
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        path = Path(module.__spec__.origin)
+        source = path.read_bytes()
+        got = hashlib.sha256(source).hexdigest()
+        if got != PINNED_SHA256[path.name]:
+            raise ImportError(f"{path.name} sha256 {got} != pinned {PINNED_SHA256[path.name]}")
+        module.__file__ = str(path)
+        exec(compile(source, str(path), "exec"), module.__dict__)
+
+
 def import_reference(snapshot):
     """Import the snapshot's puzzle modules as package `bolt_reference` (relative imports work)."""
     sys.dont_write_bytecode = True  # nothing is written into the snapshot
-    spec = importlib.util.spec_from_file_location(
-        PACKAGE, Path(snapshot) / "__init__.py", submodule_search_locations=[str(snapshot)])
-    pkg = importlib.util.module_from_spec(spec)
-    sys.modules[PACKAGE] = pkg
-    spec.loader.exec_module(pkg)
+    sys.meta_path.insert(0, _PinnedSnapshotImporter(snapshot))
+    importlib.import_module(PACKAGE)
     return types.SimpleNamespace(
         cfg=importlib.import_module(f"{PACKAGE}.configuration_nemotron_h_puzzle"),
         nh=importlib.import_module(f"{PACKAGE}.modeling_nemotron_h"),

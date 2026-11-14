@@ -8,7 +8,11 @@ from a local snapshot.
 
 - Repository: `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16` (OpenMDW-1.1)
 - Revision: `e09a4cedb1787db1760375ee5539f222cae0c672` (2026-10-23)
-- Weights: 62 safetensors shards, 149.8 GB bf16 (the language model and the vision tower)
+- Weights: 62 safetensors shards, 149.8 GB bf16 (the language model and the vision tower).
+  The index lists 63 files: `model-00001-of-00063` to `model-00062-of-00063` and
+  `model-summary-idxs.safetensors`, which holds only `vision_model.summary_idxs`. No
+  `model-00063-of-00063` exists, so the download pattern `model-*-of-00063.safetensors`
+  fetches exactly the 62 numbered shards and skips the vision-only file.
 - Code: `llm_config.auto_map` names `modeling_nemotron_h_puzzle.NemotronHPuzzleForCausalLM`,
   which subclasses `modeling_nemotron_h.NemotronHForCausalLM`. The script imports those
   two files and their two configuration files from the snapshot, plus the snapshot
@@ -27,14 +31,17 @@ The module docstring lists each change and why. In short:
    `rms_norm_ref` of mamba_ssm). The real package needs CUDA and does not install on
    macOS. The file imports it unconditionally.
 2. Multi-token Mamba input runs a corrected copy of the file's naive-SSD prefill. The
-   file's PyTorch fallback sums the inter-chunk recurrence over the wrong axis
-   (`.sum(dim=2)` where the source-chunk axis is dim 3). From position 128 (one SSD
-   chunk) on, its prefill then disagrees with its own token-by-token decode recurrence.
+   file's PyTorch fallback (`NemotronHMamba2Mixer.torch_forward`,
+   `modeling_nemotron_h.py:695`) sums the inter-chunk state carry over the target-chunk
+   axis (`.sum(dim=2)`) where the source-chunk axis is dim 3. A single chunk from zero
+   state is unaffected, so prompts up to 128 tokens are unaffected. From position 128
+   (one SSD chunk) on, its prefill disagrees with its own token-by-token decode
+   recurrence.
    The copy also takes the stored conv inputs and SSM state, so 8K prompts prefill in
    1024-token pieces (one piece at 8K needs about 69 GB per Mamba layer). Decode runs the
    file unchanged.
 3. No dt floor. The fallback clamps softplus(dt + dt_bias) at `time_step_min` (0.001,
-   lines 595 and 643). NVIDIA's CUDA path clips to `time_step_limit` (0, inf) instead, and
+   lines 595 and 643). NVIDIA's CUDA kernel path clips to `time_step_limit` (0, inf) instead, and
    so do the MLX ports. The chunked prefill omits the clamp. Each loaded mixer's
    `time_step_min` is set to 0, so the file's single-token decode branches clamp at 0,
    which does nothing to softplus output. NVIDIA's files on disk are not changed. Each
