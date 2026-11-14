@@ -476,7 +476,7 @@ actor ContinuousBatchTextPreparationLane {
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
                     stopTokenSequences: ModelRuntime.continuousBatchStopTokenSequences(
-                        requestStops: request.outputTraits.reasoningOpen ? [] : request.stop,
+                        requestStops: ModelRuntime.reasoningStopScope(request) == .whole ? request.stop : [],
                         modelStopTokenIDs: modelStopTokenIDs,
                         tokenizer: tokenizer
                     ),
@@ -1709,8 +1709,9 @@ actor ModelRuntime: ModelRuntimeServing {
               !HarmonyResponseParser.isHarmonyModelID(request.model),
               !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
-              // The speculative collectors do not split reasoning (§3.12).
-              !request.outputTraits.reasoningOpen,
+              // The speculative collectors do not split reasoning or run
+              // stops after it (§3.12).
+              reasoningStopScope(request) == .whole,
               draftLoaded,
               numDraftTokens != nil else {
             return .tokenIterator
@@ -8267,7 +8268,7 @@ maxTokens: 1,
             // A stop string inside the reasoning must not end the row; the
             // text filters apply it to the post-think output (SPEC-018 §3.12).
             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
-                requestStops: request.outputTraits.reasoningOpen ? [] : request.stop,
+                requestStops: Self.reasoningStopScope(request) == .whole ? request.stop : [],
                 context: context
             )
             let tokenizer = context.tokenizer
@@ -8622,13 +8623,13 @@ maxTokens: 1,
         private let windowedDecoder: WindowedTextDecoder?
         private let incrementalDecoder: IncrementalTextDecoder?
         private let needsPerTokenPrecision: Bool
-        private let reasoningOpen: Bool
+        private let reasoningOpen: ReasoningOutput.StopScope
         /// #2317: `streamingSafePrefix` of the row's text, incrementally.
         /// Created on the first step: the stop inputs arrive with it.
         private var outputFilter: IncrementalStreamFilter?
 
         init(request: ChatCompletionRequest, detokenizer: StreamingDetokenizer) {
-            reasoningOpen = request.outputTraits.reasoningOpen
+            reasoningOpen = ModelRuntime.reasoningStopScope(request)
             emitter = SerialStreamingTextEmitter(
                 request: request,
                 holdsCleanupDecoderPendingPrefixes: detokenizer.cleanUpTokenizationSpaces
@@ -8700,7 +8701,7 @@ maxTokens: 1,
                 idleState: idleState,
                 onChunk: onChunk
             ) {
-            case .requestStop where reasoningOpen:
+            case .requestStop where reasoningOpen != .whole:
                 // A reasoning row has no request stop-token sequences (a stop
                 // inside the reasoning must not end it); the post-think text
                 // match ends it here and the final filter cuts at it.
@@ -8786,7 +8787,7 @@ maxTokens: 1,
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
         private var observer: NativeToolCallStreamEmitter
-        private let reasoningOpen: Bool
+        private let reasoningOpen: ReasoningOutput.StopScope
         private let guaranteedSelection: Bool
         private var stopTokenCountValue: Int?
         private let incrementalDecoder: IncrementalTextDecoder
@@ -8802,7 +8803,7 @@ maxTokens: 1,
 
         init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
             guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
-            reasoningOpen = request.outputTraits.reasoningOpen
+            reasoningOpen = ModelRuntime.reasoningStopScope(request)
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
                 grammar: ModelRuntime.toolGrammar(for: request),
@@ -8914,7 +8915,7 @@ maxTokens: 1,
         // A reasoning row has no request stop-token sequences (SPEC-018
         // §3.12): its post-`</think>` stop match is the canonical boundary,
         // for streaming and non-streaming waiters alike.
-        let reasoningStop = request.outputTraits.reasoningOpen && request.stop.contains { !$0.isEmpty }
+        let reasoningStop = reasoningStopScope(request) != .whole && request.stop.contains { !$0.isEmpty }
         let serialTool = serialNativeToolStopApplies(request)
         guard serialTool || reasoningStop else { return nil }
         let state = serialTool
@@ -8923,7 +8924,8 @@ maxTokens: 1,
         let stopText = reasoningStop
             ? ReasoningStopText(
                 decoder: detokenizer.makeIncremental(),
-                filter: IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: request.stop, reasoningOpen: true)
+                filter: IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: request.stop,
+                                                reasoningOpen: reasoningStopScope(request))
             )
             : nil
         return ContinuousBatchCanonicalStopObserver { token in
@@ -9030,7 +9032,7 @@ maxTokens: 1,
             decoded,
             stopTokenFilter: stopTokenFilter,
             requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
-            reasoningOpen: request.outputTraits.reasoningOpen
+            reasoningOpen: Self.reasoningStopScope(request)
         )
         // `length` when the row ended on an output budget: an explicit
         // max_tokens reached by the post-model-stop, pre-truncation
@@ -9099,7 +9101,7 @@ maxTokens: 1,
                 stopSequence: request.stop.isEmpty ? nil : HarmonyResponseParser.isHarmonyModelID(request.model)
                     ? parsed.stopSequence
                     : matchedRequestStop(in: decode(generatedTokens), stopTokenFilter: stopTokenFilter,
-                                         requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                         requestStops: request.stop, reasoningOpen: Self.reasoningStopScope(request),
                                          hasToolCalls: !parsed.toolCalls.isEmpty),
                 servedPath: result.settlementDisposition == .nonSettlingReplay ? nil : result.servedPath
             ),
@@ -10914,7 +10916,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 modelID: request.model,
                                 stopTokenFilter: stopTokenFilter,
                                 requestStops: request.stop,
-                                reasoningOpen: request.outputTraits.reasoningOpen,
+                                reasoningOpen: Self.reasoningStopScope(request),
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                                 decode: { context.tokenizer.decode(tokenIds: $0) },
                                 decodeLookbackScalars: WindowedTextDecoder.lookbackScalars(for: context.tokenizer),
@@ -10930,7 +10932,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             let serialToolFilter = IncrementalStreamFilter(
                                 stopTokenFilter: stopTokenFilter,
                                 requestStops: request.stop,
-                                reasoningOpen: request.outputTraits.reasoningOpen
+                                reasoningOpen: Self.reasoningStopScope(request)
                             )
                             var serialToolStopText = IncrementalToolStopText(observer: serialToolObserver)
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -10989,7 +10991,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                                unchangedPrefixUTF8: decoded.unchangedPrefixUTF8,
                                                filter: serialToolFilter,
                                                stopText: &serialToolStopText,
-                                               reasoningOpen: request.outputTraits.reasoningOpen,
+                                               reasoningOpen: Self.reasoningStopScope(request),
                                                guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
                                            )
                                         {
@@ -11047,7 +11049,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
-                            reasoningOpen: request.outputTraits.reasoningOpen
+                            reasoningOpen: Self.reasoningStopScope(request)
                         )
 
                         let rawLengthFinish = Self.labSerialLengthFinish(
@@ -11113,7 +11115,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             stopSequence: HarmonyResponseParser.isHarmonyModelID(request.model)
                                 ? parsed.stopSequence
                                 : Self.matchedRequestStop(in: result.output, stopTokenFilter: stopTokenFilter,
-                                                          requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                          requestStops: request.stop, reasoningOpen: Self.reasoningStopScope(request),
                                                           hasToolCalls: !parsed.toolCalls.isEmpty)
                         ), request: request)
                         self.nativeMTPRequestShapeCapture?.record(
@@ -11236,7 +11238,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             generated.output,
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop,
-            reasoningOpen: request.outputTraits.reasoningOpen
+            reasoningOpen: Self.reasoningStopScope(request)
         )
         // Speculative decoding requires tool_choice absent: no call prefill.
         let parsed = try parseToolCallsIfRequested(filtered.text, request: request, toolCallPrefill: nil)
@@ -11262,7 +11264,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             specDecodeAcceptedTokens: generated.acceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
             stopSequence: matchedRequestStop(in: generated.output, stopTokenFilter: stopTokenFilter,
-                                             requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                             requestStops: request.stop, reasoningOpen: Self.reasoningStopScope(request),
                                              hasToolCalls: !parsed.toolCalls.isEmpty)
         ), request: request)
     }
@@ -11766,7 +11768,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             generated.output,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop,
-                            reasoningOpen: request.outputTraits.reasoningOpen
+                            reasoningOpen: Self.reasoningStopScope(request)
                         )
                         let finalDelta = Self.delta(from: emittedText, to: final.text)
                         let parsed = try Self.parseToolCallsIfRequested(final.text, request: request, toolCallPrefill: nil)
@@ -11812,7 +11814,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             specDecodeAcceptedTokens: generated.acceptedTokens,
                             specDecodeGeneration: snapshot.specDecodeGeneration,
                             stopSequence: Self.matchedRequestStop(in: generated.output, stopTokenFilter: stopTokenFilter,
-                                                                  requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                                  requestStops: request.stop, reasoningOpen: Self.reasoningStopScope(request),
                                                                   hasToolCalls: !parsed.toolCalls.isEmpty)
                         )
                         return try Self.validateStructuredStreamingCompletion(
@@ -11983,7 +11985,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             requestStops: request.stop,
                             mode: isHarmonyResponse
                                 ? .outputFilters
-                                : .streamingSafePrefix(reasoningOpen: request.outputTraits.reasoningOpen)
+                                : .streamingSafePrefix(reasoningOpen: Self.reasoningStopScope(request))
                         )
                         let labFilter = IncrementalStreamFilter(
                             stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
@@ -12125,7 +12127,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
-                            reasoningOpen: request.outputTraits.reasoningOpen
+                            reasoningOpen: Self.reasoningStopScope(request)
                         )
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
@@ -12202,12 +12204,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner,
                             reasoningContent: request.outputTraits.reasoningOpen || isHarmonyResponse
+                                || parsed.reasoningContent != nil
                                 ? textEmitter.emittedReasoning : nil,
                             reasoningTokens: parsed.reasoningTokens,
                             stopSequence: isHarmonyResponse
                                 ? parsed.stopSequence
                                 : Self.matchedRequestStop(in: result.output, stopTokenFilter: stopTokenFilter,
-                                                          requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                          requestStops: request.stop, reasoningOpen: Self.reasoningStopScope(request),
                                                           hasToolCalls: !parsed.toolCalls.isEmpty)
                         )
                         let validated = try Self.validateStructuredStreamingCompletion(
@@ -14588,13 +14591,13 @@ maxTokens: maxTokens,
         in text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: Bool = false,
+        reasoningOpen: ReasoningOutput.StopScope = false,
         hasToolCalls: Bool = false
     ) -> String? {
         guard !hasToolCalls else { return nil }
         let visible: String
-        if reasoningOpen {
-            guard let close = text.range(of: ReasoningOutput.closeTag) else { return nil }
+        if let closeTag = reasoningOpen.closeTag(for: text) {
+            guard let close = text.range(of: closeTag) else { return nil }
             visible = String(text[close.upperBound...])
         } else {
             visible = text
@@ -14611,18 +14614,33 @@ maxTokens: maxTokens,
 
     /// Native call markers are parser framing, even when the tokenizer marks
     /// them special. Strip the model's other control tokens as usual.
+    /// MiniMax M3 (#2189): an element tag directly after the namespace token
+    /// is the parameter key the call writes (`ns<filename>`), and that
+    /// vocabulary marks `<filename>`, `<commit_msg>` and other code tokens
+    /// special; there they stay for the parser, which strips namespaced
+    /// markup from content itself. Elsewhere they are stripped as usual.
     static func toolAwareStopTokenFilter(_ filter: StopTokenFilter, grammar: ToolCallGrammar?) -> StopTokenFilter {
-        guard grammar == .lfm2 else { return filter }
-        return StopTokenFilter(tokens: filter.tokens.filter {
-            $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
-        })
+        switch grammar {
+        case .lfm2?:
+            return StopTokenFilter(tokens: filter.tokens.filter {
+                $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
+            })
+        case .minimax?:
+            let tokens = filter.tokens.filter { $0 != ToolCallParser.miniMaxNamespace }
+            return StopTokenFilter(
+                tokens: tokens,
+                keeping: Set(tokens.filter { $0.hasPrefix("<") && $0.hasSuffix(">") }),
+                after: ToolCallParser.miniMaxNamespace)
+        default:
+            return filter
+        }
     }
 
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: Bool
+        reasoningOpen: ReasoningOutput.StopScope
     ) -> (text: String, hitStop: Bool) {
         ReasoningOutput.filtering(text, stopTokenFilter: stopTokenFilter, reasoningOpen: reasoningOpen) {
             applyOutputFilters($0, stopTokenFilter: stopTokenFilter, requestStops: requestStops)
@@ -15293,7 +15311,7 @@ maxTokens: maxTokens,
         _ text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: Bool
+        reasoningOpen: ReasoningOutput.StopScope
     ) -> (text: String, hitStop: Bool) {
         ReasoningOutput.filtering(text, stopTokenFilter: stopTokenFilter, reasoningOpen: reasoningOpen) {
             streamingSafePrefix($0, stopTokenFilter: stopTokenFilter, requestStops: requestStops)
@@ -15323,7 +15341,7 @@ maxTokens: maxTokens,
         private let modelID: String
         private let stopTokenFilter: StopTokenFilter
         private let requestStops: [String]
-        private let reasoningOpen: Bool
+        private let reasoningOpen: ReasoningOutput.StopScope
         private let decode: ([Int]) -> String
         private var harmonyParser: HarmonyResponseParser.StreamingParser?
         private var harmonyObservedTokenCount = 0
@@ -15336,7 +15354,7 @@ maxTokens: maxTokens,
             modelID: String,
             stopTokenFilter: StopTokenFilter,
             requestStops: [String],
-            reasoningOpen: Bool = false,
+            reasoningOpen: ReasoningOutput.StopScope = false,
             allowedFunctionNames: Set<String>? = nil,
             decode: @escaping ([Int]) -> String,
             decodeLookbackScalars: Int,
@@ -15518,8 +15536,19 @@ maxTokens: maxTokens,
             }
             // SPEC-018 §3.12: tools, JSON mode and content see only the text
             // after the first `</think>`.
-            let reasoning = request.outputTraits.reasoningOpen ? ReasoningOutput.split(filteredText) : nil
-            var answer = reasoning?.answer ?? filteredText
+            // MiniMax (#2189): only the text outside `<mm:think>` blocks. A
+            // reply that did not reason carries no reasoning_content.
+            let miniMax = splitsMiniMaxReasoning(request)
+            var reasoning: ReasoningOutput.Split?
+            var answer = filteredText
+            if request.outputTraits.reasoningOpen {
+                reasoning = ReasoningOutput.split(filteredText)
+                answer = reasoning!.answer
+            } else if miniMax {
+                let split = ReasoningOutput.MiniMax.split(filteredText)
+                if ReasoningOutput.MiniMax.reasoned(filteredText) { reasoning = split }
+                answer = split.answer
+            }
             if try stripsStrayThinkTags(request) {
                 answer = ReasoningOutput.removingStrayTags(answer, streaming: false)
             }
@@ -15536,7 +15565,9 @@ maxTokens: maxTokens,
                 output.reasoningContent = reasoning.reasoning
                 output.reasoningTokens = min(
                     defaultCompletionTokens,
-                    ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                    miniMax
+                        ? ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                        : ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                 )
             }
             return output
@@ -15719,7 +15750,7 @@ maxTokens: maxTokens,
         decoded: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: Bool = false,
+        reasoningOpen: ReasoningOutput.StopScope = false,
         guaranteedSelection: Bool = false
     ) -> Bool {
         guard !guaranteedSelection else { return false }
@@ -15745,7 +15776,7 @@ maxTokens: maxTokens,
         unchangedPrefixUTF8: Int? = nil,
         filter: IncrementalStreamFilter,
         stopText: inout IncrementalToolStopText,
-        reasoningOpen: Bool = false,
+        reasoningOpen: ReasoningOutput.StopScope = false,
         guaranteedSelection: Bool = false
     ) -> Bool {
         guard !guaranteedSelection else { return false }
@@ -15759,14 +15790,20 @@ maxTokens: maxTokens,
     private static func observeSerialToolStop(
         _ observer: inout NativeToolCallStreamEmitter,
         candidate: (text: String, hitStop: Bool),
-        reasoningOpen: Bool
+        reasoningOpen: ReasoningOutput.StopScope
     ) -> Bool {
         var text = candidate.text
-        if reasoningOpen {
+        switch reasoningOpen {
+        case .afterThink:
             // A call inside the reasoning is not a call (SPEC-018 §3.12).
             let split = ReasoningOutput.split(text)
             guard split.closed else { return false }
             text = split.answer
+        case .afterMiniMaxThink:
+            // Only the answer, outside every `<mm:think>` block, holds calls.
+            text = ReasoningOutput.MiniMax.splitStreamingPrefix(text).answer
+        case .whole:
+            break
         }
         _ = observer.observe(text)
         return observer.hasCompletedValidToolCall
@@ -15830,6 +15867,21 @@ maxTokens: maxTokens,
     /// else the catalog family of the requested model.
     static func toolGrammar(for request: ChatCompletionRequest) -> ToolCallGrammar? {
         request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
+    }
+
+    /// MiniMax M3 output (#2189): text inside `<mm:think>…</mm:think>` blocks
+    /// is reasoning (`ReasoningOutput.MiniMax`). Its prompt never leaves
+    /// `<think>` open, so this never overlaps the §3.12 split.
+    static func splitsMiniMaxReasoning(_ request: ChatCompletionRequest) -> Bool {
+        !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .minimax
+    }
+
+    /// The text request stops run over (`ReasoningOutput.StopScope`). Rows
+    /// other than `.whole` carry no request stop-token sequences: a stop in
+    /// the reasoning must not end them, so the text filters end them.
+    static func reasoningStopScope(_ request: ChatCompletionRequest) -> ReasoningOutput.StopScope {
+        if request.outputTraits.reasoningOpen { return .afterThink }
+        return splitsMiniMaxReasoning(request) ? .afterMiniMaxThink : .whole
     }
 
     /// GLM output outside a guaranteed call (#2189): stray think tags in the
@@ -16777,7 +16829,12 @@ struct SerialStreamingTextEmitter {
 
     private let streamToolsIncrementally: Bool
     private let stopsAfterFirstCompleteToolCall: Bool
-    private let reasoningOpen: Bool
+    /// `ModelRuntime.reasoningStopScope`: which reasoning split the row runs.
+    private let stopScope: ReasoningOutput.StopScope
+    private var reasoningOpen: Bool { stopScope == .afterThink }
+    /// MiniMax rows (#2189): `<mm:think>` blocks stream as
+    /// `reasoning_content` (`ReasoningOutput.MiniMax`).
+    private var splitsMiniMaxReasoning: Bool { stopScope == .afterMiniMaxThink }
     private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
@@ -16794,12 +16851,13 @@ struct SerialStreamingTextEmitter {
     /// over the text after a committed point. `usesReferenceText` runs the
     /// whole-text functions instead (the differential tests' reference).
     private var reasoningSplit = IncrementalReasoningSplit()
+    private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
     private var strayTagRemoval = IncrementalStrayTagRemoval()
     private var toolText: IncrementalToolText
     private var usesReferenceText = false
 
     var incrementalRestartCount: Int {
-        reasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
+        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
     }
 
     /// The longest text the stray-tag removal or tool-text reduction left
@@ -16829,7 +16887,7 @@ struct SerialStreamingTextEmitter {
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
-        reasoningOpen = request.outputTraits.reasoningOpen
+        stopScope = ModelRuntime.reasoningStopScope(request)
         stripsStrayThinkTags = (try? ModelRuntime.stripsStrayThinkTags(request)) ?? false
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
@@ -16855,12 +16913,20 @@ struct SerialStreamingTextEmitter {
     ) -> Step {
         var candidate = candidate
         var emittedVisible = false
-        if reasoningOpen {
+        if reasoningOpen || splitsMiniMaxReasoning {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
-            let split = usesReferenceText
-                ? ReasoningOutput.splitStreamingPrefix(candidate.text)
-                : reasoningSplit.splitStreamingPrefix(candidate.text)
+            // MiniMax: the same for every `<mm:think>…</mm:think>` block.
+            let split: ReasoningOutput.Split
+            if splitsMiniMaxReasoning {
+                split = usesReferenceText
+                    ? ReasoningOutput.MiniMax.splitStreamingPrefix(candidate.text)
+                    : miniMaxReasoningSplit.splitStreamingPrefix(candidate.text)
+            } else {
+                split = usesReferenceText
+                    ? ReasoningOutput.splitStreamingPrefix(candidate.text)
+                    : reasoningSplit.splitStreamingPrefix(candidate.text)
+            }
             // An unclosed prefix holds back cleanup-rewritable text and an
             // incomplete UTF-8 tail, as content does.
             let reasoning = split.closed
@@ -16873,7 +16939,10 @@ struct SerialStreamingTextEmitter {
                 emittedVisible = true
                 onChunk(.reasoning(delta))
             }
-            guard split.closed else { return .more }
+            // A MiniMax answer grows around its blocks: it goes on whether or
+            // not a block is open now (a request stop only ends the row after
+            // the first `</mm:think>`, `ReasoningOutput.StopScope`).
+            guard split.closed || splitsMiniMaxReasoning else { return .more }
             candidate = (split.answer, candidate.hitStop)
         }
         if stripsStrayThinkTags {
@@ -16957,8 +17026,8 @@ struct SerialStreamingTextEmitter {
         onChunk: (StreamChunk) -> Void
     ) throws {
         var finalText = finalText
-        if reasoningOpen {
-            let split = ReasoningOutput.split(finalText)
+        if reasoningOpen || splitsMiniMaxReasoning {
+            let split = splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
             let rest = ModelRuntime.streamDelta(from: emittedReasoning, to: parsed.reasoningContent ?? split.reasoning)
             if !rest.isEmpty {
                 emittedReasoning += rest
@@ -17171,6 +17240,10 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = DeepseekV4Encoding.toolCallsStart
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
             argumentKey = "arguments"
+        case .minimax?:
+            startDelimiter = ToolCallParser.miniMaxCallsStart
+            endDelimiter = ToolCallParser.miniMaxCallsEnd
+            argumentKey = "arguments"
         default:
             startDelimiter = ToolCallParser.toolCallOpen
             endDelimiter = "</tool_call>"
@@ -17194,8 +17267,11 @@ struct NativeToolCallStreamEmitter {
     /// Every marker the visible-prefix and observe paths search for, for
     /// `IncrementalToolText` (a superset is safe).
     var markerTexts: [String] {
-        [startDelimiter, endDelimiter, ToolCallParser.pythonTag, ToolCallParser.functionOpen, ToolCallParser.functionClose,
-         ToolCallParser.qwenBareWrapperOpen]
+        // MiniMax delimiters start with `]`; each holds `miniMaxMarker`,
+        // which starts with `<` as the cut rule requires.
+        (grammar == .minimax ? [ToolCallParser.miniMaxMarker] : [startDelimiter, endDelimiter])
+            + [ToolCallParser.pythonTag, ToolCallParser.functionOpen, ToolCallParser.functionClose,
+               ToolCallParser.qwenBareWrapperOpen]
             + ToolCallParser.glmCallMarkup
     }
 
@@ -17223,6 +17299,9 @@ struct NativeToolCallStreamEmitter {
         }
         if grammar == .glm {
             return ToolCallParser.glmStreamableProse(text)
+        }
+        if grammar == .minimax {
+            return ToolCallParser.miniMaxStreamableProse(text)
         }
         if grammar == .llama3 {
             // A bare JSON call has no opening tag: hold prose from the first

@@ -209,8 +209,12 @@ def _tool_calls_ok(choice: dict, name: str = "read_file") -> str | None:
     return None
 
 
+# MiniMax M3 wraps reasoning in <mm:think> (#2189); neither tag contains the other.
+REASONING_MARKUP = ("<think>", "</think>", "<mm:think>", "</mm:think>")
+
+
 def _leaks_reasoning(text: str) -> bool:
-    return "<think>" in text or "</think>" in text
+    return any(tag in text for tag in REASONING_MARKUP)
 
 
 # ---- checks: each returns (status, detail) from the responses it requests --
@@ -636,6 +640,8 @@ def tool_grammar_family(model: str) -> str:
         return "qwen"
     if "deepseek-v4" in m or "deepseek_v4" in m:
         return "dsml"
+    if "minimax-m3" in m or "minimax_m3" in m:
+        return "minimax"
     return ""
 
 

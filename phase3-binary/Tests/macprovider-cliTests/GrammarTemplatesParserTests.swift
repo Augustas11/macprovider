@@ -13,6 +13,7 @@ final class GrammarTemplatesParserTests: XCTestCase {
                 .replacingOccurrences(of: "<|\"|>Paris<|\"|>", with: "true")
                 .replacingOccurrences(of: "\"Paris\"", with: "true")
                 .replacingOccurrences(of: ">Paris<", with: ">true<")
+                .replacingOccurrences(of: ">Paris]", with: ">true]")
                 .replacingOccurrences(of: "string=\"true\"", with: "string=\"false\"")
             XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), family.rawValue)
             if family != .harmony {
@@ -140,6 +141,9 @@ final class GrammarTemplatesParserTests: XCTestCase {
         case .gemma4: return "<|tool_call>call:" + name + "{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>}<tool_call|>"
         case .harmony: return "<|start|>assistant to=functions." + name + "<|channel|>commentary<|message|>{\"city\":\"Paris\"}<|call|>"
         case .dsml: return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"" + name + "\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+        case .minimax:
+            let ns = ToolCallParser.miniMaxNamespace
+            return ns + "<tool_call>\n" + ns + "<invoke name=\"" + name + "\">" + ns + "<city>Paris" + ns + "</city>" + ns + "</invoke>\n" + ns + "</tool_call>"
         }
     }
 

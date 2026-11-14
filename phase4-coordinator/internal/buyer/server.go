@@ -8516,6 +8516,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
+				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
@@ -8564,6 +8567,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -8618,6 +8624,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		providers = toolGrammarEligibleProviders(providers)
 		if before > 0 && len(providers) == 0 {
 			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+		}
+	}
+	// #2189: every MiniMax M3 request, plain chat included, reaches only
+	// native providers that split its reasoning (providerServesModelOutput).
+	if eligible := modelOutputEligibleProviders(providers); len(eligible) < len(providers) {
+		served := anyProviderModelCandidate(providers, req.Model, poolModelClass)
+		providers = eligible
+		if served && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
+			return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 		}
 	}
 	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
@@ -10029,6 +10044,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if state != nil && state.multiTurnToolHistory && !providerToolGrammarEligible(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if !providerServesModelOutput(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.

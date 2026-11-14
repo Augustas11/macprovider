@@ -32,6 +32,7 @@ struct ControlTokenTable: Sendable, Equatable {
         "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>",
         "<|tool_call>", "<tool_call|>",
         "｜DSML｜",
+        "]<]minimax[>[", "<mm:think>", "</mm:think>",
     ]
 
     let idsByText: [String: Int]
