@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // SPEC-049-R032 gateway tests: a privacy-class request scoped to an

@@ -406,6 +406,12 @@
       "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
       "rate_class": "class-3b",
       "reason": "#2016 native image input (qwen2vl-inline-v1); OpenRouter lists no Qwen2-VL-2B market, so it is priced by its SPEC-023 section 3.3.1 rate class."
+    },
+    {
+      "canonical_model_id": "minimaxai/minimax-m3.1-flash",
+      "catalog_key": "minimaxai/minimax-m3.1-flash",
+      "rate_class": "class-120b-moe",
+      "reason": "#2189 MiniMax M3.1-Flash (native minimax_m3 engine, oQ3e build); the catalog prices it at its SPEC-023 section 3.3.1 rate class with no row override, so it is not market-pegged."
     }
   ]
 }

@@ -47,8 +47,8 @@ grep -qF 'verify-pearl-runtime-release.sh' "$DEPLOY_SH" ||
   fail "deploy script must preflight signed Pearl runtime release assets before production SSH mutation"
 grep -qF 'git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT"' "$DEPLOY_SH" ||
   fail "deploy must pin tracked inputs from the verified release commit"
-grep -qF 'git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- phase4-coordinator' "$BUILD_SH" ||
-  fail "production build must compile from a snapshot of the verified release commit"
+grep -qF 'git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- phase4-coordinator relayblind' "$BUILD_SH" ||
+  fail "production build must snapshot phase4-coordinator and the relayblind module from the verified release commit"
 grep -qF 'deploy-inputs.sha256' "$DEPLOY_SH" ||
   fail "deploy must verify remote staged input digests before install/execute"
 grep -qF 'recovery-inputs.sha256' "$DEPLOY_SH" ||

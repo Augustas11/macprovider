@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/auth"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 func TestRunAPIKeyAndWalletSession(t *testing.T) {

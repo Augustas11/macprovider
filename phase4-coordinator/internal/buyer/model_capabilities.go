@@ -62,9 +62,11 @@ func legacyToolFamily(model string) bool {
 // capability derivation and request eligibility. A SPEC-051 shard group head
 // refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
-	if toolGrammarFamily(p.ModelID) == toolGrammarLFM2 {
-		// LFM shipped after the generic grammar floor. Require the exact
-		// loaded-model declaration, which old providers cannot advertise.
+	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || family == toolGrammarMiniMax {
+		// LFM and MiniMax shipped after the generic grammar floor. Require
+		// the exact loaded-model declaration, which old providers cannot
+		// advertise (a provider without the MiniMax family declares only
+		// auto and none for it).
 		return !p.ShardGroupHeadV1 &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "required"}) &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "named"})
@@ -84,6 +86,29 @@ func providerToolGrammarEligible(p pool.Provider) bool {
 	return providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) == "" || providerParsesToolGrammar(p)
 }
 
+// providerServesModelOutput reports whether a provider can serve any request
+// for its loaded model, tools or not. A native MiniMax M3 provider must split
+// the model's <mm:think> reasoning off content (#2189); only a CLI that
+// declares the MiniMax family for its exact loaded model does, which is the
+// providerParsesToolGrammar predicate (a declaration, not a binary version).
+// Other families and external runtimes are unaffected.
+func providerServesModelOutput(p pool.Provider) bool {
+	if providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) != toolGrammarMiniMax {
+		return true
+	}
+	return providerParsesToolGrammar(p)
+}
+
+func modelOutputEligibleProviders(providers []pool.Provider) []pool.Provider {
+	eligible := make([]pool.Provider, 0, len(providers))
+	for _, p := range providers {
+		if providerServesModelOutput(p) {
+			eligible = append(eligible, p)
+		}
+	}
+	return eligible
+}
+
 func toolGrammarEligibleProviders(providers []pool.Provider) []pool.Provider {
 	eligible := make([]pool.Provider, 0, len(providers))
 	for _, p := range providers {
@@ -94,8 +119,31 @@ func toolGrammarEligibleProviders(providers []pool.Provider) []pool.Provider {
 	return eligible
 }
 
+const (
+	modelOutputProviderUnavailableCode = "tool_grammar_provider_unavailable"
+	// modelOutputProviderUnavailableMessage is the plain-request wording of
+	// the code: no tools are involved, the provider must split the model's
+	// reasoning (#2189).
+	modelOutputProviderUnavailableMessage = "No provider serving this model supports its output format yet"
+)
+
 func toolGrammarProviderUnavailableRouteError() *routeError {
-	return &routeError{status: http.StatusServiceUnavailable, code: "tool_grammar_provider_unavailable", message: "No provider serving this model parses its tool-call grammar yet"}
+	return &routeError{status: http.StatusServiceUnavailable, code: modelOutputProviderUnavailableCode, message: "No provider serving this model parses its tool-call grammar yet"}
+}
+
+// modelOutputProviderUnavailableRouteError is the same retryable 503 for a
+// request without tools (SPEC-002, SPEC-018 §3.12).
+func modelOutputProviderUnavailableRouteError() *routeError {
+	return &routeError{status: http.StatusServiceUnavailable, code: modelOutputProviderUnavailableCode, message: modelOutputProviderUnavailableMessage}
+}
+
+// modelOutputRouteError is the providerServesModelOutput refusal: the
+// tool-grammar wording for a tool request, the output-format wording else.
+func modelOutputRouteError(tools bool) *routeError {
+	if tools {
+		return toolGrammarProviderUnavailableRouteError()
+	}
+	return modelOutputProviderUnavailableRouteError()
 }
 
 func providerServesToolGrammars(p pool.Provider) bool {

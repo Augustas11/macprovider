@@ -124,7 +124,8 @@ final class GrammarTemplatesTests: XCTestCase {
             (.glm, "<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>count</arg_key><arg_value>2</arg_value></tool_call>"),
             (.gemma4, "<|tool_call>call:weather{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>count<|\"|>:2}<tool_call|>"),
             (.harmony, #"<|start|>assistant to=functions.weather<|channel|>commentary<|message|>{"city":"Paris","count":2}<|call|>"#),
-            (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="weather"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="count" string="false">2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#)
+            (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="weather"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="count" string="false">2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#),
+            (.minimax, "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"weather\">]<]minimax[>[<city>Paris]<]minimax[>[</city>]<]minimax[>[<count>2]<]minimax[>[</count>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>")
         ]
         XCTAssertEqual(examples.count, ToolCallGrammar.allCases.count)
         for (family, text) in examples {

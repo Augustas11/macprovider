@@ -249,6 +249,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
             (["tools": tools] as [String: Any], "shard_group_tools_unsupported"),
             (["presence_penalty": 0.5], "shard_group_sampling_unsupported"),
             (["response_format": ["type": "json_object"]], "shard_group_response_format_unsupported"),
+            (["model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"], "shard_group_model_unsupported"),
         ] {
             do {
                 _ = try await runtime.prepare(try request("x", extra: extra))
@@ -256,6 +257,16 @@ final class ShardGroupRuntimeTests: XCTestCase {
             } catch let error as APIError {
                 XCTAssertEqual(error.code, code)
             }
+        }
+        // A MiniMax family the catalog resolved for another model ID is
+        // refused too.
+        let resolved = try request("x", extra: [:])
+        resolved.outputState.resolve(RequestOutputTraits(toolGrammar: .minimax))
+        do {
+            _ = try await runtime.prepare(resolved)
+            XCTFail("expected shard_group_model_unsupported")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "shard_group_model_unsupported")
         }
         let prepared = try await runtime.prepare(try request("x", extra: ["seed": 7, "temperature": 0.5, "top_p": 0.8]))
         XCTAssertEqual(prepared.control, ShardRequestControl(temperature: 0.5, topP: 0.8, seed: 7))

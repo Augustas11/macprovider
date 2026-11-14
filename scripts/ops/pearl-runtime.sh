@@ -1683,8 +1683,10 @@ EOF
       unknown_why="$ref is not available locally"
     else
       # Tests, fixtures, docs and dist/ deploy tooling do not change the shipped binaries.
+      # relayblind is the protocol both binaries link, so a non-test edit there
+      # is a shipped change. A tag that predates the directory still diffs cleanly.
       local diff_rc=0
-      git -C "$REPO_ROOT" diff --quiet "$live" "$ref" -- phase4-coordinator phase5-gateway \
+      git -C "$REPO_ROOT" diff --quiet "$live" "$ref" -- phase4-coordinator phase5-gateway relayblind \
         ':(exclude)*_test.go' ':(exclude)*/testdata/*' ':(exclude)*.md' \
         ':(exclude)phase4-coordinator/dist/*' ':(exclude)phase5-gateway/dist/*' 2>/dev/null || diff_rc=$?
       case "$diff_rc" in

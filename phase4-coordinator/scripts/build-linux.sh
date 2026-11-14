@@ -115,7 +115,9 @@ else
     exit 1
   }
   trap 'rm -rf "${RELEASE_BUILD_INPUT_DIR:-}"' EXIT HUP INT TERM
-  git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- phase4-coordinator | tar -xf - -C "$RELEASE_BUILD_INPUT_DIR"
+  # The module replace is ../relayblind. The snapshot has to keep that
+  # sibling or the exact-tag build cannot resolve the protocol module.
+  git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- phase4-coordinator relayblind | tar -xf - -C "$RELEASE_BUILD_INPUT_DIR"
   BUILD_WORK_DIR="$RELEASE_BUILD_INPUT_DIR/phase4-coordinator"
 fi
 # `git describe --dirty` only marks modifications to tracked files. If

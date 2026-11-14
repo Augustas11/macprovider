@@ -15,7 +15,7 @@ journeys/evidence/local-consumer-endpoint-*.redacted.json
 
 The committed file is suitable input for
 `scripts/build-local-consumer-endpoint-journey-result.py` and the protected
-`promote-signed-local-consumer-endpoint-journey.yml` workflow.
+`signed-journey.yml (journey=local-consumer-endpoint)` workflow.
 
 ## Scope
 

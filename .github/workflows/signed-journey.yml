@@ -1,0 +1,2156 @@
+name: Build a signed journey artifact
+run-name: ${{ github.event.inputs.journey == 'native-mtp-serving' && format('native-mtp-postcut-{0}-{1}', github.event.inputs.source_sha, github.event.inputs.postcut_asset_sha256) || format('signed-journey-{0}', github.event.inputs.journey) }}
+
+# One manual dispatch for every signed journey. The journey input is a closed
+# registry: gate rejects unknown ids, and each job runs for its own ids only.
+# Acceptance, SPEC-043 production-release, and SPEC-043 on-call keys stay in
+# separate jobs. Evidence jobs do not call the conformance promoter.
+# Closed set: buyer-enforce buyer-crash-recovery buyer-paid-path byom-discovery network-model-admission provider-prebeta trusted-pool-external-runtime trusted-pool-creator-mvp trusted-pool-layer2 payout trusted-pool-model privacy-class-beta native-mtp-release native-mtp-serving local-consumer-endpoint pool-promotion-transition oncall-readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      journey:
+        description: "Closed journey id. The case in this workflow rejects every other value."
+        required: true
+        type: string
+      source_sha:
+        description: "Commit the evidence binds. Required by every journey except pool-promotion and on-call."
+        required: false
+        type: string
+      redacted_evidence_path:
+        description: "Redacted evidence path under journeys/evidence/. The journey registry checks the exact shape."
+        required: false
+        type: string
+      requirement_ids:
+        description: "Comma-separated requirement IDs. Privacy-class beta derives these from the payload."
+        required: false
+        type: string
+      promotion_confirmed:
+        description: "Set true to sign a promotion journey or a pool-promotion sibling."
+        required: false
+        default: false
+        type: boolean
+      evidence_confirmed:
+        description: "Set true to sign an evidence-only journey."
+        required: false
+        default: false
+        type: boolean
+      postcut_asset_id:
+        description: "Optional public-safe redacted ZIP asset ID in repository draft staging release"
+        required: false
+        type: string
+      postcut_asset_sha256:
+        description: "Exact SHA256 of the complete post-cut evidence ZIP"
+        required: false
+        type: string
+      postcut_release_id:
+        description: "Repository draft staging release ID owning the evidence asset"
+        required: false
+        type: string
+      signed_candidate_path:
+        description: "journeys/evidence/*.journey-result.signed.json"
+        required: false
+        type: string
+      live_activation_target:
+        description: "Production activation target, distinct from the candidate environment"
+        required: false
+        type: string
+      schema_migration_hash:
+        description: "Lowercase SHA-256 schema/migration hash bound into the sibling"
+        required: false
+        type: string
+      approval_record_version:
+        description: "Positive integer approval record version"
+        required: false
+        type: string
+      creator_agreement_version:
+        description: "Positive integer Creator Agreement version"
+        required: false
+        type: string
+      pricing_schedule_version:
+        description: "Positive integer pricing schedule version"
+        required: false
+        type: string
+      authorization_id:
+        description: "Fresh production authorization id"
+        required: false
+        type: string
+      authorized_actor:
+        description: "MacProvider production-release approver identity"
+        required: false
+        type: string
+      credential_id:
+        description: "Approver credential id"
+        required: false
+        type: string
+      operation_id:
+        description: "Idempotency key for the on-call upsert"
+        required: false
+        type: string
+      launch_environment_id:
+        description: "Launch environment id (e.g. production)"
+        required: false
+        type: string
+      record_version:
+        description: "On-call record version label"
+        required: false
+        type: string
+      primary_operator_contact:
+        description: "Primary on-call operator contact"
+        required: false
+        type: string
+      secondary_operator_contact:
+        description: "Secondary on-call operator contact"
+        required: false
+        type: string
+      break_glass_escalation_path:
+        description: "Break-glass escalation path"
+        required: false
+        type: string
+      compromise_notification_channel:
+        description: "Compromise notification channel"
+        required: false
+        type: string
+      creator_agreement_notification_commitment_ack:
+        description: "Creator-agreement notification commitment acknowledgement"
+        required: false
+        type: string
+      creator_emergency_notification_mechanism:
+        description: "Creator emergency notification mechanism"
+        required: false
+        type: string
+      confirmation_ttl_seconds:
+        description: "TTL in seconds, 0 < ttl <= 7776000 (90 days)"
+        required: false
+        default: "7776000"
+        type: string
+      signing_confirmed:
+        description: "Confirm an on-call readiness record should be signed"
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-journey-${{ github.event.inputs.journey }}-${{ github.event.inputs.source_sha }}-${{ github.event.inputs.authorization_id }}-${{ github.event.inputs.operation_id }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Reject an unknown journey
+    runs-on: ubuntu-latest
+    steps:
+      - name: Accept only a closed journey id
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          case "$JOURNEY" in
+            buyer-enforce|buyer-crash-recovery|buyer-paid-path|byom-discovery|network-model-admission|provider-prebeta|trusted-pool-external-runtime|trusted-pool-creator-mvp|trusted-pool-layer2|payout|trusted-pool-model|privacy-class-beta|native-mtp-release|native-mtp-serving|local-consumer-endpoint|pool-promotion-transition|oncall-readiness) ;;
+            *) echo "::error::unknown journey" >&2; exit 1 ;;
+          esac
+
+  acceptance_promote:
+    if: contains(fromJSON('["buyer-enforce", "buyer-crash-recovery", "buyer-paid-path", "byom-discovery", "network-model-admission", "provider-prebeta", "trusted-pool-external-runtime"]'), github.event.inputs.journey)
+    name: Build, sign, and promote an acceptance journey
+    needs: [gate]
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: promote
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+        run: bash scripts/signed-journeys/common/validate.sh
+
+      - name: Build unsigned journey-result payload
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: promote
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/build.sh
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: promote
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/preflight.sh
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/sign.sh
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: bash scripts/signed-journeys/promote/promote.sh
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: bash scripts/signed-journeys/promote/verify.sh
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: promote
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+        run: bash scripts/signed-journeys/promote/export.sh
+
+      - name: Upload signed journey artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: ${{ runner.temp }}/${{ steps.request.outputs.export_dir }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  acceptance_evidence:
+    if: contains(fromJSON('["trusted-pool-creator-mvp", "trusted-pool-layer2"]'), github.event.inputs.journey)
+    name: Build and sign evidence without conformance promotion
+    needs: [gate]
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: evidence
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+        run: bash scripts/signed-journeys/common/validate.sh
+
+      - name: Build unsigned journey-result payload
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: evidence
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/build.sh
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: evidence
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/preflight.sh
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/common/sign.sh
+
+      - name: Validate signed evidence without conformance promotion
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: bash scripts/signed-journeys/evidence/validate-signed.sh
+
+      - name: Verify signed evidence artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: bash scripts/signed-journeys/evidence/verify.sh
+
+      - name: Export signed evidence artifact
+        shell: bash
+        env:
+          JOURNEY: ${{ github.event.inputs.journey }}
+          EXPECTED_MODE: evidence
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+        run: bash scripts/signed-journeys/evidence/export.sh
+
+      - name: Upload signed journey artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: ${{ runner.temp }}/${{ steps.request.outputs.export_dir }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  payout:
+    if: github.event.inputs.journey == 'payout'
+    needs: [gate]
+    name: Capture, sign, validate, and export SPEC-016-R002 promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" == "$GITHUB_SHA" ]] || { echo "::error::source SHA must equal the reviewed workflow commit" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$SOURCE_SHA_INPUT" ]] || { echo "::error::source SHA is no longer origin/main" >&2; exit 1; }
+          short_sha="${SOURCE_SHA_INPUT:0:12}"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: Capture payout journey payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd phase4-coordinator
+            MACPROVIDER_CAPTURE_PAYOUT_JOURNEY=1 \
+              go test ./internal/payout -run TestPayoutAddressRegistrationJourneyEvidence -count=1 -v
+          )
+
+      - name: Bind generated artifact paths
+        id: generated
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path("journeys/evidence")
+          payloads = sorted(root.glob("spec016-r002-payout-address-*.journey-result.unsigned.json"))
+          if len(payloads) != 1:
+              raise SystemExit(f"expected exactly one unsigned payload, found {len(payloads)}")
+          payload = payloads[0]
+          prefix = payload.name.removesuffix(".journey-result.unsigned.json")
+          redacted = root / f"{prefix}.redacted.json"
+          candidate = root / f"{prefix}.candidate.json"
+          envelope = root / f"{prefix}.journey-result.signed.json"
+          for path in (redacted, candidate):
+              if not path.is_file():
+                  raise SystemExit(f"missing generated artifact: {path}")
+          with open(sys.argv[1], "a", encoding="ascii") as output:
+              output.write(f"payload={payload.as_posix()}\n")
+              output.write(f"redacted={redacted.as_posix()}\n")
+              output.write(f"candidate={candidate.as_posix()}\n")
+              output.write(f"envelope={envelope.as_posix()}\n")
+              output.write(f"prefix={prefix}\n")
+          PY
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.generated.outputs.payload }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/promote-signed-journey-result.py \
+            --base-ref origin/main \
+            SPEC-016-R002 \
+            "$ENVELOPE"
+
+      - name: Drop non-promotable intermediates
+        shell: bash
+        env:
+          PAYLOAD: ${{ steps.generated.outputs.payload }}
+          CANDIDATE: ${{ steps.generated.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          python3 - "$PAYLOAD" "$CANDIDATE" <<'PY'
+          import pathlib
+          import sys
+
+          for value in sys.argv[1:]:
+              path = pathlib.Path(value)
+              if path.suffix != ".json" or "journeys/evidence/" not in path.as_posix():
+                  raise SystemExit(f"refusing to remove unexpected path: {path}")
+              path.unlink()
+          PY
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.generated.outputs.redacted }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          conformance = json.loads(pathlib.Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+          matches = [
+              item for item in conformance.get("requirements", [])
+              if isinstance(item, dict) and item.get("requirement_id") == "SPEC-016-R002"
+          ]
+          if len(matches) != 1:
+              raise SystemExit("SPEC-016-R002 must exist exactly once")
+          requirement = matches[0]
+          if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+              raise SystemExit("SPEC-016-R002 was not promoted to conformant")
+          evidence = requirement.get("evidence")
+          if not isinstance(evidence, list) or not any(item.get("source") == envelope for item in evidence if isinstance(item, dict)):
+              raise SystemExit("SPEC-016-R002 evidence does not reference the signed envelope")
+          for path in pathlib.Path("journeys/evidence").glob("spec016-r002-payout-address-*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-promotable intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REDACTED: ${{ steps.generated.outputs.redacted }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-payout-journey-promotion"
+          mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
+          python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$REDACTED" "$ENVELOPE" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          output, source_sha, redacted, envelope = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-payout-journey-promotion.v1",
+              "source_sha": source_sha,
+              "requirement_id": "SPEC-016-R002",
+              "journey_id": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "workflow_run_id": __import__("os").environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": __import__("os").environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-payout-journey-promotion-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-payout-journey-promotion/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  trusted_pool_model:
+    if: github.event.inputs.journey == 'trusted-pool-model'
+    needs: [gate]
+    name: Build, sign, validate, and export trusted-pool-model promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/trusted-pool-model-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid requirement IDs" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          requirement_slug="$(printf '%s' "$REQUIREMENT_IDS_INPUT" | tr '[:upper:]' '[:lower:]' | tr ',' '-')"
+          [[ "$requirement_slug" =~ ^spec-[0-9]{3}-r[0-9]{3}(-spec-[0-9]{3}-r[0-9]{3})*$ ]] || { echo "::error::invalid requirement slug" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/trusted-pool-model-journey-result-${requirement_slug}.unsigned.json"
+          short_sha="${SOURCE_SHA_INPUT:0:12}"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_ids=%s\n' "$REQUIREMENT_IDS_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_slug=%s\n' "$requirement_slug" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      # The verifier is the reviewed main commit's coordinator-cli: the
+      # deployed source_sha predates verify-manifest, and this checkout is the
+      # code the signature attests to.
+      - name: Build reviewed coordinator-cli verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd phase4-coordinator && go build -trimpath -o "$RUNNER_TEMP/coordinator-cli" ./cmd/coordinator-cli)
+
+      - name: Build unsigned trusted-pool-model journey-result payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-trusted-pool-model-journey-result.py payload \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --coordinator-cli "$RUNNER_TEMP/coordinator-cli" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id JOURNEY-TRUSTED-POOL-MODEL
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 - "$REQUIREMENT_IDS" "$ENVELOPE" <<'PY'
+          import subprocess
+          import sys
+
+          requirement_ids = [item for item in sys.argv[1].split(",") if item]
+          envelope = sys.argv[2]
+          for requirement_id in requirement_ids:
+              subprocess.run(
+                  [
+                      "python3",
+                      "scripts/promote-signed-journey-result.py",
+                      "--base-ref",
+                      "origin/main",
+                      requirement_id,
+                      envelope,
+                  ],
+                  check=True,
+              )
+          PY
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          requirement_ids = [item for item in sys.argv[2].split(",") if item]
+          conformance = json.loads(pathlib.Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+          rows = {
+              item.get("requirement_id"): item
+              for item in conformance.get("requirements", [])
+              if isinstance(item, dict)
+          }
+          for requirement_id in requirement_ids:
+              requirement = rows.get(requirement_id)
+              if requirement is None:
+                  raise SystemExit(f"{requirement_id} missing from conformance ledger")
+              if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+                  raise SystemExit(f"{requirement_id} was not promoted to conformant")
+              evidence = requirement.get("evidence")
+              if not isinstance(evidence, list) or not any(item.get("source") == envelope for item in evidence if isinstance(item, dict)):
+                  raise SystemExit(f"{requirement_id} evidence does not reference the signed envelope")
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-promotable intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-trusted-pool-model-journey-promotion"
+          mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp -R "${REDACTED%.redacted.json}.manifests" "$export_dir/journeys/evidence/"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
+          python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-trusted-pool-model-journey-promotion.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "requirement_slug": os.environ["REQUIREMENT_SLUG"],
+              "journey_id": "JOURNEY-TRUSTED-POOL-MODEL",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-trusted-pool-model-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}
+          path: ${{ runner.temp }}/signed-trusted-pool-model-journey-promotion/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  privacy_evidence:
+    # JOURNEY-PRIVACY-CLASS-BETA / JOURNEY-PRIVACY-CLASS-BETA-V2 (SPEC-049).
+    # Validates the committed reviewed redacted evidence and its bundle, signs
+    # the journey result with the acceptance key in the protected environment,
+    # and exports it. It never promotes conformance: SPEC-049-R023 keeps every
+    # SPEC-049 requirement non-conformant until a staged canary and three-lane
+    # audits are recorded too, and governance treats this journey result as
+    # evidence-only.
+    if: github.event.inputs.journey == 'privacy-class-beta'
+    needs: [gate]
+    name: Build, sign, validate, and export privacy-class beta evidence
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$EVIDENCE_CONFIRMED_INPUT" == true ]] || { echo "::error::evidence confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/privacy-class-beta-[0-9]{8}T[0-9]{6}Z\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          bundle="${REDACTED_EVIDENCE_INPUT%.redacted.json}"
+          [[ -d "$bundle" && ! -L "$bundle" ]] || { echo "::error::reviewed bundle is absent or unsafe" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/privacy-class-beta-journey-result.unsigned.json"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned privacy-class beta journey-result payload
+        id: payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-privacy-class-beta-journey-result.py \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+          requirement_ids="$(python3 -c 'import json, sys; print(",".join(json.load(open(sys.argv[1], encoding="utf-8"))["requirement_ids"]))' "$PAYLOAD")"
+          [[ "$requirement_ids" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid derived requirement IDs" >&2; exit 1; }
+          journey_id="$(python3 -c 'import json, sys; value = json.load(open(sys.argv[1], encoding="utf-8"))["journey_id"]; print(value if isinstance(value, str) else "")' "$PAYLOAD")"
+          case "$journey_id" in
+            JOURNEY-PRIVACY-CLASS-BETA|JOURNEY-PRIVACY-CLASS-BETA-V2) ;;
+            *) echo "::error::invalid derived journey ID" >&2; exit 1 ;;
+          esac
+          printf 'requirement_ids=%s\n' "$requirement_ids" >> "$GITHUB_OUTPUT"
+          printf 'journey_id=%s\n' "$journey_id" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+          JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id "$JOURNEY_ID"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed evidence without conformance promotion
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-signed-journey-result.py \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Verify signed evidence artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          git diff --quiet -- specs/CONFORMANCE.json || { echo "::error::conformance ledger must not change" >&2; exit 1; }
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed evidence artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          BUNDLE: ${{ steps.request.outputs.bundle }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+          JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-privacy-class-beta-journey-evidence"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" "$JOURNEY_ID" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids, journey_id = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-privacy-class-beta-journey-evidence.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "journey_id": journey_id,
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "redaction_manifest": f"{bundle}/MANIFEST.sha256",
+              "redaction_manifest_sha256": hashlib.sha256((root / bundle / "MANIFEST.sha256").read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed evidence artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-privacy-class-beta-journey-evidence-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-privacy-class-beta-journey-evidence/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  native_mtp_release:
+    if: github.event.inputs.journey == 'native-mtp-release'
+    needs: [gate]
+    name: Build, sign, validate, and export native-MTP release evidence
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$EVIDENCE_CONFIRMED_INPUT" == true ]] || { echo "::error::evidence confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/native-mtp-release-[0-9]{8}T[0-9]{6}Z\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          bundle="${REDACTED_EVIDENCE_INPUT%.redacted.json}"
+          [[ -d "$bundle" && ! -L "$bundle" ]] || { echo "::error::reviewed bundle is absent or unsafe" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/native-mtp-release-journey-result.unsigned.json"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned native-MTP release journey-result payload
+        id: payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-native-mtp-journey-result.py payload release \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+          requirement_ids="$(python3 -c 'import json, sys; print(",".join(json.load(open(sys.argv[1], encoding="utf-8"))["requirement_ids"]))' "$PAYLOAD")"
+          [[ "$requirement_ids" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid derived requirement IDs" >&2; exit 1; }
+          printf 'requirement_ids=%s\n' "$requirement_ids" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release target ref independently
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+        run: |
+          set -euo pipefail
+          # The evidence names the protected main tip captured before the
+          # review freeze. Re-derive it here instead of trusting the bundle:
+          # it must be a commit on origin/main, and the base the reviews bound.
+          target="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target_commit"])' "$REDACTED")"
+          base="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_commit"])' "$REDACTED")"
+          [[ "$target" =~ ^[0-9a-f]{40}$ && "$target" == "$base" ]] || { echo "::error::target_commit must equal base_commit" >&2; exit 1; }
+          git merge-base --is-ancestor "$target" refs/remotes/origin/main || { echo "::error::target_commit is not on origin/main" >&2; exit 1; }
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id JOURNEY-NATIVE-MTP-RELEASE
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed evidence
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-signed-journey-result.py \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Verify signed evidence artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          git diff --quiet -- specs/CONFORMANCE.json || { echo "::error::conformance ledger must not change" >&2; exit 1; }
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed evidence artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          BUNDLE: ${{ steps.request.outputs.bundle }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-native-mtp-release-journey-evidence"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-native-mtp-release-journey-evidence.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "journey_id": "JOURNEY-NATIVE-MTP-RELEASE",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "redaction_manifest": f"{bundle}/MANIFEST.sha256",
+              "redaction_manifest_sha256": hashlib.sha256((root / bundle / "MANIFEST.sha256").read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed evidence artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-native-mtp-release-journey-evidence-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-native-mtp-release-journey-evidence/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  native_mtp_serving:
+    if: github.event.inputs.journey == 'native-mtp-serving'
+    needs: [gate]
+    permissions:
+      contents: read
+      actions: read
+    name: Build, sign, validate, and export native-MTP serving evidence
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stage authenticated post-cut serving evidence
+        if: ${{ inputs.postcut_asset_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          REDACTED: ${{ inputs.redacted_evidence_path }}
+          ASSET_ID: ${{ inputs.postcut_asset_id }}
+          ASSET_SHA: ${{ inputs.postcut_asset_sha256 }}
+          RELEASE_ID: ${{ inputs.postcut_release_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$ASSET_ID" =~ ^[1-9][0-9]*$ && "$RELEASE_ID" =~ ^[1-9][0-9]*$ && "$ASSET_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          [[ "$GITHUB_REPOSITORY" == Augustas11/macprovider ]]
+          work="$RUNNER_TEMP/native-mtp-postcut"
+          mkdir -m 700 "$work"
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$work/asset.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$work/release.json"
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$work/evidence.zip"
+          python3 - "$work" "$ASSET_SHA" "$SOURCE_SHA" "$REDACTED" <<'PYCODE'
+          import json,pathlib,sys
+          sys.path.insert(0,'scripts')
+          from native_mtp_postcut_evidence import archive_bytes
+          work=pathlib.Path(sys.argv[1])
+          manifest,_=archive_bytes(work/'evidence.zip',*sys.argv[2:])
+          (work/'manifest.json').write_text(json.dumps(manifest))
+          PYCODE
+          candidate_run="$(jq -r .acceptance_run_id "$work/manifest.json")"
+          ci_run="$(jq -r .ci_run_id "$work/manifest.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" > "$work/candidate-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run/artifacts?per_page=100" > "$work/candidate-artifacts.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" > "$work/ci-run.json"
+          gh run download "$candidate_run" -R "$GITHUB_REPOSITORY" -n "acceptance-candidate-$SOURCE_SHA" -D "$work/candidate"
+          python3 scripts/native_mtp_postcut_evidence.py --root . \
+            --archive "$work/evidence.zip" --archive-sha256 "$ASSET_SHA" --source-sha "$SOURCE_SHA" --redacted "$REDACTED" \
+            --asset-id "$ASSET_ID" --release-id "$RELEASE_ID" --asset-json "$work/asset.json" --release-json "$work/release.json" \
+            --candidate-run-json "$work/candidate-run.json" --candidate-artifacts-json "$work/candidate-artifacts.json" \
+            --ci-run-json "$work/ci-run.json" --candidate-dir "$work/candidate"
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+          POSTCUT_ASSET_ID: ${{ inputs.postcut_asset_id }}
+          POSTCUT_ASSET_SHA: ${{ inputs.postcut_asset_sha256 }}
+          POSTCUT_RELEASE_ID: ${{ inputs.postcut_release_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          if [[ -z "$POSTCUT_ASSET_ID" ]]; then
+            [[ -z "$POSTCUT_ASSET_SHA$POSTCUT_RELEASE_ID" ]] || { echo "::error::partial post-cut inputs" >&2; exit 1; }
+          fi
+          [[ "$EVIDENCE_CONFIRMED_INPUT" == true ]] || { echo "::error::evidence confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/native-mtp-serving-[0-9]{8}T[0-9]{6}Z\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          bundle="${REDACTED_EVIDENCE_INPUT%.redacted.json}"
+          [[ -d "$bundle" && ! -L "$bundle" ]] || { echo "::error::reviewed bundle is absent or unsafe" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/native-mtp-serving-journey-result.unsigned.json"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned native-MTP serving journey-result payload
+        id: payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          POSTCUT_ASSET_ID: ${{ inputs.postcut_asset_id }}
+        run: |
+          set -euo pipefail
+          postcut_args=()
+          if [[ -n "$POSTCUT_ASSET_ID" ]]; then
+            postcut_args=(--postcut-provenance "${REDACTED%.redacted.json}/postcut-provenance.json")
+          fi
+          python3 scripts/build-native-mtp-journey-result.py payload serving "${postcut_args[@]}" \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+          requirement_ids="$(python3 -c 'import json, sys; print(",".join(json.load(open(sys.argv[1], encoding="utf-8"))["requirement_ids"]))' "$PAYLOAD")"
+          [[ "$requirement_ids" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid derived requirement IDs" >&2; exit 1; }
+          printf 'requirement_ids=%s\n' "$requirement_ids" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id JOURNEY-NATIVE-MTP-SERVING
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed evidence
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-signed-journey-result.py \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Verify signed evidence artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          git diff --quiet -- specs/CONFORMANCE.json || { echo "::error::conformance ledger must not change" >&2; exit 1; }
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed evidence artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          BUNDLE: ${{ steps.request.outputs.bundle }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-native-mtp-serving-journey-evidence"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp -R "$BUNDLE" "$export_dir/$BUNDLE"
+          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-native-mtp-serving-journey-evidence.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "journey_id": "JOURNEY-NATIVE-MTP-SERVING",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "redaction_manifest": f"{bundle}/MANIFEST.sha256",
+              "redaction_manifest_sha256": hashlib.sha256((root / bundle / "MANIFEST.sha256").read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed evidence artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-native-mtp-serving-journey-evidence-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-native-mtp-serving-journey-evidence/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  local_consumer_transport:
+    if: github.event.inputs.journey == 'local-consumer-endpoint'
+    needs: [gate]
+    name: Re-run and bind the trusted transport matrix
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Checkout reviewed main controls for transport verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate transport verification request
+        id: matrix_request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/local-consumer-endpoint-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-045-R00[1-8](,SPEC-045-R00[1-8])*$ ]] || { echo "::error::invalid SPEC-045 requirement IDs" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse refs/remotes/origin/main)" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          matrix_required=false
+          case ",${REQUIREMENT_IDS_INPUT}," in
+            *,SPEC-045-R003,*|*,SPEC-045-R004,*|*,SPEC-045-R008,*) matrix_required=true ;;
+          esac
+          printf 'matrix_required=%s\n' "$matrix_required" >> "$GITHUB_OUTPUT"
+
+      - name: Select reviewed Swift toolchain
+        if: ${{ steps.matrix_request.outputs.matrix_required == 'true' }}
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Execute exact-source trusted transport matrix
+        if: ${{ steps.matrix_request.outputs.matrix_required == 'true' }}
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          source_tree="$RUNNER_TEMP/local-consumer-transport-source"
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          report="$report_dir/trusted-metadata-transport-matrix.json"
+          mkdir -p "$report_dir"
+          git worktree add --detach "$source_tree" "$SOURCE_SHA_INPUT"
+          before_status="$(git -C "$source_tree" status --porcelain --untracked-files=no)"
+          [[ -z "$before_status" ]] || { echo "::error::source worktree is not clean before verification" >&2; exit 1; }
+          (
+            cd "$source_tree/phase3-binary"
+            MACPROVIDER_TRUSTED_METADATA_TRANSPORT_MATRIX_REPORT="$report" \
+              swift test --filter ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed
+          )
+          git -C "$source_tree" diff --quiet -- . ':(exclude)phase3-binary/Package.resolved' || {
+            echo "::error::transport verification changed tracked files beyond Package.resolved" >&2
+            git -C "$source_tree" status --short --untracked-files=no >&2
+            exit 1
+          }
+          git -C "$source_tree" restore -- phase3-binary/Package.resolved
+          after_status="$(git -C "$source_tree" status --porcelain --untracked-files=no)"
+          [[ -z "$after_status" ]] || { echo "::error::transport verification changed tracked source bytes" >&2; exit 1; }
+
+      - name: Bind executed transport report to reviewed evidence
+        shell: bash
+        env:
+          MATRIX_REQUIRED: ${{ steps.matrix_request.outputs.matrix_required }}
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          report="$report_dir/trusted-metadata-transport-matrix.json"
+          manifest="$report_dir/verification.json"
+          mkdir -p "$report_dir"
+          python3 - "$MATRIX_REQUIRED" "$SOURCE_SHA_INPUT" "$GITHUB_SHA" "$REDACTED_EVIDENCE_INPUT" "$REQUIREMENT_IDS_INPUT" "$report" "$manifest" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          matrix_required, source_sha, evidence_sha, evidence_path, requirement_ids, report_path, manifest_path = sys.argv[1:]
+          required = matrix_required == "true"
+          report = pathlib.Path(report_path)
+          evidence = json.loads(pathlib.Path(evidence_path).read_text(encoding="utf-8"))
+          report_sha256 = None
+          if required:
+              if evidence.get("schema_version") != "macprovider.local-consumer-endpoint-evidence.v2":
+                  raise SystemExit("transport requirements require v2 redacted evidence")
+              embedded = (
+                  evidence.get("support_artifacts", {})
+                  .get("trusted_metadata_transport_matrix", {})
+                  .get("report")
+              )
+              if not isinstance(embedded, dict):
+                  raise SystemExit("redacted evidence does not embed the trusted transport report")
+              generated = report.read_bytes()
+              expected = (json.dumps(embedded, indent=2, sort_keys=False) + "\n").encode("utf-8")
+              if generated != expected:
+                  raise SystemExit("executed transport report bytes do not match reviewed redacted evidence")
+              report_sha256 = hashlib.sha256(generated).hexdigest()
+          manifest = {
+              "schema_version": "macprovider.trusted-metadata-transport-verification.v1",
+              "status": "passed" if required else "not_required",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "test_selector": "ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed",
+              "report_sha256": report_sha256,
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(manifest_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload verified transport matrix
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: verified-local-consumer-transport-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-local-consumer-transport-matrix/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  local_consumer_promote:
+    if: github.event.inputs.journey == 'local-consumer-endpoint'
+    needs: [gate, local_consumer_transport]
+    name: Build, sign, validate, and export local-consumer endpoint promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/local-consumer-endpoint-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-045-R00[1-8](,SPEC-045-R00[1-8])*$ ]] || { echo "::error::invalid SPEC-045 requirement IDs" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          requirement_slug="$(printf '%s' "$REQUIREMENT_IDS_INPUT" | tr '[:upper:]' '[:lower:]' | tr ',' '-')"
+          [[ "$requirement_slug" =~ ^spec-045-r00[1-8](-spec-045-r00[1-8])*$ ]] || { echo "::error::invalid requirement slug" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/local-consumer-endpoint-journey-result-${requirement_slug}.unsigned.json"
+          short_sha="${SOURCE_SHA_INPUT:0:12}"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_ids=%s\n' "$REQUIREMENT_IDS_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_slug=%s\n' "$requirement_slug" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Download verified transport matrix
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: verified-local-consumer-transport-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-local-consumer-transport-matrix/
+
+      - name: Verify transport matrix attestation before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          python3 - "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$REQUIREMENT_IDS" "$report_dir" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          source_sha, evidence_sha, evidence_path, requirement_ids, report_dir = sys.argv[1:]
+          root = pathlib.Path(report_dir)
+          manifest = json.loads((root / "verification.json").read_text(encoding="utf-8"))
+          ids = [item for item in requirement_ids.split(",") if item]
+          required = bool({"SPEC-045-R003", "SPEC-045-R004", "SPEC-045-R008"}.intersection(ids))
+          expected_status = "passed" if required else "not_required"
+          if manifest.get("schema_version") != "macprovider.trusted-metadata-transport-verification.v1":
+              raise SystemExit("unexpected transport verification schema")
+          if manifest.get("status") != expected_status:
+              raise SystemExit("transport verification status does not match selected requirements")
+          if manifest.get("source_sha") != source_sha or manifest.get("evidence_sha") != evidence_sha:
+              raise SystemExit("transport verification source identity mismatch")
+          if manifest.get("requirement_ids") != ids:
+              raise SystemExit("transport verification requirement set mismatch")
+          if required:
+              report = (root / "trusted-metadata-transport-matrix.json").read_bytes()
+              evidence = json.loads(pathlib.Path(evidence_path).read_text(encoding="utf-8"))
+              embedded = evidence["support_artifacts"]["trusted_metadata_transport_matrix"]["report"]
+              expected = (json.dumps(embedded, indent=2, sort_keys=False) + "\n").encode("utf-8")
+              if report != expected:
+                  raise SystemExit("verified transport report differs from reviewed evidence")
+              if hashlib.sha256(report).hexdigest() != manifest.get("report_sha256"):
+                  raise SystemExit("verified transport report hash mismatch")
+          PY
+
+      - name: Build unsigned local-consumer endpoint journey-result payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-local-consumer-endpoint-journey-result.py \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py --source-sha "$SOURCE_SHA" --evidence-sha "$EVIDENCE_SHA" --requirement-ids "$REQUIREMENT_IDS" --journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/promote-signed-journey-result.py \
+            --base-ref origin/main \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          requirement_ids = [item for item in sys.argv[2].split(",") if item]
+          conformance = json.loads(pathlib.Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+          rows = {
+              item.get("requirement_id"): item
+              for item in conformance.get("requirements", [])
+              if isinstance(item, dict)
+          }
+          for requirement_id in requirement_ids:
+              requirement = rows.get(requirement_id)
+              if requirement is None:
+                  raise SystemExit(f"{requirement_id} missing from conformance ledger")
+              if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+                  raise SystemExit(f"{requirement_id} was not promoted to conformant")
+              evidence = requirement.get("evidence")
+              if not isinstance(evidence, list) or not any(item.get("source") == envelope for item in evidence if isinstance(item, dict)):
+                  raise SystemExit(f"{requirement_id} evidence does not reference the signed envelope")
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-promotable intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-local-consumer-endpoint-journey-promotion"
+          mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
+          python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-local-consumer-endpoint-journey-promotion.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "requirement_slug": os.environ["REQUIREMENT_SLUG"],
+              "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "transport_verification_sha256": hashlib.sha256(
+                  pathlib.Path(os.environ["RUNNER_TEMP"])
+                  .joinpath("verified-local-consumer-transport-matrix", "verification.json")
+                  .read_bytes()
+              ).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-local-consumer-endpoint-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}
+          path: ${{ runner.temp }}/signed-local-consumer-endpoint-journey-promotion/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  pool_promotion:
+    if: github.event.inputs.journey == 'pool-promotion-transition'
+    needs: [gate]
+    name: Build, sign, and export PoolPromotionTransitionV1 without promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source and fail-closed keyring
+        id: request
+        shell: bash
+        env:
+          CANDIDATE_INPUT: ${{ github.event.inputs.signed_candidate_path }}
+          LIVE_TARGET_INPUT: ${{ github.event.inputs.live_activation_target }}
+          SCHEMA_HASH_INPUT: ${{ github.event.inputs.schema_migration_hash }}
+          APPROVAL_VERSION_INPUT: ${{ github.event.inputs.approval_record_version }}
+          AGREEMENT_VERSION_INPUT: ${{ github.event.inputs.creator_agreement_version }}
+          PRICING_VERSION_INPUT: ${{ github.event.inputs.pricing_schedule_version }}
+          AUTHORIZATION_ID_INPUT: ${{ github.event.inputs.authorization_id }}
+          AUTHORIZED_ACTOR_INPUT: ${{ github.event.inputs.authorized_actor }}
+          CREDENTIAL_ID_INPUT: ${{ github.event.inputs.credential_id }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$CANDIDATE_INPUT" =~ ^journeys/evidence/trusted-pool-creator-mvp-[A-Za-z0-9_.:-]+\.journey-result\.signed\.json$ ]] || { echo "::error::invalid signed candidate path" >&2; exit 1; }
+          [[ -f "$CANDIDATE_INPUT" && ! -L "$CANDIDATE_INPUT" ]] || { echo "::error::signed candidate is absent or unsafe" >&2; exit 1; }
+          [[ "$LIVE_TARGET_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid live activation target" >&2; exit 1; }
+          [[ "$SCHEMA_HASH_INPUT" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid schema migration hash" >&2; exit 1; }
+          [[ "$APPROVAL_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid approval record version" >&2; exit 1; }
+          [[ "$AGREEMENT_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid creator agreement version" >&2; exit 1; }
+          [[ "$PRICING_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid pricing schedule version" >&2; exit 1; }
+          [[ "$AUTHORIZATION_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid authorization id" >&2; exit 1; }
+          [[ "$AUTHORIZED_ACTOR_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:@-]*$ ]] || { echo "::error::invalid authorized actor" >&2; exit 1; }
+          [[ "$CREDENTIAL_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid credential id" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          python3 scripts/register-spec043-production-release-key.py --check
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          stem="$(basename "$CANDIDATE_INPUT" .journey-result.signed.json)"
+          capture="${stem%%.spec-043-*}"
+          [[ "$capture" =~ ^trusted-pool-creator-mvp-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "::error::signed candidate path is missing a capture timestamp" >&2; exit 1; }
+          payload="$RUNNER_TEMP/${capture}.pool-promotion-transition.unsigned.json"
+          envelope="journeys/evidence/${capture}.pool-promotion-transition.signed.json"
+          printf 'candidate=%s\n' "$CANDIDATE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned PoolPromotionTransitionV1 payload
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          LIVE_TARGET: ${{ github.event.inputs.live_activation_target }}
+          SCHEMA_HASH: ${{ github.event.inputs.schema_migration_hash }}
+          APPROVAL_VERSION: ${{ github.event.inputs.approval_record_version }}
+          AGREEMENT_VERSION: ${{ github.event.inputs.creator_agreement_version }}
+          PRICING_VERSION: ${{ github.event.inputs.pricing_schedule_version }}
+          AUTHORIZATION_ID: ${{ github.event.inputs.authorization_id }}
+          AUTHORIZED_ACTOR: ${{ github.event.inputs.authorized_actor }}
+          CREDENTIAL_ID: ${{ github.event.inputs.credential_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-pool-promotion-transition.py \
+            --candidate "$CANDIDATE" \
+            --output "$PAYLOAD" \
+            --live-activation-target "$LIVE_TARGET" \
+            --schema-migration-hash "$SCHEMA_HASH" \
+            --approval-record-version "$APPROVAL_VERSION" \
+            --creator-agreement-version "$AGREEMENT_VERSION" \
+            --pricing-schedule-version "$PRICING_VERSION" \
+            --authorization-id "$AUTHORIZATION_ID" \
+            --authorized-actor "$AUTHORIZED_ACTOR" \
+            --credential-id "$CREDENTIAL_ID"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign PoolPromotionTransitionV1 payload
+        shell: bash
+        env:
+          MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-pool-promotion-transition.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/signed-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed sibling without ledger consume or conformance promotion
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-pool-promotion-transition.py \
+            --transition "$ENVELOPE" \
+            --candidate "$CANDIDATE"
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1])
+          if envelope.name.endswith(".unsigned.json"):
+              raise SystemExit("signed output path is still unsigned")
+          for path in pathlib.Path("journeys/evidence").glob("*pool-promotion-transition.unsigned.json"):
+              raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion-transition artifact
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-pool-promotion-transition"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$CANDIDATE" "$export_dir/$CANDIDATE"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          python3 - "$export_dir/evidence-manifest.json" "$CANDIDATE" "$ENVELOPE" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, candidate, envelope = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-pool-promotion-transition.v1",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+              "signed_candidate": candidate,
+              "signed_candidate_sha256": hashlib.sha256((root / candidate).read_bytes()).hexdigest(),
+              "signed_transition": envelope,
+              "signed_transition_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion-transition artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-pool-promotion-transition-${{ steps.request.outputs.short_sha }}
+          path: ${{ runner.temp }}/signed-pool-promotion-transition/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+  oncall:
+    if: github.event.inputs.journey == 'oncall-readiness'
+    needs: [gate]
+    name: Build and sign an on-call readiness record
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Validate exact main source and fail-closed keyring
+        id: request
+        shell: bash
+        env:
+          OPERATION_ID_INPUT: ${{ github.event.inputs.operation_id }}
+          LAUNCH_ENV_INPUT: ${{ github.event.inputs.launch_environment_id }}
+          RECORD_VERSION_INPUT: ${{ github.event.inputs.record_version }}
+          TTL_INPUT: ${{ github.event.inputs.confirmation_ttl_seconds }}
+          SIGNING_CONFIRMED_INPUT: ${{ github.event.inputs.signing_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SIGNING_CONFIRMED_INPUT" == true ]] || { echo "::error::signing confirmation is required" >&2; exit 1; }
+          [[ "$OPERATION_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid operation id" >&2; exit 1; }
+          [[ "$LAUNCH_ENV_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid launch environment id" >&2; exit 1; }
+          [[ "$RECORD_VERSION_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid record version" >&2; exit 1; }
+          [[ "$TTL_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid confirmation ttl" >&2; exit 1; }
+          (( TTL_INPUT <= 7776000 )) || { echo "::error::confirmation ttl exceeds 90 days" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          registered_digest="$(python3 scripts/register-spec043-oncall-authority-key.py --check | sed -n 's/^MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256=//p')"
+          [[ "$registered_digest" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::keyring is fail-closed or digest unavailable" >&2; exit 1; }
+          printf 'registered_digest=%s\n' "$registered_digest" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned on-call readiness payload
+        id: payload
+        shell: bash
+        env:
+          OPERATION_ID: ${{ github.event.inputs.operation_id }}
+          LAUNCH_ENV: ${{ github.event.inputs.launch_environment_id }}
+          RECORD_VERSION: ${{ github.event.inputs.record_version }}
+          PRIMARY: ${{ github.event.inputs.primary_operator_contact }}
+          SECONDARY: ${{ github.event.inputs.secondary_operator_contact }}
+          BREAK_GLASS: ${{ github.event.inputs.break_glass_escalation_path }}
+          COMPROMISE: ${{ github.event.inputs.compromise_notification_channel }}
+          AGREEMENT_ACK: ${{ github.event.inputs.creator_agreement_notification_commitment_ack }}
+          EMERGENCY: ${{ github.event.inputs.creator_emergency_notification_mechanism }}
+          TTL: ${{ github.event.inputs.confirmation_ttl_seconds }}
+        run: |
+          set -euo pipefail
+          unsigned="$RUNNER_TEMP/oncall-unsigned.json"
+          python3 - "$unsigned" <<'PY'
+          import datetime
+          import json
+          import os
+          import sys
+
+          now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+          record = {
+              "operation_id": os.environ["OPERATION_ID"],
+              "launch_environment_id": os.environ["LAUNCH_ENV"],
+              "record_version": os.environ["RECORD_VERSION"],
+              "primary_operator_contact": os.environ["PRIMARY"],
+              "secondary_operator_contact": os.environ["SECONDARY"],
+              "break_glass_escalation_path": os.environ["BREAK_GLASS"],
+              "compromise_notification_channel": os.environ["COMPROMISE"],
+              "creator_agreement_notification_commitment_ack": os.environ["AGREEMENT_ACK"],
+              "creator_emergency_notification_mechanism": os.environ["EMERGENCY"],
+              "last_confirmed_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "confirmation_ttl_seconds": int(os.environ["TTL"]),
+          }
+          for key, value in record.items():
+              if isinstance(value, str) and not value.strip():
+                  raise SystemExit(f"empty field: {key}")
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(record, handle, indent=2)
+              handle.write("\n")
+          PY
+          printf 'unsigned=%s\n' "$unsigned" >> "$GITHUB_OUTPUT"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign on-call readiness record
+        id: sign
+        shell: bash
+        env:
+          MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM }}
+          UNSIGNED: ${{ steps.payload.outputs.unsigned }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM:-}" ]] || { echo "::error::on-call signing key secret is not set" >&2; exit 1; }
+          signed="$RUNNER_TEMP/oncall-signed.json"
+          ( cd phase4-coordinator && go run ./cmd/coordinator-cli trust-pool-oncall sign --in "$UNSIGNED" --out "$signed" )
+          printf 'signed=%s\n' "$signed" >> "$GITHUB_OUTPUT"
+
+      - name: Validate signed record binds the registered authority key
+        shell: bash
+        env:
+          SIGNED: ${{ steps.sign.outputs.signed }}
+          REGISTERED_DIGEST: ${{ steps.request.outputs.registered_digest }}
+        run: |
+          set -euo pipefail
+          python3 - "$SIGNED" "$REGISTERED_DIGEST" <<'PY'
+          import base64
+          import hashlib
+          import json
+          import sys
+
+          signed = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          for field in ("operations_authority_public_key", "operations_authority_signature", "operation_id"):
+              if not signed.get(field):
+                  raise SystemExit(f"signed record missing {field}")
+          pub = base64.b64decode(signed["operations_authority_public_key"])
+          if len(pub) != 32:
+              raise SystemExit("operations authority public key is not a raw Ed25519 key")
+          digest = hashlib.sha256(pub).hexdigest()
+          if digest != sys.argv[2]:
+              raise SystemExit(f"signed record key digest {digest} != registered {sys.argv[2]}")
+          print("signed on-call record binds the registered operations-authority key")
+          PY
+
+      - name: Export signed on-call readiness artifact
+        shell: bash
+        env:
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-oncall-readiness"
+          mkdir -p "$export_dir"
+          cp "$SIGNED" "$export_dir/oncall-readiness.signed.json"
+
+      - name: Upload signed on-call readiness artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signed-oncall-readiness-${{ steps.request.outputs.short_sha }}
+          path: ${{ runner.temp }}/signed-oncall-readiness/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1

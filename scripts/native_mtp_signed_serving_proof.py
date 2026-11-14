@@ -18,7 +18,9 @@ import tempfile
 import zipfile
 
 REPOSITORY = 'Augustas11/macprovider'
-WORKFLOW = '.github/workflows/promote-signed-native-mtp-serving-journey.yml'
+LEGACY_WORKFLOW = '.github/workflows/promote-signed-native-mtp-serving-journey.yml'
+WORKFLOW = '.github/workflows/signed-journey.yml'
+SERVING_WORKFLOW_PATHS = {LEGACY_WORKFLOW, WORKFLOW}
 SCHEMA = 'macprovider.native-mtp-signed-serving-proof.v1'
 PUBLIC_KEY_SHA256 = '849e9c9bc53db1fb8e28d3b46ab431089b12cb50b398c5317ced682d39bdbd38'
 MAX_BYTES = 64 << 20
@@ -71,7 +73,7 @@ def authenticate(receipt: dict, source: str) -> tuple[dict, dict]:
     run = gh(f"actions/runs/{receipt['run_id']}")
     require(run.get('id') == receipt['run_id'] and run.get('status') == 'completed' and run.get('conclusion') == 'success'
             and run.get('event') == 'workflow_dispatch' and run.get('head_branch') == 'main'
-            and run.get('path') == WORKFLOW and run.get('repository',{}).get('full_name') == REPOSITORY
+            and run.get('path') in SERVING_WORKFLOW_PATHS and run.get('repository',{}).get('full_name') == REPOSITORY
             and run.get('head_repository',{}).get('full_name') == REPOSITORY,
             'serving signing run is not the successful reviewed main workflow')
     control = run.get('head_sha','')
@@ -153,7 +155,7 @@ def validate_checkout(root: Path, files: dict[str, bytes], m: dict, run: dict, s
     envelope = parse(files[m['signed_envelope']])
     signatures = envelope.get('signatures')
     require(isinstance(signatures,list) and len(signatures) == 1
-            and signatures[0].get('verifier') == f"{WORKFLOW}:{run['id']}:{run['run_attempt']}", 'signed verifier run differs')
+            and signatures[0].get('verifier') == f"{run.get('path')}:{run['id']}:{run['run_attempt']}", 'signed verifier run differs')
     provenance = bundle + '/postcut-provenance.json'
     require(provenance in files, 'signed post-cut provenance missing')
     # Build before signature validation: this reopens every genuine step, policy,

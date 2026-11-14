@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.96
+**Version:** 0.1.97
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.96",
+  "version": "0.1.97",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,19 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.58` | `a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.59` | `7ee1b3f73d719726c86b39da11a715be5d1c197e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.58` is on `3.32.3-macprovider.56`
+The mlx-swift-lm row `3.32.3-macprovider.59` is on `3.32.3-macprovider.58`
+(`a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e`) (#2327), at
+`7ee1b3f73d719726c86b39da11a715be5d1c197e`: Qwen2-VL post-vision decode uses
+fused non-traditional RoPE when the three M-RoPE axes share one rope delta;
+per-row deltas and traditional RoPE stay on the position-id path. The Swift,
+core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.58` is on `3.32.3-macprovider.56`
 (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`) (#2335), at
 `a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e`: MLX core v0.32.4-macprovider.14 (via
 mlx-swift 0.32.3-macprovider.22): one row of a qualifying affine weight takes
@@ -2606,6 +2613,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.97 (2026-11-14, Related: #2327)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.59` (`7ee1b3f73d719726c86b39da11a715be5d1c197e`) on
+  `3.32.3-macprovider.58`: Qwen2-VL post-vision decode uses fused non-traditional RoPE when
+  the three M-RoPE axes share one rope delta; per-row deltas and traditional
+  RoPE stay on the position-id path. Other model sources and the Swift, core
+  and C rows are unchanged.
 - **0.1.96 (2026-11-14, Related: #2335)** — R003: the serial small-row route
   is decided from resolved state. Native MTP `auto` is inactive when the
   signed admission set the loader reads (the baked feed on an ordinary

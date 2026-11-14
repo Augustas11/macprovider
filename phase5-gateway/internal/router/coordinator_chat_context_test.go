@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // Codex R2 MEDIUM 3 / review R3 LOW-4: every gateway request to the
