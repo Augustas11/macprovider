@@ -699,6 +699,17 @@ enum PagedKVRuntimeParityProbe {
                 Self.logParityDivergence(stage: "serial-batch-of-two", row: "b", serial: serialB, shared: serialPair.last)
                 if serialPair.last == twoRow["shared-parity-b"] {
                     PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b equals two-row row=b")
+                    let common = min(serialB.count, serialPair.last?.count ?? 0)
+                    let divergence = (0 ..< common).first { serialB[$0] != serialPair.last?[$0] } ?? common
+                    try await container.perform { context in
+                        try Self.logBatchOfTwoBitDivergence(
+                            model: context.model,
+                            promptA: promptA, promptB: promptB,
+                            tokensA: serialA, tokensB: serialB,
+                            throughStep: divergence,
+                            makeCache: { try context.model.newCache(parameters: nil) }
+                        )
+                    }
                 } else if serialPair.last == serialB {
                     PagedKVRuntimeDiagnostics.log("shared-parity serial-batch-of-two row=b matches serial")
                 }
@@ -945,6 +956,108 @@ enum PagedKVRuntimeParityProbe {
             y = next.reshaped([rows, 1])
         }
         return out
+    }
+
+    /// Diagnostic only: row b decoded alone versus as row 1 of a batch of two
+    /// on the stock serial caches, both teacher-forced with the rows' lone
+    /// greedy tokens so their inputs stay identical. Logs where the bits
+    /// first differ: after which prefill chunk or decode step, in which
+    /// layer's cached K/V (the first differing layer's K/V projection reads
+    /// the output of the layer before it), the logits' max abs difference,
+    /// and row b's top-2 logit margin at each differing step up to
+    /// `throughStep` (a near-tie flip versus a real numeric fault).
+    private static func logBatchOfTwoBitDivergence(
+        model: any LanguageModel,
+        promptA: [Int],
+        promptB: [Int],
+        tokensA: [Int],
+        tokensB: [Int],
+        throughStep: Int,
+        prefillStepSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
+        makeCache: () throws -> [KVCache]
+    ) throws {
+        guard promptA.count == promptB.count, !promptB.isEmpty,
+              tokensA.count == tokensB.count, throughStep < tokensB.count
+        else { return }
+        let one = try makeCache()
+        let two = try makeCache()
+        var stateOne: LMOutput.State?
+        var stateTwo: LMOutput.State?
+        func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
+            guard a.shape == b.shape else { return .infinity }
+            return (a.asType(.float32) - b.asType(.float32)).abs().max().item(Float.self)
+        }
+        func topTwoMargin(_ row: MLXArray) -> Float {
+            let sortedRow = sorted(row.asType(.float32), axis: -1)
+            let n = sortedRow.dim(0)
+            return (sortedRow[n - 1] - sortedRow[n - 2]).item(Float.self)
+        }
+        // Compares row b's logits and every layer's cached K/V; logs and
+        // returns true when any bit differs.
+        func compare(_ label: String, _ logitsOne: MLXArray, _ logitsTwo: MLXArray, step: Int?) -> Bool {
+            let rowOne = logitsOne[0, logitsOne.dim(1) - 1, 0...]
+            let rowTwo = logitsTwo[1, logitsTwo.dim(1) - 1, 0...]
+            var firstLayer: (index: Int, keys: Float, values: Float)?
+            var differingLayers = 0
+            for (index, (cacheOne, cacheTwo)) in zip(one, two).enumerated() {
+                let kvOne = cacheOne.state
+                let kvTwo = cacheTwo.state
+                guard kvOne.count >= 2, kvTwo.count >= 2 else { continue }
+                let keys = maxAbsDiff(kvOne[0], kvTwo[0][1 ..< 2, 0..., 0..., 0...])
+                let values = maxAbsDiff(kvOne[1], kvTwo[1][1 ..< 2, 0..., 0..., 0...])
+                if keys != 0 || values != 0 {
+                    differingLayers += 1
+                    if firstLayer == nil { firstLayer = (index, keys, values) }
+                }
+            }
+            let logits = arrayEqual(rowOne, rowTwo).item(Bool.self) ? 0 : maxAbsDiff(rowOne, rowTwo)
+            guard logits != 0 || firstLayer != nil else { return false }
+            var line = "batch-bits \(label) logits_max_abs_diff=\(logits) kv_layers_differing=\(differingLayers)/\(one.count)"
+            if let firstLayer {
+                line += " first_kv_layer=\(firstLayer.index) k_diff=\(firstLayer.keys) v_diff=\(firstLayer.values)"
+            }
+            if let step, step <= throughStep {
+                line += " margin_one=\(topTwoMargin(rowOne)) margin_two=\(topTwoMargin(rowTwo))"
+            }
+            PagedKVRuntimeDiagnostics.log(line)
+            return true
+        }
+
+        let chunkSize = max(1, prefillStepSize)
+        var start = 0
+        var chunk = 0
+        var reported = 0
+        while start < promptB.count {
+            let end = min(promptB.count, start + chunkSize)
+            let inputOne = MLXArray(promptB[start ..< end].map { Int32($0) }).reshaped([1, end - start])
+            let inputTwo = MLXArray((promptA[start ..< end] + promptB[start ..< end]).map { Int32($0) })
+                .reshaped([2, end - start])
+            let outOne = model(LMInput.Text(tokens: inputOne), cache: one, state: stateOne)
+            let outTwo = model(LMInput.Text(tokens: inputTwo), cache: two, state: stateTwo)
+            stateOne = outOne.state
+            stateTwo = outTwo.state
+            eval(outOne.logits, outTwo.logits)
+            if compare("prefill_chunk=\(chunk) tokens=\(start)..<\(end)", outOne.logits, outTwo.logits, step: nil) {
+                reported += 1
+            }
+            start = end
+            chunk += 1
+        }
+        // Decode step t feeds the lone greedy token t (token 0 came from the
+        // prefill logits) and yields the logits for token t + 1.
+        for step in 0 ..< throughStep where reported < 6 {
+            let inputOne = MLXArray([Int32(tokensB[step])]).reshaped([1, 1])
+            let inputTwo = MLXArray([Int32(tokensA[step]), Int32(tokensB[step])]).reshaped([2, 1])
+            let outOne = model(LMInput.Text(tokens: inputOne), cache: one, state: stateOne)
+            let outTwo = model(LMInput.Text(tokens: inputTwo), cache: two, state: stateTwo)
+            stateOne = outOne.state
+            stateTwo = outTwo.state
+            eval(outOne.logits, outTwo.logits)
+            if compare("decode_step=\(step) yields_token=\(step + 1)", outOne.logits, outTwo.logits, step: step + 1) {
+                reported += 1
+            }
+        }
+        PagedKVRuntimeDiagnostics.log("batch-bits done chunks=\(chunk) decode_steps=\(throughStep) reported=\(reported)")
     }
 
     private static func lastTokenArgmax(_ logits: MLXArray) -> Int32 {
