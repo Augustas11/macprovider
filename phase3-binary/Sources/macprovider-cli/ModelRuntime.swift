@@ -14040,7 +14040,7 @@ maxTokens: maxTokens,
         maxProposalDepth: Int
     ) -> Bool {
         if familyAdapter == "deepseek_v4_dspark_v1" { return predictionLayerCount == 3 }
-        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        return switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .targetEmbeddedAssistant:
             (1...gemma4NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
         case .separateArtifact, .targetEmbedded:
