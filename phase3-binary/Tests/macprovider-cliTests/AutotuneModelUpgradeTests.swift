@@ -4,7 +4,7 @@ import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-023-R028 / AC-52: stale-recommendation model upgrade.
+/// SPEC-023-R029 / AC-52: stale-recommendation model upgrade.
 final class AutotuneModelUpgradeTests: XCTestCase {
     private static let threeBKey = "meta-llama/llama-3.2-3b-instruct"
     private static let llama8BKey = "meta-llama/llama-3.1-8b-instruct"
@@ -621,7 +621,7 @@ final class AutotuneModelUpgradeTests: XCTestCase {
         ]))
         XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--upgrade", "--apply", "--calibrate-context"]))
         XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--upgrade", "--freshness-check"]))
-        // The pinned (pre-R028) prefetch still requires its allowlist.
+        // The pinned (pre-R029) prefetch still requires its allowlist.
         XCTAssertThrowsError(try AutotuneCommand.parse([
             "--recommend", "--prefetch", "--prefetch-receipt", "/tmp/receipt.json",
         ]))
@@ -844,5 +844,202 @@ private struct PrefetchFixture {
                 )
             }
         )
+    }
+}
+
+// MARK: - #2367 fleet bounds and unattended trigger
+
+extension AutotuneModelUpgradeTests {
+    func testRunDownloadCapAdmitsTheFirstDownloadsAndDropsTheRest() async throws {
+        let fixture = try PrefetchFixture()
+        let fetched = FetchLog()
+        var downloader = fixture.downloader(log: fetched)
+        // Each fixture snapshot advertises 11 bytes ("replacement").
+        let budget = RunDownloadBudget(limitBytes: 11)
+        downloader.runDownloadBudget = budget
+        let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: downloader)
+        let outcome = try await AutotuneRecommendationBenchmarker(artifactResolver: resolver).prefetchArtifacts(
+            candidateCatalog: fixture.catalog,
+            hardware: Self.hardware(memoryGB: 16),
+            candidateModelIDs: Set(fixture.catalog.rows.values.map(\.modelID)),
+            modelKeyOrder: ["incumbent", "winner", "loser"]
+        )
+
+        // The loser's size listing is read (that is how its size is known);
+        // its snapshot is refused before any file is fetched.
+        XCTAssertEqual(fetched.modelIDs, ["namespace/winner", "namespace/loser"])
+        XCTAssertEqual(Set(outcome.artifacts.map(\.modelKey)), ["incumbent", "preexisting", "winner"])
+        XCTAssertEqual(outcome.diagnostics.map(\.modelID), ["namespace/loser"])
+        XCTAssertTrue(outcome.diagnostics.allSatisfy { $0.reason.contains("run download cap reached") })
+        XCTAssertEqual(budget.remainingBytes, 0)
+        let loser = try XCTUnwrap(fixture.catalog.rows["loser"])
+        let staging = resolver.prefetchSnapshotURL(
+            modelID: loser.modelID,
+            revision: try XCTUnwrap(loser.modelRevision),
+            sha256: try XCTUnwrap(loser.modelSHA256)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+        XCTAssertNoThrow(try AutotuneModelUpgrade.verifiedUpgradeArtifacts(outcome, incumbentModelID: "namespace/incumbent"))
+    }
+
+    func testRunDownloadBudgetChargesOnlyAdmittedSnapshots() throws {
+        let budget = RunDownloadBudget(limitBytes: 100)
+        XCTAssertNoThrow(try budget.reserve(bytes: 60, modelID: "a"))
+        XCTAssertThrowsError(try budget.reserve(bytes: 41, modelID: "b")) { error in
+            XCTAssertEqual(
+                error as? AutotuneRecommendError,
+                .downloadBudgetExceeded(modelID: "b", requiredBytes: 41, remainingBytes: 40)
+            )
+        }
+        XCTAssertEqual(budget.remainingBytes, 40)
+        XCTAssertNoThrow(try budget.reserve(bytes: 40, modelID: "c"))
+        XCTAssertEqual(RunDownloadBudget.total([Int64.max, 1]), Int64.max)
+    }
+
+    func testRunDownloadCapIsTwiceMemory() {
+        XCTAssertEqual(AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: 8), 16 * 1_073_741_824)
+        XCTAssertEqual(AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: 512), 1_024 * 1_073_741_824)
+        XCTAssertEqual(AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: 0), 2 * 1_073_741_824)
+    }
+
+    func testStaggerOffsetIsStableInTheWindowAndSpreadsTheFleet() {
+        let window = TimeInterval(AutotuneModelUpgrade.staggerWindowSeconds)
+        let catalog = String(repeating: "c", count: 64)
+        let first = AutotuneModelUpgrade.staggerOffsetSeconds(providerKey: "provider-1", catalogSHA256: catalog)
+        XCTAssertEqual(first, AutotuneModelUpgrade.staggerOffsetSeconds(providerKey: "provider-1", catalogSHA256: catalog))
+        let offsets = (0..<400).map {
+            AutotuneModelUpgrade.staggerOffsetSeconds(providerKey: "provider-\($0)", catalogSHA256: catalog)
+        }
+        XCTAssertTrue(offsets.allSatisfy { $0 >= 0 && $0 < window })
+        // Spread: every quarter of the window holds a share of the fleet.
+        for quarter in 0..<4 {
+            let low = window * Double(quarter) / 4
+            let high = window * Double(quarter + 1) / 4
+            XCTAssertGreaterThan(offsets.filter { $0 >= low && $0 < high }.count, 60, "quarter \(quarter)")
+        }
+        // A new catalog reorders the fleet.
+        let next = String(repeating: "d", count: 64)
+        let reordered = (0..<400).filter {
+            AutotuneModelUpgrade.staggerOffsetSeconds(providerKey: "provider-\($0)", catalogSHA256: catalog)
+                != AutotuneModelUpgrade.staggerOffsetSeconds(providerKey: "provider-\($0)", catalogSHA256: next)
+        }
+        XCTAssertGreaterThan(reordered.count, 390)
+    }
+
+    func testUnattendedGateWaitsForTheOffsetThenRetriesOncePerDay() {
+        let released = Date(timeIntervalSince1970: 1_800_000_000)
+        let catalog = String(repeating: "c", count: 64)
+        let key = "provider-7"
+        let notBefore = AutotuneModelUpgrade.staggerNotBefore(catalogGeneratedAt: released, providerKey: key, catalogSHA256: catalog)
+        func gate(_ now: Date, _ last: AutotuneModelUpgrade.AttemptRecord?) -> AutotuneModelUpgrade.UnattendedGate {
+            AutotuneModelUpgrade.unattendedGate(
+                now: now,
+                catalogGeneratedAt: released,
+                catalogSHA256: catalog,
+                binaryVersion: "1.2.3",
+                providerKey: key,
+                lastAttempt: last
+            )
+        }
+        if notBefore > released {
+            XCTAssertEqual(gate(notBefore.addingTimeInterval(-1), nil), .staggered(until: notBefore))
+        }
+        XCTAssertEqual(gate(notBefore, nil), .proceed)
+
+        let attempt = AutotuneModelUpgrade.AttemptRecord(catalogSHA256: catalog, binaryVersion: "1.2.3", attemptedAt: notBefore)
+        let retryAt = notBefore.addingTimeInterval(AutotuneModelUpgrade.unattendedRetrySeconds)
+        XCTAssertEqual(gate(notBefore.addingTimeInterval(3600), attempt), .retryLater(until: retryAt))
+        XCTAssertEqual(gate(retryAt, attempt), .proceed)
+        // A new binary or a new catalog is a new attempt.
+        var otherBinary = attempt
+        otherBinary.binaryVersion = "1.2.4"
+        XCTAssertEqual(gate(notBefore.addingTimeInterval(3600), otherBinary), .proceed)
+        var otherCatalog = attempt
+        otherCatalog.catalogSHA256 = String(repeating: "e", count: 64)
+        XCTAssertEqual(gate(notBefore.addingTimeInterval(3600), otherCatalog), .proceed)
+    }
+
+    func testAttemptRecordRoundTrips() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("model-upgrade-attempt-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("model-upgrade-attempt.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        XCTAssertNil(AutotuneModelUpgrade.readAttempt(from: url))
+        let record = AutotuneModelUpgrade.AttemptRecord(
+            catalogSHA256: String(repeating: "c", count: 64),
+            binaryVersion: "1.2.3",
+            attemptedAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        AutotuneModelUpgrade.writeAttempt(record, to: url)
+        XCTAssertEqual(AutotuneModelUpgrade.readAttempt(from: url), record)
+    }
+
+    func testUnattendedTriggerIsSuppressedForPinnedPausedAndCandidateServes() {
+        XCTAssertNil(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false, poolModelID: nil, autotuneCandidate: false, operatorPaused: false
+        ))
+        XCTAssertEqual(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false, poolModelID: nil, autotuneCandidate: true, operatorPaused: false
+        ), "autotune_candidate")
+        XCTAssertEqual(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: true, poolModelID: nil, autotuneCandidate: false, operatorPaused: false
+        ), "donor_mode")
+        XCTAssertEqual(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false, poolModelID: "pool/model", autotuneCandidate: false, operatorPaused: false
+        ), "pool_model_id")
+        XCTAssertNil(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false, poolModelID: "  ", autotuneCandidate: false, operatorPaused: false
+        ))
+        XCTAssertEqual(AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false, poolModelID: nil, autotuneCandidate: false, operatorPaused: true
+        ), "operator_paused")
+    }
+
+    func testUnattendedArgumentsAndFlagValidation() {
+        XCTAssertEqual(
+            AutotuneModelUpgrade.afterUpdateArguments(configPath: "/tmp/config.yaml", unattended: true),
+            ["autotune", "--recommend", "--upgrade", "--apply", "--unattended", "--config", "/tmp/config.yaml"]
+        )
+        XCTAssertNoThrow(try AutotuneCommand.parse(["--recommend", "--upgrade", "--apply", "--unattended"]))
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--apply", "--unattended"]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--upgrade", "--prefetch", "--prefetch-receipt", "/tmp/r.json", "--unattended",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--upgrade", "--apply", "--prefetch-receipt", "/tmp/r.json", "--unattended",
+        ]))
+    }
+
+    func testDetachedSpawnRunsInItsOwnSessionAndWritesTheLog() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("model-upgrade-spawn-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-cli")
+        // Records its arguments and whether it leads its own session.
+        try Data("""
+        #!/bin/sh
+        echo "args=$*"
+        if [ "$(ps -o sess= -p $$ | tr -d ' ')" = "$(ps -o pid= -p $$ | tr -d ' ')" ] || [ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ]; then echo leader=yes; else echo leader=no; fi
+        echo stderr-line >&2
+        """.utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let log = directory.appendingPathComponent("model-upgrade.log").path
+
+        XCTAssertNotNil(AutotuneModelUpgrade.spawnDetachedUnattendedUpgrade(
+            executable: script,
+            configPath: "/tmp/config.yaml",
+            logPath: log
+        ))
+        let deadline = Date().addingTimeInterval(10)
+        var text = ""
+        while Date() < deadline {
+            text = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+            if text.contains("stderr-line") { break }
+            usleep(50_000)
+        }
+        XCTAssertTrue(text.contains("args=autotune --recommend --upgrade --apply --unattended --config /tmp/config.yaml"), text)
+        XCTAssertTrue(text.contains("leader=yes"), text)
+        XCTAssertTrue(text.contains("stderr-line"), text)
     }
 }

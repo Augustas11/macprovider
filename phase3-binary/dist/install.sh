@@ -11434,7 +11434,7 @@ validate_autotune_candidate_model_id() {
 }
 
 append_fresh_autotune_operator_bounds() {
-  # A SPEC-023-R028 upgrade benchmarks exactly its prefetch receipt. Do not
+  # A SPEC-023-R029 upgrade benchmarks exactly its prefetch receipt. Do not
   # mix operator bounds with that receipt allowlist.
   if [ "${#autotune_candidate_args[@]}" -gt 0 ]; then
     return 0
@@ -11518,7 +11518,7 @@ run_autotune_recommend_apply() {
       && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
       || die 6 "upgrade benchmark lacks its private prefetch receipt; the staged release will not acquire artifacts after cutover"
     if [ "${AUTOTUNE_MODEL_UPGRADE:-0}" = "1" ]; then
-      # SPEC-023-R028: benchmark every verified receipt row and switch only
+      # SPEC-023-R029: benchmark every verified receipt row and switch only
       # to a strictly better admitted model; the incumbent is one of them.
       autotune_candidate_args=(
         --upgrade
@@ -11653,7 +11653,7 @@ own_macprovider_cli_holds_live_port() {
   return 1
 }
 
-# A staged release older than SPEC-023-R028 has no `autotune --upgrade`; an
+# A staged release older than SPEC-023-R029 has no `autotune --upgrade`; an
 # installer pinned to such a release keeps the incumbent-only re-tune. The help
 # text is captured first so a pipe cannot fail the probe under pipefail.
 staged_cli_supports_model_upgrade() {
@@ -11696,7 +11696,7 @@ prefetch_upgrade_autotune_model() {
     return 0
   fi
   AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
-  # SPEC-023-R028: prefetch the installed model plus every signed row that fits
+  # SPEC-023-R029: prefetch the installed model plus every signed row that fits
   # this Mac, so a stale re-tune can move to a strictly better model. Rows that
   # fail prefetch are dropped; the installed model must verify.
   if staged_cli_supports_model_upgrade; then

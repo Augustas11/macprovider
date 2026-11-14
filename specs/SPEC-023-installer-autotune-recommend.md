@@ -8,7 +8,11 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.43 (2026-11-14, Related: #2367, #2154)** — The automatic switch treats
+- **v0.22.43 (2026-11-14, Related: #2367, #2154)** — §9.4 adds a per-run
+  download cap of twice the Mac's memory (step 2) and the unattended
+  trigger (step 9): a serving provider checks every 6 hours, in its own
+  session, staggered per provider over 48 hours after each catalog release
+  and retried at most daily per catalog and binary. The automatic switch treats
   the catalog bench gate as hard (manual `--recommend` keeps it advisory).
   Prefetch fetches the likely winners first under the free-space reserve,
   records what the run downloaded, and the run removes its unselected
@@ -3228,7 +3232,12 @@ use it.
    `min_sustained_tps`), so the likely winners are fetched first. Every
    download MUST leave the advertised artifact size plus the downloader's
    5 GiB free-space reserve available on its volumes, or it is refused before
-   any byte is written. A row whose prefetch fails is dropped with a
+   any byte is written. One run MUST NOT download more than twice the Mac's
+   memory in total (`2 × memory_gb` GiB, summed over advertised snapshot
+   sizes and charged before a snapshot's first byte). Every planned
+   challenger fits in memory, so the cap always admits the best-ordered
+   challenger; a row the cap refuses is dropped like any failed prefetch,
+   and artifacts already on disk are not charged. A row whose prefetch fails is dropped with a
    diagnostic, and a snapshot directory the run created for it is removed.
    The receipt records `downloaded_by_run: true` for each row this run
    downloaded: no copy of it existed before the run (durable store, Hugging
@@ -3291,6 +3300,31 @@ use it.
    rows. `--upgrade` cannot be combined with `--candidate-models`,
    `--check-only`, `--freshness-check`, `--recover-hardware-admission` or
    the calibration flags. `--donor-mode` requires a receipt.
+9. **Unattended trigger.** The binary autoupdate (SPEC-020) swaps the
+   binary and restarts the provider in-process; it does not run
+   `malibu-cli update`, and a signed catalog release changes no binary. So a
+   serving provider starts the check itself: 15 minutes after start and
+   then every 6 hours, `serve` spawns
+   `autotune --recommend --upgrade --apply --unattended` in its own session
+   (so the step 3 stop of the provider's launchd job does not end it), with
+   output appended to `~/Library/Logs/macprovider/model-upgrade.log`. No
+   check starts for an autotune candidate serve, `donor_mode`, a
+   `pool_model_id` or an operator-paused provider. `--unattended` requires
+   `--upgrade --apply` without a receipt and adds two gates after the
+   freshness and pin checks:
+   - **Stagger.** The run acts on a catalog only from
+     `generated_at + offset`, where `offset` is the first 8 bytes of
+     `SHA-256(diversification_id "\n" candidate_catalog_sha256)` modulo 48
+     hours. Each release therefore moves the fleet evenly over 48 hours,
+     and the order changes with every release. Before its offset the run
+     exits 0 and the incumbent keeps serving.
+   - **Retry.** The run records the catalog digest, binary version and
+     time in `~/.config/macprovider/model-upgrade-attempt.json` before
+     prefetch. A later unattended run for the same catalog and binary waits
+     24 hours from that record, so a failing prefetch or a busy provider is
+     retried daily, not every check.
+   The installer and a manual `malibu-cli update` do not pass `--unattended`
+   and are not staggered.
 
 ## 10. Goodhart mitigations
 
@@ -3444,7 +3478,13 @@ download without room for its size plus the free-space reserve is refused
 and leaves no directory, and after the decision only the run's own
 unselected `downloaded_by_run` snapshots are removed. The provider is
 stopped only after it reports idle, and it is restarted after success,
-failure and interrupt.
+failure and interrupt. A run whose downloads reach `2 × memory_gb` GiB drops
+the remaining rows and keeps the incumbent's verification. An unattended run
+exits without a change before its stagger offset, and again within 24 hours
+of an attempt on the same catalog and binary; its offsets are stable per
+provider, spread across the 48-hour window and reordered by a new catalog.
+The serve trigger is suppressed for donor, pool, operator-paused and
+autotune-candidate serves, and its child leads its own session.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 
