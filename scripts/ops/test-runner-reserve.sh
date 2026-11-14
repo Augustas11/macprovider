@@ -207,7 +207,7 @@ run_rc 0 "row restore after a third-party row was removed" "$RESERVE" restore
 grep -q '"restore": "row"' "$T/err" && grep -q "row re-added" "$T/err" || die "row restore not reported"
 [ "$(restarts)" = 2 ] && has_studio "$T/svc/runner_loaded.json" || die "row restore did not restart onto the Studio row"
 [ ! -e "$T/reserve/runner-reserve.json" ] || die "row restore left the reservation"
-[ "$(stat -f %Lp "$PEARL_RUNNER_TARGETS" 2>/dev/null || stat -c %a "$PEARL_RUNNER_TARGETS")" = 644 ] || die "row restore changed the file mode"
+[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "$PEARL_RUNNER_TARGETS")" = 644 ] || die "row restore changed the file mode"
 three "retire a trailing row"
 edit_targets 'd["targets"] = [t for t in d["targets"] if t["provider_id"] != "mp-bbb0001"]'
 run_rc 0 "row restore after the trailing row was removed" "$RESERVE" restore
