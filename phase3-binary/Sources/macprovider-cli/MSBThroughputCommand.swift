@@ -1302,7 +1302,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let usagePass = msbUsageAttributionPass(
             rows: usageRows,
             expectedPromptTokens: lengths,
-            expectedCompletionTokens: decodeTokens
+            expectedCompletionTokens: msb03ExpectedCompletionTokens(decodeTokens: decodeTokens)
         )
         let msb03 = MSB03Evidence(
             promptTokenLengths: lengths,

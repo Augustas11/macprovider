@@ -285,6 +285,13 @@ func msbTokenSequenceSHA256(_ tokens: [Int]) -> String {
     return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
 }
 
+/// Completion tokens one msb03 row is asked for and billed: the prefill's
+/// sampled token plus `decodeTokens` timed decode steps (the scheduler run's
+/// `maxOutputTokens`, and the serial run's `maxTokens`).
+func msb03ExpectedCompletionTokens(decodeTokens: Int) -> Int {
+    decodeTokens + 1
+}
+
 func msbUsageAttributionPass(
     rows: [MSBUsageRow],
     expectedPromptTokens: [Int],

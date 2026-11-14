@@ -15,8 +15,10 @@ short-request TTFT at most 2x serial and makespan above 1.0x serial, with the
 measured ratio recorded per release. Backends that share the prefill forward
 keep the above-1.2x bar. `msb-throughput --scenario msb03` reports the bar and
 the prefill kind. GLM-5.3-Flash (M3 Ultra, prompts 512/1024/1536/2048,
-`--decode-tokens 128 --runs 3`) measured 1.18x and 1.19x; its ceiling is
-1.17x to 1.19x.
+`--decode-tokens 128 --runs 3`) measured 1.18x and 1.19x, at the lower edge of
+its 1.19x to 1.22x ceiling. msb03's usage check now expects the request's
+`decodeTokens + 1` completion tokens (the prefill's sampled token plus the
+timed decode steps), which the scheduler reports.
 
 **Change log v0.3.51 (2026-11-14, small-row route from resolved state, Related: #2335):**
 FR-CB9 decides the serial small-row route from resolved state instead of
@@ -2377,12 +2379,16 @@ short-request TTFT gate passes (unchanged) and the makespan ratio is above
 the prefill forward across rows keeps the above-1.2x bar. Measured on
 GLM-5.3-Flash (`glm5_next` pagedMLA, 8-token cap), M3 Ultra, `--runs 3
 --decode-tokens 128`: serial makespan aggregate 18.72 tok/s (512 decoded
-tokens in 27.35 s); short-row serial TTFT 1.55 s for 512 prompt tokens, so P is
-about 15.5 s for the 5120 prompt tokens and D_serial about 11.8 s (4 x 128
-tokens at 42.5 tok/s); equal-length four-row cells in the same window decode at
-69.6 tok/s (1024-token prompts) and 64.9 tok/s (2048), so D_batched is 7.4 to
-7.9 s and the ceiling 1.17x to 1.19x. Batched makespan measured 1.18x and
-1.19x.
+tokens in 27.35 s); same-window serial first-token times of 1.55 s (512-token
+prompt), 3.06 s (1024) and 6.01 s (2048) put prefill at 330 to 341 tok/s, so P
+is about 15.1 s for the 5120 prompt tokens and D_serial about 12.2 s;
+equal-length four-row cells in the same window decode at 69.6 tok/s
+(1024-token prompts) and 64.9 tok/s (2048), so D_batched is 7.4 to 7.9 s and
+the ceiling 1.19x to 1.22x. Batched makespan measured 1.18x and 1.19x, at the
+lower edge of that ceiling. Reaching 1.2x would need the mixed-length batch to
+decode at 66.6 tok/s or more; the measured residual is about 65 tok/s (the
+2048-token rate), so scheduling has no room left, and only a backend that
+shares the prefill forward across rows moves it.
 
 **DeepSeek V4 campaign gate (Related: #2111).** For the
 `TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX` artifact on the M3 Ultra

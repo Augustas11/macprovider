@@ -130,7 +130,7 @@ final class MSB03MakespanAggregateTests: XCTestCase {
     }
 
     func testPerRowPrefillBackendPassesAboveSerialMakespan() {
-        // GLM-5.3-Flash on the M3 Ultra: 1.19x against a 1.17x-1.19x ceiling.
+        // GLM-5.3-Flash on the M3 Ultra: 1.19x, the lower edge of a 1.19x-1.22x ceiling.
         XCTAssertTrue(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .perRow))
         XCTAssertFalse(msb03Passes(makespan: 0.99, ttftRatio: 1.0, prefill: .perRow))
         XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 2.5, prefill: .perRow))
@@ -139,6 +139,30 @@ final class MSB03MakespanAggregateTests: XCTestCase {
     func testSharedForwardBackendKeepsTheAbove1point2Bar() {
         XCTAssertFalse(msb03Passes(makespan: 1.19, ttftRatio: 1.0, prefill: .shared))
         XCTAssertTrue(msb03Passes(makespan: 1.21, ttftRatio: 1.0, prefill: .shared))
+    }
+
+    /// GLM-5.3-Flash msb03 lab rows (#2331): `--decode-tokens 128` asks for
+    /// 129 output tokens, the prefill's sampled token plus 128 decode steps.
+    func testUsageExpectsThePrefillTokenPlusTheDecodeSteps() {
+        let rows = zip([512, 1024, 1536, 2048], 0...).map { prompt, index in
+            MSBUsageRow(
+                requestID: "msb-sched-\(index)",
+                promptTokens: prompt,
+                completionTokens: 129,
+                emittedTokens: 129,
+                cachedPromptTokens: 0,
+                terminalStatus: ContinuousBatchSchedulerTerminalStatus.length.rawValue,
+                settlementDisposition: ContinuousBatchSettlementDisposition.eligibleOwner.rawValue
+            )
+        }
+        let expected = msb03ExpectedCompletionTokens(decodeTokens: 128)
+        XCTAssertEqual(expected, 129)
+        XCTAssertTrue(msbUsageAttributionPass(
+            rows: rows, expectedPromptTokens: msb03PromptLengths(), expectedCompletionTokens: expected
+        ))
+        XCTAssertFalse(msbUsageAttributionPass(
+            rows: rows, expectedPromptTokens: msb03PromptLengths(), expectedCompletionTokens: 128
+        ))
     }
 
     func testMakespanSampleRejectsARowThatEndsBeforeItArrives() {

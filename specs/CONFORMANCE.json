@@ -5822,7 +5822,8 @@
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testMakespanSampleRejectsARowThatEndsBeforeItArrives",
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testPrefillKindFollowsTheBackendsFlattenedPrefillCap",
         "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testPerRowPrefillBackendPassesAboveSerialMakespan",
-        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testSharedForwardBackendKeepsTheAbove1point2Bar"
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testSharedForwardBackendKeepsTheAbove1point2Bar",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testUsageExpectsThePrefillTokenPlusTheDecodeSteps"
       ],
       "journeys": [],
       "evidence": [],
