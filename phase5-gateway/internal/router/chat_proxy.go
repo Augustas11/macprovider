@@ -586,9 +586,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil && decision.Admitted {
@@ -597,9 +596,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Belt-and-suspenders: if the store returned an unexpected error but the
 	// decision already shows quota exceeded, surface 429 rather than 500.
 	if err != nil && !decision.Admitted && decision.RemainingTokens == 0 && decision.LimitTokens > 0 {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil {
@@ -622,7 +620,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          walletSessionAdmissionAuditReason(err),
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 		// Defensive cleanup: if the reservation INSERT committed before the
@@ -834,7 +832,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          "dispatch_fence",
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 	}
@@ -2194,6 +2192,29 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			slog.Warn("anthropic stream finalization buyer write failed", "request_id", requestID(r), "error", adapter.writeErr)
 			poisonDedupeCapture(w)
 			settleCancelled()
+			return
+		}
+	}
+	// #2360: a Responses stream that closed with neither [DONE] nor a
+	// finish_reason is truncated. Fail it, settle it as
+	// invalid_provider_response and keep it out of the dedupe cache, as the
+	// Messages branch above does.
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamTerminal {
+		adapter.drainPendingStreamLine()
+		if adapter.emitTruncatedStreamFailed() {
+			if sw, ok := unwrapStatusWriter(w); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+				sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			if adapter.writeErr != nil {
+				slog.Warn("responses stream truncated-response write failed", "request_id", requestID(r), "error", adapter.writeErr)
+				settleCancelled()
+				return
+			}
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
 			return
 		}
 	}

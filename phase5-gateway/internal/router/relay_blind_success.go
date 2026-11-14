@@ -349,7 +349,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		if sessionAuth != nil {
 			s.writeWalletAdmissionError(w, err, walletDecision)
 		} else if errors.Is(err, storage.ErrQuotaExceeded) {
-			writeError(w, 429, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+			writeQuotaExhausted(w, decision)
 		} else {
 			writeError(w, 409, "invalid_request_error", "duplicate_request_id", "Request cannot reserve quota")
 		}
