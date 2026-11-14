@@ -17,11 +17,12 @@ import Foundation
 // a turn includes the drain of the work it queued (the arbiter's), so a
 // pipelined serial loop pays for its own queued step.
 //
-// While another participant is active, the arbiter sizes this participant's
-// prefill chunks to about `prefill_chunk_ms` of GPU time (measured rate, at
-// least `prefill_min_tokens`), so a decoding sibling waits about one step per
-// chunk instead of a whole 1.2 s chunk. `prefill_chunk_ms=0` keeps full-size
-// chunks; the repayment rule then still holds the prefill share, because a
+// With `prefill_chunk_ms` > 0 (default 0: off, see
+// `GPUTurnPolicyDefaults.prefillChunkTargetMilliseconds`) and another
+// participant active, the arbiter sizes this participant's prefill chunks to
+// about that much GPU time (measured rate, at least `prefill_min_tokens`), so a
+// decoding sibling waits about one step per chunk instead of a whole 1.2 s
+// chunk. `prefill_chunk_ms=0` keeps full-size chunks; the repayment rule then still holds the prefill share, because a
 // prefill quantum is no longer capped at `window_ms`.
 //
 // The arbiter state has no busy counter for a sliding window and no start time
@@ -45,7 +46,7 @@ struct FairShareGPUTurnPolicy: GPUTurnPolicy {
 
     static let factory = GPUTurnPolicyFactory(
         name: name,
-        summary: "Equal GPU busy time per contender with exclusive turns; prefill chunks sized to a target while a sibling is active and repaid with decode time (window_ms=500, tolerance_ms=30, prefill_share=0.5, stall_ms=10000, prefill_chunk_ms=150 [0 = full chunks], prefill_min_tokens=256)."
+        summary: "Equal GPU busy time per contender with exclusive turns; prefill repaid with decode time (window_ms=500, tolerance_ms=30, prefill_share=0.5, stall_ms=10000, prefill_chunk_ms=0 [0 = full chunks; >0 sizes chunks to that many ms while a sibling is active], prefill_min_tokens=256)."
     ) { parameters in
         var rest = parameters
         let window = try GPUTurnPolicyParameters.milliseconds(&rest, "window_ms", policy: name, default: defaultWindowMilliseconds)

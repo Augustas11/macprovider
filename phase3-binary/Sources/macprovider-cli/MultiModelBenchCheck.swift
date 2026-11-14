@@ -34,7 +34,7 @@ import MacProviderCore
 /// Tokens are placed on chunk arrival times in order: exact when chunks
 /// equal completion tokens, proportional otherwise (recorded per phase).
 ///
-/// stdout ends with `GATE pass|fail ...` then `GOAL share=...`. Exit codes:
+/// stdout ends with `GATE pass|fail ...` then `GOAL policy=<spec> share=...`. Exit codes:
 /// 0 pass, 2 gate fail, 3 hang, 1 when the check cannot run.
 ///
 /// Policies: without `--gpu-turn-policies` every phase runs under the one
@@ -42,7 +42,8 @@ import MacProviderCore
 /// reference phases run once under passthrough. Either way each policy then
 /// runs its own contended phase and, with `--soak-seconds`, its own soak, and
 /// prints one `POLICY` line (contended numbers) and one `SOAK` line; the
-/// final `GATE`/`GOAL` lines are the last policy's. GOAL uses the soak when
+/// final `GATE` line is the aggregate of every policy (fail names each failed
+/// policy and its first reason) and `GOAL` is the first listed policy's. GOAL uses the soak when
 /// one ran (a 60 s window is alignment-sensitive), else the contended phase.
 /// Exit 2 when any policy fails its gate.
 ///
@@ -57,11 +58,17 @@ import MacProviderCore
 /// Watchdog: per model (`MultiModelCheckWatchdog`); exit 3 names the model.
 enum MultiModelCheck {
     static let rampSeconds: Double = 10
+    /// Shorter phases read about 7% high and cannot complete a 1024-token main request.
+    static let minimumPhaseSeconds: Double = 120
     static let minimumOverlap = 0.95
     /// Upper bound on waiting for serve's CB self-check decision at load.
     static let selfCheckBoundSeconds: Double = 1800
     static let promptsPerModel = 8
     static let schema = "macprovider.multi-model-bench.check.v2"
+    /// Lab #2338 evalLock experiment (scratchpad/evallock/): one MLX stream per
+    /// lane and per blocking inference. Default off.
+    static let labStreamPerRuntime =
+        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_MLX_STREAM_PER_RUNTIME"] == "1"
 
     static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
 
@@ -165,6 +172,8 @@ extension MultiModelBenchCommand {
             throw ExitCode(1)
         }
         GPUTurnArbiter.shared.setPolicy(gpuTurnSelection.policy)
+        let labEnv = ProcessInfo.processInfo.environment
+        MultiModelBenchCommand.log("lab_mlx stream_per_runtime=\(MultiModelCheck.labStreamPerRuntime) eval_wait_unlocked=\(labEnv["MLX_SWIFT_LAB_EVAL_WAIT_UNLOCKED"] ?? "unset") max_ops_per_buffer=\(labEnv["MLX_MAX_OPS_PER_BUFFER"] ?? "unset") max_mb_per_buffer=\(labEnv["MLX_MAX_MB_PER_BUFFER"] ?? "unset")")
         MultiModelBenchCommand.log("gpu_turn_policy name=\(gpuTurnSelection.policy.name) parameters=\(gpuTurnSelection.policy.parameters.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")) source=\(gpuTurnSelection.source)")
         let config = MultiModelCheckConfig(
             modelA: modelA,
@@ -331,9 +340,12 @@ struct MultiModelCheckRunner: Sendable {
     ) async throws {
         let sharedPhases = box.snapshot().phases
         let listed = config.gpuTurnPolicies != nil
-        var anyFailed = false
-        var lastGateLine = ""
-        var lastGoalLine = ""
+        var gateResults: [(spec: String, gate: MultiModelCheckGate)] = []
+        var parityChecked = 0
+        var parityMismatches: [MultiModelCheckMismatch] = []
+        // GOAL is the first listed policy's (the baseline).
+        var baselineGoal: MultiModelCheckGoal?
+        var goalLine = ""
         for (index, entry) in policies.enumerated() {
             let policy = entry.policy
             GPUTurnArbiter.shared.setPolicy(policy)
@@ -405,11 +417,11 @@ struct MultiModelCheckRunner: Sendable {
                 outcome.line = "GATE fail reason=\(first)\(more)"
             }
             let pass = outcome.reasons.isEmpty
-            if !pass { anyFailed = true }
             let waits = Self.waits(contended)
+            let wired = Self.footprintOverWired(phases: sharedPhases + policyPhases)
             let contendedMetrics = MultiModelCheckGoal.metrics(contendedGoal?.goal, measured: contended)
             let gatePart = String(outcome.line.dropFirst("GATE ".count))
-            let line = "POLICY \(entry.spec) \(gatePart) \(contendedMetrics) a_wait_s=\(MultiModelCheckGoal.fmt(waits["a"], "%.3f")) b_wait_s=\(MultiModelCheckGoal.fmt(waits["b"], "%.3f"))"
+            let line = "POLICY \(entry.spec) \(gatePart) \(contendedMetrics) a_wait_s=\(MultiModelCheckGoal.fmt(waits["a"], "%.3f")) b_wait_s=\(MultiModelCheckGoal.fmt(waits["b"], "%.3f")) wired_limit_bytes=\(wired.wiredLimitBytes.map(String.init) ?? "n/a") footprint_over_wired_bytes=\(wired.overBytes.map(String.init) ?? "n/a")"
             var soakLine: String?
             if config.soakSeconds > 0 {
                 let soakWaits = Self.waits(soak)
@@ -432,6 +444,8 @@ struct MultiModelCheckRunner: Sendable {
                 workerTtftMsMedian: contended?.b?.ttftMsMedian,
                 aWaitSeconds: waits["a"],
                 bWaitSeconds: waits["b"],
+                wiredLimitBytes: wired.wiredLimitBytes,
+                footprintOverWiredBytes: wired.overBytes,
                 parityChecked: outcome.checked,
                 parityMismatches: outcome.mismatches,
                 gpuTurns: policyPhases.compactMap(\.gpuTurns),
@@ -446,23 +460,64 @@ struct MultiModelCheckRunner: Sendable {
             box.emit(line)
             if let soakLine { box.emit(soakLine) }
             box.write()
-            lastGateLine = outcome.line
-            lastGoalLine = goal?.line ?? "GOAL unavailable reason=\(outcome.reasons.first { $0.hasPrefix("goal_unavailable") } ?? "see_json")"
-            if index == policies.count - 1 {
-                box.update { report in
-                    report.parityChecked = outcome.checked
-                    report.parityMismatches = outcome.mismatches
-                    report.gate = result.gate
-                    report.goal = goal
-                }
+            gateResults.append((entry.spec, result.gate))
+            parityChecked += outcome.checked
+            parityMismatches += outcome.mismatches
+            if index == 0 {
+                baselineGoal = goal
+                goalLine = Self.goalLine(spec: entry.spec, goal: goal, reasons: outcome.reasons)
             }
         }
+        // The final GATE and the top-level JSON gate cover every policy; GOAL
+        // is the baseline's. Exit 2 when any policy failed.
+        let aggregate = Self.aggregateGate(gateResults)
         await recordRuntimeEnds(lanes.runtimes)
-        box.update { $0.complete = true }
-        box.emit(lastGateLine)
-        box.emit(lastGoalLine)
+        box.update { report in
+            report.parityChecked = parityChecked
+            report.parityMismatches = parityMismatches
+            report.gate = aggregate
+            report.goal = baselineGoal
+            report.complete = true
+        }
+        box.emit(aggregate.line)
+        box.emit(goalLine)
         box.write()
-        if anyFailed { throw ExitCode(2) }
+        if !aggregate.pass { throw ExitCode(2) }
+    }
+
+    /// Pure. `GATE pass`, or a fail naming every failed policy and its first
+    /// reason; the first failed policy's reason leads the line.
+    static func aggregateGate(_ results: [(spec: String, gate: MultiModelCheckGate)]) -> MultiModelCheckGate {
+        let failed = results.filter { !$0.gate.pass }
+        guard let lead = failed.first else {
+            return MultiModelCheckGate(pass: true, reasons: [], line: "GATE pass")
+        }
+        func first(_ gate: MultiModelCheckGate) -> String { gate.reasons.first ?? "unspecified" }
+        var line = "GATE fail policies=\(failed.map(\.spec).joined(separator: "|")) reason=\(first(lead.gate))"
+        for other in failed.dropFirst() { line += " other_policy=\(other.spec) other_reason=\(first(other.gate))" }
+        let reasons = failed.flatMap { entry in entry.gate.reasons.map { "policy=\(entry.spec) \($0)" } }
+        return MultiModelCheckGate(pass: false, reasons: reasons, line: line)
+    }
+
+    /// Pure. The GOAL line names the policy it measured.
+    static func goalLine(spec: String, goal: MultiModelCheckGoal?, reasons: [String]) -> String {
+        if let goal { return "GOAL policy=\(spec) " + String(goal.line.dropFirst("GOAL ".count)) }
+        return "GOAL policy=\(spec) unavailable reason=\(reasons.first { $0.hasPrefix("goal_unavailable") } ?? "see_json")"
+    }
+
+    /// Pure, information only (never a failing condition): the wired limit and
+    /// the largest process footprint above it across the phases.
+    static func footprintOverWired(phases: [MultiModelCheckPhaseResult]) -> (wiredLimitBytes: Int?, overBytes: Int?) {
+        var wired: Int?
+        var over: Int?
+        for phase in phases {
+            guard let limit = phase.memoryBudget?.wiredLimitBytes, limit > 0 else { continue }
+            wired = limit
+            guard let footprint = phase.physFootprintMaxBytes else { continue }
+            let excess = footprint > UInt64(limit) ? Int(footprint - UInt64(limit)) : 0
+            over = max(over ?? 0, excess)
+        }
+        return (wired, over)
     }
 
     /// Arbiter wait seconds per slot over one phase.
@@ -690,7 +745,14 @@ struct MultiModelCheckRunner: Sendable {
                     for lane in 0..<count {
                         let offset = (lane * lanes.promptCount) / count
                         group.addTask {
-                            try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
+                            // Lab #2338: each lane, and the scheduler tasks it
+                            // starts, on its own MLX stream (own command queue).
+                            if MultiModelCheck.labStreamPerRuntime {
+                                return try await MLX.Stream.withNewDefaultStream {
+                                    try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
+                                }
+                            }
+                            return try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
                         }
                     }
                 }
@@ -1666,6 +1728,9 @@ struct MultiModelCheckPolicyResult: Encodable, Sendable {
     var workerTtftMsMedian: Double?
     var aWaitSeconds: Double?
     var bWaitSeconds: Double?
+    /// Information only: the wired limit and the largest footprint above it.
+    var wiredLimitBytes: Int?
+    var footprintOverWiredBytes: Int?
     var parityChecked = 0
     var parityMismatches: [MultiModelCheckMismatch] = []
     var gpuTurns: [MultiModelCheckGPUTurnStats] = []
@@ -1935,8 +2000,21 @@ struct MultiModelCheckTTFT: Encodable, Sendable, Equatable {
     let n: Int
     let medianMs: Double?
     let p95Ms: Double?
+    /// TTFT of the phase's first request, kept out of n/median/p95: it starts
+    /// at t=0 together with the sibling's first request and collides with its
+    /// prefill, which steady state never does.
+    let firstMs: Double?
 
-    init(_ values: [Double]) {
+    /// First request (earliest start) reported alone; n/median/p95 over the rest.
+    init(records: [MultiModelCheckRequestRecord]) {
+        let ordered = records.sorted { $0.startSeconds < $1.startSeconds }
+        self.init(rest: ordered.dropFirst().compactMap(\.ttftMilliseconds), first: ordered.first?.ttftMilliseconds)
+    }
+
+    init(_ values: [Double]) { self.init(rest: values, first: nil) }
+
+    private init(rest values: [Double], first: Double?) {
+        firstMs = first
         let sorted = values.sorted()
         n = sorted.count
         medianMs = MultiModelBenchModelStats.median(sorted)
@@ -1985,7 +2063,7 @@ struct MultiModelCheckModelPhaseStats: Encodable, Sendable {
         let rates = MultiModelCheckWork.soloRates(decodeTokens: tokensInInterval, prefillTokens: prefill.tokens, prefillSeconds: prefill.seconds, intervalSeconds: intervalSeconds)
         decodeOnlyTokensPerSecond = rates.decode
         prefillTokensPerSecond = rates.prefill
-        ttft = MultiModelCheckTTFT(records.compactMap(\.ttftMilliseconds))
+        ttft = MultiModelCheckTTFT(records: records)
         ttftMsMedian = ttft.medianMs
         ttftMsP95 = ttft.p95Ms
         tokenChunkMapping = records.allSatisfy { $0.chunkOffsetsSeconds.count == $0.completionTokens } ? "exact" : "proportional"
@@ -2108,7 +2186,10 @@ struct MultiModelCheckGoal: Encodable, Sendable {
     static func fmt(_ value: Double?, _ format: String) -> String { value.map { String(format: format, $0) } ?? "n/a" }
 
     static func ttftFields(_ label: String, _ ttft: MultiModelCheckTTFT?) -> String {
-        "\(label)_ttft_n=\(ttft?.n ?? 0) \(label)_ttft_ms=\(fmt(ttft?.medianMs, "%.0f")) \(label)_ttft_p95_ms=\(fmt(ttft?.p95Ms, "%.0f"))"
+        let first = "\(label)_ttft_first_ms=\(fmt(ttft?.firstMs, "%.0f"))"
+        // No request after the first: n=0 and no median rather than a misleading one.
+        guard let ttft, ttft.n > 0 else { return "\(label)_ttft_n=0 \(first)" }
+        return "\(label)_ttft_n=\(ttft.n) \(label)_ttft_ms=\(fmt(ttft.medianMs, "%.0f")) \(label)_ttft_p95_ms=\(fmt(ttft.p95Ms, "%.0f")) \(first)"
     }
 
     /// The metric fields of POLICY, SOAK and GOAL lines; starts `share=`.

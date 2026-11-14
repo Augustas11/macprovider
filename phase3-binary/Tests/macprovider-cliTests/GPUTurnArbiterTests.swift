@@ -556,7 +556,7 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertEqual(p1.prefillChunkTokens(fullSize: fullSize), fullSize)
 
         let arbiter = GPUTurnArbiter(
-            policy: FairShareGPUTurnPolicy(), clock: { clock.now() }, drainQueuedWork: { clock.advance(7_000_000) })
+            policy: FairShareGPUTurnPolicy(prefillTargetMilliseconds: 150), clock: { clock.now() }, drainQueuedWork: { clock.advance(7_000_000) })
         let a = arbiter.register(modelID: "a")
         let b = arbiter.register(modelID: "b")
         a.beginWork()
@@ -576,8 +576,10 @@ final class GPUTurnArbiterTests: XCTestCase {
         arbiter.setPolicy(FairShareGPUTurnPolicy(prefillTargetMilliseconds: 0))
         b.beginWork()
         XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize)
-        // Single participant left: the hint is the full size again.
+        // The default policy never shrinks chunks (the hint is off).
         arbiter.setPolicy(FairShareGPUTurnPolicy())
+        XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize)
+        // Single participant left: the hint is the full size again.
         arbiter.unregister(b)
         XCTAssertEqual(a.prefillChunkTokens(fullSize: fullSize), fullSize)
     }

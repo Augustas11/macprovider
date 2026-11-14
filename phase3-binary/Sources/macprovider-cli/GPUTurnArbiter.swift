@@ -213,9 +213,12 @@ enum GPUTurnPolicyDefaults {
     /// Real turns on the M3 Ultra: decode steps 26-75 ms, prefill chunks about
     /// 1.2 s; a turn ten seconds long is a hang, not work.
     static let stallMilliseconds: UInt64 = 10_000
-    /// About one sibling decode step (59-75 ms for a 2-row 27B worker) plus
-    /// headroom, so a decoding sibling waits at most about this long per chunk.
-    static let prefillChunkTargetMilliseconds: UInt64 = 150
+    /// 0 = full-size chunks, the hint is off. Measured: a 150 ms target
+    /// shortened GLM's prefill chunks and changed its greedy output (token-id
+    /// mismatch against the unchunked reference). A lab run may still set
+    /// `prefill_chunk_ms`; about one sibling decode step (59-75 ms for a 2-row
+    /// 27B worker) plus headroom is the value that was tried.
+    static let prefillChunkTargetMilliseconds: UInt64 = 0
     static let prefillChunkMinimumTokens = 256
 }
 

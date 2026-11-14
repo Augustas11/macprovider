@@ -210,7 +210,9 @@ private struct MaxWaitFallbackTestPolicy: GPUTurnPolicy {
 }
 
 final class GPUTurnPolicyFairShareTests: XCTestCase {
-    private let policy = FairShareGPUTurnPolicy()
+    /// The prefill chunk hint is off by default (it changed GLM's greedy
+    /// output); these simulations exercise it explicitly at 150 ms.
+    private let policy = FairShareGPUTurnPolicy(prefillTargetMilliseconds: 150)
     /// Real prefill chunk on the M3 Ultra: 8192 tokens in about 1.2 s.
     private let realChunk = SimPrompt(tokens: 8192 * 6, fullChunk: 8192, nanosecondsPerToken: 1.2e9 / 8192)
 
@@ -448,10 +450,11 @@ final class GPUTurnPolicyFairShareTests: XCTestCase {
         XCTAssertFalse(defaults.alwaysProceeds)
         XCTAssertEqual(defaults.parameters, [
             "window_ms": "500", "tolerance_ms": "30", "prefill_share": "0.5",
-            "stall_ms": "10000", "prefill_chunk_ms": "150", "prefill_min_tokens": "256",
+            "stall_ms": "10000", "prefill_chunk_ms": "0", "prefill_min_tokens": "256",
         ])
         XCTAssertEqual(defaults.stallNanoseconds, 10_000 * ms)
-        XCTAssertEqual(defaults.prefillChunkTargetNanoseconds, 150 * ms)
+        XCTAssertNil(defaults.prefillChunkTargetNanoseconds, "hint off by default")
+        XCTAssertEqual(try GPUTurnPolicyRegistry.make("fairshare:prefill_chunk_ms=150").prefillChunkTargetNanoseconds, 150 * ms)
         XCTAssertEqual(defaults.prefillChunkMinimumTokens, 256)
         let custom = try GPUTurnPolicyRegistry.make(
             "fairshare:window_ms=800,tolerance_ms=10,prefill_share=0.25,stall_ms=4000,prefill_chunk_ms=500,prefill_min_tokens=512")

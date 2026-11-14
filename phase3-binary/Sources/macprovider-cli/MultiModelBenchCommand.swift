@@ -90,8 +90,11 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("max-tokens-b"), help: "--check: max_tokens per model B request. Default 256.")
     var maxTokensB: Int = 256
 
-    @Option(name: .customLong("phase-seconds"), help: "--check: duration of solo-a, solo-b and contended. Must exceed the 10 s ramp. Default 60.")
-    var phaseSeconds: Double = 60
+    @Option(name: .customLong("phase-seconds"), help: "--check: duration of solo-a, solo-b and contended. Must exceed the 10 s ramp and be at least 120 unless --allow-short-phases (60 s phases read about 7% high and cannot complete a 1024-token main request). Default 120.")
+    var phaseSeconds: Double = 120
+
+    @Flag(name: .customLong("allow-short-phases"), help: "--check: accept --phase-seconds below 120 (smoke runs only; the numbers are not comparable).")
+    var allowShortPhases = false
 
     @Option(name: .customLong("soak-seconds"), help: "--check: contended soak after each policy's contended phase, printed as a SOAK line; when it runs, GOAL uses the soak numbers. 0 skips it. Default 0.")
     var soakSeconds: Double = 0
@@ -120,7 +123,7 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in passthrough. Recorded in the check JSON.")
     var gpuTurnPolicy: String?
 
-    @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase and, with --soak-seconds, its own soak. Prints one POLICY (and SOAK) line per policy; the final GATE/GOAL lines are the last policy's.")
+    @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase and, with --soak-seconds, its own soak. Prints one POLICY (and SOAK) line per policy; the final GATE line fails if any policy failed and GOAL is the first policy's.")
     var gpuTurnPolicies: String?
 
     /// `--gpu-turn-policies` split into trimmed, validated specs.
@@ -158,6 +161,9 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
             guard maxTokensA > 0, maxTokensB > 0 else { throw ValidationError("--max-tokens-a and --max-tokens-b must be > 0") }
             guard phaseSeconds > MultiModelCheck.rampSeconds else {
                 throw ValidationError("--phase-seconds must exceed the \(Int(MultiModelCheck.rampSeconds)) s ramp")
+            }
+            guard allowShortPhases || phaseSeconds >= MultiModelCheck.minimumPhaseSeconds else {
+                throw ValidationError("--phase-seconds must be at least \(Int(MultiModelCheck.minimumPhaseSeconds)) (pass --allow-short-phases for a smoke run)")
             }
             for (flag, value) in [("--cb-a", cbA), ("--cb-b", cbB)] where ContinuousBatchingMode(rawValue: value) == nil {
                 throw ValidationError("\(flag) must be off, canary or on")

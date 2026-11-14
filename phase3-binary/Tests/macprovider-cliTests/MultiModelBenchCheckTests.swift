@@ -151,7 +151,7 @@ final class MultiModelBenchCheckTests: XCTestCase {
         XCTAssertEqual(goal.source, "soak")
         XCTAssertTrue(goal.line.hasPrefix("GOAL share=1.0000 "), goal.line)
         XCTAssertTrue(goal.line.contains(" work_share=2.0000 "), goal.line)
-        XCTAssertTrue(goal.line.contains(" main_solo_ttft_n=2 "), goal.line)
+        XCTAssertTrue(goal.line.contains(" main_solo_ttft_n=1 "), goal.line)
         XCTAssertTrue(goal.line.contains(" source=soak "), goal.line)
     }
 
@@ -254,6 +254,88 @@ final class MultiModelBenchCheckTests: XCTestCase {
         XCTAssertEqual(empty.n, 0)
         XCTAssertNil(empty.medianMs)
         XCTAssertNil(empty.p95Ms)
+    }
+
+    func testTTFTReportsFirstRequestSeparately() {
+        // Earliest start is the first request, wherever it sits in the array.
+        let ttft = MultiModelCheckTTFT(records: [
+            record(start: 20, end: 30, chunks: [20.2]),
+            record(start: 0, end: 10, chunks: [3]),
+            record(start: 40, end: 50, chunks: [40.4]),
+        ])
+        XCTAssertEqual(ttft.firstMs ?? 0, 3000, accuracy: 1e-6)
+        XCTAssertEqual(ttft.n, 2)
+        XCTAssertEqual(ttft.medianMs ?? 0, 300, accuracy: 1e-6)
+        XCTAssertEqual(ttft.p95Ms ?? 0, 400, accuracy: 1e-6)
+
+        let only = MultiModelCheckTTFT(records: [record(start: 0, end: 10, chunks: [3])])
+        XCTAssertEqual(only.n, 0)
+        XCTAssertNil(only.medianMs)
+        XCTAssertEqual(only.firstMs ?? 0, 3000, accuracy: 1e-6)
+        let line = MultiModelCheckGoal.ttftFields("main", only)
+        XCTAssertEqual(line, "main_ttft_n=0 main_ttft_first_ms=3000")
+        XCTAssertTrue(MultiModelCheckGoal.ttftFields("main", ttft).contains(" main_ttft_first_ms=3000"))
+    }
+
+    // MARK: Aggregate gate and GOAL
+
+    private func gate(_ reasons: [String]) -> MultiModelCheckGate {
+        MultiModelCheckGate(pass: reasons.isEmpty, reasons: reasons, line: reasons.isEmpty ? "GATE pass" : "GATE fail reason=\(reasons[0])")
+    }
+
+    func testAggregateGateFailsWhenAnyPolicyFailsNotOnlyTheLast() {
+        let aggregate = MultiModelCheckRunner.aggregateGate([
+            ("fairshare", gate(["output_mismatch phase=contended model=a", "second"])),
+            ("passthrough", gate([])),
+        ])
+        XCTAssertFalse(aggregate.pass)
+        XCTAssertEqual(aggregate.line, "GATE fail policies=fairshare reason=output_mismatch phase=contended model=a")
+        XCTAssertEqual(aggregate.reasons, ["policy=fairshare output_mismatch phase=contended model=a", "policy=fairshare second"])
+
+        let both = MultiModelCheckRunner.aggregateGate([
+            ("fairshare", gate(["output_mismatch"])),
+            ("rr", gate(["hang"])),
+        ])
+        XCTAssertEqual(both.line, "GATE fail policies=fairshare|rr reason=output_mismatch other_policy=rr other_reason=hang")
+
+        let pass = MultiModelCheckRunner.aggregateGate([("a", gate([])), ("b", gate([]))])
+        XCTAssertTrue(pass.pass)
+        XCTAssertEqual(pass.line, "GATE pass")
+    }
+
+    func testGoalLineNamesThePolicy() throws {
+        let solo = soloStats()
+        let goal = try XCTUnwrap(MultiModelCheckRunner.goal(
+            soloA: solo, soloB: solo, measuredPhase: "contended", a: solo, b: solo, intervalSeconds: 50).goal)
+        XCTAssertTrue(MultiModelCheckRunner.goalLine(spec: "passthrough", goal: goal, reasons: []).hasPrefix("GOAL policy=passthrough share=1.0000 "))
+        XCTAssertEqual(
+            MultiModelCheckRunner.goalLine(spec: "passthrough", goal: nil, reasons: ["x", "goal_unavailable no_contended_phase"]),
+            "GOAL policy=passthrough unavailable reason=goal_unavailable no_contended_phase")
+    }
+
+    // MARK: Footprint over the wired limit (information only)
+
+    private func memoryPhase(footprint: UInt64?, wired: Int?) -> MultiModelCheckPhaseResult {
+        var phase = MultiModelCheckPhaseResult(phase: "contended", durationSeconds: 120)
+        phase.physFootprintMaxBytes = footprint
+        phase.memoryBudget = MultiModelCheckMemoryBudgetStats(
+            limitBytes: nil, wiredLimitBytes: wired, cacheLimitBytes: 0, headroomMinBytes: nil,
+            admissionRefusals: 0, rowsAdmittedPastBudget: 0, cacheClearsPerformed: 0, cacheClearsSkipped: 0,
+            commandBufferBudgetSetBy: nil, commandBufferBudgetMb: nil, commandBufferConflicts: [], runtimes: [])
+        return phase
+    }
+
+    func testFootprintOverWiredIsReportedNotGated() {
+        let over = MultiModelCheckRunner.footprintOverWired(phases: [
+            memoryPhase(footprint: 90, wired: 100), memoryPhase(footprint: 130, wired: 100),
+        ])
+        XCTAssertEqual(over.wiredLimitBytes, 100)
+        XCTAssertEqual(over.overBytes, 30)
+        let under = MultiModelCheckRunner.footprintOverWired(phases: [memoryPhase(footprint: 90, wired: 100)])
+        XCTAssertEqual(under.overBytes, 0)
+        let none = MultiModelCheckRunner.footprintOverWired(phases: [memoryPhase(footprint: 90, wired: nil)])
+        XCTAssertNil(none.wiredLimitBytes)
+        XCTAssertNil(none.overBytes)
     }
 
     // MARK: Build SHA
