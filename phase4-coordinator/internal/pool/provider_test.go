@@ -3632,3 +3632,22 @@ func TestAtCapacitySeparatesFullFromFaults(t *testing.T) {
 		t.Errorf("routable provider must be in service")
 	}
 }
+
+// #2371 re-check: a shard member under a thermal hold is still in service.
+func TestShardMemberInServiceIgnoresCapacityHolds(t *testing.T) {
+	member := Provider{State: StateBusy, SlotsFree: 0, SlotsTotal: 1, ShardMemberV1: true, capacitySafetyHold: true}
+	if !member.ShardMemberInService() {
+		t.Fatal("a thermally held member must be in service")
+	}
+	if member.ShardMemberAdmissible() {
+		t.Fatal("ShardMemberAdmissible keeps the hold for group availability")
+	}
+	suspended := member
+	suspended.ComputeIntegritySuspended = true
+	if suspended.ShardMemberInService() {
+		t.Fatal("a suspended member is not in service")
+	}
+	if (Provider{State: StateReady, SlotsTotal: 1}).ShardMemberInService() {
+		t.Fatal("a non-member is not a member in service")
+	}
+}

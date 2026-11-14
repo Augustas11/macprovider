@@ -1863,6 +1863,20 @@ func TestHealthzReportsInjectedVersion(t *testing.T) {
 	}
 }
 
+// #2371: /v1/pool/check reports a busy provider as busy, not degraded.
+func TestPoolCheckReportsBusyNotDegraded(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.3:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte(`"state":"busy"`)) {
+		t.Fatalf("status=%d body=%s, want state busy", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)

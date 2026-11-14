@@ -859,6 +859,18 @@ func (p Provider) AtCapacity() bool {
 	return p.RoutingEligible()
 }
 
+// ShardMemberInService reports a SPEC-051 member session that passes every
+// member gate apart from capacity, as AtCapacity does for a routable session:
+// a thermal or queue-full hold does not make a member unhealthy.
+func (p Provider) ShardMemberInService() bool {
+	if !p.ShardMemberV1 {
+		return false
+	}
+	p.capacitySafetyHold = false
+	p.queueFullHold = false
+	return p.shardMemberAdmissible()
+}
+
 // InService is the one definition of a provider serving buyers for public
 // health surfaces (#2371): routable now, or at capacity. A busy provider is in
 // service; free capacity is reported separately. Buyer routing keeps

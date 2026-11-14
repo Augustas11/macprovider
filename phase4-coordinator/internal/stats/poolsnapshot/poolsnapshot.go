@@ -388,7 +388,7 @@ func publicProviderState(prov pool.Provider, serving, inAvailableShardGroup bool
 		return "unknown"
 	case prov.InService():
 		return "online"
-	case prov.ShardMemberV1 && inAvailableShardGroup && prov.ShardMemberAdmissible():
+	case inAvailableShardGroup && prov.ShardMemberInService():
 		// A member never routes on its own (SPEC-051-R016); it is healthy
 		// while its group is available.
 		return "online"

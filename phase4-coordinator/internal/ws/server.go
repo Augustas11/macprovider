@@ -7743,7 +7743,11 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 				resp.PoolPolicyReady++
 			}
 		case pool.StateBusy:
-			resp.PoolBusy++
+			if p.InService() {
+				resp.PoolBusy++
+			} else {
+				resp.PoolDegraded++
+			}
 		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:

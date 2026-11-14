@@ -1340,6 +1340,11 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	// servingProviders counts providers in service, including one that is
 	// busy with every slot in flight (routing_eligible false, #2371).
 	servingProviders := 0
+	// faulted holds, per model, rows that are neither routable nor in service
+	// because they are unavailable, draining or degraded. They never list a
+	// model or count in an exposed field; they only let FR-B1's "fewer than
+	// half in service" see the model's real provider total.
+	faulted := map[string]poolzModelStats{}
 	for _, p := range poolz.Pool {
 		inService := poolzProviderInService(p)
 		if inService {
@@ -1367,6 +1372,14 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		// provider in service but full still counts (#2371).
 		routable := poolzProviderCountsTowardBuyerCapacity(p)
 		if !routable && !inService {
+			if p.ModelID != "" && poolzProviderFaulted(p) {
+				f := faulted[p.ModelID]
+				f.TotalProviders++
+				if p.State == "unavailable" || p.State == "draining" {
+					f.UnavailableOrDraining++
+				}
+				faulted[p.ModelID] = f
+			}
 			continue
 		}
 		out.Pool.TotalProviders++
@@ -1389,8 +1402,12 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		m.ID = p.ModelID
 		m.ProviderCount++
 		m.TotalSlots += p.SlotsTotal
-		m.SlotsFree += p.SlotsFree
-		if p.State == "ready" {
+		// Free slots and the ready capacity the OpenRouter document reads
+		// come only from routable rows: a held provider's slots are not free.
+		if routable {
+			m.SlotsFree += p.SlotsFree
+		}
+		if p.State == "ready" && routable {
 			m.ReadyProviderCount++
 			m.ReadySlotsTotal += p.SlotsTotal
 			m.ReadySlotsFree += p.SlotsFree
@@ -1438,6 +1455,15 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		if poolz.Summary.InService != nil && *poolz.Summary.InService > servingProviders {
 			servingProviders = *poolz.Summary.InService
 		}
+		// The summary carries ready and in_service only: busy is the in-service
+		// remainder and the rest is unavailable, so the five counters still sum
+		// to total_providers (SPEC-006 §5.6).
+		if busy := servingProviders - out.Pool.Ready; busy > 0 {
+			out.Pool.Busy = busy
+		}
+		if rest := out.Pool.TotalProviders - out.Pool.Ready - out.Pool.Busy; rest > 0 {
+			out.Pool.Unavailable = rest
+		}
 	}
 	// SPEC-006 §5.6: idle and degraded are decided by serving providers, so
 	// a pool whose providers are all busy serving is up, not idle or degraded.
@@ -1461,12 +1487,29 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	}
 	for _, model := range models {
 		model.ToolChoiceModes = out.ServingToolChoiceModes[model.ID]
+		st := stats[model.ID]
+		if f, ok := faulted[model.ID]; ok {
+			st.TotalProviders += f.TotalProviders
+			st.UnavailableOrDraining += f.UnavailableOrDraining
+			stats[model.ID] = st
+		}
 		model.Degraded = computeDegraded(stats[model.ID])
 		model.Available, model.Availability = computeAvailability(stats[model.ID])
 		out.Models = append(out.Models, model)
 	}
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ID < out.Models[j].ID })
 	return out
+}
+
+// poolzProviderFaulted reports a row excluded from buyer capacity because of
+// its own state (unavailable, draining, degraded), not because its session
+// failed credential trust; the latter never counts toward a model (FR-C9.4).
+func poolzProviderFaulted(p poolzProviderRow) bool {
+	switch p.AuthState {
+	case authStateBearerlessDuplicate, authStateSelfMinted, authStateMintFailed:
+		return false
+	}
+	return p.State == "unavailable" || p.State == "draining" || p.State == "degraded"
 }
 
 // poolzProviderInService reports a ready or busy row the coordinator marks

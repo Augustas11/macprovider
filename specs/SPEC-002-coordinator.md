@@ -12,8 +12,10 @@ FR-B1 per-model `degraded` counts providers in service and drops the "all
 predicate under the same public gates as `routing_eligible`) and the summary
 gains `in_service`; `serving_eligible` keeps its v1.6.17 meaning because the
 gateway's served-context grant and decode-idle timeout read it. FR-O1
-`/healthz` on both ports adds `pool_busy`; `pool_degraded` counts only the
-pool `degraded` state.
+`/healthz` on both ports adds `pool_busy` (state `busy` and in service); a busy
+provider that is not in service counts in `pool_degraded`, with the pool
+`degraded` state. `GET /v1/pool/check` reports `busy` as `busy`, no longer
+as `degraded`.
 
 **Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
 `tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
@@ -2416,8 +2418,9 @@ match buyer trust requirements to provider attestation levels.
 }
 ```
 
-`pool_busy` counts providers in state `busy` (serving); `pool_degraded`
-counts only providers in state `degraded` (v1.6.35).
+`pool_busy` counts providers in state `busy` that are in service (FR-B1);
+`pool_degraded` counts providers in state `degraded` and busy providers that
+are not in service, such as a compute-integrity suspension (v1.6.35).
 
 Returns HTTP 200 if the coordinator is running. Returns HTTP 503 if
 the coordinator is draining (SIGTERM received).
@@ -3658,8 +3661,9 @@ not a buyer API surface.
 ```
 
 `tier` MUST be `"pinned"`, `"trusted"`, or `"provisional"`. `state`
-MUST be one of `"ready"`, `"draining"`, `"unavailable"`, or
-`"unknown"`.
+MUST be one of `"ready"`, `"busy"`, `"degraded"`, `"draining"`,
+`"unavailable"`, or `"unknown"`. `busy` is a provider serving with no free
+slot; it is reported as `busy`, never as `degraded` (v1.6.35).
 
 Unknown providers return the same 200 shape with `"state": "unknown"`.
 

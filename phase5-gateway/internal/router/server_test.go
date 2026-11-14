@@ -1799,6 +1799,41 @@ func TestAggregateStatusPoolCountersSumToTotal(t *testing.T) {
 	}
 }
 
+// #2371 re-check: FR-B1 "fewer than half in service" sees a model's
+// unavailable and draining rows, which still list nothing and count in no
+// exposed field. A held provider's free slot is not reported free.
+func TestAggregateStatusModelDegradedCountsFaultedRows(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"draining","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":false,"in_service":false,"auth_state":"self_minted"},
+			{"model_id":"held","state":"busy","slots_free":1,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"gone","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false}
+		],
+		"summary":{"total_providers":7,"ready":0,"total_slots":9,"free_slots":0}
+	}`), 1, fixedNow())
+
+	byID := map[string]statusModel{}
+	for _, m := range out.Models {
+		byID[m.ID] = m
+	}
+	if m := byID["llama"]; !m.Degraded || m.ProviderCount != 1 {
+		t.Fatalf("llama=%+v, want degraded (1 of 4 in service) with provider_count 1", m)
+	}
+	if m := byID["held"]; m.Degraded || m.SlotsFree != 0 || m.Availability != "no_free_slots" {
+		t.Fatalf("held=%+v, want not degraded, slots_free 0, no_free_slots", m)
+	}
+	if _, ok := byID["gone"]; ok {
+		t.Fatalf("a model with no provider in service must not be listed: %+v", out.Models)
+	}
+	if out.Pool.TotalProviders != 2 || out.Pool.Busy != 2 {
+		t.Fatalf("pool=%+v, want only the two in-service rows counted", out.Pool)
+	}
+}
+
 // #2371: a summary-only payload whose providers are all busy is not idle.
 func TestAggregateStatusSummaryOnlyAllBusyIsNotIdle(t *testing.T) {
 	out := aggregateStatus(decodePoolz(t, `{
@@ -1806,6 +1841,10 @@ func TestAggregateStatusSummaryOnlyAllBusyIsNotIdle(t *testing.T) {
 	}`), 1, fixedNow())
 	if out.Status != "up" || out.Degraded {
 		t.Fatalf("status=%q degraded=%t, want up", out.Status, out.Degraded)
+	}
+	p := out.Pool
+	if p.Busy != 2 || p.Ready+p.Busy+p.Degraded+p.Draining+p.Unavailable != p.TotalProviders {
+		t.Fatalf("pool=%+v, want 2 busy and counters summing to total", p)
 	}
 }
 

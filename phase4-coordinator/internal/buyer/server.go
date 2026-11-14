@@ -1784,8 +1784,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 				resp.PoolReady++
 			}
 		case pool.StateBusy:
-			// A busy provider is serving, not degraded (#2371).
-			resp.PoolBusy++
+			// A busy provider in service is serving, not degraded (#2371); a
+			// busy one that is not (e.g. compute-integrity suspended) is.
+			if p.InService() {
+				resp.PoolBusy++
+			} else {
+				resp.PoolDegraded++
+			}
 		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -1871,10 +1876,9 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// A busy provider is serving with no free slot: report it as busy, not
+	// degraded (#2371).
 	state := p.State
-	if state == pool.StateBusy {
-		state = pool.StateDegraded
-	}
 	s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
 	w.Header().Set("Content-Type", "application/json")
 	response := poolCheckResponse{
