@@ -241,6 +241,20 @@ func (a *responsesAdapter) finish() {
 			a.lineBuf.Reset()
 		}
 		if a.status == http.StatusOK && !a.streamTerminal {
+			// #2360: the upstream closed with neither [DONE] nor a
+			// finish_reason, so the answer is truncated. Report it as
+			// failed, as the Messages adapter does (validateStreamComplete).
+			// Settlement already ran inside handleChatCompletions; this
+			// changes only the client-facing terminal event.
+			if strings.TrimSpace(a.finishReason) == "" {
+				a.emitStreamFailed(&responsesStreamError{
+					Message:   "Upstream provider stream ended without finish_reason",
+					Type:      "api_error",
+					Code:      "invalid_provider_response",
+					Retryable: true,
+				})
+				return
+			}
 			a.emitStreamDone()
 		}
 		return
