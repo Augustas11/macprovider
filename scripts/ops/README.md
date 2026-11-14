@@ -232,6 +232,20 @@ scripts/ops/lib/runner-reserve.sh status
   `targets.json.bak-runner-reserve-<UTC>` next to it, records the reservation
   under `PEARL_RUNNER_RESERVE_DIR` and restarts the runner (its other targets
   keep traffic). Restore writes the backup bytes back and restarts once more.
+- If `targets.json` changed during the reservation (another target added or
+  retired), restore does not write the backup bytes, which would undo that
+  edit. It inserts only the reserved Studio row into the current document,
+  after its nearest surviving predecessor from the backup (else before its
+  nearest surviving successor, else first if it was first, else last). It
+  checks the result with the installed parser, writes it with the recorded
+  mode and restarts once. If the identical row is already present, restore
+  writes nothing and does not restart. The exception is a restore interrupted
+  after its write, which restarts once more. Restore refuses (exit 3, nothing
+  changed) when the backup no longer matches its recorded digest, the current
+  file does not parse or has no `targets` list, the current file holds a
+  different row with the Studio prefix, or the backup holds more than one such
+  row. The JSON result and the log line name the path that ran:
+  `"restore": "bytes" | "row" | "already"`.
 - `with-studio-paused` restores on every exit of the command, on its failure
   and on INT/TERM/HUP. `restore` with nothing outstanding changes nothing. A
   reservation held by another owner is refused, never taken over; a restore

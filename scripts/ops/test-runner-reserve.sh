@@ -186,7 +186,78 @@ run_rc 1 "set-target-model with failing restarts" retarget other/model
 grep -q "did not come back stable" "$T/err" || die "unstable rollback not named"
 rm -f "$T/svc/runner_restart_fail"
 
-# 10. catalog-activate: the ordinary gateway_proof step is blocked without a
+# 10. another target changed during the reservation: restore re-adds only the
+#     Studio row to the current file; conflicts and a changed backup refuse.
+THREE='{"targets": [{"provider_id": "mp-aaa0001", "model": "m/a", "slots": 1}, {"provider_id": "mp-studio01abcdef", "model": "org/old-model", "slots": 8}, {"provider_id": "mp-bbb0001", "model": "m/b", "slots": 2}], "private": 7}'
+three() { reset; printf '%s\n' "$THREE" > "$PEARL_RUNNER_TARGETS"; run_rc 0 "pause ($1)" "$RESERVE" pause-studio; }
+edit_targets() { python3 - "$PEARL_RUNNER_TARGETS" "$1" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+exec(sys.argv[2])
+open(p, "w").write(json.dumps(d) + "\n")
+PY
+}
+ids() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(t["provider_id"] for t in d["targets"]), d.get("private"), d.get("note"))' "$PEARL_RUNNER_TARGETS"; }
+STUDIO_ROW='{"provider_id": "mp-studio01abcdef", "model": "org/old-model", "slots": 8}'
+three "retire a leading row"
+edit_targets 'd["targets"] = [t for t in d["targets"] if t["provider_id"] != "mp-aaa0001"]'
+run_rc 0 "row restore after a third-party row was removed" "$RESERVE" restore
+[ "$(ids)" = "mp-studio01abcdef mp-bbb0001 7 None" ] || die "row restore after removal: $(ids)"
+grep -q '"restore": "row"' "$T/err" && grep -q "row re-added" "$T/err" || die "row restore not reported"
+[ "$(restarts)" = 2 ] && has_studio "$T/svc/runner_loaded.json" || die "row restore did not restart onto the Studio row"
+[ ! -e "$T/reserve/runner-reserve.json" ] || die "row restore left the reservation"
+[ "$(stat -f %Lp "$PEARL_RUNNER_TARGETS" 2>/dev/null || stat -c %a "$PEARL_RUNNER_TARGETS")" = 644 ] || die "row restore changed the file mode"
+three "retire a trailing row"
+edit_targets 'd["targets"] = [t for t in d["targets"] if t["provider_id"] != "mp-bbb0001"]'
+run_rc 0 "row restore after the trailing row was removed" "$RESERVE" restore
+[ "$(ids)" = "mp-aaa0001 mp-studio01abcdef 7 None" ] || die "row restore after trailing removal: $(ids)"
+three "add a row and a key"
+edit_targets 'd["targets"].append({"provider_id": "mp-ccc0001", "model": "m/c", "slots": 1}); d["note"] = "x"'
+run_rc 0 "row restore after a third-party row was added" "$RESERVE" restore
+[ "$(ids)" = "mp-aaa0001 mp-studio01abcdef mp-bbb0001 mp-ccc0001 7 x" ] || die "row restore after addition: $(ids)"
+three "all neighbours gone"
+edit_targets 'd["targets"] = [{"provider_id": "mp-ddd0001", "model": "m/d", "slots": 1}]'
+run_rc 0 "row restore with no surviving neighbour" "$RESERVE" restore
+[ "$(ids)" = "mp-ddd0001 mp-studio01abcdef 7 None" ] || die "row restore without neighbours: $(ids)"
+three "identical row put back by hand"
+edit_targets "d['targets'].insert(1, json.loads('$STUDIO_ROW')); d['note'] = 'y'"
+row_sha="$(targets_sha)"
+run_rc 0 "identical Studio row already present" "$RESERVE" restore
+grep -q '"restore": "already"' "$T/err" || die "already-present row not reported"
+[ "$(targets_sha)" = "$row_sha" ] && [ "$(restarts)" = 1 ] || die "already-present row rewrote or restarted"
+[ ! -e "$T/reserve/runner-reserve.json" ] || die "already-present restore left the reservation"
+three "conflicting Studio row"
+edit_targets 'd["targets"].append({"provider_id": "mp-studio01abcdef", "model": "org/new-model", "slots": 8})'
+conflict_sha="$(targets_sha)"
+run_rc 3 "conflicting Studio row refuses" "$RESERVE" restore
+grep -q "changed during the reservation" "$T/err" || die "conflict refusal message changed"
+[ "$(targets_sha)" = "$conflict_sha" ] && [ -e "$T/reserve/runner-reserve.json" ] || die "conflict refusal changed something"
+grep -q mp-studio01 "$T/err" && die "Studio provider id printed" || true
+three "unparseable targets"
+printf 'not json\n' > "$PEARL_RUNNER_TARGETS"
+run_rc 3 "unparseable targets refuse" "$RESERVE" restore
+[ -e "$T/reserve/runner-reserve.json" ] || die "unparseable refusal dropped the reservation"
+three "tampered backup"
+edit_targets 'd["targets"].pop(0)'
+printf '%s\n' "$THREE " > "$(ls "$T/runner"/targets.json.bak-runner-reserve-*)"
+run_rc 3 "changed backup refuses" "$RESERVE" restore
+grep -q "reservation backup changed" "$T/err" || die "backup refusal not named"
+[ -e "$T/reserve/runner-reserve.json" ] && ! has_studio "$PEARL_RUNNER_TARGETS" || die "backup refusal changed something"
+# Interrupted after the row write and before the state drop (the restart
+# failed): the next restore restarts onto the present row and converges.
+three "interrupted row restore"
+edit_targets 'd["targets"].pop(0)'
+touch "$T/svc/runner_restart_fail"
+run_rc 1 "row restore whose restart fails" "$RESERVE" restore
+has_studio "$PEARL_RUNNER_TARGETS" && grep -q '"phase": "restoring"' "$T/reserve/runner-reserve.json" || die "interrupted row restore state wrong"
+rm -f "$T/svc/runner_restart_fail"
+written_sha="$(targets_sha)"
+run_rc 0 "second restore converges" "$RESERVE" restore
+[ "$(targets_sha)" = "$written_sha" ] && [ "$(ids)" = "mp-studio01abcdef mp-bbb0001 7 None" ] || die "converged restore changed the targets: $(ids)"
+has_studio "$T/svc/runner_loaded.json" && [ ! -e "$T/reserve/runner-reserve.json" ] || die "converged restore did not restart or drop state"
+
+# 11. catalog-activate: the ordinary gateway_proof step is blocked without a
 #     prefix and, with one, is a mutate step that runs the probe under the
 #     reservation and states the runner pause as its downtime.
 CAT="$OPS_DIR/catalog-activate.sh"
