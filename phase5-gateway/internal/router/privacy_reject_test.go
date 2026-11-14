@@ -199,14 +199,15 @@ func TestRelayBlindProviderUnsupportedReachesBuyerAsRetryable(t *testing.T) {
 			if resp.Header().Get("Retry-After") != tc.retryAfter {
 				t.Fatalf("Retry-After %q, want %q", resp.Header().Get("Retry-After"), tc.retryAfter)
 			}
-			if got.Error.Macprovider != nil {
-				want := "do_not_resubmit"
-				if tc.retryable {
-					want = "new_reservation_and_envelope"
-				}
-				if got.Error.Macprovider.RetryAction != want {
-					t.Fatalf("retry_action %q, want %q", got.Error.Macprovider.RetryAction, want)
-				}
+			if got.Error.Macprovider == nil {
+				t.Fatalf("no macprovider metadata: %s", resp.Body.String())
+			}
+			want := "do_not_resubmit"
+			if tc.retryable {
+				want = "new_reservation_and_envelope"
+			}
+			if got.Error.Macprovider.RetryAction != want {
+				t.Fatalf("retry_action %q, want %q", got.Error.Macprovider.RetryAction, want)
 			}
 		})
 	}
