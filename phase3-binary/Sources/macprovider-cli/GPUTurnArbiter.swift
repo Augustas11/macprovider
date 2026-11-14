@@ -200,6 +200,7 @@ struct GPUTurnPolicyFactory: Sendable {
 enum GPUTurnPolicyRegistry {
     static let factories: [GPUTurnPolicyFactory] = [
         PassthroughGPUTurnPolicy.factory,
+        AlternateGPUTurnPolicy.factory,
         TimeSliceGPUTurnPolicy.factory,
     ]
 
