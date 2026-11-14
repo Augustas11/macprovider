@@ -877,6 +877,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// alone under the existing flattened-token rule.
     let nativeMTPPromptRowsJoinRaggedPrefill: Bool
 
+    /// Whether native verification attends each column as its decode step
+    /// (`PagedKVBatchLayerCache.columnExactVerification`): Gemma 4 only.
+    let nativeMTPColumnExactVerification: Bool
+
+    static func verifiesColumnsAsDecode(familyAdapter: String?) -> Bool {
+        familyAdapter == NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+    }
+
     static func supportsNativeMTPPromptRowsInRaggedPrefill(familyAdapter: String?) -> Bool {
         familyAdapter == "qwen3_5_mtp_v1"
     }
@@ -984,6 +992,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
             familyAdapter: nativeMTPFamilyAdapter
         )
+        self.nativeMTPColumnExactVerification = Self.verifiesColumnsAsDecode(familyAdapter: nativeMTPFamilyAdapter)
         self.nativeMTPDrafterPromptWindow = Self.drafterPromptWindow(
             familyAdapter: nativeMTPFamilyAdapter
         )
@@ -4764,6 +4773,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let cache = raggedPrefill
                     ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rows)
                     : PagedKVBatchLayerCache(rowCaches: rows, attachRows: attachRows)
+                cache.columnExactVerification = nativeMTP && nativeMTPColumnExactVerification
                 return PagedKVSharedLayerBatch(
                     cache: cache,
                     validateBatchStateClosure: {},
@@ -5455,13 +5465,18 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol,
+    KVCacheAttentionReturningStateProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int
         let proposalTokenCount: Int
         let inputKeys: MLXArray
         let inputValues: MLXArray
+        /// Column-exact verification: the row keeps the sliding ring its
+        /// one-token decode steps would have kept, as if the accepted columns
+        /// had been appended one at a time.
+        var keepsRingAnchor = false
 
         func commit(inputCount: Int) throws {
             eval(try stageCommit(inputCount: inputCount))
@@ -5476,7 +5491,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             guard inputCount > 0 else { return [] }
             let keySlice = inputKeys[0..., 0..., 0 ..< inputCount, 0...]
             let valueSlice = inputValues[0..., 0..., 0 ..< inputCount, 0...]
+            let anchor = rowCache.slidingRingAnchor
             let updated = rowCache.update(keys: keySlice, values: valueSlice)
+            if keepsRingAnchor { rowCache.slidingRingAnchor = anchor }
             return [updated.0, updated.1]
         }
     }
@@ -5525,6 +5542,13 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// `attachRows` (decode sessions) attaches rows that hold full, unwindowed
     /// history; sliding-window rows take the per-row update path, where an
     /// attached row would copy its history out every step.
+    /// Native MTP verification attends every verify column as the one-token
+    /// decode step at its position would (`attendVerificationColumnsAsDecode`).
+    /// Set for families whose verify must equal ordinary decode bit for bit
+    /// and whose decode attention a multi-column call cannot reproduce
+    /// (Gemma 4: sliding-window ring order, head-dim-512 fallback, #2328).
+    var columnExactVerification = false
+
     init(rowCaches: [PagedKVCache], attachRows: Bool = false) {
         self.rowCaches = rowCaches
         self.attachesRows = attachRows
@@ -5820,7 +5844,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil).output
         PagedKVAttentionTrace.record(
             rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
         )
@@ -5837,11 +5861,28 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         sinks: MLXArray
     ) -> MLXArray {
-        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks).output
         PagedKVAttentionTrace.record(
             rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
         )
         return output
+    }
+
+    /// Gemma 4's layers whose K/V the drafter reads attend here too, so
+    /// they take the same route as every other layer, and get the K/V a
+    /// plain `update` returns.
+    func updateAndAttendReturningState(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> (output: MLXArray, keys: MLXArray, values: MLXArray) {
+        let attended = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: attended.output
+        )
+        return attended
     }
 
     private func attendRows(
@@ -5851,6 +5892,23 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         sinks: MLXArray?
+    ) -> (output: MLXArray, keys: MLXArray, values: MLXArray) {
+        var updatedKeys = incomingKeys
+        var updatedValues = incomingValues
+        let output = attendRowsBody(
+            queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks
+        ) { updatedKeys = $0; updatedValues = $1 }
+        return (output, updatedKeys, updatedValues)
+    }
+
+    private func attendRowsBody(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?,
+        updated: (MLXArray, MLXArray) -> Void
     ) -> MLXArray {
         let queryTokens = queries.dim(2)
         let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
@@ -5860,6 +5918,14 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         insideUpdateAndAttend = true
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
         insideUpdateAndAttend = false
+        updated(keys, values)
+        if columnExactVerification, sinks == nil,
+           let rowMaps = preparedMTPPackedRowMaps,
+           let exact = attendVerificationColumnsAsDecode(
+               queries: queries, keys: keys, values: values, scale: scale, rowMaps: rowMaps
+           ) {
+            return exact
+        }
         func batched() -> MLXArray {
             MLXFast.scaledDotProductAttention(
                 queries: queries, keys: keys, values: values, scale: scale, mask: mask, sinks: sinks
@@ -6021,6 +6087,64 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         }, axis: 0)
     }
 
+    /// Column-exact native MTP verification (#2328): column `c` of a row at
+    /// query offset `n` attends as the one-token decode step at position
+    /// `n + c` does. One query, no mask, and the keys that step's `update`
+    /// presents: the whole history `[..<n+c+1]`, or for a sliding window the
+    /// last `window` keys in the row's ring order
+    /// (`PagedKVCache.presentation`). Every other operator of the forward
+    /// treats its rows independently, so the column's logits are the decode
+    /// step's. Padded columns attend nothing. Nil when the update did not
+    /// stage this verification (the caller keeps its own route).
+    private func attendVerificationColumnsAsDecode(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        rowMaps: [MTPPackedVerificationRowMap]
+    ) -> MLXArray? {
+        guard mtpPackedForwardDidUpdate,
+              rowMaps.count == rowCaches.count,
+              queries.dim(0) == rowCaches.count,
+              keys.dim(0) == rowCaches.count,
+              zip(rowCaches, rowMaps).allSatisfy({ $0.offset == $1.queryOffset }),
+              rowMaps.allSatisfy({ $0.queryOffset + $0.inputCount <= keys.dim(2) && $0.inputCount <= queries.dim(2) })
+        else {
+            return nil
+        }
+        let window = presentationWindowTokens
+        let rows = rowMaps.enumerated().map { row, map -> MLXArray in
+            let columns = (0 ..< queries.dim(2)).map { column -> MLXArray in
+                guard column < map.inputCount else {
+                    return MLXArray.zeros([1, queries.dim(1), 1, values.dim(3)], dtype: queries.dtype)
+                }
+                let end = map.queryOffset + column + 1
+                var rowKeys = keys[row ..< row + 1, 0..., ..<end, 0...]
+                var rowValues = values[row ..< row + 1, 0..., ..<end, 0...]
+                if let window, window > 0 {
+                    let keepPrior = PagedKVCache.slidingWindowPresentationPrefix(priorTokens: end - 1, windowSize: window)
+                    let start = max(0, end - keepPrior - 1)
+                    if start > 0 {
+                        let shift = PagedKVCache.slidingRingShift(
+                            postUpdateOffset: end, anchor: rowCaches[row].slidingRingAnchor, windowSize: window
+                        )
+                        rowKeys = PagedKVCache.ringOrdered(rowKeys[.ellipsis, start..., 0...], shift: shift)
+                        rowValues = PagedKVCache.ringOrdered(rowValues[.ellipsis, start..., 0...], shift: shift)
+                    }
+                }
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries[row ..< row + 1, 0..., column ..< column + 1, 0...],
+                    keys: rowKeys,
+                    values: rowValues,
+                    scale: scale,
+                    mask: .none
+                )
+            }
+            return columns.count == 1 ? columns[0] : concatenated(columns, axis: 2)
+        }
+        return rows.count == 1 ? rows[0] : concatenated(rows, axis: 0)
+    }
+
     private func updatePackedMTPVerification(
         keys incomingKeys: MLXArray,
         values incomingValues: MLXArray,
@@ -6070,7 +6194,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
                 inputTokenCount: map.inputCount,
                 proposalTokenCount: map.proposalCount,
                 inputKeys: inputKeys,
-                inputValues: inputValues
+                inputValues: inputValues,
+                keepsRingAnchor: columnExactVerification
             ))
         }
 

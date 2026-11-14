@@ -10,7 +10,22 @@ import MLX
 /// token came from verify column 0 (the decode position) or a later column,
 /// and how close the tie was. Token ids only, no text.
 enum NativeMTPLabTokenTrace {
-    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_MTP_TOKEN_TRACE"] == "1"
+    private static let environmentEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_MTP_TOKEN_TRACE"] == "1"
+    private static let sinkLock = NSLock()
+    nonisolated(unsafe) private static var sink: ((String, String, Entry) -> Void)?
+
+    static var enabled: Bool {
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
+        return environmentEnabled || sink != nil
+    }
+
+    /// Tests: receives every entry (request id, path, entry) instead of stderr.
+    static func setSink(_ newSink: ((String, String, Entry) -> Void)?) {
+        sinkLock.lock()
+        sink = newSink
+        sinkLock.unlock()
+    }
     static let limit = 64
 
     struct Entry: Equatable {
@@ -79,6 +94,13 @@ enum NativeMTPLabTokenTrace {
 
     static func write(requestID: String, path: String, _ entries: [Entry]) {
         guard !entries.isEmpty else { return }
+        sinkLock.lock()
+        let sink = sink
+        sinkLock.unlock()
+        if let sink {
+            entries.forEach { sink(requestID, path, $0) }
+            return
+        }
         let text = entries.map { line(requestID: requestID, path: path, $0) }.joined()
         try? FileHandle.standardError.write(contentsOf: Data(text.utf8))
     }
