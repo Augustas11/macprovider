@@ -58,7 +58,7 @@ LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
 LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.gemma4-mtp-window.lock
-RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
+RELEASE_METALLIB_SHA256=41863424710154758311c118db69a23231eadb0cc542abded55ac5859b51e3b2
 MODEL_ID=google/gemma-4-12b-it
 ROOT=${ROOT:-$LAB/fixtures/gemma4}
 # SPEC-048 sidecar floor; the gemma4_mtp_v1 native row ceiling is 1.
