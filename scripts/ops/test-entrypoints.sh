@@ -405,7 +405,7 @@ case "$(next_field expected_downtime)" in "about 1-2 min"*) ok ;; *) bad "apply 
 printf '{"database_schema_fingerprint":"%s"}\n' "$FP_B" > "$tmp/gh/downloads/v9.0.1/pearl-release.json"
 PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a schema-changing apply next" scripts/ops/pearl-runtime.sh status
 if [ "$(fact_of apply_schema_change)" = True ]; then ok; else bad "schema change fact: $(fact_of apply_schema_change)"; fi
-case "$(next_field expected_downtime)" in "buyers held with 503 until all serving gates pass, about 1-2 min"*) ok ;; *) bad "schema-change downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field expected_downtime)" in "buyers held with 503, typically about 1-2 minutes"*) ok ;; *) bad "schema-change downtime: $(next_field expected_downtime)" ;; esac
 rm -rf "$tmp/gh/downloads/v9.0.1"
 PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unknown schema change" scripts/ops/pearl-runtime.sh status
 if [ "$(fact_of apply_schema_change)" = unknown ]; then ok; else bad "unknown schema fact: $(fact_of apply_schema_change)"; fi

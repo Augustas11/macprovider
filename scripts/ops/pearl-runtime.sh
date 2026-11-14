@@ -46,9 +46,10 @@
 #                       candidate's database schema fingerprint equals the
 #                       installed release's (read-only: the release's
 #                       pearl-release.json and Pearl's current-release.json);
-#                       otherwise or when unknown, buyers held with 503 until
-#                       every serving gate passes, about 1-2 min (last
-#                       measured v1.8.288: buyers held 116 s)
+#                       otherwise or when unknown, buyers held with 503:
+#                       typically about 1-2 minutes (last measured: v1.8.286
+#                       80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers
+#                       stay held until the serving gates pass
 #   6 health            bounded wait for the updater unit, coordinator and
 #                       gateway /healthz report the tag with no buyer hold, the
 #                       new binary's stats migrations, then the measured apply
@@ -254,7 +255,7 @@ RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
 VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
 APPLY_DOWNTIME_SHORT="about 1-2 min of coordinator/gateway restart (the candidate keeps the installed database schema fingerprint, so buyers are released as soon as the new gateway is up; the updater's rollback-point verification afterwards runs with services up)"
-APPLY_DOWNTIME_HELD="buyers held with 503 until all serving gates pass, about 1-2 min (last measured: v1.8.288 buyers held 116 s, gateway down 94 s; v1.8.286 apply 80 s) (the candidate changes the database schema fingerprint, or that is unknown: the updater keeps buyers held until the release commits so a rollback can restore the databases)"
+APPLY_DOWNTIME_HELD="buyers held with 503, typically about 1-2 minutes (last measured: v1.8.286 80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers stay held until the serving gates pass (the candidate changes the database schema fingerprint, or that is unknown: the updater keeps buyers held until the release commits so a rollback can restore the databases)"
 APPLY_DOWNTIME="$APPLY_DOWNTIME_HELD"
 PEARL_UPDATER_STATE_ROOT="${PEARL_UPDATER_STATE_ROOT:-/var/lib/macprovider-pearl-updater}"
 PEARL_UPDATER_AUDIT="${PEARL_UPDATER_AUDIT:-$PEARL_UPDATER_STATE_ROOT/audit.jsonl}"
