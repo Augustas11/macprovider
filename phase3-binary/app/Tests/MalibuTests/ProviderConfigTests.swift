@@ -90,6 +90,18 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertFalse(ProviderConfig.hasProviderToken(paths: paths))
     }
 
+    func testSavedWarmModelsAreReadFromTheConfig() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        XCTAssertEqual(ProviderConfig.readSavedWarmModels(paths: paths), [])
+        try "model: main/model\nwarm_models: [org/second, \"org/third\"]\n".write(
+            to: paths.configFile, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProviderConfig.readSavedWarmModels(paths: paths), ["org/second", "org/third"])
+        try "model: main/model\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProviderConfig.readSavedWarmModels(paths: paths), [])
+    }
+
     func testConfigReadersRejectNonRegularConfigWithoutFollowingOrBlocking() throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()

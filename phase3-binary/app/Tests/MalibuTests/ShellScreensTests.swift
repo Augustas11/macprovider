@@ -378,6 +378,46 @@ final class ShellScreensTests: XCTestCase {
 
     // MARK: Provider
 
+    /// Status reads the loaded-model list; the Models screen shows "Also
+    /// loaded" only when more than one model is loaded.
+    func testStatusReadsLoadedModelsAndAlsoLoadedOnlyWithSeveral() throws {
+        func decode(_ json: String) throws -> ProviderEngineStatus? {
+            ProviderEngineStatus.decode(status: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]))
+        }
+        let two = try XCTUnwrap(try decode("""
+        {"warm_models":[{"model_id":"org/main","state":"warm","primary":true,"pinned":true,"slots_total":4,"slots_free":4,"max_context_tokens":32768},
+          {"model_id":"org/second","state":"warm","primary":false,"pinned":false,"slots_total":2,"slots_free":1,"max_context_tokens":16384}]}
+        """))
+        XCTAssertEqual(two.loadedModels?.map(\.modelID), ["org/main", "org/second"])
+        let member = try XCTUnwrap(two.alsoLoaded.first)
+        XCTAssertEqual(two.alsoLoaded.count, 1)
+        XCTAssertEqual(member.slotsTotal, 2)
+        XCTAssertEqual(member.maxContextTokens, 16_384)
+        XCTAssertEqual(ModelsPresentation.alsoLoadedDetail(member), "2 slots · \(16_384.formatted()) tokens of context")
+        let strings = ModelsPresentation.screenStrings(rows: [], listState: .ready, alsoLoaded: two.alsoLoaded)
+        XCTAssertTrue(strings.contains("Also loaded"))
+        XCTAssertTrue(strings.contains { $0.contains("org/second") && $0.contains("Keep loaded") && $0.contains("Unload") })
+        XCTAssertFalse(ModelsPresentation.screenStrings(
+            rows: [], listState: .ready, alsoLoaded: two.alsoLoaded, savedLoadedModelIDs: ["org/second"])
+            .contains { $0.contains("Keep loaded") }, "a model config.yaml already keeps loaded offers only Unload")
+
+        let one = try XCTUnwrap(try decode("""
+        {"warm_models":[{"model_id":"org/main","state":"warm","primary":true,"pinned":true,"slots_total":4,"slots_free":4}]}
+        """))
+        XCTAssertEqual(one.loadedModels?.count, 1)
+        XCTAssertEqual(one.alsoLoaded, [])
+        XCTAssertEqual(ModelsPresentation.alsoLoadedStrings(one.alsoLoaded, saved: []), [])
+        XCTAssertFalse(ModelsPresentation.screenStrings(rows: [], listState: .ready, alsoLoaded: one.alsoLoaded)
+            .contains("Also loaded"))
+
+        let mainNotFirst = try XCTUnwrap(try decode("""
+        {"warm_models":[{"model_id":"org/second","state":"warm","primary":false},{"model_id":"org/main","state":"warm","primary":true}],
+         "recent_restarts":[]}
+        """))
+        XCTAssertNil(mainNotFirst.loadedModels, "a list without the main model first is not used")
+        XCTAssertEqual(mainNotFirst.alsoLoaded, [])
+    }
+
     func testEngineStatusDecodesCBAndMTPFromStatus() throws {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("""
         {"continuous_batching":{"mode":"on","active":true,"unsupported_reason":null,"scheduler":{"slots_total":8,"slots_free":6,"waiting_count":2}},

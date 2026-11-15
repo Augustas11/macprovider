@@ -10,6 +10,19 @@ struct ProviderEngineStatus: Equatable, Sendable {
         let version: String?
     }
 
+    /// One model this Mac keeps loaded (`warm_models` in `/v1/status`).
+    struct LoadedModel: Equatable, Sendable, Identifiable {
+        let modelID: String
+        /// `loading`, `warm` or `evicting`.
+        let state: String
+        let primary: Bool
+        let slotsTotal: Int?
+        let slotsFree: Int?
+        let maxContextTokens: Int?
+
+        var id: String { modelID }
+    }
+
     let continuousBatchingMode: String?
     let continuousBatchingActive: Bool?
     let continuousBatchingUnsupportedReason: String?
@@ -27,6 +40,16 @@ struct ProviderEngineStatus: Equatable, Sendable {
     /// nil means an older CLI does not expose the list; [] means supported
     /// with no recorded restart.
     let recentRestarts: [Restart]?
+    /// Every loaded model, main model first. nil when the CLI sends no list.
+    let loadedModels: [LoadedModel]?
+
+    /// The models loaded beside the main one; empty when only one is loaded.
+    var alsoLoaded: [LoadedModel] {
+        guard let loadedModels, loadedModels.count > 1 else { return [] }
+        return loadedModels.filter { !$0.primary }
+    }
+
+    static let loadedModelStates: Set<String> = ["loading", "warm", "evicting"]
 
     /// `ContinuousBatchingMode` and `NativeMTPStatusMode` in the CLI.
     static let continuousBatchingModes: Set<String> = ["off", "canary", "on"]
@@ -37,7 +60,8 @@ struct ProviderEngineStatus: Equatable, Sendable {
         let mtp = object["native_mtp"] as? [String: Any]
         let kv = object["kv_disk_tier"] as? [String: Any]
         let restartObjects = object["recent_restarts"] as? [[String: Any]]
-        guard cb != nil || mtp != nil || kv != nil || restartObjects != nil else { return nil }
+        let loadedObjects = object["warm_models"] as? [[String: Any]]
+        guard cb != nil || mtp != nil || kv != nil || restartObjects != nil || loadedObjects != nil else { return nil }
         let scheduler = cb?["scheduler"] as? [String: Any]
         func int(_ value: Any?) -> Int? {
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
@@ -75,6 +99,27 @@ struct ProviderEngineStatus: Equatable, Sendable {
             }
             return Restart(at: at, reason: reason, version: version)
         }}
+        func modelID(_ value: Any?) -> String? {
+            guard let string = value as? String, !string.isEmpty, string.utf8.count <= 256,
+                  string.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F && !(0x80...0x9F).contains($0.value) })
+            else { return nil }
+            return string
+        }
+        // A list is kept only whole: every entry readable and exactly one
+        // main model, listed first.
+        let loadedModels = loadedObjects.flatMap { objects -> [LoadedModel]? in
+            let models = objects.prefix(32).compactMap { entry -> LoadedModel? in
+                guard let id = modelID(entry["model_id"]),
+                      let state = token(entry["state"], Self.loadedModelStates),
+                      let primary = bool(entry["primary"]) else { return nil }
+                return LoadedModel(
+                    modelID: id, state: state, primary: primary, slotsTotal: int(entry["slots_total"]),
+                    slotsFree: int(entry["slots_free"]), maxContextTokens: int(entry["max_context_tokens"]))
+            }
+            guard models.count == objects.count, models.first?.primary == true,
+                  models.filter(\.primary).count == 1 else { return nil }
+            return models
+        }
         return ProviderEngineStatus(
             continuousBatchingMode: token(cb?["mode"], Self.continuousBatchingModes),
             continuousBatchingActive: bool(cb?["active"]),
@@ -90,7 +135,8 @@ struct ProviderEngineStatus: Equatable, Sendable {
             kvDiskUnsupportedReason: presentToken(kv?["unsupported_reason"]),
             kvDiskBytesUsed: int(kv?["bytes_used"]),
             kvDiskMaxBytes: int(kv?["max_bytes"]),
-            recentRestarts: recentRestarts
+            recentRestarts: recentRestarts,
+            loadedModels: loadedModels
         )
     }
 }

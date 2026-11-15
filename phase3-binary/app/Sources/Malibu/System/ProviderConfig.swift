@@ -112,6 +112,13 @@ enum ProviderConfig {
         return parseTopLevelValue(named: "model", from: contents)
     }
 
+    /// The models config.yaml loads beside the main model at start.
+    static func readSavedWarmModels(paths: ProviderPaths = .current) -> [String] {
+        guard let contents = readTrustedConfigContents(paths: paths),
+              let snapshot = try? WarmSetConfigText.read(contents) else { return [] }
+        return snapshot.warmModels
+    }
+
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
         guard let contents = readTrustedConfigContents(paths: paths),
               let value = parseTopLevelValue(named: "port", from: contents),
