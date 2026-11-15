@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MacProviderCore
 import XCTest
@@ -112,9 +113,9 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         let second = await status.beginRequest(requestID: "two")
         let done = LockedBox(false)
         let wait = Task {
-            let idle = await status.waitUntilIdleForRestart(pollNanoseconds: 5_000_000)
+            let outcome = await status.waitUntilIdleForRestart(pollNanoseconds: 5_000_000)
             done.set(true)
-            return idle
+            return outcome
         }
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(done.get())
@@ -122,8 +123,44 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(done.get(), "one request is still in flight")
         await status.finishRequest(startedAt: second, completion: nil, failed: false)
-        let idle = await wait.value
-        XCTAssertTrue(idle)
+        let outcome = await wait.value
+        XCTAssertEqual(outcome, .idle)
+    }
+
+    /// Past its deadline the wait gives up without cutting anything and
+    /// lowers the fence, so the provider can serve again.
+    func testWaitUntilIdleForRestartExpiresWithoutCutting() async throws {
+        let status = status()
+        let startedAt = await status.beginRequest(requestID: "one")
+        let outcome = await status.waitUntilIdleForRestart(
+            deadline: Date().addingTimeInterval(0.2), pollNanoseconds: 5_000_000
+        )
+        XCTAssertEqual(outcome, .expired)
+        let inFlight = await status.requestsInFlightCount()
+        XCTAssertEqual(inFlight, 1)
+        await status.setState(.ready, reason: "abandoned")
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .ready)
+        let admitted = await status.admitRequest(requestID: "two")
+        guard case .admitted(let second) = admitted else { return XCTFail("serving again after the cap") }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        await status.finishRequest(startedAt: second, completion: nil, failed: false)
+    }
+
+    /// Under the fence no state that admits requests can be published.
+    func testRestartFenceHoldsReadyBusyAndDegraded() async throws {
+        let status = status()
+        let startedAt = await status.beginRequest(requestID: "one")
+        let wait = Task { await status.waitUntilIdleForRestart(pollNanoseconds: 5_000_000) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        for state in [ProviderHealthState.ready, .busy, .degraded] {
+            await status.setState(state, reason: "other_path")
+            let snapshot = await status.snapshot()
+            XCTAssertEqual(snapshot.status, .draining, "\(state)")
+        }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        let outcome = await wait.value
+        XCTAssertEqual(outcome, .idle)
     }
 
     func testWaitUntilIdleForRestartStopsOnlyWhenCancelled() async throws {
@@ -132,8 +169,8 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         let wait = Task { await status.waitUntilIdleForRestart(pollNanoseconds: 5_000_000) }
         try await Task.sleep(nanoseconds: 100_000_000)
         wait.cancel()
-        let idle = await wait.value
-        XCTAssertFalse(idle)
+        let outcome = await wait.value
+        XCTAssertEqual(outcome, .cancelled)
         let inFlight = await status.requestsInFlightCount()
         XCTAssertEqual(inFlight, 1, "a cancelled wait cuts nothing")
         await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
@@ -196,12 +233,244 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
 
     /// Only the installed LaunchAgent's process counts as restarted on exit;
     /// an orphaned `serve` also has parent 1 but would stay down.
-    func testSupervisedOnlyAsTheInstalledLaunchAgent() {
-        let agent = ["MACPROVIDER_LAUNCHD_DOMAIN": "gui/501"]
-        XCTAssertTrue(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: agent))
+    private static let dist = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("dist", isDirectory: true)
+
+    /// The job a shipped provider plist describes, as launchd runs it: its
+    /// label (which launchd exports as `XPC_SERVICE_NAME`) and the
+    /// environment the plist itself sets.
+    private func launchdJob(plistAt relativePath: String) throws -> (label: String, environment: [String: String]) {
+        let text = try String(contentsOf: Self.dist.appendingPathComponent(relativePath), encoding: .utf8)
+        func strings(afterKey key: String, in text: String) -> String? {
+            guard let keyRange = text.range(of: "<key>\(key)</key>"),
+                  let open = text.range(of: "<string>", range: keyRange.upperBound..<text.endIndex),
+                  let close = text.range(of: "</string>", range: open.upperBound..<text.endIndex)
+            else { return nil }
+            return String(text[open.upperBound..<close.lowerBound])
+        }
+        let label = try XCTUnwrap(strings(afterKey: "Label", in: text), relativePath)
+        var environment = ["XPC_SERVICE_NAME": label]
+        if text.contains("<key>MACPROVIDER_LAUNCHD_DOMAIN</key>") {
+            environment["MACPROVIDER_LAUNCHD_DOMAIN"] = "gui/501"
+        }
+        return (label, environment)
+    }
+
+    /// Every shipped provider plist yields a process the pickup may restart,
+    /// including the templates that set no `MACPROVIDER_LAUNCHD_DOMAIN`; an
+    /// orphaned `serve` also has parent 1 but would stay down.
+    func testSupervisedForEveryShippedProviderPlistAndNotForAnOrphan() throws {
+        for template in ["launchd-plist-template.plist", "compatibility-set-assets/provider-launch-agent.plist.template"] {
+            let job = try launchdJob(plistAt: template)
+            XCTAssertEqual(job.label, ProviderConflictDetector.launchdLabel, template)
+            XCTAssertNil(job.environment["MACPROVIDER_LAUNCHD_DOMAIN"], "\(template) sets no domain key; the label must be enough")
+            XCTAssertTrue(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: job.environment), template)
+            XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 4242, environment: job.environment), template)
+        }
+        // The installer's own plist names the same label.
+        let installer = try String(contentsOf: Self.dist.appendingPathComponent("install.sh"), encoding: .utf8)
+        XCTAssertTrue(installer.contains("<string>\(ProviderConflictDetector.launchdLabel)</string>"))
+        XCTAssertTrue(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: ["MACPROVIDER_LAUNCHD_DOMAIN": "gui/501"]))
+
+        // Orphaned or foreground processes: parent 1 without the job identity,
+        // another job's identity, or a shell parent.
         XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: [:]))
+        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: ["XPC_SERVICE_NAME": "0"]))
+        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: ["XPC_SERVICE_NAME": "com.apple.Terminal"]))
         XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: ["MACPROVIDER_LAUNCHD_DOMAIN": " "]))
-        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 4242, environment: agent))
+    }
+
+    // MARK: - The check's branches
+
+    private static let model = "org/model"
+    private static let digest = String(repeating: "d", count: 64)
+
+    /// A signed set naming `model`, written like a fetched set, plus static
+    /// inputs that trust its key.
+    private func signedSet(named: String) throws -> (sidecar: URL, inputs: AutotuneStaticInputs) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-pickup-set-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let key = Curve25519.Signing.PrivateKey()
+        let body = Data(#"{"entries":[{"artifact_hash":"\#(Self.digest)","model_key":"\#(named)"}]}"#.utf8)
+        let sidecar = directory.appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)
+        try body.write(to: sidecar)
+        let signature = try key.signature(for: body).base64EncodedString()
+        try Data(#"{"key_id":"\#(AutotuneStaticInputs.keyID)","alg":"ed25519","signature":"\#(signature)"}"#.utf8)
+            .write(to: directory.appendingPathComponent(NativeMTPAdmissionFeed.signatureFileName))
+        let inputs = AutotuneStaticInputs(
+            fetch: { _ in throw URLError(.cannotConnectToHost) },
+            trustedPublicKeys: [AutotuneStaticInputs.keyID: key.publicKey.rawRepresentation.base64EncodedString()]
+        )
+        return (sidecar, inputs)
+    }
+
+    private func authority() -> NativeMTPResolvedArtifactAuthority {
+        NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
+            releaseID: "release-b", signerKeyID: AutotuneStaticInputs.keyID, feedSHA256: String(repeating: "f", count: 64),
+            modelKey: Self.model, artifactID: "artifact", hashAlgorithm: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
+            hash: Self.digest, verificationStatus: "verified", targetURLPath: "/nonexistent/model", targetSHA256: Self.digest
+        )
+    }
+
+    private func runCheck(
+        startup: SmallMRoute.NativeMTPAdmission,
+        startupSidecar: URL? = nil,
+        inputs: AutotuneStaticInputs = AutotuneStaticInputs(fetch: { _ in throw URLError(.cannotConnectToHost) }),
+        resolution: ServeCommand.NativeMTPAdmissionResolution,
+        probe: @escaping (URL) -> String? = { _ in nil }
+    ) async -> NativeMTPAdmissionPickup.Check {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.model = Self.model
+        config.modelCatalogKey = Self.model
+        config.modelArtifactSHA256 = Self.digest
+        config.nativeMTPMode = .auto
+        var binding = ServeCommand.VerifiedModelRuntimeBinding(
+            authorityPath: "/nonexistent/model", authoritySHA256: Self.digest,
+            loadPath: "/nonexistent/model", loadSHA256: Self.digest,
+            nativeMTPResolvedArtifactAuthority: nil
+        )
+        binding.nativeMTPAdmissionSidecarPath = startupSidecar?.path
+        return await ServeCommand.nativeMTPAdmissionNewlyActivatable(
+            config: config,
+            startupAdmission: startup,
+            envelope: CoordinatorClient.CatalogEnvelope(
+                releaseID: "release-b", policyVersion: "policy-a", candidateSHA256: String(repeating: "c", count: 64),
+                signerKeyID: "operator-2026-01", rowIdentity: String(repeating: "b", count: 64), modelSHA256: Self.digest
+            ),
+            binding: binding,
+            slotCount: 1,
+            staticInputs: inputs,
+            probeRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent("native-mtp-admission-probe-\(UUID().uuidString)", isDirectory: true),
+            resolve: { _ in resolution },
+            admissionProbe: { sidecar, _, _, _ in probe(sidecar) }
+        )
+    }
+
+    /// A definite "nothing for this model" is final; only unresolved inputs
+    /// are worth another check.
+    func testCheckClassifiesNoEntryAsFinalAndUnresolvedInputsAsRetryable() async {
+        let noEntry = await runCheck(startup: .none, resolution: .noEntry)
+        XCTAssertEqual(noEntry, .notActivatable)
+        let unavailable = await runCheck(startup: .none, resolution: .unavailable)
+        XCTAssertEqual(unavailable, .unavailable)
+    }
+
+    func testCheckIgnoresAReleaseWhenTheSetIsOperatorPlaced() async {
+        let resolution = ServeCommand.NativeMTPAdmissionResolution.admitted(
+            ServeCommand.NativeMTPResolvedAdmission(authority: authority(), sidecarPath: nil)
+        )
+        let check = await runCheck(startup: .none, resolution: resolution)
+        XCTAssertEqual(check, .notActivatable)
+    }
+
+    func testCheckFollowsTheLoaderAdmissionStageForTheNewSet() async throws {
+        let new = try signedSet(named: Self.model)
+        let resolution = ServeCommand.NativeMTPAdmissionResolution.admitted(
+            ServeCommand.NativeMTPResolvedAdmission(authority: authority(), sidecarPath: new.sidecar.path)
+        )
+        let admitted = await runCheck(startup: .none, inputs: new.inputs, resolution: resolution)
+        XCTAssertEqual(admitted, .activatable)
+        let refused = await runCheck(startup: .none, inputs: new.inputs, resolution: resolution, probe: { _ in "admission_rejected" })
+        XCTAssertEqual(refused, .notActivatable)
+        // A set that names another model only is a definite no, before the loader stage runs.
+        let other = try signedSet(named: "org/other")
+        let otherResolution = ServeCommand.NativeMTPAdmissionResolution.admitted(
+            ServeCommand.NativeMTPResolvedAdmission(authority: authority(), sidecarPath: other.sidecar.path)
+        )
+        let probed = LockedBox(0)
+        let notNamed = await runCheck(startup: .none, inputs: other.inputs, resolution: otherResolution, probe: { _ in
+            probed.update { $0 += 1 }
+            return nil
+        })
+        XCTAssertEqual(notNamed, .notActivatable)
+        XCTAssertEqual(probed.get(), 0)
+    }
+
+    /// The set the process started on named the model: a restart helps only
+    /// if that set's tuple is refused where the new set's is admitted.
+    func testCheckComparesTheStartupSetAtTupleLevel() async throws {
+        let new = try signedSet(named: Self.model)
+        let startupSidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-startup-\(UUID().uuidString).json")
+        let resolution = ServeCommand.NativeMTPAdmissionResolution.admitted(
+            ServeCommand.NativeMTPResolvedAdmission(authority: authority(), sidecarPath: new.sidecar.path)
+        )
+        // The startup set already admits this tuple: nothing new, no restart.
+        let alreadyAdmitted = await runCheck(
+            startup: .entryForModel, startupSidecar: startupSidecar, inputs: new.inputs, resolution: resolution
+        )
+        XCTAssertEqual(alreadyAdmitted, .notActivatable)
+        // The startup set named the model for another tuple; the new set admits this one.
+        let newTuple = await runCheck(
+            startup: .entryForModel, startupSidecar: startupSidecar, inputs: new.inputs, resolution: resolution,
+            probe: { $0.path == startupSidecar.path ? "admission_rejected" : nil }
+        )
+        XCTAssertEqual(newTuple, .activatable)
+    }
+
+    /// The production resolve against the compiled-in signed feeds: a model
+    /// the artifact feed does not name is a definite no and fetches no
+    /// admission member; a model it names whose admission members cannot be
+    /// fetched is unresolved.
+    func testResolveClassifiesAgainstTheCompiledInFeeds() async throws {
+        let now = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        ).generatedAt.addingTimeInterval(3_600)
+        let inputs = AutotuneStaticInputs(fetch: { _ in throw URLError(.cannotConnectToHost) }, now: { now })
+        let loaded = await inputs.loadRecommendationInputs(includeArtifactFeed: true)
+        let feed = try XCTUnwrap(loaded.artifactFeed.value)
+        XCTAssertTrue(loaded.artifactFeed.warnings.blockingArtifactFeedWarnings.isEmpty)
+        let releaseID = loaded.candidate.value.version
+        XCTAssertEqual(feed.releaseID, releaseID)
+        let catalogDigest = AutotuneStaticInputs.candidateCatalogSHA256(bytes: loaded.candidate.selectedBytes)
+        let fetches = LockedBox(0)
+        let failing: NativeMTPAdmissionFeed.Fetcher = { _, _ in
+            fetches.update { $0 += 1 }
+            return NativeMTPAdmissionFeed.FetchResponse(statusCode: 503, body: Data())
+        }
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-resolve-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
+        func resolve(modelKey: String, hash: String) async -> ServeCommand.NativeMTPAdmissionResolution {
+            var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+            config.nativeMTPMode = .auto
+            config.modelCatalogKey = modelKey
+            return await ServeCommand.resolveNativeMTPAdmission(
+                config: config, releaseID: releaseID, catalogDigest: catalogDigest,
+                authorityPath: scratch.appendingPathComponent("model").path, authoritySHA256: hash,
+                staticInputs: inputs, artifactResolver: CachedModelArtifactResolver(),
+                admissionRoot: scratch.appendingPathComponent("probe"), admissionFetcher: failing
+            )
+        }
+        guard case .noEntry = await resolve(modelKey: "org/not-in-the-feed", hash: Self.digest) else {
+            return XCTFail("a model the artifact feed does not name is a definite no")
+        }
+        XCTAssertEqual(fetches.get(), 0)
+
+        let identity = try XCTUnwrap(feed.artifactIdentities().first {
+            $0.isPrimary && $0.hashAlgorithm == NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm
+                && $0.verificationStatus == "verified"
+        })
+        guard case .unavailable = await resolve(modelKey: identity.catalogKey, hash: identity.hash) else {
+            return XCTFail("admission members that cannot be fetched leave the release unresolved")
+        }
+        XCTAssertGreaterThan(fetches.get(), 0)
+        // Another release id than the feeds carry is unresolved, not a definite no.
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.nativeMTPMode = .auto
+        config.modelCatalogKey = identity.catalogKey
+        guard case .unavailable = await ServeCommand.resolveNativeMTPAdmission(
+            config: config, releaseID: releaseID + "-next", catalogDigest: catalogDigest,
+            authorityPath: scratch.appendingPathComponent("model").path, authoritySHA256: identity.hash,
+            staticInputs: inputs, artifactResolver: CachedModelArtifactResolver(),
+            admissionRoot: scratch.appendingPathComponent("probe"), admissionFetcher: failing
+        ) else {
+            return XCTFail("feeds that do not carry the release yet are unresolved")
+        }
     }
 
     func testHooksAreBuiltOnlyWhereAReleaseCanChangeNativeMTP() {

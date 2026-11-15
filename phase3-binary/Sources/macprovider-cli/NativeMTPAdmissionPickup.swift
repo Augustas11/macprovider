@@ -26,6 +26,24 @@ enum NativeMTPAdmissionPickup {
     /// activation leaves sessions with an unchanged row connected, so no new
     /// session accept would ever show them the release.
     static let refreshIntervalSeconds: Double = 1800
+    /// Each timer interval is scaled by a random factor in this range, so
+    /// providers started together (a fleet update) do not refresh in step.
+    static let refreshJitterFactor: ClosedRange<Double> = 0.8...1.2
+    /// How long a provider may stay out of routing for one pickup, from the
+    /// end of its delay: waiting out an update or an operator pause plus the
+    /// wait for requests in flight. Past it the pickup is abandoned without
+    /// cutting anything and the provider serves again.
+    static let maxWaitSeconds: Double = 7200
+    /// How often one release is checked again while its inputs cannot be
+    /// resolved (fetch or transport failures).
+    static let maxUnavailableChecks = 6
+
+    /// The durable record key of a restart. A retry for the release a
+    /// process started on (its startup admission fetch failed) has its own
+    /// key, so it is also spent at most once.
+    static func claimKey(releaseID: String, startupRetry: Bool) -> String {
+        startupRetry ? "startup-retry\n\(releaseID)" : releaseID
+    }
 
     /// What the check found for one release.
     enum Check: String, Sendable, Equatable {
@@ -55,6 +73,10 @@ enum NativeMTPAdmissionPickup {
         var claim: @Sendable (_ releaseID: String) -> Bool
         /// Whether a nonzero exit of this process is restarted.
         var supervised: @Sendable () -> Bool
+        /// The startup admission fetch of this process failed, so the release
+        /// it started on is checked too (once, under its own record key).
+        var retryStartupRelease = false
+        var maxWaitSeconds: Double = NativeMTPAdmissionPickup.maxWaitSeconds
         var randomUnit: @Sendable () -> Double = { Double.random(in: 0...1) }
         var sleep: @Sendable (_ seconds: Double) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
@@ -134,15 +156,18 @@ enum NativeMTPAdmissionPickup {
     }
 
     /// True for the provider LaunchAgent's process, whose nonzero exit launchd
-    /// restarts (`StopIntentMarker`): its parent is launchd and it carries
-    /// the environment key only the installed plist sets. A foreground, lab
-    /// or orphaned `serve` would stay down, so it is never restarted.
+    /// restarts (`StopIntentMarker`): its parent is launchd and launchd named
+    /// it as the provider job (`XPC_SERVICE_NAME` is the job label), or it
+    /// carries the environment key the installer's plist sets. A foreground,
+    /// lab or orphaned `serve` would stay down, so it is never restarted.
     static func supervisedByLaunchd(
         parentPID: pid_t = getppid(),
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        parentPID == 1
-            && environment["MACPROVIDER_LAUNCHD_DOMAIN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard parentPID == 1 else { return false }
+        if environment["XPC_SERVICE_NAME"] == ProviderConflictDetector.launchdLabel { return true }
+        return environment["MACPROVIDER_LAUNCHD_DOMAIN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }
 

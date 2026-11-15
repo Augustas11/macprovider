@@ -863,6 +863,9 @@ actor CoordinatorClient {
     private var nativeMTPAdmissionPickupReleases: Set<String> = []
     private var nativeMTPAdmissionPickupTask: Task<Void, Never>?
     private var nativeMTPAdmissionRefreshTask: Task<Void, Never>?
+    private var nativeMTPAdmissionUnavailableChecks: [String: Int] = [:]
+    /// True from an operator pause request until it is confirmed or rejected.
+    private var operatorPauseInProgress = false
     private let nativeMTPAdmissionRefreshIntervalSeconds: Double
     private var nativeMTPAdmissionRestartDraining = false
     private var pendingCatalogEnvelope: CatalogEnvelope?
@@ -6887,6 +6890,8 @@ actor CoordinatorClient {
             return .accepted
         }
 
+        operatorPauseInProgress = true
+        defer { operatorPauseInProgress = false }
         await providerStatus.setState(.draining, reason: "operator_pause_draining")
         do {
             try await sendStateUpdate(state: nil, reason: "operator_pause_draining")
@@ -9464,7 +9469,8 @@ actor CoordinatorClient {
         let interval = nativeMTPAdmissionRefreshIntervalSeconds
         nativeMTPAdmissionRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                let factor = Double.random(in: NativeMTPAdmissionPickup.refreshJitterFactor)
+                try? await Task.sleep(nanoseconds: UInt64(interval * factor * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
                 await self.refreshCatalogEnvelopeIfDue(trigger: "native_mtp_admission_timer")
             }
@@ -9483,7 +9489,7 @@ actor CoordinatorClient {
     private func considerNativeMTPAdmissionPickup(_ envelope: CatalogEnvelope) {
         guard let hooks = nativeMTPAdmissionPickup,
               let startupCatalogReleaseID,
-              envelope.releaseID != startupCatalogReleaseID,
+              envelope.releaseID != startupCatalogReleaseID || hooks.retryStartupRelease,
               nativeMTPAdmissionPickupTask == nil,
               !signalShutdownStarted,
               nativeMTPAdmissionPickupReleases.insert(envelope.releaseID).inserted
@@ -9499,65 +9505,125 @@ actor CoordinatorClient {
         _ envelope: CatalogEnvelope,
         hooks: NativeMTPAdmissionPickup.Hooks
     ) async {
-        let release = Self.sanitizedDiagnosticText(envelope.releaseID, maxLength: 120)
+        let releaseID = envelope.releaseID
+        let release = Self.sanitizedDiagnosticText(releaseID, maxLength: 120)
         func log(_ outcome: String, _ extra: String = "") {
             print("event=native_mtp_admission_pickup outcome=\(outcome) release_id=\(release)\(extra)")
+        }
+        func reportRestartRequired() async {
+            await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
+                releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+            ))
         }
         let check = await hooks.newlyActivatable(envelope)
         guard check == .activatable else {
             log(check.rawValue)
-            // Unresolved inputs are checked again at a later refresh.
-            if check == .unavailable { nativeMTPAdmissionPickupReleases.remove(envelope.releaseID) }
+            if check == .unavailable {
+                // Fetch or transport failures are checked again at a later
+                // refresh, a bounded number of times.
+                let attempts = (nativeMTPAdmissionUnavailableChecks[releaseID] ?? 0) + 1
+                nativeMTPAdmissionUnavailableChecks[releaseID] = attempts
+                if attempts < NativeMTPAdmissionPickup.maxUnavailableChecks {
+                    nativeMTPAdmissionPickupReleases.remove(releaseID)
+                }
+            }
             nativeMTPAdmissionPickupTask = nil
             return
         }
         guard hooks.supervised() else {
             // Nothing restarts this process after an exit: report and keep serving.
-            await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                releaseID: envelope.releaseID, phase: .restartRequired, drainNotBefore: nil
-            ))
+            await reportRestartRequired()
             log("restart_required_unsupervised")
             nativeMTPAdmissionPickupTask = nil
             return
         }
-        guard hooks.claim(envelope.releaseID) else {
+        let claimKey = NativeMTPAdmissionPickup.claimKey(
+            releaseID: releaseID, startupRetry: releaseID == startupCatalogReleaseID
+        )
+        guard hooks.claim(claimKey) else {
+            // Already spent on this release, or the record cannot be written.
+            await reportRestartRequired()
             log("claim_refused")
             nativeMTPAdmissionPickupTask = nil
             return
         }
-        // From here the task is never cleared: this process restarts once.
         let delay = NativeMTPAdmissionPickup.jitterSeconds(unit: hooks.randomUnit())
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: envelope.releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay)
+            releaseID: releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay)
         ))
         log("scheduled", " delay_s=\(Int(delay))")
         await hooks.sleep(delay)
-        // An update in flight replaces the process itself, and an operator
-        // pause is the operator's: wait either out before draining.
-        while coordinatorRecommendationInFlightIdentity != nil || operatorPaused,
-              !Task.isCancelled, !signalShutdownStarted {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-        guard !Task.isCancelled, !signalShutdownStarted else { return }
-        nativeMTPAdmissionRestartDraining = true
-        await providerStatus.raiseRestartDrainFence()
-        await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: envelope.releaseID, phase: .waitingForIdle, drainNotBefore: nil
-        ))
-        log("waiting_for_idle")
-        // New requests are refused from here, by the coordinator (draining is
-        // not routable) and locally; requests in flight finish, however long.
-        try? await sendStateUpdate(state: .draining, reason: NativeMTPAdmissionPickup.drainReason)
-        guard await providerStatus.waitUntilIdleForRestart(), !signalShutdownStarted else {
-            if !signalShutdownStarted, !stopped {
-                nativeMTPAdmissionRestartDraining = false
-                await providerStatus.setNativeMTPAdmissionPending(nil)
-                await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_cancelled")
+        let deadline = Date().addingTimeInterval(hooks.maxWaitSeconds)
+        while true {
+            // An update in flight replaces the process itself, and a pause
+            // (requested or confirmed) is the operator's: never drain or exit
+            // under either; carry on once it is over.
+            while autoupdateInFlightOrPending() || operatorPaused || operatorPauseInProgress {
+                guard !Task.isCancelled, !signalShutdownStarted else { return }
+                if Date() >= deadline {
+                    await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
+                    log("abandoned_wait_expired")
+                    return
+                }
+                try? await Task.sleep(nanoseconds: NativeMTPAdmissionPickup.idlePollNanoseconds)
             }
-            return
+            guard !Task.isCancelled, !signalShutdownStarted else { return }
+            nativeMTPAdmissionRestartDraining = true
+            await providerStatus.raiseRestartDrainFence()
+            await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
+                releaseID: releaseID, phase: .waitingForIdle, drainNotBefore: nil
+            ))
+            log("waiting_for_idle")
+            // New requests are refused from here, by the coordinator (draining
+            // is not routable) and locally; requests in flight finish.
+            try? await sendStateUpdate(state: .draining, reason: NativeMTPAdmissionPickup.drainReason)
+            switch await providerStatus.waitUntilIdleForRestart(deadline: deadline) {
+            case .idle:
+                break
+            case .cancelled:
+                if !signalShutdownStarted, !stopped {
+                    await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
+                }
+                return
+            case .expired:
+                // A request that never ends must not park the provider.
+                await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
+                log("abandoned_wait_expired")
+                return
+            }
+            guard !signalShutdownStarted else { return }
+            if operatorPaused || operatorPauseInProgress || autoupdateInFlightOrPending() { continue }
+            break
         }
         log("restarting")
         hooks.requestExit()
+    }
+
+    /// An update being evaluated, applied, or not yet finalized after its
+    /// relaunch (pending marker). An exit inside that window could leave the
+    /// update unfinalized past its deadline and roll it back. A marker that
+    /// cannot be read counts as pending.
+    private func autoupdateInFlightOrPending() -> Bool {
+        if coordinatorRecommendationInFlightIdentity != nil { return true }
+        do {
+            return try autoupdateMarkerStore.readPending() != nil
+        } catch {
+            return true
+        }
+    }
+
+    /// Gives up a restart without cutting anything: the provider serves
+    /// again and reports that the admission still needs a restart. The
+    /// release stays checked, so the next release or the next start retries.
+    private func abandonNativeMTPAdmissionRestart(releaseID: String) async {
+        nativeMTPAdmissionRestartDraining = false
+        await providerStatus.lowerRestartDrainFence()
+        await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
+            releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+        ))
+        await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_abandoned")
+        try? await sendStateUpdate(state: nil, reason: "native_mtp_admission_restart_abandoned")
+        nativeMTPAdmissionPickupTask = nil
     }
 
     private func adoptPendingCatalogEnvelope() {

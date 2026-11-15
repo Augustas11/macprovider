@@ -1474,17 +1474,25 @@ actor ProviderStatus {
         nativeMTPAdmissionPending = pending
     }
 
+    enum RestartIdleWait: Sendable, Equatable {
+        case idle
+        case cancelled
+        case expired
+    }
+
     /// SPEC-048-R013: the wait before a native-MTP admission restart. Raises
     /// the restart fence (no `ready`, no reopened local admission), moves to
     /// `draining`, preempts local work as an update drain does, then waits
-    /// for buyer and local work with no deadline: a buyer request in flight
-    /// is never cut. Returns false, with the fence lowered, only when the
-    /// waiting task is cancelled.
+    /// for buyer and local work: a buyer request in flight is never cut.
+    /// `drain_timeout_s` does not apply; `deadline` only bounds how long the
+    /// provider stays out of routing behind a request that never ends. On
+    /// `cancelled` and `expired` the fence is lowered and nothing was cut.
     func waitUntilIdleForRestart(
+        deadline: Date? = nil,
         pollNanoseconds: UInt64 = NativeMTPAdmissionPickup.idlePollNanoseconds
-    ) async -> Bool {
+    ) async -> RestartIdleWait {
         restartDrainFence = true
-        if status == .ready || status == .busy {
+        if status == .ready || status == .busy || status == .degraded {
             transition(to: .draining, reason: NativeMTPAdmissionPickup.drainReason)
         }
         localAdmissionClosed = true
@@ -1492,13 +1500,22 @@ actor ProviderStatus {
         wakeLocalCapacityWaiters()
         while requestsInFlight > 0 || !localLeases.isEmpty || localQueuedCount > 0 {
             if Task.isCancelled {
-                restartDrainFence = false
-                localAdmissionClosed = false
-                return false
+                lowerRestartDrainFence()
+                return .cancelled
+            }
+            if let deadline, Date() >= deadline {
+                lowerRestartDrainFence()
+                return .expired
             }
             try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
-        return true
+        return .idle
+    }
+
+    /// Ends an abandoned restart drain; the caller publishes the next state.
+    func lowerRestartDrainFence() {
+        restartDrainFence = false
+        localAdmissionClosed = false
     }
 
     /// Raises the restart fence ahead of the first `draining` frame.
@@ -1623,7 +1640,7 @@ actor ProviderStatus {
             newState = .unavailable
             reason = operatorPauseFence ? "operator_paused" : "local_creative_hold"
         }
-        if restartDrainFence, newState == .ready || newState == .busy {
+        if restartDrainFence, newState == .ready || newState == .busy || newState == .degraded {
             newState = .draining
             reason = NativeMTPAdmissionPickup.drainReason
         }
