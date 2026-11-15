@@ -19,6 +19,9 @@ TEXT_SUFFIXES = {".bash", ".json", ".mjs", ".py", ".sh", ".yaml", ".yml"}
 LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "ops" / "studio-mtp-measurement.py",
     ROOT / "scripts" / "tests" / "test_studio_mtp_measurement.py",
+    # Isolated loopback lab rig: builds the lab binary that reads the
+    # static-feed lab override (#2364); never a release or signing path.
+    ROOT / "scripts" / "lab" / "1690-m6" / "rig.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
