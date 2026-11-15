@@ -1,6 +1,16 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.57 (2026-11-15, a provider process may keep and serve a set of warm models)
+**Version:** 1.9.58 (2026-11-15, warm-set control frames, member catalog binding, promotion)
+
+**Change log v1.9.58 (2026-11-15, Related: #2338):** §6.16 matches what is
+built. R016: a switch to a warm member promotes it (SPEC-011 R-3.10.3) and the
+primary-only fields follow it, except the KV disk tier, which stays with the
+runtime the process started; `served_model_id` travels in the outer
+`inference_request` routing frame, also for a SPEC-008-wrapped or SPEC-041
+relay-blind request; each further member loads from its own signed catalog
+binding. R017: a further member's `slots_free` is its `slots_total` minus the
+requests holding it. New *Control socket* paragraph defines the `warm_set`
+request and response frames. No trust tier or attestation label changes.
 
 **Change log v1.9.57 (2026-11-15, Related: #2338):** Lifts the
 one-model-per-process limit (SPEC-010 L-3). New §6.16 adds `SPEC-001-R016`
@@ -5452,7 +5462,8 @@ container), its own scheduler and its own KV pool. Requests are routed to a
 runtime by model id, never by arrival order.
 
 *Primary model.* Exactly one warm member is the **primary**: the boot
-`model`, or the target of the latest SPEC-011 swap of the primary. The
+`model`, the target of the latest SPEC-011 swap of the primary, or the warm
+member the latest switch promoted (SPEC-011 R-3.10.3). The
 existing single-model fields of `hello`, the v2 `auth_request`, `heartbeat`,
 `state_update.metrics_snapshot` and `/v1/status` (`model_id`, `model_hash`,
 `model_hash_algorithm`, `weights_manifest_sha256`,
@@ -5460,7 +5471,18 @@ existing single-model fields of `hello`, the v2 `auth_request`, `heartbeat`,
 `max_concurrency`, `slots_free`, `slots_total`, `throughput_tps_estimate`,
 `loading`, `cb_self_check`, `engine_profile` and the SPEC-028 fields) keep
 their current meaning and describe the primary only. The SPEC-012 term
-`loaded_model` names the same primary.
+`loaded_model` names the same primary. A promotion moves them, with the
+provider status, the preflight answer and the idle prewarmer, to the promoted
+member. The KV disk tier (SPEC-037) stays with the runtime the process
+started, whether or not it is still the primary.
+
+*Member binding.* A further member loads from the signed catalog row and the
+locally verified artifact a switch to that model would load (SPEC-011), and
+its runtime verifies the loaded artifact against that hash exactly as it does
+the primary's. Its entry's `model_hash` is that hash. While the primary is
+bound to a verified catalog artifact, a member without such a binding, or one
+that fails artifact verification, is refused and never becomes `warm`. An
+unbound primary's members load by model id, as the primary does.
 
 *`warm_models`.* A provider that implements this section MUST send
 `warm_models` on the v2 `auth_request` initial stage, on the legacy `hello`,
@@ -5497,6 +5519,12 @@ retryable `model_not_loaded` dispatch failure, when no entry with that id is
 `warm`. When absent the provider serves on the primary, exactly as today. A
 loopback local request is served on the warm entry whose id equals the body
 `model` (case-folded), else on the primary. The buyer body is never rewritten.
+`served_model_id` is routing metadata of the outer `inference_request` frame,
+beside `request_id` and `stream`: it is never inside a SPEC-008 encrypted
+payload or a SPEC-041 relay-blind envelope, and the provider reads it from the
+outer frame for those requests too. It names only the model the coordinator
+already chose and already sees, which SPEC-049 §1.2 lists as request metadata
+those modes do not hide.
 
 *Compatibility.* A provider built before this section sends no
 `warm_models`; a coordinator MUST treat the top-level fields as a warm set of
@@ -5527,9 +5555,11 @@ one runtime MUST NOT free memory another runtime's rows hold.
 - *Row admission.* A row of any member is admitted only if its KV growth to
   the request's token bound fits the shared budget at admission. A row that
   does not fit fails exactly like today's over-capacity dispatch (retryable);
-  it never evicts a model. Each member's `slots_free` is what that member
-  could admit now against the shared budget, so per-member values are not
-  additive and admission, not the advertised count, is authoritative.
+  it never evicts a model. The primary's `slots_free` is the top-level
+  value. A further member's `slots_free` is its `slots_total` less the
+  requests holding it (leased from routing to their terminal point). The
+  shared budget can admit fewer, so per-member values are not additive and
+  admission, not the advertised count, is authoritative.
 - *Load.* A load is admitted only if the model's weights fit the budget after
   evicting idle unpinned members (below); otherwise it is refused with
   `insufficient_memory` and the warm set is unchanged.
@@ -5548,6 +5578,31 @@ one runtime MUST NOT free memory another runtime's rows hold.
   order while they fit. When `supported_models` is set it MUST contain each of
   them; when it is unset the effective `supported_models` is the primary
   followed by `warm_models`. Its absence is a warm set of one.
+
+*Control socket.* The operator control socket (SPEC-011 R-3.1.5) carries one
+request and one reply per warm-set action:
+
+- `{"type":"warm_set_request","action":A,"model_id":M}`, where `A` is
+  `status`, `load` or `unload`, and `model_id` is required for `load` and
+  `unload` and ignored for `status`.
+- `{"type":"warm_set_response","action":A,"status":S,"model_id":M,"detail":D,"entries":[...]}`,
+  where `model_id` echoes the request and `detail`, when present, is a short
+  reason code. `entries` is the warm set after the action, primary first;
+  each entry has the `warm_models` fields `model_id`, `state`, `primary`,
+  `pinned`, `slots_total`, `slots_free` (only while `warm`),
+  `max_context_tokens`, `throughput_tps_estimate`, `model_params_b`,
+  `model_hash`, `model_hash_algorithm` and `weights_manifest_sha256` (each
+  absent when unknown), plus `leases`, the requests holding the member.
+
+`status` is `ok` for `status`. A `load` answers `loaded`, `already_warm`,
+`insufficient_memory`, `unsupported_model` (not in `supported_models`, not on
+this Mac, or a model family that cannot run beside the loaded members) or
+`load_failed`. An `unload` answers `unloaded`, `not_loaded`, `primary` (the
+primary is never unloaded), `busy` (a request holds the member) or `failed`.
+A missing `model_id` or an unknown action answers `invalid_request` (detail
+`model_id_required` or `unknown_action`); a process without a warm set
+answers `unavailable` (detail `no_warm_set`) with no entries. A load runs
+through R017 exactly as a boot load does.
 
 **SPEC-001-R018 — Sharing one GPU.** Rows of different models MUST NOT be
 batched in one forward; continuous batching (SPEC-038) batches rows of one

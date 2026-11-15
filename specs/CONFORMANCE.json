@@ -15820,30 +15820,65 @@
       "requirement_id": "SPEC-001-R016",
       "spec_id": "SPEC-001",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/WarmModelTable.swift:final class WarmModelTable",
+        "phase3-binary/Sources/macprovider-cli/WarmModelRouting.swift:enum WarmModelRoute",
+        "phase3-binary/Sources/macprovider-cli/WarmModelsWire.swift:static func entries",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:static func warmServingLease",
+        "phase3-binary/Sources/macprovider-cli/WarmSetBoot.swift:func promoteInSwapTurn",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:static func warmSetMemberBinding"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelTableTests.swift:testResolveRules",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testRelayServesTheNamedMemberOnItsOwnRuntime",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testHTTPForwardedHeaderRoutesToTheMemberAndRefusesAnUnknownOne",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testRelayReceiptBindsTheServingMembersModelHash",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testHTTPReceiptBindsTheServingMembersModelHash",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testAWarmSetOfOneRepeatsTheTopLevelPrimaryFields",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testWireEntriesArePrimaryFirstAfterPromotion",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelPreflightTests.swift:testWarmMemberIsAnsweredForItsOwnContextCapacity",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testSwitchToAWarmMemberPromotesItWithoutALoad",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testAMemberThatFailsArtifactVerificationNeverBecomesWarm",
+        "phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift:testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2338",
-        "rationale": "SPEC-001 v1.9.57 (#2338) warm set state and wire: primary model, warm_models on handshake and heartbeat, served_model_id routing, single-model compatibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+        "rationale": "SPEC-001 v1.9.58 (#2338) warm set state and wire: primary model and promotion, warm_models on handshake and heartbeat, served_model_id routing, member catalog binding, single-model compatibility. Implemented and unit-tested; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     },
     {
       "requirement_id": "SPEC-001-R017",
       "spec_id": "SPEC-001",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SharedModelMemoryBudget.swift:final class SharedModelMemoryBudget",
+        "phase3-binary/Sources/macprovider-cli/WarmModelLoader.swift:actor WarmModelLoader",
+        "phase3-binary/Sources/macprovider-cli/WarmSetBoot.swift:func load(_ modelID: String) async -> WarmSetLoadOutcome",
+        "phase3-binary/Sources/macprovider-cli/ControlSocket.swift:nonisolated static func handleWarmSetRequest"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SharedModelMemoryBudgetTests.swift:testTwoRuntimeAdmissionRefusedPastSharedBudget",
+        "phase3-binary/Tests/macprovider-cliTests/SharedModelMemoryBudgetTests.swift:testLoadDecisionKeepsPinnedReservedRows",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testFitsAfterEvictionEvictsTheIdleUnpinnedMember",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testEvictionIsLeastRecentlyUsedFirst",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testMemberWithInFlightRowsIsNeverEvicted",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testPinnedMemberRowsAreReserved",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsConfigTests.swift:testUnsetSupportedModelsIsPrimaryFollowedByWarmModels",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testPrimaryFirstAndOnlyWarmEntriesCarrySlotsFree",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testBootLoadsInListOrderPinnedAndPublishesEachMember",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2338",
-        "rationale": "SPEC-001 v1.9.57 (#2338) one memory budget for every warm model: row admission against the shared budget, load, LRU eviction of idle unpinned models, pinning, warm_models configuration. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+        "rationale": "SPEC-001 v1.9.58 (#2338) one memory budget for every warm model: row admission against the shared budget, load, LRU eviction of idle unpinned models, pinning, warm_models configuration, warm_set control frames. Implemented and unit-tested; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     },
     {

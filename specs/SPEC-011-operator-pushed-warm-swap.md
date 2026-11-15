@@ -1,6 +1,6 @@
 # SPEC-011 — Operator-Pushed Warm Swap
 
-**Version:** 0.6 (2026-11-13, warm swap replaces one member of a warm set)
+**Version:** 0.7 (2026-11-15, a switch to a warm member promotes it in the swap turn)
 **Status:** **LOCKED** at v0.5 (2026-06-06, Decision-log Entry 55 —
 codex round-4 returned 0/0/0). Implemented end-to-end (operator-pushed
 warm swap, NDJSON control socket, opt-in `model_hash`/`loading` heartbeat,
@@ -17,6 +17,16 @@ candidate per §6.2), SPEC-004 v0.3.1, SPEC-008 v0.3.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §7 OQ-1 (control-socket transport), OQ-2 (CLI block-vs-detach), and OQ-3 (audit-backfill for WS-drop-mid-load swaps) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-011.
+
+**Change log v0.7 (2026-11-15, Related: #2338 — post-lock amendment):**
+R-3.10.3 now states what the promotion does as built: it runs in the swap's
+warm-set turn, loads nothing, moves every primary-only attachment to the
+promoted member, and completes with the ordinary `switch_progress` `loaded`
+frame; a target that is still `loading` or `evicting` is refused. New
+R-3.10.7: a swap accepted while a warm-set load, evict or unload holds the
+turn reports the primary ready until its turn begins. R-3.10.5: the text
+table also shows a member that is still loading or evicting. No wire field of
+§3.3, no billing (L-5) and no trust tier changes.
 
 **Change log v0.6 (2026-11-13, Related: #2338 — post-lock amendment):**
 L-3 now reads per warm-set member: a provider process may keep several warm
@@ -1131,17 +1141,34 @@ No coordinator-side config additions (per L-7).
   primary (SPEC-001-R019).
 - **R-3.10.3** If `<model-id>` is already a warm member, the switch promotes
   it to primary without a load; the old primary stays warm, unpinned, and
-  becomes an LRU eviction candidate (SPEC-001-R017).
+  becomes an LRU eviction candidate (SPEC-001-R017). The promoted member is
+  pinned with its rows reserved. The promotion runs in the swap's warm-set
+  turn (no load, evict or unload overlaps it) and moves every primary-only
+  attachment to the promoted member at once: provider status ownership, the
+  top-level handshake, heartbeat and `/v1/status` fields, the preflight
+  answer, the switch acknowledgement subscribers and the right to be
+  switched again. Requests already admitted on either member finish there
+  and are counted against that member. The switch completes with the
+  ordinary `switch_progress` `loaded` frame. A target that is still
+  `loading` or `evicting` is refused; a target whose load finished while the
+  switch waited for the turn is refused with a request to switch again,
+  never loaded a second time.
 - **R-3.10.4** The target's load is admitted against the shared memory
   budget (SPEC-001-R017), with the old primary's weights counted as
   available to it exactly as in a single-model swap; other members' weights
   and rows are never counted as available. A target that does not fit fails
   the swap with rollback per R-3.2.6 and leaves the warm set unchanged.
 - **R-3.10.5** `models list` (R-3.1.1) reports state `warm` for every warm
-  member and marks the primary.
+  member and marks the primary. The text table also lists a member that is
+  still `loading` or `evicting` with that state; the JSON list keeps its
+  states.
 - **R-3.10.6** Warm swap, SPEC-012 `set_model` (`mode: "replace"` or
   `"add"`), boot `warm_models` configuration and SPEC-001-R017 eviction are
   the only ways warm-set membership changes.
+- **R-3.10.7** A swap accepted while a warm-set load, evict or unload holds
+  the warm-set turn reserves the runtime (a second switch is refused) but
+  has not started: the primary keeps serving and is reported ready, not
+  `loading`, until the swap's turn begins.
 
 ---
 
