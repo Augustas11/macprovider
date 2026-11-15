@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.100
+**Version:** 0.1.101
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.100",
+  "version": "0.1.101",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1959,6 +1959,74 @@ listed file is missing or changes without a regenerated digest.
   R015, a live e2e gate or conformance promotion; the ordinary committed-evidence
   route remains available.
 
+**Admission pickup by a running provider (0.1.100).** Native MTP activates
+only at process start: the admission set is read once and the drafter loads
+with the model. A running `serve` process MUST therefore pick up an admission
+that a later catalog release adds for its loaded model, on every small-row
+route (R003):
+
+1. The provider runs its runtime catalog refresh (SPEC-023-R010) on a session
+   accept that reports another catalog document and also every 30 minutes,
+   because a catalog activation leaves a session whose row did not change
+   connected. When the refresh verifies a catalog document for the loaded
+   weights under a `release_id` other than the one the process started on,
+   the provider re-runs the startup admission resolve against that release:
+   the signed catalog and artifact feed, the signed admission set, the store
+   projection (which fetches the drafter ahead of the restart) and the
+   loader's admission checks (tuple, artifact binding, revocation state). The
+   set is written to a probe directory; the set the running process loaded
+   from stays in place.
+2. The provider restarts itself only if `native_mtp_mode` is `auto`, no draft
+   model is configured, a fresh start on that release would admit the loaded
+   model, and the set the process started on did not (it named no entry for
+   the model and artifact digest, could not be verified, or named one whose
+   tuple the loader's admission checks refuse). A definite answer (no
+   artifact identity or no admission entry for the model, a projected target
+   that is not the served artifact, a refused tuple) is final for that
+   release in that process. Inputs that cannot be fetched or do not carry the
+   release yet are checked again at later refreshes, at most 6 checks per
+   release per process; after the sixth the provider reports phase
+   `check_exhausted` and leaves that release alone. A release costs at most one restart per provider
+   across process starts, recorded durably before the delay starts; if the
+   record cannot be written the provider does not restart and reports
+   `restart_required`. A process does not restart for the release it started
+   on, with one exception: when its startup admission resolve failed on such
+   unresolved inputs, that release is checked too and may cost one restart
+   under its own durable record.
+3. The restart waits a random delay, uniform over 60 to 1800 seconds per
+   provider, while serving normally. It never drains or exits while an update
+   is in flight or not yet finalized, or while an operator pause is requested
+   or in effect; it carries on when that ends. It then reports `draining`
+   with reason `native_mtp_admission_restart`, refuses new buyer and local
+   requests, and preempts local (non-network) work as an update drain does
+   (SPEC-001-R011). It waits for the requests in flight to reach zero: no
+   buyer request is cut, and `drain_timeout_s` does not apply to this wait.
+   Until the exit no path may report `ready`, `busy` or `degraded` or reopen
+   local admission. At zero it exits nonzero through the
+   unsolicited-termination path (SPEC-001 FR-12), which the provider
+   LaunchAgent restarts; the next start decides the route and loads the
+   drafter as any start does. If more than 2 hours pass after the delay
+   without reaching that exit (a request that never ends, a long pause), the
+   provider abandons the restart without cutting anything, serves again and
+   reports `restart_required`; the next release or the next process start
+   picks the admission up.
+4. Only the provider LaunchAgent's process exits: its parent is launchd and
+   launchd names it as the provider job (`XPC_SERVICE_NAME` equals the
+   provider label) or it carries the installer plist's
+   `MACPROVIDER_LAUNCHD_DOMAIN`. Any other process does not exit; it reports
+   the pending admission and keeps serving. Local `/v1/status` reports
+   `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
+   `waiting_for_idle`, `restart_required` or `check_exhausted`, and
+   `drain_not_before` while scheduled), else null.
+5. A revocation never restarts a provider; the live revocation feed (R014)
+   disables the tuple in place. An autotune child, a shard-group process and
+   a process with an operator-placed admission set do not pick up.
+6. Not provided: providers of one model do not coordinate. The random delay
+   spreads their restarts, but two can overlap, and a model with a single
+   provider is unserved for that provider's drain and reload. The length of
+   that gap is not measured here. The restart counts in the provider's
+   restart history like any unsolicited termination.
+
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force
 `decode_path=ordinary`; `native_mtp_mode=auto` is ignored for those
@@ -2652,7 +2720,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.100 (2026-11-15, Related: #2338)** — R003 names mlx-swift-lm
+- **0.1.101 (2026-11-16, Related: #2338)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.67` (`2baaf9ecbc975e0d7a9fe131ba588f04fc453154`) on
   `3.32.3-macprovider.63`, `.63` plus only the mlx-swift pin move, and
   mlx-swift `0.32.3-macprovider.23`
@@ -2660,6 +2728,12 @@ requests.
   synchronous eval waits for the device without holding the process-wide
   evalLock (Swift layer only). Model sources, the core and C rows and the
   metallib are unchanged.
+- **0.1.100 (2026-11-15)** — R013 adds the admission pickup: a running
+  provider re-fetches the admission set when its catalog refresh sees another
+  release and, if a fresh start would newly admit its loaded model, restarts
+  once per release after a 60 to 1800 second random delay and a drain that
+  waits for the requests in flight with no forced cut. Before this, a new
+  admission took effect only at the provider's next unrelated process start.
 - **0.1.99 (2026-11-14, Related: #2352)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.63` (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) on
   `3.32.3-macprovider.61`: DeepSeek V4 prefill can yield between evaluated

@@ -2846,6 +2846,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 runtimeSnapshot?.continuousBatching, admissionHold: snapshot.cbSelfCheckAdmissionHold
             ),
             "native_mtp": (runtimeSnapshot?.nativeMTPStatus ?? NativeMTPStatusSink.disabled().snapshot()).statusObject(),
+            // SPEC-048-R013: an admission waiting for this process to restart.
+            "native_mtp_admission_pending": snapshot.nativeMTPAdmissionPending.map { $0.statusObject() as Any } ?? NSNull(),
             "kv_disk_tier": kvDiskTierStatus(kvDiskTierSnapshot),
             "recent_restarts": recentRestarts(lifecycleStateInspection),
             "coordinator": [
