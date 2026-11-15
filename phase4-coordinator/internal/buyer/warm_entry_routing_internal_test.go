@@ -282,3 +282,49 @@ func TestWarmEntryStickyIsPerModel(t *testing.T) {
 		t.Fatalf("legacy sticky entry=%+v, want other with no served model", entry)
 	}
 }
+
+// SPEC-002-R011: a preflight_ack model_not_loaded from a warm entry closes
+// that entry until its next heartbeat and selection moves to the next
+// candidate; with no other candidate the answer is today's no-provider one.
+func TestWarmEntryPreflightModelNotLoadedFailsOver(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWarmEntryProvider(t, registry, "pw", 1)
+	s := warmEntryServer(registry)
+	s.preflightThreshold = 1
+	s.preflightTimeout = time.Second
+	s.preflight = func(p pool.Provider, _ string, _ int, _ time.Duration) (PreflightResult, bool, error) {
+		if p.ProviderID == "pw" && p.ServedModelID == "model-b" {
+			return PreflightResult{Accepted: false, Reason: "model_not_loaded"}, true, nil
+		}
+		return PreflightResult{Accepted: true}, true, nil
+	}
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", warmChatReq("model-b"), http.Header{}, nil, "2026-11-15", &forwardState{slotReservationsEnabled: true})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" || routeErr.message != "No provider available for model model-b" {
+		t.Fatalf("exhausted preflight = %+v, want 503 no_provider_available for model-b", routeErr)
+	}
+	if member := mustEntry(t, registry, "pw", "model-b"); member.RoutingEligible() {
+		t.Fatalf("member after preflight model_not_loaded = %s, want unavailable", member.State)
+	}
+	if primary := mustEntry(t, registry, "pw", "model-a"); !primary.RoutingEligible() {
+		t.Fatalf("primary after member model_not_loaded = %s, want routable", primary.State)
+	}
+	// No candidate left: the same answer a request gets with no provider.
+	_, again := s.selectProviderExcluding(context.Background(), "rid-2", warmChatReq("model-b"), http.Header{}, nil, "2026-11-15", &forwardState{slotReservationsEnabled: true})
+	if again == nil || again.status != routeErr.status || again.code != routeErr.code || again.message != routeErr.message {
+		t.Fatalf("no-candidate answer = %+v, want %+v", again, routeErr)
+	}
+
+	now := time.Now().UTC()
+	registry.Register(&pool.Provider{
+		ProviderID: "p2", AssignedID: "s-p2", Hostname: "p2.local", ModelID: "model-b",
+		State: pool.StateReady, Tier: pool.TierPinned, MaxContextTokens: 50000,
+		MaxConcurrency: 1, SlotsTotal: 1, SlotsFree: 1, ThroughputTPSEstimate: 10,
+		EndpointURL: "https://p2.example", InferencePath: pool.InferencePathHTTPForwarding,
+		LastHeartbeatAt: now, ConnectedAt: now,
+	}, nil)
+	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-3", warmChatReq("model-b"), http.Header{}, nil, "2026-11-15", &forwardState{slotReservationsEnabled: true})
+	if routeErr != nil || got.ProviderID != "p2" {
+		t.Fatalf("failover provider=%q err=%+v, want p2", got.ProviderID, routeErr)
+	}
+}

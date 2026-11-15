@@ -491,6 +491,11 @@ const (
 	// it renders 413 request_too_large and is neither retried nor
 	// breaker-qualifying.
 	wsForwardRequestTooLarge wsForwardResult = "request_too_large"
+	// wsForwardEntryNotLoaded is a warm-set entry's model_not_loaded answer
+	// before any byte reached the buyer (SPEC-002-R011): the entry is closed
+	// until its next heartbeat and the request fails over like queue-full,
+	// without the queue-full hold and without a breaker fault.
+	wsForwardEntryNotLoaded wsForwardResult = "entry_not_loaded"
 )
 
 const providerFrameTooLargeMessage = "Request is too large for the selected provider's transport"
@@ -3256,7 +3261,7 @@ func (s *Server) forwardStreamSequence(
 			return false
 		},
 		skipRetryBudgetCheck: func(dispatched dispatchedAttempt) bool {
-			return dispatched.nativeResult == wsForwardQueueFull
+			return dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardEntryNotLoaded
 		},
 		renderRetryExhausted: func(w http.ResponseWriter, dispatched dispatchedAttempt, state *forwardState) {
 			// Curated attempt.Error: classifyStreamResult populated
@@ -3464,7 +3469,7 @@ func (s *Server) forwardWSNonStreamSequence(
 			// when a candidate exists). M2-1d-preserved behaviour pinned
 			// by forward_loop_test scenario
 			// TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance.
-			return dispatched.nativeResult == wsForwardQueueFull
+			return dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardEntryNotLoaded
 		},
 		renderRetryExhausted: func(w http.ResponseWriter, dispatched dispatchedAttempt, state *forwardState) {
 			// Only the timeout branch reaches this in WS-non-streaming
@@ -3488,7 +3493,7 @@ func (s *Server) forwardWSNonStreamSequence(
 			// Matches pre-refactor pattern (timeout at server.go:1427,
 			// queue-full at :1487).
 			status := http.StatusGatewayTimeout
-			if dispatched.nativeResult == wsForwardQueueFull {
+			if dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardEntryNotLoaded {
 				status = http.StatusServiceUnavailable
 			}
 			if err := logAttempt(state.provider, status, dispatched.tr.attempt, state.explicitRetries); err != nil {
@@ -3819,6 +3824,7 @@ func (s *Server) forwardHTTPSequence(
 			// Non-200 path.
 			status := 0
 			localPreempted := false
+			entryNotLoaded := false
 			attempt := requestLogAttempt{}
 			var respBody []byte
 			if resp != nil {
@@ -3840,6 +3846,10 @@ func (s *Server) forwardHTTPSequence(
 					localPreempted = true
 					status = http.StatusBadGateway
 					attempt.ErrorCode = providerLocalPreemptedCode
+				}
+				if status == http.StatusServiceUnavailable && entryModelNotLoaded(state.provider, httpProviderErrorCode(respBody)) {
+					entryNotLoaded = true
+					attempt.ErrorCode = entryNotLoadedErrorCode
 				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalState := terminalStateFromAttempt(status, http.StatusText(status), attempt.ErrorCode)
@@ -3918,7 +3928,7 @@ func (s *Server) forwardHTTPSequence(
 				// audit H1). Only short-circuit when the retry budget
 				// is genuinely exhausted; otherwise fall through so
 				// the buyer's explicit retry budget is honored.
-				if attempt.ErrorCode != "" && !localPreempted && providerReceiptEligible(state.provider) {
+				if attempt.ErrorCode != "" && !localPreempted && !entryNotLoaded && providerReceiptEligible(state.provider) {
 					if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, nil) {
 						attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
 						if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
@@ -3964,14 +3974,19 @@ func (s *Server) forwardHTTPSequence(
 			}
 			tr := classifyHTTPResult(resp, doErr, attempt)
 			s.log.Warn().Err(doErr).Int("status", status).Str("error_code", attempt.ErrorCode).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("provider request failed")
-			if localPreempted {
+			nativeResult := wsForwardResult("")
+			switch {
+			case entryNotLoaded:
+				s.markEntryNotLoaded(state.provider, requestID)
+				nativeResult = wsForwardEntryNotLoaded
+			case localPreempted:
 				tr.status = status
-			} else if status != 0 {
+			case status != 0:
 				s.handleProviderFailure(state.provider, status)
 			}
 			return dispatchedAttempt{
 				tr:           tr,
-				nativeResult: "",
+				nativeResult: nativeResult,
 				success:      false,
 				extra: httpDispatchExtra{
 					status:         status,
@@ -3988,6 +4003,11 @@ func (s *Server) forwardHTTPSequence(
 		// a no-op (never invoked because dispatch returns success=false
 		// for the non-200 path it falls through with).
 		renderSuccess: func(http.ResponseWriter, *http.Request, chatRequest, dispatchedAttempt, *forwardState) {},
+		// A warm-set entry's model_not_loaded fails over like a WS
+		// queue-full refusal, outside the buyer retry budget.
+		skipRetryBudgetCheck: func(dispatched dispatchedAttempt) bool {
+			return dispatched.nativeResult == wsForwardEntryNotLoaded
+		},
 		renderRetryExhausted: func(w http.ResponseWriter, dispatched dispatchedAttempt, state *forwardState) {
 			extra := dispatched.extra.(httpDispatchExtra)
 			// HTTP-specific terminal disambiguation: provider_timeout
@@ -4285,13 +4305,13 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	s.noteProviderAcceptedRequest(state)
 	if stream {
 		result, attempt := s.forwardWSStreaming(w, r, requestID, provider, relay, state, billingAttemptN)
-		if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
+		if reserved && (result == wsForwardQueueFull || result == wsForwardEntryNotLoaded || result == wsForwardProviderDisconnected) {
 			s.admission.RefundRequest(provider)
 		}
 		return result, attempt
 	}
 	result, attempt := s.forwardWSNonStreaming(w, r, requestID, provider, relay, logNonStreamingSuccess, declareNonStreamingTrailers, state, billingAttemptN)
-	if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
+	if reserved && (result == wsForwardQueueFull || result == wsForwardEntryNotLoaded || result == wsForwardProviderDisconnected) {
 		s.admission.RefundRequest(provider)
 	}
 	return result, attempt
@@ -4372,6 +4392,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				if end.Status == "error_queue_full" {
 					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+				}
+				if body.Len() == 0 && entryModelNotLoaded(provider, end.Status) {
+					markProviderDone()
+					s.markEntryNotLoaded(provider, requestID)
+					return wsForwardEntryNotLoaded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
 				writeWSEndError(w, end)
@@ -4910,6 +4935,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if end.Status == "error_context_exceeded" {
 					markProviderDone()
 					return wsForwardContextExceeded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+				}
+				if entryModelNotLoaded(provider, end.Status) {
+					markProviderDone()
+					s.markEntryNotLoaded(provider, requestID)
+					return wsForwardEntryNotLoaded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
@@ -5464,6 +5494,11 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			attempt.Status = http.StatusBadGateway
 			attempt.ErrorCode = providerLocalPreemptedCode
 			return wsForwardFailed, http.StatusBadGateway, attempt
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && entryModelNotLoaded(provider, httpProviderErrorCode(respBody)) {
+			s.markEntryNotLoaded(provider, requestID)
+			attempt.ErrorCode = entryNotLoadedErrorCode
+			return wsForwardEntryNotLoaded, resp.StatusCode, attempt
 		}
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
 		s.handleProviderFailure(provider, resp.StatusCode)
@@ -6960,7 +6995,7 @@ func statusForForwardResult(result wsForwardResult) int {
 	switch result {
 	case wsForwardTimedOut:
 		return http.StatusGatewayTimeout
-	case wsForwardQueueFull, wsForwardUnavailable:
+	case wsForwardQueueFull, wsForwardUnavailable, wsForwardEntryNotLoaded:
 		return http.StatusServiceUnavailable
 	case wsForwardContextExceeded, wsForwardRequestTooLarge:
 		return http.StatusRequestEntityTooLarge
@@ -6973,7 +7008,7 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult, cont
 	switch result {
 	case wsForwardTimedOut:
 		writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
-	case wsForwardQueueFull, wsForwardUnavailable:
+	case wsForwardQueueFull, wsForwardUnavailable, wsForwardEntryNotLoaded:
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
@@ -8173,6 +8208,9 @@ type routeError struct {
 	// ownershipLookupFailed marks a buyer-ownership refusal caused by a
 	// lookup that could not answer, not by an owned provider.
 	ownershipLookupFailed bool
+	// entryNotLoaded marks a warm-set entry's preflight model_not_loaded
+	// answer (SPEC-002-R011): the entry is closed and selection moves on.
+	entryNotLoaded bool
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -8935,6 +8973,11 @@ func (s *Server) selectReservedProvider(candidate pool.Provider, model string, r
 	provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
 	if routeErr != nil {
 		s.releaseQueuedSlotReservation(state)
+		if routeErr.entryNotLoaded {
+			// The next candidate is tried; exhausted, the buyer gets the
+			// answer for a model no provider can serve.
+			routeErr = noProviderForModelRouteError(model)
+		}
 		return pool.Provider{}, routeErr
 	}
 	return provider, nil
@@ -9864,6 +9907,10 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 	if err != nil || !ok {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "Provider preflight timed out"}
 	}
+	if !result.Accepted && entryModelNotLoaded(provider, result.Reason) {
+		s.markEntryNotLoaded(provider, requestID)
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Provider preflight: model not loaded", entryNotLoaded: true}
+	}
 	if !result.Accepted {
 		msg := "Provider rejected preflight"
 		if result.Reason != "" {
@@ -9927,6 +9974,9 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				selected, routeErr := s.preflightCandidate(provider, requestID, estimatedTokens)
 				if routeErr != nil {
 					s.slotQueue.releaseReservation(slotKey(provider))
+					if routeErr.entryNotLoaded {
+						routeErr = noProviderForModelRouteError(model)
+					}
 					lastPreflightErr = routeErr
 					tried[slotKey(provider)] = struct{}{}
 					goto nextQueueCandidate

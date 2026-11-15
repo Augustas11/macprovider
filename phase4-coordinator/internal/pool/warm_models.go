@@ -53,6 +53,9 @@ type WarmModel struct {
 	// like Provider.forwardedInFlight does for the primary. It follows the
 	// member by model id across heartbeats, promotion included.
 	forwardedInFlight int
+	// notLoaded records a model_not_loaded answer for this member; its entry
+	// is unavailable until the next heartbeat replaces the member list.
+	notLoaded bool
 }
 
 // warmModelKey is the SPEC-010 case-folded model id.
@@ -233,6 +236,9 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v := session
 	v.ServedModelID = m.ModelID
 	if m.Primary {
+		if m.notLoaded && (session.State == StateReady || session.State == StateBusy) {
+			v.State = StateUnavailable
+		}
 		return v
 	}
 	v.ModelID = m.ModelID
@@ -269,14 +275,14 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.ignoredLowerReadyReport = false
 	v.queueFullHold = false
 	v.capacitySafetyHold = thermal
-	if m.State != WarmModelWarm {
+	if m.State != WarmModelWarm || m.notLoaded {
 		v.SlotsFree = 0
 	}
 	if session.State != StateReady && session.State != StateBusy {
 		return v
 	}
 	switch {
-	case m.State != WarmModelWarm:
+	case m.State != WarmModelWarm || m.notLoaded:
 		v.State = StateUnavailable
 	case thermal || v.SlotsFree <= 0:
 		v.State = StateBusy
@@ -453,7 +459,7 @@ func (r *Registry) RoutableSlotsFreeFor(providerID, assignedID, servedModelID st
 	default:
 		m := p.WarmModels[idx]
 		thermal := p.capacitySafetyHold && !p.queueFullHold
-		if thermal || m.State != WarmModelWarm || m.SlotsFree < 0 {
+		if thermal || m.State != WarmModelWarm || m.notLoaded || m.SlotsFree < 0 {
 			return 0, true
 		}
 		return m.SlotsFree, true
@@ -477,4 +483,26 @@ func (r *Registry) ForwardedInFlightFor(providerID, assignedID, servedModelID st
 	default:
 		return p.WarmModels[idx].forwardedInFlight
 	}
+}
+
+// MarkEntryNotLoaded records a provider's model_not_loaded answer for the
+// entry serving servedModelID (SPEC-002-R011): that entry is unavailable
+// until the next heartbeat replaces the warm set. The session, its other
+// entries and Snapshot are untouched. A provider without a warm set, or a
+// model no longer in it, is a no-op.
+func (r *Registry) MarkEntryNotLoaded(providerID, assignedID, servedModelID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.WarmModels == nil || servedModelID == "" {
+		return false
+	}
+	key := warmModelKey(servedModelID)
+	for i := range p.WarmModels {
+		if warmModelKey(p.WarmModels[i].ModelID) == key {
+			mutableWarmMemberLocked(p, i).notLoaded = true
+			return true
+		}
+	}
+	return false
 }

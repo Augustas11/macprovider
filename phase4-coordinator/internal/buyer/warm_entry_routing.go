@@ -1,11 +1,13 @@
 package buyer
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -90,4 +92,53 @@ func setServedModelHeader(h http.Header, p pool.Provider) {
 	if p.ServedModelID != "" {
 		h.Set(servedModelHeader, p.ServedModelID)
 	}
+}
+
+// entryNotLoadedErrorCode is the SPEC-001 end status of a model_not_loaded
+// answer; the request log records it so the attempt carries null usage.
+const entryNotLoadedErrorCode = "error_model_not_loaded"
+
+// entryModelNotLoaded reports a provider's model_not_loaded answer to a
+// dispatch that named a warm-set entry (SPEC-001-R016 Request routing): a
+// preflight_ack reason, a WS end status or an HTTP error code. A provider
+// without a warm set never gets an entry view, so its answer keeps today's
+// handling.
+func entryModelNotLoaded(p pool.Provider, code string) bool {
+	if p.ServedModelID == "" {
+		return false
+	}
+	return code == entryNotLoadedErrorCode || code == string(providerws.PreflightRejectionModelNotLoaded)
+}
+
+// markEntryNotLoaded closes the entry until its next heartbeat. It is never a
+// breaker fault and never touches the session or its other entries.
+func (s *Server) markEntryNotLoaded(p pool.Provider, requestID string) {
+	if s.pool == nil || !s.pool.MarkEntryNotLoaded(p.ProviderID, p.AssignedID, p.ServedModelID) {
+		return
+	}
+	s.log.Warn().
+		Str("event", "warm_entry_model_not_loaded").
+		Str("provider_id", p.ProviderID).
+		Str("served_model_id", p.ServedModelID).
+		Str("request_id", requestID).
+		Msg("warm-set entry answered model_not_loaded; unavailable until its next heartbeat")
+}
+
+// httpProviderErrorCode is the error.code of a provider's JSON error body.
+func httpProviderErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return envelope.Error.Code
+}
+
+// noProviderForModelRouteError is the answer for a model no provider can
+// serve, given once every entry that answered model_not_loaded is excluded.
+func noProviderForModelRouteError(model string) *routeError {
+	return &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
 }

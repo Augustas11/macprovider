@@ -3982,3 +3982,57 @@ func TestEntrySnapshotEqualsSnapshotWithoutWarmSet(t *testing.T) {
 		t.Fatalf("ResolveEntry = %+v, Resolve = %+v", resolved, plain)
 	}
 }
+
+func TestWarmEntryMarkNotLoadedUntilNextHeartbeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	at := time.Now()
+	registerWarmHeartbeatProvider(t, registry, at)
+
+	if !registry.MarkEntryNotLoaded("p1", "current", "MODEL-B") {
+		t.Fatal("mark not loaded failed")
+	}
+	if member := warmEntry(t, registry, "model-b"); member.State != StateUnavailable || member.SlotsFree != 0 || member.RoutingEligible() {
+		t.Fatalf("member after model_not_loaded = %s free=%d", member.State, member.SlotsFree)
+	}
+	if free, ok := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); !ok || free != 0 {
+		t.Fatalf("routable member seats = %d %v", free, ok)
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.State != StateReady || session.SlotsFree != 2 || !session.RoutingEligible() {
+		t.Fatalf("model_not_loaded touched the session: %s free=%d", session.State, session.SlotsFree)
+	}
+	if primary := warmEntry(t, registry, "model-a"); primary.State != StateReady || !primary.RoutingEligible() {
+		t.Fatalf("model_not_loaded touched the primary entry: %s", primary.State)
+	}
+
+	// A further mark on the primary entry leaves the session and Snapshot alone.
+	if !registry.MarkEntryNotLoaded("p1", "current", "model-a") {
+		t.Fatal("mark primary not loaded failed")
+	}
+	if primary := warmEntry(t, registry, "model-a"); primary.State != StateUnavailable || primary.RoutingEligible() {
+		t.Fatalf("primary entry after model_not_loaded = %s", primary.State)
+	}
+	if session, _ := registry.Resolve("p1", "current"); session.State != StateReady || !session.RoutingEligible() {
+		t.Fatalf("primary model_not_loaded touched the session: %s", session.State)
+	}
+
+	// The next heartbeat listing the members warm makes them routable again.
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a",
+		warmTestMember("model-b", WarmModelWarm, 2, 2)))); !ok {
+		t.Fatal("heartbeat rejected")
+	}
+	for _, model := range []string{"model-a", "model-b"} {
+		if entry := warmEntry(t, registry, model); entry.State != StateReady || !entry.RoutingEligible() {
+			t.Fatalf("%s after heartbeat = %s", model, entry.State)
+		}
+	}
+
+	if registry.MarkEntryNotLoaded("p1", "current", "model-z") || registry.MarkEntryNotLoaded("p1", "other", "model-b") || registry.MarkEntryNotLoaded("p1", "current", "") {
+		t.Fatal("marked an entry that does not exist")
+	}
+	legacy := NewRegistry(nil)
+	legacy.Register(&Provider{ProviderID: "p2", AssignedID: "s2", ModelID: "model-a", State: StateReady, SlotsTotal: 1, SlotsFree: 1}, nil)
+	if legacy.MarkEntryNotLoaded("p2", "s2", "model-a") {
+		t.Fatal("marked a provider without a warm set")
+	}
+}
