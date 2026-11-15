@@ -317,6 +317,26 @@ final class WarmModelLoaderTests: XCTestCase {
 
     // MARK: ModelRuntime
 
+    /// SPEC-011 R-3.10.3: a promotion loads nothing; the budget's pins
+    /// follow the table, so the old primary becomes evictable and the new
+    /// one keeps its rows reserved.
+    func testPromotionLoadsNothingAndMovesThePins() async throws {
+        let h = Harness(limitBytes: 100 * gib + 3 * margin)
+        _ = try await h.adoptPrimary("P", bytes: 40 * gib)
+        try await h.loader.load(h.spec("A", 30 * gib), pinned: false)
+        let promoted = try await h.loader.exclusive { try await h.loader.promoteInTurn("a") }
+        XCTAssertEqual(promoted.new.modelID, "A")
+        XCTAssertEqual(h.log.all, ["load A"], "no load and no unload")
+        XCTAssertEqual(h.budget.member(1)?.pinned, false)
+        XCTAssertEqual(h.budget.member(h.memberID("A"))?.pinned, true)
+        XCTAssertEqual(h.state, ["A:warm", "P:warm"])
+
+        // The old primary is now the idle unpinned member a load evicts.
+        try await h.loader.load(h.spec("B", 31 * gib), pinned: false)
+        XCTAssertEqual(h.state, ["A:warm", "B:warm"])
+        XCTAssertEqual(h.log.all, ["load A", "unload P", "load B"])
+    }
+
     func testModelRuntimeUnloadForWarmSetReleasesArbiterAndBudgetMember() async throws {
         let status = ProviderStatus(
             modelID: "fixture-model", modelLoaded: true,

@@ -1233,6 +1233,59 @@ final class ControlSocketTests: XCTestCase {
             action: "load", status: "unavailable", modelID: "model-b", detail: "no_warm_set", entries: [])))
     }
 
+    /// SPEC-011 R-3.10.3: a switch to a warm member is acknowledged and
+    /// completes without a load; the status the socket answers afterwards
+    /// is the new primary's.
+    func testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary() async throws {
+        let socketPath = try makeSocketPath()
+        let providerStatus = ProviderStatus(
+            modelID: "ready-model", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 32_768, maxConcurrencyOverride: 1))
+        let primary = makeRuntime(modelID: "ready-model")
+        let member = makeRuntime(modelID: "member-model", warmSwapEnabled: false)
+        await primary.setProviderStatus(providerStatus)
+        let table = WarmModelTable<ModelRuntime>()
+        let loader = WarmModelLoader(
+            table: table, budget: SharedModelMemoryBudget(), limitBytes: { Int.max / 4 }, idlePollNanoseconds: 1_000_000
+        ) { _ in member }
+        let boot = WarmSetBoot(
+            table: table, loader: loader, supportedModels: ["ready-model", "member-model"],
+            loadSpec: { WarmModelLoadSpec(modelID: $0, estimatedResidentBytes: 1, minimumRowKVBytes: 0) },
+            memberInfo: { _ in WarmModelMemberInfo(maxContextTokens: 4_096, slotsTotal: 1) },
+            primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: providerStatus),
+            log: { _ in })
+        try await boot.adoptPrimary(modelID: "ready-model", runtime: primary)
+        await primary.setWarmSetSwapHooks(boot)
+        let loaded = await boot.load("member-model")
+        XCTAssertEqual(loaded, .loaded)
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: primary, idleTimeoutSeconds: 0.5, warmSet: boot,
+            primaryRuntime: { table.primaryRuntime() })
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.switchRequest(targetModelID: "member-model", requestedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+        var frames: [ControlSocketFrame] = []
+        for _ in 0..<4 {
+            let frame = try await connection.receive(timeout: 5)
+            frames.append(frame)
+            if case let .switchProgress(state, _, _, _, _) = frame, state == .loaded || state == .failed { break }
+        }
+        await connection.close()
+        let status = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await status.send(.statusRequest)
+        let current = try await status.receive(timeout: 2)
+        await status.close()
+        await server.stop()
+
+        XCTAssertEqual(frames.first, .switchAck(accepted: true, reason: nil, currentTarget: nil, secondsRemaining: nil))
+        guard case let .switchProgress(state, _, _, _, _)? = frames.last else {
+            return XCTFail("no terminal switch frame: \(frames)")
+        }
+        XCTAssertEqual(state, .loaded)
+        XCTAssertEqual(current, .statusResponse(currentModelID: "member-model", runtimeState: .ready))
+    }
+
     private func assertRoundTrip(_ frame: ControlSocketFrame) throws {
         XCTAssertEqual(try ControlSocketCodec.decode(try ControlSocketCodec.encode(frame)), frame)
     }

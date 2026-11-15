@@ -631,9 +631,21 @@ actor ProviderStatus {
     /// Every network request in flight, on any warm member: what drain,
     /// pause and idle work wait for.
     private var requestsInFlight = 0
-    /// SPEC-001-R016: the part of `requestsInFlight` running on secondary
-    /// warm members, by routing key. The primary's slots exclude it.
-    private var secondaryInFlight: [String: Int] = [:]
+    /// SPEC-001-R016: the network requests in flight on each warm member, by
+    /// the member key the request was admitted with. A request keeps its
+    /// member for its whole life; which member is primary can change
+    /// (SPEC-011 R-3.10.3), so the split is taken at read time.
+    private var memberInFlight: [String: Int] = [:]
+    /// The member key of the current primary; nil for a process without a
+    /// warm set, where every keyed request is a secondary's.
+    private var primaryMemberKey: String?
+
+    /// The part of `requestsInFlight` running on secondary members. The
+    /// primary's slots exclude it.
+    private var secondaryInFlight: [String: Int] {
+        guard let primaryMemberKey else { return memberInFlight }
+        return memberInFlight.filter { $0.key != primaryMemberKey }
+    }
     private var errorsTotal = 0
     private var restartCount = 0
     private var recentRestartsAt: [Date] = []
@@ -744,7 +756,7 @@ actor ProviderStatus {
         noteRealRequestStart()
         requestsInFlight += 1
         if let warmMember {
-            secondaryInFlight[warmMember, default: 0] += 1
+            memberInFlight[warmMember, default: 0] += 1
         }
         if let requestID {
             activeRequestIDs.insert(requestID)
@@ -910,8 +922,11 @@ actor ProviderStatus {
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil, warmMember: String? = nil) async {
         noteRealRequestEnd()
         requestsInFlight = max(0, requestsInFlight - 1)
-        if let warmMember, let count = secondaryInFlight[warmMember] {
-            secondaryInFlight[warmMember] = count > 1 ? count - 1 : nil
+        // Read before the decrement: telemetry below describes the member
+        // that is primary when the request ends.
+        let onPrimary = warmMember == nil || warmMember == primaryMemberKey
+        if let warmMember, let count = memberInFlight[warmMember] {
+            memberInFlight[warmMember] = count > 1 ? count - 1 : nil
         }
         if let index = cbAdmissionHoldArrivals.firstIndex(of: startedAt) {
             cbAdmissionHoldArrivals.remove(at: index)
@@ -935,7 +950,7 @@ actor ProviderStatus {
             windowGenerationSeconds += elapsed
             // Speculative, decode-rate and native-MTP telemetry describe the
             // primary's engine; a secondary member's rows stay out of it.
-            if warmMember == nil {
+            if onPrimary {
                 if completion.specDecodeGeneration == specDecodeGeneration {
                     specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
                     specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
@@ -983,6 +998,41 @@ actor ProviderStatus {
 
     /// SPEC-001-R016: network requests in flight per secondary warm member.
     func secondaryRequestsInFlight() -> [String: Int] { secondaryInFlight }
+
+    /// SPEC-001-R016: the member key the primary's requests are admitted
+    /// with, set once the warm set adopts the boot model.
+    func setPrimaryWarmMember(_ key: String) async {
+        primaryMemberKey = key
+        await refreshAvailabilityState()
+    }
+
+    /// SPEC-011 R-3.10.3: a warm secondary became the primary without a
+    /// load. The top-level model identity and capacity now describe it, and
+    /// the requests already running on each member move to the side their
+    /// member is now on: the new primary's count toward the primary's
+    /// slots, the old primary's toward a secondary's. The served-slot stamp
+    /// restarts, because the new primary's runtime stamps its own counts.
+    func promoteWarmPrimary(
+        memberKey: String,
+        modelID: String,
+        modelHash: String?,
+        modelHashAlgorithm: String?,
+        weightsManifestSHA256: String?,
+        maxContextTokens: Int,
+        maxConcurrency: Int
+    ) async {
+        primaryMemberKey = memberKey
+        servedSlotsStamp = nil
+        await completeTargetSwap(
+            modelID: modelID,
+            modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
+            weightsManifestSHA256: weightsManifestSHA256,
+            maxContextTokens: max(1, maxContextTokens),
+            maxContextSource: capacity.maxContextSource,
+            maxConcurrency: max(1, maxConcurrency)
+        )
+    }
 
     func currentSpecDecodeGeneration() -> Int {
         specDecodeGeneration

@@ -196,4 +196,79 @@ final class WarmModelsWireTests: XCTestCase {
         XCTAssertEqual(snapshot.nativeMTPProposedTokensSinceLast, 0)
         XCTAssertEqual(snapshot.nativeMTPAcceptedTokensSinceLast, 0)
     }
+
+    // MARK: Promotion (SPEC-011 R-3.10.3)
+
+    /// Requests in flight on both members when the primary role moves end
+    /// up on the side their member is now on, and stay right as they end.
+    func testPromotionMovesInFlightRequestsToTheRightSide() async throws {
+        let status = status(slots: 4)
+        await status.setPrimaryWarmMember("member-a")
+        let a1 = try await admit(status, "a1", "member-a")
+        let a2 = try await admit(status, "a2", "member-a")
+        let b1 = try await admit(status, "b1", "member-b")
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.primaryRequestsInFlight, 2)
+        XCTAssertEqual(snapshot.secondaryRequestsInFlight, ["member-b": 1])
+        XCTAssertEqual(snapshot.slotsFree, 2)
+
+        await status.promoteWarmPrimary(
+            memberKey: "member-b", modelID: "model-b", modelHash: "bb", modelHashAlgorithm: "sha256",
+            weightsManifestSHA256: "ww", maxContextTokens: 8_000, maxConcurrency: 3)
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.modelID, "model-b")
+        XCTAssertEqual(snapshot.modelHash, "bb")
+        XCTAssertEqual(snapshot.capacity.maxContextTokens, 8_000)
+        XCTAssertEqual(snapshot.capacity.maxConcurrency, 3)
+        XCTAssertEqual(snapshot.requestsInFlight, 3)
+        XCTAssertEqual(snapshot.primaryRequestsInFlight, 1, "the new primary's request counts on the primary")
+        XCTAssertEqual(snapshot.secondaryRequestsInFlight, ["member-a": 2])
+        XCTAssertEqual(snapshot.slotsFree, 2)
+        XCTAssertEqual(status.preflightCell.value.maxContextTokens, 8_000)
+
+        await status.finishRequest(startedAt: a1, completion: nil, failed: false, requestID: "a1", warmMember: "member-a")
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.primaryRequestsInFlight, 1)
+        XCTAssertEqual(snapshot.secondaryRequestsInFlight, ["member-a": 1])
+        await status.finishRequest(startedAt: b1, completion: nil, failed: false, requestID: "b1", warmMember: "member-b")
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.primaryRequestsInFlight, 0)
+        XCTAssertEqual(snapshot.slotsFree, 3)
+        await status.finishRequest(startedAt: a2, completion: nil, failed: false, requestID: "a2", warmMember: "member-a")
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsInFlight, 0)
+        XCTAssertTrue(snapshot.secondaryRequestsInFlight.isEmpty)
+    }
+
+    /// The new primary's served-slot counts apply even though its runtime
+    /// stamps them lower than the old primary's.
+    func testPromotionRestartsTheServedSlotStamp() async throws {
+        let status = status(slots: 4)
+        await status.updateServedSlots(4, stamp: 9)
+        await status.promoteWarmPrimary(
+            memberKey: "member-b", modelID: "model-b", modelHash: nil, modelHashAlgorithm: nil,
+            weightsManifestSHA256: nil, maxContextTokens: 8_000, maxConcurrency: 2)
+        await status.updateServedSlots(1, stamp: 1)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.capacity.maxConcurrency, 1)
+    }
+
+    /// After a promotion the new primary's entry comes first, carrying the
+    /// top-level fields; the demoted member is an unpinned warm secondary.
+    func testWireEntriesArePrimaryFirstAfterPromotion() throws {
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 1, modelID: "model-a", hash: "aa"))
+        let token = try table.beginLoading(modelID: "model-b", pinned: false)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 2, modelID: "model-b", hash: "bb"))
+        let promoted = try table.promote(modelID: "model-b")
+        table.updateInfo(token: promoted.old.token, WarmModelMemberInfo(maxContextTokens: 4_000, slotsTotal: 2, modelHash: "aa"))
+        let entries = WarmModelsWire.entries(
+            primaryFields: ["model_id": "model-b", "model_hash": "bb"], primarySlotsTotal: 3, primarySlotsFree: 3,
+            views: table.views.value)
+        XCTAssertEqual(entries.map { $0["model_id"] as? String }, ["model-b", "model-a"])
+        XCTAssertEqual(entries.map { $0["primary"] as? Bool }, [true, false])
+        XCTAssertEqual(entries.map { $0["pinned"] as? Bool }, [true, false])
+        XCTAssertEqual(entries.map { $0["model_hash"] as? String }, ["bb", "aa"])
+        XCTAssertEqual(entries[1]["slots_free"] as? Int, 2)
+    }
 }

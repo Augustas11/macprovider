@@ -11,19 +11,30 @@ final class WarmServingLease: @unchecked Sendable {
     /// The member was the primary when the lease was taken.
     let primary: Bool
     let runtime: any ModelRuntimeServing
+    /// The `ProviderStatus` key the request is counted under
+    /// (`WarmModelTable.memberKey`), for the primary too: a promotion moves
+    /// the primary role, never a request's member.
+    let memberKey: String
     private let onRelease: @Sendable () -> Void
 
-    init(modelID: String, primary: Bool, runtime: any ModelRuntimeServing, onRelease: @escaping @Sendable () -> Void) {
+    init(
+        modelID: String, primary: Bool, runtime: any ModelRuntimeServing, memberKey: String,
+        onRelease: @escaping @Sendable () -> Void
+    ) {
         self.modelID = modelID
         self.primary = primary
         self.runtime = runtime
+        self.memberKey = memberKey
         self.onRelease = onRelease
     }
 
     func release() { onRelease() }
 
-    /// The `ProviderStatus` key of a secondary member, nil for the primary.
-    var secondaryKey: String? { primary ? nil : modelID.lowercased(with: nil) }
+    /// Whether the request runs on `boot`, the runtime the process started
+    /// with, which keeps serving under its boot identity (configured id,
+    /// catalog alias, swap-aware validation) whether or not it is still the
+    /// primary. Any other member serves under its own id.
+    func runsOn(_ boot: any ModelRuntimeServing) -> Bool { runtime === boot }
 }
 
 /// The routing face of a warm set, free of the table's runtime type.
@@ -34,6 +45,9 @@ protocol WarmModelRouting: AnyObject, Sendable {
     func servingLeaseLocal(bodyModel: String?) throws -> WarmServingLease
     /// The member views, readable without awaiting.
     var views: WarmModelViewCell { get }
+    /// The current primary's runtime (SPEC-011 R-3.10.3 moves it): what the
+    /// top-level status, handshake and heartbeat fields describe.
+    func primaryServingRuntime() -> (any ModelRuntimeServing)?
 }
 
 extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {
@@ -45,8 +59,13 @@ extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {
         Self.serving(try leaseLocal(bodyModel: bodyModel))
     }
 
+    func primaryServingRuntime() -> (any ModelRuntimeServing)? { primaryRuntime() }
+
     private static func serving(_ lease: WarmModelLease<Runtime>) -> WarmServingLease {
-        WarmServingLease(modelID: lease.modelID, primary: lease.primary, runtime: lease.runtime) { lease.release() }
+        WarmServingLease(
+            modelID: lease.modelID, primary: lease.primary, runtime: lease.runtime,
+            memberKey: memberKey(token: lease.token)
+        ) { lease.release() }
     }
 }
 

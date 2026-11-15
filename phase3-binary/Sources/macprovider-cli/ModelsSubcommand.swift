@@ -1140,6 +1140,9 @@ struct ModelsListCommand: AsyncParsableCommand {
                 await connection.close()
                 throw ControlSocketConnectError.handshakeTimeout(path: socketPath.path)
             }
+            // SPEC-011 R-3.10.5: every warm member is listed `warm`; the
+            // current model (the primary) stays the one marked current.
+            let warmModelIDs = await readWarmSecondaryModelIDs(connection: connection, primary: status.currentModelID)
             await connection.close()
             // Preserve every configured supported model for the catalog. The
             // running authority inventory only determines whether an idle row
@@ -1154,6 +1157,9 @@ struct ModelsListCommand: AsyncParsableCommand {
             if !models.contains(where: { modelIDKey($0) == modelIDKey(status.currentModelID) }) {
                 models.insert(status.currentModelID, at: 0)
             }
+            for warmModelID in warmModelIDs where !models.contains(where: { modelIDKey($0) == modelIDKey(warmModelID) }) {
+                models.append(warmModelID)
+            }
             if emitJSON {
                 try await emitJSONList(
                     currentModelID: status.currentModelID,
@@ -1161,10 +1167,13 @@ struct ModelsListCommand: AsyncParsableCommand {
                     source: "control_socket",
                     warmSwapAvailable: true,
                     authorizedModelIDs: Set(authorizedModelIDs.map(modelIDKey)),
+                    warmModelIDs: Set(warmModelIDs.map(modelIDKey)),
                     artifactResolver: CachedModelArtifactResolver.forConfig(resolved)
                 )
             } else {
-                printModelsTable(currentModelID: status.currentModelID, supportedModels: models)
+                printModelsTable(
+                    currentModelID: status.currentModelID, supportedModels: models,
+                    warmModelIDs: Set(warmModelIDs.map(modelIDKey)))
             }
         } catch ControlSocketConnectError.socketAbsent(let path) {
             let models = idleCatalog(from: resolved)
@@ -3103,8 +3112,26 @@ private func idleCatalog(from config: AppConfig) -> [String] {
     return []
 }
 
-private func printModelsTable(currentModelID: String?, supportedModels: [String]) {
-    print("model_id\tstate")
+/// The ids of the warm members beside the primary (SPEC-001-R016), read on
+/// an open control connection. Empty when serve keeps one model or does not
+/// answer the request.
+private func readWarmSecondaryModelIDs(connection: ControlSocketConnection, primary: String) async -> [String] {
+    do {
+        try await connection.send(.warmSetRequest(action: "status", modelID: nil))
+        guard case let .warmSetResponse(reply) = try await connection.receive(timeout: 2.0) else { return [] }
+        return reply.entries
+            .filter { $0.state == WarmModelState.warm.rawValue && !$0.primary && modelIDKey($0.modelID) != modelIDKey(primary) }
+            .map(\.modelID)
+    } catch {
+        return []
+    }
+}
+
+/// `warmModelIDs` are the warm members beside the current model. With any,
+/// a `primary` column marks the current model (SPEC-011 R-3.10.5); with
+/// none the table is the single-model table.
+func printModelsTable(currentModelID: String?, supportedModels: [String], warmModelIDs: Set<String> = []) {
+    print(warmModelIDs.isEmpty ? "model_id\tstate" : "model_id\tstate\tprimary")
     var rows: [String] = []
     var seen = Set<String>()
     for modelID in supportedModels where seen.insert(modelIDKey(modelID)).inserted {
@@ -3114,8 +3141,13 @@ private func printModelsTable(currentModelID: String?, supportedModels: [String]
         rows.insert(currentModelID, at: 0)
     }
     for modelID in rows {
-        let state = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true ? "warm" : "idle"
-        print("\(modelID)\t\(state)")
+        let current = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true
+        let state = current || warmModelIDs.contains(modelIDKey(modelID)) ? "warm" : "idle"
+        if warmModelIDs.isEmpty {
+            print("\(modelID)\t\(state)")
+        } else {
+            print("\(modelID)\t\(state)\t\(current ? "yes" : "no")")
+        }
     }
 }
 
@@ -3137,6 +3169,7 @@ private func emitJSONList(
     source: String,
     warmSwapAvailable: Bool,
     authorizedModelIDs: Set<String>? = nil,
+    warmModelIDs: Set<String> = [],
     artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws {
     do {
@@ -3146,6 +3179,7 @@ private func emitJSONList(
             source: source,
             warmSwapAvailable: warmSwapAvailable,
             authorizedModelIDs: authorizedModelIDs,
+            warmModelIDs: warmModelIDs,
             artifactResolver: artifactResolver
         )
         try ModelSwitchingWireCodec.printJSON(document)
@@ -3159,12 +3193,16 @@ private func emitJSONList(
     }
 }
 
-private func makeModelsListWire(
+/// `warmModelIDs` (case-folded) are the warm members beside the current
+/// model: listed `warm` (SPEC-011 R-3.10.5); `current_model_id` marks the
+/// primary.
+func makeModelsListWire(
     currentModelID: String?,
     supportedModels: [String],
     source: String,
     warmSwapAvailable: Bool,
     authorizedModelIDs: Set<String>? = nil,
+    warmModelIDs: Set<String> = [],
     artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws -> ModelsListWire {
     var effectiveModels = supportedModels
@@ -3182,7 +3220,8 @@ private func makeModelsListWire(
     for modelID in effectiveModels {
         guard ModelSwitchingWireCodec.safeID(modelID) else { throw ModelsListWireError.invalidModelID }
         guard seen.insert(modelIDKey(modelID)).inserted else { continue }
-        let state = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true ? "warm" : "idle"
+        let current = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true
+        let state = current || warmModelIDs.contains(modelIDKey(modelID)) ? "warm" : "idle"
         let verdict = ModelFit.evaluate(modelID: modelID, ramGB: ModelFit.detectRAMGB())
         let estimate = ModelFit.estimateWeightSizeGB(modelID: modelID).map(Double.init)
         let weightsPresent: Bool

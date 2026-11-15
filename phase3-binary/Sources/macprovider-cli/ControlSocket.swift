@@ -1283,6 +1283,10 @@ actor ControlSocketServer {
     /// The serve process's warm set; nil when `--model` is served by an
     /// external runtime, and `warm_set` requests then reply `unavailable`.
     private let warmSet: (any WarmSetControl)?
+    /// SPEC-011 R-3.10.3: the warm set's current primary. Switch, status and
+    /// adoption frames go to it; nil (no warm set) means `modelRuntime`. The
+    /// KV disk tier frames stay on `modelRuntime`, which holds the tier.
+    private let primaryRuntime: (@Sendable () -> ModelRuntime?)?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -1307,8 +1311,10 @@ actor ControlSocketServer {
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         watchdogCleanup: ControlSocketWatchdogCleanup? = nil,
         kvDiskTier: KVDiskTier? = nil,
-        warmSet: (any WarmSetControl)? = nil
+        warmSet: (any WarmSetControl)? = nil,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)? = nil
     ) {
+        self.primaryRuntime = primaryRuntime
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
         self.supportedModels = supportedModels
@@ -1414,6 +1420,7 @@ actor ControlSocketServer {
                 resumeProvider: resumeProvider,
                 kvDiskTier: self.kvDiskTier,
                 warmSet: self.warmSet,
+                primaryRuntime: self.primaryRuntime,
                 server: self
             )
         }
@@ -1478,6 +1485,7 @@ actor ControlSocketServer {
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         kvDiskTier: KVDiskTier?,
         warmSet: (any WarmSetControl)?,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -1516,7 +1524,8 @@ actor ControlSocketServer {
                     pauseProvider: pauseProvider,
                     resumeProvider: resumeProvider,
                     kvDiskTier: kvDiskTier,
-                    warmSet: warmSet
+                    warmSet: warmSet,
+                    primaryRuntime: primaryRuntime
                 )
                 await server.removeClientFD(clientFD)
             }
@@ -1526,7 +1535,7 @@ actor ControlSocketServer {
 
     private nonisolated static func handleClient(
         fd: Int32,
-        modelRuntime: ModelRuntime,
+        modelRuntime bootRuntime: ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?,
         receiptRotator: (@Sendable () async throws -> Void)?,
@@ -1542,13 +1551,16 @@ actor ControlSocketServer {
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         kvDiskTier: KVDiskTier? = nil,
-        warmSet: (any WarmSetControl)? = nil
+        warmSet: (any WarmSetControl)? = nil,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
+        let currentRuntime: @Sendable () -> ModelRuntime = { primaryRuntime?() ?? bootRuntime }
 
         while !Task.isCancelled {
             do {
                 let frame = try await connection.receive(timeout: idleTimeoutSeconds)
+                let modelRuntime = currentRuntime()
                 switch frame {
                 case .statusRequest:
                     let snapshot = await modelRuntime.currentSnapshot()
@@ -1574,6 +1586,7 @@ actor ControlSocketServer {
                         requestedAtMs: requestedAtMs,
                         connection: connection,
                         modelRuntime: modelRuntime,
+                        currentRuntime: currentRuntime,
                         tracker: tracker,
                         supportedModels: supportedModels
                     )
@@ -1709,11 +1722,11 @@ actor ControlSocketServer {
                         .referralChallengeCancelAck(status: try await service.cancel())
                     }
                 case let .kvCachePurgeRequest(mode, key):
-                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: bootRuntime, connection: connection)
                     await connection.close()
                     return
                 case .kvCacheStatusRequest:
-                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: bootRuntime, connection: connection)
                     await connection.close()
                     return
                 case let .warmSetRequest(action, modelID):
@@ -1980,6 +1993,7 @@ actor ControlSocketServer {
         requestedAtMs: Int64,
         connection: ControlSocketConnection,
         modelRuntime: ModelRuntime,
+        currentRuntime: @Sendable () -> ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?
     ) async {
@@ -2020,7 +2034,8 @@ actor ControlSocketServer {
                     try await connection.send(.switchProgress(state: .draining, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
                     continue
                 case .completed:
-                    let served = await modelRuntime.servedContext()
+                    // A promotion completes on the new primary.
+                    let served = await currentRuntime().servedContext()
                     try await connection.send(.switchProgress(
                         state: .loaded,
                         elapsedMs: elapsedMs(since: requestedAtMs),

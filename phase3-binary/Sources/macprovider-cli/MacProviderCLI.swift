@@ -638,11 +638,22 @@ struct ServeCommand: AsyncParsableCommand {
         )
     }
 
+    /// The primary's switch targets: a member promoted to primary (SPEC-011
+    /// R-3.10.3) switches to them exactly as the boot primary would.
+    struct WarmSetSwitchTargets: Sendable {
+        let targetAuthorities: [String: ModelRuntimeTargetAuthority]
+        let authorizedSwitchModelIDs: [String]
+        let maxContextByTarget: [String: Int]
+        let maxBatchByTarget: [String: Int]
+        let contextProvenanceModelIDs: Set<String>
+    }
+
     /// SPEC-001-R016: a further warm member, built from the configuration
     /// the primary is built from. It carries no catalog binding of its own
     /// (no verified artifact hash, draft model or signed native-MTP sidecar,
-    /// which name the primary), cannot be swapped, never receives the
-    /// provider status, and gets no KV disk tier or idle prewarm.
+    /// which name the primary), cannot be switched until it is promoted to
+    /// primary (SPEC-011 R-3.10.3), never receives the provider status, and
+    /// gets no KV disk tier.
     static func makeWarmSetMemberRuntime(
         modelID: String,
         family: String?,
@@ -650,7 +661,8 @@ struct ServeCommand: AsyncParsableCommand {
         acceptedTuples: [ContinuousBatchingAcceptedTuple],
         policy: ContinuousBatchingPolicyLoadResult,
         emergencyOffOverride: Bool,
-        autotuneCandidate: Bool
+        autotuneCandidate: Bool,
+        switchTargets: WarmSetSwitchTargets
     ) async throws -> ModelRuntime {
         let context = ProviderCapacity(maxContextOverride: config.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
         return try await ModelRuntime(
@@ -676,7 +688,12 @@ struct ServeCommand: AsyncParsableCommand {
             continuousBatchingModeExplicitlyConfigured: config.continuousBatchingExplicitlyConfigured,
             nativeMTPMode: config.nativeMTPMode,
             warmSwapEnabled: false,
-            swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds
+            swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds,
+            targetAuthorities: switchTargets.targetAuthorities,
+            authorizedSwitchModelIDs: switchTargets.authorizedSwitchModelIDs,
+            switchMaxContextByTarget: switchTargets.maxContextByTarget,
+            switchMaxBatchByTarget: switchTargets.maxBatchByTarget,
+            switchContextProvenanceModelIDs: switchTargets.contextProvenanceModelIDs
         )
     }
 
@@ -3578,6 +3595,12 @@ struct ServeCommand: AsyncParsableCommand {
             let config = warmSetConfig
             let acceptedTuples = effectiveAcceptedTuples
             let policy = continuousBatchingPolicy
+            let switchTargets = WarmSetSwitchTargets(
+                targetAuthorities: targetAuthorities,
+                authorizedSwitchModelIDs: authorizedSwitchModelIDs,
+                maxContextByTarget: switchMaxContextByTarget,
+                maxBatchByTarget: switchMaxBatchByTarget,
+                contextProvenanceModelIDs: switchContextProvenanceModelIDs)
             let table = WarmModelTable<ModelRuntime>()
             let boot = WarmSetBoot(
                 table: table,
@@ -3585,7 +3608,8 @@ struct ServeCommand: AsyncParsableCommand {
                     try await Self.makeWarmSetMemberRuntime(
                         modelID: spec.modelID, family: spec.modelFamily, config: config,
                         acceptedTuples: acceptedTuples, policy: policy,
-                        emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate)
+                        emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
+                        switchTargets: switchTargets)
                 },
                 supportedModels: resolved.supportedModels,
                 loadSpec: { try Self.warmSetLoadSpec($0) },
@@ -3596,10 +3620,14 @@ struct ServeCommand: AsyncParsableCommand {
                         modelHash: await runtime.loadedModelHash,
                         modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
                         weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256)
-                }
+                },
+                // SPEC-011 R-3.10.3: what only the primary holds moves with
+                // a promotion.
+                primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: providerStatus)
             )
             try await boot.adoptPrimary(modelID: primaryModelID, runtime: mlxPrimary)
             await mlxPrimary.setWarmSetSwapHooks(boot)
+            if let key = boot.primaryMemberKey { await providerStatus.setPrimaryWarmMember(key) }
             warmSet = boot
         } else {
             warmSet = nil
@@ -3982,7 +4010,8 @@ struct ServeCommand: AsyncParsableCommand {
             thermalGate: thermalGate,
             powerSource: SystemPowerSourceReporter(),
             config: IdlePrewarmConfig(appConfig: resolved),
-            logger: idlePrewarmLogger
+            logger: idlePrewarmLogger,
+            primaryRuntime: warmSet.map { warmSet in { warmSet.table.primaryRuntime() } }
         )
         let controlSocket: ControlSocketServer?
         let receiptRotator: (@Sendable () async throws -> Void)?
@@ -4095,7 +4124,8 @@ struct ServeCommand: AsyncParsableCommand {
             resumeProvider: resumeProvider,
             watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
             kvDiskTier: kvDiskTier,
-            warmSet: warmSet
+            warmSet: warmSet,
+            primaryRuntime: warmSet.map { warmSet in { warmSet.table.primaryRuntime() } }
         )
         } else {
             // SPEC-046 loopback serving runtime (#1569) exposes no MLX warm-swap,

@@ -2413,7 +2413,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
     private var mlxCacheLimitBeforeLFM25: Int?
     private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
-    private let warmSwapEnabled: Bool
+    /// Moves with the primary role on a promotion (SPEC-011 R-3.10.3).
+    private var warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     struct DrainTiming: Sendable {
         let nowMilliseconds: @Sendable () -> Int64
@@ -2429,6 +2430,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-011 §3.10: the warm set this runtime is the primary of; nil for
     /// a single-model process and for every non-primary member.
     private var warmSetSwapHooks: (any WarmSetSwapHooks)?
+    /// SPEC-011 R-3.10.3: the warm member a switch is promoting; a second
+    /// switch is refused until it ends.
+    private var pendingPromotionTarget: String?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
     private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
@@ -4852,6 +4856,80 @@ maxTokens: 1,
     /// primary does, SPEC-001-R016).
     func hasProviderStatus() -> Bool { providerStatus != nil }
 
+    /// What only the primary of a warm set holds (SPEC-001-R016, SPEC-011
+    /// §3.10): the provider status it writes, the warm set's swap hooks, the
+    /// switch permission and the subscribers to its swap signals.
+    struct PrimaryRole: Sendable {
+        let providerStatus: ProviderStatus?
+        let swapHooks: (any WarmSetSwapHooks)?
+        let warmSwapEnabled: Bool
+        let signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation]
+    }
+
+    /// SPEC-011 R-3.10.3: this runtime stops being the primary. It stops
+    /// writing the provider status, can no longer be switched, and its swap
+    /// signal subscribers (the control socket's pending switch, the
+    /// coordinator session) now hear `successor`. Its requests keep running.
+    /// Returns the switch target to announce once the caller has moved the
+    /// rest of the primary's state (`announceSwitchCompleted`).
+    @discardableResult
+    func handOffPrimaryRole(to successor: ModelRuntime) async -> String? {
+        let role = PrimaryRole(
+            providerStatus: providerStatus,
+            swapHooks: warmSetSwapHooks,
+            warmSwapEnabled: warmSwapEnabled,
+            signalContinuations: signalContinuations
+        )
+        providerStatus = nil
+        warmSetSwapHooks = nil
+        warmSwapEnabled = false
+        signalContinuations = [:]
+        await successor.acceptPrimaryRole(role)
+        return pendingPromotionTarget
+    }
+
+    private func acceptPrimaryRole(_ role: PrimaryRole) {
+        providerStatus = role.providerStatus
+        warmSetSwapHooks = role.swapHooks
+        warmSwapEnabled = role.warmSwapEnabled
+        signalContinuations.merge(role.signalContinuations) { current, _ in current }
+    }
+
+    /// The switch to this runtime, promoted to primary, is complete.
+    func announceSwitchCompleted(target: String) {
+        signal(SwapSignal(
+            targetModelID: target,
+            outcome: .completed(newModelID: currentModelID ?? target, newModelHash: currentModelHash)))
+    }
+
+    /// A switch to a warm secondary: no load, no drain. The promotion runs
+    /// in the warm set's turn, so it never overlaps a load, an eviction or
+    /// another swap.
+    private func beginPromotion(target: String, hooks: any WarmSetSwapHooks) throws -> Task<Void, Error> {
+        guard state == .ready, pendingPromotionTarget == nil else {
+            throw RuntimeStateMachineError.notReady(current: state)
+        }
+        pendingPromotionTarget = target
+        return Task.detached { [weak self] in
+            await hooks.runSwapTurn {
+                do {
+                    try await hooks.promoteInSwapTurn(target)
+                    await self?.finishPromotion(failure: nil)
+                } catch {
+                    await self?.finishPromotion(failure: String(describing: error))
+                }
+            }
+        }
+    }
+
+    private func finishPromotion(failure: String?) {
+        let target = pendingPromotionTarget ?? ""
+        pendingPromotionTarget = nil
+        if let failure {
+            signal(SwapSignal(targetModelID: target, outcome: .failed(reason: failure)))
+        }
+    }
+
     func authorizedSwitchModelIDList() -> [String] {
         authorizedSwitchModelIDs
     }
@@ -6059,6 +6137,13 @@ maxTokens: 1,
         } else if adoptionTransactionID != nil {
             throw ModelRuntimeAdoptionError.transactionNotPrepared
         }
+        // SPEC-011 R-3.10.3: a target already warm beside the primary is
+        // promoted, never loaded twice. An adoption carries knobs for a load
+        // and stays on the load path, which refuses a member target.
+        if let hooks = warmSetSwapHooks, adoptionTransactionID == nil, !creativeRestore,
+           hooks.isWarmSecondary(targetModelID) {
+            return try beginPromotion(target: targetModelID, hooks: hooks)
+        }
         try Self.refuseQuantizedKV(explicit: adoptionKnobs?.kvBits ?? kvBitsOverride, modelIDs: [targetModelID])
         let targetAuthority = targetAuthority(for: targetModelID)
         if testLoader == nil {
@@ -6066,8 +6151,8 @@ maxTokens: 1,
                 throw ModelRuntimeLoadError(target: targetModelID, reason: "signed catalog identity unavailable")
             }
         }
-        // SPEC-011 §3.10: a swap replaces the primary only; a model already
-        // warm beside it is refused, never loaded twice.
+        // SPEC-011 §3.10: a swap replaces the primary only; a member that is
+        // loading or evicting is refused.
         let warmSetSwapHooks = warmSetSwapHooks
         try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
         try transitionToLoading(target: targetModelID)
@@ -7629,7 +7714,7 @@ maxTokens: 1,
     }
 
     private func transitionToLoading(target: String) throws {
-        guard state == .ready else {
+        guard state == .ready, pendingPromotionTarget == nil else {
             throw RuntimeStateMachineError.notReady(current: state)
         }
         state = .loading

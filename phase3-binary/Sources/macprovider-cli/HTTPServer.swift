@@ -987,7 +987,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let writer = ResponseWriter(context: context)
         let images = images
         let providerStatus = providerStatus
-        let modelRuntime = modelRuntime
+        // SPEC-011 R-3.10.3: the top-level fields describe the current
+        // primary, which a promotion moves off the boot runtime.
+        let modelRuntime = warmModels?.primaryServingRuntime() ?? self.modelRuntime
+        // The KV disk tier stays attached to the boot runtime.
+        let bootRuntime = self.modelRuntime
         let warmSwapEnabled = warmSwapEnabled
         let providerID = providerID
         let coordinatorURL = coordinatorURL
@@ -998,7 +1002,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let lifecycleLeaseStore = lifecycleLeaseStore
         let compatibilitySetManifest = compatibilitySetManifest
         let warmModels = warmModels
-        Task.detached { @Sendable [images, providerStatus, modelRuntime, warmModels, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
+        Task.detached { @Sendable [images, providerStatus, modelRuntime, bootRuntime, warmModels, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
             let snapshot = await providerStatus.snapshot()
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
@@ -1014,7 +1018,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 assignedID: checkedAssignedID
             )
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
-            let kvDiskTierSnapshot = await modelRuntime.kvDiskTierSnapshot()
+            let kvDiskTierSnapshot = await bootRuntime.kvDiskTierSnapshot()
             let telemetryMatchesRuntime = !warmSwapEnabled
                 || runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
             let telemetryRuntimeEligible = !warmSwapEnabled
@@ -1184,9 +1188,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     primaryNames: [modelID, catalogModelIDAlias]
                 )
             }
-            // A primary lease serves on `modelRuntime` exactly as without a
-            // warm set; a secondary member serves under its own id.
-            let member = servingLease.flatMap { $0.primary ? nil : $0 }
+            // A lease on the boot runtime serves on `modelRuntime` exactly as
+            // without a warm set; any other member (a secondary, or one
+            // promoted to primary) serves under its own id.
+            let member = servingLease.flatMap { $0.runsOn(modelRuntime) ? nil : $0 }
             let servingRuntime = member?.runtime ?? modelRuntime
             do {
                 if let member {
@@ -1229,7 +1234,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let idlePrewarmer = idlePrewarmer
             let task = Task.detached { @Sendable [modelRuntime = servingRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
                 defer { servingLease?.release() }
-                let warmMember = servingLease?.secondaryKey
+                let warmMember = servingLease?.memberKey
                 var startedAt = requestAcceptedAt
                 var timeline = RequestTimeline(admittedAt: requestAcceptedAt)
                 var providerRequestStarted = false
@@ -1657,7 +1662,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let logRequestID = Self.logRequestID(requestID, localLease: localLease)
         let task = Task.detached { @Sendable [modelRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
             defer { servingLease?.release() }
-            let warmMember = servingLease?.secondaryKey
+            let warmMember = servingLease?.memberKey
             var startedAt = Date()
             var timeline = RequestTimeline(admittedAt: startedAt)
             var providerRequestStarted = false

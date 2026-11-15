@@ -593,9 +593,17 @@ actor CoordinatorClient {
     private let providerID: String
     private let endpointURL: String?
     private let wsTunneledMode: Bool
-    private let modelRuntime: any ModelRuntimeServing
+    /// The runtime the process booted with. The relay keeps its boot
+    /// identity for it (SPEC-001-R016 routing).
+    private let bootModelRuntime: any ModelRuntimeServing
     /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
     private let warmModels: (any WarmModelRouting)?
+    /// The current primary: what every top-level handshake and heartbeat
+    /// field describes. A promotion (SPEC-011 R-3.10.3) moves it off the
+    /// boot runtime.
+    private var modelRuntime: any ModelRuntimeServing {
+        warmModels?.primaryServingRuntime() ?? bootModelRuntime
+    }
     /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
     /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
     private let runtimeSource: String?
@@ -1133,8 +1141,11 @@ actor CoordinatorClient {
         }
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
-        self.modelRuntime = modelRuntime
+        self.bootModelRuntime = modelRuntime
         self.warmModels = warmModels
+        let primaryRuntime: @Sendable () -> any ModelRuntimeServing = {
+            warmModels?.primaryServingRuntime() ?? modelRuntime
+        }
         self.runtimeSource = runtimeSource
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
@@ -1244,13 +1255,15 @@ actor CoordinatorClient {
         self.computeScoreReference = config.computeScoreReference
         if let computeScoreExecutor {
             self.computeScoreExecutor = computeScoreExecutor
-        } else if let runtime = modelRuntime as? ModelRuntime {
-            self.computeScoreExecutor = { request in await runtime.runComputeScore(request) }
+        } else if let bootRuntime = modelRuntime as? ModelRuntime {
+            self.computeScoreExecutor = { request in
+                await ((primaryRuntime() as? ModelRuntime) ?? bootRuntime).runComputeScore(request)
+            }
         } else {
             self.computeScoreExecutor = nil
         }
         self.nativeMTPCanaryExecutor = nativeMTPCanaryExecutor ?? { request in
-            if let runtime = modelRuntime as? ModelRuntime {
+            if let runtime = primaryRuntime() as? ModelRuntime {
                 return await runtime.runNativeMTPCanary(request)
             }
             return Self.inconclusiveNativeMTPCanaryResult(
@@ -1259,7 +1272,7 @@ actor CoordinatorClient {
             )
         }
         self.nativeMTPTupleDisableHandler = nativeMTPTupleDisableHandler ?? { payload in
-            guard let runtime = modelRuntime as? ModelRuntime else { return }
+            guard let runtime = primaryRuntime() as? ModelRuntime else { return }
             if payload.reason == "bank_mismatch" {
                 // SPEC-048-R016 v0.1.48: fenced, kept for a re-offer.
                 await runtime.parkNativeMTPTupleForReoffer(
@@ -1276,7 +1289,7 @@ actor CoordinatorClient {
             }
         }
         self.nativeMTPTupleRestoreHandler = nativeMTPTupleRestoreHandler ?? { offer in
-            guard let runtime = modelRuntime as? ModelRuntime else { return .gone }
+            guard let runtime = primaryRuntime() as? ModelRuntime else { return .gone }
             return await runtime.restoreParkedNativeMTPTuple(offer)
         }
         self.nativeMTPServedBankDigest = nativeMTPServedBankDigest ?? {
@@ -1544,8 +1557,10 @@ actor CoordinatorClient {
     private func consumeSwapSignals() async {
         // Warm-swap signals are MLX-runtime specific; loopback serving runtimes
         // (SPEC-046 adapters) never swap, so there is nothing to consume.
-        guard let modelRuntime = modelRuntime as? ModelRuntime else { return }
-        let stream = await modelRuntime.swapSignals()
+        // A promotion (SPEC-011 R-3.10.3) hands this subscription to the new
+        // primary, so it keeps hearing the primary's swaps.
+        guard let signalSource = modelRuntime as? ModelRuntime else { return }
+        let stream = await signalSource.swapSignals()
         for await signal in stream {
             if Task.isCancelled {
                 return
@@ -2104,7 +2119,8 @@ actor CoordinatorClient {
         let publicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
         guard let recoveryClient = CoordinatorClient(
             config: recoveryConfig,
-            modelRuntime: modelRuntime,
+            modelRuntime: bootModelRuntime,
+            warmModels: warmModels,
             providerStatus: providerStatus,
             runtimeSource: runtimeSource,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
@@ -2514,7 +2530,7 @@ actor CoordinatorClient {
     private func installTier2Session(_ session: Tier2ProviderSession, sendFrame: @escaping InferenceRelay.SendFrame) {
         tier2Session = session
         inferenceRelay = InferenceRelay(
-            modelRuntime: modelRuntime,
+            modelRuntime: bootModelRuntime,
             warmModels: warmModels,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,

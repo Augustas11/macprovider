@@ -115,6 +115,17 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         try await unloadMarked(table.beginEvicting(modelID: modelID, allowPinned: true))
     }
 
+    /// SPEC-011 R-3.10.3 promotion of a `warm` secondary to primary, no
+    /// load. The caller holds the turn (`exclusive`, the swap's turn). The
+    /// new primary is pinned with its rows reserved; the old one is
+    /// unpinned, so a later load may evict it once it is idle.
+    func promoteInTurn(_ modelID: String) async throws -> (old: WarmModelTableEntry<Runtime>, new: WarmModelTableEntry<Runtime>) {
+        let promoted = try table.promote(modelID: modelID)
+        if let memberID = promoted.old.memberID { budget.setPinned(memberID: memberID, false) }
+        if let runtime = promoted.new.runtime { await pinAndReserve(runtime, pinned: true) }
+        return promoted
+    }
+
     /// Process shutdown: refuses every later load and marks a load in
     /// flight to be unloaded when its factory returns. Never waits for the
     /// turn, so a load that is still reading weights cannot hold it up.

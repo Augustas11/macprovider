@@ -5,8 +5,15 @@ import MacProviderCore
 /// (§3.10). `ModelRuntime` holds it type-erased.
 protocol WarmSetSwapHooks: AnyObject, Sendable {
     /// Throws `WarmSetSwapError` when `modelID` is a member other than the
-    /// primary (loading, warm or evicting).
+    /// primary (loading, warm or evicting): a load is never started for it.
     func refuseSwapTarget(_ modelID: String) throws
+    /// R-3.10.3: `modelID` is a `warm` member other than the primary, so a
+    /// switch to it promotes it instead of loading it.
+    func isWarmSecondary(_ modelID: String) -> Bool
+    /// R-3.10.3: promotes the warm member `modelID` to primary, inside the
+    /// caller's `runSwapTurn`. Every primary-only attachment moves with it
+    /// before this returns.
+    func promoteInSwapTurn(_ modelID: String) async throws
     /// Runs the swap's load, drain and switch while no warm-set load, evict
     /// or unload runs.
     func runSwapTurn(_ body: @Sendable () async -> Void) async
@@ -15,13 +22,18 @@ protocol WarmSetSwapHooks: AnyObject, Sendable {
 }
 
 enum WarmSetSwapError: Error, Equatable, CustomStringConvertible {
-    /// The target already runs beside the primary; unload it first.
+    /// The target finished loading beside the primary while this switch
+    /// waited to load it; a new switch promotes it.
     case targetAlreadyWarm(modelID: String)
+    /// The target is being loaded or unloaded beside the primary.
+    case targetNotWarm(modelID: String, state: String)
 
     var description: String {
         switch self {
         case let .targetAlreadyWarm(modelID):
-            return "model_already_warm model=\(modelID): it is already loaded beside the primary model; unload it before switching to it"
+            return "model_already_warm model=\(modelID): it finished loading beside the primary model while this switch waited; switch to it again to make it the primary"
+        case let .targetNotWarm(modelID, state):
+            return "model_not_warm model=\(modelID) state=\(state): it is being loaded or unloaded beside the primary model; switch when it is warm"
         }
     }
 }
@@ -108,6 +120,10 @@ protocol WarmSetControl: AnyObject, Sendable {
 final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShutdown, WarmSetControl, @unchecked Sendable {
     typealias LoadSpec = @Sendable (String) throws -> WarmModelLoadSpec
     typealias MemberInfo = @Sendable (Runtime) async -> WarmModelMemberInfo
+    /// R-3.10.3: moves every primary-only attachment from the old primary's
+    /// runtime to the new one's (provider status, swap hooks, top-level
+    /// fields). Runs inside the loader's turn.
+    typealias PrimaryHandoff = @Sendable (_ old: WarmModelTableEntry<Runtime>, _ new: WarmModelTableEntry<Runtime>) async -> Void
 
     let table: WarmModelTable<Runtime>
     let loader: WarmModelLoader<Runtime>
@@ -115,6 +131,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     private let supportedModels: [String]?
     private let loadSpec: LoadSpec
     private let memberInfo: MemberInfo
+    private let primaryHandoff: PrimaryHandoff
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var bootTask: Task<Void, Never>?
@@ -126,6 +143,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         supportedModels: [String]?,
         loadSpec: @escaping LoadSpec,
         memberInfo: @escaping MemberInfo,
+        primaryHandoff: @escaping PrimaryHandoff = { _, _ in },
         log: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
     ) {
         self.table = table
@@ -133,7 +151,13 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         self.supportedModels = supportedModels
         self.loadSpec = loadSpec
         self.memberInfo = memberInfo
+        self.primaryHandoff = primaryHandoff
         self.log = log
+    }
+
+    /// The `ProviderStatus` member key of the current primary.
+    var primaryMemberKey: String? {
+        table.entries().first(where: \.primary).map { WarmModelTable<Runtime>.memberKey(token: $0.token) }
     }
 
     /// Startup check: warm models need a primary this process loads itself.
@@ -233,9 +257,26 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     // MARK: WarmSetSwapHooks
 
     func refuseSwapTarget(_ modelID: String) throws {
-        if let entry = table.entry(modelID: modelID), !entry.primary {
-            throw WarmSetSwapError.targetAlreadyWarm(modelID: modelID)
+        guard let entry = table.entry(modelID: modelID), !entry.primary else { return }
+        if entry.state == .warm { throw WarmSetSwapError.targetAlreadyWarm(modelID: modelID) }
+        throw WarmSetSwapError.targetNotWarm(modelID: modelID, state: entry.state.rawValue)
+    }
+
+    func isWarmSecondary(_ modelID: String) -> Bool {
+        guard let entry = table.entry(modelID: modelID) else { return false }
+        return !entry.primary && entry.state == .warm
+    }
+
+    func promoteInSwapTurn(_ modelID: String) async throws {
+        let promoted = try await loader.promoteInTurn(modelID)
+        await primaryHandoff(promoted.old, promoted.new)
+        setPrimaryModelID(promoted.new.modelID)
+        // The demoted member is a secondary now: its wire entry and
+        // preflight answer come from the info it publishes.
+        if let runtime = promoted.old.runtime {
+            table.updateInfo(token: promoted.old.token, await memberInfo(runtime))
         }
+        log("event=warm_model_promote model=\(promoted.new.modelID) previous_primary=\(promoted.old.modelID)")
     }
 
     func runSwapTurn(_ body: @Sendable () async -> Void) async {
@@ -244,7 +285,8 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
 
     func primarySwapped(to modelID: String) {
         // The swap target was refused while it was another member, inside
-        // the same turn, so the new id is free.
+        // the same turn, so the new id is free. A promotion never comes
+        // here: it re-keys nothing.
         try? table.rekeyPrimary(to: modelID)
         setPrimaryModelID(modelID)
     }
@@ -320,5 +362,28 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         lock.unlock()
         let key = WarmModelTable<Runtime>.key(modelID)
         return (supportedModels ?? primary.map { [$0] } ?? []).contains { WarmModelTable<Runtime>.key($0) == key }
+    }
+}
+
+extension WarmSetBoot where Runtime == ModelRuntime {
+    /// SPEC-011 R-3.10.3 in `serve`: the primary role moves to the promoted
+    /// runtime (the provider status, the switch, the swap-signal
+    /// subscribers), then the top-level identity and capacity follow it,
+    /// then the pending switch hears `completed`.
+    static func modelRuntimePrimaryHandoff(providerStatus: ProviderStatus) -> PrimaryHandoff {
+        { old, new in
+            guard let oldRuntime = old.runtime, let newRuntime = new.runtime else { return }
+            let target = await oldRuntime.handOffPrimaryRole(to: newRuntime)
+            let rows = await newRuntime.warmSetRowReservation()
+            await providerStatus.promoteWarmPrimary(
+                memberKey: WarmModelTable<ModelRuntime>.memberKey(token: new.token),
+                modelID: new.modelID,
+                modelHash: await newRuntime.loadedModelHash,
+                modelHashAlgorithm: await newRuntime.loadedModelHashAlgorithm,
+                weightsManifestSHA256: await newRuntime.loadedWeightsManifestSHA256,
+                maxContextTokens: rows.tokensPerRow,
+                maxConcurrency: rows.rows)
+            if let target { await newRuntime.announceSwitchCompleted(target: target) }
+        }
     }
 }

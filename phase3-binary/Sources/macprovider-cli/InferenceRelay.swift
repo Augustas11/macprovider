@@ -436,7 +436,7 @@ actor InferenceRelay {
             }
         }
 
-        let admission = await providerStatus.admitRequest(requestID: requestID, warmMember: servingLease?.secondaryKey)
+        let admission = await providerStatus.admitRequest(requestID: requestID, warmMember: servingLease?.memberKey)
         guard case .admitted(let startedAt) = admission else {
             servingLease?.release()
             if let relayBlindOpened {
@@ -492,9 +492,10 @@ actor InferenceRelay {
                 throw error
             }
         }
-        // A primary lease serves on `modelRuntime` with today's identity; a
-        // secondary member serves on its own runtime under its own id.
-        let member = servingLease.flatMap { $0.primary ? nil : $0 }
+        // A lease on the boot runtime serves on `modelRuntime` with today's
+        // identity; any other member (a secondary, or one promoted to
+        // primary) serves on its own runtime under its own id.
+        let member = servingLease.flatMap { $0.runsOn(modelRuntime) ? nil : $0 }
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime, servingLease, member] in
             defer { servingLease?.release() }
             await Self.process(
@@ -507,6 +508,7 @@ actor InferenceRelay {
                 loadedModelID: member?.modelID ?? loadedModelID,
                 catalogModelIDAlias: member?.modelID ?? catalogModelIDAlias,
                 servedMemberModelID: member?.modelID,
+                warmMemberKey: servingLease?.memberKey,
                 warmSwapEnabled: warmSwapEnabled,
                 tier2Session: tier2Session,
                 receiptBuilder: receiptBuilder,
@@ -816,6 +818,7 @@ actor InferenceRelay {
         loadedModelID: String?,
         catalogModelIDAlias: String?,
         servedMemberModelID: String? = nil,
+        warmMemberKey: String? = nil,
         warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
         receiptBuilder: ReceiptBuilder?,
@@ -1141,7 +1144,7 @@ actor InferenceRelay {
             completion: completionResult,
             failed: failed,
             requestID: requestID,
-            warmMember: servedMemberModelID?.lowercased(with: nil)
+            warmMember: warmMemberKey
         )
         if relayBlindOpened == nil, !failed, !state.isCancelled, let completionResult {
             KVCacheTelemetry.emitRequestCompleted(

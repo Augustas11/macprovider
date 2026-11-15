@@ -280,6 +280,41 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         members[index].key = key
     }
 
+    /// SPEC-011 R-3.10.3: a switch to a `warm` secondary promotes it without
+    /// a load. It becomes the pinned primary; the old primary stays `warm`
+    /// but unpinned, an LRU eviction candidate (SPEC-001-R017). Leases keep
+    /// their member: a request keeps running on the runtime it was routed
+    /// to. Returns the old and the new primary.
+    func promote(modelID: String) throws -> (old: WarmModelTableEntry<Runtime>, new: WarmModelTableEntry<Runtime>) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let target = indexLocked(key: Self.key(modelID)), members[target].state == .warm,
+              !members[target].primary, members[target].runtime != nil else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        guard let old = members.firstIndex(where: \.primary) else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        members[old].primary = false
+        members[old].pinned = false
+        members[target].primary = true
+        members[target].pinned = true
+        // The primary's info lives in the top-level fields; the demoted
+        // member republishes its own.
+        members[target].info = nil
+        return (snapshot(members[old]), snapshot(members[target]))
+    }
+
+    /// The runtime of the current primary, nil without one.
+    func primaryRuntime() -> Runtime? {
+        lock.lock(); defer { lock.unlock() }
+        return members.first(where: \.primary)?.runtime
+    }
+
+    /// The `ProviderStatus` key a request on member `token` is counted
+    /// under; stable across a re-key of the primary and a promotion.
+    static func memberKey(token: UInt64) -> String { "warm-member-\(token)" }
+
     /// Records what the member's runtime reports (R016 wire, preflight).
     func updateInfo(token: UInt64, _ info: WarmModelMemberInfo) {
         lock.lock(); defer { lock.unlock() }

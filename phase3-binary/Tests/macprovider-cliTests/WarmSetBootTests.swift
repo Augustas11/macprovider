@@ -429,9 +429,10 @@ final class WarmSetBootTests: XCTestCase {
     // MARK: ModelRuntime members
 
     private static func fixture(_ modelID: String, warmSwapEnabled: Bool = false, swapDrainTimeoutSeconds: Int = 30,
+                         hash: String = String(repeating: "a", count: 64),
                          testLoader: (@Sendable (String) async throws -> (String, String?))? = nil) -> ModelRuntime {
         ModelRuntime(
-            modelID: modelID, modelHash: String(repeating: "a", count: 64), warmSwapEnabled: warmSwapEnabled,
+            modelID: modelID, modelHash: hash, warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
             loader: { _ in throw BootUnexpectedContainerLoad() },
             testLoader: testLoader ?? { target in (target, String(repeating: "c", count: 64)) })
@@ -445,7 +446,10 @@ final class WarmSetBootTests: XCTestCase {
         var loader: WarmModelLoader<ModelRuntime>!
         var boot: WarmSetBoot<ModelRuntime>!
 
-        init(make: @escaping @Sendable (String) -> ModelRuntime) {
+        init(providerStatus: ProviderStatus? = nil, make: @escaping @Sendable (String) -> ModelRuntime) {
+            let noHandoff: WarmSetBoot<ModelRuntime>.PrimaryHandoff = { _, _ in }
+            let handoff = providerStatus.map { WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: $0) }
+                ?? noHandoff
             loader = WarmModelLoader(
                 table: table, budget: SharedModelMemoryBudget(), limitBytes: { Int.max / 4 }, idlePollNanoseconds: 1_000_000
             ) { [unowned self] spec in
@@ -461,6 +465,7 @@ final class WarmSetBootTests: XCTestCase {
                     return WarmModelMemberInfo(
                         maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows, modelHash: await runtime.loadedModelHash)
                 },
+                primaryHandoff: handoff,
                 log: { [log] in log.append($0) }
             )
         }
@@ -486,32 +491,107 @@ final class WarmSetBootTests: XCTestCase {
         XCTAssertEqual(snapshot.modelID, "model-a")
     }
 
-    func testSwapToAWarmMemberIsRefusedAndAnotherTargetRekeysThePrimary() async throws {
+    /// SPEC-011 R-3.10.3: a switch to a warm member promotes it with no
+    /// load; every primary-only attachment moves to it and the old primary
+    /// stays warm, unpinned and evictable.
+    func testSwitchToAWarmMemberPromotesItWithoutALoad() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 2))
+        let h = RuntimeHarness(providerStatus: status) { Self.fixture($0, hash: String(repeating: "b", count: 64)) }
+        let primary = Self.fixture("model-a", warmSwapEnabled: true)
+        await primary.setProviderStatus(status)
+        try await h.boot.adoptPrimary(modelID: "model-a", runtime: primary)
+        await primary.setWarmSetSwapHooks(h.boot)
+        await status.setPrimaryWarmMember(try XCTUnwrap(h.boot.primaryMemberKey))
+        let loaded = await h.boot.load("model-b")
+        XCTAssertEqual(loaded, .loaded)
+        let member = try XCTUnwrap(h.table.entry(modelID: "model-b")?.runtime)
+        let loads = h.log.all.filter { $0.hasPrefix("load ") }
+
+        let signals = await primary.swapSignals()
+        try await primary.beginSwap(targetModelID: "MODEL-B").value
+        var iterator = signals.makeAsyncIterator()
+        let signal = await iterator.next()
+        guard case let .completed(newModelID, newModelHash)? = signal?.outcome else {
+            return XCTFail("no completed signal: \(String(describing: signal))")
+        }
+        XCTAssertEqual(signal?.targetModelID, "MODEL-B")
+        XCTAssertEqual(newModelID, "model-b")
+        XCTAssertEqual(newModelHash, String(repeating: "b", count: 64))
+
+        XCTAssertEqual(h.log.all.filter { $0.hasPrefix("load ") }, loads, "a promotion loads nothing")
+        XCTAssertEqual(h.table.entries().map(\.modelID), ["model-b", "model-a"])
+        XCTAssertTrue(h.table.primaryRuntime() === member)
+        let old = try XCTUnwrap(h.table.entry(modelID: "model-a"))
+        XCTAssertEqual(old.state, .warm)
+        XCTAssertFalse(old.pinned)
+        XCTAssertTrue(h.table.entry(modelID: "model-b")?.pinned == true)
+        XCTAssertEqual(h.table.views.value.last?.info?.modelHash, String(repeating: "a", count: 64),
+                       "the demoted member publishes its own wire info")
+
+        let memberHasStatus = await member.hasProviderStatus()
+        let primaryHasStatus = await primary.hasProviderStatus()
+        XCTAssertTrue(memberHasStatus)
+        XCTAssertFalse(primaryHasStatus)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.modelID, "model-b")
+        XCTAssertEqual(snapshot.modelHash, String(repeating: "b", count: 64))
+
+        do {
+            _ = try await primary.beginSwap(targetModelID: "model-c")
+            XCTFail("the demoted primary accepted a switch")
+        } catch {
+            XCTAssertTrue(error is WarmSwapDisabledError, String(describing: error))
+        }
+
+        // The old primary is now an LRU eviction candidate.
+        try await h.loader.evict("model-a")
+        XCTAssertNil(h.table.entry(modelID: "model-a"))
+        XCTAssertTrue(h.log.contains("event=warm_model_promote model=model-b previous_primary=model-a"))
+    }
+
+    /// The promoted primary switches on: a later load swap replaces it and
+    /// leaves the other member serving.
+    func testAPromotedPrimarySwitchesAgain() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 2))
+        let h = RuntimeHarness(providerStatus: status) { Self.fixture($0, warmSwapEnabled: false) }
+        let primary = Self.fixture("model-a", warmSwapEnabled: true)
+        await primary.setProviderStatus(status)
+        try await h.boot.adoptPrimary(modelID: "model-a", runtime: primary)
+        await primary.setWarmSetSwapHooks(h.boot)
+        _ = await h.boot.load("model-b")
+        try await primary.beginSwap(targetModelID: "model-b").value
+        let member = try XCTUnwrap(h.table.primaryRuntime())
+
+        try await member.beginSwap(targetModelID: "model-c").value
+        let swapped = await member.currentSnapshot()
+        XCTAssertEqual(swapped.modelID, "model-c")
+        XCTAssertEqual(h.table.entries().map(\.modelID), ["model-c", "model-a"])
+        XCTAssertEqual(h.table.entry(modelID: "model-a")?.state, .warm, "the other member kept serving")
+    }
+
+    /// A member that is still loading is refused, never loaded a second time.
+    func testSwitchToALoadingMemberIsRefused() async throws {
         let h = RuntimeHarness { Self.fixture($0) }
+        h.gated = ["model-b"]
         let primary = Self.fixture("model-a", warmSwapEnabled: true)
         try await h.boot.adoptPrimary(modelID: "model-a", runtime: primary)
         await primary.setWarmSetSwapHooks(h.boot)
-        let loaded = await h.boot.load("model-b")
-        XCTAssertEqual(loaded, .loaded)
-
+        h.boot.startBootLoads(["model-b"])
+        await eventually { h.table.entry(modelID: "model-b")?.state == .loading }
         do {
-            _ = try await primary.beginSwap(targetModelID: "MODEL-B")
-            XCTFail("swap to a warm member began")
+            _ = try await primary.beginSwap(targetModelID: "model-b")
+            XCTFail("switch to a loading member began")
         } catch {
-            XCTAssertEqual(error as? WarmSetSwapError, .targetAlreadyWarm(modelID: "MODEL-B"))
-            XCTAssertTrue(String(describing: error).contains("unload it before switching"))
+            XCTAssertEqual(error as? WarmSetSwapError, .targetNotWarm(modelID: "model-b", state: "loading"))
         }
         let refused = await primary.currentSnapshot()
         XCTAssertEqual(refused.state, .ready)
-        XCTAssertEqual(refused.modelID, "model-a")
-
-        try await primary.beginSwap(targetModelID: "model-c").value
-        let swapped = await primary.currentSnapshot()
-        XCTAssertEqual(swapped.modelID, "model-c")
-        XCTAssertEqual(h.table.entries().map(\.modelID), ["model-c", "model-b"])
-        XCTAssertTrue(h.table.entry(modelID: "model-c")?.primary == true)
-        XCTAssertEqual(h.table.entry(modelID: "model-b")?.state, .warm, "the other member kept serving")
-        XCTAssertNil(h.table.entry(modelID: "model-a"))
+        await h.gate.release()
+        await eventually { h.table.entry(modelID: "model-b")?.state == .warm }
     }
 
     func testSwapAndWarmLoadAreSerialized() async throws {

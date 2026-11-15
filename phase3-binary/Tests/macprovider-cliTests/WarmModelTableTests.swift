@@ -219,6 +219,43 @@ final class WarmModelTableTests: XCTestCase {
 
     // MARK: Primary re-key
 
+    /// SPEC-011 R-3.10.3: the member becomes the pinned primary, the old
+    /// primary an unpinned warm member; leases stay where they were taken.
+    func testPromoteMovesThePrimaryAndPinning() throws {
+        let (table, primary, warm) = try makeTable()
+        let onPrimary = try table.lease(servedModelID: nil)
+        let onSecond = try table.lease(servedModelID: "org/second")
+        let promoted = try table.promote(modelID: "ORG/SECOND")
+        XCTAssertEqual(promoted.old.modelID, "Org/Primary")
+        XCTAssertEqual(promoted.new.modelID, "Org/Second")
+        XCTAssertEqual(table.entries().map(\.modelID), ["Org/Second", "Org/Primary"])
+        XCTAssertEqual(table.entries().map(\.pinned), [true, false])
+        XCTAssertEqual(table.memberViews().map(\.primary), [true, false])
+        XCTAssertTrue(table.primaryRuntime() === warm)
+        XCTAssertTrue(try table.resolve(servedModelID: nil).runtime === warm)
+        XCTAssertTrue(try table.resolve(servedModelID: "org/primary").runtime === primary)
+        XCTAssertEqual(table.entry(modelID: "Org/Primary")?.leases, 1)
+        XCTAssertEqual(table.entry(modelID: "Org/Second")?.leases, 1)
+        XCTAssertTrue(onPrimary.runtime === primary, "a lease keeps its member")
+        XCTAssertEqual(WarmModelTable<FakeWarmRuntime>.memberKey(token: onSecond.token),
+                       WarmModelTable<FakeWarmRuntime>.memberKey(token: promoted.new.token))
+        onPrimary.release()
+        onSecond.release()
+        // The demoted primary may now be evicted once idle.
+        XCTAssertEqual(try table.beginEvicting(modelID: "Org/Primary", allowPinned: false).state, .evicting)
+    }
+
+    func testPromoteRefusesThePrimaryAndANonWarmMember() throws {
+        let (table, _, _) = try makeTable()
+        assertNotLoaded(try table.promote(modelID: "org/primary"))
+        assertNotLoaded(try table.promote(modelID: "org/absent"))
+        _ = try table.beginLoading(modelID: "Org/Third", pinned: false)
+        assertNotLoaded(try table.promote(modelID: "org/third"))
+        _ = try table.beginEvicting(modelID: "Org/Second", allowPinned: false)
+        assertNotLoaded(try table.promote(modelID: "org/second"))
+        XCTAssertEqual(table.entries().first?.modelID, "Org/Primary")
+    }
+
     func testPrimaryRekeyAfterWarmSwap() throws {
         let (table, primary, _) = try makeTable()
         let lease = try table.lease(servedModelID: nil)
