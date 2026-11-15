@@ -1,0 +1,94 @@
+{
+  "auth_request" : {
+    "max_concurrency" : 2,
+    "max_context_tokens" : 20000,
+    "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+    "model_id" : "model-a",
+    "model_params_b" : 0,
+    "ram_gb" : 32,
+    "stage" : "initial",
+    "supported_models" : [
+      "model-a",
+      "model-b",
+      "model-c"
+    ],
+    "throughput_tps_estimate" : 40,
+    "type" : "auth_request",
+    "warm_models" : [
+      {
+        "max_context_tokens" : 20000,
+        "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "model-a",
+        "model_params_b" : 0,
+        "pinned" : true,
+        "primary" : true,
+        "slots_free" : 2,
+        "slots_total" : 2,
+        "state" : "warm",
+        "throughput_tps_estimate" : 40
+      },
+      {
+        "max_context_tokens" : 8000,
+        "model_hash" : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "model-b",
+        "model_params_b" : 4,
+        "pinned" : true,
+        "primary" : false,
+        "slots_free" : 3,
+        "slots_total" : 3,
+        "state" : "warm",
+        "throughput_tps_estimate" : 30,
+        "tool_selection_capabilities" : [
+          {
+            "model_id" : "model-b",
+            "modes" : [
+              "auto",
+              "none"
+            ],
+            "runtime" : "mlx_cache",
+            "schema_profiles" : [
+              "ordinary-parameters-v1"
+            ],
+            "validation" : "schema-holdback-v1"
+          }
+        ]
+      },
+      {
+        "model_id" : "model-c",
+        "pinned" : false,
+        "primary" : false,
+        "slots_total" : 0,
+        "state" : "loading"
+      }
+    ]
+  },
+  "hello" : {
+    "max_concurrency" : 2,
+    "max_context_tokens" : 20000,
+    "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+    "model_id" : "model-a",
+    "model_params_b" : 0,
+    "ram_gb" : 32,
+    "throughput_tps_estimate" : 40,
+    "type" : "hello",
+    "warm_models" : [
+      {
+        "max_context_tokens" : 20000,
+        "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "model-a",
+        "model_params_b" : 0,
+        "pinned" : true,
+        "primary" : true,
+        "slots_free" : 2,
+        "slots_total" : 2,
+        "state" : "warm",
+        "throughput_tps_estimate" : 40
+      }
+    ]
+  }
+}

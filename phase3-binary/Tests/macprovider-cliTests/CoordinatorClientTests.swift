@@ -1091,17 +1091,43 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(entries[0]["slots_total"] as? Int, heartbeat["slots_total"] as? Int)
         XCTAssertEqual(entries[0]["slots_free"] as? Int, heartbeat["slots_free"] as? Int)
 
-        // The fixture keeps what the coordinator's heartbeat parser reads.
-        let keys = WarmModelsWire.primaryFieldKeys + [
-            "type", "status", "ram_gb", "max_concurrency", "slots_free", "slots_total", "loading",
-            "requests_served_since_last", "avg_latency_ms_since_last", "throughput_tps_since_last", "warm_models",
-        ]
         let rendered: [String: Any] = [
             "supported_models": try XCTUnwrap(auth["supported_models"]),
-            "heartbeat": heartbeat.filter { keys.contains($0.key) },
+            "heartbeat": Self.contractFields(heartbeat, Self.contractHeartbeatKeys),
         ]
-        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("../../../test/fixtures/warm-models/contended-heartbeat-v1.json").standardizedFileURL
+        try assertMatchesContractFixture("contended-heartbeat-v1.json", rendered)
+    }
+
+    // MARK: SPEC-001-R016 cross-language contract fixtures
+
+    /// The heartbeat fields the coordinator's heartbeat parser reads.
+    private static let contractHeartbeatKeys = WarmModelsWire.primaryFieldKeys + [
+        "type", "status", "ram_gb", "max_concurrency", "slots_free", "slots_total", "loading",
+        "requests_served_since_last", "avg_latency_ms_since_last", "throughput_tps_since_last", "warm_models",
+    ]
+
+    /// The `hello` / `auth_request` fields `warm_models` is checked against.
+    private static let contractHandshakeKeys = WarmModelsWire.primaryFieldKeys + [
+        "type", "stage", "ram_gb", "max_concurrency", "supported_models", "publishes_supported_models", "warm_models",
+    ]
+
+    private static func contractFields(_ frame: [String: Any], _ keys: [String]) -> [String: Any] {
+        frame.filter { keys.contains($0.key) }
+    }
+
+    private static func contractFixtureURL(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../test/fixtures/warm-models/\(name)").standardizedFileURL
+    }
+
+    /// Compares a provider-rendered contract with its checked-in fixture,
+    /// which the coordinator's decoders read in `internal/ws`
+    /// (`warm_models_contract_test.go`). `WARM_MODELS_CONTRACT_WRITE=1`
+    /// rewrites the fixture first.
+    private func assertMatchesContractFixture(
+        _ name: String, _ rendered: [String: Any], file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let fixture = Self.contractFixtureURL(name)
         if ProcessInfo.processInfo.environment["WARM_MODELS_CONTRACT_WRITE"] == "1" {
             try FileManager.default.createDirectory(at: fixture.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONSerialization.data(withJSONObject: rendered, options: [.sortedKeys, .prettyPrinted]).write(to: fixture)
@@ -1121,7 +1147,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(
             String(decoding: try JSONSerialization.data(withJSONObject: portable(golden), options: .sortedKeys), as: UTF8.self),
             String(decoding: try JSONSerialization.data(withJSONObject: portable(rendered), options: .sortedKeys), as: UTF8.self),
-            "the provider's warm_models heartbeat drifted from the coordinator contract fixture")
+            "the provider's frames drifted from the coordinator contract fixture \(name)", file: file, line: line)
     }
 
     // MARK: SPEC-001-R016 promotion on the wire
@@ -1273,6 +1299,134 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(heartbeatIDs, ["model-a", "model-a", "model-b", "model-b", "model-b"])
         // The demoted member's info was on the table before the status switch.
         XCTAssertEqual(rig.table.views.value.first { $0.modelID == "model-a" }?.info, PromotionRig.infoA)
+    }
+
+    /// The cross-language handshake contract: `warm_models` on the
+    /// `auth_request` initial stage (with its `supported_models`) and on a
+    /// legacy `hello`, as `ParseAuthRequest` / `ParseHello` read them
+    /// (`TestWarmModelsContractHandshakesAreAccepted`).
+    func testHandshakeWarmModelsMatchTheContractFixture() async throws {
+        let rig = try await promotionRig()
+        let auth = await rig.client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let hello = await rig.client.helloMessage()
+        XCTAssertEqual((auth["warm_models"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual((hello["warm_models"] as? [[String: Any]])?.count, 1)
+        try assertMatchesContractFixture("provider-handshakes-v1.json", [
+            "auth_request": Self.contractFields(auth, Self.contractHandshakeKeys),
+            "hello": Self.contractFields(hello, Self.contractHandshakeKeys),
+        ])
+    }
+
+    /// The cross-language heartbeat contract at the three instants a member
+    /// changes state: a further member loading, a further member evicting,
+    /// and the promotion instant (the provider status names the new primary,
+    /// the demoted member has not yet published its info). The coordinator
+    /// parses each (`TestWarmModelsContractHeartbeatTransitionsAreAccepted`).
+    func testHeartbeatsAtMemberTransitionsMatchTheContractFixture() async throws {
+        func heartbeat(_ rig: PromotionRig) async throws -> [String: Any] {
+            let frames = try await rig.frames()
+            let frame = try XCTUnwrap(frames.last { $0.0 == "heartbeat" }?.1)
+            try assertOneAgreeingPrimary(frame, "heartbeat")
+            return Self.contractFields(frame, Self.contractHeartbeatKeys)
+        }
+        let loading = try await promotionRig()
+        let midLoad = try await heartbeat(loading)
+
+        let evicting = try await promotionRig()
+        _ = try evicting.table.beginEvicting(modelID: "model-b", allowPinned: true)
+        let midEviction = try await heartbeat(evicting)
+
+        let promoting = try await promotionRig()
+        _ = try promoting.table.promote(modelID: "model-b")
+        await promoting.switchStatus()
+        let promotionInstant = try await heartbeat(promoting)
+
+        let states = { (frame: [String: Any]) in
+            (frame["warm_models"] as? [[String: Any]] ?? []).map { "\($0["model_id"] ?? ""):\($0["state"] ?? "")" }
+        }
+        XCTAssertEqual(states(midLoad), ["model-a:warm", "model-b:warm", "model-c:loading"])
+        XCTAssertEqual(states(midEviction), ["model-a:warm", "model-b:evicting", "model-c:loading"])
+        XCTAssertEqual(states(promotionInstant), ["model-b:warm", "model-a:warm", "model-c:loading"])
+        try assertMatchesContractFixture("heartbeat-transitions-v1.json", [
+            "supported_models": Array(PromotionRig.members).sorted(),
+            "mid_load": midLoad,
+            "mid_eviction": midEviction,
+            "promotion_instant": promotionInstant,
+        ])
+    }
+
+    /// The cross-language `model_not_loaded` contract: a dispatch naming no
+    /// `warm` member is refused on the preflight ack, on the WebSocket end
+    /// frame and on the HTTP-forwarded path, each as the provider renders it
+    /// (`TestWarmModelsContractModelNotLoadedIsClassified`).
+    func testModelNotLoadedRefusalsMatchTheContractFixture() async throws {
+        let rig = try await promotionRig()
+        let ack = CoordinatorClient.preflightAck(
+            requestID: "req-not-loaded", estimatedTokens: 64,
+            view: ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 20_000),
+            servedModelID: .some("model-c"), warmModels: rig.table.views.value, primaryNames: ["model-a"])
+        let refusal: APIError
+        do {
+            let lease = try WarmModelRoute.lease(rig.table, servedModelID: "model-c", primaryNames: ["model-a"])
+            lease.release()
+            return XCTFail("a loading member was leased")
+        } catch let error as APIError {
+            refusal = error
+        }
+        let end = InferenceRelay.errorEndFrame(requestID: "req-not-loaded", error: refusal, chunksSent: 0)
+        XCTAssertEqual(ack["reason"] as? String, "model_not_loaded")
+        XCTAssertEqual(end["status"] as? String, "error_model_not_loaded")
+        XCTAssertEqual(refusal.status, 503)
+        try assertMatchesContractFixture("model-not-loaded-v1.json", [
+            "preflight_ack": ack,
+            "inference_response_end": end,
+            "http": ["status": refusal.status, "body": refusal.envelope] as [String: Any],
+        ])
+    }
+
+    /// The coordinator-rendered dispatch frames (`preflight`, the plain,
+    /// relay-blind and encrypted `inference_request`, and the HTTP
+    /// `X-MacProvider-Served-Model` header), written by the coordinator's own
+    /// renderers in `TestWarmModelsContractCoordinatorDispatch`, each lease the
+    /// member they name through the provider's own readers.
+    func testCoordinatorDispatchFixtureLeasesTheNamedMember() async throws {
+        let rig = try await promotionRig()
+        let fixture = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: Self.contractFixtureURL("coordinator-dispatch-v1.json")))
+                as? [String: Any])
+        let served = try XCTUnwrap(fixture["served_model_id"] as? String)
+        XCTAssertEqual(served, "model-b")
+
+        let preflightText = String(decoding: try JSONSerialization.data(
+            withJSONObject: try XCTUnwrap(fixture["preflight"])), as: UTF8.self)
+        let preflight = try XCTUnwrap(CoordinatorClient.inboundPreflight(.string(preflightText)))
+        XCTAssertEqual(preflight.servedModelID, .some(served))
+        let ack = CoordinatorClient.preflightAck(
+            requestID: preflight.requestID, estimatedTokens: preflight.estimatedTokens,
+            view: ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 20_000),
+            servedModelID: preflight.servedModelID, warmModels: rig.table.views.value, primaryNames: ["model-a"])
+        XCTAssertEqual(ack["accepted"] as? Bool, true, "\(ack)")
+
+        for kind in ["inference_request", "inference_request_relay_blind", "inference_request_encrypted"] {
+            let frame = try XCTUnwrap(fixture[kind] as? [String: Any], kind)
+            XCTAssertEqual(frame["type"] as? String, "inference_request", kind)
+            let lease = try InferenceRelay.warmServingLease(
+                rig.table, servedModelWire: frame["served_model_id"], primaryNames: ["model-a"])
+            XCTAssertEqual(lease.modelID, served, kind)
+            XCTAssertFalse(lease.primary, kind)
+            lease.release()
+        }
+        let encrypted = try XCTUnwrap(fixture["inference_request_encrypted"] as? [String: Any])
+        XCTAssertEqual(encrypted["encrypted"] as? Bool, true)
+        XCTAssertNil(encrypted["body"], "the encrypted frame carries no plaintext body")
+
+        let header = try XCTUnwrap(fixture["served_model_header"] as? [String: Any])
+        XCTAssertEqual(header["name"] as? String, WarmModelRoute.servedModelHeaderName)
+        let headerLease = try RouterHandler.warmServingLease(
+            rig.table, servedModelHeader: header["value"] as? String, local: false, bodyModel: "model-a",
+            primaryNames: ["model-a"])
+        XCTAssertEqual(headerLease.modelID, served)
+        headerLease.release()
     }
 
     func testNoWarmSetSendsNoWarmModels() async throws {
