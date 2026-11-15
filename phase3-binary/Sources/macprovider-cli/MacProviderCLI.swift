@@ -3251,7 +3251,19 @@ struct ServeCommand: AsyncParsableCommand {
                 smallMRouteVerdictStore.verdict(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
             } ?? .absent
         )
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only: run the same serve on a chosen batching route
+        // so two routes can be compared in one window. Never serial-only,
+        // which a process cannot leave and the batching entries refuse.
+        let decidedSmallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        let smallMRoute = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_SMALL_M_ROUTE"]
+            .flatMap(SmallMRoute.init(rawValue:))
+            .flatMap { $0 == .serialOnly ? nil : $0 }
+            .map { SmallMRoute.Decision(route: $0, reason: "lab_override_\(decidedSmallMRoute.reason)") }
+            ?? decidedSmallMRoute
+        #else
         let smallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        #endif
         // SPEC-048-R013 pickup: the slot count the startup loader matches an
         // admission tuple on, read before the self-check lowers the served count.
         let nativeMTPLoaderSlotCount = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
