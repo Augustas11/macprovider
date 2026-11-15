@@ -9838,6 +9838,12 @@ final class CoordinatorClientTests: XCTestCase {
             let snapshot = await status.snapshot()
             return snapshot.nativeMTPAdmissionPending?.phase == .restartRequired
         }
+        // The abandon publishes the pending phase one step before it sets the
+        // provider ready again; wait for that step so the read is not racing it.
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.status == .ready || snapshot.status == .busy
+        }
         var snapshot = await status.snapshot()
         XCTAssertEqual(snapshot.requestsInFlight, 1, "the capped wait cuts nothing")
         XCTAssertTrue(snapshot.status == .ready || snapshot.status == .busy)
