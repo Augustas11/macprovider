@@ -3637,6 +3637,7 @@ func (s *Server) forwardHTTPSequence(
 			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			providerhttp.SetCoordinatorOrigin(upReq.Header)
+			setServedModelHeader(upReq.Header, state.provider)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			if doErr == nil && resp != nil {
@@ -5390,6 +5391,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 	setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 	providerhttp.SetCoordinatorOrigin(upReq.Header)
+	setServedModelHeader(upReq.Header, provider)
 	markProviderDone := func() {
 		if state != nil {
 			now := phaseTimingNow(s)
@@ -7213,7 +7215,7 @@ func (s *Server) dispatchBodyForProviderChecked(req chatRequest, provider pool.P
 	if !req.hasVision {
 		return dispatchBodyForProvider(req, provider)
 	}
-	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	live, ok := s.pool.ResolveEntry(provider.ProviderID, provider.AssignedID, provider.ServedModelID)
 	if !ok {
 		return nil, errors.New("provider_session_ended")
 	}
@@ -8319,7 +8321,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if ownershipErr != nil {
 		return pool.Provider{}, ownershipErr
 	}
-	providers := s.pool.Snapshot()
+	// SPEC-002-R011: a candidate is a (provider, model) entry. A provider
+	// without a warm set is one entry, exactly its Snapshot value.
+	providers := s.pool.EntrySnapshot()
 	if pinned := headers.Get("X-MacProvider-Provider"); pinned != "" && owned[pinned] {
 		return pool.Provider{}, s.ownershipRefusal(false, nil)
 	}
@@ -8496,7 +8500,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.shardRoute = shardRoute
 	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
-		for _, p := range providers {
+		for _, p := range s.pinnedEntries(providers, req.Model, class) {
 			if p.AssignedID == session {
 				if !shardRoute.routable(p) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned session provider is a shard group head not authorized for this route"}
@@ -8553,7 +8557,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "session_ended", message: "Pinned session has ended"}
 	}
 	if providerID := headers.Get("X-MacProvider-Provider"); providerID != "" {
-		for _, p := range providers {
+		for _, p := range s.pinnedEntries(providers, req.Model, class) {
 			if p.ProviderID == providerID {
 				if !shardRoute.routable(p) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned provider is a shard group head not authorized for this route"}
@@ -8881,7 +8885,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				checker.rememberSelectedProvider(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
-				if stickyResult == "hit" && provider.ProviderID != candidates[0].ProviderID {
+				if stickyResult == "hit" && !sameServedEntry(provider, candidates[0]) {
 					state.stickyResult = "miss"
 					state.stickyMissReason = "provider_not_candidate"
 				}
@@ -8943,17 +8947,18 @@ func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forw
 	if provider.ProviderID == "" {
 		return false, false
 	}
-	if state.queuedSlotProviderID == provider.ProviderID {
+	key := slotKey(provider)
+	if state.queuedSlotProviderID == key {
 		return true, false
 	}
 	if state.queuedSlotProviderID != "" {
 		s.releaseQueuedSlotReservation(state)
 	}
-	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, s.liveSlotsFree(provider))
+	reserved, busy = s.slotQueue.reserveProviderLive(key, s.liveSlotsFree(provider))
 	if !reserved {
 		return false, busy || s.demandBelowAdvertisedCapacity(provider)
 	}
-	state.queuedSlotProviderID = provider.ProviderID
+	state.queuedSlotProviderID = key
 	return true, false
 }
 
@@ -8968,11 +8973,11 @@ func (s *Server) demandBelowAdvertisedCapacity(provider pool.Provider) bool {
 	if s.pool == nil || s.slotQueue == nil {
 		return false
 	}
-	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	live, ok := s.pool.ResolveEntry(provider.ProviderID, provider.AssignedID, provider.ServedModelID)
 	if !ok || live.SlotsTotal <= 0 {
 		return false
 	}
-	demand := s.pool.ForwardedInFlight(provider.ProviderID, provider.AssignedID) + s.slotQueue.claims(provider.ProviderID)
+	demand := s.pool.ForwardedInFlightFor(provider.ProviderID, provider.AssignedID, provider.ServedModelID) + s.slotQueue.claims(slotKey(provider))
 	return demand < live.SlotsTotal
 }
 
@@ -8987,7 +8992,7 @@ func (s *Server) liveSlotsFree(provider pool.Provider) func() int {
 // (the dispatch path rejects that case on its own).
 func (s *Server) routableSlotsFree(provider pool.Provider) int {
 	if s.pool != nil {
-		if free, ok := s.pool.RoutableSlotsFree(provider.ProviderID, provider.AssignedID); ok {
+		if free, ok := s.pool.RoutableSlotsFreeFor(provider.ProviderID, provider.AssignedID, provider.ServedModelID); ok {
 			return free
 		}
 	}
@@ -9338,7 +9343,8 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 		return candidates, "miss", reason
 	}
 	for i, candidate := range candidates {
-		if candidate.ProviderID != entry.ProviderID {
+		// SPEC-002-R011: a sticky entry names one (provider, model) entry.
+		if candidate.ProviderID != entry.ProviderID || servedModelKey(candidate.ServedModelID) != servedModelKey(entry.ServedModelID) {
 			continue
 		}
 		if i == 0 {
@@ -9381,7 +9387,7 @@ func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelS
 		return
 	}
 	accountID := headers.Get("X-MacProvider-Account")
-	mismatch := s.stickyMap.Update(key, accountID, provider.ProviderID, modelScope)
+	mismatch := s.stickyMap.UpdateServed(key, accountID, provider.ProviderID, provider.ServedModelID, modelScope)
 	if mismatch && s.stickyMismatchLimiter.allow(key) {
 		// Rate-limited per-conversation_key (1 warn / minute / key,
 		// bounded entry table). Suppressed warns are dropped, NOT
@@ -9835,7 +9841,7 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
-	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, s.liveSlotsFree(p)) {
+	if s.slotQueue != nil && s.slotQueue.blocksProvider(slotKey(p), s.liveSlotsFree(p)) {
 		return pool.Provider{}, capacityShedRouteErrorWithLegacy(model, unavailableMessage)
 	}
 	if s.tier2ProviderExcludedForRoute(p, poolView) {
@@ -9898,7 +9904,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 	tried := map[string]struct{}{}
 	queueCandidates := make([]poolQueueCandidate, 0, len(ordered))
 	for _, candidate := range ordered {
-		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID, slotsTotal: candidate.SlotsTotal})
+		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: slotKey(candidate), slotsTotal: candidate.SlotsTotal})
 	}
 	queueFull := false
 	for len(tried) < len(queueCandidates) {
@@ -9920,12 +9926,12 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.queueWait = queueWait
 				selected, routeErr := s.preflightCandidate(provider, requestID, estimatedTokens)
 				if routeErr != nil {
-					s.slotQueue.releaseReservation(provider.ProviderID)
+					s.slotQueue.releaseReservation(slotKey(provider))
 					lastPreflightErr = routeErr
-					tried[provider.ProviderID] = struct{}{}
+					tried[slotKey(provider)] = struct{}{}
 					goto nextQueueCandidate
 				}
-				state.queuedSlotProviderID = provider.ProviderID
+				state.queuedSlotProviderID = slotKey(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
 				// SPEC-002-R007: the slot queue keeps its own order.
@@ -10003,8 +10009,8 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 	if !s.slotQueue.head(waiter) {
 		return pool.Provider{}, queuedProviderWait
 	}
-	for _, provider := range s.pool.Snapshot() {
-		if provider.ProviderID != waiter.providerID {
+	for _, provider := range s.pool.EntrySnapshot() {
+		if slotKey(provider) != waiter.providerID {
 			continue
 		}
 		// SPEC-042 R005: the queue stores only providerID, so a same-ID
@@ -10231,7 +10237,7 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 	queued := make([]pool.Provider, 0, len(candidates))
 	for _, provider := range candidates {
 		var slotsFree int
-		if s.slotQueue.blocksProvider(provider.ProviderID, func() int {
+		if s.slotQueue.blocksProvider(slotKey(provider), func() int {
 			slotsFree = s.routableSlotsFree(provider)
 			return slotsFree
 		}) {
@@ -10243,7 +10249,7 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 			// When coordinator-owned demand is still below SlotsTotal the
 			// block is a slots_free count that lags the Mac, not overflow,
 			// so the request waits for the seat (#1906).
-			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow || s.demandBelowAdvertisedCapacity(provider) {
+			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(slotKey(provider)) || queueReservationOverflow || s.demandBelowAdvertisedCapacity(provider) {
 				queued = append(queued, provider)
 			}
 			continue
@@ -10288,7 +10294,7 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 	if s.pool != nil {
 		provider := state.provider
 		if provider.ProviderID == "" && state.queuedSlotProviderID != "" {
-			if got, ok := s.pool.Resolve(state.queuedSlotProviderID, ""); ok {
+			if got, ok := s.resolveSlotKey(state.queuedSlotProviderID); ok {
 				provider = got
 				state.provider = got
 			}
@@ -10298,11 +10304,12 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 			// this provider: chats the Mac may already be running that the
 			// coordinator has not yet counted in flight.
 			consume := func(otherReserved int) {
-				if ok, unconfirmed := s.pool.ConsumeForwardedSlotDetailed(provider.ProviderID, provider.AssignedID); ok {
+				if ok, unconfirmed := s.pool.ConsumeForwardedSlotFor(provider.ProviderID, provider.AssignedID, provider.ServedModelID); ok {
 					state.acceptedOnUnconfirmedOccupancy = unconfirmed || otherReserved > 0
 					state.slotConsumedOnAccept = true
 					state.consumedProviderID = provider.ProviderID
 					state.consumedAssignedID = provider.AssignedID
+					state.consumedServedModelID = provider.ServedModelID
 				}
 			}
 			if s.slotQueue != nil && state.queuedSlotProviderID != "" {
@@ -10311,7 +10318,7 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 				// both a consumed seat and a live reservation (#1906).
 				leaseProviderID := state.queuedSlotProviderID
 				s.slotQueue.releaseReservationAfter(leaseProviderID, func(otherReserved int) {
-					if leaseProviderID != provider.ProviderID {
+					if leaseProviderID != slotKey(provider) {
 						otherReserved = 0
 					}
 					consume(otherReserved)
@@ -10331,12 +10338,14 @@ func (s *Server) restoreConsumedForwardedSlot(state *forwardState) {
 	}
 	providerID := state.consumedProviderID
 	assignedID := state.consumedAssignedID
+	servedModelID := state.consumedServedModelID
 	if providerID == "" {
 		providerID = state.provider.ProviderID
 		assignedID = state.provider.AssignedID
+		servedModelID = state.provider.ServedModelID
 	}
 	if providerID != "" && assignedID != "" {
-		s.pool.RestoreForwardedSlot(providerID, assignedID)
+		s.pool.RestoreForwardedSlotFor(providerID, assignedID, servedModelID)
 	}
 	s.dropConsumedForwardedSlot(state)
 }
@@ -10348,6 +10357,7 @@ func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
 	state.slotConsumedOnAccept = false
 	state.consumedProviderID = ""
 	state.consumedAssignedID = ""
+	state.consumedServedModelID = ""
 }
 
 // requeueAfterQueueFull reports whether a provider error_queue_full refusal
@@ -10363,7 +10373,7 @@ func (s *Server) requeueAfterQueueFull(r *http.Request, state *forwardState) boo
 	if state == nil || hasPinnedRoute(r.Header) || s.pool == nil {
 		return false
 	}
-	if s.pool.ForwardedInFlight(state.provider.ProviderID, state.provider.AssignedID) == 0 && !state.acceptedOnUnconfirmedOccupancy {
+	if s.pool.ForwardedInFlightFor(state.provider.ProviderID, state.provider.AssignedID, state.provider.ServedModelID) == 0 && !state.acceptedOnUnconfirmedOccupancy {
 		return false
 	}
 	now := s.now()
@@ -10387,12 +10397,14 @@ func (s *Server) markForwardedSlotFull(state *forwardState) {
 	if s.pool != nil {
 		providerID := state.provider.ProviderID
 		assignedID := state.provider.AssignedID
+		servedModelID := state.provider.ServedModelID
 		if state.slotConsumedOnAccept && state.consumedProviderID != "" {
 			providerID = state.consumedProviderID
 			assignedID = state.consumedAssignedID
+			servedModelID = state.consumedServedModelID
 		}
 		if providerID != "" && assignedID != "" {
-			s.pool.MarkForwardedSlotFull(providerID, assignedID, state.slotConsumedOnAccept)
+			s.pool.MarkForwardedSlotFullFor(providerID, assignedID, servedModelID, state.slotConsumedOnAccept)
 		}
 	}
 	s.dropConsumedForwardedSlot(state)
@@ -10413,7 +10425,9 @@ func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
 		return
 	}
 	provider := state.provider
-	if provider.ProviderID == "" || provider.AssignedID == "" || provider.SlotsTotal <= 0 {
+	// A further warm-set member's seats are its own and come back with its
+	// next heartbeat; the session-level hint below describes the primary.
+	if provider.ProviderID == "" || provider.AssignedID == "" || provider.SlotsTotal <= 0 || furtherWarmEntry(provider) {
 		return
 	}
 	slotsFree := provider.SlotsFree

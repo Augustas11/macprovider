@@ -38,6 +38,9 @@ type Entry struct {
 	ModelScope      string
 	CreatedAt       time.Time
 	LastUsedAt      time.Time
+	// ServedModelID names the provider's warm-set entry (SPEC-002-R011);
+	// empty for a provider without a warm set.
+	ServedModelID string
 }
 
 // Map is the bounded TTL + LRU sticky-affinity store. Zero-value
@@ -126,6 +129,12 @@ func (m *Map) Lookup(conversationKey string) LookupResult {
 // Buyers SHOULD ensure conversation_key uniqueness per account at
 // the gateway; this is defense-in-depth.
 func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) (mismatch bool) {
+	return m.UpdateServed(conversationKey, accountID, providerID, "", modelScope)
+}
+
+// UpdateServed is Update for one (provider, served model) entry of a
+// multi-model provider (SPEC-002-R011).
+func (m *Map) UpdateServed(conversationKey, accountID, providerID, servedModelID, modelScope string) (mismatch bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
@@ -156,6 +165,7 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 		m.entries[conversationKey] = Entry{
 			ConversationKey: conversationKey,
 			ProviderID:      providerID,
+			ServedModelID:   servedModelID,
 			AccountID:       effectiveAccountID,
 			ModelScope:      modelScope,
 			CreatedAt:       existing.CreatedAt,
@@ -187,6 +197,7 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 	m.entries[conversationKey] = Entry{
 		ConversationKey: conversationKey,
 		ProviderID:      providerID,
+		ServedModelID:   servedModelID,
 		AccountID:       accountID,
 		ModelScope:      modelScope,
 		CreatedAt:       now,
