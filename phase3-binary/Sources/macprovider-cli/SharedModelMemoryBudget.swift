@@ -43,6 +43,9 @@ struct SharedModelMemoryMember: Sendable, Equatable {
     /// decoding).
     var inFlightRows = 0
     var pinned = false
+    /// R017 *Pinning*: KV of the `slots_total` rows a pinned member keeps
+    /// through a load (`SharedModelMemoryBudget.reserveRows`).
+    var reservedRowKVBytes = 0
     /// Last row admission, monotonic nanoseconds (eviction order).
     var lastAdmissionAt: UInt64 = 0
     /// The MLX buffer-cache limit this member's runtime asks for.
@@ -66,6 +69,11 @@ enum SharedModelMemoryRules {
     static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
         let (sum, overflow) = max(0, lhs).addingReportingOverflow(max(0, rhs))
         return overflow ? Int.max : sum
+    }
+
+    static func saturatingMultiply(_ lhs: Int, _ rhs: Int) -> Int {
+        let (product, overflow) = max(0, lhs).multipliedReportingOverflow(by: max(0, rhs))
+        return overflow ? Int.max : product
     }
 
     static func loadedCount(_ members: [Int: SharedModelMemoryMember]) -> Int {
@@ -108,23 +116,26 @@ enum SharedModelMemoryRules {
     /// Row admission. One loaded member: exactly `legacyAdmits` (MLX's live
     /// limit check, SPEC-038 FR-CB2). Several: the live check and
     /// resident(all) + committed KV(all rows of all members) + this row's
-    /// worst-case KV + one margin per member <= limit.
+    /// worst-case KV + one margin per member + the weights of models still
+    /// loading (`pendingLoadBytes`) <= limit.
     static func rowDecision(
         legacyAdmits: Bool,
         limitBytes: Int,
         members: [Int: SharedModelMemoryMember],
         requesterID: Int,
         requesterCommittedBytes: Int,
-        rowBytes: Int
+        rowBytes: Int,
+        pendingLoadBytes: Int = 0
     ) -> RowDecision {
         guard loadedCount(members) > 1 else {
             return RowDecision(admitted: legacyAdmits, holdWhenIdle: false, overSharedBudget: false, requiredBytes: 0)
         }
-        let required = saturatingAdd(
-            chargedBytes(members, committedOverride: (requesterID, requesterCommittedBytes)), rowBytes)
+        let required = saturatingAdd(saturatingAdd(
+            chargedBytes(members, committedOverride: (requesterID, requesterCommittedBytes)), rowBytes), pendingLoadBytes)
         let fits = required <= limitBytes
         let admitted = legacyAdmits && fits
-        let neverFits = !fits && saturatingAdd(chargedBytes(members, includeRowKV: false), rowBytes) > limitBytes
+        let neverFits = !fits && saturatingAdd(
+            saturatingAdd(chargedBytes(members, includeRowKV: false), rowBytes), pendingLoadBytes) > limitBytes
         let siblingsHoldRows = members.contains { id, member in
             id != requesterID && member.loaded && (member.liveKVBytes > 0 || member.inFlightRows > 0)
         }
@@ -249,23 +260,29 @@ enum SharedModelMemoryRules {
     }
 
     /// A load fits when resident(loaded) + estimated resident(new) + for each
-    /// member the larger of one minimum row and its live (batched and
-    /// serial) row KV + the new one's minimum row + margins fits the limit,
-    /// else after evicting idle unpinned members (R017 *Load*).
+    /// member the largest of one minimum row, its live (batched and serial)
+    /// row KV and, when pinned, its reserved rows + the new one's minimum
+    /// row + margins + models still loading (`pendingLoadBytes`) fits the
+    /// limit, else after evicting idle unpinned members (R017 *Load*,
+    /// *Pinning*: a load never takes a pinned member's reserved rows).
     static func loadDecision(
         limitBytes: Int?,
         members: [Int: SharedModelMemoryMember],
         estimatedResidentBytes: Int,
-        newMinimumRowKVBytes: Int
+        newMinimumRowKVBytes: Int,
+        pendingLoadBytes: Int = 0
     ) -> LoadDecision {
         let loaded = members.filter { $0.value.loaded }
         let resident = loaded.values.reduce(0) { saturatingAdd($0, $1.residentBytes) }
         let rows = loaded.values.reduce(max(0, newMinimumRowKVBytes)) {
             saturatingAdd($0, max($1.liveKVBytes,
-                MLXMemoryBudget.kvBytes(tokens: minimumRowTokens, bytesPerToken: $1.kvBytesPerToken)))
+                MLXMemoryBudget.kvBytes(tokens: minimumRowTokens, bytesPerToken: $1.kvBytesPerToken),
+                $1.pinned ? $1.reservedRowKVBytes : 0))
         }
         let margins = (loaded.count + 1) * perMemberMarginBytes
-        let required = saturatingAdd(saturatingAdd(resident, max(0, estimatedResidentBytes)), saturatingAdd(rows, margins))
+        let required = saturatingAdd(
+            saturatingAdd(saturatingAdd(resident, max(0, estimatedResidentBytes)), saturatingAdd(rows, margins)),
+            max(0, pendingLoadBytes))
         guard let limitBytes else {
             return LoadDecision(admitted: false, reason: "limit_unavailable", limitBytes: nil, loadedResidentBytes: resident,
                                 estimatedResidentBytes: estimatedResidentBytes, minimumRowKVBytes: rows, requiredBytes: required, eviction: nil)
@@ -311,6 +328,10 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
     /// Live serial-path row charges by id.
     private var serialCharges: [UInt64: (memberID: Int, bytes: Int)] = [:]
     private var nextSerialChargeID: UInt64 = 0
+    /// Estimated weights plus margin of models loading now, by reservation
+    /// id (R017: a `loading` member is charged before it registers).
+    private var loadReservations: [UInt64: Int] = [:]
+    private var nextLoadReservationID: UInt64 = 0
     /// `MLX_MAX_MB_PER_BUFFER` as MLX's device read it, and which family set it.
     private var commandBufferBudget: (family: String?, megabytes: Int?)?
     private var commandBufferConflicts: [String] = []
@@ -385,6 +406,39 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard members[memberID] != nil else { return }
         members[memberID]!.inFlightRows = max(0, count)
+    }
+
+    func member(_ memberID: Int) -> SharedModelMemoryMember? {
+        lock.lock(); defer { lock.unlock() }
+        return members[memberID]
+    }
+
+    /// Rows the member holds now: in flight (queued, prefilling, decoding),
+    /// or at least one while any row KV is still charged. Zero means idle
+    /// (R017 *Eviction*).
+    func busyRows(memberID: Int) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let member = members[memberID] else { return 0 }
+        return max(member.inFlightRows, member.liveKVBytes > 0 ? 1 : 0)
+    }
+
+    /// Registration pins every member; the warm set unpins the members a
+    /// load may evict.
+    func setPinned(memberID: Int, _ pinned: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard members[memberID] != nil else { return }
+        members[memberID]!.pinned = pinned
+    }
+
+    /// R017 *Pinning*: keeps `rows` rows of `tokensPerRow` tokens of the
+    /// member's KV out of every later load decision while it is pinned.
+    func reserveRows(memberID: Int, rows: Int, tokensPerRow: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard var member = members[memberID] else { return }
+        member.reservedRowKVBytes = MLXMemoryBudget.kvBytes(
+            tokens: SharedModelMemoryRules.saturatingMultiply(max(0, rows), max(0, tokensPerRow)),
+            bytesPerToken: member.kvBytesPerToken)
+        members[memberID] = member
     }
 
     // MARK: Cache limit
@@ -480,7 +534,8 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
         let row = MLXMemoryBudget.kvBytes(tokens: rowTokens, bytesPerToken: member.kvBytesPerToken)
         let decision = SharedModelMemoryRules.rowDecision(
             legacyAdmits: legacyAdmits, limitBytes: limitBytes, members: members,
-            requesterID: memberID, requesterCommittedBytes: committed, rowBytes: row)
+            requesterID: memberID, requesterCommittedBytes: committed, rowBytes: row,
+            pendingLoadBytes: pendingLoadBytesLocked())
         if decision.admitted {
             member.committedKVBytes = SharedModelMemoryRules.saturatingAdd(committed, row)
             member.peakCommittedKVBytes = max(member.peakCommittedKVBytes, member.liveKVBytes)
@@ -504,16 +559,47 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
 
     // MARK: Load admission
 
-    /// R017 *Load*: whether a model of `estimatedResidentBytes` (from its
-    /// safetensors sizes) with `minimumRowKVBytes` for one row may load now.
-    func canLoad(estimatedResidentBytes: Int, minimumRowKVBytes: Int = 0) -> SharedModelMemoryRules.LoadDecision {
-        let limit = MLXMemoryLimit.appliedLimitBytes() ?? MLXMemoryBudget.limitBytes(
+    /// The process memory limit a load is decided against.
+    static func processLimitBytes() -> Int? {
+        MLXMemoryLimit.appliedLimitBytes() ?? MLXMemoryBudget.limitBytes(
             recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes(),
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+    }
+
+    /// R017 *Load*: whether a model of `estimatedResidentBytes` (from its
+    /// safetensors sizes) with `minimumRowKVBytes` for one row may load now.
+    func canLoad(
+        estimatedResidentBytes: Int, minimumRowKVBytes: Int = 0, limitBytes: Int? = SharedModelMemoryBudget.processLimitBytes()
+    ) -> SharedModelMemoryRules.LoadDecision {
         lock.lock(); defer { lock.unlock() }
         return SharedModelMemoryRules.loadDecision(
-            limitBytes: limit, members: members, estimatedResidentBytes: estimatedResidentBytes,
-            newMinimumRowKVBytes: minimumRowKVBytes)
+            limitBytes: limitBytes, members: members, estimatedResidentBytes: estimatedResidentBytes,
+            newMinimumRowKVBytes: minimumRowKVBytes, pendingLoadBytes: pendingLoadBytesLocked())
+    }
+
+    /// Charges a model being loaded its estimated weights and one margin
+    /// until `releaseLoad`, which runs once the runtime has registered its
+    /// measured weights or the load failed.
+    func reserveLoad(estimatedResidentBytes: Int) -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        nextLoadReservationID &+= 1
+        loadReservations[nextLoadReservationID] = SharedModelMemoryRules.saturatingAdd(
+            estimatedResidentBytes, SharedModelMemoryRules.perMemberMarginBytes)
+        return nextLoadReservationID
+    }
+
+    func releaseLoad(_ reservationID: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        loadReservations.removeValue(forKey: reservationID)
+    }
+
+    var pendingLoadBytes: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingLoadBytesLocked()
+    }
+
+    private func pendingLoadBytesLocked() -> Int {
+        loadReservations.values.reduce(0, SharedModelMemoryRules.saturatingAdd)
     }
 
     // MARK: Cache clears

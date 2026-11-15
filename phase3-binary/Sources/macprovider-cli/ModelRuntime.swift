@@ -5904,6 +5904,42 @@ maxTokens: 1,
         }
     }
 
+    /// SPEC-001-R017 *Pinning*: every served slot at the full context.
+    func warmSetRowReservation() -> WarmModelRowReservation {
+        WarmModelRowReservation(rows: servedSlotLimit, tokensPerRow: maxContextTokens)
+    }
+
+    /// SPEC-001-R017 eviction or unload of an idle warm-set member. The
+    /// release steps of `discardCreativePartialReload`, without its writes
+    /// to process-wide state: the provider status describes the primary
+    /// (R016), and the cache limit follows the members that stay once this
+    /// one leaves the shared budget.
+    func unloadForWarmSet() async {
+        let hadMLXModel = currentContainer != nil || currentDraftContainer != nil || currentNativeMTPDrafterContainer != nil
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
+        continuousBatchScheduler = nil
+        currentContinuousBatchTextPreparationLane = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
+        publishNativeMTPStatusSink(capability: nil, admissionCapability: nil)
+        currentDraftContainer = nil
+        currentContainer = nil
+        currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
+        currentDraftModelID = nil
+        currentDraftTargetModelID = nil
+        await conversationCache.purgeAllHot()
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
+        state = .ready
+        targetModelID = nil
+        // Fixture runtimes own no MLX allocations and must not initialize a GPU.
+        if hadMLXModel { SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: memoryBudgetMemberID) }
+    }
+
     private func discardCreativePartialReload() async {
         stopNativeMTPRevocationRefresh()
         currentNativeMTPTupleOffer = nil

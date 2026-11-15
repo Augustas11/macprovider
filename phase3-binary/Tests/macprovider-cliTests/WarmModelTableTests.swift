@@ -5,6 +5,8 @@ import XCTest
 private final class FakeWarmRuntime: WarmModelRuntime, @unchecked Sendable {
     let memoryBudgetMemberID: Int
     init(_ memberID: Int) { memoryBudgetMemberID = memberID }
+    func warmSetRowReservation() async -> WarmModelRowReservation { .init(rows: 0, tokensPerRow: 0) }
+    func unloadForWarmSet() async {}
 }
 
 /// SPEC-001-R016 warm-set table: routing, leases and state rules.

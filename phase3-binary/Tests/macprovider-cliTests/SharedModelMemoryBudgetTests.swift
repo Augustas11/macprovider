@@ -249,6 +249,71 @@ final class SharedModelMemoryBudgetTests: XCTestCase {
             "limit_unavailable")
     }
 
+    /// R017 *Pinning*: a pinned member's reserved rows count in a load
+    /// decision; an unpinned member's do not, and none is set by default.
+    func testLoadDecisionKeepsPinnedReservedRows() {
+        var pinned = member("glm", resident: 150 * gib, pinned: true)
+        pinned.reservedRowKVBytes = 30 * gib
+        let decision = SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: [1: pinned], estimatedResidentBytes: 16 * gib, newMinimumRowKVBytes: gib)
+        XCTAssertEqual(decision.requiredBytes, 150 * gib + 16 * gib + 30 * gib + gib + 2 * margin)
+        XCTAssertEqual(decision.reason, "fits")
+        XCTAssertEqual(SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: [1: pinned], estimatedResidentBytes: 20 * gib, newMinimumRowKVBytes: gib).reason,
+            "insufficient_memory")
+        var unpinned = pinned
+        unpinned.pinned = false
+        XCTAssertEqual(SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: [1: unpinned], estimatedResidentBytes: 16 * gib, newMinimumRowKVBytes: gib).requiredBytes,
+            150 * gib + 16 * gib + gib + 2 * margin)
+        XCTAssertEqual(SharedModelMemoryMember(label: "x").reservedRowKVBytes, 0)
+
+        let budget = SharedModelMemoryBudget()
+        _ = budget.recordLoaded(memberID: 1, label: "glm", modelFamily: "glm", wires: false, activeBytes: gib,
+                                weightBytes: nil, kvBytesPerToken: 1000, pinned: true)
+        budget.reserveRows(memberID: 1, rows: 4, tokensPerRow: 2048)
+        XCTAssertEqual(budget.member(1)?.reservedRowKVBytes, 4 * 2048 * 1000)
+        budget.reserveRows(memberID: 1, rows: Int.max, tokensPerRow: Int.max)
+        XCTAssertEqual(budget.member(1)?.reservedRowKVBytes, MLXMemoryBudget.kvBytes(tokens: Int.max, bytesPerToken: 1000))
+        budget.setPinned(memberID: 1, false)
+        XCTAssertEqual(budget.member(1)?.pinned, false)
+    }
+
+    /// A model still loading is charged in the multi-member row check and
+    /// in load decisions; one loaded member keeps the legacy row decision.
+    func testPendingLoadIsCharged() {
+        let members = [1: member("a", resident: 100 * gib), 2: member("b", resident: 50 * gib)]
+        let free = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: 200 * gib, members: members, requesterID: 1,
+            requesterCommittedBytes: 0, rowBytes: 10 * gib)
+        XCTAssertTrue(free.admitted)
+        let loading = SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: 200 * gib, members: members, requesterID: 1,
+            requesterCommittedBytes: 0, rowBytes: 10 * gib, pendingLoadBytes: 40 * gib)
+        XCTAssertFalse(loading.admitted)
+        XCTAssertTrue(loading.neverFits)
+        XCTAssertEqual(loading.requiredBytes, free.requiredBytes + 40 * gib)
+        XCTAssertEqual(SharedModelMemoryRules.rowDecision(
+            legacyAdmits: true, limitBytes: 1, members: [1: member("a", resident: 100 * gib)], requesterID: 1,
+            requesterCommittedBytes: 0, rowBytes: 10 * gib, pendingLoadBytes: 40 * gib),
+            .init(admitted: true, holdWhenIdle: false, overSharedBudget: false, requiredBytes: 0))
+        XCTAssertEqual(SharedModelMemoryRules.loadDecision(
+            limitBytes: 200 * gib, members: members, estimatedResidentBytes: gib, newMinimumRowKVBytes: 0,
+            pendingLoadBytes: 7 * gib).requiredBytes,
+            SharedModelMemoryRules.loadDecision(
+                limitBytes: 200 * gib, members: members, estimatedResidentBytes: gib, newMinimumRowKVBytes: 0).requiredBytes + 7 * gib)
+
+        let budget = SharedModelMemoryBudget()
+        let first = budget.reserveLoad(estimatedResidentBytes: 10 * gib)
+        let second = budget.reserveLoad(estimatedResidentBytes: 5 * gib)
+        XCTAssertEqual(budget.pendingLoadBytes, 15 * gib + 2 * margin)
+        budget.releaseLoad(first)
+        budget.releaseLoad(first)
+        XCTAssertEqual(budget.pendingLoadBytes, 5 * gib + margin)
+        budget.releaseLoad(second)
+        XCTAssertEqual(budget.pendingLoadBytes, 0)
+    }
+
     func testEstimatedResidentBytesSumsSafetensorsThroughSymlinks() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("shared-budget-\(UUID().uuidString)")
         let blobs = root.appendingPathComponent("blobs")

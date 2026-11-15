@@ -5,6 +5,17 @@ import Foundation
 protocol WarmModelRuntime: AnyObject, Sendable {
     /// SPEC-001-R017: the runtime's key in `SharedModelMemoryBudget`.
     var memoryBudgetMemberID: Int { get }
+    /// R017 *Pinning*: the rows (`slots_total`) and per-row token bound a
+    /// pinned member keeps through a later load.
+    func warmSetRowReservation() async -> WarmModelRowReservation
+    /// Releases the model and every per-runtime registration once the
+    /// member is idle; never writes the process-wide provider status.
+    func unloadForWarmSet() async
+}
+
+struct WarmModelRowReservation: Sendable, Equatable {
+    let rows: Int
+    let tokensPerRow: Int
 }
 
 extension ModelRuntime: WarmModelRuntime {}
