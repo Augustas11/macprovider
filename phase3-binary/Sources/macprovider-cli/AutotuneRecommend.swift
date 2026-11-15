@@ -522,7 +522,27 @@ enum AutotuneModelContextCap {
             verifiedArtifactSizeBytes: Int(clamping: max(1, stageWeightBytes)))
     }
 
-    private static func usableKVBytes(
+    /// SPEC-001-R017: the same envelope with several resident models: their
+    /// verified artifact sizes, summed, are the weights, and the safety
+    /// margin is counted once. One size gives exactly the single-model
+    /// envelope; an empty list or an unknown size falls back to
+    /// `catalogMinRAMGB` as that envelope does.
+    static func usableKVBytes(
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizesBytes sizes: [Int]
+    ) -> UInt64 {
+        var total: Int? = sizes.isEmpty ? nil : 0
+        for size in sizes {
+            guard size > 0, let sum = total else { total = nil; break }
+            let (next, overflow) = sum.addingReportingOverflow(size)
+            total = overflow ? Int.max : next
+        }
+        return usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB, catalogMinRAMGB: catalogMinRAMGB, verifiedArtifactSizeBytes: total)
+    }
+
+    static func usableKVBytes(
         hardwareMemoryGB: Int,
         catalogMinRAMGB: Int,
         verifiedArtifactSizeBytes: Int?
