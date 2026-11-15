@@ -229,3 +229,52 @@ func TestWarmMemberIdentityPin(t *testing.T) {
 		t.Fatalf("member back in the warm set = %s, want verified with a fresh pin", b.HashStatus)
 	}
 }
+
+// A further member closed by a refusal reopens on the next ready heartbeat
+// reporting free seats, while a long dispatch on it stays open; the lower
+// count applies. Without such a report the hold stays.
+func TestWarmMemberRefusalHoldLiftedByReadyHeartbeat(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
+		SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2, LastHeartbeatAt: at,
+		WarmModels: warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 4, 4)),
+	}, nil)
+	members := func(free int) []WarmModel {
+		return warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 4, free))
+	}
+	// One long dispatch, then a second one the provider refuses.
+	for i := 0; i < 2; i++ {
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok {
+			t.Fatal("consume failed")
+		}
+	}
+	if !registry.MarkForwardedSlotFullFor("p1", "current", "model-b", true) {
+		t.Fatal("mark full failed")
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 0 {
+		t.Fatalf("after refusal routable seats = %d, want 0", free)
+	}
+	// A busy heartbeat with no free member seat keeps the hold.
+	update := warmHeartbeatUpdate(at.Add(time.Second), members(0))
+	update.Status = StateBusy
+	registry.ApplyHeartbeat("p1", "current", update)
+	if b := warmEntry(t, registry, "model-b"); b.SlotsFree != 0 || b.RoutingEligible() {
+		t.Fatalf("hold lifted without a free seat: free=%d", b.SlotsFree)
+	}
+	// The next heartbeat reports three free seats: the member reopens.
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), members(3)))
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 3 {
+		t.Fatalf("after ready heartbeat routable seats = %d, want 3", free)
+	}
+	if b := warmEntry(t, registry, "model-b"); !b.RoutingEligible() || registry.ForwardedInFlightFor("p1", "current", "model-b") != 1 {
+		t.Fatalf("member not reopened: state=%s in_flight=%d", b.State, registry.ForwardedInFlightFor("p1", "current", "model-b"))
+	}
+	// The lower count applies: a report above the coordinator's own count
+	// while the dispatch is open does not raise it.
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(3*time.Second), members(4)))
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 3 {
+		t.Fatalf("stale higher report raised the count to %d", free)
+	}
+}

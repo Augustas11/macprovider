@@ -78,6 +78,11 @@ type WarmModel struct {
 	// leaves the warm set or becomes primary (the session's pin is then its
 	// authority, reset on a model change as for any session).
 	identityPin *IdentityPin
+	// refusalHold mirrors the session's queueFullHold for this member: a
+	// refusal (MarkForwardedSlotFullFor) closes its seats while SlotsFree
+	// keeps the coordinator's own count; a ready heartbeat reporting free
+	// seats lifts it, taking the lower of the two counts.
+	refusalHold bool
 }
 
 // warmModelKey is the SPEC-010 case-folded model id.
@@ -190,7 +195,7 @@ func promoteWarmPrimaryLocked(p *Provider, incoming []WarmModel, inFlight map[st
 // A warm set of exactly one member (the primary) is stored as no warm set: the
 // session is a legacy session everywhere (entry views, served model, route
 // snapshot flag, sort and sticky keys, model_not_loaded and swap handling).
-func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFlight map[string]int, verify bool) {
+func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFlight map[string]int, verify, serving bool) {
 	if len(incoming) <= 1 {
 		p.WarmModels = nil
 		return
@@ -213,9 +218,23 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		}
 		m.forwardedInFlight = inFlight[key]
 		m.identityPin = prior[key].identityPin
-		if m.State != WarmModelWarm {
+		old, known := prior[key]
+		switch {
+		case m.State != WarmModelWarm:
 			m.SlotsFree = 0
-		} else if old, ok := prior[key]; ok && m.forwardedInFlight > 0 && old.SlotsFree < m.SlotsFree {
+		case known && old.refusalHold && serving && m.SlotsFree > 0:
+			// The refusal and this report share the provider's ordered
+			// stream, so a free seat this member reports opened after the
+			// refusal. The session's status describes the primary's seats,
+			// so a busy primary does not keep the member closed. The lower
+			// of the two counts applies.
+			if old.SlotsFree < m.SlotsFree {
+				m.SlotsFree = old.SlotsFree
+			}
+		case known && old.refusalHold:
+			m.refusalHold = true
+			m.SlotsFree = old.SlotsFree
+		case known && m.forwardedInFlight > 0 && old.SlotsFree < m.SlotsFree:
 			// While the coordinator has dispatches open on this member its
 			// own count is at least as fresh as the provider's report.
 			m.SlotsFree = old.SlotsFree
@@ -350,7 +369,7 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.ignoredLowerReadyReport = false
 	v.queueFullHold = false
 	v.capacitySafetyHold = thermal
-	if m.State != WarmModelWarm || m.notLoaded {
+	if m.State != WarmModelWarm || m.notLoaded || m.refusalHold {
 		v.SlotsFree = 0
 	}
 	if session.State != StateReady && session.State != StateBusy {
@@ -521,7 +540,8 @@ func (r *Registry) DropForwardedInFlightFor(providerID, assignedID, servedModelI
 // MarkForwardedSlotFullFor is MarkForwardedSlotFull for the entry serving
 // servedModelID. A further member's refusal (the shared memory budget
 // admitted fewer rows than advertised, SPEC-001-R017) closes that member's
-// seats until its next heartbeat; the primary and the session are untouched.
+// seats until a ready heartbeat reports a free seat for it; the primary and
+// the session are untouched.
 func (r *Registry) MarkForwardedSlotFullFor(providerID, assignedID, servedModelID string, refusedSeatConsumed bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -536,10 +556,15 @@ func (r *Registry) MarkForwardedSlotFullFor(providerID, assignedID, servedModelI
 		return false
 	default:
 		m := mutableWarmMemberLocked(p, idx)
-		if refusedSeatConsumed && m.forwardedInFlight > 0 {
-			m.forwardedInFlight--
+		if refusedSeatConsumed {
+			if m.forwardedInFlight > 0 {
+				m.forwardedInFlight--
+			}
+			if m.SlotsFree < m.SlotsTotal {
+				m.SlotsFree++
+			}
 		}
-		m.SlotsFree = 0
+		m.refusalHold = true
 		return true
 	}
 }
@@ -564,7 +589,7 @@ func (r *Registry) RoutableSlotsFreeFor(providerID, assignedID, servedModelID st
 	default:
 		m := p.WarmModels[idx]
 		thermal := p.capacitySafetyHold && !p.queueFullHold
-		if thermal || m.State != WarmModelWarm || m.notLoaded || m.SlotsFree < 0 {
+		if thermal || m.State != WarmModelWarm || m.notLoaded || m.refusalHold || m.SlotsFree < 0 {
 			return 0, true
 		}
 		return m.SlotsFree, true

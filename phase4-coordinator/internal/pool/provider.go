@@ -1422,7 +1422,7 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	}
 	// SPEC-002-R011: the handshake's warm set, each further member verified
 	// for its own model when the session's own model was.
-	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, p.HashStatus != "")
+	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, p.HashStatus != "", false)
 	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
 	// session's authority from its first heartbeat on, not from the first
 	// heartbeat that happens to verify.
@@ -3445,7 +3445,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if hb.KeepWarmModels {
 		r.keepWarmModelsLocked(p)
 	} else {
-		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true)
+		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true, hb.Status == StateReady || hb.Status == StateBusy)
 	}
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
