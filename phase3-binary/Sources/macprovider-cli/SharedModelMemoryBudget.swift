@@ -306,6 +306,41 @@ enum SharedModelMemoryRules {
             minimumRowKVBytes: rows, requiredBytes: required, eviction: plan.satisfied ? plan : nil)
     }
 
+    /// The resident bytes MLX's process memory limit is sized from
+    /// (`MLXMemoryBudget.limitBytes`, which adds one workspace). One loaded
+    /// member or none: nil, so the limit keeps MLX's active memory exactly as
+    /// a single runtime did. Several: every loaded member's weights plus one
+    /// margin per member beyond the first, so the floor covers all of them,
+    /// whichever member loaded last.
+    static func processLimitResidentBytes(members: [Int: SharedModelMemoryMember]) -> Int? {
+        let loaded = members.values.filter(\.loaded)
+        guard loaded.count > 1 else { return nil }
+        let weights = loaded.reduce(0) { saturatingAdd($0, $1.residentBytes) }
+        return saturatingAdd(weights, saturatingMultiply(loaded.count - 1, perMemberMarginBytes))
+    }
+
+    /// KV bytes per token of the only loaded member, nil unless exactly one
+    /// is loaded: the admission sample's source once a sibling has loaded and
+    /// left, so the last load's value never stands in for the survivor's.
+    static func soleLoadedKVBytesPerToken(members: [Int: SharedModelMemoryMember]) -> Int? {
+        let loaded = members.values.filter(\.loaded)
+        return loaded.count == 1 ? loaded[0].kvBytesPerToken : nil
+    }
+
+    /// MLX reads `MLX_MAX_MB_PER_BUFFER` once, when it creates its Metal
+    /// device. A family that wants another value than the device has would
+    /// run with the wrong budget, so it may not load beside the members
+    /// already there. `effective` is the recorded budget and its owner (nil
+    /// before any member registered); an operator-set value
+    /// (`operatorMB`) is the operator's choice and never conflicts.
+    static func commandBufferBudgetConflicts(
+        family: String, wantedMB: Int?, effective: (family: String?, megabytes: Int?)?, operatorMB: Int?
+    ) -> Bool {
+        let owner = effective.map { $0.family } ?? (operatorMB == nil ? nil : "environment")
+        let current = effective.map { $0.megabytes } ?? operatorMB
+        return owner != "environment" && owner != family && wantedMB != current
+    }
+
     /// Bytes of a model directory's `*.safetensors` files (symlinks followed,
     /// as in a Hugging Face snapshot): the load estimate of its weights.
     static func estimatedResidentBytes(modelDirectory: URL) -> Int {
@@ -557,6 +592,15 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
         members[memberID]!.lastAdmissionAt = DispatchTime.now().uptimeNanoseconds
     }
 
+    /// The process-limit and admission inputs from every loaded member
+    /// (`SharedModelMemoryRules.processLimitResidentBytes`,
+    /// `soleLoadedKVBytesPerToken`).
+    func processLimitView() -> (residentBytes: Int?, soleKVBytesPerToken: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        return (SharedModelMemoryRules.processLimitResidentBytes(members: members),
+                SharedModelMemoryRules.soleLoadedKVBytesPerToken(members: members))
+    }
+
     // MARK: Load admission
 
     /// The process memory limit a load is decided against.
@@ -636,6 +680,22 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
     func recordCommandBufferBudget(modelFamily: String, megabytes: Int) {
         lock.lock(); defer { lock.unlock() }
         if commandBufferBudget == nil { commandBufferBudget = (modelFamily, megabytes) }
+    }
+
+    /// A warm-set load's refusal reason when `modelFamily` needs another
+    /// command-buffer budget than the device was created with; nil when it
+    /// may load (`SharedModelMemoryRules.commandBufferBudgetConflicts`).
+    func commandBufferBudgetConflict(modelFamily: String) -> String? {
+        let operatorMB = ProcessInfo.processInfo.environment["MLX_MAX_MB_PER_BUFFER"].flatMap(Int.init)
+        let wanted = ModelRuntime.commandBufferBudgetMBByFamily[modelFamily]
+        lock.lock()
+        let effective = commandBufferBudget
+        lock.unlock()
+        guard SharedModelMemoryRules.commandBufferBudgetConflicts(
+            family: modelFamily, wantedMB: wanted, effective: effective, operatorMB: operatorMB
+        ) else { return nil }
+        let current = effective.map { $0.megabytes } ?? operatorMB
+        return "family=\(modelFamily) wanted_mb=\(wanted.map(String.init) ?? "default") effective_mb=\(current.map(String.init) ?? "default")"
     }
 
     /// MLX reads `MLX_MAX_MB_PER_BUFFER` once, at device creation, so a later

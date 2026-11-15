@@ -2426,6 +2426,9 @@ actor ModelRuntime: ModelRuntimeServing {
         try? await Task.sleep(nanoseconds: 50_000_000)
     }
     private var providerStatus: ProviderStatus?
+    /// SPEC-011 §3.10: the warm set this runtime is the primary of; nil for
+    /// a single-model process and for every non-primary member.
+    private var warmSetSwapHooks: (any WarmSetSwapHooks)?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
     private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
@@ -4838,6 +4841,17 @@ maxTokens: 1,
         self.providerStatus = providerStatus
     }
 
+    /// The primary's warm set (SPEC-011 §3.10): a swap is refused for a
+    /// target that is another member, runs while no warm-set load, evict or
+    /// unload runs, and re-keys the primary once it completes.
+    func setWarmSetSwapHooks(_ hooks: any WarmSetSwapHooks) {
+        warmSetSwapHooks = hooks
+    }
+
+    /// Whether this runtime writes the process-wide provider status (only the
+    /// primary does, SPEC-001-R016).
+    func hasProviderStatus() -> Bool { providerStatus != nil }
+
     func authorizedSwitchModelIDList() -> [String] {
         authorizedSwitchModelIDs
     }
@@ -6052,6 +6066,10 @@ maxTokens: 1,
                 throw ModelRuntimeLoadError(target: targetModelID, reason: "signed catalog identity unavailable")
             }
         }
+        // SPEC-011 §3.10: a swap replaces the primary only; a model already
+        // warm beside it is refused, never loaded twice.
+        let warmSetSwapHooks = warmSetSwapHooks
+        try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
         try transitionToLoading(target: targetModelID)
         let drainTimeoutSeconds = swapDrainTimeoutSeconds
         let providerStatus = providerStatus
@@ -6064,144 +6082,158 @@ maxTokens: 1,
         let serialKVBits = Self.serialKVBits(
             explicit: kvBitsOverride, familyKVQuantDefault: familyKVQuantDefault, modelID: targetModelID)
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, serialKVBits, prefillStepSize, targetAuthority, adoptionKnobs] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, serialKVBits, prefillStepSize, targetAuthority, adoptionKnobs, warmSetSwapHooks] in
             guard let self else { return }
-            do {
-                let container: ModelContainer?
-                let modelID: String
-                let modelHash: String?
-                let modelHashAlgorithm: String?
-                let weightsManifestSHA256: String?
-                let tokenizerConfigSHA256: String?
-                let chatTemplateSHA256: String?
-                let nativeVisionProfile: NativeVisionProfile?
-                let modelCapabilities: PagedKVRuntimeModelCapabilities
-                let draftModelID: String?
-                let draftContainer: ModelContainer?
-                let draftFailureReason: String?
-                if let testLoader {
-                    let loaded = try await testLoader(targetModelID)
-                    container = nil
-                    modelID = loaded.0
-                    modelHash = loaded.1
-                    modelHashAlgorithm = await self.currentModelHashAlgorithm
-                    weightsManifestSHA256 = nil
-                    tokenizerConfigSHA256 = nil
-                    chatTemplateSHA256 = nil
-                    nativeVisionProfile = nil
-                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
-                    if let configuredDraftModelID {
-                        do {
-                            let loadedDraft = try await testLoader(configuredDraftModelID)
-                            draftModelID = loadedDraft.0
-                            draftContainer = nil
-                            draftFailureReason = nil
-                        } catch {
+            // SPEC-011 §3.10: a primary swap never overlaps a warm-set load,
+            // evict or unload, so both are admitted against one budget.
+            await Self.inWarmSetSwapTurn(warmSetSwapHooks) {
+                do {
+                    // A load of the target may have finished while this swap waited.
+                    try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
+                    let container: ModelContainer?
+                    let modelID: String
+                    let modelHash: String?
+                    let modelHashAlgorithm: String?
+                    let weightsManifestSHA256: String?
+                    let tokenizerConfigSHA256: String?
+                    let chatTemplateSHA256: String?
+                    let nativeVisionProfile: NativeVisionProfile?
+                    let modelCapabilities: PagedKVRuntimeModelCapabilities
+                    let draftModelID: String?
+                    let draftContainer: ModelContainer?
+                    let draftFailureReason: String?
+                    if let testLoader {
+                        let loaded = try await testLoader(targetModelID)
+                        container = nil
+                        modelID = loaded.0
+                        modelHash = loaded.1
+                        modelHashAlgorithm = await self.currentModelHashAlgorithm
+                        weightsManifestSHA256 = nil
+                        tokenizerConfigSHA256 = nil
+                        chatTemplateSHA256 = nil
+                        nativeVisionProfile = nil
+                        modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+                        if let configuredDraftModelID {
+                            do {
+                                let loadedDraft = try await testLoader(configuredDraftModelID)
+                                draftModelID = loadedDraft.0
+                                draftContainer = nil
+                                draftFailureReason = nil
+                            } catch {
+                                draftModelID = nil
+                                draftContainer = nil
+                                draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            }
+                        } else {
                             draftModelID = nil
                             draftContainer = nil
-                            draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            draftFailureReason = nil
                         }
                     } else {
-                        draftModelID = nil
-                        draftContainer = nil
-                        draftFailureReason = nil
+                        guard let targetAuthority else {
+                            throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                        }
+                        // Nil-model startup defers Metal setup until its first signed load.
+                        await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
+                        let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
+                        let loaded = try await Self.loadLocalContainer(
+                            from: targetAuthority.modelArgument,
+                            nativeVision: visionModelID != nil
+                        )
+                        container = loaded.0
+                        modelID = targetModelID
+                        guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
+                        else {
+                            throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                        }
+                        modelHash = targetAuthority.artifactSHA256
+                        modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
+                        weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                        let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
+                        tokenizerConfigSHA256 = swapTokenizerHashes.config
+                        chatTemplateSHA256 = swapTokenizerHashes.template
+                        nativeVisionProfile = try NativeVisionProfile.load(
+                            modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
+                        modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
+                        if let configuredDraftModelID {
+                            do {
+                                let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
+                                try await Self.validateTokenizerCompatibility(
+                                    target: loaded.0,
+                                    targetDirectory: loaded.1,
+                                    draft: draftLoaded.0,
+                                    draftDirectory: draftLoaded.1
+                                )
+                                try await Self.runSpeculativeStartupProbe(
+                                    target: loaded.0,
+                                    draft: draftLoaded.0,
+                                    numDraftTokens: 1,
+                                    maxContextTokens: maxContextTokens,
+                                    kvBitsOverride: serialKVBits,
+                                    prefillStepSize: prefillStepSize,
+                                    blockingInferenceExecutor: self.blockingInferenceExecutor
+                                )
+                                try await Self.runSpeculativeEquivalenceCanary(
+                                    target: loaded.0,
+                                    draft: draftLoaded.0,
+                                    targetModelID: modelID,
+                                    numDraftTokens: numDraftTokens,
+                                    maxContextTokens: maxContextTokens,
+                                    kvBitsOverride: serialKVBits,
+                                    prefillStepSize: prefillStepSize,
+                                    blockingInferenceExecutor: self.blockingInferenceExecutor
+                                )
+                                draftModelID = configuredDraftModelID
+                                draftContainer = draftLoaded.0
+                                draftFailureReason = nil
+                            } catch {
+                                draftModelID = nil
+                                draftContainer = nil
+                                draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            }
+                        } else {
+                            draftModelID = nil
+                            draftContainer = nil
+                            draftFailureReason = nil
+                        }
                     }
-                } else {
-                    guard let targetAuthority else {
-                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    try await self.enterDrainPhase()
+                    let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                    if didTimeout {
+                        await self.cancelAllInFlightForDrainTimeout()
+                        // Cancellation is only a request to stop old-generation
+                        // work, not proof that the old container is quiescent.
+                        // Keep the old snapshot installed and fail this swap.
+                        throw DrainCancelledError()
                     }
-                    // Nil-model startup defers Metal setup until its first signed load.
-                    await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
-                    let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
-                    let loaded = try await Self.loadLocalContainer(
-                        from: targetAuthority.modelArgument,
-                        nativeVision: visionModelID != nil
+                    await self.completeSwapAtomically(
+                        container: container,
+                        modelID: modelID,
+                        modelHash: modelHash,
+                        modelHashAlgorithm: modelHashAlgorithm,
+                        weightsManifestSHA256: weightsManifestSHA256,
+                        tokenizerConfigSHA256: tokenizerConfigSHA256,
+                        chatTemplateSHA256: chatTemplateSHA256,
+                        nativeVisionProfile: nativeVisionProfile,
+                        draftModelID: draftModelID,
+                        draftContainer: draftContainer,
+                        draftFailureReason: draftFailureReason,
+                        modelCapabilities: modelCapabilities,
+                        adoptionKnobs: adoptionKnobs
                     )
-                    container = loaded.0
-                    modelID = targetModelID
-                    guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
-                    else {
-                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
-                    }
-                    modelHash = targetAuthority.artifactSHA256
-                    modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
-                    weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
-                    let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
-                    tokenizerConfigSHA256 = swapTokenizerHashes.config
-                    chatTemplateSHA256 = swapTokenizerHashes.template
-                    nativeVisionProfile = try NativeVisionProfile.load(
-                        modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
-                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
-                    if let configuredDraftModelID {
-                        do {
-                            let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
-                            try await Self.validateTokenizerCompatibility(
-                                target: loaded.0,
-                                targetDirectory: loaded.1,
-                                draft: draftLoaded.0,
-                                draftDirectory: draftLoaded.1
-                            )
-                            try await Self.runSpeculativeStartupProbe(
-                                target: loaded.0,
-                                draft: draftLoaded.0,
-                                numDraftTokens: 1,
-                                maxContextTokens: maxContextTokens,
-                                kvBitsOverride: serialKVBits,
-                                prefillStepSize: prefillStepSize,
-                                blockingInferenceExecutor: blockingInferenceExecutor
-                            )
-                            try await Self.runSpeculativeEquivalenceCanary(
-                                target: loaded.0,
-                                draft: draftLoaded.0,
-                                targetModelID: modelID,
-                                numDraftTokens: numDraftTokens,
-                                maxContextTokens: maxContextTokens,
-                                kvBitsOverride: serialKVBits,
-                                prefillStepSize: prefillStepSize,
-                                blockingInferenceExecutor: blockingInferenceExecutor
-                            )
-                            draftModelID = configuredDraftModelID
-                            draftContainer = draftLoaded.0
-                            draftFailureReason = nil
-                        } catch {
-                            draftModelID = nil
-                            draftContainer = nil
-                            draftFailureReason = Self.draftSwapFailureReason(for: error)
-                        }
-                    } else {
-                        draftModelID = nil
-                        draftContainer = nil
-                        draftFailureReason = nil
-                    }
+                    warmSetSwapHooks?.primarySwapped(to: modelID)
+                } catch {
+                    await self.failSwap(reason: String(describing: error))
                 }
-                try await self.enterDrainPhase()
-                let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
-                if didTimeout {
-                    await self.cancelAllInFlightForDrainTimeout()
-                    // Cancellation is only a request to stop old-generation
-                    // work, not proof that the old container is quiescent.
-                    // Keep the old snapshot installed and fail this swap.
-                    throw DrainCancelledError()
-                }
-                await self.completeSwapAtomically(
-                    container: container,
-                    modelID: modelID,
-                    modelHash: modelHash,
-                    modelHashAlgorithm: modelHashAlgorithm,
-                    weightsManifestSHA256: weightsManifestSHA256,
-                    tokenizerConfigSHA256: tokenizerConfigSHA256,
-                    chatTemplateSHA256: chatTemplateSHA256,
-                    nativeVisionProfile: nativeVisionProfile,
-                    draftModelID: draftModelID,
-                    draftContainer: draftContainer,
-                    draftFailureReason: draftFailureReason,
-                    modelCapabilities: modelCapabilities,
-                    adoptionKnobs: adoptionKnobs
-                )
-            } catch {
-                await self.failSwap(reason: String(describing: error))
             }
         }
+    }
+
+    /// Runs a swap's work inside the warm set's turn, or directly without one.
+    private static func inWarmSetSwapTurn(
+        _ hooks: (any WarmSetSwapHooks)?, _ body: @Sendable () async -> Void
+    ) async {
+        if let hooks { await hooks.runSwapTurn(body) } else { await body() }
     }
 
     func prepareModelAdoption(
@@ -7622,7 +7654,9 @@ maxTokens: 1,
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
-            let providerInFlight = snapshot.requestsInFlight > 0
+            // SPEC-011 R-3.10.2: requests on other warm members keep serving
+            // through the swap; only the primary's are drained.
+            let providerInFlight = snapshot.primaryRequestsInFlight > 0
             let runtimeInFlight = !inFlightCancellations.isEmpty
             if !providerInFlight && !runtimeInFlight {
                 return false

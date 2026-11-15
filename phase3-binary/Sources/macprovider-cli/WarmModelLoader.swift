@@ -7,16 +7,27 @@ struct WarmModelLoadSpec: Sendable, Equatable {
     let estimatedResidentBytes: Int
     /// One minimum row of the new model's KV.
     let minimumRowKVBytes: Int
+    /// The model's family (`config.json` `model_type`), nil when unknown:
+    /// decides whether its command-buffer budget matches the device's.
+    var modelFamily: String? = nil
 }
 
 enum WarmModelLoaderError: Error, Equatable, CustomStringConvertible {
     /// R017 *Load*: the weights do not fit, even after evicting every idle
     /// unpinned member. `reason` is the load decision's reason.
     case insufficientMemory(modelID: String, reason: String, requiredBytes: Int, limitBytes: Int?)
+    /// R017: MLX's command-buffer budget is set once per process; this
+    /// model's family needs another value than the loaded members run with.
+    case commandBufferBudgetConflict(modelID: String, detail: String)
+    /// The loader was stopped (process shutdown): no further load starts,
+    /// and a load that finishes afterwards is unloaded again.
+    case stopped(modelID: String)
 
     var reason: String {
         switch self {
         case .insufficientMemory: return "insufficient_memory"
+        case .commandBufferBudgetConflict: return "command_buffer_budget_conflict"
+        case .stopped: return "stopping"
         }
     }
 
@@ -24,6 +35,10 @@ enum WarmModelLoaderError: Error, Equatable, CustomStringConvertible {
         switch self {
         case let .insufficientMemory(modelID, reason, required, limit):
             return "insufficient_memory model=\(modelID) decision=\(reason) required_bytes=\(required) limit_bytes=\(limit.map(String.init) ?? "nil")"
+        case let .commandBufferBudgetConflict(modelID, detail):
+            return "command_buffer_budget_conflict model=\(modelID) \(detail)"
+        case let .stopped(modelID):
+            return "stopping model=\(modelID)"
         }
     }
 }
@@ -41,6 +56,7 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
     private let factory: Factory
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var stopped = false
 
     init(
         table: WarmModelTable<Runtime>,
@@ -99,6 +115,33 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         try await unloadMarked(table.beginEvicting(modelID: modelID, allowPinned: true))
     }
 
+    /// Process shutdown: refuses every later load and marks a load in
+    /// flight to be unloaded when its factory returns. Never waits for the
+    /// turn, so a load that is still reading weights cannot hold it up.
+    func stop() {
+        stopped = true
+    }
+
+    /// Process shutdown, after `stop()` and the relay drain: unloads every
+    /// warm non-primary member without taking the turn (a load in flight may
+    /// hold it). A member still holding a lease or a row is given until
+    /// `idleTimeoutNanoseconds` to finish and is left to process exit after.
+    func unloadSecondariesForShutdown(idleTimeoutNanoseconds: UInt64) async {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ idleTimeoutNanoseconds
+        for entry in table.entries() where !entry.primary && entry.state == .warm {
+            guard let memberID = entry.memberID else { continue }
+            while (table.entry(token: entry.token)?.leases ?? 0) > 0 || budget.busyRows(memberID: memberID) > 0 {
+                guard DispatchTime.now().uptimeNanoseconds < deadline,
+                      (try? await Task.sleep(nanoseconds: idlePollNanoseconds)) != nil else { break }
+            }
+            guard budget.busyRows(memberID: memberID) == 0,
+                  let marked = try? table.beginEvicting(modelID: entry.modelID, allowPinned: true),
+                  let runtime = marked.runtime else { continue }
+            await runtime.unloadForWarmSet()
+            table.finishEvicting(token: marked.token)
+        }
+    }
+
     // MARK: Private
 
     /// The turn passes straight to the next waiter, so no caller that
@@ -116,8 +159,13 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
     }
 
     private func loadExclusive(_ spec: WarmModelLoadSpec, pinned: Bool) async throws -> WarmModelTableEntry<Runtime> {
+        guard !stopped else { throw WarmModelLoaderError.stopped(modelID: spec.modelID) }
         if table.entry(modelID: spec.modelID) != nil {
             throw WarmModelTableError.duplicate(modelID: spec.modelID)
+        }
+        // Before any eviction: a refusal here must leave the set unchanged.
+        if let family = spec.modelFamily, let detail = budget.commandBufferBudgetConflict(modelFamily: family) {
+            throw WarmModelLoaderError.commandBufferBudgetConflict(modelID: spec.modelID, detail: detail)
         }
         let decision = decide(spec)
         guard decision.admitted else { throw refusal(spec, decision) }
@@ -156,6 +204,11 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
             throw error
         }
         budget.releaseLoad(reservation)
+        if stopped {
+            table.cancelLoading(token: token)
+            await runtime.unloadForWarmSet()
+            throw WarmModelLoaderError.stopped(modelID: spec.modelID)
+        }
         await pinAndReserve(runtime, pinned: pinned)
         try table.finishLoading(token: token, runtime: runtime)
         return table.entry(token: token)!

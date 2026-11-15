@@ -625,6 +625,75 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    /// SPEC-001-R017 *Load*: what the shared budget decides a warm load on,
+    /// read from the model's local files before any weights load.
+    static func warmSetLoadSpec(_ modelID: String) throws -> WarmModelLoadSpec {
+        let directory = try ModelRuntime.localModelDirectory(for: modelID)
+        let perToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory) ?? 0
+        return WarmModelLoadSpec(
+            modelID: modelID,
+            estimatedResidentBytes: SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: directory),
+            minimumRowKVBytes: MLXMemoryBudget.kvBytes(tokens: SharedModelMemoryRules.minimumRowTokens, bytesPerToken: perToken),
+            modelFamily: ModelRuntime.localModelFamily(modelID)
+        )
+    }
+
+    /// SPEC-001-R016: a further warm member, built from the configuration
+    /// the primary is built from. It carries no catalog binding of its own
+    /// (no verified artifact hash, draft model or signed native-MTP sidecar,
+    /// which name the primary), cannot be swapped, never receives the
+    /// provider status, and gets no KV disk tier or idle prewarm.
+    static func makeWarmSetMemberRuntime(
+        modelID: String,
+        family: String?,
+        config: AppConfig,
+        acceptedTuples: [ContinuousBatchingAcceptedTuple],
+        policy: ContinuousBatchingPolicyLoadResult,
+        emergencyOffOverride: Bool,
+        autotuneCandidate: Bool
+    ) async throws -> ModelRuntime {
+        let context = ProviderCapacity(maxContextOverride: config.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+        return try await ModelRuntime(
+            modelID: modelID,
+            mlxCacheLimitMB: config.mlxCacheLimitMB,
+            maxContextTokensOverride: config.maxContextOverride,
+            kvBitsOverride: config.kvBitsOverride,
+            familyKVQuantDefault: true,
+            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(contextTokens: context),
+            prefillStepSize: config.prefillStepSize,
+            prefillStepSizeExplicitlyConfigured: config.prefillStepSizeExplicitlyConfigured,
+            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: config.maxConcurrencyOverride),
+            continuousBatchingMode: config.continuousBatching,
+            continuousBatchQueueLimit: config.continuousBatchQueueLimit,
+            continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS,
+            continuousBatchPrefillTokensPerIteration: config.continuousBatchPrefillTokensPerIteration,
+            continuousBatchingCachedTurns: config.continuousBatchingCachedTurns,
+            continuousBatchingAcceptanceCoverage: autotuneCandidate
+                ? ContinuousBatchingAcceptanceCoverage(acceptedTuples: acceptedTuples)
+                : .defaultOn(revocations: policy.selection.revocations, acceptedTuples: acceptedTuples),
+            continuousBatchingPolicyLoadResult: policy,
+            continuousBatchingEmergencyOffOverride: emergencyOffOverride,
+            continuousBatchingModeExplicitlyConfigured: config.continuousBatchingExplicitlyConfigured,
+            nativeMTPMode: config.nativeMTPMode,
+            warmSwapEnabled: false,
+            swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds
+        )
+    }
+
+    /// Further warm models need a primary this process loads itself (an MLX
+    /// model), not a loopback model server or a shard group.
+    static func runWarmModelsRuntimePreflight(_ resolved: AppConfig, shardRole: Bool) throws {
+        let external: String? = shardRole
+            ? "a shard group"
+            : (LoopbackServeSelection.select(resolved.model) == nil ? nil : "a local model server")
+        do {
+            try WarmSetBoot<ModelRuntime>.requireLocalPrimary(warmModels: resolved.warmModels, externalRuntime: external)
+        } catch let error as WarmSetConfigurationError {
+            FileHandle.standardError.write(Data(("\(error)\n").utf8))
+            throw ExitCode(2)
+        }
+    }
+
     /// Builds the same target authority used by `models list --json` to report
     /// local weights. A supported-model string is only a policy hint; a warm
     /// switch target also needs a signed catalog row and a locally verified
@@ -2503,6 +2572,7 @@ struct ServeCommand: AsyncParsableCommand {
         // preflight bundle repeats this idempotent check after acquiring its
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
+        try Self.runWarmModelsRuntimePreflight(resolved, shardRole: shardGroup != nil || shardMember != nil)
 
         // Round-2 code MEDIUM-3: clear the resolved draft model for autotune
         // candidates so the speculative route is never taken and the probe
@@ -3099,6 +3169,9 @@ struct ServeCommand: AsyncParsableCommand {
             modelID: resolved.model,
             operationID: lifecycleOperationID
         )
+        // SPEC-001-R016: further warm models are built from the same
+        // configuration the primary is built from below.
+        let warmSetConfig = resolved
         let modelRuntime: any ModelRuntimeServing
         // Non-nil only when a SPEC-046 loopback adapter serves (issue #1569);
         // threaded to the coordinator hello as `runtime_source`.
@@ -3496,6 +3569,41 @@ struct ServeCommand: AsyncParsableCommand {
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
+        // SPEC-001-R016/R017: an MLX primary heads a warm set (a set of one
+        // without `warm_models`). Only the primary has the provider status,
+        // the KV disk tier and the idle prewarmer; a further member is built
+        // from the primary's configuration and reports through the table.
+        let warmSet: WarmSetBoot<ModelRuntime>?
+        if let mlxPrimary = modelRuntime as? ModelRuntime, let primaryModelID = resolved.model {
+            let config = warmSetConfig
+            let acceptedTuples = effectiveAcceptedTuples
+            let policy = continuousBatchingPolicy
+            let table = WarmModelTable<ModelRuntime>()
+            let boot = WarmSetBoot(
+                table: table,
+                loader: WarmModelLoader(table: table) { spec in
+                    try await Self.makeWarmSetMemberRuntime(
+                        modelID: spec.modelID, family: spec.modelFamily, config: config,
+                        acceptedTuples: acceptedTuples, policy: policy,
+                        emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate)
+                },
+                supportedModels: resolved.supportedModels,
+                loadSpec: { try Self.warmSetLoadSpec($0) },
+                memberInfo: { runtime in
+                    let rows = await runtime.warmSetRowReservation()
+                    return WarmModelMemberInfo(
+                        maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows,
+                        modelHash: await runtime.loadedModelHash,
+                        modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
+                        weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256)
+                }
+            )
+            try await boot.adoptPrimary(modelID: primaryModelID, runtime: mlxPrimary)
+            await mlxPrimary.setWarmSetSwapHooks(boot)
+            warmSet = boot
+        } else {
+            warmSet = nil
+        }
         // SPEC-038 v0.3.15: qualify continuous batching on this Mac in the
         // background, only while idle; it never blocks serving.
         let cbSelfCheckTask: Task<Void, Never>? = {
@@ -3801,6 +3909,7 @@ struct ServeCommand: AsyncParsableCommand {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
+                warmModels: warmSet?.table,
                 providerStatus: providerStatus,
                 runtimeSource: helloRuntimeSource,
                 attestationGenerator: {
@@ -4016,9 +4125,11 @@ struct ServeCommand: AsyncParsableCommand {
         let lifecycleReadyWriter: ProviderLifecycleWriter = operatorPausedInitially
             ? .operatorCommand
             : .serve
+        let warmBootModels = resolved.warmModels
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
+            warmModels: warmSet?.table,
             providerStatus: providerStatus,
             receiptBuilder: receiptRuntime.builder,
             idlePrewarmer: idlePrewarmer,
@@ -4054,18 +4165,23 @@ struct ServeCommand: AsyncParsableCommand {
                 Self.startCoordinatorAfterListening {
                     await coordinatorClient?.start()
                 }
+                // SPEC-001-R017: the boot warm models load once the primary
+                // serves, in list order, while they fit.
+                warmSet?.startBootLoads(warmBootModels)
             }
         )
         let terminationHandlers = installTerminationHandlers(
             coordinatorClient: coordinatorClient, controlSocket: controlSocket,
             idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
-            cbSelfCheckTask: cbSelfCheckTask
+            cbSelfCheckTask: cbSelfCheckTask,
+            warmSet: warmSet, warmSetIdleTimeoutSeconds: resolved.drainTimeoutSeconds
         )
         defer {
-            Task { [kvDiskTier] in
+            Task { [kvDiskTier, warmSet, warmSetIdleTimeoutSeconds = resolved.drainTimeoutSeconds] in
                 await idlePrewarmer.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
+                await warmSet?.shutdown(idleTimeoutSeconds: warmSetIdleTimeoutSeconds)
                 // M-A: flush queued cold writes + release the namespace lock on the
                 // normal serve-teardown path as well.
                 await kvDiskTier?.shutdown()
@@ -5094,7 +5210,9 @@ private func installTerminationHandlers(
     controlSocket: ControlSocketServer?,
     idlePrewarmer: IdlePrewarmer?,
     kvDiskTier: KVDiskTier?,
-    cbSelfCheckTask: Task<Void, Never>?
+    cbSelfCheckTask: Task<Void, Never>?,
+    warmSet: (any WarmSetShutdown)?,
+    warmSetIdleTimeoutSeconds: Int
 ) -> [DispatchSourceSignal] {
     let latch = TerminationLatch()
     return [SIGTERM, SIGINT].map { signalNumber in
@@ -5131,6 +5249,10 @@ private func installTerminationHandlers(
                 await coordinatorClient?.drainForExit(
                     reason: "\(signalName(signalNumber)) received"
                 )
+                // SPEC-001-R017: stop warm-set loads (one in flight is not
+                // waited for) and unload every further member before the
+                // primary's teardown below.
+                await warmSet?.shutdown(idleTimeoutSeconds: warmSetIdleTimeoutSeconds)
                 // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
                 // release the namespace lock BEFORE exit, on the signal path too.
                 await kvDiskTier?.shutdown()

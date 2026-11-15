@@ -46,11 +46,13 @@ enum MLXMemoryLimit {
     /// Sets MLX's memory limit for this process and logs the effective value.
     /// `stage` is `startup` before the model loads and `model_loaded` after,
     /// when MLX's active memory is the resident model (the small-Mac floor).
+    /// SPEC-001-R017: with several models loaded the floor is the shared
+    /// budget's weights of all of them, never the last load's view.
     @discardableResult
     static func apply(stage: String, kvBytesPerToken: Int?) -> Int? {
         let workingSet = GPU.maxRecommendedWorkingSetBytes()
         let physical = ProcessInfo.processInfo.physicalMemory
-        let resident = Memory.activeMemory
+        let resident = SharedModelMemoryBudget.shared.processLimitView().residentBytes ?? Memory.activeMemory
         guard let limit = MLXMemoryBudget.limitBytes(
             recommendedWorkingSetBytes: workingSet, physicalMemoryBytes: physical, residentBytes: resident
         ) else {
@@ -78,11 +80,16 @@ enum MLXMemoryLimit {
         return state.limitBytes
     }
 
+    /// SPEC-001-R017: the KV bytes per token are the only loaded model's
+    /// from the shared budget, so a sibling's load (which applies its own
+    /// value here) or its unload never leaves the survivor with another
+    /// model's figure. Before any model registers, the applied value.
     static func admissionSample() -> MLXMemoryAdmissionSample? {
         state.lock.lock()
         let limit = state.limitBytes
-        let perToken = state.kvBytesPerToken
+        let applied = state.kvBytesPerToken
         state.lock.unlock()
+        let perToken = SharedModelMemoryBudget.shared.processLimitView().soleKVBytesPerToken ?? applied
         guard let limit else { return nil }
         return MLXMemoryAdmissionSample(limitBytes: limit, activeBytes: Memory.activeMemory, kvBytesPerToken: perToken)
     }
