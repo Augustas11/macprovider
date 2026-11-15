@@ -862,6 +862,8 @@ actor CoordinatorClient {
     private let startupCatalogReleaseID: String?
     private var nativeMTPAdmissionPickupReleases: Set<String> = []
     private var nativeMTPAdmissionPickupTask: Task<Void, Never>?
+    private var nativeMTPAdmissionRefreshTask: Task<Void, Never>?
+    private let nativeMTPAdmissionRefreshIntervalSeconds: Double
     private var nativeMTPAdmissionRestartDraining = false
     private var pendingCatalogEnvelope: CatalogEnvelope?
     private let compatibilitySetID: String?
@@ -970,6 +972,7 @@ actor CoordinatorClient {
         catalogEnvelopeRefresher: CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         nativeMTPAdmissionPickup: NativeMTPAdmissionPickup.Hooks? = nil,
+        nativeMTPAdmissionRefreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds,
         coordinatorReadiness: CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 15,
         coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
@@ -1239,6 +1242,7 @@ actor CoordinatorClient {
         self.catalogEnvelopeRefresher = catalogEnvelopeRefresher
         self.catalogEnvelopeRefreshMinimumInterval = catalogEnvelopeRefreshMinimumInterval
         self.nativeMTPAdmissionPickup = nativeMTPAdmissionPickup
+        self.nativeMTPAdmissionRefreshIntervalSeconds = nativeMTPAdmissionRefreshIntervalSeconds
         self.startupCatalogReleaseID = catalogReleaseID
         self.catalogArtifactIdentity = catalogArtifactIdentity ?? { modelID in
             guard let modelID,
@@ -1344,6 +1348,7 @@ actor CoordinatorClient {
             await runStartupAutoupdateRecovery()
         }
         startReconnectTask()
+        startNativeMTPAdmissionRefresh()
         if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in
                 await self?.consumeSwapSignals()
@@ -1357,6 +1362,7 @@ actor CoordinatorClient {
         stopped = true
         runTask?.cancel()
         nativeMTPAdmissionPickupTask?.cancel()
+        nativeMTPAdmissionRefreshTask?.cancel()
         stopNativeMTPServedBankPoll()
         stopNativeMTPTupleOfferRetry()
         heartbeatTask?.cancel()
@@ -9447,6 +9453,28 @@ actor CoordinatorClient {
         return outcome == "adopted_next_hello"
     }
 
+    /// SPEC-048-R013: a catalog activation leaves a session whose row did not
+    /// change connected, and such a session gets no new accept, so a provider
+    /// with a pickup re-reads the signed catalog on a timer as well. The
+    /// refresh keeps its own minimum interval.
+    private func startNativeMTPAdmissionRefresh() {
+        guard nativeMTPAdmissionPickup != nil, catalogEnvelopeRefresher != nil,
+              nativeMTPAdmissionRefreshTask == nil, nativeMTPAdmissionRefreshIntervalSeconds > 0
+        else { return }
+        let interval = nativeMTPAdmissionRefreshIntervalSeconds
+        nativeMTPAdmissionRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                await self.refreshCatalogEnvelopeIfDue(trigger: "native_mtp_admission_timer")
+            }
+        }
+    }
+
+    func startNativeMTPAdmissionRefreshForTest() {
+        startNativeMTPAdmissionRefresh()
+    }
+
     /// SPEC-048-R013: a verified catalog document for the loaded weights
     /// under a release other than the one this process started on may carry
     /// a new native-MTP admission. Each release is checked once, one at a
@@ -9475,8 +9503,11 @@ actor CoordinatorClient {
         func log(_ outcome: String, _ extra: String = "") {
             print("event=native_mtp_admission_pickup outcome=\(outcome) release_id=\(release)\(extra)")
         }
-        guard await hooks.newlyActivatable(envelope) else {
-            log("not_activatable")
+        let check = await hooks.newlyActivatable(envelope)
+        guard check == .activatable else {
+            log(check.rawValue)
+            // Unresolved inputs are checked again at a later refresh.
+            if check == .unavailable { nativeMTPAdmissionPickupReleases.remove(envelope.releaseID) }
             nativeMTPAdmissionPickupTask = nil
             return
         }
@@ -9490,7 +9521,7 @@ actor CoordinatorClient {
             return
         }
         guard hooks.claim(envelope.releaseID) else {
-            log("already_restarted_for_release")
+            log("claim_refused")
             nativeMTPAdmissionPickupTask = nil
             return
         }
@@ -9501,12 +9532,15 @@ actor CoordinatorClient {
         ))
         log("scheduled", " delay_s=\(Int(delay))")
         await hooks.sleep(delay)
-        // An update in flight replaces the process itself; wait it out.
-        while coordinatorRecommendationInFlightIdentity != nil, !Task.isCancelled, !signalShutdownStarted {
+        // An update in flight replaces the process itself, and an operator
+        // pause is the operator's: wait either out before draining.
+        while coordinatorRecommendationInFlightIdentity != nil || operatorPaused,
+              !Task.isCancelled, !signalShutdownStarted {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         guard !Task.isCancelled, !signalShutdownStarted else { return }
         nativeMTPAdmissionRestartDraining = true
+        await providerStatus.raiseRestartDrainFence()
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
             releaseID: envelope.releaseID, phase: .waitingForIdle, drainNotBefore: nil
         ))
@@ -9515,7 +9549,7 @@ actor CoordinatorClient {
         // not routable) and locally; requests in flight finish, however long.
         try? await sendStateUpdate(state: .draining, reason: NativeMTPAdmissionPickup.drainReason)
         guard await providerStatus.waitUntilIdleForRestart(), !signalShutdownStarted else {
-            if !signalShutdownStarted {
+            if !signalShutdownStarted, !stopped {
                 nativeMTPAdmissionRestartDraining = false
                 await providerStatus.setNativeMTPAdmissionPending(nil)
                 await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_cancelled")

@@ -1868,9 +1868,10 @@ struct ServeCommand: AsyncParsableCommand {
     /// not. It re-runs the startup resolve against that release (signed
     /// catalog and artifact feed, the fetched admission set, the store
     /// projection, which also fetches the drafter ahead of the restart) and
-    /// then the loader's admission stage (tuple, build, artifact binding and
-    /// revocation). A process whose startup set already named the model
-    /// gains nothing from a restart, and neither does an operator-placed set.
+    /// then the loader's admission stage (tuple, artifact binding and
+    /// revocation). A process whose own set already admits its tuple gains
+    /// nothing from a restart (whatever keeps native MTP off there is local),
+    /// and neither does an operator-placed set.
     static func nativeMTPAdmissionNewlyActivatable(
         config: AppConfig,
         startupAdmission: SmallMRoute.NativeMTPAdmission,
@@ -1879,17 +1880,21 @@ struct ServeCommand: AsyncParsableCommand {
         slotCount: Int,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
-        probeRoot: URL = nativeMTPAdmissionProbeRoot(),
+        probeRoot: URL = ServeCommand.nativeMTPAdmissionProbeRoot(),
         admissionFetcher: @escaping NativeMTPAdmissionFeed.Fetcher = NativeMTPAdmissionFeed.defaultFetch,
-        admissionProbe: ((URL, URL?, NativeMTPAdmissionSidecar.TrustedKeyring, NativeMTPResolvedArtifactAuthority) async -> String?)? = nil
-    ) async -> Bool {
+        admissionProbe: ((URL, URL?, NativeMTPAdmissionSidecar.TrustedKeyring, NativeMTPResolvedArtifactAuthority?) async -> String?)? = nil
+    ) async -> NativeMTPAdmissionPickup.Check {
         guard config.nativeMTPMode == .auto,
               config.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
-              startupAdmission != .entryForModel,
               let modelID = config.model,
               let modelRevision = config.modelArtifactSHA256, !modelRevision.isEmpty
         else {
-            return false
+            return .notActivatable
+        }
+        // A set named the model at startup: only a set this process read from
+        // the feed can be superseded by a release.
+        if startupAdmission == .entryForModel, binding.nativeMTPAdmissionSidecarPath == nil {
+            return .notActivatable
         }
         var artifactResolver = artifactResolver
         if let root = config.modelArtifactRoot, root.hasPrefix("/") {
@@ -1906,9 +1911,10 @@ struct ServeCommand: AsyncParsableCommand {
             artifactResolver: artifactResolver,
             admissionRoot: probeRoot,
             admissionFetcher: admissionFetcher
-        ), let sidecarPath = resolved.sidecarPath else {
-            return false
+        ) else {
+            return .unavailable
         }
+        guard let sidecarPath = resolved.sidecarPath else { return .notActivatable }
         let sidecarURL = URL(fileURLWithPath: sidecarPath)
         let keyring = NativeMTPAdmissionSidecar.TrustedKeyring(
             publicKeysByKeyID: staticInputs.trustedPublicKeys,
@@ -1917,14 +1923,14 @@ struct ServeCommand: AsyncParsableCommand {
         guard SmallMRoute.nativeMTPAdmission(
             sidecarURL: sidecarURL, modelID: modelID, modelRevision: modelRevision, trustedKeyring: keyring
         ) == .entryForModel else {
-            return false
+            return .notActivatable
         }
-        let artifactRoot = resolved.artifactRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let refusal: String?
-        if let admissionProbe {
-            refusal = await admissionProbe(sidecarURL, artifactRoot, keyring, resolved.authority)
-        } else {
-            refusal = await NativeMTPAdmissionPickup.loaderRefusal(
+        func refusal(_ sidecarURL: URL, _ artifactRoot: String?, _ authority: NativeMTPResolvedArtifactAuthority?) async -> String? {
+            let artifactRoot = artifactRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            if let admissionProbe {
+                return await admissionProbe(sidecarURL, artifactRoot, keyring, authority)
+            }
+            return await NativeMTPAdmissionPickup.loaderRefusal(
                 mode: config.nativeMTPMode,
                 targetModelID: modelID,
                 targetModelRevision: modelRevision,
@@ -1932,15 +1938,27 @@ struct ServeCommand: AsyncParsableCommand {
                 sidecarURL: sidecarURL,
                 artifactRoot: artifactRoot,
                 trustedKeyring: keyring,
-                resolvedArtifactAuthority: resolved.authority
+                resolvedArtifactAuthority: authority
             )
         }
-        if let refusal {
-            FileHandle.standardError.write(Data(
-                "event=native_mtp_admission_pickup action=probe_refused reason=\(refusal)\n".utf8
-            ))
+        // The set this process started on already admits its tuple: the
+        // release adds nothing a restart could use.
+        if startupAdmission == .entryForModel,
+           let startupSidecarPath = binding.nativeMTPAdmissionSidecarPath,
+           await refusal(
+               URL(fileURLWithPath: (startupSidecarPath as NSString).expandingTildeInPath),
+               binding.nativeMTPAdmissionArtifactRoot,
+               binding.nativeMTPResolvedArtifactAuthority
+           ) == nil {
+            return .notActivatable
         }
-        return refusal == nil
+        if let reason = await refusal(sidecarURL, resolved.artifactRoot, resolved.authority) {
+            FileHandle.standardError.write(Data(
+                "event=native_mtp_admission_pickup action=probe_refused reason=\(reason)\n".utf8
+            ))
+            return .notActivatable
+        }
+        return .activatable
     }
 
     /// SPEC-048-R013: the pickup hooks of a `serve` process, or nil when a
@@ -3190,6 +3208,9 @@ struct ServeCommand: AsyncParsableCommand {
             } ?? .absent
         )
         let smallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        // SPEC-048-R013 pickup: the slot count the startup loader matches an
+        // admission tuple on, read before the self-check lowers the served count.
+        let nativeMTPLoaderSlotCount = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
         let appliedSmallMRoute = SmallMRoute.apply(smallMRoute.route, reason: smallMRoute.reason)
         FileHandle.standardError.write(Data(SmallMRoute.event(
             SmallMRoute.Decision(
@@ -3969,7 +3990,7 @@ struct ServeCommand: AsyncParsableCommand {
                     startupAdmission: smallMRouteInputs.nativeMTPAdmission,
                     binding: startupPreflight.runtimeBinding,
                     hasCatalogTrust: startupPreflight.catalogTrust != nil,
-                    slotCount: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+                    slotCount: nativeMTPLoaderSlotCount,
                     excluded: autotuneCandidate || smallMRouteInputs.shardGroupRole
                 ),
                 receiptIdentitySigningKeyCandidates: admissionIdentitySigningKeyCandidates,

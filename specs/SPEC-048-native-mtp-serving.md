@@ -1944,32 +1944,44 @@ with the model. A running `serve` process MUST therefore pick up an admission
 that a later catalog release adds for its loaded model, on every small-row
 route (R003):
 
-1. When its runtime catalog refresh (SPEC-023-R010) verifies a catalog
-   document for the loaded weights under a `release_id` other than the one
-   the process started on, the provider re-runs the startup admission resolve
-   against that release: the signed catalog and artifact feed, the signed
-   admission set, the store projection (which fetches the drafter ahead of
-   the restart) and the loader's admission checks (tuple, build and artifact
-   binding, revocation state). The set is written to a probe directory; the
-   set the running process loaded from stays in place.
-2. Only if `native_mtp_mode` is `auto`, the set the process started on had no
-   entry for the loaded model and artifact digest, and a fresh start would
-   now admit it, the provider restarts itself. Each release is checked at
-   most once per process and costs at most one restart per provider across
-   process starts; a process never restarts for the release it started on.
+1. The provider runs its runtime catalog refresh (SPEC-023-R010) on a session
+   accept that reports another catalog document and also every 30 minutes,
+   because a catalog activation leaves a session whose row did not change
+   connected. When the refresh verifies a catalog document for the loaded
+   weights under a `release_id` other than the one the process started on,
+   the provider re-runs the startup admission resolve against that release:
+   the signed catalog and artifact feed, the signed admission set, the store
+   projection (which fetches the drafter ahead of the restart) and the
+   loader's admission checks (tuple, artifact binding, revocation state). The
+   set is written to a probe directory; the set the running process loaded
+   from stays in place.
+2. The provider restarts itself only if `native_mtp_mode` is `auto`, no draft
+   model is configured, a fresh start on that release would admit the loaded
+   model, and the set the process started on did not (it named no entry for
+   the model and artifact digest, could not be verified, or named one whose
+   tuple the loader's admission checks refuse). A release with a definite
+   answer is checked once per process; one whose inputs cannot be resolved
+   yet is checked again at a later refresh. A release costs at most one
+   restart per provider across process starts, recorded durably before the
+   delay starts; if the record cannot be written the provider does not
+   restart. A process never restarts for the release it started on.
 3. The restart waits a random delay, uniform over 60 to 1800 seconds per
-   provider, while serving normally. It then reports `draining` with reason
-   `native_mtp_admission_restart`, refuses new buyer and local requests as an
-   update drain does, and waits for the requests in flight to reach zero with
-   no deadline: no request is cut, and `drain_timeout_s` does not apply to
-   this wait. At zero it exits nonzero through the unsolicited-termination
+   provider, while serving normally, and then waits out an update in flight
+   or an operator pause. It then reports `draining` with reason
+   `native_mtp_admission_restart`, refuses new buyer and local requests, and
+   preempts local (non-network) work as an update drain does (SPEC-001-R011).
+   It waits for the requests in flight to reach zero with no deadline: no
+   buyer request is cut, and `drain_timeout_s` does not apply to this wait.
+   Until the exit no path may report `ready` or `busy` or reopen local
+   admission. At zero it exits nonzero through the unsolicited-termination
    path (SPEC-001 FR-12), which the provider LaunchAgent restarts; the next
    start decides the route and loads the drafter as any start does.
-4. A process that nothing restarts (not started by launchd) does not exit; it
-   reports the pending admission and keeps serving. Local `/v1/status`
-   reports `native_mtp_admission_pending` (`release_id`, `phase` of
-   `scheduled`, `waiting_for_idle` or `restart_required`, and
-   `drain_not_before` while scheduled), else null.
+4. Only the installed LaunchAgent's process (parent launchd, started from
+   the installed plist) exits. Any other process does not exit; it reports
+   the pending admission and keeps serving. Local `/v1/status` reports
+   `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
+   `waiting_for_idle` or `restart_required`, and `drain_not_before` while
+   scheduled), else null.
 5. A revocation never restarts a provider; the live revocation feed (R014)
    disables the tuple in place. An autotune child, a shard-group process and
    a process with an operator-placed admission set do not pick up.

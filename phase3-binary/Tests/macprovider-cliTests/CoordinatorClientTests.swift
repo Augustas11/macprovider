@@ -8860,7 +8860,7 @@ final class CoordinatorClientTests: XCTestCase {
         private var _claimed: Set<String> = []
         private var sleepGate: AsyncStream<Void>.Continuation?
         private var sleepReleased = false
-        var activatable: @Sendable (CoordinatorClient.CatalogEnvelope) async -> Bool = { _ in true }
+        var activatable: @Sendable (CoordinatorClient.CatalogEnvelope) async -> NativeMTPAdmissionPickup.Check = { _ in .activatable }
         var supervised = true
         var unit = 0.5
         var holdSleep = false
@@ -8919,7 +8919,8 @@ final class CoordinatorClientTests: XCTestCase {
         status: ProviderStatus,
         recorder: CoordinatorFrameRecorder,
         refreshed: @escaping @Sendable () async -> CoordinatorClient.CatalogEnvelope? = { CoordinatorClientTests.refreshedCatalogEnvelope() },
-        hooks: NativeMTPAdmissionPickup.Hooks? = nil
+        hooks: NativeMTPAdmissionPickup.Hooks? = nil,
+        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds
     ) async throws -> CoordinatorClient {
         try await makeClient(
             status: status,
@@ -8933,7 +8934,8 @@ final class CoordinatorClientTests: XCTestCase {
             catalogModelSHA256: "model-hash",
             catalogEnvelopeRefresher: refreshed,
             catalogEnvelopeRefreshMinimumInterval: 0,
-            nativeMTPAdmissionPickup: hooks ?? probe.hooks
+            nativeMTPAdmissionPickup: hooks ?? probe.hooks,
+            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds
         )
     }
 
@@ -9003,10 +9005,10 @@ final class CoordinatorClientTests: XCTestCase {
                 fetcher: origin.fetcher,
                 baseURL: NativeMTPAdmissionOriginStub.baseURL,
                 root: probeRoot
-            ) else { return false }
+            ) else { return .unavailable }
             return SmallMRoute.nativeMTPAdmission(
                 sidecarURL: fetched, modelID: "model-a", modelRevision: modelSHA256, trustedKeyring: origin.keyring
-            ) == .entryForModel
+            ) == .entryForModel ? .activatable : .notActivatable
         }
         let recorder = CoordinatorFrameRecorder()
         let status = Self.admissionPickupStatus()
@@ -9108,7 +9110,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testAdmissionPickupLeavesAProviderAloneWhenNothingNewIsActivatable() async throws {
         let probe = NativeMTPAdmissionPickupProbe()
-        probe.activatable = { $0.releaseID == "release-never" }
+        probe.activatable = { $0.releaseID == "release-never" ? .activatable : .notActivatable }
         let release = LockedBox("release-b")
         let recorder = CoordinatorFrameRecorder()
         let status = Self.admissionPickupStatus()
@@ -9122,10 +9124,16 @@ final class CoordinatorClientTests: XCTestCase {
 
         try await Self.acceptSessionOnNewerCatalog(client)
         try await Self.waitUntil { probe.checks == ["release-b"] }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // The same release is not checked again once it has a definite answer.
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(probe.checks, ["release-b"])
         // A later release is still checked: a refused release does not end the pickup.
         release.set("release-c")
         try await Self.acceptSessionOnNewerCatalog(client)
         try await Self.waitUntil { probe.checks == ["release-b", "release-c"] }
+        try await Task.sleep(nanoseconds: 200_000_000)
         // The release this process started on is never checked.
         release.set("release-a")
         try await Self.acceptSessionOnNewerCatalog(client)
@@ -9241,6 +9249,75 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(frames.dropFirst(framesBeforeReconnect).contains {
             $0["type"] as? String == "state_update" && ["ready", "busy"].contains($0["state"] as? String ?? "")
         })
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Self.waitUntil { probe.exits == 1 }
+    }
+
+    /// A catalog activation leaves a session with an unchanged row connected,
+    /// so no new session accept arrives: the timer alone must find the release.
+    func testAdmissionPickupFindsAReleaseWithoutANewSession() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            refreshIntervalSeconds: 0.05
+        )
+        defer { Task { await client.stop() } }
+
+        await client.startNativeMTPAdmissionRefreshForTest()
+        try await Self.waitUntil { probe.exits == 1 }
+        XCTAssertEqual(probe.checks, ["release-b"])
+    }
+
+    /// Inputs that cannot be resolved yet (a feed not published everywhere, a
+    /// drafter download that timed out) are checked again; nothing restarts
+    /// until a check says the release is activatable.
+    func testAdmissionPickupChecksAgainAfterUnavailableInputs() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let attempts = LockedBox(0)
+        probe.activatable = { _ in
+            var attempt = 0
+            attempts.update { $0 += 1; attempt = $0 }
+            return attempt < 3 ? .unavailable : .activatable
+        }
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            refreshIntervalSeconds: 0.05
+        )
+        defer { Task { await client.stop() } }
+
+        await client.startNativeMTPAdmissionRefreshForTest()
+        try await Self.waitUntil { probe.exits == 1 }
+        XCTAssertEqual(probe.checks, ["release-b", "release-b", "release-b"])
+        XCTAssertEqual(probe.claimed, ["release-b"])
+    }
+
+    /// A creative-hold release or a finished swap publishes `ready` straight
+    /// from the status; the restart fence keeps the provider draining.
+    func testAdmissionPickupDrainHoldsAgainstDirectReadyTransitions() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: CoordinatorFrameRecorder())
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.status == .draining
+        }
+        await status.setState(.ready, reason: "some_other_path")
+        await status.setState(.busy, reason: "some_other_path")
+        await status.reopenLocalAdmission()
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+        let refused = await status.admitRequest(requestID: "new-request")
+        XCTAssertEqual(refused, .pausedOrDraining)
+        XCTAssertEqual(probe.exits, 0)
 
         await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
         try await Self.waitUntil { probe.exits == 1 }
@@ -11162,6 +11239,7 @@ final class CoordinatorClientTests: XCTestCase {
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         nativeMTPAdmissionPickup: NativeMTPAdmissionPickup.Hooks? = nil,
+        nativeMTPAdmissionRefreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
         admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
@@ -11249,6 +11327,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,
             nativeMTPAdmissionPickup: nativeMTPAdmissionPickup,
+            nativeMTPAdmissionRefreshIntervalSeconds: nativeMTPAdmissionRefreshIntervalSeconds,
             coordinatorReadiness: coordinatorReadiness,
             coordinatorReadinessAttempts: coordinatorReadinessAttempts,
             coordinatorReadinessRetryNanoseconds: 0,

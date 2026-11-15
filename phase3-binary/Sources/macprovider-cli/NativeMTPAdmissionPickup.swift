@@ -22,6 +22,20 @@ enum NativeMTPAdmissionPickup {
     /// The `state_update` reason while the provider waits for its requests.
     static let drainReason = "native_mtp_admission_restart"
     static let idlePollNanoseconds: UInt64 = 100_000_000
+    /// How often a connected provider re-reads the signed catalog. A catalog
+    /// activation leaves sessions with an unchanged row connected, so no new
+    /// session accept would ever show them the release.
+    static let refreshIntervalSeconds: Double = 1800
+
+    /// What the check found for one release.
+    enum Check: String, Sendable, Equatable {
+        /// A fresh start would admit the loaded model where this process did not.
+        case activatable
+        /// The release verifiably adds nothing for this process.
+        case notActivatable = "not_activatable"
+        /// The release's inputs could not be resolved now; check again later.
+        case unavailable
+    }
 
     /// Maps a unit sample onto `jitterRangeSeconds`; any input stays in range.
     static func jitterSeconds(unit: Double) -> Double {
@@ -35,7 +49,7 @@ enum NativeMTPAdmissionPickup {
         /// Re-fetches the release's admission set and reports whether a fresh
         /// start of this process would admit native MTP for the loaded model
         /// where this process did not.
-        var newlyActivatable: @Sendable (CoordinatorClient.CatalogEnvelope) async -> Bool
+        var newlyActivatable: @Sendable (CoordinatorClient.CatalogEnvelope) async -> Check
         /// Records the release as handled; false when it already was, in this
         /// process or an earlier one.
         var claim: @Sendable (_ releaseID: String) -> Bool
@@ -119,10 +133,17 @@ enum NativeMTPAdmissionPickup {
         }
     }
 
-    /// True for a process started by launchd, whose nonzero exit the provider
-    /// LaunchAgent restarts (`StopIntentMarker`). A foreground or lab `serve`
-    /// has a shell or harness as parent and would stay down.
-    static func supervisedByLaunchd() -> Bool { getppid() == 1 }
+    /// True for the provider LaunchAgent's process, whose nonzero exit launchd
+    /// restarts (`StopIntentMarker`): its parent is launchd and it carries
+    /// the environment key only the installed plist sets. A foreground, lab
+    /// or orphaned `serve` would stay down, so it is never restarted.
+    static func supervisedByLaunchd(
+        parentPID: pid_t = getppid(),
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        parentPID == 1
+            && environment["MACPROVIDER_LAUNCHD_DOMAIN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
 }
 
 /// What `/v1/status` reports while a pickup is pending.

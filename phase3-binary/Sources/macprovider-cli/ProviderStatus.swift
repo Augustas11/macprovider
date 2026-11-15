@@ -680,6 +680,10 @@ actor ProviderStatus {
     /// to ready; an operator pause never closes it.
     private var localAdmissionClosed = false
     private var nativeMTPAdmissionPending: NativeMTPAdmissionPendingStatus?
+    /// SPEC-048-R013: set while the provider waits to restart for a new
+    /// native-MTP admission. No path may publish `ready` or `busy` or reopen
+    /// local admission under it.
+    private var restartDrainFence = false
     private var localCapacityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(
@@ -1441,6 +1445,7 @@ actor ProviderStatus {
     /// Reopens local admission after a process-exit or update drain that did
     /// not end the process.
     func reopenLocalAdmission() {
+        guard !restartDrainFence else { return }
         localAdmissionClosed = false
     }
 
@@ -1457,7 +1462,7 @@ actor ProviderStatus {
         while requestsInFlight > 0 || (preemptingLocal && (!localLeases.isEmpty || localQueuedCount > 0)) {
             if Date() >= deadline || (cancellationAware && Task.isCancelled) {
                 // A drain that timed out leaves the provider serving.
-                if preemptingLocal { localAdmissionClosed = false }
+                if preemptingLocal { localAdmissionClosed = restartDrainFence }
                 return false
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1469,25 +1474,36 @@ actor ProviderStatus {
         nativeMTPAdmissionPending = pending
     }
 
-    /// SPEC-048-R013: the wait before a native-MTP admission restart. Closes
-    /// local admission and preempts local work as an update drain does, then
-    /// waits for buyer and local work with no deadline: requests in flight
-    /// are never cut. Returns false, with local admission reopened, only when
-    /// the waiting task is cancelled.
+    /// SPEC-048-R013: the wait before a native-MTP admission restart. Raises
+    /// the restart fence (no `ready`, no reopened local admission), moves to
+    /// `draining`, preempts local work as an update drain does, then waits
+    /// for buyer and local work with no deadline: a buyer request in flight
+    /// is never cut. Returns false, with the fence lowered, only when the
+    /// waiting task is cancelled.
     func waitUntilIdleForRestart(
         pollNanoseconds: UInt64 = NativeMTPAdmissionPickup.idlePollNanoseconds
     ) async -> Bool {
+        restartDrainFence = true
+        if status == .ready || status == .busy {
+            transition(to: .draining, reason: NativeMTPAdmissionPickup.drainReason)
+        }
         localAdmissionClosed = true
         localLeases.forEach { $0.preempt() }
         wakeLocalCapacityWaiters()
         while requestsInFlight > 0 || !localLeases.isEmpty || localQueuedCount > 0 {
             if Task.isCancelled {
+                restartDrainFence = false
                 localAdmissionClosed = false
                 return false
             }
             try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
         return true
+    }
+
+    /// Raises the restart fence ahead of the first `draining` frame.
+    func raiseRestartDrainFence() {
+        restartDrainFence = true
     }
 
     private func refreshAvailabilityState() async {
@@ -1606,6 +1622,10 @@ actor ProviderStatus {
         if (operatorPauseFence || localCreativeHold), newState == .ready || newState == .busy {
             newState = .unavailable
             reason = operatorPauseFence ? "operator_paused" : "local_creative_hold"
+        }
+        if restartDrainFence, newState == .ready || newState == .busy {
+            newState = .draining
+            reason = NativeMTPAdmissionPickup.drainReason
         }
         guard status != newState else { return false }
         status = newState

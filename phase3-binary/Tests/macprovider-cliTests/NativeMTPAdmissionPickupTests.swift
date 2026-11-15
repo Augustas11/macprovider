@@ -15,7 +15,8 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         XCTAssertEqual(NativeMTPAdmissionPickup.jitterSeconds(unit: 0), range.lowerBound)
         XCTAssertEqual(NativeMTPAdmissionPickup.jitterSeconds(unit: 1), range.upperBound)
         XCTAssertEqual(NativeMTPAdmissionPickup.jitterSeconds(unit: 0.5), 930)
-        for unit in [-1, -0.0001, 0.25, 0.9999, 1.0001, 2, 1e308, -.infinity, .infinity, .nan] {
+        let samples: [Double] = [-1, -0.0001, 0.25, 0.9999, 1.0001, 2, 1e308, -Double.infinity, Double.infinity, Double.nan]
+        for unit in samples {
             XCTAssertTrue(range.contains(NativeMTPAdmissionPickup.jitterSeconds(unit: unit)), "unit \(unit)")
         }
         var generator = SystemRandomNumberGenerator()
@@ -24,7 +25,7 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
             XCTAssertTrue(range.contains(NativeMTPAdmissionPickup.jitterSeconds(unit: unit)))
         }
         // The default sample source feeds the same mapping.
-        let hooks = NativeMTPAdmissionPickup.Hooks(newlyActivatable: { _ in false }, claim: { _ in false }, supervised: { false })
+        let hooks = NativeMTPAdmissionPickup.Hooks(newlyActivatable: { _ in .notActivatable }, claim: { _ in false }, supervised: { false })
         for _ in 0..<1_000 {
             XCTAssertTrue(range.contains(NativeMTPAdmissionPickup.jitterSeconds(unit: hooks.randomUnit())))
         }
@@ -162,7 +163,7 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
             loadSHA256: String(repeating: "d", count: 64),
             nativeMTPResolvedArtifactAuthority: nil
         )
-        func check(_ mutate: (inout AppConfig) -> Void, startup: SmallMRoute.NativeMTPAdmission) async -> Bool {
+        func check(_ mutate: (inout AppConfig) -> Void, startup: SmallMRoute.NativeMTPAdmission) async -> NativeMTPAdmissionPickup.Check {
             var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
             config.model = "model-a"
             config.modelCatalogKey = "model-a"
@@ -182,14 +183,25 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
             )
         }
         let modeOff = await check({ $0.nativeMTPMode = .off }, startup: .none)
-        XCTAssertFalse(modeOff)
+        XCTAssertEqual(modeOff, .notActivatable)
         let draft = await check({ $0.draftModel = "org/draft" }, startup: .none)
-        XCTAssertFalse(draft)
+        XCTAssertEqual(draft, .notActivatable)
         let alreadyNamed = await check({ _ in }, startup: .entryForModel)
-        XCTAssertFalse(alreadyNamed)
+        // Named by an operator-placed set (no feed sidecar path): a release cannot supersede it.
+        XCTAssertEqual(alreadyNamed, .notActivatable)
         let noDigest = await check({ $0.modelArtifactSHA256 = nil }, startup: .none)
-        XCTAssertFalse(noDigest)
+        XCTAssertEqual(noDigest, .notActivatable)
         XCTAssertEqual(fetches.get(), 0)
+    }
+
+    /// Only the installed LaunchAgent's process counts as restarted on exit;
+    /// an orphaned `serve` also has parent 1 but would stay down.
+    func testSupervisedOnlyAsTheInstalledLaunchAgent() {
+        let agent = ["MACPROVIDER_LAUNCHD_DOMAIN": "gui/501"]
+        XCTAssertTrue(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: agent))
+        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: [:]))
+        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 1, environment: ["MACPROVIDER_LAUNCHD_DOMAIN": " "]))
+        XCTAssertFalse(NativeMTPAdmissionPickup.supervisedByLaunchd(parentPID: 4242, environment: agent))
     }
 
     func testHooksAreBuiltOnlyWhereAReleaseCanChangeNativeMTP() {
