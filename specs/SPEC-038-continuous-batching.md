@@ -1,11 +1,24 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.54
+Version: v0.3.55
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
+FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
+again. An aged long prompt therefore leads one turn and then yields to the
+shorter prompts again. Before, it led every turn until its prompt was done.
+Measured on an M3 Ultra (GLM-5.3-Flash, 4 served rows, a 71K-token prompt,
+nine 4.3K-token requests arriving during its prefill): the first two short
+requests got their first token in 31 s and 42 s. The other seven waited
+224-292 s, for the whole remaining long prefill, after the long row aged. A
+long prompt under a steady stream of shorter ones now leads one turn after
+every 8 turns in which later-queued rows pass it, so it still finishes, and
+its first token comes later than before under that load. This is a deliberate trade
+in favour of short-request latency.
+
 **Change log v0.3.54 (2026-11-14, DeepSeek V4 prefill yields between tiles, Related: #2352):**
 While a `deepseek_v4` reference chunk stays one forward, ordinary rows that
 are already decoding may take one decode step between evaluated prefill
@@ -1175,9 +1188,11 @@ offered is the group head. A row that stands ahead of the head in round-robin
 turn order, is not selected for the turn and was admitted before the head
 (v0.3.45) MUST be charged one bypass turn; a row passed by a head admitted
 before it is not charged; a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
-aged and MUST stay aged until its prompt is done. An aged row is never charged
-again, so no row is passed over more than 8 times, and an aged row progresses
-at least as fast as round-robin order would let it. When no row decodes, a
+aged. (v0.3.55) The head of a turn MUST reset its bypass count to zero, so an
+aged row leads one turn and then is ordered by prompt tokens left again. No
+row is passed over more than 8 times between two of its turns, so under any
+stream of shorter prompts a row keeps leading a turn after at most 8 bypass
+turns and finishes. When no row decodes, a
 turn MAY take more prompt tokens than the configured per-iteration budget (up
 to `maxPrefillRowsPerIteration` chunks), but a peer whose chunk takes the
 group past the configured budget MUST join only when it has exactly as many
@@ -2952,8 +2967,9 @@ hardware-capability run or a static-review obligation. Every
   Scheduler fixtures MUST prove the prefill order: mixed-length rows arriving
   together prefill shortest first and the shortest alone; equal rows arriving
   together keep one cohort forward per turn; a row passed over by a stream of
-  shorter rows leads after at most 8 bypass turns and no row is charged more
-  than 8; and the idle cohort turn admits past the configured budget only rows
+  shorter rows leads after at most 8 bypass turns, no row is charged more
+  than 8 in a row, and (v0.3.55) a row that led yields to the shorter rows
+  still waiting; and the idle cohort turn admits past the configured budget only rows
   with as many prompt tokens left as the head. Scheduler
   fixtures MUST preserve staggered-arrival FCFS and balanced chunk lengths;
   capability fixtures MUST reject default and non-Qwen adapter cases while
