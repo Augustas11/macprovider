@@ -26,6 +26,10 @@ entry is updated for the 2026-11-15 MiniMax activation.
   Evidence (a)-(d) passed; (e) is owed for the MiniMax M3.1-Flash artifact
   because no connected provider served it. The previous live release was
   `published-2026-11-12-nemotron-3.5-lightning-listed-v283`.
+  `buyer_ux_conformance_owed` remains for `minimaxai/minimax-m3.1-flash`
+  (no conformance record yet), and the activation tool still lists
+  `live_probe` as pending: the canary serves the uncensored GLM-5.3-Flash
+  build, which has no native-MTP admission entry (#2382).
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since
