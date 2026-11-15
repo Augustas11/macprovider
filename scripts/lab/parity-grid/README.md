@@ -42,7 +42,17 @@ scripts/lab/parity-grid/run-grid.sh \
 
 Outputs in `$OUT`: `reference.jsonl`, `provider.jsonl`, `summary.md`,
 `summary.json`, and `serve/` (config, serve logs, `/v1/status`, binary sha256).
-Exit code is compare's: 0 all cells pass, 1 a cell fails, 2 unusable input.
+Exit code is compare's: 0 all cells pass, 1 a cell fails, 2 unusable input;
+7 when the client failed, after the compare table is printed.
+
+`--autotune-candidate` makes the serve an autotune child, which always takes
+the row-invariant small-row route; a production serve does not run that way.
+`--no-autotune-candidate` drops the flag. `window.sh` runs several models and
+routes in one window: `default` (autotune flag, batching auto: row-invariant),
+`stock` (no autotune flag, batching auto: the production route, stock order
+unless native MTP may activate), `serial` (batching and native MTP off, no
+autotune flag: serial-only) and `cb` (batching on). Each route prints the
+`small_m_route` the serve reported in `serve/status.json`.
 JSONL files are appended to, so use a fresh `--out-dir` per window.
 
 The pieces also run alone:

@@ -12,7 +12,13 @@
 #
 # --no-autotune-candidate drops the lab autotune flag from the serve command;
 # with --cb off (and native MTP off for a model that has an admission entry)
-# the provider then takes its serial-only small-row route. Check
+# the provider then takes its serial-only small-row route, and with --cb auto
+# the route a production serve takes. With the flag the serve is an autotune
+# child, which always takes the row-invariant route.
+#
+# Exit code: compare's (0 all cells pass, 1 a cell fails, 2 unusable input),
+# or 7 when the client failed (after the compare table is printed); 3, 5, 6
+# and 64 before the client runs. Check
 # serve/status.json continuous_batching.small_m_route to see which route ran.
 #
 # --python is an interpreter with mlx_lm installed (reference only); the client
@@ -153,5 +159,15 @@ CMP=(--ref "$REF" --ours "$OURS" --floor "$FLOOR" --json "$OUT_DIR/summary.json"
 [ -n "$FALLBACK" ] && CMP+=(--text-fallback-reason "$FALLBACK")
 [ -n "$MARGINS" ] && CMP+=(--margins "$MARGINS")
 [ -n "$TIE_STEPS" ] && CMP+=(--tie-steps "$TIE_STEPS")
+# errexit would end the script at a failing compare, before the client check.
+set +e
 /usr/bin/python3 -I "$HERE/compare.py" "${CMP[@]}" | tee "$OUT_DIR/summary.md"
-exit "${PIPESTATUS[0]}"
+compare_rc="${PIPESTATUS[0]}"
+set -e
+# A client that failed leaves cells missing or partial: the table above is
+# printed for diagnosis, but the window fails whatever compare said.
+if [ "$client_rc" -ne 0 ]; then
+  echo "client failed (rc=$client_rc; compare rc=$compare_rc)" >&2
+  exit 7
+fi
+exit "$compare_rc"

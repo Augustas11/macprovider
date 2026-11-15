@@ -5,13 +5,21 @@
 #
 # usage: window.sh --bin-dir DIR --python PY --out-dir DIR MODEL...
 #   MODEL is name=path[:routes[:rows]]
-#     routes  comma list of default, serial, cb   (default "default,serial")
-#       default  serve as the lab starts it (autotune flag, no batching flag):
-#                the row-invariant small-row route
+#     routes  comma list of default, stock, serial, cb
+#             (default "default,serial")
+#       default  the lab autotune flag, batching auto: an autotune child
+#                always takes the row-invariant small-row route. Not the
+#                route a production serve takes.
+#       stock    no autotune flag, batching auto: the route a production
+#                serve takes, stock order unless native MTP may activate
+#                (then row-invariant) or a stored verdict decides otherwise
 #       serial   batching off, native MTP off, no autotune flag: the
 #                serial-only small-row route
-#       cb       batching on (only for a model the build admits to batching)
+#       cb       batching on, autotune flag (only for a model the build
+#                admits to batching)
 #     rows    comma list for the cb route (default "1,4"); other routes run 1
+# Each route prints the small_m_route the serve reported; read it, the route
+# name alone does not prove which small-row route ran.
 # Each route's result is OUT/<name>/<route>/summary.md; a failed reference is
 # reported and the model skipped. Exit code 0 means every grid ran, not that
 # every cell passed: read the summaries.
@@ -56,6 +64,7 @@ for spec in "${MODELS[@]}"; do
           --trials "$TRIALS" --skip-reference --sample-seconds "$SAMPLE")
     case "$route" in
       default) args+=(--cb auto --rows 1) ;;
+      stock)   args+=(--cb auto --rows 1 --no-autotune-candidate) ;;
       serial)  args+=(--cb off --rows 1 --no-autotune-candidate --serve-arg --native-mtp --serve-arg off) ;;
       cb)      args+=(--cb on --rows "$rows") ;;
       *) echo "unknown route $route" >&2; failed=1; continue ;;
