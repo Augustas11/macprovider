@@ -14,6 +14,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -349,5 +350,100 @@ func TestModelsListsWarmEntries(t *testing.T) {
 	got = models(buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0)))
 	if len(got) != 1 || got["model-a"]["provider_count"] != 1.0 {
 		t.Fatalf("a loading member must not be listed: %v", got)
+	}
+}
+
+// SPEC-022 R-16.2a with SPEC-036 FR-25 sanction identity: a member declared
+// under a name of its catalog row other than the row's model_id (here the
+// row key model-a of the row whose model_id is org/model-a) is never marked
+// a served-model dispatch, even with a passing verification, so a hold
+// opened on the row (keyed on its model_id, as the scoring engine opens it)
+// withholds the credit. Without this the snapshot's model_id spelling would
+// differ from the hold's and the credit would escape it.
+func TestWarmEntryUnderCatalogAliasCreditStaysUnderHold(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "alias-settlement-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:   true,
+		CatalogPath:      writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey: pubkey,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+	up := &servedModelCapture{}
+	upstream := httptest.NewServer(up.handler())
+	defer upstream.Close()
+
+	member := warmMember("model-a", false, 1)
+	member.ModelHash = buyerTestHash
+	member.ModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	member.ExpectedModelHash = buyerTestHash
+	registry := pool.NewRegistry(nil, pool.WithSanctionResolver(func(key string) (string, bool) {
+		if key == "model-a" || key == "org/model-a" {
+			return "org/model-a", true
+		}
+		return "", false
+	}))
+	registerWarmHTTPProvider(registry, "warm", upstream.URL, warmMember("model-z", true, 1), member, warmEntryOtherHash, bytes.Repeat([]byte{0x74}, 32))
+	registry.SetComputeIntegrityPassing("warm", "org/model-a", true)
+	if entry, ok := registry.ResolveEntry("warm", "warm-session", "model-a"); !ok || !entry.ComputeIntegrityPassing {
+		t.Fatalf("setup: member passing=%v ok=%v", entry.ComputeIntegrityPassing, ok)
+	}
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{
+		"Authorization":         {"Bearer operator-key"},
+		"X-MacProvider-Account": {"acct_gateway"},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var modelID string
+	var flagged int
+	if err := db.QueryRow(`SELECT model_id, served_model_dispatch FROM settlement_route_snapshots`).Scan(&modelID, &flagged); err != nil {
+		t.Fatalf("route snapshot: %v", err)
+	}
+	if modelID != "model-a" || flagged != 0 {
+		t.Fatalf("snapshot model=%s served_model_dispatch=%d, want the provider's spelling and 0", modelID, flagged)
+	}
+	var credits int64
+	if err := db.QueryRow(`SELECT COALESCE(SUM(provider_credits), 0) FROM ledger_request_credits WHERE provider_id = 'warm' AND settled = 0`).Scan(&credits); err != nil || credits <= 0 {
+		t.Fatalf("setup: provider credits=%d err=%v", credits, err)
+	}
+	// The hold predicate is the one the payable view and the weekly
+	// settlement selection share; HeldCredits is that predicate's sum.
+	now := time.Now().UTC()
+	end := now.Add(time.Hour)
+	if _, err := billingStore.OpenComputeIntegrityHold(context.Background(), "warm", "org/model-a", computeintegrity.HoldKindFailure, now.Add(-time.Hour), &end, "confirmed_failure", now); err != nil {
+		t.Fatal(err)
+	}
+	holds, err := billingStore.ComputeIntegrityHolds(context.Background(), "warm")
+	if err != nil || len(holds) != 1 || holds[0].HeldCredits != credits {
+		t.Fatalf("holds=%+v err=%v, want the row's hold to withhold %d", holds, err, credits)
 	}
 }

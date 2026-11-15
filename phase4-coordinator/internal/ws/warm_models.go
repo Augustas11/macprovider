@@ -266,6 +266,39 @@ func validateWarmModelsSupported(models []pool.WarmModel, supported []string, to
 	return nil
 }
 
+// warmModelsSameCatalogRow is the SPEC-002-R011 rule that one signed catalog
+// row is one member: a warm set of two or more members in which two members
+// (the primary entry is the top-level model) name the same row, under its row
+// key and its model_id or otherwise (pool.Registry.SanctionKey), is
+// malformed, and so is one whose session declared two supported_models
+// entries that name the same row. Both take the bad-warm_models path: the
+// handshake proceeds without a warm set, a heartbeat keeps the previous one.
+// A warm set of one has no second member, so a single-model session is never
+// affected; ids that name no catalog row compare as pool.ModelKey, which the
+// decode rules already keep distinct.
+func (s *Server) warmModelsSameCatalogRow(models []pool.WarmModel, supported []string) error {
+	if len(models) < 2 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	for i, m := range models {
+		key := s.pool.SanctionKey(m.ModelID)
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("warm_models[%d]: names the same catalog model as an earlier entry", i)
+		}
+		seen[key] = struct{}{}
+	}
+	declared := make(map[string]struct{}, len(supported))
+	for _, model := range supported {
+		key := s.pool.SanctionKey(model)
+		if _, dup := declared[key]; dup {
+			return fmt.Errorf("supported_models names one catalog model twice")
+		}
+		declared[key] = struct{}{}
+	}
+	return nil
+}
+
 // withoutWarmModels is a heartbeat payload with its warm_models key removed.
 func withoutWarmModels(payload []byte) ([]byte, bool) {
 	var raw map[string]json.RawMessage

@@ -365,6 +365,26 @@ func (c *Catalog) HighestClaimedTier(modelID string) (key string, row Row, ok bo
 	return bestKey, bestRow, true
 }
 
+// CanonicalModelID is the one identity of the signed row a provider-sent
+// model id names, for per-model sanctions (SPEC-036 FR-25): a row is
+// reachable as its row key and as its model_id (HighestClaimedTier), and both
+// map to the row's normalized model_id. A name that is some row's model_id is
+// its own identity, so the result maps to itself. ok is false for a name no
+// row carries.
+func (c *Catalog) CanonicalModelID(modelID string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	normalized := normalizeModelID(modelID)
+	if _, ok := c.keysByModel[normalized]; ok {
+		return normalized, true
+	}
+	if row, ok := c.rowsByKey[normalized]; ok {
+		return normalizeModelID(row.ModelID), true
+	}
+	return "", false
+}
+
 func normalizeModelID(modelID string) string {
 	return strings.ToLower(strings.TrimSpace(modelID))
 }

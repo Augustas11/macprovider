@@ -91,9 +91,11 @@ type WarmModel struct {
 }
 
 // ModelKey is the SPEC-010 canonical model id (surrounding whitespace
-// trimmed, NFC, then lowercase): the one form the pool, buyer entry routing,
-// compute-integrity suspension and scoring, not-loaded strikes, identity
-// pins and the routing perf store key a model on.
+// trimmed, NFC, then lowercase): the one form the pool, buyer entry routing
+// and the routing perf store key a model on. Per-model sanctions
+// (compute-integrity suspension and scoring, not-loaded strikes, identity
+// pins) key on Registry.SanctionKey, which maps every name of one catalog
+// row to one identity and falls back to ModelKey.
 func ModelKey(modelID string) string {
 	return strings.ToLower(norm.NFC.String(strings.TrimSpace(modelID)))
 }
@@ -347,7 +349,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 			continue
 		}
 		m.forwardedInFlight = inFlight[key]
-		m.identityPin = p.warmPins[key]
+		m.identityPin = p.warmPins[r.SanctionKey(m.ModelID)]
 		old, known := prior[key]
 		switch {
 		case m.State != WarmModelWarm:
@@ -378,7 +380,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		m.identityPin = pinIdentity(m.identityPin, verdict)
 		m.HashStatus, m.ArtifactIdentity = verdict.Status, verdict.Artifact
 	}
-	p.warmPins = warmPinsOf(entries)
+	p.warmPins = r.warmPinsOf(entries)
 	if !warmMultiModel(p, entries) {
 		p.WarmModels = nil
 		return
@@ -387,12 +389,13 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 	r.applyComputeIntegritySuspensionLocked(p)
 }
 
-// warmPinsOf is the identity pin of each further member, by case-folded model.
-func warmPinsOf(members []WarmModel) map[string]*IdentityPin {
+// warmPinsOf is the identity pin of each further member, by SanctionKey, so
+// a member declared under another name of its catalog row keeps its pin.
+func (r *Registry) warmPinsOf(members []WarmModel) map[string]*IdentityPin {
 	pins := map[string]*IdentityPin{}
 	for _, m := range members {
 		if !m.Primary && m.identityPin != nil {
-			pins[warmModelKey(m.ModelID)] = m.identityPin
+			pins[r.SanctionKey(m.ModelID)] = m.identityPin
 		}
 	}
 	return pins
@@ -469,7 +472,7 @@ func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func
 		m.identityPin = pinIdentity(m.identityPin, next)
 		m.HashStatus, m.ArtifactIdentity = next.Status, next.Artifact
 	}
-	p.warmPins = warmPinsOf(entries)
+	p.warmPins = r.warmPinsOf(entries)
 	if !warmMultiModel(p, entries) {
 		// A refresh that leaves fewer than two verified warm members makes
 		// the session legacy until a heartbeat makes it multi-model again.
@@ -841,7 +844,8 @@ func (r *Registry) MarkEntryNotLoaded(providerID, assignedID, servedModelID stri
 // the same race) are not. It returns the strikes within window (all kept
 // strikes when window is 0).
 //
-// Strikes are the session's, per case-folded model: only window ages them.
+// Strikes are the session's, per SanctionKey: only window ages them, and a
+// member declared under another name of its catalog row keeps them.
 // A member reporting another state, leaving and rejoining the warm set, or
 // the session becoming a legacy session and a multi-model one again keeps
 // them, so a provider cannot clear its strikes by cycling a member's state.
@@ -872,7 +876,8 @@ func (r *Registry) RecordEntryNotLoaded(providerID, assignedID, servedModelID st
 				strikes[model] = kept
 			}
 		}
-		kept := strikes[key]
+		strikeKey := r.SanctionKey(servedModelID)
+		kept := strikes[strikeKey]
 		if !m.notLoaded {
 			kept = append(kept, at)
 		}
@@ -880,7 +885,7 @@ func (r *Registry) RecordEntryNotLoaded(providerID, assignedID, servedModelID st
 			kept = kept[len(kept)-maxNotLoadedStrikes:]
 		}
 		if len(kept) > 0 {
-			strikes[key] = kept
+			strikes[strikeKey] = kept
 		}
 		p.notLoadedStrikes = strikes
 		m.notLoaded = true

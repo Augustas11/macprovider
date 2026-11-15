@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -695,6 +696,32 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 	return s.autotuneCatalog, s.autotuneCompatibleCatalogs
 }
 
+// catalogSanctionIdentity is the registry's SanctionResolver: the identity
+// of the signed row a model id names (autotune.Catalog.CanonicalModelID) in
+// the active release, else in the first compatible release (by key order)
+// that carries it, so a session admitted on a retained previous release keys
+// its sanctions on its own row.
+func (s *Server) catalogSanctionIdentity(modelKey string) (string, bool) {
+	current, compatible := s.autotuneCatalogSnapshot()
+	if id, ok := current.CanonicalModelID(modelKey); ok {
+		return id, true
+	}
+	if len(compatible) == 0 {
+		return "", false
+	}
+	keys := make([]string, 0, len(compatible))
+	for key := range compatible {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if id, ok := compatible[key].CanonicalModelID(modelKey); ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // SetAutotuneCatalog atomically swaps the active + compatible catalogs. The
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
@@ -1350,6 +1377,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 			return s.verifyModelIdentity(req)
 		})(registry)
+		// SPEC-036 FR-25: every name of one signed catalog row keys one
+		// set of per-model sanctions.
+		pool.WithSanctionResolver(s.catalogSanctionIdentity)(registry)
 	}
 	if s.currentAutotuneCatalog() != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
 		go s.runAutotuneCatalogBridgeDeadline()
@@ -2607,6 +2637,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
 		return "", ""
 	}
+	if err := s.warmModelsSameCatalogRow(hello.WarmModels, nil); err != nil {
+		hello.WarmModels, hello.WarmModelsErr = nil, err
+	}
 	s.logHandshakeWarmModelsDropped(hello.ProviderID, "hello", hello.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
 		providerID:       hello.ProviderID,
@@ -2806,6 +2839,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		}
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
+	}
+	if err := s.warmModelsSameCatalogRow(initial.WarmModels, initial.SupportedModels); err != nil {
+		initial.WarmModels, initial.WarmModelsErr = nil, err
 	}
 	s.logHandshakeWarmModelsDropped(initial.ProviderID, "auth_request", initial.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
@@ -6733,6 +6769,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			supported = current.SupportedModels
 		}
 		if err := validateWarmModelsSupported(hb.WarmModels, supported, hb.ModelID); err != nil {
+			warmModelsErr = err
+			hb.WarmModels = nil
+		} else if err := s.warmModelsSameCatalogRow(hb.WarmModels, supported); err != nil {
 			warmModelsErr = err
 			hb.WarmModels = nil
 		}
