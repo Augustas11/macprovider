@@ -15900,7 +15900,11 @@
         "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testPrimaryFirstAndOnlyWarmEntriesCarrySlotsFree",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testBootLoadsInListOrderPinnedAndPublishesEachMember",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning",
-        "phase3-binary/Tests/macprovider-cliTests/WarmSetCheckTests.swift:final class WarmSetCheckTests"
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetCheckTests.swift:final class WarmSetCheckTests",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testCommandBufferBudgetRule",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testDefaultRequirementMemberLoadsUnderAnExplicitPrimaryBudget",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneWarmSetPlanTests.swift:testCommandBufferBudgetConflictDoesNotFit",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testModelsWarmLoadReportsACommandBufferBudgetConflictUnderItsOwnCode"
       ],
       "journeys": [],
       "evidence": [],
