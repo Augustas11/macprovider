@@ -8273,6 +8273,7 @@ actor CoordinatorClient {
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
         )
+        appendWarmModels(to: &payload, snapshot: snapshot)
         let shardGroupMessages = await buildShardGroupMessages(sessionStarted: false)
         if let heartbeatBeforeSendForTest {
             await heartbeatBeforeSendForTest()
@@ -9141,6 +9142,7 @@ actor CoordinatorClient {
             runtimeSource: runtimeSource,
             configuredModelID: loadedModelID
         )
+        appendWarmModels(to: &message, snapshot: snapshot)
         return message
     }
 
@@ -9247,7 +9249,22 @@ actor CoordinatorClient {
             runtimeSource: runtimeSource,
             configuredModelID: loadedModelID
         )
+        appendWarmModels(to: &message, snapshot: snapshot)
         return message
+    }
+
+    /// SPEC-001-R016: `warm_models` beside the top-level fields, which keep
+    /// describing the primary. Absent without a warm set, so a provider
+    /// with none sends exactly today's message; a coordinator that predates
+    /// the field ignores the unknown key.
+    private func appendWarmModels(to message: inout [String: Any], snapshot: ProviderSnapshot) {
+        guard let warmModels else { return }
+        message["warm_models"] = WarmModelsWire.entries(
+            primaryFields: message,
+            primarySlotsTotal: snapshot.slotsTotal,
+            primarySlotsFree: snapshot.slotsFree,
+            views: warmModels.views.value
+        )
     }
 
     /// Privacy mode never also advertises those keys as `relay_blind_key_records`.

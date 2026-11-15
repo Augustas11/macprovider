@@ -436,7 +436,7 @@ actor InferenceRelay {
             }
         }
 
-        let admission = await providerStatus.admitRequest(requestID: requestID)
+        let admission = await providerStatus.admitRequest(requestID: requestID, warmMember: servingLease?.secondaryKey)
         guard case .admitted(let startedAt) = admission else {
             servingLease?.release()
             if let relayBlindOpened {
@@ -1140,7 +1140,8 @@ actor InferenceRelay {
             startedAt: startedAt,
             completion: completionResult,
             failed: failed,
-            requestID: requestID
+            requestID: requestID,
+            warmMember: servedMemberModelID?.lowercased(with: nil)
         )
         if relayBlindOpened == nil, !failed, !state.isCancelled, let completionResult {
             KVCacheTelemetry.emitRequestCompleted(

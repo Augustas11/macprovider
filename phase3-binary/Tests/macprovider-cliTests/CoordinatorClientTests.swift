@@ -987,6 +987,77 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(CoordinatorClient.inboundPreflight(.string(#"{"type":"preflight","request_id":"x","estimated_tokens":7}"#))?.estimatedTokens, 7)
     }
 
+    // SPEC-001-R016: the heartbeat and hello carry `warm_models` beside the
+    // top-level fields, which keep describing the primary; a busy secondary
+    // member never moves the primary's slots_free.
+    func testHeartbeatAndHelloCarryWarmModelsAndKeepThePrimarysSlots() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 7_301, modelID: "model-a", hash: "a"))
+        let token = try table.beginLoading(modelID: "model-b", pinned: false)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 7_302, modelID: "model-b", hash: "b"))
+        table.updateInfo(token: token, .init(maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 21, modelHash: String(repeating: "b", count: 64), modelHashAlgorithm: "sha256", modelParamsB: 4))
+        _ = try table.beginLoading(modelID: "model-c", pinned: false)
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(status: status, recorder: recorder, warmModels: table)
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+
+        let lease = try table.lease(servedModelID: "model-b")
+        guard case .admitted(let startedAt) = await status.admitRequest(requestID: "secondary", warmMember: "model-b") else {
+            return XCTFail("secondary request was not admitted")
+        }
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertEqual(heartbeat["slots_free"] as? Int, 2)
+        XCTAssertEqual(heartbeat["slots_total"] as? Int, 2)
+        let entries = try XCTUnwrap(heartbeat["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["model_id"] as? String }, ["model-a", "model-b", "model-c"])
+        XCTAssertEqual(entries[0]["primary"] as? Bool, true)
+        XCTAssertEqual(entries[0]["state"] as? String, "warm")
+        XCTAssertEqual(entries[0]["slots_free"] as? Int, heartbeat["slots_free"] as? Int)
+        XCTAssertEqual(entries[0]["slots_total"] as? Int, heartbeat["slots_total"] as? Int)
+        XCTAssertEqual(entries[0]["max_context_tokens"] as? Int, heartbeat["max_context_tokens"] as? Int)
+        XCTAssertEqual(entries[1]["primary"] as? Bool, false)
+        XCTAssertEqual(entries[1]["state"] as? String, "warm")
+        XCTAssertEqual(entries[1]["slots_total"] as? Int, 3)
+        XCTAssertEqual(entries[1]["slots_free"] as? Int, 2)
+        XCTAssertEqual(entries[1]["max_context_tokens"] as? Int, 8_000)
+        XCTAssertEqual(entries[1]["model_hash"] as? String, String(repeating: "b", count: 64))
+        XCTAssertEqual(entries[2]["state"] as? String, "loading")
+        XCTAssertNil(entries[2]["slots_free"])
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "secondary", warmMember: "model-b")
+        lease.release()
+        let hello = await client.helloMessage()
+        let helloEntries = try XCTUnwrap(hello["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(helloEntries[0]["model_id"] as? String, hello["model_id"] as? String)
+        XCTAssertEqual(helloEntries[0]["slots_free"] as? Int, 2)
+        XCTAssertEqual(helloEntries[1]["slots_free"] as? Int, 3)
+    }
+
+    func testNoWarmSetSendsNoWarmModels() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertNil(heartbeat["warm_models"])
+        XCTAssertEqual(heartbeat["slots_free"] as? Int, 2)
+        let hello = await client.helloMessage()
+        XCTAssertNil(hello["warm_models"])
+    }
+
     func testPreflightCellTracksStatusChanges() async {
         let status = ProviderStatus(
             modelID: "model-a",
@@ -10704,7 +10775,8 @@ final class CoordinatorClientTests: XCTestCase {
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
-        coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider"
+        coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider",
+        warmModels: (any WarmModelRouting)? = nil
     ) async throws -> CoordinatorClient {
         let resumeRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("coordinator-resume-\(UUID().uuidString)", isDirectory: true)
@@ -10740,6 +10812,7 @@ final class CoordinatorClientTests: XCTestCase {
         return try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
+            warmModels: warmModels,
             providerStatus: status,
             runtimeSource: runtimeSource,
             sendOverride: useDefaultSendOverride ? (sendOverride ?? defaultSendOverride) : sendOverride,

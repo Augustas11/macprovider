@@ -21,6 +21,9 @@ final class WarmServingLease: @unchecked Sendable {
     }
 
     func release() { onRelease() }
+
+    /// The `ProviderStatus` key of a secondary member, nil for the primary.
+    var secondaryKey: String? { primary ? nil : modelID.lowercased(with: nil) }
 }
 
 /// The routing face of a warm set, free of the table's runtime type.

@@ -483,10 +483,21 @@ struct ProviderSnapshot: Sendable {
     var localUsage = LocalUsageSnapshot()
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
     var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
+    /// SPEC-001-R016: network requests in flight on each secondary warm
+    /// member, by routing key. `requestsInFlight` counts them too.
+    var secondaryRequestsInFlight: [String: Int] = [:]
 
+    /// Network requests in flight on the primary, the model every top-level
+    /// capacity field describes.
+    var primaryRequestsInFlight: Int {
+        max(0, requestsInFlight - secondaryRequestsInFlight.values.reduce(0, +))
+    }
+
+    /// The primary's free rows: secondary members' traffic never consumes
+    /// them (R016 *Primary model*).
     var slotsFree: Int {
         if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true { return 0 }
-        return max(0, capacity.maxConcurrency - requestsInFlight)
+        return max(0, capacity.maxConcurrency - primaryRequestsInFlight)
     }
 
     var slotsTotal: Int {
@@ -617,7 +628,12 @@ actor ProviderStatus {
     private var outputTokensToday: Int64 = 0
     private var inputTokensAllTime: Int64 = 0
     private var outputTokensAllTime: Int64 = 0
+    /// Every network request in flight, on any warm member: what drain,
+    /// pause and idle work wait for.
     private var requestsInFlight = 0
+    /// SPEC-001-R016: the part of `requestsInFlight` running on secondary
+    /// warm members, by routing key. The primary's slots exclude it.
+    private var secondaryInFlight: [String: Int] = [:]
     private var errorsTotal = 0
     private var restartCount = 0
     private var recentRestartsAt: [Date] = []
@@ -724,9 +740,12 @@ actor ProviderStatus {
         }
     }
 
-    func beginRequest(requestID: String? = nil) async -> Date {
+    func beginRequest(requestID: String? = nil, warmMember: String? = nil) async -> Date {
         noteRealRequestStart()
         requestsInFlight += 1
+        if let warmMember {
+            secondaryInFlight[warmMember, default: 0] += 1
+        }
         if let requestID {
             activeRequestIDs.insert(requestID)
         }
@@ -787,12 +806,16 @@ actor ProviderStatus {
     /// self-check admission hold (v0.3.36): it is admitted and waits behind
     /// the probe's exclusive inference permit; the hold yields only once a
     /// buyer has waited `selfCheckBuyerWaitYieldSeconds` behind that permit.
-    func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
+    ///
+    /// `warmMember` is the routing key of the secondary warm member the
+    /// request runs on (SPEC-001-R016), nil for the primary; pass the same
+    /// key to `finishRequest`.
+    func admitRequest(requestID: String? = nil, warmMember: String? = nil) async -> ProviderRequestAdmission {
         guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
         // Classified before beginRequest suspends: a hold that starts during
         // that suspension must still drain this request as pre-hold work.
         let holdAtArrival = cbAdmissionHold.active ? cbAdmissionHold.holdsTotal : nil
-        let startedAt = await beginRequest(requestID: requestID)
+        let startedAt = await beginRequest(requestID: requestID, warmMember: warmMember)
         if cbAdmissionHold.active, cbAdmissionHold.holdsTotal == holdAtArrival {
             cbAdmissionHoldArrivals.append(startedAt)
         }
@@ -816,6 +839,11 @@ actor ProviderStatus {
     }
 
     func requestsInFlightCount() -> Int { requestsInFlight }
+
+    /// Network requests in flight on the primary only.
+    private var primaryInFlight: Int {
+        max(0, requestsInFlight - secondaryInFlight.values.reduce(0, +))
+    }
 
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): hold admission so a due self-check
     /// can run: routing sees no free slot and local use is declined; a buyer
@@ -879,9 +907,12 @@ actor ProviderStatus {
         return max(1, Int(end.timeIntervalSince(now).rounded(.up)))
     }
 
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) async {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil, warmMember: String? = nil) async {
         noteRealRequestEnd()
         requestsInFlight = max(0, requestsInFlight - 1)
+        if let warmMember, let count = secondaryInFlight[warmMember] {
+            secondaryInFlight[warmMember] = count > 1 ? count - 1 : nil
+        }
         if let index = cbAdmissionHoldArrivals.firstIndex(of: startedAt) {
             cbAdmissionHoldArrivals.remove(at: index)
         }
@@ -902,16 +933,20 @@ actor ProviderStatus {
         if let completion {
             windowCompletionTokens += completion.completionTokens
             windowGenerationSeconds += elapsed
-            if completion.specDecodeGeneration == specDecodeGeneration {
-                specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
-                specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
+            // Speculative, decode-rate and native-MTP telemetry describe the
+            // primary's engine; a secondary member's rows stay out of it.
+            if warmMember == nil {
+                if completion.specDecodeGeneration == specDecodeGeneration {
+                    specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
+                    specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
+                }
+                if let sample = Self.decodeSample(completion) {
+                    windowDecodeTokens += sample.tokens
+                    windowDecodeMilliseconds += sample.milliseconds
+                }
+                windowNativeMTPProposedTokens += completion.nativeMTPProposedTokens
+                windowNativeMTPAcceptedTokens += completion.nativeMTPAcceptedTokens
             }
-            if let sample = Self.decodeSample(completion) {
-                windowDecodeTokens += sample.tokens
-                windowDecodeMilliseconds += sample.milliseconds
-            }
-            windowNativeMTPProposedTokens += completion.nativeMTPProposedTokens
-            windowNativeMTPAcceptedTokens += completion.nativeMTPAcceptedTokens
             recordTokenUsage(
                 promptTokens: completion.promptTokens,
                 completionTokens: completion.completionTokens
@@ -938,13 +973,16 @@ actor ProviderStatus {
     }
 
     /// Routes a request's end to the buyer or the SPEC-001-R011 local books.
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?) async {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?, warmMember: String? = nil) async {
         if let localLease {
             finishLocalRequest(localLease, completion: completion, failed: failed)
         } else {
-            await finishRequest(startedAt: startedAt, completion: completion, failed: failed)
+            await finishRequest(startedAt: startedAt, completion: completion, failed: failed, warmMember: warmMember)
         }
     }
+
+    /// SPEC-001-R016: network requests in flight per secondary warm member.
+    func secondaryRequestsInFlight() -> [String: Int] { secondaryInFlight }
 
     func currentSpecDecodeGeneration() -> Int {
         specDecodeGeneration
@@ -1174,7 +1212,7 @@ actor ProviderStatus {
             inputTokensAllTime: inputTokensAllTime,
             outputTokensAllTime: outputTokensAllTime,
             requestsInFlight: requestsInFlight,
-            requestsQueued: max(0, requestsInFlight - capacity.maxConcurrency),
+            requestsQueued: max(0, primaryInFlight - capacity.maxConcurrency),
             errorsTotal: errorsTotal,
             restartCount: restartCount,
             memoryRSSMB: Self.memoryRSSMB(),
@@ -1216,6 +1254,7 @@ actor ProviderStatus {
             cbSelfCheckAdmissionHold: cbAdmissionHold
         )
         snapshot.localUsage = currentLocalUsage()
+        snapshot.secondaryRequestsInFlight = secondaryInFlight
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0
@@ -1265,7 +1304,7 @@ actor ProviderStatus {
         let slots = max(1, capacity.maxConcurrency)
         let limit = operatorPauseFence ? slots : localPriorityPolicy.localSlotLimit(forServedSlots: slots)
         return localLeases.count < limit
-            && requestsInFlight + localLeases.count < slots
+            && primaryInFlight + localLeases.count < slots
     }
 
     /// Preempts every admitted local request (a self-check hold, a runtime
@@ -1390,7 +1429,7 @@ actor ProviderStatus {
     private func localExcess() -> Int {
         let slots = max(1, capacity.maxConcurrency)
         let active = localLeases.filter { !$0.isPreempted }
-        return requestsInFlight + active.count - slots
+        return primaryInFlight + active.count - slots
     }
 
     /// A buyer must never wait on local work: when buyers plus local
@@ -1470,14 +1509,14 @@ actor ProviderStatus {
             return
         }
         let held = cbAdmissionHold.active
-        let capacityFull = held || requestsInFlight >= capacity.maxConcurrency
+        let capacityFull = held || primaryInFlight >= capacity.maxConcurrency
         let nextState: ProviderHealthState = capacityFull ? .busy : .ready
         let reason = lastObservedThermalThrottle
             ? "thermal_throttled"
             : (held ? "cb_self_check_admission_hold" : (capacityFull ? "request_capacity_full" : "request_capacity_available"))
         let stateChanged = transition(to: nextState, reason: reason)
         let emittedState = lastObservedThermalThrottle ? .busy : nextState
-        let slotsFree = (lastObservedThermalThrottle || held) ? 0 : max(0, capacity.maxConcurrency - requestsInFlight)
+        let slotsFree = (lastObservedThermalThrottle || held) ? 0 : max(0, capacity.maxConcurrency - primaryInFlight)
         let baselineSlotsFree = pendingRequestCapacitySlotsFree ?? lastPublishedRequestCapacitySlotsFree
         let baselineSlotsTotal = pendingRequestCapacitySlotsTotal ?? lastPublishedRequestCapacitySlotsTotal
         let slotsChanged = baselineSlotsFree != slotsFree
