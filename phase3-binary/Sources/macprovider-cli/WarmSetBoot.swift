@@ -394,9 +394,22 @@ extension WarmSetBoot where Runtime == ModelRuntime {
     /// runtime (the provider status, the switch, the swap-signal
     /// subscribers), then the top-level identity and capacity follow it,
     /// then the pending switch hears `completed`.
-    static func modelRuntimePrimaryHandoff(providerStatus: ProviderStatus) -> PrimaryHandoff {
+    ///
+    /// SPEC-001-R018: the demoted primary keeps, as its member solo rate, the
+    /// estimate the top level advertised for it while it was the primary: the
+    /// start-up probe of the boot model, the same measurement a member probe
+    /// would repeat. No probe runs, so a promotion never takes the GPU from
+    /// the serving members. With `--autotune-candidate` that estimate is 0,
+    /// as the primary's is.
+    static func modelRuntimePrimaryHandoff(
+        providerStatus: ProviderStatus, memberServices: WarmSetMemberServices? = nil
+    ) -> PrimaryHandoff {
         { old, new in
             guard let oldRuntime = old.runtime, let newRuntime = new.runtime else { return }
+            if let memberServices {
+                memberServices.setSoloThroughput(
+                    memberID: oldRuntime.memoryBudgetMemberID, await providerStatus.primarySoloThroughputEstimate())
+            }
             let target = await oldRuntime.handOffPrimaryRole(to: newRuntime)
             let rows = await newRuntime.warmSetRowReservation()
             await providerStatus.promoteWarmPrimary(

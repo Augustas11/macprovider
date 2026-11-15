@@ -1012,6 +1012,12 @@ actor ProviderStatus {
     /// member is now on: the new primary's count toward the primary's
     /// slots, the old primary's toward a secondary's. The served-slot stamp
     /// restarts, because the new primary's runtime stamps its own counts.
+    /// The primary's solo decode estimate: the start-up probe's result,
+    /// before any warm-set contention scaling (SPEC-001-R018).
+    func primarySoloThroughputEstimate() -> Double {
+        capacity.throughputTPSEstimate
+    }
+
     func promoteWarmPrimary(
         memberKey: String,
         modelID: String,

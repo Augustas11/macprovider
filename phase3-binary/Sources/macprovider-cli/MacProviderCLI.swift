@@ -3812,7 +3812,8 @@ struct ServeCommand: AsyncParsableCommand {
                 },
                 // SPEC-011 R-3.10.3: what only the primary holds moves with
                 // a promotion.
-                primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: providerStatus)
+                primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(
+                    providerStatus: providerStatus, memberServices: memberServices)
             )
             memberServices.gate = boot
             try await boot.adoptPrimary(modelID: primaryModelID, runtime: mlxPrimary)

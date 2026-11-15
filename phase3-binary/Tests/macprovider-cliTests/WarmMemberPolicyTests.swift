@@ -394,4 +394,59 @@ final class WarmMemberPolicyTests: XCTestCase {
         func append(_ item: String) { lock.lock(); items.append(item); lock.unlock() }
         var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
     }
+
+    // MARK: R018 throughput of a demoted primary
+
+    /// After a promotion the demoted boot model's entry reports the
+    /// start-up estimate it advertised as the primary, not 0; no probe runs.
+    /// With the estimate 0 (an autotune candidate) it stays 0, as the
+    /// primary's does.
+    func testADemotedPrimaryKeepsItsStartupEstimateAsItsMemberRate() async throws {
+        for estimate in [37.5, 0] {
+            let services = WarmSetMemberServices()
+            let status = ProviderStatus(
+                modelID: "model-a", modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 2).withThroughputEstimate(estimate))
+            let table = WarmModelTable<ModelRuntime>()
+            let factoryCalls = LockedCounter()
+            let loader = WarmModelLoader<ModelRuntime>(
+                table: table, budget: SharedModelMemoryBudget(), limitBytes: { Int.max / 4 }, idlePollNanoseconds: 1_000_000,
+                factory: { spec in
+                    factoryCalls.increment()
+                    return Self.fixture(spec.modelID, hash: Self.hashB)
+                })
+            let boot = WarmSetBoot(
+                table: table, loader: loader, supportedModels: ["model-a", "model-b"],
+                loadSpec: { WarmModelLoadSpec(modelID: $0, estimatedResidentBytes: 1, minimumRowKVBytes: 0) },
+                memberInfo: { runtime in
+                    let rows = await runtime.warmSetRowReservation()
+                    return WarmModelMemberInfo(
+                        maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows,
+                        throughputTPSEstimate: services.soloThroughput(memberID: runtime.memoryBudgetMemberID))
+                },
+                primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: status, memberServices: services),
+                log: { _ in })
+            let primary = Self.fixture("model-a", hash: Self.hashA)
+            await primary.setProviderStatus(status)
+            try await boot.adoptPrimary(modelID: "model-a", runtime: primary)
+            await status.setPrimaryWarmMember(try XCTUnwrap(boot.primaryMemberKey))
+            let loaded = await boot.load("model-b")
+            XCTAssertEqual(loaded, .loaded)
+            XCTAssertEqual(services.soloThroughput(memberID: primary.memoryBudgetMemberID), 0, "no entry before a demotion")
+
+            await boot.runSwapTurn { try? await boot.promoteInSwapTurn("model-b") }
+
+            XCTAssertEqual(table.entries().map(\.modelID), ["model-b", "model-a"])
+            let demoted = try XCTUnwrap(table.views.value.first { $0.modelID == "model-a" })
+            XCTAssertEqual(demoted.info?.throughputTPSEstimate, estimate)
+            XCTAssertEqual(factoryCalls.value, 1, "the promotion loads and probes nothing")
+        }
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func increment() { lock.lock(); count += 1; lock.unlock() }
 }
