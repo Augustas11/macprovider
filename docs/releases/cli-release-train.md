@@ -176,7 +176,7 @@ Test-only, no binary change: `30fdbe2cf` (deterministic head-prompt budget and r
 
 ### Open, not in the cut until merged (2026-11-14)
 
-- [#2348](https://github.com/Augustas11/macprovider/pull/2348) (Related: #2328): native MTP `gemma4_mtp_v1` adapter for Gemma 4 12B (mlx-swift-lm `3.32.3-macprovider.60`). Open draft PR.
+- [#2348](https://github.com/Augustas11/macprovider/pull/2348) (Related: #2328): native MTP `gemma4_mtp_v1` adapter for Gemma 4 12B (mlx-swift-lm `3.32.3-macprovider.65`). Open draft PR.
 
 ## CLI release — 1.8.287 (published 2026-11-13; tracked from 2026-11-10)
 

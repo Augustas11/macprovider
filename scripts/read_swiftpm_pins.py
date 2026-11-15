@@ -42,6 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.65 (#2328) on 3.32.3-macprovider.63 (8f882166): the three
+# Gemma 4 commits of 3.32.3-macprovider.64 (packed assistant drafter and
+# embedded loader, cache-owned attention for row-safe batching, K/V-read layers
+# through the cache), cherry-picked without change. Other model families are
+# as in .63.
 # 3.32.3-macprovider.64 (#2328) on 3.32.3-macprovider.60 (a4b4b536): one
 # Gemma 4 commit. The two K/V-read layers attend through a cache that owns
 # attention and get its keys and values back, so the provider's native MTP
@@ -58,8 +63,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # can yield between evaluated tiles so other continuous-batch rows decode
 # while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
 # hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.64"
-SPEC048_MLX_SWIFT_LM_REVISION = "5e6c86449e26a1818efbe94804e6d37fd1c1cf57"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.65"
+SPEC048_MLX_SWIFT_LM_REVISION = "8cb290572057724090123f2aadcc15b443cf4c41"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"

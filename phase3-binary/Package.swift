@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.65 (#2328) on 3.32.3-macprovider.63: the
+        // three Gemma 4 commits of 3.32.3-macprovider.64 (f844a94 packed
+        // assistant drafter, embedded assistant loader and target state
+        // emission; 361733b cache-owned attention for row-safe batching;
+        // 8cb2905 K/V-read layers attend through the cache too), which the
+        // provider's gemma4_mtp_v1 adapter and column-exact verify need.
         // Tag 3.32.3-macprovider.60 (#2328) on 3.32.3-macprovider.58: the
         // Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision decode
         // uses fused non-traditional RoPE when the three M-RoPE axes share
@@ -172,12 +178,14 @@ let package = Package(
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage. 10.10 batches GLM MTP indexer projections and
         // compatible per-column attention while retaining row-owned caches.
-        // 3.32.3-macprovider.64 (5e6c8644, branch campaign/2328-gemma4-column-exact, on
-        // 3.32.3-macprovider.60 a4b4b536) lets Gemma 4's K/V-read layers attend
-        // through a cache that owns attention (#2328 column-exact verification).
+        // 3.32.3-macprovider.65 (8cb29057, branch campaign/2328-gemma4-on-63, on
+        // 3.32.3-macprovider.63 8f882166) carries the three Gemma 4 commits of
+        // 3.32.3-macprovider.64 (packed assistant drafter and embedded loader,
+        // cache-owned attention for row-safe batching, K/V-read layers through
+        // the cache) onto main's .63 (#2328).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "5e6c86449e26a1818efbe94804e6d37fd1c1cf57"
+            revision: "8cb290572057724090123f2aadcc15b443cf4c41"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
