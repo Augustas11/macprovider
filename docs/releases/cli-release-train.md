@@ -144,9 +144,15 @@ The exploratory goal matrix does not constitute admission qualification.
 
 No provider-side commit on `main` since tag `v1.8.289` (`git log v1.8.289..origin/main` is empty on 2026-11-15).
 
+### Merged, rides the next CLI cut
+
+| Change | What it is |
+| --- | --- |
+| [PR 2384](https://github.com/Augustas11/macprovider/pull/2384): quiet idle timeout on the control socket | An idle client timeout on the provider control socket (the menu-bar app's long-lived status connection) now ends the connection without an error line; a timeout in the middle of a frame and every other error are still logged. Merged 2026-11-15 as `36781cfa6`. No qualification change. |
+
 ### Open, not in the cut until merged (2026-11-15)
 
-- [#2348](https://github.com/Augustas11/macprovider/pull/2348) (Related: #2328): native MTP `gemma4_mtp_v1` adapter for Gemma 4 12B (mlx-swift-lm `3.32.3-macprovider.60`). Open draft PR.
+- [#2348](https://github.com/Augustas11/macprovider/pull/2348) (Related: #2328): native MTP `gemma4_mtp_v1` adapter for Gemma 4 12B (mlx-swift-lm `3.32.3-macprovider.65`). Open draft PR.
 
 ## CLI release — 1.8.289 (published 2026-11-15; tracked from 2026-11-13)
 
