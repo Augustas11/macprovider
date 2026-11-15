@@ -1233,6 +1233,14 @@ actor ContinuousBatchingSelfCheckDriver {
     private let lifecycleLease: @Sendable () -> String?
     /// This Mac's 0..`admissionHoldJitterSeconds` offset on the first due time.
     private let admissionHoldJitter: Double
+    /// SPEC-001-R019: the drivers of one process measure one at a time.
+    private let turn: ContinuousBatchingSelfCheckTurn?
+    /// Whether this driver may act now; a further warm member waits while
+    /// it is not `warm` or while a warm-set load, eviction or swap runs.
+    private let stepAllowed: @Sendable () async -> Bool
+    /// Called after the runtime's self-check state or report changed, so a
+    /// further warm member's wire entry follows it.
+    private let published: @Sendable () async -> Void
     private var consecutiveDrainTimeouts = 0
     private var consecutiveCheckBounds = 0
     private var deferrals = 0
@@ -1262,8 +1270,14 @@ actor ContinuousBatchingSelfCheckDriver {
         lifecycleLease: @escaping @Sendable () -> String? = { nil },
         admissionHoldJitter: Double = Double.random(in: 0...ContinuousBatchingSelfCheck.admissionHoldJitterSeconds),
         verdictRecorder: SmallMRouteVerdictRecorder? = nil,
+        turn: ContinuousBatchingSelfCheckTurn? = nil,
+        stepAllowed: @escaping @Sendable () async -> Bool = { true },
+        published: @escaping @Sendable () async -> Void = {},
         log: @escaping @Sendable (String) -> Void
     ) {
+        self.turn = turn
+        self.stepAllowed = stepAllowed
+        self.published = published
         self.runtime = runtime
         self.providerStatus = providerStatus
         self.store = store
@@ -1288,9 +1302,18 @@ actor ContinuousBatchingSelfCheckDriver {
         return [provisionalSlots, store.priorGrant(for: key)].compactMap { $0 }.filter { $0 > 1 }.max()
     }
 
+    /// Runs `body` holding the process's self-check turn, when there is one.
+    private func inTurn(_ body: () async -> Void) async {
+        guard let turn else { return await body() }
+        guard await turn.acquire() else { return }
+        await body()
+        await turn.release()
+    }
+
     func run() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+            guard await stepAllowed() else { continue }
             guard let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) else {
                 checkDueSince = nil
                 continue
@@ -1301,7 +1324,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 // The previous process died inside this step (including a
                 // re-measurement of a kept grant): never retry that width.
                 log("event=cb_self_check action=crash_recovered slots=\(crashed)")
-                await finish(record, crashedAt: crashed, target: target)
+                await inTurn { await finish(record, crashedAt: crashed, target: target) }
                 continue
             }
             if let record, let decision = record.decision {
@@ -1312,8 +1335,10 @@ actor ContinuousBatchingSelfCheckDriver {
                         if await runtime.continuousBatchingCachedTurnsSelfCheckResult() != parity {
                             await runtime.applyContinuousBatchingCachedTurnsSelfCheck(parity, expected: target)
                         }
-                    } else if Date() >= nextAttemptAt, await isIdle(), await measureCachedTurns(target) {
-                        continue
+                    } else if Date() >= nextAttemptAt, await isIdle() {
+                        var ran = false
+                        await inTurn { ran = await measureCachedTurns(target) }
+                        if ran { continue }
                     }
                 }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
@@ -1322,7 +1347,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 let due = record.remeasureAfter.flatMap(Self.parseDate).map { Date() >= $0 } ?? false
                 if due || ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: bound),
                    Date() >= nextAttemptAt, await isIdle() {
-                    await measure(target, remeasureOf: record)
+                    await inTurn { await measure(target, remeasureOf: record) }
                 }
                 continue
             }
@@ -1342,7 +1367,7 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             let idle = await isIdle()
             if idle {
-                if Date() >= nextAttemptAt { await measure(target, remeasureOf: nil) }
+                if Date() >= nextAttemptAt { await inTurn { await measure(target, remeasureOf: nil) } }
                 continue
             }
             // A busy Mac never finds an idle window under steady traffic: once
@@ -1352,7 +1377,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 dueSince: due.at, notBefore: admissionHoldNotBefore,
                 after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
                ) {
-                await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at))
+                await inTurn { await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at)) }
             }
         }
     }
@@ -1771,7 +1796,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 // The count this Mac serves now (an owner pin can serve above
                 // the decision's own slots, up to its verified width), or a
                 // stored or provisional grant.
-                let served = await providerStatus.snapshot().capacity.maxConcurrency
+                let served = await servedSlotsNow()
                 let prior = [served, record.decision?.slots, priorGrant(for: target.key)]
                     .compactMap { $0 }.filter { $0 > 1 }.max()
                 let resume = ContinuousBatchingSelfCheck.backpressureResumeSeconds
@@ -1940,14 +1965,25 @@ actor ContinuousBatchingSelfCheckDriver {
         await apply(reconciled.decision, target: target, source: crashedAt == nil ? "measured" : "crash_recovered")
     }
 
+    /// The slots this runtime serves now: the provider status while it is
+    /// the primary (it alone writes it), else its own served count
+    /// (SPEC-001-R019: a further warm member reports its own).
+    private func servedSlotsNow() async -> Int {
+        if await runtime.hasProviderStatus() {
+            return await providerStatus.snapshot().capacity.maxConcurrency
+        }
+        return await runtime.warmSetRowReservation().rows
+    }
+
     private func report(decision: String, target: ContinuousBatchingSelfCheckTarget) async {
         await runtime.setContinuousBatchingSelfCheckReport(.init(
             decision: decision,
-            servedSlots: await providerStatus.snapshot().capacity.maxConcurrency,
+            servedSlots: await servedSlotsNow(),
             verifiedSlots: 1,
             deferrals: deferrals,
             key: target.key
         ))
+        await published()
     }
 
     private func apply(
@@ -1975,6 +2011,53 @@ actor ContinuousBatchingSelfCheckDriver {
         }
         log("event=cb_self_check action=applied source=\(source) reason=\(decision.reason) slots=\(slots) verified_k=\(decision.verifiedSlots) model_sha256=\(target.key.modelSHA256)")
         verdictRecorder?.applied(key: target.key, decision: decision)
+        await published()
+    }
+}
+
+/// SPEC-001-R019: the continuous-batching self-checks of one process (one
+/// per warm-set runtime) measure one at a time, so no check shares the GPU
+/// with another check or writes the shared journal beside it. FIFO; an
+/// uncontended `acquire` returns at once. A waiter that is cancelled leaves
+/// the queue and returns false without the turn.
+actor ContinuousBatchingSelfCheckTurn {
+    private var busy = false
+    private var waiters: [(id: UInt64, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var nextID: UInt64 = 0
+
+    /// True holding the turn; false only when cancelled while waiting.
+    @discardableResult
+    func acquire() async -> Bool {
+        guard busy else {
+            busy = true
+            return true
+        }
+        nextID &+= 1
+        let id = nextID
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters.append((id, continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    /// The turn passes straight to the next waiter.
+    func release() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().continuation.resume(returning: true) }
+    }
+
+    var isHeld: Bool { busy }
+    var waiterCount: Int { waiters.count }
+
+    private func cancelWaiter(_ id: UInt64) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(returning: false)
     }
 }
 

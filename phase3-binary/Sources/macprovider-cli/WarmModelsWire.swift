@@ -46,10 +46,14 @@ enum WarmModelsWire {
                 primary[key] = value
             }
         }
-        return [primary] + views.filter { !$0.primary }.map(secondaryEntry)
+        let primaryEngineProfile = primaryFields["engine_profile"] as? [String: Any]
+        return [primary] + views.filter { !$0.primary }.map { secondaryEntry($0, primaryEngineProfile: primaryEngineProfile) }
     }
 
-    static func secondaryEntry(_ view: WarmModelMemberView) -> [String: Any] {
+    /// `primaryEngineProfile` is the primary's `engine_profile`: a member's
+    /// profile takes its chip and memory classes from it and is sent only
+    /// beside it.
+    static func secondaryEntry(_ view: WarmModelMemberView, primaryEngineProfile: [String: Any]? = nil) -> [String: Any] {
         var entry: [String: Any] = [
             "model_id": view.modelID,
             "state": view.state.rawValue,
@@ -75,6 +79,23 @@ enum WarmModelsWire {
         if let weights = info.weightsManifestSHA256 {
             entry["weights_manifest_sha256"] = weights
             entry["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
+        }
+        // SPEC-001-R019: the member's own self-check and engine.
+        if let report = info.cbSelfCheck {
+            entry["cb_self_check"] = report.jsonObject
+        }
+        if let engine = info.engine, let primaryEngineProfile {
+            var profile = EngineProfile(
+                nativeMTPActive: engine.nativeMTPActive,
+                continuousBatchingActive: engine.continuousBatchingActive,
+                cbGrantedSlots: engine.cbGrantedSlots,
+                chip: nil,
+                ramGB: 0,
+                maxContextTokens: info.maxContextTokens
+            ).wireObject
+            profile["chip_class"] = primaryEngineProfile["chip_class"]
+            profile["ram_class_gb"] = primaryEngineProfile["ram_class_gb"]
+            entry["engine_profile"] = profile
         }
         return entry
     }

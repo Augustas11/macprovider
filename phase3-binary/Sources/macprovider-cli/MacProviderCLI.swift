@@ -3628,6 +3628,8 @@ struct ServeCommand: AsyncParsableCommand {
         // the KV disk tier and the idle prewarmer; a further member is built
         // from the primary's configuration and reports through the table.
         let warmSet: WarmSetBoot<ModelRuntime>?
+        let warmSetMemberServices = WarmSetMemberServices()
+        let cbSelfCheckTurn = ContinuousBatchingSelfCheckTurn()
         if let mlxPrimary = modelRuntime as? ModelRuntime, let primaryModelID = resolved.model {
             let config = warmSetConfig
             let acceptedTuples = effectiveAcceptedTuples
@@ -3644,32 +3646,73 @@ struct ServeCommand: AsyncParsableCommand {
                     modelID: modelID, authorities: targetAuthorities, primaryVerified: primaryVerified)
             }
             let table = WarmModelTable<ModelRuntime>()
+            // SPEC-001-R019: each further member runs its own self-check
+            // against its own tuple, from the store, plan and signed
+            // provisional grant the boot model's uses, one check at a time.
+            let memberServices = warmSetMemberServices
+            let memberPlan = autoServedSlots
+            let memberProvisional = cbProvisional
+            let memberStore = cbSelfCheckStore
+            let memberSerialOnly = appliedSmallMRoute == .serialOnly
+            let memberTurn = cbSelfCheckTurn
+            let drainSeconds = resolved.drainTimeoutSeconds
             let boot = WarmSetBoot(
                 table: table,
-                loader: WarmModelLoader(table: table) { spec in
-                    try await Self.makeWarmSetMemberRuntime(
+                loader: WarmModelLoader(table: table, factory: { spec in
+                    let runtime = try await Self.makeWarmSetMemberRuntime(
                         modelID: spec.modelID, family: spec.modelFamily, binding: try memberBinding(spec.modelID),
                         config: config,
                         acceptedTuples: acceptedTuples, policy: policy,
                         emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
                         switchTargets: switchTargets)
-                },
+                    let memberID = runtime.memoryBudgetMemberID
+                    let driver = await WarmSetMemberServices.configureMemberSelfCheck(
+                        runtime: runtime, plan: memberPlan, serialOnlyRoute: memberSerialOnly,
+                        store: memberStore, provisional: memberProvisional,
+                        makeDriver: { ownerPinned in
+                            ContinuousBatchingSelfCheckDriver(
+                                runtime: runtime,
+                                providerStatus: providerStatus,
+                                store: memberStore,
+                                ownerPinnedSlots: ownerPinned,
+                                provisional: memberProvisional,
+                                admissionHoldDrainSeconds: drainSeconds,
+                                lifecycleLease: {
+                                    guard case .valid(let lease) = lifecycleLeaseStore.inspect() else { return nil }
+                                    return lease.kind.rawValue
+                                },
+                                turn: memberTurn,
+                                stepAllowed: { await memberServices.stepAllowed(memberID: memberID) },
+                                published: { await memberServices.published(memberID: memberID) },
+                                log: { line in FileHandle.standardError.write(Data((line + " model=\(spec.modelID)\n").utf8)) }
+                            )
+                        },
+                        log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) })
+                    if let driver { memberServices.add(memberID: memberID, Task { await driver.run() }) }
+                    return runtime
+                }, beforeUnload: { runtime in
+                    await memberServices.stop(memberID: runtime.memoryBudgetMemberID)
+                }),
                 supportedModels: resolved.supportedModels,
                 // An unbound member is refused by the factory, with the
                 // switch's error, before any weights load.
                 loadSpec: { try Self.warmSetLoadSpec($0, loadPath: (try? memberBinding($0))?.loadPath) },
                 memberInfo: { runtime in
                     let rows = await runtime.warmSetRowReservation()
+                    let snapshot = await runtime.currentSnapshot()
                     return WarmModelMemberInfo(
                         maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows,
                         modelHash: await runtime.loadedModelHash,
                         modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
-                        weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256)
+                        weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256,
+                        cbSelfCheck: snapshot.continuousBatching?.selfCheck,
+                        engine: WarmModelEngineState(snapshot: snapshot))
                 },
                 // SPEC-011 R-3.10.3: what only the primary holds moves with
                 // a promotion.
                 primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: providerStatus)
             )
+            memberServices.gate = boot
             try await boot.adoptPrimary(modelID: primaryModelID, runtime: mlxPrimary)
             await mlxPrimary.setWarmSetSwapHooks(boot)
             if let key = boot.primaryMemberKey { await providerStatus.setPrimaryWarmMember(key) }
@@ -3704,6 +3747,12 @@ struct ServeCommand: AsyncParsableCommand {
                     return lease.kind.rawValue
                 },
                 verdictRecorder: smallMRouteVerdictRecorder,
+                // SPEC-001-R019: one check at a time with the further
+                // members' checks; once demoted, its own wire entry follows it.
+                turn: cbSelfCheckTurn,
+                published: { [memberID = mlxRuntime.memoryBudgetMemberID] in
+                    await warmSetMemberServices.published(memberID: memberID)
+                },
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

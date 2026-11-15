@@ -54,6 +54,10 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
     private let limitBytes: @Sendable () -> Int?
     private let idlePollNanoseconds: UInt64
     private let factory: Factory
+    /// SPEC-001-R019: stops what runs on a member's runtime (its own
+    /// self-check) right before that runtime unloads; never called for
+    /// another member.
+    private let beforeUnload: @Sendable (Runtime) async -> Void
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var stopped = false
@@ -63,8 +67,10 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         budget: SharedModelMemoryBudget = .shared,
         limitBytes: @escaping @Sendable () -> Int? = { SharedModelMemoryBudget.processLimitBytes() },
         idlePollNanoseconds: UInt64 = 10_000_000,
-        factory: @escaping Factory
+        factory: @escaping Factory,
+        beforeUnload: @escaping @Sendable (Runtime) async -> Void = { _ in }
     ) {
+        self.beforeUnload = beforeUnload
         self.table = table
         self.budget = budget
         self.limitBytes = limitBytes
@@ -133,6 +139,9 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         stopped = true
     }
 
+    /// True while a load, evict, unload or swap holds the turn.
+    var isBusy: Bool { busy }
+
     /// Process shutdown, after `stop()` and the relay drain: unloads every
     /// warm non-primary member without taking the turn (a load in flight may
     /// hold it). A member still holding a lease or a row is given until
@@ -148,6 +157,7 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
             guard budget.busyRows(memberID: memberID) == 0,
                   let marked = try? table.beginEvicting(modelID: entry.modelID, allowPinned: true),
                   let runtime = marked.runtime else { continue }
+            await beforeUnload(runtime)
             await runtime.unloadForWarmSet()
             table.finishEvicting(token: marked.token)
         }
@@ -217,6 +227,7 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         budget.releaseLoad(reservation)
         if stopped {
             table.cancelLoading(token: token)
+            await beforeUnload(runtime)
             await runtime.unloadForWarmSet()
             throw WarmModelLoaderError.stopped(modelID: spec.modelID)
         }
@@ -259,6 +270,7 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
                 throw error
             }
         }
+        await beforeUnload(runtime)
         await runtime.unloadForWarmSet()
         table.finishEvicting(token: entry.token)
     }

@@ -12,6 +12,32 @@ struct WarmModelMemberInfo: Sendable, Equatable {
     var modelHashAlgorithm: String? = nil
     var weightsManifestSHA256: String? = nil
     var modelParamsB: Double? = nil
+    /// SPEC-001-R019: this member's own continuous-batching self-check.
+    var cbSelfCheck: ContinuousBatchingSelfCheckReport? = nil
+    /// SPEC-001-R019: this member's own serving engine state, the inputs of
+    /// its `engine_profile`.
+    var engine: WarmModelEngineState? = nil
+}
+
+/// What a member's `engine_profile` says about its own runtime; the chip and
+/// memory classes are the process's.
+struct WarmModelEngineState: Sendable, Equatable {
+    let continuousBatchingActive: Bool
+    let cbGrantedSlots: Int
+    let nativeMTPActive: Bool
+
+    init(continuousBatchingActive: Bool, cbGrantedSlots: Int, nativeMTPActive: Bool) {
+        self.continuousBatchingActive = continuousBatchingActive
+        self.cbGrantedSlots = cbGrantedSlots
+        self.nativeMTPActive = nativeMTPActive
+    }
+
+    init(snapshot: RuntimeSnapshot) {
+        self.init(
+            continuousBatchingActive: snapshot.continuousBatching?.active == true,
+            cbGrantedSlots: snapshot.continuousBatching?.scheduler?.slotsTotal ?? 0,
+            nativeMTPActive: snapshot.nativeMTPStatus.mode == .active)
+    }
 }
 
 /// One member as preflight and the wire read it at one instant.

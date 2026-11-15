@@ -222,6 +222,28 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         return .unloaded
     }
 
+    /// SPEC-001-R019: a member's runtime changed what its wire entry reports
+    /// (its own self-check or engine). Only a further member's entry carries
+    /// its info; the primary's comes from the top-level fields.
+    func republishInfo(memberID: Int) async {
+        guard let entry = table.entries().first(where: { $0.memberID == memberID }),
+              !entry.primary, entry.state == .warm, let runtime = entry.runtime else { return }
+        let info = await memberInfo(runtime)
+        // A promotion while the info was read moved the member to the top-level fields.
+        guard table.entry(token: entry.token)?.primary == false else { return }
+        table.updateInfo(token: entry.token, info)
+    }
+
+    /// SPEC-001-R019: whether the self-check of member `memberID` may act now:
+    /// the member is `warm`, and no warm-set load, eviction or swap runs.
+    /// A check never holds up a load; it only starts between them.
+    func memberSelfCheckAllowed(memberID: Int) async -> Bool {
+        let entries = table.entries()
+        guard entries.contains(where: { $0.memberID == memberID && $0.state == .warm }),
+              entries.allSatisfy({ $0.state == .warm }) else { return false }
+        return await !loader.isBusy
+    }
+
     // MARK: WarmSetControl
 
     /// A member whose runtime has not published its info yet (the primary)
