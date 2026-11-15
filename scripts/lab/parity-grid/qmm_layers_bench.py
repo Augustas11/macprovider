@@ -63,6 +63,9 @@ def main(argv=None):
     ap.add_argument("--rows", type=int, default=1)
     ap.add_argument("--passes", type=int, default=30)
     ap.add_argument("--warmup", type=int, default=5)
+    ap.add_argument("--chain", action="store_true",
+                    help="make each layer's input depend on the previous output, "
+                         "as in a real decode, so the GPU cannot overlap layers")
     args = ap.parse_args(argv)
 
     import mlx.core as mx
@@ -82,11 +85,18 @@ def main(argv=None):
 
     def one_pass(xs, subset=None):
         outs = []
+        prev = None
         for i, (_, w, s, b, gs, bits, _, _) in enumerate(layers):
             if subset is not None and i not in subset:
                 continue
-            outs.append(mx.quantized_matmul(
-                xs[i], w, scales=s, biases=b, transpose=True, group_size=gs, bits=bits))
+            x = xs[i]
+            if args.chain and prev is not None:
+                x = x + (prev[:, :1] * 0).astype(x.dtype)
+            prev = mx.quantized_matmul(
+                x, w, scales=s, biases=b, transpose=True, group_size=gs, bits=bits)
+            outs.append(prev)
+        if args.chain:
+            outs = outs[-1:]
         t = time.perf_counter()
         mx.eval(outs)
         return (time.perf_counter() - t) * 1e3
@@ -112,6 +122,7 @@ def main(argv=None):
     print(json.dumps({
         "model": os.path.basename(os.path.normpath(args.model_path)),
         "rows": args.rows,
+        "chain": args.chain,
         "row_invariant_env": os.environ.get("MLX_METAL_SMALL_M_ROW_INVARIANT", "unset"),
         "mlx": mx.__version__,
         "layers": len(layers),
