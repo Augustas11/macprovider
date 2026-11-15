@@ -5697,7 +5697,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-038 v0.3.56 stock order route and its sticky row-invariant fallback (FR-CB9): unit tests only; no batched forward has run on this route in a provider, no evidence recorded."
+        "rationale": "SPEC-038 v0.3.56 stock order route and its sticky row-invariant fallback (FR-CB9): unit tests, plus one lab serve with batching granted on an M3 Ultra (Llama 3.1 8B and a 27B model, 1 to 8 concurrent requests); the fallback has unit tests only; no evidence file recorded."
       }
     },
     {

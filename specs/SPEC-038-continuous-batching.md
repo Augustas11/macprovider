@@ -33,8 +33,9 @@ an unfit reference) never sends a start to `serial_only`: the verdict store
 records a sticky `stock_order_fallback` for the startup identity and the
 next start takes `row_invariant`, whose own grant and self-check are
 untouched; a failure measured on `row_invariant` keeps the existing rule.
-SPEC-037 v0.2.7 gives the route its own disk decode-path class. Run in the provider on an M3 Ultra with one request
-over HTTP only; no batched forward has run on this route in a provider yet.
+SPEC-037 v0.2.7 gives the route its own disk decode-path class. Run in the provider on an M3 Ultra: one request
+over HTTP, and a lab serve with batching granted at 1, 2, 3, 4 and 8
+concurrent requests on Llama 3.1 8B and a 27B model.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
 again. An aged long prompt therefore leads one turn and then yields to the
@@ -1912,8 +1913,10 @@ row at 8.76 ms per pass on `stock_order` against 9.96 ms on `row_invariant`
 for Llama 3.1 8B, and 26.45 ms against 30.38 ms for a 27B model; from three
 rows both routes run the same kernel. In the provider, one request over HTTP
 on that Mac measured 0.94-0.97 of stock mlx-lm on Llama 3.1 8B and 1.00-1.02
-on a 27B model on this route; no batched forward has run on it in a provider
-yet.
+on a 27B model on this route. A lab serve with batching granted on that Mac
+(self-check conformant at widths 2 to 8) served two concurrent requests with
+text equal to their lone runs on both models; with three or more concurrent
+requests most rows of the 27B model differed in text from their lone runs.
 
 **Stock order fallback (v0.3.56).** A failure found on `stock_order` MUST
 NOT send a later start to `serial_only`. A `stock_order` process records a
