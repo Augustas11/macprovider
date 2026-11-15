@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.69 (#2389) is .63 plus three commits that
+        // Tag 3.32.3-macprovider.70 (#2389) is .63 plus three commits that
         // only move the mlx-swift pin: mlx-swift 0.32.3-macprovider.24
         // (7fbcada9), MLX core v0.32.4-macprovider.15 (4e9a71dc9). The core
         // adds the stock-order small-row route (MLX_METAL_SMALL_M_ROW_INVARIANT=2,

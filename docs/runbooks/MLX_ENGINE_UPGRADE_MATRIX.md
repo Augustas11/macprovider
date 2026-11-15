@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.69` | `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.70` | `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,7 +47,7 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-16 (#2389) the LM row is `3.32.3-macprovider.69` (`5cd9eb9`),
+As of 2026-11-16 (#2389) the LM row is `3.32.3-macprovider.70` (`5cd9eb9`),
 `.63` plus three commits that only move its mlx-swift pin. The Swift row is
 `0.32.3-macprovider.24` (`7fbcada`, `.22` plus three commits that move the
 core gitlink and regenerate the quantized jit sources) and the core row
