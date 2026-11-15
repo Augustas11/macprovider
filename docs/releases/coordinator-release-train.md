@@ -31,9 +31,9 @@ PR #2377 (`589fd8d24`), issue #2365. Live in v1.8.290 (2026-11-15 14:17 WITA); i
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: two `/v1/messages` turns with the same `metadata.user_id` and a shared system prompt; the second reports a non-zero `cache_read_input_tokens`.
 
-## Relay-blind retry message and LFM tool feed (SPEC-041-R007, SPEC-018) — merged 2026-11-14, rides the next Pearl runtime
+## Relay-blind retry message and LFM tool feed (SPEC-041-R007, SPEC-018) — live in v1.8.290 (merged 2026-11-14)
 
-PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
+PR #2375 (`a8c2e6157`), epic #2355. Live in v1.8.290 (2026-11-15 14:17 WITA).
 
 - Gateway: a retryable relay-blind refusal (`relay_blind_provider_unsupported`, `key_expired`, `decrypt_failed`, `metadata_rate_limited`) tells the buyer to retry with a new reservation and envelope; permanent codes keep "do not reuse its envelope". Status, `retryable`, `Retry-After` and `retry_action` are unchanged.
 - Gateway: the OpenRouter model feed advertises `tools` for `lfm2.5-24b-a2b`, matching the coordinator's tool-grammar family.
