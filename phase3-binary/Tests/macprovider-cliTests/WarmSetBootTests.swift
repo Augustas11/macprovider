@@ -71,6 +71,9 @@ final class WarmSetBootTests: XCTestCase {
         var factoryCalls: [String] = []
         let sizes: [String: Int]
         var families: [String: String] = [:]
+        /// `warm_model_limits` as serve's load spec reads them.
+        var configLimits: [String: WarmModelLimits] = [:]
+        var limitsSeen: [String: WarmModelLimits?] = [:]
         var loader: WarmModelLoader<BootFakeRuntime>!
         var boot: WarmSetBoot<BootFakeRuntime>!
 
@@ -85,7 +88,7 @@ final class WarmSetBootTests: XCTestCase {
                     guard let bytes = self.sizes[modelID] else { throw BootFactoryFailure() }
                     return WarmModelLoadSpec(
                         modelID: modelID, estimatedResidentBytes: bytes, minimumRowKVBytes: 0,
-                        modelFamily: self.families[modelID])
+                        modelFamily: self.families[modelID], limits: self.configLimits[modelID])
                 },
                 memberInfo: { runtime in
                     let rows = await runtime.warmSetRowReservation()
@@ -98,6 +101,7 @@ final class WarmSetBootTests: XCTestCase {
         func make(_ spec: WarmModelLoadSpec) async throws -> BootFakeRuntime {
             lock.lock()
             factoryCalls.append(spec.modelID)
+            limitsSeen[spec.modelID] = spec.limits
             let fail = failing.contains(spec.modelID)
             let wait = gated.contains(spec.modelID)
             let verify = self.verify
@@ -704,5 +708,38 @@ final class WarmSetBootTests: XCTestCase {
         try await primary.beginSwap(targetModelID: "model-c").value
         let snapshot = await primary.currentSnapshot()
         XCTAssertEqual(snapshot.modelID, "model-a", "a primary request still holds the drain until its timeout")
+    }
+
+    // MARK: Member limits (SPEC-001-R017 warm_model_limits)
+
+    func testConfiguredLimitsReachTheFactoryAndARequestsLimitsReplaceThem() async throws {
+        let h = Harness(limitBytes: 200 * gib, sizes: ["A": gib, "B": gib, "C": gib], supported: ["P", "A", "B", "C"])
+        h.configLimits = ["A": WarmModelLimits(contextTokens: 8_192, slots: 2), "B": WarmModelLimits(slots: 1)]
+        try await h.adoptPrimary("P", bytes: gib)
+        _ = await h.boot.bootLoad(["A"])
+        let loadedB = await h.boot.load("B", limits: WarmModelLimits(contextTokens: 4_096))
+        let loadedC = await h.boot.load("C")
+        XCTAssertEqual([loadedB, loadedC], [.loaded, .loaded])
+        h.lock.lock(); let seen = h.limitsSeen; h.lock.unlock()
+        XCTAssertEqual(seen["A"], .some(WarmModelLimits(contextTokens: 8_192, slots: 2)))
+        XCTAssertEqual(seen["B"], .some(WarmModelLimits(contextTokens: 4_096)), "a request's limits replace the configured ones")
+        XCTAssertEqual(seen["C"], .some(nil), "no limits: the member takes the primary's")
+    }
+
+    func testMemberCapacityTakesEachOwnLimitElseThePrimarysValue() {
+        var config = AppConfig.defaults()
+        config.maxContextOverride = 32_768
+        config.maxConcurrencyOverride = 4
+        let inherited = ServeCommand.warmSetMemberCapacity(config: config, limits: nil)
+        XCTAssertEqual(inherited, .init(maxContextOverride: 32_768, maxBatch: 4))
+        XCTAssertEqual(inherited.contextTokens, 32_768)
+        XCTAssertEqual(ServeCommand.warmSetMemberCapacity(config: config, limits: WarmModelLimits()), inherited)
+        XCTAssertEqual(ServeCommand.warmSetMemberCapacity(config: config, limits: WarmModelLimits(contextTokens: 8_192)),
+                       .init(maxContextOverride: 8_192, maxBatch: 4))
+        XCTAssertEqual(ServeCommand.warmSetMemberCapacity(config: config, limits: WarmModelLimits(slots: 1)),
+                       .init(maxContextOverride: 32_768, maxBatch: 1))
+        config.maxConcurrencyOverride = nil
+        XCTAssertEqual(ServeCommand.warmSetMemberCapacity(config: config, limits: nil).maxBatch,
+                       ProviderCapacity.servedSlotCount(maxConcurrencyOverride: nil))
     }
 }

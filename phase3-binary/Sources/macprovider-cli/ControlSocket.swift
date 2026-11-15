@@ -169,7 +169,8 @@ public enum ControlSocketFrame: Equatable, Sendable {
 
     /// Warm-set control: `action` is `status`, `load` or `unload`; `load`
     /// and `unload` name `modelID`.
-    case warmSetRequest(action: String, modelID: String?)
+    /// `contextTokens` / `slots`: a `load`'s own limits (optional).
+    case warmSetRequest(action: String, modelID: String?, contextTokens: Int? = nil, slots: Int? = nil)
     case warmSetResponse(WarmSetControlReply)
 }
 
@@ -442,9 +443,11 @@ public enum ControlSocketCodec {
             object = ["type": "kv_cache_status_request"]
         case let .kvCacheStatusResponse(payloadJSON):
             object = ["type": "kv_cache_status_response", "payload_json": payloadJSON]
-        case let .warmSetRequest(action, modelID):
+        case let .warmSetRequest(action, modelID, contextTokens, slots):
             var frame: [String: Any] = ["type": "warm_set_request", "action": action]
             if let modelID { frame["model_id"] = modelID }
+            if let contextTokens { frame["context_tokens"] = contextTokens }
+            if let slots { frame["slots"] = slots }
             object = frame
         case let .warmSetResponse(reply):
             object = try Self.object(encoding: reply, adding: ["type": "warm_set_response"])
@@ -762,7 +765,10 @@ public enum ControlSocketCodec {
         case "kv_cache_status_response":
             return .kvCacheStatusResponse(payloadJSON: try stringField("payload_json", in: object))
         case "warm_set_request":
-            return .warmSetRequest(action: try stringField("action", in: object), modelID: object["model_id"] as? String)
+            return .warmSetRequest(
+                action: try stringField("action", in: object), modelID: object["model_id"] as? String,
+                contextTokens: optionalIntField("context_tokens", in: object),
+                slots: optionalIntField("slots", in: object))
         case "warm_set_response":
             return .warmSetResponse(try decode(WarmSetControlReply.self, from: object, removing: "type"))
         default:
@@ -1736,9 +1742,11 @@ actor ControlSocketServer {
                     await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: bootRuntime, connection: connection)
                     await connection.close()
                     return
-                case let .warmSetRequest(action, modelID):
+                case let .warmSetRequest(action, modelID, contextTokens, slots):
                     try await connection.send(.warmSetResponse(
-                        await handleWarmSetRequest(action: action, modelID: modelID, warmSet: warmSet)))
+                        await handleWarmSetRequest(
+                            action: action, modelID: modelID, warmSet: warmSet,
+                            contextTokens: contextTokens, slots: slots)))
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()
@@ -1863,7 +1871,8 @@ actor ControlSocketServer {
     /// the warm-set loader and the shared memory budget; an unload refuses
     /// the primary and a member holding a request.
     nonisolated static func handleWarmSetRequest(
-        action: String, modelID: String?, warmSet: (any WarmSetControl)?
+        action: String, modelID: String?, warmSet: (any WarmSetControl)?,
+        contextTokens: Int? = nil, slots: Int? = nil
     ) async -> WarmSetControlReply {
         func reply(_ status: String, detail: String? = nil) async -> WarmSetControlReply {
             WarmSetControlReply(
@@ -1877,7 +1886,14 @@ actor ControlSocketServer {
             return await reply("ok")
         case "load":
             guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
-            let outcome = await warmSet.load(target)
+            // The same bounds `warm_model_limits` has in config.yaml.
+            if let contextTokens, contextTokens < 1 { return await reply("invalid_request", detail: "invalid_limits") }
+            if let slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
+                return await reply("invalid_request", detail: "invalid_limits")
+            }
+            let limits = contextTokens == nil && slots == nil
+                ? nil : WarmModelLimits(contextTokens: contextTokens, slots: slots)
+            let outcome = await warmSet.load(target, limits: limits)
             return await reply(outcome.code, detail: outcome.detail)
         case "unload":
             guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }

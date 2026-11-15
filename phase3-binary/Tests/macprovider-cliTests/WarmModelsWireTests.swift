@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -384,4 +385,50 @@ final class WarmModelsWireTests: XCTestCase {
         XCTAssertEqual(entries.map { $0["model_hash"] as? String }, ["bb", "aa"])
         XCTAssertEqual(entries[1]["slots_free"] as? Int, 2)
     }
+
+    // MARK: Control-socket load limits (SPEC-001-R017 warm_model_limits)
+
+    func testALoadRequestCarriesOptionalLimitsOnTheWire() throws {
+        let request = ControlSocketFrame.warmSetRequest(action: "load", modelID: "m", contextTokens: 8_192, slots: 2)
+        let data = try ControlSocketCodec.encode(request)
+        XCTAssertEqual(try ControlSocketCodec.decode(data), request)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"context_tokens\":8192") && text.contains("\"slots\":2"), text)
+        // Without limits the frame is the one older CLIs send.
+        let plain = String(decoding: try ControlSocketCodec.encode(.warmSetRequest(action: "load", modelID: "m")), as: UTF8.self)
+        XCTAssertFalse(plain.contains("context_tokens") || plain.contains("slots"), plain)
+        XCTAssertEqual(try ControlSocketCodec.decode(Data("{\"type\":\"warm_set_request\",\"action\":\"load\",\"model_id\":\"m\"}".utf8)),
+                       .warmSetRequest(action: "load", modelID: "m"))
+    }
+
+    func testALoadPassesItsLimitsAndOutOfBoundsLimitsAreRefused() async {
+        let control = LimitsRecordingWarmSet()
+        let loaded = await ControlSocketServer.handleWarmSetRequest(
+            action: "load", modelID: "m", warmSet: control, contextTokens: 4_096, slots: 1)
+        XCTAssertEqual(loaded.status, "loaded")
+        let plain = await ControlSocketServer.handleWarmSetRequest(action: "load", modelID: "n", warmSet: control)
+        XCTAssertEqual(plain.status, "loaded")
+        XCTAssertEqual(control.loads["m"], .some(WarmModelLimits(contextTokens: 4_096, slots: 1)))
+        XCTAssertEqual(control.loads["n"], .some(nil))
+        for (context, slots) in [(0, 1), (4_096, 0), (4_096, AppConfig.warmModelSlotsLimit + 1)] {
+            let refused = await ControlSocketServer.handleWarmSetRequest(
+                action: "load", modelID: "x", warmSet: control, contextTokens: context, slots: slots)
+            XCTAssertEqual(refused.status, "invalid_request")
+            XCTAssertEqual(refused.detail, "invalid_limits")
+        }
+        XCTAssertFalse(control.loads.keys.contains("x"), "a refused request never loads")
+        XCTAssertEqual(control.loads.count, 2)
+    }
+}
+
+private final class LimitsRecordingWarmSet: WarmSetControl, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String: WarmModelLimits?] = [:]
+    var loads: [String: WarmModelLimits?] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func controlEntries() async -> [WarmSetControlEntry] { [] }
+    func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
+        lock.lock(); recorded[modelID] = limits; lock.unlock()
+        return .loaded
+    }
+    func unload(_ modelID: String) async -> WarmSetUnloadOutcome { .unloaded }
 }

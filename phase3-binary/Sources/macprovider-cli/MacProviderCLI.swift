@@ -722,11 +722,31 @@ struct ServeCommand: AsyncParsableCommand {
     /// cannot be switched until it is promoted to primary (SPEC-011
     /// R-3.10.3), never receives the provider status, and gets no KV disk
     /// tier.
+    /// SPEC-001-R017: a further member's context override and rows. Each
+    /// limit the member has (`warm_model_limits`, or the limits its load
+    /// named) replaces the primary's value; without one it takes the
+    /// primary's `max_context_override` and `max_concurrency_override`.
+    struct WarmSetMemberCapacity: Equatable {
+        let maxContextOverride: Int?
+        let maxBatch: Int
+        /// The tokens one row is sized for.
+        var contextTokens: Int {
+            ProviderCapacity(maxContextOverride: maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+        }
+    }
+
+    static func warmSetMemberCapacity(config: AppConfig, limits: WarmModelLimits?) -> WarmSetMemberCapacity {
+        WarmSetMemberCapacity(
+            maxContextOverride: limits?.contextTokens ?? config.maxContextOverride,
+            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: limits?.slots ?? config.maxConcurrencyOverride))
+    }
+
     static func makeWarmSetMemberRuntime(
         modelID: String,
         family: String?,
         binding: WarmSetMemberBinding,
         config: AppConfig,
+        limits: WarmModelLimits?,
         acceptedTuples: [ContinuousBatchingAcceptedTuple],
         policy: ContinuousBatchingPolicyLoadResult,
         emergencyOffOverride: Bool,
@@ -734,18 +754,19 @@ struct ServeCommand: AsyncParsableCommand {
         switchTargets: WarmSetSwitchTargets,
         nativeMTP: WarmSetMemberNativeMTP
     ) async throws -> ModelRuntime {
-        let context = ProviderCapacity(maxContextOverride: config.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+        let capacity = warmSetMemberCapacity(config: config, limits: limits)
+        let context = capacity.contextTokens
         return try await ModelRuntime(
             modelID: modelID,
             modelLoadPath: binding.loadPath,
             mlxCacheLimitMB: config.mlxCacheLimitMB,
-            maxContextTokensOverride: config.maxContextOverride,
+            maxContextTokensOverride: capacity.maxContextOverride,
             kvBitsOverride: config.kvBitsOverride,
             familyKVQuantDefault: true,
             pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(contextTokens: context),
             prefillStepSize: config.prefillStepSize,
             prefillStepSizeExplicitlyConfigured: config.prefillStepSizeExplicitlyConfigured,
-            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: config.maxConcurrencyOverride),
+            maxBatch: capacity.maxBatch,
             continuousBatchingMode: config.continuousBatching,
             continuousBatchQueueLimit: config.continuousBatchQueueLimit,
             continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS,
@@ -3723,7 +3744,7 @@ struct ServeCommand: AsyncParsableCommand {
                         })
                     let runtime = try await Self.makeWarmSetMemberRuntime(
                         modelID: spec.modelID, family: spec.modelFamily, binding: binding,
-                        config: config,
+                        config: config, limits: spec.limits,
                         acceptedTuples: acceptedTuples, policy: policy,
                         emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
                         switchTargets: switchTargets, nativeMTP: nativeMTP)
@@ -3771,7 +3792,11 @@ struct ServeCommand: AsyncParsableCommand {
                 supportedModels: resolved.supportedModels,
                 // An unbound member is refused by the factory, with the
                 // switch's error, before any weights load.
-                loadSpec: { try Self.warmSetLoadSpec($0, loadPath: (try? memberBinding($0))?.loadPath) },
+                loadSpec: { modelID in
+                    var spec = try Self.warmSetLoadSpec(modelID, loadPath: (try? memberBinding(modelID))?.loadPath)
+                    spec.limits = config.warmModelLimits(for: modelID)
+                    return spec
+                },
                 memberInfo: { runtime in
                     let rows = await runtime.warmSetRowReservation()
                     let snapshot = await runtime.currentSnapshot()

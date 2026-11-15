@@ -109,7 +109,8 @@ protocol WarmSetShutdown: AnyObject, Sendable {
 protocol WarmSetControl: AnyObject, Sendable {
     /// Every member, primary first: its wire entry fields plus leases.
     func controlEntries() async -> [WarmSetControlEntry]
-    func load(_ modelID: String) async -> WarmSetLoadOutcome
+    /// `limits` replaces the configured `warm_model_limits` for this load.
+    func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome
     func unload(_ modelID: String) async -> WarmSetUnloadOutcome
 }
 
@@ -195,8 +196,8 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
 
     /// One load on request (the control socket): unpinned, so a later load
     /// may evict it while idle.
-    func load(_ modelID: String) async -> WarmSetLoadOutcome {
-        await load(modelID, pinned: false, boot: false)
+    func load(_ modelID: String, limits: WarmModelLimits? = nil) async -> WarmSetLoadOutcome {
+        await load(modelID, pinned: false, boot: false, limits: limits)
     }
 
     /// An explicit unload: refused for the primary and for a member holding
@@ -327,25 +328,26 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
 
     // MARK: Private
 
-    private func load(_ modelID: String, pinned: Bool, boot: Bool) async -> WarmSetLoadOutcome {
-        let outcome = await loadOutcome(modelID, pinned: pinned)
+    private func load(_ modelID: String, pinned: Bool, boot: Bool, limits: WarmModelLimits? = nil) async -> WarmSetLoadOutcome {
+        let outcome = await loadOutcome(modelID, pinned: pinned, limits: limits)
         var line = "event=warm_model_load action=\(outcome == .loaded ? "loaded" : "refused") model=\(modelID) outcome=\(outcome.code) pinned=\(pinned) source=\(boot ? "boot" : "request")"
         if let detail = outcome.detail { line += " detail=\(detail.replacingOccurrences(of: " ", with: "_"))" }
         log(line)
         return outcome
     }
 
-    private func loadOutcome(_ modelID: String, pinned: Bool) async -> WarmSetLoadOutcome {
+    private func loadOutcome(_ modelID: String, pinned: Bool, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
         if let entry = table.entry(modelID: modelID) {
             return entry.state == .warm ? .alreadyWarm : .loadFailed(detail: "member_\(entry.state.rawValue)")
         }
         guard isSupported(modelID) else { return .unsupportedModel(detail: "not_in_supported_models") }
-        let spec: WarmModelLoadSpec
+        var spec: WarmModelLoadSpec
         do {
             spec = try loadSpec(modelID)
         } catch {
             return .unsupportedModel(detail: "model_unavailable")
         }
+        if let limits { spec.limits = limits }
         let entry: WarmModelTableEntry<Runtime>
         do {
             entry = try await loader.load(spec, pinned: pinned)

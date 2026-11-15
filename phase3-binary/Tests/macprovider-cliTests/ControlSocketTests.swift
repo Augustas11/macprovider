@@ -1968,7 +1968,7 @@ private final class RecordingWarmSetControl: WarmSetControl, @unchecked Sendable
 
     func controlEntries() async -> [WarmSetControlEntry] { Self.entries }
 
-    func load(_ modelID: String) async -> WarmSetLoadOutcome {
+    func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
         record("load \(modelID)")
         return .insufficientMemory(detail: "needs 9 GiB")
     }

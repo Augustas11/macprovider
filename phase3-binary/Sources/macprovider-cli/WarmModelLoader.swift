@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 /// What a load needs before any weights are read.
 struct WarmModelLoadSpec: Sendable, Equatable {
@@ -10,6 +11,9 @@ struct WarmModelLoadSpec: Sendable, Equatable {
     /// The model's family (`config.json` `model_type`), nil when unknown:
     /// decides whether its command-buffer budget matches the device's.
     var modelFamily: String? = nil
+    /// The member's own context and slots (`warm_model_limits`, or the
+    /// limits a control-socket load names); nil takes the primary's.
+    var limits: WarmModelLimits? = nil
 }
 
 enum WarmModelLoaderError: Error, Equatable, CustomStringConvertible {
