@@ -1072,8 +1072,13 @@ struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
 /// prompt that arrived with it. Ties keep the round-robin turn order. A row
 /// passed over while it stood ahead of the head in that order counts one
 /// bypass turn; after `maxBypassTurns` it is aged and leads, in round-robin
-/// order with other aged rows, until its prompt is done. A long prompt
-/// therefore waits at most `maxBypassTurns` turns longer than it would have.
+/// order with other aged rows. A row that leads a turn starts counting again
+/// from zero (v0.3.55, #2366), so an aged long prompt leads one turn and then
+/// yields to shorter prompts again: between two of its turns at most
+/// `maxBypassTurns` later-queued rows pass it (rows queued ahead of it in
+/// round-robin order still go first), and a short prompt that arrives during
+/// its prefill waits at most one of its chunks instead of its whole remaining
+/// prompt.
 enum ContinuousBatchPrefillOrder {
     static let maxBypassTurns = 8
 
@@ -6518,6 +6523,9 @@ actor ContinuousBatchScheduler {
         ) {
             activePrompt[id]?.prefillBypassTurns += 1
         }
+        // The head is served this turn: it counts bypass turns from zero
+        // again (v0.3.55), so an aged row does not lead until its prompt ends.
+        activePrompt[head.row.request.id]?.prefillBypassTurns = 0
 
         // The turn budget goes to the head's prompt first (v0.3.46): with no
         // row decoding, after each forward the head's next original chunk
