@@ -512,6 +512,20 @@ enum ContinuousBatchingSelfCheck {
         Array((usesSameOrderReference(route: route, slots: slots) ? sameOrder : lone).prefix(slots))
     }
 
+    /// SPEC-038 FR-CB10 (stock order, from three rows): whether every row of
+    /// a cohort run decoded each of its tokens in a step that held the whole
+    /// cohort and nothing else (`cohortDecodeTokens` equals the row's tokens
+    /// after the prefill token). Only then is each row's forward, and so its
+    /// kernel order, fixed for its whole run: the cohort's row set, its
+    /// admission order and the positional row-bound split are all constant.
+    /// A run where any row also decoded in a narrower step (the cohort hold
+    /// released early) may mix orders mid-run; it is judged neither way and
+    /// its width is a shape not met.
+    static func cohortRowsRanInOneOrder(outputs: [[Int]], cohortDecodeTokens: [Int]) -> Bool {
+        !outputs.isEmpty && outputs.count == cohortDecodeTokens.count
+            && zip(outputs, cohortDecodeTokens).allSatisfy { !$0.isEmpty && $1 == $0.count - 1 }
+    }
+
     /// Each distinct (row, output) of `passes` that differs from the row's
     /// reference and, when one is given, from the row's exact alternate. On
     /// stock order the alternate of a width from three rows is the lone run:
@@ -1724,6 +1738,15 @@ actor ContinuousBatchingSelfCheckDriver {
                     // The cohort never all reached a row: its shape was not met.
                     throw StepError.probeShapeUnmet(slots: slots)
                 }
+                if sameOrder, !ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                    outputs: probe.outputs, cohortDecodeTokens: probe.cohortDecodeTokens
+                ) {
+                    // Checked before any row is judged: a run that may mix
+                    // orders gives no correctness result either way.
+                    record.widthProgress?.probe = nil
+                    log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=probe_mixed_order cohort_decode_tokens=\(probe.cohortDecodeTokens.map(String.init).joined(separator: ","))")
+                    throw StepError.probeShapeUnmet(slots: slots)
+                }
                 let probeCheck = try await checkRows(
                     passes: [probe.outputs], alone: probeReferences, prompts: probePrompts, label: "probe",
                     exactAlternates: sameOrder ? Array(probeAlone.prefix(slots)) : []
@@ -1770,7 +1793,11 @@ actor ContinuousBatchingSelfCheckDriver {
                 // rates: serial tokens after each first token over their time,
                 // batched cohort decode tokens over the span all rows decoded
                 // together (the batch runs as a cohort, so no row decodes while
-                // another prefills). Other widths: one batch for isolation
+                // another prefills). On stock order from three rows every
+                // batch also runs as a cohort, so each row keeps one forward
+                // and one kernel order (`cohortRowsRanInOneOrder`); its gain
+                // stays end-to-end but no longer credits prefill overlapping
+                // another row's decode. Other widths: one batch for isolation
                 // only. A width whose probe already diverged runs neither.
                 let isRung = rungs.contains(slots)
                 let batchPrompts = Array(prompts.prefix(slots))
@@ -1792,14 +1819,35 @@ actor ContinuousBatchingSelfCheckDriver {
                             }
                         }
                         let decodeOnly = target.decodeOnlyGain
-                        batch = try await yieldingToRequests {
-                            try await runtime.runContinuousBatchingSelfCheckBatch(
-                                prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
-                                cohort: decodeOnly
-                            )
+                        do {
+                            batch = try await yieldingToRequests {
+                                try await runtime.runContinuousBatchingSelfCheckBatch(
+                                    prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
+                                    cohort: decodeOnly || sameOrder
+                                )
+                            }
+                        } catch where sameOrder && (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
+                            throw StepError.probeShapeUnmet(slots: slots)
                         }
-                        record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
-                        try save(record)
+                        if !sameOrder || ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                            outputs: batch.outputs, cohortDecodeTokens: batch.cohortDecodeTokens
+                        ) {
+                            record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
+                            try save(record)
+                        }
+                    }
+                    if sameOrder, !ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                        outputs: batch.outputs, cohortDecodeTokens: batch.cohortDecodeTokens
+                    ) {
+                        // Stock order from three rows: every pass runs as a
+                        // cohort and is judged only if each row kept one
+                        // forward for its whole run; a pass that may mix
+                        // orders is not stored and gives no result either way.
+                        if let stored = record.widthProgress?.passes, stored.count > pass {
+                            record.widthProgress?.passes = Array(stored.prefix(pass))
+                        }
+                        log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=pass_mixed_order pass=\(pass) cohort_decode_tokens=\(batch.cohortDecodeTokens.map(String.init).joined(separator: ","))")
+                        throw StepError.probeShapeUnmet(slots: slots)
                     }
                     let decodeOnly = target.decodeOnlyGain
                     let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS
@@ -1966,6 +2014,14 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
             } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
                 // The reference cohort never all reached a row: its shape was not met.
+                throw StepError.probeShapeUnmet(slots: slots)
+            }
+            guard ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                outputs: run.outputs, cohortDecodeTokens: run.cohortDecodeTokens
+            ) else {
+                // A row also decoded in a narrower step, so the rows may not
+                // share one order: judged neither way.
+                log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=same_order_reference_mixed_order index=\(index)")
                 throw StepError.probeShapeUnmet(slots: slots)
             }
             guard let reference = ContinuousBatchingSelfCheck.sameOrderReference(run.outputs) else {

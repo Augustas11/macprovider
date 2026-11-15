@@ -20,7 +20,12 @@ states how the accepted numerical tolerance covers the 3+-row difference.
 FR-CB10: on `stock_order` a width of three or more rows is compared with
 each prompt's same-order reference (the prompt run as three identical rows,
 row 0) instead of its lone run; the reference's rows must be identical, and
-the stored key carries the route. SPEC-037 v0.2.7 gives the route its own
+the stored key carries the route. From three rows the throughput passes
+also run as cohorts, and a probe, reference or pass is judged only if every
+row decoded each token beside its whole cohort (each row then keeps one
+forward and one kernel order); a run that may mix orders is a shape not met,
+never a divergence. The gain keeps its end-to-end definition but no longer
+credits prefill overlapping decode at those widths. SPEC-037 v0.2.7 gives the route its own
 disk decode-path class. Not yet run on hardware in the provider.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
@@ -2058,7 +2063,13 @@ buyer traffic. No extra runtime enable flag is introduced.
    first over the time from that first token to its last, summed over the
    prompts; the batch runs as a cohort, held until every row has prefilled,
    and its rate is the cohort's decode tokens over the common wall-clock
-   span in which every row decoded together. It grants the rung with the highest gain, preferring the lowest k
+   span in which every row decoded together. (v0.3.55) On the FR-CB9
+   `stock_order` route, from three rows, the batch also runs as a cohort
+   (exactness probe item 3). The batch rate keeps its definition (every
+   generated token over the time from submission to the last row's end),
+   but no row decodes while another prefills, so the number no longer
+   credits prefill overlapping decode and can read lower than the same
+   width measured without a cohort; it is not adjusted for that. It grants the rung with the highest gain, preferring the lowest k
    within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
    Mac serves serially. The highest k whose rows all passed is recorded as
    `verified_k`.
@@ -2303,11 +2314,24 @@ from 2 runs an exactness probe through the production scheduler:
    exactly also passes, because the FR-CB2 decode row bound can leave it in a
    forward of one or two rows. Every other row is judged against the
    same-order reference under the same tie rule, tolerance and leak rule.
-   The throughput passes are not cohorts, so a row admitted early can decode
-   some steps in a forward of one or two rows and the rest in a wider one; a
-   flip that causes is judged under the same rule and fails the width unless
-   it is an exact tie. The gain is still measured against the stock serial
-   baseline. Same-order references are stored with the SHA-256 of their
+   Each row MUST equal its lone run or its same-order reference for its
+   whole run, so on this route, from three rows, the throughput passes also
+   run as cohorts (item 2), and a row's forward size, and so its kernel
+   order, MUST NOT change during a judged run. Within a cohort run whose
+   every decode step held the whole cohort and no other row, it cannot: the
+   rows are the same in every step, their order in a step is admission
+   order, the FR-CB2 split is positional by a fixed row bound (bound 5 and
+   width 7 always give forwards of 5 and 2, rows 6 and 7 always in the
+   two-row forward), and self-check rows carry no stop tokens, so every row
+   ends at its full length in the same step. The cohort hold can release
+   early (a paged-KV pool bounce while later rows wait), and then early rows
+   decode some steps in narrower forwards: the order can change mid-run. So
+   a probe, same-order reference or throughput run on this route from three
+   rows is judged only if every row's decode tokens at full cohort width
+   equal its tokens after the first; otherwise, checked before any row is
+   compared, it has no correctness result either way (neither a divergence
+   nor a pass), the pass is not stored, and the width is a shape not met
+   (item 4). Same-order references are stored with the SHA-256 of their
    prompt and reused only for that prompt at that completion length, like
    lone outputs. The row-invariant route is unchanged.
 4. Fail closed. A width is probed only if all k rows fit the scheduler's
@@ -2326,7 +2350,9 @@ from 2 runs an exactness probe through the production scheduler:
    (`probe_shape_unmet_at_<k>` when none), lowers a wider prior grant to
    them, and the full ladder is re-measured after 1 h. A row divergence is
    a correctness result even when the cohort shape was not met: the rows
-   differed from their lone runs in the served path at a width at most k.
+   differed from their lone runs in the served path at a width at most k
+   (on the `stock_order` route from three rows, item 3 checks the shape
+   first and a run that may mix orders is not compared).
    With no width verified yet, a divergence, a crashed step or an unmet
    shape is the result even before a serial baseline exists, so it never
    reads as `serial_baseline_unavailable`, which keeps a prior grant.
