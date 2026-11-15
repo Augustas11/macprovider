@@ -278,6 +278,7 @@ final class StatusCommandTests: XCTestCase {
             ProviderContextSetCommand.helpMessage(),
             ProviderContextRollbackCommand.helpMessage(),
             ModelsSwitchCommand.helpMessage(),
+            ModelsWarmCommand.helpMessage(),
             AutotuneCommand.helpMessage(),
             Spec028CanaryCommand.helpMessage(),
             Spec028BenchmarkCommand.helpMessage(),

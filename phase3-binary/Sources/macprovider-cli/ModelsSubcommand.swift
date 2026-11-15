@@ -23,6 +23,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsStagingInputCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
+            ModelsWarmCommand.self,
             ModelsBrowseCommand.self,
             ModelsAdoptRecommendationCommand.self,
         ]
@@ -1483,6 +1484,98 @@ struct ModelsStatusCommand: AsyncParsableCommand {
         await connection.close()
         let data = try ControlSocketCodec.encode(.statusResponse(currentModelID: status.currentModelID, runtimeState: status.runtimeState))
         print(String(decoding: data.dropLast(), as: UTF8.self))
+    }
+}
+
+enum ModelsWarmAction: String, CaseIterable, ExpressibleByArgument {
+    case status
+    case load
+    case unload
+}
+
+struct ModelsWarmCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "warm",
+        abstract: "Show, load or unload the extra models kept loaded beside the main model.",
+        discussion: """
+        status lists every loaded model with its state and active requests. \
+        load adds a supported model if it fits in memory beside the loaded ones. \
+        unload removes an extra model; the main model and a model that is \
+        serving a request are never unloaded. Use models switch to change the \
+        main model.
+        """
+    )
+
+    @Argument(help: "status, load or unload.")
+    var action: ModelsWarmAction
+
+    @Argument(help: "HuggingFace model ID or local path to load or unload.")
+    var targetModelID: String?
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Control socket path override. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock.")
+    var ctlSocketPath: String?
+
+    func validate() throws {
+        switch action {
+        case .status:
+            if targetModelID != nil { throw ValidationError("status takes no model") }
+        case .load, .unload:
+            if (targetModelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError("\(action.rawValue) needs a model")
+            }
+        }
+    }
+
+    func run() async throws {
+        let resolved = try loadModelsConfig(config: config, model: nil, supportedModels: nil, ctlSocketPath: ctlSocketPath)
+        let socketPath = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+        let connection: ControlSocketConnection
+        do {
+            connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        } catch ControlSocketConnectError.socketAbsent(let path) {
+            writeStderr("malibu-cli serve is not running on this host (no control socket at \(path))")
+            throw ExitCode(4)
+        } catch ControlSocketConnectError.connectionRefused(let path) {
+            writeStderr("stale control socket at \(path) (no listener); remove the file and restart serve")
+            throw ExitCode(4)
+        }
+        // A load reads the model's weights from disk, which can take many
+        // minutes for a large model.
+        let timeout: TimeInterval = action == .status ? 10 : 3_600
+        let frame: ControlSocketFrame
+        do {
+            try await connection.send(.warmSetRequest(action: action.rawValue, modelID: targetModelID))
+            frame = try await connection.receive(timeout: timeout)
+        } catch {
+            await connection.close()
+            writeStderr("serve did not answer the request: \(error)")
+            throw ExitCode(4)
+        }
+        await connection.close()
+        guard case let .warmSetResponse(reply) = frame else {
+            writeStderr("serve sent an unexpected reply")
+            throw ExitCode(4)
+        }
+        print(String(decoding: try ControlSocketCodec.encode(frame).dropLast(), as: UTF8.self))
+        switch reply.status {
+        case "ok", "loaded", "already_warm", "unloaded":
+            return
+        case "unavailable":
+            writeStderr("this provider serves its model through another runtime and cannot load extra models")
+            throw ExitCode(4)
+        case "busy":
+            writeStderr("\(targetModelID ?? "") is serving a request; try again when it is idle")
+            throw ExitCode(3)
+        case "primary":
+            writeStderr("\(targetModelID ?? "") is the main model; use models switch to change it")
+            throw ExitCode(2)
+        default:
+            writeStderr("\(action.rawValue) refused: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")")
+            throw ExitCode(2)
+        }
     }
 }
 

@@ -33,6 +33,63 @@ struct ProviderControlCommandResult: Equatable, Sendable {
     }
 }
 
+/// One warm-set member in a `warm_set_response`: the `warm_models` wire
+/// entry fields plus the requests holding it (`leases`).
+public struct WarmSetControlEntry: Codable, Equatable, Sendable {
+    public var modelID: String
+    public var state: String
+    public var primary: Bool
+    public var pinned: Bool
+    public var leases: Int
+    public var slotsTotal: Int
+    /// Absent unless `warm`.
+    public var slotsFree: Int?
+    public var maxContextTokens: Int?
+    public var throughputTPSEstimate: Double?
+    public var modelParamsB: Double?
+    public var modelHash: String?
+    public var modelHashAlgorithm: String?
+    public var weightsManifestSHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case modelID = "model_id"
+        case state
+        case primary
+        case pinned
+        case leases
+        case slotsTotal = "slots_total"
+        case slotsFree = "slots_free"
+        case maxContextTokens = "max_context_tokens"
+        case throughputTPSEstimate = "throughput_tps_estimate"
+        case modelParamsB = "model_params_b"
+        case modelHash = "model_hash"
+        case modelHashAlgorithm = "model_hash_algorithm"
+        case weightsManifestSHA256 = "weights_manifest_sha256"
+    }
+}
+
+/// The reply to every `warm_set_request`. `status` is `ok` for `status`, the
+/// load outcome (`loaded`, `already_warm`, `insufficient_memory`,
+/// `unsupported_model`, `load_failed`) or the unload outcome (`unloaded`,
+/// `not_loaded`, `primary`, `busy`, `failed`), `invalid_request`, or
+/// `unavailable` when the process has no warm set. `entries` is the warm
+/// set after the action.
+public struct WarmSetControlReply: Codable, Equatable, Sendable {
+    public var action: String
+    public var status: String
+    public var modelID: String?
+    public var detail: String?
+    public var entries: [WarmSetControlEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case status
+        case modelID = "model_id"
+        case detail
+        case entries
+    }
+}
+
 public enum ControlSocketFrame: Equatable, Sendable {
     case switchRequest(targetModelID: String, requestedAtMs: Int64)
     case statusRequest
@@ -109,6 +166,11 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case kvCachePurgeResponse(status: String, entriesRemoved: Int, bytesFreed: Int, detail: String?)
     case kvCacheStatusRequest
     case kvCacheStatusResponse(payloadJSON: String)
+
+    /// Warm-set control: `action` is `status`, `load` or `unload`; `load`
+    /// and `unload` name `modelID`.
+    case warmSetRequest(action: String, modelID: String?)
+    case warmSetResponse(WarmSetControlReply)
 }
 
 public enum RewardAuditControlErrorCode: String, Sendable, Equatable {
@@ -380,6 +442,12 @@ public enum ControlSocketCodec {
             object = ["type": "kv_cache_status_request"]
         case let .kvCacheStatusResponse(payloadJSON):
             object = ["type": "kv_cache_status_response", "payload_json": payloadJSON]
+        case let .warmSetRequest(action, modelID):
+            var frame: [String: Any] = ["type": "warm_set_request", "action": action]
+            if let modelID { frame["model_id"] = modelID }
+            object = frame
+        case let .warmSetResponse(reply):
+            object = try Self.object(encoding: reply, adding: ["type": "warm_set_response"])
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -693,6 +761,10 @@ public enum ControlSocketCodec {
             return .kvCacheStatusRequest
         case "kv_cache_status_response":
             return .kvCacheStatusResponse(payloadJSON: try stringField("payload_json", in: object))
+        case "warm_set_request":
+            return .warmSetRequest(action: try stringField("action", in: object), modelID: object["model_id"] as? String)
+        case "warm_set_response":
+            return .warmSetResponse(try decode(WarmSetControlReply.self, from: object, removing: "type"))
         default:
             throw ControlSocketError.unknownType(type)
         }
@@ -1208,6 +1280,9 @@ actor ControlSocketServer {
     /// re-acquisition); nil ⇒ the tier is disabled and the standalone CLI path
     /// acquires the free lock instead.
     private let kvDiskTier: KVDiskTier?
+    /// The serve process's warm set; nil when `--model` is served by an
+    /// external runtime, and `warm_set` requests then reply `unavailable`.
+    private let warmSet: (any WarmSetControl)?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -1231,7 +1306,8 @@ actor ControlSocketServer {
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         watchdogCleanup: ControlSocketWatchdogCleanup? = nil,
-        kvDiskTier: KVDiskTier? = nil
+        kvDiskTier: KVDiskTier? = nil,
+        warmSet: (any WarmSetControl)? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -1250,6 +1326,7 @@ actor ControlSocketServer {
         self.resumeProvider = resumeProvider
         self.watchdogCleanup = watchdogCleanup
         self.kvDiskTier = kvDiskTier
+        self.warmSet = warmSet
     }
 
     func start() async throws {
@@ -1336,6 +1413,7 @@ actor ControlSocketServer {
                 pauseProvider: pauseProvider,
                 resumeProvider: resumeProvider,
                 kvDiskTier: self.kvDiskTier,
+                warmSet: self.warmSet,
                 server: self
             )
         }
@@ -1399,6 +1477,7 @@ actor ControlSocketServer {
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         kvDiskTier: KVDiskTier?,
+        warmSet: (any WarmSetControl)?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -1436,7 +1515,8 @@ actor ControlSocketServer {
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
                     resumeProvider: resumeProvider,
-                    kvDiskTier: kvDiskTier
+                    kvDiskTier: kvDiskTier,
+                    warmSet: warmSet
                 )
                 await server.removeClientFD(clientFD)
             }
@@ -1461,7 +1541,8 @@ actor ControlSocketServer {
 		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
-        kvDiskTier: KVDiskTier? = nil
+        kvDiskTier: KVDiskTier? = nil,
+        warmSet: (any WarmSetControl)? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
 
@@ -1635,6 +1716,9 @@ actor ControlSocketServer {
                     await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
                     await connection.close()
                     return
+                case let .warmSetRequest(action, modelID):
+                    try await connection.send(.warmSetResponse(
+                        await handleWarmSetRequest(action: action, modelID: modelID, warmSet: warmSet)))
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()
@@ -1755,6 +1839,36 @@ actor ControlSocketServer {
     /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
     /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
     /// the CLI, and hide surviving disk residue.
+    /// `warm_set status | load <model> | unload <model>`. A load goes through
+    /// the warm-set loader and the shared memory budget; an unload refuses
+    /// the primary and a member holding a request.
+    nonisolated static func handleWarmSetRequest(
+        action: String, modelID: String?, warmSet: (any WarmSetControl)?
+    ) async -> WarmSetControlReply {
+        func reply(_ status: String, detail: String? = nil) async -> WarmSetControlReply {
+            WarmSetControlReply(
+                action: action, status: status, modelID: modelID, detail: detail,
+                entries: await warmSet?.controlEntries() ?? [])
+        }
+        guard let warmSet else { return await reply("unavailable", detail: "no_warm_set") }
+        let target = modelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch action {
+        case "status":
+            return await reply("ok")
+        case "load":
+            guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
+            let outcome = await warmSet.load(target)
+            return await reply(outcome.code, detail: outcome.detail)
+        case "unload":
+            guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
+            let outcome = await warmSet.unload(target)
+            if case let .failed(detail) = outcome { return await reply(outcome.code, detail: detail) }
+            return await reply(outcome.code)
+        default:
+            return await reply("invalid_request", detail: "unknown_action")
+        }
+    }
+
     private nonisolated static func handleKVCacheStatus(
         tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {

@@ -191,6 +191,86 @@ final class WarmSetBootTests: XCTestCase {
         XCTAssertEqual(primary, .alreadyWarm)
     }
 
+    // MARK: Control socket
+
+    private func warmSet(_ h: Harness, _ action: String, _ modelID: String? = nil) async -> WarmSetControlReply {
+        await ControlSocketServer.handleWarmSetRequest(action: action, modelID: modelID, warmSet: h.boot)
+    }
+
+    func testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning() async throws {
+        let h = Harness(
+            limitBytes: 60 * gib + 4 * margin,
+            sizes: ["A": 5 * gib, "Big": 50 * gib, "Broken": gib],
+            supported: ["P", "A", "Big", "Broken"])
+        h.failing = ["Broken"]
+        try await h.adoptPrimary("P", bytes: 40 * gib)
+
+        let loaded = await warmSet(h, "load", "A")
+        XCTAssertEqual(loaded.status, "loaded")
+        XCTAssertNil(loaded.detail)
+        XCTAssertEqual(loaded.entries.map(\.modelID), ["P", "A"])
+        let again = await warmSet(h, "load", "a")
+        XCTAssertEqual(again.status, "already_warm")
+        let big = await warmSet(h, "load", "Big")
+        XCTAssertEqual(big.status, "insufficient_memory")
+        XCTAssertNotNil(big.detail)
+        let unlisted = await warmSet(h, "load", "Unlisted")
+        XCTAssertEqual(unlisted.status, "unsupported_model")
+        XCTAssertEqual(unlisted.detail, "not_in_supported_models")
+        let broken = await warmSet(h, "load", "Broken")
+        XCTAssertEqual(broken.status, "load_failed")
+        XCTAssertTrue(h.log.contains("model=A outcome=loaded pinned=false source=request"))
+
+        let lease = try h.table.lease(servedModelID: "A")
+        let status = await warmSet(h, "status")
+        lease.release()
+        XCTAssertEqual(status.status, "ok")
+        XCTAssertEqual(status.entries, [
+            WarmSetControlEntry(
+                modelID: "P", state: "warm", primary: true, pinned: true, leases: 0, slotsTotal: 2, slotsFree: 2,
+                maxContextTokens: 8_192, throughputTPSEstimate: 0),
+            WarmSetControlEntry(
+                modelID: "A", state: "warm", primary: false, pinned: false, leases: 1, slotsTotal: 2, slotsFree: 1,
+                maxContextTokens: 8_192, throughputTPSEstimate: 0),
+        ])
+    }
+
+    func testControlUnloadRefusesThePrimaryAndABusyMember() async throws {
+        let h = Harness(limitBytes: 200 * gib, sizes: ["A": gib], supported: ["P", "A"])
+        try await h.adoptPrimary("P", bytes: gib)
+        _ = await warmSet(h, "load", "A")
+
+        let lease = try h.table.lease(servedModelID: "A")
+        let busy = await warmSet(h, "unload", "A")
+        XCTAssertEqual(busy.status, "busy")
+        XCTAssertEqual(h.table.entry(modelID: "A")?.state, .warm)
+        lease.release()
+
+        let primary = await warmSet(h, "unload", "P")
+        XCTAssertEqual(primary.status, "primary")
+        XCTAssertEqual(h.table.entry(modelID: "P")?.state, .warm)
+
+        let unloaded = await warmSet(h, "unload", "A")
+        XCTAssertEqual(unloaded.status, "unloaded")
+        XCTAssertEqual(unloaded.entries.map(\.modelID), ["P"])
+        XCTAssertTrue(h.log.contains("unload A"))
+        let absent = await warmSet(h, "unload", "A")
+        XCTAssertEqual(absent.status, "not_loaded")
+    }
+
+    func testControlRefusesMalformedRequestsAndAnswersWithoutAWarmSet() async throws {
+        let h = Harness(limitBytes: 200 * gib, sizes: [:], supported: ["P"])
+        try await h.adoptPrimary("P", bytes: gib)
+        let noModel = await warmSet(h, "load", "  ")
+        XCTAssertEqual(noModel.status, "invalid_request")
+        XCTAssertEqual(noModel.detail, "model_id_required")
+        let unknown = await warmSet(h, "evict", "P")
+        XCTAssertEqual(unknown.status, "invalid_request")
+        XCTAssertEqual(unknown.detail, "unknown_action")
+        let none = await ControlSocketServer.handleWarmSetRequest(action: "status", modelID: nil, warmSet: nil)
+        XCTAssertEqual(none, WarmSetControlReply(action: "status", status: "unavailable", detail: "no_warm_set", entries: []))
+    }
+
     // MARK: Configuration
 
     func testWarmModelsWithAnExternalPrimaryAreAConfigurationError() throws {

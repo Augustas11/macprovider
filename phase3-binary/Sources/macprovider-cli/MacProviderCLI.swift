@@ -4094,7 +4094,8 @@ struct ServeCommand: AsyncParsableCommand {
             pauseProvider: pauseProvider,
             resumeProvider: resumeProvider,
             watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
-            kvDiskTier: kvDiskTier
+            kvDiskTier: kvDiskTier,
+            warmSet: warmSet
         )
         } else {
             // SPEC-046 loopback serving runtime (#1569) exposes no MLX warm-swap,

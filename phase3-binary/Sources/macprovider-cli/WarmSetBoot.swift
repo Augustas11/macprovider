@@ -93,11 +93,19 @@ protocol WarmSetShutdown: AnyObject, Sendable {
     func shutdown(idleTimeoutSeconds: Int) async
 }
 
+/// The control socket's `warm_set` commands, free of the runtime type.
+protocol WarmSetControl: AnyObject, Sendable {
+    /// Every member, primary first: its wire entry fields plus leases.
+    func controlEntries() async -> [WarmSetControlEntry]
+    func load(_ modelID: String) async -> WarmSetLoadOutcome
+    func unload(_ modelID: String) async -> WarmSetUnloadOutcome
+}
+
 /// SPEC-001-R016/R017 in `serve`: the primary adopted into the warm set, the
 /// boot `warm_models` loaded in list order once the primary serves, runtime
 /// loads and unloads, and shutdown. A refused or failed load is one event
 /// line and never fatal.
-final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShutdown, @unchecked Sendable {
+final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShutdown, WarmSetControl, @unchecked Sendable {
     typealias LoadSpec = @Sendable (String) throws -> WarmModelLoadSpec
     typealias MemberInfo = @Sendable (Runtime) async -> WarmModelMemberInfo
 
@@ -188,6 +196,38 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         }
         log("event=warm_model_unload action=unloaded model=\(modelID)")
         return .unloaded
+    }
+
+    // MARK: WarmSetControl
+
+    /// A member whose runtime has not published its info yet (the primary)
+    /// is asked for it here.
+    func controlEntries() async -> [WarmSetControlEntry] {
+        let views = table.views.value
+        var result: [WarmSetControlEntry] = []
+        for entry in table.entries() {
+            let view = views.first { $0.key == entry.key }
+            var info = view?.info
+            if info == nil, entry.state == .warm, let runtime = entry.runtime {
+                info = await memberInfo(runtime)
+            }
+            result.append(WarmSetControlEntry(
+                modelID: entry.modelID,
+                state: entry.state.rawValue,
+                primary: entry.primary,
+                pinned: entry.pinned,
+                leases: entry.leases,
+                slotsTotal: info?.slotsTotal ?? 0,
+                slotsFree: entry.state == .warm ? max(0, (info?.slotsTotal ?? 0) - entry.leases) : nil,
+                maxContextTokens: info?.maxContextTokens,
+                throughputTPSEstimate: info?.throughputTPSEstimate,
+                modelParamsB: info?.modelParamsB,
+                modelHash: info?.modelHash,
+                modelHashAlgorithm: info?.modelHash == nil ? nil : info?.modelHashAlgorithm,
+                weightsManifestSHA256: info?.weightsManifestSHA256
+            ))
+        }
+        return result
     }
 
     // MARK: WarmSetSwapHooks
