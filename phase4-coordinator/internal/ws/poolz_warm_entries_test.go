@@ -9,6 +9,21 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
+// warmEntryTestHash is a reported model hash; verifyEveryReportedHash
+// replaces the server's identity verdict (model-hash verification inactive in
+// the default config) with one that verifies every reported hash, so a warm
+// set whose members report one is multi-model (SPEC-002-R011).
+const warmEntryTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func verifyEveryReportedHash(registry *pool.Registry) {
+	pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+		if req.ReportedHash == "" {
+			return pool.ModelIdentityVerdict{Status: pool.HashStatusUncatalogued}
+		}
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusVerified}
+	})(registry)
+}
+
 // SPEC-002-R011 Pool and operator views: /poolz has one row per (provider,
 // model) entry with served_model, primary and warm_state; a provider without
 // warm_models keeps its single row with none of them. The summary counts
@@ -30,10 +45,12 @@ func TestPoolzWarmEntryRows(t *testing.T) {
 	if _, ok := h.Registry.Register(base("legacy", "model-a", 1), nil); !ok {
 		t.Fatal("register legacy failed")
 	}
+	verifyEveryReportedHash(h.Registry)
 	warm := base("warm", "model-a", 2)
+	warm.ModelHash, warm.HashStatus = warmEntryTestHash, pool.HashStatusVerified
 	warm.WarmModels = []pool.WarmModel{
 		{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 8192, ThroughputTPSEstimate: 20},
-		{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 3, SlotsFree: 3, MaxContextTokens: 4096, ThroughputTPSEstimate: 12},
+		{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 3, SlotsFree: 3, MaxContextTokens: 4096, ThroughputTPSEstimate: 12, ModelHash: warmEntryTestHash},
 		{ModelID: "model-c", State: pool.WarmModelLoading, SlotsTotal: 1, MaxContextTokens: 4096},
 	}
 	if _, ok := h.Registry.Register(warm, nil); !ok {

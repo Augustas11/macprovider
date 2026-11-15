@@ -13,20 +13,41 @@ import (
 
 func warmHeartbeatServer(t *testing.T) (*Server, *pool.Registry, *lockedBuffer, time.Time) {
 	t.Helper()
-	registry := pool.NewRegistry(nil)
+	// Every reported hash verifies, so the registered warm set (two warm,
+	// hash_verified members) is multi-model (SPEC-002-R011).
+	registry := pool.NewRegistry(nil, pool.WithModelIdentityVerifier(func(_, _, reported, _ string) pool.HashStatus {
+		if reported == "" {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusVerified
+	}))
 	logs := &lockedBuffer{}
 	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	registry.Register(&pool.Provider{
 		ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", State: pool.StateReady,
 		SlotsFree: 1, SlotsTotal: 4, MaxConcurrency: 4, MaxContextTokens: 32000, LastHeartbeatAt: at,
+		ModelHash: warmModelsTestHash, HashStatus: pool.HashStatusVerified,
 		SupportedModels: []string{"model-a", "model-b", "model-c"},
 		WarmModels: []pool.WarmModel{
 			{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 4, SlotsFree: 1, MaxContextTokens: 32000},
-			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 8000},
+			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 8000, ModelHash: warmModelsTestHash},
 		},
 	}, nil)
 	server := NewServer(config.Default(), registry, zerolog.New(logs), WithNow(func() time.Time { return at.Add(time.Minute) }))
+	verifyReportedHashes(registry)
 	return server, registry, logs, at
+}
+
+// verifyReportedHashes replaces the server's identity verdict (model-hash
+// verification inactive in the default config) with one that verifies every
+// reported hash, so a warm set whose members report one is multi-model.
+func verifyReportedHashes(registry *pool.Registry) {
+	pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+		if req.ReportedHash == "" {
+			return pool.ModelIdentityVerdict{Status: pool.HashStatusUncatalogued}
+		}
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusVerified}
+	})(registry)
 }
 
 func heartbeatPayload(t *testing.T, payload map[string]any) []byte {
@@ -49,10 +70,6 @@ func TestHeartbeatMalformedWarmModelsKeepsPreviousSetAndAppliesTheRest(t *testin
 	} {
 		server, registry, logs, at := warmHeartbeatServer(t)
 		payload := warmModelsHeartbeat()
-		delete(payload, "model_hash")
-		delete(payload, "model_hash_algorithm")
-		delete(warmModelsEntry(payload, 0), "model_hash")
-		delete(warmModelsEntry(payload, 0), "model_hash_algorithm")
 		mutate(payload)
 		server.handleHeartbeat(nil, "p1", "s1", heartbeatPayload(t, payload))
 

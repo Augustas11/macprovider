@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -31,8 +32,12 @@ func TestComputeScoringVerifiesFurtherWarmMember(t *testing.T) {
 		ModelHash: scoringModelHash, ExpectedModelHash: scoringModelHash, WeightsManifestSHA256: scoringManifest,
 	}
 	primary := pool.WarmModel{ModelID: "model-primary", State: pool.WarmModelWarm, Primary: true, SlotsTotal: 4, SlotsFree: 4, MaxContextTokens: 8192}
+	// The primary's identity verifies too (two verified warm members make the
+	// session multi-model); without a manifest it is never itself scored.
+	primaryHash := strings.Repeat("f", 64)
 	if _, _, ok := registry.ApplyHeartbeat("multi", "as-multi", pool.HeartbeatUpdate{
 		Status: pool.StateReady, ModelID: "model-primary", MaxContextTokens: 8192, MaxConcurrency: 4, SlotsTotal: 4, SlotsFree: 4,
+		ModelHash: primaryHash, ExpectedModelHash: primaryHash, ModelHashPresent: true,
 		WarmModels: []pool.WarmModel{primary, member}, At: time.Now(),
 	}); !ok {
 		t.Fatal("heartbeat failed")

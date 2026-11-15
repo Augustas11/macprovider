@@ -496,6 +496,9 @@ type Provider struct {
 	// notLoadedStrikes are the SPEC-002-R011 model_not_loaded strikes of the
 	// session's warm-set entries per case-folded model (RecordEntryNotLoaded).
 	notLoadedStrikes map[string][]time.Time
+	// warmPins are the further members' identity pins by case-folded model
+	// (WarmModel.identityPin), kept while a member stays declared.
+	warmPins map[string]*IdentityPin
 
 	Tier2Session *Tier2Session `json:"-"`
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -148,6 +149,88 @@ func TestWarmSetOfOneRouteSnapshotFlagIsZero(t *testing.T) {
 	var flagged int
 	if err := db.QueryRow(`SELECT served_model_dispatch FROM settlement_route_snapshots`).Scan(&flagged); err != nil || flagged != 0 {
 		t.Fatalf("served_model_dispatch=%d err=%v, want 0", flagged, err)
+	}
+}
+
+// SPEC-022 R-16.2a / SPEC-002-R011: the route snapshot flag is 1 only while
+// the provider is multi-model (at least two warm, hash_verified members). A
+// declared second member that is still loading leaves it legacy: flag 0, and
+// a hold for any model of the provider withholds the credit (provider-wide
+// R-16.2). Once the member is warm and verified the flag is 1 and a hold for
+// that other model leaves the model-a credit payable.
+func TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		state    pool.WarmModelState
+		flag     int
+		withheld bool
+	}{
+		{name: "declared-loading", state: pool.WarmModelLoading, flag: 0, withheld: true},
+		{name: "warm-verified", state: pool.WarmModelWarm, flag: 1, withheld: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			raw, pubkey := routeSnapshotCatalogFixture(t, "second-member-catalog", time.Now().UTC().Add(time.Hour))
+			if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey}, zerolog.Nop()); err != nil {
+				t.Fatalf("tier2.Configure: %v", err)
+			}
+			reqLog, dbPath := openBuyerRequestLog(t)
+			t.Cleanup(func() { _ = reqLog.Close() })
+			billingStore, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			cfg := config.Default().Rewards
+			snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+			if err != nil {
+				t.Fatalf("InsertConfigSnapshot: %v", err)
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
+			defer upstream.Close()
+			registry := pool.NewRegistry(nil)
+			second := warmMember("model-b", false, 1)
+			second.State = tc.state
+			if tc.state != pool.WarmModelWarm {
+				second.SlotsFree = 0
+			}
+			registerWarmHTTPProvider(registry, "p1", upstream.URL, warmMember("model-a", true, 1), second, buyerTestHash, bytes.Repeat([]byte{0x82}, 32))
+			if session, _ := registry.Resolve("p1", "p1-session"); (session.WarmModels != nil) != (tc.flag == 1) {
+				t.Fatalf("setup: multi-model=%v, want %v", session.WarmModels != nil, tc.flag == 1)
+			}
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+				buyer.WithRequestLog(reqLog), buyer.WithBilling(billingStore, cfg), buyer.WithBillingSnapshotID(snapshotID))
+			if rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil); rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var flagged int
+			if err := db.QueryRow(`SELECT served_model_dispatch FROM settlement_route_snapshots`).Scan(&flagged); err != nil || flagged != tc.flag {
+				t.Fatalf("served_model_dispatch=%d err=%v, want %d", flagged, err, tc.flag)
+			}
+			payable := func() int64 {
+				var n int64
+				if err := db.QueryRow(`SELECT COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits WHERE provider_id = 'p1'`).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			before := payable()
+			if before <= 0 {
+				t.Fatalf("setup: no payable credit for the dispatch")
+			}
+			start := time.Now().UTC().Add(-time.Hour)
+			if _, err := billingStore.OpenComputeIntegrityHold(context.Background(), "p1", "model-b", computeintegrity.HoldKindFailure, start, nil, "confirmed_failure", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			if after := payable(); (after == 0) != tc.withheld {
+				t.Fatalf("payable after a model-b hold = %d (before %d), withheld want %v", after, before, tc.withheld)
+			}
+		})
 	}
 }
 

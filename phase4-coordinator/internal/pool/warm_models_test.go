@@ -193,9 +193,15 @@ func TestComputeIntegritySuspensionIsPerEntry(t *testing.T) {
 
 // SPEC-010-R007(b)(c) per member: a further member that verifies as one feed
 // identity and later reports another becomes hash_mismatch exactly as the
-// primary does; the pin resets only when the member leaves the warm set.
+// primary does, which leaves one verified warm member: the session is legacy
+// (SPEC-002-R011). The pin outlives that and resets only when the member
+// leaves the declared warm set.
 func TestWarmMemberIdentityPin(t *testing.T) {
 	resolver := WithModelIdentityResolver(func(req ModelIdentityRequest) ModelIdentityVerdict {
+		if req.ModelID == "model-a" {
+			// The primary keeps its admitted identity throughout.
+			return ModelIdentityVerdict{Status: HashStatusVerified}
+		}
 		switch req.ReportedHash {
 		case "h1", "h2":
 			return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: artifactidentity.Member{ModelID: req.ModelID, ArtifactID: "art-" + req.ReportedHash, Hash: req.ReportedHash}}}
@@ -218,29 +224,39 @@ func TestWarmMemberIdentityPin(t *testing.T) {
 			t.Fatal("heartbeat failed")
 		}
 	}
+	legacy := func(stage string) {
+		t.Helper()
+		if _, ok := registry.ResolveEntry("p1", "current", "model-b"); ok {
+			t.Fatalf("%s: a member that fails its pin has an entry", stage)
+		}
+	}
 	beat(1, "h1", member("h1"))
 	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified || b.IdentityPin == nil {
 		t.Fatalf("member first verdict = %s pin=%v", b.HashStatus, b.IdentityPin)
 	}
-	// Both the primary and the member switch to another verified identity.
-	beat(2, "h2", member("h2"))
-	session, _ := registry.Resolve("p1", "current")
-	if session.HashStatus != HashStatusMismatch {
-		t.Fatalf("primary identity change = %s, want hash_mismatch", session.HashStatus)
-	}
-	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusMismatch {
-		t.Fatalf("member identity change = %s, want hash_mismatch like the primary", b.HashStatus)
-	}
-	// A release refresh keeps the member's pin.
+	// The member switches to another verified identity: mismatch, legacy.
+	beat(2, "h1", member("h2"))
+	legacy("identity change")
+	// The pin survives the legacy session and a member state change.
+	loading := member("h2")
+	loading.State, loading.SlotsFree = WarmModelLoading, 0
+	beat(3, "h1", loading)
+	beat(4, "h1", member("h2"))
+	legacy("after a loading report")
+	// A release refresh keeps it too.
 	registry.UpdateModelIdentities(func(p Provider) ModelIdentityVerdict {
 		return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: artifactidentity.Member{ModelID: p.ModelID, ArtifactID: "art-" + p.ModelHash, Hash: p.ModelHash}}}
 	})
-	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusMismatch {
-		t.Fatalf("member after refresh = %s, want hash_mismatch (pin kept)", b.HashStatus)
+	beat(5, "h1", member("h2"))
+	legacy("after a refresh")
+	// The pinned identity verifies again.
+	beat(6, "h1", member("h1"))
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified {
+		t.Fatalf("member back on its pinned identity = %s", b.HashStatus)
 	}
 	// Leaving the warm set resets the member's pin.
-	beat(3, "h2")
-	beat(4, "h2", member("h2"))
+	beat(7, "h1")
+	beat(8, "h1", member("h2"))
 	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified {
 		t.Fatalf("member back in the warm set = %s, want verified with a fresh pin", b.HashStatus)
 	}
@@ -252,9 +268,11 @@ func TestWarmMemberIdentityPin(t *testing.T) {
 func TestWarmMemberRefusalHoldLiftedByReadyHeartbeat(t *testing.T) {
 	at := time.Now()
 	registry := NewRegistry(nil)
+	verifyWarmTestHashes(registry)
 	registry.Register(&Provider{
 		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
 		SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2, LastHeartbeatAt: at,
+		ModelHash: warmTestHash("model-a"), HashStatus: HashStatusVerified,
 		WarmModels: warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 4, 4)),
 	}, nil)
 	members := func(free int) []WarmModel {
@@ -436,6 +454,7 @@ func TestWarmShrinkToLegacyIgnoresDepartedMember(t *testing.T) {
 func TestWarmLegacyModelDemotedToFurtherMember(t *testing.T) {
 	at := time.Now()
 	registry := NewRegistry(nil)
+	verifyWarmTestHashes(registry)
 	registry.Register(&Provider{
 		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
 		SlotsFree: 3, SlotsTotal: 3, MaxConcurrency: 3, LastHeartbeatAt: at, LastActivityAt: at,
@@ -449,7 +468,7 @@ func TestWarmLegacyModelDemotedToFurtherMember(t *testing.T) {
 	registry.MarkForwardedSlotFullFor("p1", "current", "", true)
 
 	members := []WarmModel{
-		{ModelID: "model-b", State: WarmModelWarm, Primary: true, SlotsTotal: 2, SlotsFree: 2},
+		{ModelID: "model-b", State: WarmModelWarm, Primary: true, SlotsTotal: 2, SlotsFree: 2, ModelHash: warmTestHash("model-b")},
 		warmTestMember("Model-A", WarmModelWarm, 3, 0),
 	}
 	update := warmHeartbeatUpdate(at.Add(time.Second), members)
@@ -494,6 +513,7 @@ func TestWarmLegacyModelDemotedToFurtherMember(t *testing.T) {
 func TestWarmLegacyGrowthKeepsPrimary(t *testing.T) {
 	at := time.Now()
 	registry := NewRegistry(nil)
+	verifyWarmTestHashes(registry)
 	registry.Register(&Provider{
 		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
 		SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2, LastHeartbeatAt: at, LastActivityAt: at,
@@ -502,10 +522,92 @@ func TestWarmLegacyGrowthKeepsPrimary(t *testing.T) {
 	update := warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))
 	update.SlotsFree = 1
 	registry.ApplyHeartbeat("p1", "current", update)
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels == nil {
+		t.Fatal("setup: the grown warm set is not multi-model")
+	}
 	if registry.ForwardedInFlight("p1", "current") != 1 || registry.ForwardedInFlightFor("p1", "current", "model-b") != 0 {
 		t.Fatalf("growth moved counts: a=%d b=%d", registry.ForwardedInFlight("p1", "current"), registry.ForwardedInFlightFor("p1", "current", "model-b"))
 	}
 	if !registry.RestoreForwardedSlotFor("p1", "current", "") || registry.ForwardedInFlight("p1", "current") != 0 {
 		t.Fatal("legacy dispatch did not end on the primary")
+	}
+}
+
+// SPEC-002-R011 multi-model predicate: a session is multi-model only while
+// at least two members are warm and hash_verified. A declared second member
+// still loading, or warm without a verified identity, leaves a legacy
+// session; it becomes multi-model when that member is warm and verified.
+func TestWarmMultiModelNeedsTwoWarmVerifiedMembers(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerHeartbeatProvider(t, registry, "model-a", warmTestHash("model-a"), HashStatusVerified, at)
+	verifyWarmTestHashes(registry)
+	unverified := warmTestMember("model-b", WarmModelWarm, 2, 2)
+	unverified.ModelHash = ""
+	for i, members := range [][]WarmModel{
+		warmTestMembers("model-a", warmTestMember("model-b", WarmModelLoading, 2, 0)),
+		warmTestMembers("model-a", unverified),
+		warmTestMembers("model-a", warmTestMember("model-b", WarmModelEvicting, 2, 0), warmTestMember("model-c", WarmModelLoading, 2, 0)),
+	} {
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Duration(i+1)*time.Second), members)); !ok {
+			t.Fatal("heartbeat failed")
+		}
+		session, _ := registry.Resolve("p1", "current")
+		if session.WarmModels != nil || len(registry.EntrySnapshot()) != 1 || registry.EntrySnapshot()[0].ServedModelID != "" {
+			t.Fatalf("case %d: a session without two warm verified members is multi-model: %+v", i, session.WarmModels)
+		}
+		if registry.MarkEntryNotLoaded("p1", "current", "model-b") {
+			t.Fatalf("case %d: legacy session took an entry mark", i)
+		}
+	}
+	// The second member finishes loading with a verified identity.
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(10*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if b := warmEntry(t, registry, "model-b"); b.ServedModelID != "model-b" || b.HashStatus != HashStatusVerified || len(registry.EntrySnapshot()) != 2 {
+		t.Fatalf("warm verified second member: served=%q status=%s entries=%d", b.ServedModelID, b.HashStatus, len(registry.EntrySnapshot()))
+	}
+	// An unverified primary leaves one verified member: legacy again.
+	update := warmHeartbeatUpdate(at.Add(11*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))
+	update.ModelHash = ""
+	registry.ApplyHeartbeat("p1", "current", update)
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels != nil {
+		t.Fatal("a session whose primary is unverified is multi-model")
+	}
+}
+
+// A second member that finishes loading as the new primary flips the legacy
+// session through the demotion handling: the old model's open dispatches
+// stay its own.
+func TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	collapsed := warmTestMembers("model-a", warmTestMember("model-b", WarmModelLoading, 2, 0))
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), collapsed))
+	for i := 0; i < 2; i++ {
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", ""); !ok {
+			t.Fatal("legacy consume failed")
+		}
+	}
+	promoted := []WarmModel{
+		{ModelID: "model-b", State: WarmModelWarm, Primary: true, SlotsTotal: 2, SlotsFree: 2, ModelHash: warmTestHash("model-b")},
+		warmTestMember("model-a", WarmModelWarm, 2, 0),
+	}
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), promoted))
+	if registry.ForwardedInFlightFor("p1", "current", "model-a") != 2 || registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatalf("flip on load: model-a=%d model-b=%d", registry.ForwardedInFlightFor("p1", "current", "model-a"), registry.ForwardedInFlight("p1", "current"))
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	if registry.ForwardedInFlightFor("p1", "current", "model-a") != 0 || registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatal("legacy dispatches did not end on model-a")
+	}
+	// A member dispatch the member does not count reopens no seat.
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(3*time.Second), promoted))
+	before, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-a")
+	registry.RestoreForwardedSlotFor("p1", "current", "model-a")
+	if after, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-a"); before != 0 || after != 0 {
+		t.Fatalf("an uncounted member dispatch reopened a seat: %d -> %d", before, after)
 	}
 }

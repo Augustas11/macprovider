@@ -3657,12 +3657,29 @@ func TestShardMemberInServiceIgnoresCapacityHolds(t *testing.T) {
 // SPEC-002-R011 multi-model providers: one session, one entry per warm model.
 
 func warmTestMembers(primary string, members ...WarmModel) []WarmModel {
-	out := []WarmModel{{ModelID: primary, State: WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 20000, ThroughputTPSEstimate: 20}}
+	out := []WarmModel{{ModelID: primary, State: WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 20000, ThroughputTPSEstimate: 20, ModelHash: warmTestHash(primary)}}
 	return append(out, members...)
 }
 
+// warmTestHash is the reported hash of a test member; verifyWarmTestHashes
+// verifies every reported hash, so members carrying one are hash_verified and
+// a warm set of two such warm members is multi-model (SPEC-002-R011).
+func warmTestHash(modelID string) string { return "h-" + ModelKey(modelID) }
+
+func verifyWarmTestHashes(r *Registry) {
+	if r.modelIdentityResolver != nil || r.modelIdentityVerifier != nil || r.hashVerifier != nil {
+		return
+	}
+	WithModelIdentityVerifier(func(_, _, reported, _ string) HashStatus {
+		if reported == "" {
+			return HashStatusUncatalogued
+		}
+		return HashStatusVerified
+	})(r)
+}
+
 func warmTestMember(modelID string, state WarmModelState, total, free int) WarmModel {
-	m := WarmModel{ModelID: modelID, State: state, SlotsTotal: total, MaxContextTokens: 8000, ThroughputTPSEstimate: 12}
+	m := WarmModel{ModelID: modelID, State: state, SlotsTotal: total, MaxContextTokens: 8000, ThroughputTPSEstimate: 12, ModelHash: warmTestHash(modelID)}
 	if state == WarmModelWarm {
 		m.SlotsFree = free
 	}
@@ -3673,10 +3690,13 @@ func warmTestMember(modelID string, state WarmModelState, total, free int) WarmM
 // primary model-a (2 seats), warm model-b (2 seats) and loading model-c.
 func registerWarmHeartbeatProvider(t *testing.T, registry *Registry, at time.Time) {
 	t.Helper()
+	verifyWarmTestHashes(registry)
 	registry.Register(&Provider{
 		ProviderID:                    "p1",
 		AssignedID:                    "current",
 		ModelID:                       "model-a",
+		ModelHash:                     warmTestHash("model-a"),
+		HashStatus:                    HashStatusVerified,
 		State:                         StateReady,
 		SlotsFree:                     2,
 		SlotsTotal:                    2,
@@ -3697,6 +3717,7 @@ func registerWarmHeartbeatProvider(t *testing.T, registry *Registry, at time.Tim
 
 func warmHeartbeatUpdate(at time.Time, members []WarmModel) HeartbeatUpdate {
 	update := heartbeatUpdateAt(members[0].ModelID, at)
+	update.ModelHash, update.ModelHashPresent = warmTestHash(members[0].ModelID), true
 	update.MaxConcurrency = members[0].SlotsTotal
 	update.SlotsTotal = members[0].SlotsTotal
 	update.SlotsFree = members[0].SlotsFree
@@ -3731,8 +3752,9 @@ func TestWarmEntryViewsProjectEachMember(t *testing.T) {
 		member.MaxContextTokens != 8000 || member.ThroughputTPSEstimate != 12 || member.State != StateReady || !member.RoutingEligible() {
 		t.Fatalf("member view = %+v", member)
 	}
+	session, _ := registry.Resolve("p1", "current")
 	if _, bound := member.ModelAdmissionBinding(); bound || member.ModelAdmissionCatalogModelKey != "" || member.NativeMTPCanary != nil ||
-		member.CandidateRowIdentity != "" || member.IdentityPin != nil || member.ArtifactIdentity != nil {
+		member.CandidateRowIdentity != "" || (member.IdentityPin != nil && member.IdentityPin == session.IdentityPin) || member.ArtifactIdentity != nil {
 		t.Fatalf("member view kept a primary-only binding: %+v", member)
 	}
 	if member.SortKey() != "p1/current#model-b" {
@@ -3745,7 +3767,7 @@ func TestWarmEntryViewsProjectEachMember(t *testing.T) {
 	if _, ok := registry.ResolveEntry("p1", "current", "model-z"); ok {
 		t.Fatal("resolved a model outside the warm set")
 	}
-	session, _ := registry.Resolve("p1", "current")
+	session, _ = registry.Resolve("p1", "current")
 	if session.ServedModelID != "" || session.SortKey() != "p1/current" {
 		t.Fatalf("session = %q %q", session.ServedModelID, session.SortKey())
 	}

@@ -198,8 +198,14 @@ func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 		memberRow.SlotsTotal != 3 || memberRow.SlotsFree != 3 || memberRow.WarmState != "warm" {
 		t.Fatalf("warm entries primary=%+v member=%+v", primaryRow, memberRow)
 	}
-	if row, ok := s.warmPoolzRow(fallbackID, memberModel); !ok || row.RoutingEligible || row.WarmState != "loading" {
-		t.Fatalf("fallback member before eviction = %+v ok=%v, want loading and not routable", row, ok)
+	// SPEC-002-R011: a declared member that is still loading makes no
+	// multi-model session. The fallback is legacy: one /poolz row without
+	// entry fields and no row for the loading member.
+	if row, ok := s.warmPoolzRow(fallbackID, memberModel); ok {
+		t.Fatalf("fallback loading member has a /poolz entry %+v, want a legacy session", row)
+	}
+	if row, ok := s.warmPoolzRow(fallbackID, ""); !ok || row.Primary != nil {
+		t.Fatalf("fallback before eviction = %+v ok=%v, want one legacy row", row, ok)
 	}
 
 	chat := func(requestID, model string) {

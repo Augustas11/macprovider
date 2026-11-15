@@ -20,14 +20,21 @@ func warmCapabilityProvider(single pool.Provider) pool.Provider {
 	p := single
 	p.ProviderID, p.AssignedID = "warm", "s-warm"
 	p.EndpointURL = "https://warm.example"
-	p.ModelID, p.ModelHash, p.ModelHashAlgorithm, p.WeightsManifestSHA256 = "model-a", "", "", ""
+	p.ModelID, p.ModelHash, p.ModelHashAlgorithm, p.WeightsManifestSHA256 = "model-a", "h-model-a", "", ""
+	p.HashStatus = pool.HashStatusVerified
 	p.ToolSelectionCapabilities, p.VisionRuntimeCapabilities = nil, nil
 	p.SupportedModels = []string{"model-a", single.ModelID}
+	// A further member reports a hash, so it verifies (verifyWarmHashes) and
+	// the session is multi-model.
+	memberHash := single.ModelHash
+	if memberHash == "" {
+		memberHash = "h-" + single.ModelID
+	}
 	p.WarmModels = []pool.WarmModel{
 		{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: p.SlotsTotal, SlotsFree: p.SlotsFree, MaxContextTokens: p.MaxContextTokens},
 		{
 			ModelID: single.ModelID, State: pool.WarmModelWarm, SlotsTotal: single.SlotsTotal, SlotsFree: single.SlotsFree,
-			MaxContextTokens: single.MaxContextTokens, ModelHash: single.ModelHash, ModelHashAlgorithm: single.ModelHashAlgorithm,
+			MaxContextTokens: single.MaxContextTokens, ModelHash: memberHash, ModelHashAlgorithm: single.ModelHashAlgorithm,
 			WeightsManifestSHA256: single.WeightsManifestSHA256, ToolSelectionCapabilities: single.ToolSelectionCapabilities,
 			VisionRuntimeCapabilities: single.VisionRuntimeCapabilities,
 		},
@@ -56,6 +63,7 @@ func TestWarmEntryToolRequestFollowsTheMembersDeclaration(t *testing.T) {
 	tools.multiTurnToolHistory, tools.declaresTools = true, true
 	route := func(req chatRequest, providers ...pool.Provider) (pool.Provider, *routeError) {
 		s, registry, _ := poolIsolationServer(t)
+		verifyWarmHashes(registry)
 		for i := range providers {
 			registry.Register(&providers[i], nil)
 		}
@@ -97,6 +105,7 @@ func TestWarmEntryVisionRequestFollowsTheMembersDeclaration(t *testing.T) {
 	single, q := visionRegressionProvider()
 	route := func(providers ...pool.Provider) (pool.Provider, *routeError) {
 		registry := pool.NewRegistry(nil)
+		verifyWarmHashes(registry)
 		for i := range providers {
 			registry.Register(&providers[i], nil)
 		}

@@ -15,12 +15,15 @@ import (
 // (memberFree of it free).
 func registerWarmEntryProvider(t *testing.T, registry *pool.Registry, providerID string, memberFree int) {
 	t.Helper()
+	verifyWarmHashes(registry)
 	now := time.Now().UTC()
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
 		AssignedID:            "s-" + providerID,
 		Hostname:              providerID + ".local",
 		ModelID:               "model-a",
+		ModelHash:             "h-model-a",
+		HashStatus:            pool.HashStatusVerified,
 		State:                 pool.StateReady,
 		Tier:                  pool.TierPinned,
 		MaxContextTokens:      50000,
@@ -34,9 +37,21 @@ func registerWarmEntryProvider(t *testing.T, registry *pool.Registry, providerID
 		ConnectedAt:           now,
 		WarmModels: []pool.WarmModel{
 			{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 50000, ThroughputTPSEstimate: 20},
-			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 1, SlotsFree: memberFree, MaxContextTokens: 50000, ThroughputTPSEstimate: 20},
+			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 1, SlotsFree: memberFree, MaxContextTokens: 50000, ThroughputTPSEstimate: 20, ModelHash: "h-model-b"},
 		},
 	}, nil)
+}
+
+// verifyWarmHashes makes the registry verify every reported hash, so a warm
+// set whose members report one is multi-model (SPEC-002-R011: at least two
+// warm, hash_verified members).
+func verifyWarmHashes(registry *pool.Registry) {
+	pool.WithModelIdentityVerifier(func(_, _, reported, _ string) pool.HashStatus {
+		if reported == "" {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusVerified
+	})(registry)
 }
 
 func warmEntryServer(registry *pool.Registry) *Server {
@@ -182,7 +197,9 @@ func TestWarmEntrySlotQueueWaiterIsolation(t *testing.T) {
 		t.Fatalf("model-a beside a member waiter served=%q err=%+v", got.ServedModelID, routeErr)
 	}
 
-	// A seat on the member is granted to its waiter, as that member.
+	// A seat on the member is granted to its waiter, as that member: a
+	// dispatch on the member ends.
+	registry.ConsumeForwardedSlotFor("pw", "s-pw", "model-b")
 	registry.RestoreForwardedSlotFor("pw", "s-pw", "model-b")
 	if member := mustEntry(t, registry, "pw", "model-b"); member.SlotsFree != 1 {
 		t.Fatalf("member slots_free=%d after restore, want 1", member.SlotsFree)

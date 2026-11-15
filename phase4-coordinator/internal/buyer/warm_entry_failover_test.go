@@ -21,6 +21,7 @@ import (
 // registerWarmWSProvider registers a WS-tunneled session with primary
 // model-a and warm member model-b, one seat each.
 func registerWarmWSProvider(registry *pool.Registry, providerID string, throughput float64) {
+	verifyWarmMemberHashes(registry)
 	now := time.Now().UTC()
 	primary := warmMember("model-a", true, 1)
 	member := warmMember("model-b", false, 1)
@@ -30,6 +31,8 @@ func registerWarmWSProvider(registry *pool.Registry, providerID string, throughp
 		AssignedID:            providerID + "-session",
 		Hostname:              providerID + ".local",
 		ModelID:               "model-a",
+		ModelHash:             warmMemberHash("model-a"),
+		HashStatus:            pool.HashStatusVerified,
 		ModelParamsB:          7,
 		RAMGB:                 16,
 		MaxContextTokens:      20000,
@@ -183,6 +186,8 @@ func TestWarmEntryModelNotLoadedFailsOver(t *testing.T) {
 			SlotsFree:             1,
 			SlotsTotal:            1,
 			ThroughputTPSEstimate: 50,
+			ModelHash:             warmMemberHash("model-a"),
+			ModelHashPresent:      true,
 			WarmModels:            []pool.WarmModel{primary, reloaded},
 			At:                    time.Now().UTC(),
 		}); !ok {

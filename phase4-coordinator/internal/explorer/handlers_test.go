@@ -1190,7 +1190,14 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 // warm_models list.
 func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
-	registry := pool.NewRegistry(nil)
+	// Every reported hash verifies, so the warm set (two warm, hash_verified
+	// members) is multi-model (SPEC-002-R011).
+	registry := pool.NewRegistry(nil, pool.WithModelIdentityVerifier(func(_, _, reported, _ string) pool.HashStatus {
+		if reported == "" {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusVerified
+	}))
 	registry.Register(&pool.Provider{
 		ProviderID: "provider_legacy", AssignedID: "assigned_legacy", ModelID: "llama",
 		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
@@ -1198,9 +1205,10 @@ func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
 	registry.Register(&pool.Provider{
 		ProviderID: "provider_warm", AssignedID: "assigned_warm", ModelID: "model-a",
 		State: pool.StateReady, SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2,
+		ModelHash: "h-model-a", HashStatus: pool.HashStatusVerified,
 		WarmModels: []pool.WarmModel{
 			{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2},
-			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 3, SlotsFree: 1},
+			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 3, SlotsFree: 1, ModelHash: "h-model-b"},
 			{ModelID: "model-c", State: pool.WarmModelLoading, SlotsTotal: 2},
 		},
 	}, nil)

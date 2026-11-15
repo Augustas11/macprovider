@@ -5009,6 +5009,12 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
+	verifyEveryReportedHash(h.Registry)
+	// Hashes verify, so two warm members make the session multi-model.
+	withHash := func(m map[string]any) map[string]any {
+		m["model_hash"], m["model_hash_algorithm"] = warmEntryTestHash, modelidentity.SnapshotManifestV1
+		return m
+	}
 	member := map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0}
 	conn, assignedID := dialAndAuthV2ProviderWithInitial(t, h, func(initial map[string]any) {
 		initial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit", "model-b"}
@@ -5016,12 +5022,12 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 	})
 	defer conn.Close()
 
-	busy := heartbeat()
+	busy := withHash(heartbeat())
 	busy["status"] = "busy"
 	busy["slots_free"] = 0
-	primary := warmModelsPrimaryEntry()
+	primary := withHash(warmModelsPrimaryEntry())
 	primary["slots_free"] = 0
-	busy["warm_models"] = []any{primary, map[string]any{"model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 2}}
+	busy["warm_models"] = []any{primary, withHash(map[string]any{"model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 2})}
 	if err := wsutil.WriteClientText(conn, mustJSON(busy)); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
@@ -5034,8 +5040,8 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 		t.Fatalf("model-b entry = %+v ok=%v", member, ok)
 	}
 
-	bad := heartbeat()
-	bad["warm_models"] = []any{warmModelsPrimaryEntry(), map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1}}
+	bad := withHash(heartbeat())
+	bad["warm_models"] = []any{withHash(warmModelsPrimaryEntry()), withHash(map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1})}
 	if err := wsutil.WriteClientText(conn, mustJSON(bad)); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}

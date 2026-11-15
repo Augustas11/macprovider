@@ -75,8 +75,9 @@ type WarmModel struct {
 	computeIntegritySuspended bool
 	// identityPin is this further member's SPEC-010-R007(b)(c) authority:
 	// the identity it first verified while a further member. It follows the
-	// member by model id across heartbeats and is reset when the member
-	// leaves the warm set or becomes primary (the session's pin is then its
+	// member by model id across heartbeats (Provider.warmPins, also while the
+	// session is not multi-model) and is reset when the member leaves the
+	// declared warm set or becomes primary (the session's pin is then its
 	// authority, reset on a model change as for any session).
 	identityPin *IdentityPin
 	// refusalHold mirrors the session's queueFullHold for this member: a
@@ -95,6 +96,26 @@ func ModelKey(modelID string) string {
 
 func warmModelKey(modelID string) string {
 	return ModelKey(modelID)
+}
+
+// warmMultiModel is the SPEC-002-R011 multi-model predicate: the session
+// keeps at least two members that are warm and whose identity verdict is
+// hash_verified (the primary's verdict is the session's own). Only then does
+// the session have entry views, a served_model_id, a route snapshot flag of
+// 1 and per-model compute-integrity holds; otherwise it is a legacy session
+// exactly as with a warm set of one member.
+func warmMultiModel(p *Provider, members []WarmModel) bool {
+	n := 0
+	for _, m := range members {
+		status := m.HashStatus
+		if m.Primary {
+			status = p.HashStatus
+		}
+		if m.State == WarmModelWarm && status == HashStatusVerified {
+			n++
+		}
+	}
+	return n >= 2
 }
 
 func cloneWarmModels(in []WarmModel) []WarmModel {
@@ -270,15 +291,21 @@ func endedDispatchModelLocked(p *Provider, servedModelID string) string {
 // own model. verify is false at registration while the session itself has
 // no verdict (model-hash verification inactive).
 //
-// A warm set of exactly one member (the primary) is stored as no warm set: the
-// session is a legacy session everywhere (entry views, served model, route
-// snapshot flag, sort and sticky keys, model_not_loaded and swap handling).
+// A warm set that is not multi-model (warmMultiModel: fewer than two warm,
+// hash-verified members, e.g. one member, or a second member still loading
+// or unverified) is stored as no warm set: the session is a legacy session
+// everywhere (entry views, served model, route snapshot flag, sort and sticky
+// keys, model_not_loaded and swap handling). A later heartbeat that makes it
+// multi-model is a legacy-to-multi flip (demoteLegacyModelLocked when the
+// primary changes); one that makes it legacy again drops the member entries,
+// so their dispatches resolve as missing.
 //
 // demoted is the prior entry demoteLegacyModelLocked made for the legacy
 // session's own model, or nil.
 func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFlight map[string]int, demoted *WarmModel, verify, serving bool) {
 	if len(incoming) <= 1 {
 		p.WarmModels = nil
+		p.warmPins = nil
 		return
 	}
 	prior := map[string]WarmModel{}
@@ -301,7 +328,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 			continue
 		}
 		m.forwardedInFlight = inFlight[key]
-		m.identityPin = prior[key].identityPin
+		m.identityPin = p.warmPins[key]
 		old, known := prior[key]
 		switch {
 		case m.State != WarmModelWarm:
@@ -332,8 +359,24 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		m.identityPin = pinIdentity(m.identityPin, verdict)
 		m.HashStatus, m.ArtifactIdentity = verdict.Status, verdict.Artifact
 	}
+	p.warmPins = warmPinsOf(entries)
+	if !warmMultiModel(p, entries) {
+		p.WarmModels = nil
+		return
+	}
 	p.WarmModels = entries
 	r.applyComputeIntegritySuspensionLocked(p)
+}
+
+// warmPinsOf is the identity pin of each further member, by case-folded model.
+func warmPinsOf(members []WarmModel) map[string]*IdentityPin {
+	pins := map[string]*IdentityPin{}
+	for _, m := range members {
+		if !m.Primary && m.identityPin != nil {
+			pins[warmModelKey(m.ModelID)] = m.identityPin
+		}
+	}
+	return pins
 }
 
 // keepWarmModelsLocked keeps the previous member list for a heartbeat whose
@@ -342,6 +385,10 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 // session serves its top-level model only until a valid warm set arrives).
 func (r *Registry) keepWarmModelsLocked(p *Provider) {
 	if p.WarmModels != nil && warmModelKey(p.WarmModels[0].ModelID) != warmModelKey(p.ModelID) {
+		p.WarmModels = nil
+		p.warmPins = nil
+	}
+	if p.WarmModels != nil && !warmMultiModel(p, p.WarmModels) {
 		p.WarmModels = nil
 	}
 	r.applyComputeIntegritySuspensionLocked(p)
@@ -396,6 +443,13 @@ func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func
 		next := pinArtifactSession(m.identityPin, verdictFor(warmEntryView(session, *m)))
 		m.identityPin = pinIdentity(m.identityPin, next)
 		m.HashStatus, m.ArtifactIdentity = next.Status, next.Artifact
+	}
+	p.warmPins = warmPinsOf(entries)
+	if !warmMultiModel(p, entries) {
+		// A refresh that leaves fewer than two verified warm members makes
+		// the session legacy until a heartbeat makes it multi-model again.
+		p.WarmModels = nil
+		return
 	}
 	p.WarmModels = entries
 }
@@ -599,9 +653,12 @@ func (r *Registry) RestoreForwardedSlotFor(providerID, assignedID, servedModelID
 		return false
 	default:
 		m := mutableWarmMemberLocked(p, idx)
-		if m.forwardedInFlight > 0 {
-			m.forwardedInFlight--
+		if m.forwardedInFlight == 0 {
+			// A dispatch the member does not count (opened before the
+			// member last joined a multi-model warm set) reopens no seat.
+			return true
 		}
+		m.forwardedInFlight--
 		if m.State == WarmModelWarm && m.SlotsFree < m.SlotsTotal {
 			m.SlotsFree++
 		}

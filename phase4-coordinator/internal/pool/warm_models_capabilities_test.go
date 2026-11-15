@@ -14,8 +14,13 @@ func TestWarmEntryCarriesItsOwnCapabilitiesAndArtifactBinding(t *testing.T) {
 	const memberHash = "3333333333333333333333333333333333333333333333333333333333333333"
 	artifact := &artifactidentity.Binding{Member: artifactidentity.Member{ArtifactID: "artifact-b", Hash: memberHash}}
 	registry := NewRegistry(nil, WithModelIdentityResolver(func(req ModelIdentityRequest) ModelIdentityVerdict {
-		if req.ModelID == "model-b" && req.ReportedHash == memberHash {
+		switch {
+		case req.ModelID == "model-b" && req.ReportedHash == memberHash:
 			return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: artifact}
+		case req.ModelID == "model-b":
+			return ModelIdentityVerdict{Status: HashStatusUncatalogued}
+		case req.ReportedHash != "":
+			return ModelIdentityVerdict{Status: HashStatusVerified}
 		}
 		return ModelIdentityVerdict{Status: HashStatusUncatalogued}
 	}))
@@ -51,12 +56,14 @@ func TestWarmEntryCarriesItsOwnCapabilitiesAndArtifactBinding(t *testing.T) {
 }
 
 // A release publication re-verifies each further member against its own
-// model id and hash, as it does the session's model.
+// model id and hash, as it does the session's model. A member that no longer
+// verifies leaves fewer than two verified warm members: the session becomes a
+// legacy session (SPEC-002-R011) and the member has no entry.
 func TestWarmEntryIdentityRefreshIsPerMember(t *testing.T) {
 	const memberHash = "4444444444444444444444444444444444444444444444444444444444444444"
 	revoked := false
 	registry := NewRegistry(nil, WithModelIdentityResolver(func(req ModelIdentityRequest) ModelIdentityVerdict {
-		if req.ModelID == "model-b" && !revoked {
+		if req.ModelID == "model-a" || (req.ModelID == "model-b" && !revoked) {
 			return ModelIdentityVerdict{Status: HashStatusVerified}
 		}
 		return ModelIdentityVerdict{Status: HashStatusMismatch}
@@ -77,13 +84,16 @@ func TestWarmEntryIdentityRefreshIsPerMember(t *testing.T) {
 	var seen []string
 	registry.UpdateModelIdentities(func(p Provider) ModelIdentityVerdict {
 		seen = append(seen, p.ModelID)
-		if p.ModelID == "model-b" && !revoked {
+		if p.ModelID == "model-a" || (p.ModelID == "model-b" && !revoked) {
 			return ModelIdentityVerdict{Status: HashStatusVerified}
 		}
 		return ModelIdentityVerdict{Status: HashStatusMismatch}
 	})
-	if got := warmEntry(t, registry, "model-b").HashStatus; got != HashStatusMismatch {
-		t.Fatalf("member after refresh = %s, want mismatch", got)
+	if entry, ok := registry.ResolveEntry("p1", "current", "model-b"); ok {
+		t.Fatalf("member after a failed refresh still has an entry: %s", entry.HashStatus)
+	}
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels != nil || session.HashStatus != HashStatusVerified {
+		t.Fatalf("session after the member's failed refresh: warm=%v status=%s", session.WarmModels, session.HashStatus)
 	}
 	if len(seen) != 2 || seen[0] != "model-a" || seen[1] != "model-b" {
 		t.Fatalf("refresh evaluated %v, want the session then its member", seen)

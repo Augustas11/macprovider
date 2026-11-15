@@ -15,7 +15,8 @@ func reAdvertiseWarm(t *testing.T, registry *pool.Registry) {
 	member.ThroughputTPSEstimate = 50
 	if _, _, ok := registry.ApplyHeartbeat("pw", "pw-session", pool.HeartbeatUpdate{
 		Status: pool.StateReady, ModelID: "model-a", MaxContextTokens: 20000, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1,
-		ThroughputTPSEstimate: 50, WarmModels: []pool.WarmModel{warmMember("model-a", true, 1), member}, At: time.Now().UTC(),
+		ThroughputTPSEstimate: 50, ModelHash: warmMemberHash("model-a"), ModelHashPresent: true,
+		WarmModels: []pool.WarmModel{warmMember("model-a", true, 1), member}, At: time.Now().UTC(),
 	}); !ok {
 		t.Fatal("heartbeat rejected")
 	}
@@ -81,7 +82,8 @@ func TestWarmEntryNotLoadedCycleThroughLoadingIsABreakerFault(t *testing.T) {
 	loading.State, loading.SlotsFree = pool.WarmModelLoading, 0
 	if _, _, ok := registry.ApplyHeartbeat("pw", "pw-session", pool.HeartbeatUpdate{
 		Status: pool.StateReady, ModelID: "model-a", MaxContextTokens: 20000, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1,
-		ThroughputTPSEstimate: 50, WarmModels: []pool.WarmModel{warmMember("model-a", true, 1), loading}, At: time.Now().UTC(),
+		ThroughputTPSEstimate: 50, ModelHash: warmMemberHash("model-a"), ModelHashPresent: true,
+		WarmModels: []pool.WarmModel{warmMember("model-a", true, 1), loading}, At: time.Now().UTC(),
 	}); !ok {
 		t.Fatal("heartbeat rejected")
 	}

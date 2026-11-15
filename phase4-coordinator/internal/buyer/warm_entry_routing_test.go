@@ -70,6 +70,7 @@ func (c *servedModelCapture) last(t *testing.T) servedModelHit {
 }
 
 func registerWarmHTTPProvider(registry *pool.Registry, providerID, endpointURL string, primary, member pool.WarmModel, primaryHash string, receiptPubkey []byte) {
+	verifyWarmMemberHashes(registry)
 	now := time.Now().UTC()
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
@@ -103,7 +104,21 @@ func registerWarmHTTPProvider(registry *pool.Registry, providerID, endpointURL s
 }
 
 func warmMember(model string, primary bool, slots int) pool.WarmModel {
-	return pool.WarmModel{ModelID: model, State: pool.WarmModelWarm, Primary: primary, Pinned: primary, SlotsTotal: slots, SlotsFree: slots, MaxContextTokens: 20000, ThroughputTPSEstimate: 20}
+	return pool.WarmModel{ModelID: model, State: pool.WarmModelWarm, Primary: primary, Pinned: primary, SlotsTotal: slots, SlotsFree: slots, MaxContextTokens: 20000, ThroughputTPSEstimate: 20, ModelHash: warmMemberHash(model)}
+}
+
+// warmMemberHash is a test member's reported hash; verifyWarmMemberHashes
+// verifies every reported hash, so two such warm members make a
+// multi-model session (SPEC-002-R011).
+func warmMemberHash(model string) string { return "h-" + model }
+
+func verifyWarmMemberHashes(registry *pool.Registry) {
+	pool.WithModelIdentityVerifier(func(_, _, reported, _ string) pool.HashStatus {
+		if reported == "" {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusVerified
+	})(registry)
 }
 
 // SPEC-002-R011 / SPEC-001-R016: an HTTP-forwarded dispatch to a warm-set
