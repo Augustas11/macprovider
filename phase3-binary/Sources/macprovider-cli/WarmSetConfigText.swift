@@ -1,5 +1,4 @@
 import Foundation
-import MacProviderCore
 
 // SPEC-001-R017 *Configuration*: the warm-set keys of the provider config
 // file (`warm_models`, `warm_model_limits`, and `supported_models` when a
@@ -70,8 +69,12 @@ enum WarmSetConfigText {
         }
     }
 
+    /// Same fold as `SupportedModels.foldedModelID` (MacProviderCore), written
+    /// out here because Malibu.app does not link MacProviderCore; the CLI test
+    /// WarmModelRoutingTests pins the two to the same bytes.
     static func fold(_ modelID: String) -> String {
-        SupportedModels.foldedModelID(modelID.trimmingCharacters(in: .whitespacesAndNewlines))
+        modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping.lowercased(with: nil)
     }
 
     static func read(_ text: String) throws -> Snapshot {
