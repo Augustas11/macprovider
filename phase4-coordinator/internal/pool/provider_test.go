@@ -3976,10 +3976,16 @@ func TestEntrySnapshotEqualsSnapshotWithoutWarmSet(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("EntrySnapshot = %+v\nSnapshot = %+v", got, want)
 	}
-	resolved, ok := registry.ResolveEntry("p1", "current", "any-model")
 	plain, _ := registry.Resolve("p1", "current")
-	if !ok || !reflect.DeepEqual(resolved, plain) {
-		t.Fatalf("ResolveEntry = %+v, Resolve = %+v", resolved, plain)
+	for _, model := range []string{"", "model-a", "MODEL-A"} {
+		resolved, ok := registry.ResolveEntry("p1", "current", model)
+		if !ok || !reflect.DeepEqual(resolved, plain) {
+			t.Fatalf("ResolveEntry(%q) = %+v, Resolve = %+v", model, resolved, plain)
+		}
+	}
+	// Another model is not this legacy session's entry.
+	if _, ok := registry.ResolveEntry("p1", "current", "any-model"); ok {
+		t.Fatal("a legacy session resolved a model it does not serve")
 	}
 }
 

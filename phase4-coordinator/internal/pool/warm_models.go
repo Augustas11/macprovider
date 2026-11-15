@@ -121,14 +121,21 @@ const (
 )
 
 // warmMemberIndexLocked names the slot owner for a dispatch: the session
-// itself (warmMemberSession) for a provider without a warm set, an empty
-// served model or the primary; the index of a further member; or
-// warmMemberMissing when the served model is not in the warm set (evicted).
+// itself (warmMemberSession) for an empty served model, the primary, or the
+// session's own model on a session without a warm set; the index of a further
+// member; or warmMemberMissing when the served model is neither (a member
+// that left the warm set, also when the session became a legacy session).
 func warmMemberIndexLocked(p *Provider, servedModelID string) int {
-	if p.WarmModels == nil || servedModelID == "" {
+	if servedModelID == "" {
 		return warmMemberSession
 	}
 	key := warmModelKey(servedModelID)
+	if p.WarmModels == nil {
+		if key == warmModelKey(p.ModelID) {
+			return warmMemberSession
+		}
+		return warmMemberMissing
+	}
 	for i := range p.WarmModels {
 		if warmModelKey(p.WarmModels[i].ModelID) != key {
 			continue
@@ -457,15 +464,22 @@ func (r *Registry) EntrySnapshot() []Provider {
 }
 
 // ResolveEntry is Resolve for one entry. A provider without a warm set
-// resolves as Resolve does whatever model is named; a provider with one
-// resolves the member named by model (case-folded; empty is the primary) and
-// fails when that model is not in its warm set.
+// resolves as Resolve does for an empty model or its own model (case-folded)
+// and fails for any other; a provider with one resolves the member named by
+// model (case-folded; empty is the primary) and fails when that model is not
+// in its warm set.
 func (r *Registry) ResolveEntry(providerID, assignedID, model string) (Provider, bool) {
 	session, ok := r.Resolve(providerID, assignedID)
-	if !ok || session.WarmModels == nil {
+	if !ok {
 		return session, ok
 	}
 	key := warmModelKey(model)
+	if session.WarmModels == nil {
+		if model != "" && key != warmModelKey(session.ModelID) {
+			return Provider{}, false
+		}
+		return session, true
+	}
 	for _, m := range session.WarmModels {
 		if (model == "" && m.Primary) || (model != "" && warmModelKey(m.ModelID) == key) {
 			return warmEntryView(session, m), true

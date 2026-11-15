@@ -112,6 +112,22 @@ func TestWarmPromotionOnlyFromAFurtherMember(t *testing.T) {
 	if session.WarmModels != nil || session.ModelID != "model-b" || registry.ForwardedInFlight("p1", "current") != 2 {
 		t.Fatalf("promotion to a one-member set: model=%s in_flight=%d warm=%v", session.ModelID, registry.ForwardedInFlight("p1", "current"), session.WarmModels)
 	}
+	// model-a left the set in the same heartbeat: its open dispatch ending
+	// (completion, refusal, drop) never touches model-b's session counts.
+	free := session.SlotsFree
+	if registry.RestoreForwardedSlotFor("p1", "current", "model-a") || registry.MarkForwardedSlotFullFor("p1", "current", "MODEL-A", true) ||
+		registry.DropForwardedInFlightFor("p1", "current", "model-a") {
+		t.Fatal("a dispatch on the departed primary resolved to the promoted session")
+	}
+	if _, ok := registry.ResolveEntry("p1", "current", "model-a"); ok {
+		t.Fatal("the departed model resolved to the legacy session")
+	}
+	if got, _ := registry.Resolve("p1", "current"); registry.ForwardedInFlight("p1", "current") != 2 || got.SlotsFree != free || got.queueFullHold {
+		t.Fatalf("departed model's dispatch moved the survivor: in_flight=%d free=%d hold=%v", registry.ForwardedInFlight("p1", "current"), got.SlotsFree, got.queueFullHold)
+	}
+	if !registry.RestoreForwardedSlotFor("p1", "current", "Model-B") || registry.ForwardedInFlight("p1", "current") != 1 {
+		t.Fatalf("the survivor's own dispatch: in_flight=%d, want 1", registry.ForwardedInFlight("p1", "current"))
+	}
 
 	// A swap to a model outside the warm set keeps the session's count.
 	registry = NewRegistry(nil)
@@ -321,5 +337,49 @@ func TestWarmEntryNotLoadedStrikes(t *testing.T) {
 	beat(5*time.Minute+30*time.Second, WarmModelWarm)
 	if n := record(5*time.Minute + 31*time.Second); n != 1 {
 		t.Fatalf("strikes after a non-warm report = %d, want 1", n)
+	}
+}
+
+// A warm set shrinking to its primary makes a legacy session; a dispatch still
+// open on the member that left never restores or holds the primary's seats.
+func TestWarmShrinkToLegacyIgnoresDepartedMember(t *testing.T) {
+	at := time.Now()
+	for _, refusal := range []bool{false, true} {
+		registry := NewRegistry(nil)
+		registerWarmHeartbeatProvider(t, registry, at)
+		registry.ConsumeForwardedSlotFor("p1", "current", "model-a")
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok {
+			t.Fatal("consume on model-b failed")
+		}
+		update := warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a"))
+		update.SlotsFree = 1
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", update); !ok {
+			t.Fatal("heartbeat failed")
+		}
+		before, _ := registry.Resolve("p1", "current")
+		if before.WarmModels != nil {
+			t.Fatal("one-member set kept")
+		}
+		var resolved bool
+		if refusal {
+			resolved = registry.MarkForwardedSlotFullFor("p1", "current", "model-b", true)
+		} else {
+			resolved = registry.RestoreForwardedSlotFor("p1", "current", "model-b")
+		}
+		if resolved {
+			t.Fatalf("refusal=%v: the departed member resolved to the legacy session", refusal)
+		}
+		after, _ := registry.Resolve("p1", "current")
+		if registry.ForwardedInFlight("p1", "current") != 1 || after.SlotsFree != before.SlotsFree || after.queueFullHold || after.capacitySafetyHold {
+			t.Fatalf("refusal=%v: primary moved: in_flight=%d free=%d->%d hold=%v/%v", refusal,
+				registry.ForwardedInFlight("p1", "current"), before.SlotsFree, after.SlotsFree, after.queueFullHold, after.capacitySafetyHold)
+		}
+		if free, ok := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); ok || free != 0 {
+			t.Fatalf("refusal=%v: departed member routable seats = %d %v", refusal, free, ok)
+		}
+		// The primary's own dispatch, named or legacy, still restores.
+		if !registry.RestoreForwardedSlotFor("p1", "current", "MODEL-A") || registry.ForwardedInFlight("p1", "current") != 0 {
+			t.Fatalf("refusal=%v: primary restore: in_flight=%d", refusal, registry.ForwardedInFlight("p1", "current"))
+		}
 	}
 }
