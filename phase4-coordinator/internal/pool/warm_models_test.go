@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 )
 
 // registerTwin registers the same session on a legacy registry (no warm set)
@@ -170,5 +172,60 @@ func TestComputeIntegritySuspensionIsPerEntry(t *testing.T) {
 	}
 	if b := warmEntry(t, registry, "model-b"); b.ComputeIntegritySuspended || !b.RoutingEligible() {
 		t.Fatalf("suspended primary closed a healthy member: suspended=%v state=%s", b.ComputeIntegritySuspended, b.State)
+	}
+}
+
+// SPEC-010-R007(b)(c) per member: a further member that verifies as one feed
+// identity and later reports another becomes hash_mismatch exactly as the
+// primary does; the pin resets only when the member leaves the warm set.
+func TestWarmMemberIdentityPin(t *testing.T) {
+	resolver := WithModelIdentityResolver(func(req ModelIdentityRequest) ModelIdentityVerdict {
+		switch req.ReportedHash {
+		case "h1", "h2":
+			return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: artifactidentity.Member{ModelID: req.ModelID, ArtifactID: "art-" + req.ReportedHash, Hash: req.ReportedHash}}}
+		}
+		return ModelIdentityVerdict{Status: HashStatusUncatalogued}
+	})
+	at := time.Now()
+	registry := NewRegistry(nil, resolver)
+	registerHeartbeatProvider(t, registry, "model-a", "h1", HashStatusVerified, at)
+	member := func(hash string) WarmModel {
+		m := warmTestMember("model-b", WarmModelWarm, 1, 1)
+		m.ModelHash = hash
+		return m
+	}
+	beat := func(i int, primaryHash string, members ...WarmModel) {
+		t.Helper()
+		update := warmHeartbeatUpdate(at.Add(time.Duration(i)*time.Second), warmTestMembers("model-a", members...))
+		update.ModelHash, update.ModelHashPresent = primaryHash, true
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", update); !ok {
+			t.Fatal("heartbeat failed")
+		}
+	}
+	beat(1, "h1", member("h1"))
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified || b.IdentityPin == nil {
+		t.Fatalf("member first verdict = %s pin=%v", b.HashStatus, b.IdentityPin)
+	}
+	// Both the primary and the member switch to another verified identity.
+	beat(2, "h2", member("h2"))
+	session, _ := registry.Resolve("p1", "current")
+	if session.HashStatus != HashStatusMismatch {
+		t.Fatalf("primary identity change = %s, want hash_mismatch", session.HashStatus)
+	}
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusMismatch {
+		t.Fatalf("member identity change = %s, want hash_mismatch like the primary", b.HashStatus)
+	}
+	// A release refresh keeps the member's pin.
+	registry.UpdateModelIdentities(func(p Provider) ModelIdentityVerdict {
+		return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: artifactidentity.Member{ModelID: p.ModelID, ArtifactID: "art-" + p.ModelHash, Hash: p.ModelHash}}}
+	})
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusMismatch {
+		t.Fatalf("member after refresh = %s, want hash_mismatch (pin kept)", b.HashStatus)
+	}
+	// Leaving the warm set resets the member's pin.
+	beat(3, "h2")
+	beat(4, "h2", member("h2"))
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified {
+		t.Fatalf("member back in the warm set = %s, want verified with a fresh pin", b.HashStatus)
 	}
 }

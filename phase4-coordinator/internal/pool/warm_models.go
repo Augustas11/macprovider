@@ -72,6 +72,12 @@ type WarmModel struct {
 	// (provider, model) key; the entry view of a further member takes it in
 	// place of the session's (the primary's) flag.
 	computeIntegritySuspended bool
+	// identityPin is this further member's SPEC-010-R007(b)(c) authority:
+	// the identity it first verified while a further member. It follows the
+	// member by model id across heartbeats and is reset when the member
+	// leaves the warm set or becomes primary (the session's pin is then its
+	// authority, reset on a model change as for any session).
+	identityPin *IdentityPin
 }
 
 // warmModelKey is the SPEC-010 case-folded model id.
@@ -206,6 +212,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 			continue
 		}
 		m.forwardedInFlight = inFlight[key]
+		m.identityPin = prior[key].identityPin
 		if m.State != WarmModelWarm {
 			m.SlotsFree = 0
 		} else if old, ok := prior[key]; ok && m.forwardedInFlight > 0 && old.SlotsFree < m.SlotsFree {
@@ -218,7 +225,8 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 			m.ArtifactIdentity = nil
 			continue
 		}
-		verdict := r.warmModelIdentityLocked(p, *m)
+		verdict := pinArtifactSession(m.identityPin, r.warmModelIdentityLocked(p, *m))
+		m.identityPin = pinIdentity(m.identityPin, verdict)
 		m.HashStatus, m.ArtifactIdentity = verdict.Status, verdict.Artifact
 	}
 	p.WarmModels = entries
@@ -271,7 +279,8 @@ func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func
 		if m.ModelHash == "" {
 			continue
 		}
-		next := verdictFor(warmEntryView(session, *m))
+		next := pinArtifactSession(m.identityPin, verdictFor(warmEntryView(session, *m)))
+		m.identityPin = pinIdentity(m.identityPin, next)
 		m.HashStatus, m.ArtifactIdentity = next.Status, next.Artifact
 	}
 	p.WarmModels = entries
@@ -279,12 +288,13 @@ func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func
 
 // warmEntryView projects one member onto a copy of its session. The primary
 // is the session as it is. A further member takes its own model, slots,
-// throughput, identity, verdict, artifact binding, SPEC-036 FR-25 suspension
-// and tool and vision declarations; the session-level gates (connection, trust, admission tier,
-// breaker, pause, draining/degraded/unavailable, thermal hold) stay. Bindings
-// that belong to the primary's tuple alone (the SPEC-047 session-to-candidate
-// model admission binding, the identity pin, the native-MTP canary, pool
-// model and shard group) are cleared so every consumer fails closed on them.
+// throughput, identity, verdict, identity pin, artifact binding, SPEC-036
+// FR-25 suspension and tool and vision declarations; the session-level gates
+// (connection, trust, admission tier, breaker, pause,
+// draining/degraded/unavailable, thermal hold) stay. Bindings that belong to
+// the primary's tuple alone (the SPEC-047 session-to-candidate model
+// admission binding, the native-MTP canary, pool model and shard group) are
+// cleared so every consumer fails closed on them.
 func warmEntryView(session Provider, m WarmModel) Provider {
 	v := session
 	v.ServedModelID = m.ModelID
@@ -312,7 +322,7 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.CBSelfCheck = cloneProviderCBSelfCheck(m.CBSelfCheck)
 	v.EngineProfile = cloneEngineProfile(m.EngineProfile)
 	v.ArtifactIdentity = m.ArtifactIdentity
-	v.IdentityPin = nil
+	v.IdentityPin = m.identityPin
 	clearModelAdmissionBinding(&v)
 	v.ModelAdmissionBindingGeneration = 0
 	v.NativeMTPCanary = nil
