@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -113,30 +114,46 @@ func setServedModelHeader(h http.Header, p pool.Provider) {
 // answer; the request log records it so the attempt carries null usage.
 const entryNotLoadedErrorCode = "error_model_not_loaded"
 
-// entryModelNotLoaded reports a provider's model_not_loaded answer to a
+// A model_not_loaded answer from an entry the provider advertised warm is
+// the genuine race (evicted between heartbeat and dispatch) once; repeated
+// across heartbeats that keep advertising the entry warm it is a fault. The
+// strike count and window are the default breaker's (2 faults in 120 s), a
+// strike being one heartbeat generation that answered model_not_loaded.
+const (
+	entryNotLoadedFaultStrikes = 2
+	entryNotLoadedFaultWindow  = 120 * time.Second
+)
+
+// entryModelNotLoaded handles a provider's model_not_loaded answer to a
 // dispatch that named a warm-set entry (SPEC-001-R016 Request routing): a
-// preflight_ack reason, a WS end status or an HTTP error code. A provider
-// without a warm set never gets an entry view, so its answer keeps today's
-// handling.
-func entryModelNotLoaded(p pool.Provider, code string) bool {
-	if p.ServedModelID == "" {
+// preflight_ack reason, a WS end status or an HTTP error code. The entry is
+// closed until its next heartbeat. It reports true for the non-penalising
+// warm-entry path (failover outside the retry budget, no breaker fault);
+// once the entry has entryNotLoadedFaultStrikes strikes within
+// entryNotLoadedFaultWindow it records a breaker fault and reports false, so
+// the answer takes the ordinary failure path and its retry budget. A
+// provider without a warm set never gets an entry view, so its answer keeps
+// today's handling.
+func (s *Server) entryModelNotLoaded(p pool.Provider, code, requestID string) bool {
+	if p.ServedModelID == "" || (code != entryNotLoadedErrorCode && code != string(providerws.PreflightRejectionModelNotLoaded)) {
 		return false
 	}
-	return code == entryNotLoadedErrorCode || code == string(providerws.PreflightRejectionModelNotLoaded)
-}
-
-// markEntryNotLoaded closes the entry until its next heartbeat. It is never a
-// breaker fault and never touches the session or its other entries.
-func (s *Server) markEntryNotLoaded(p pool.Provider, requestID string) {
-	if s.pool == nil || !s.pool.MarkEntryNotLoaded(p.ProviderID, p.AssignedID, p.ServedModelID) {
-		return
+	if s.pool == nil {
+		return true
 	}
+	strikes, ok := s.pool.RecordEntryNotLoaded(p.ProviderID, p.AssignedID, p.ServedModelID, s.now(), entryNotLoadedFaultWindow)
 	s.log.Warn().
 		Str("event", "warm_entry_model_not_loaded").
 		Str("provider_id", p.ProviderID).
 		Str("served_model_id", p.ServedModelID).
 		Str("request_id", requestID).
+		Int("strikes", strikes).
 		Msg("warm-set entry answered model_not_loaded; unavailable until its next heartbeat")
+	if !ok || strikes < entryNotLoadedFaultStrikes {
+		return true
+	}
+	s.recordBreakerFault(p, breakerFaultRepeatedEntryNotLoaded, requestID)
+	return false
 }
 
 // httpProviderErrorCode is the error.code of a provider's JSON error body.

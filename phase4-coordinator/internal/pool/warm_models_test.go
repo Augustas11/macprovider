@@ -278,3 +278,48 @@ func TestWarmMemberRefusalHoldLiftedByReadyHeartbeat(t *testing.T) {
 		t.Fatalf("stale higher report raised the count to %d", free)
 	}
 }
+
+// A strike is one heartbeat generation in which an entry advertised warm
+// answered model_not_loaded; strikes follow the member while it stays warm
+// and reset when it reports another state or leaves the warm set.
+func TestWarmEntryNotLoadedStrikes(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	record := func(d time.Duration) int {
+		t.Helper()
+		n, ok := registry.RecordEntryNotLoaded("p1", "current", "model-b", at.Add(d), 2*time.Minute)
+		if !ok {
+			t.Fatal("record failed")
+		}
+		return n
+	}
+	beat := func(d time.Duration, state WarmModelState) {
+		t.Helper()
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(d), warmTestMembers("model-a", warmTestMember("model-b", state, 2, 2)))); !ok {
+			t.Fatal("heartbeat failed")
+		}
+	}
+	if n := record(time.Second); n != 1 {
+		t.Fatalf("first answer strikes = %d", n)
+	}
+	// A concurrent dispatch answering in the same race is no new strike.
+	if n := record(2 * time.Second); n != 1 {
+		t.Fatalf("same-generation answer strikes = %d, want 1", n)
+	}
+	beat(30*time.Second, WarmModelWarm)
+	if n := record(31 * time.Second); n != 2 {
+		t.Fatalf("answer after a re-advertising heartbeat strikes = %d, want 2", n)
+	}
+	// Outside the window old strikes no longer count.
+	beat(4*time.Minute, WarmModelWarm)
+	if n := record(4*time.Minute + time.Second); n != 1 {
+		t.Fatalf("strikes after the window = %d, want 1", n)
+	}
+	// A heartbeat reporting the member loading resets its strikes.
+	beat(5*time.Minute, WarmModelLoading)
+	beat(5*time.Minute+30*time.Second, WarmModelWarm)
+	if n := record(5*time.Minute + 31*time.Second); n != 1 {
+		t.Fatalf("strikes after a non-warm report = %d, want 1", n)
+	}
+}

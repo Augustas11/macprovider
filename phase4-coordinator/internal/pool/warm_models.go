@@ -2,6 +2,7 @@ package pool
 
 import (
 	"strings"
+	"time"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -83,6 +84,11 @@ type WarmModel struct {
 	// keeps the coordinator's own count; a ready heartbeat reporting free
 	// seats lifts it, taking the lower of the two counts.
 	refusalHold bool
+	// notLoadedStrikes are the times of model_not_loaded answers from this
+	// member, at most one per heartbeat that advertised it warm. They follow
+	// the member while it stays warm and reset when it leaves the warm set
+	// or reports another state.
+	notLoadedStrikes []time.Time
 }
 
 // warmModelKey is the SPEC-010 case-folded model id.
@@ -201,7 +207,9 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		return
 	}
 	prior := map[string]WarmModel{}
+	strikes := map[string][]time.Time{}
 	for _, m := range p.WarmModels {
+		strikes[warmModelKey(m.ModelID)] = m.notLoadedStrikes
 		if !m.Primary {
 			prior[warmModelKey(m.ModelID)] = m
 		}
@@ -210,6 +218,9 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 	for i := range entries {
 		m := &entries[i]
 		key := warmModelKey(m.ModelID)
+		if m.State == WarmModelWarm {
+			m.notLoadedStrikes = strikes[key]
+		}
 		if m.Primary {
 			m.forwardedInFlight = p.forwardedInFlight
 			m.ExpectedModelHash = p.ExpectedModelHash
@@ -615,24 +626,52 @@ func (r *Registry) ForwardedInFlightFor(providerID, assignedID, servedModelID st
 	}
 }
 
+// maxNotLoadedStrikes bounds a member's strike history.
+const maxNotLoadedStrikes = 16
+
 // MarkEntryNotLoaded records a provider's model_not_loaded answer for the
 // entry serving servedModelID (SPEC-002-R011): that entry is unavailable
 // until the next heartbeat replaces the warm set. The session, its other
 // entries and Snapshot are untouched. A provider without a warm set, or a
 // model no longer in it, is a no-op.
 func (r *Registry) MarkEntryNotLoaded(providerID, assignedID, servedModelID string) bool {
+	_, ok := r.RecordEntryNotLoaded(providerID, assignedID, servedModelID, time.Now(), 0)
+	return ok
+}
+
+// RecordEntryNotLoaded is MarkEntryNotLoaded that also counts strikes: the
+// first answer after a heartbeat advertised the entry warm is a strike at
+// `at`; further answers before the next heartbeat (concurrent dispatches in
+// the same race) are not. It returns the strikes within window (all kept
+// strikes when window is 0).
+func (r *Registry) RecordEntryNotLoaded(providerID, assignedID, servedModelID string, at time.Time, window time.Duration) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID || p.WarmModels == nil || servedModelID == "" {
-		return false
+		return 0, false
 	}
 	key := warmModelKey(servedModelID)
 	for i := range p.WarmModels {
-		if warmModelKey(p.WarmModels[i].ModelID) == key {
-			mutableWarmMemberLocked(p, i).notLoaded = true
-			return true
+		if warmModelKey(p.WarmModels[i].ModelID) != key {
+			continue
 		}
+		m := mutableWarmMemberLocked(p, i)
+		kept := make([]time.Time, 0, len(m.notLoadedStrikes)+1)
+		for _, t := range m.notLoadedStrikes {
+			if window <= 0 || t.After(at.Add(-window)) {
+				kept = append(kept, t)
+			}
+		}
+		if !m.notLoaded {
+			kept = append(kept, at)
+		}
+		if len(kept) > maxNotLoadedStrikes {
+			kept = kept[len(kept)-maxNotLoadedStrikes:]
+		}
+		m.notLoadedStrikes = kept
+		m.notLoaded = true
+		return len(kept), true
 	}
-	return false
+	return 0, false
 }

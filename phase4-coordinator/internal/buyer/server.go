@@ -508,6 +508,9 @@ const (
 	breakerFaultZeroTokenCompletion breakerFault = "zero_token_completion"
 	breakerFaultHTTPStreamDead      breakerFault = "http_stream_disconnected_mid_inference"
 	breakerFaultHTTPStreamTimeout   breakerFault = "http_stream_timed_out_mid_inference"
+	// breakerFaultRepeatedEntryNotLoaded is a warm-set entry that keeps
+	// answering model_not_loaded while advertised warm (SPEC-002-R011).
+	breakerFaultRepeatedEntryNotLoaded breakerFault = "repeated_warm_entry_model_not_loaded"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -3849,7 +3852,7 @@ func (s *Server) forwardHTTPSequence(
 					status = http.StatusBadGateway
 					attempt.ErrorCode = providerLocalPreemptedCode
 				}
-				if status == http.StatusServiceUnavailable && entryModelNotLoaded(state.provider, httpProviderErrorCode(respBody)) {
+				if status == http.StatusServiceUnavailable && s.entryModelNotLoaded(state.provider, httpProviderErrorCode(respBody), requestID) {
 					entryNotLoaded = true
 					attempt.ErrorCode = entryNotLoadedErrorCode
 				}
@@ -3979,7 +3982,6 @@ func (s *Server) forwardHTTPSequence(
 			nativeResult := wsForwardResult("")
 			switch {
 			case entryNotLoaded:
-				s.markEntryNotLoaded(state.provider, requestID)
 				nativeResult = wsForwardEntryNotLoaded
 			case localPreempted:
 				tr.status = status
@@ -4395,9 +4397,8 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
-				if body.Len() == 0 && entryModelNotLoaded(provider, end.Status) {
+				if body.Len() == 0 && s.entryModelNotLoaded(provider, end.Status, requestID) {
 					markProviderDone()
-					s.markEntryNotLoaded(provider, requestID)
 					return wsForwardEntryNotLoaded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
@@ -4938,9 +4939,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					markProviderDone()
 					return wsForwardContextExceeded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
-				if entryModelNotLoaded(provider, end.Status) {
+				if s.entryModelNotLoaded(provider, end.Status, requestID) {
 					markProviderDone()
-					s.markEntryNotLoaded(provider, requestID)
 					return wsForwardEntryNotLoaded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
@@ -5497,8 +5497,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			attempt.ErrorCode = providerLocalPreemptedCode
 			return wsForwardFailed, http.StatusBadGateway, attempt
 		}
-		if resp.StatusCode == http.StatusServiceUnavailable && entryModelNotLoaded(provider, httpProviderErrorCode(respBody)) {
-			s.markEntryNotLoaded(provider, requestID)
+		if resp.StatusCode == http.StatusServiceUnavailable && s.entryModelNotLoaded(provider, httpProviderErrorCode(respBody), requestID) {
 			attempt.ErrorCode = entryNotLoadedErrorCode
 			return wsForwardEntryNotLoaded, resp.StatusCode, attempt
 		}
@@ -9909,8 +9908,7 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 	if err != nil || !ok {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "Provider preflight timed out"}
 	}
-	if !result.Accepted && entryModelNotLoaded(provider, result.Reason) {
-		s.markEntryNotLoaded(provider, requestID)
+	if !result.Accepted && s.entryModelNotLoaded(provider, result.Reason, requestID) {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Provider preflight: model not loaded", entryNotLoaded: true}
 	}
 	if !result.Accepted {
