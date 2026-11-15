@@ -4931,3 +4931,117 @@ func mustJSON(v any) []byte {
 func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http") + "/ws/provider"
 }
+
+func warmModelsPrimaryEntry() map[string]any {
+	hb := heartbeat()
+	return map[string]any{
+		"model_id": hb["model_id"], "state": "warm", "primary": true, "pinned": true,
+		"slots_total": hb["slots_total"], "slots_free": hb["slots_free"], "max_context_tokens": hb["max_context_tokens"],
+		"throughput_tps_estimate": hb["throughput_tps_estimate"], "model_params_b": hb["model_params_b"],
+	}
+}
+
+// SPEC-001-R016 / SPEC-002-R011: a hello may carry its warm set; one outside
+// the hello's model (a hello declares no supported_models) closes it as an
+// invalid hello.
+func TestHelloWarmModelsHandshake(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	hello := validHello("m4-anon")
+	hello["warm_models"] = []any{warmModelsPrimaryEntry()}
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil || ack.Type != "hello_ack" || ack.AssignedID == "" {
+		t.Fatalf("ack = %s err=%v", payload, err)
+	}
+	conn.Close()
+
+	hello["warm_models"] = []any{
+		warmModelsPrimaryEntry(),
+		map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0},
+	}
+	code, reason := sendHelloExpectClose(t, ts.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "invalid_hello: warm_models" {
+		t.Fatalf("close = %d %q", code, reason)
+	}
+}
+
+func dialAndAuthV2ProviderWithInitial(t *testing.T, h providerHarness, mutate func(map[string]any)) (net.Conn, string) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	mutate(initial)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		conn.Close()
+		t.Fatalf("auth_response = %+v error = %s", response, authResponseErrorText(response))
+	}
+	return conn, challenge.AssignedID
+}
+
+// A v2 provider declares its warm set on the initial stage and repeats it on
+// every heartbeat. A heartbeat whose warm set leaves supported_models is
+// malformed: it is logged once and changes nothing in the pool.
+func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	member := map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0}
+	conn, assignedID := dialAndAuthV2ProviderWithInitial(t, h, func(initial map[string]any) {
+		initial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit", "model-b"}
+		initial["warm_models"] = []any{warmModelsPrimaryEntry(), member}
+	})
+	defer conn.Close()
+
+	busy := heartbeat()
+	busy["status"] = "busy"
+	busy["slots_free"] = 0
+	primary := warmModelsPrimaryEntry()
+	primary["slots_free"] = 0
+	busy["warm_models"] = []any{primary, map[string]any{"model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 2}}
+	if err := wsutil.WriteClientText(conn, mustJSON(busy)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && p.State == pool.StateBusy && p.SlotsFree == 0
+	})
+
+	bad := heartbeat()
+	bad["warm_models"] = []any{warmModelsPrimaryEntry(), map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1}}
+	if err := wsutil.WriteClientText(conn, mustJSON(bad)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		return strings.Count(logs.String(), `"field":"warm_models"`) == 1
+	})
+	if !strings.Contains(logs.String(), `"message":"invalid heartbeat"`) {
+		t.Fatalf("logs = %s", logs.String())
+	}
+	p, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok || p.State != pool.StateBusy || p.SlotsFree != 0 {
+		t.Fatalf("a rejected heartbeat changed the session: ok=%v state=%s slots_free=%d", ok, p.State, p.SlotsFree)
+	}
+}

@@ -55,6 +55,9 @@ type Hello struct {
 	RelayBlindKeyRecords   []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords      []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment      *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels is the SPEC-001-R016 warm set, primary first; nil for a
+	// provider without one (SPEC-002-R011).
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
 }
 
 const (
@@ -157,6 +160,8 @@ type AuthRequest struct {
 	RelayBlindKeyRecords           []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords              []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment              *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels: see Hello.WarmModels. Initial stage only.
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -386,6 +391,8 @@ type Heartbeat struct {
 	RelayBlindKeyRecords    []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment       *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels: see Hello.WarmModels.
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -975,6 +982,15 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if field, err := parsePrivacyEnrollment(raw, &h.PrivacyEnrollment); err != nil {
 		return Hello{}, field, err
 	}
+	warmModels, err := parseWarmModels(raw, warmModelsTopLevel{ramGB: h.RAMGB})
+	if err == nil {
+		// A hello carries no supported_models: its warm set is its model.
+		err = validateWarmModelsSupported(warmModels, nil, h.ModelID)
+	}
+	if err != nil {
+		return Hello{}, warmModelsField, err
+	}
+	h.WarmModels = warmModels
 	return h, "", nil
 }
 
@@ -1250,6 +1266,14 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if field, err := parsePrivacyEnrollment(raw, &req.PrivacyEnrollment); err != nil {
 		return AuthRequest{}, presence, field, err
 	}
+	warmModels, err := parseWarmModels(raw, warmModelsTopLevel{ramGB: req.RAMGB})
+	if err == nil {
+		err = validateWarmModelsSupported(warmModels, req.SupportedModels, req.ModelID)
+	}
+	if err != nil {
+		return AuthRequest{}, presence, warmModelsField, err
+	}
+	req.WarmModels = warmModels
 	return req, presence, "", nil
 }
 
@@ -1367,6 +1391,7 @@ func (r AuthRequest) Hello() Hello {
 		RelayBlindKeyRecords:   append([]relayblind.KeyRecord(nil), r.RelayBlindKeyRecords...),
 		PrivacyKeyRecords:      append([]relayblind.PrivacyKeyRecord(nil), r.PrivacyKeyRecords...),
 		PrivacyEnrollment:      r.PrivacyEnrollment,
+		WarmModels:             append([]pool.WarmModel(nil), r.WarmModels...),
 	}
 }
 
@@ -2080,6 +2105,19 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	}
 	if field, err := parsePrivacyEnrollment(raw, &hb.PrivacyEnrollment); err != nil {
 		return Heartbeat{}, presence, field, err
+	}
+	// supported_models lives on the session, so handleHeartbeat checks the
+	// entries against it (validateWarmModelsSupported).
+	hb.WarmModels, err = parseWarmModels(raw, warmModelsTopLevel{
+		ramGB:          hb.RAMGB,
+		slotsReported:  true,
+		slotsTotal:     hb.SlotsTotal,
+		slotsFree:      hb.SlotsFree,
+		loadingPresent: presence.Loading,
+		loading:        hb.Loading,
+	})
+	if err != nil {
+		return Heartbeat{}, presence, warmModelsField, err
 	}
 	return hb, presence, "", nil
 }

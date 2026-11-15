@@ -6687,6 +6687,18 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		}
 		return
 	}
+	if hb.WarmModels != nil {
+		// SPEC-002-R011: a warm set outside the session's supported_models is
+		// a malformed heartbeat and changes nothing.
+		var supported []string
+		if current, ok := s.pool.Resolve(providerID, assignedID); ok {
+			supported = current.SupportedModels
+		}
+		if err := validateWarmModelsSupported(hb.WarmModels, supported, hb.ModelID); err != nil {
+			s.log.Warn().Err(err).Str("field", warmModelsField).Str("provider_id", providerID).Msg("invalid heartbeat")
+			return
+		}
+	}
 	state := pool.State(hb.Status)
 	if !validState(state) {
 		s.log.Warn().Str("state", hb.Status).Str("provider_id", providerID).Msg("invalid heartbeat state")
