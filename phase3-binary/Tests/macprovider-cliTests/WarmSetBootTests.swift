@@ -370,14 +370,20 @@ final class WarmSetBootTests: XCTestCase {
 
     func testCommandBufferBudgetRule() {
         typealias Rules = SharedModelMemoryRules
-        // A family that keeps MLX's default beside one that set 64 GiB buffers.
-        XCTAssertTrue(Rules.commandBufferBudgetConflicts(
-            family: "llama", wantedMB: nil, effective: ("glm5_next", 65_536), operatorMB: nil))
+        // A family with no requirement runs under whatever budget the
+        // process has: beside one that set 64 GiB buffers, or the default.
+        XCTAssertFalse(Rules.commandBufferBudgetConflicts(
+            family: "qwen", wantedMB: nil, effective: ("glm5_next", 65_536), operatorMB: nil))
+        XCTAssertFalse(Rules.commandBufferBudgetConflicts(
+            family: "llama", wantedMB: nil, effective: ("deepseek_v4", 65_536), operatorMB: nil))
         // The device kept the default; a family that needs a budget cannot get it.
         XCTAssertTrue(Rules.commandBufferBudgetConflicts(
             family: "glm5_next", wantedMB: 65_536, effective: (nil, nil), operatorMB: nil))
         XCTAssertTrue(Rules.commandBufferBudgetConflicts(
             family: "glm5_next", wantedMB: 65_536, effective: nil, operatorMB: nil))
+        // Two explicit, different values.
+        XCTAssertTrue(Rules.commandBufferBudgetConflicts(
+            family: "glm5_next", wantedMB: 65_536, effective: ("other", 16_384), operatorMB: nil))
         // Same value, or the family that set it, or the operator's value: no conflict.
         XCTAssertFalse(Rules.commandBufferBudgetConflicts(
             family: "deepseek_v4", wantedMB: 65_536, effective: ("glm5_next", 65_536), operatorMB: nil))
@@ -393,28 +399,48 @@ final class WarmSetBootTests: XCTestCase {
 
     func testCommandBufferBudgetConflictIsRefusedBeforeAnyEviction() async throws {
         let h = Harness(
-            limitBytes: 60 * gib + 4 * margin, sizes: ["A": 15 * gib, "L": 15 * gib, "D": 5 * gib],
-            supported: ["P", "A", "L", "D"])
-        h.budget.recordCommandBufferBudget(modelFamily: "glm5_next", megabytes: 65_536)
-        h.families = ["L": "llama", "D": "deepseek_v4"]
+            limitBytes: 60 * gib + 4 * margin, sizes: ["A": 15 * gib, "G": 15 * gib, "D": 5 * gib],
+            supported: ["P", "A", "G", "D"])
+        // Nothing recorded: the device kept MLX's default.
+        h.families = ["G": "glm5_next", "D": "llama"]
         try await h.adoptPrimary("P", bytes: 40 * gib)
         _ = await h.boot.load("A")
-        let outcome = await h.boot.load("L")
-        XCTAssertEqual(outcome.code, "unsupported_model")
+        let outcome = await h.boot.load("G")
+        XCTAssertEqual(outcome.code, "command_buffer_budget_conflict")
         XCTAssertTrue(outcome.detail?.contains("command_buffer_budget_conflict") == true, "\(outcome)")
-        XCTAssertTrue(outcome.detail?.contains("family=llama") == true, "\(outcome)")
+        XCTAssertTrue(outcome.detail?.contains("family=glm5_next") == true, "\(outcome)")
+        XCTAssertTrue(h.log.contains(
+            "event=warm_model_load action=refused model=G outcome=command_buffer_budget_conflict pinned=false source=request"))
         XCTAssertEqual(h.state, ["P:warm", "A:warm"], "the idle unpinned member was not evicted for a refused load")
         XCTAssertEqual(h.calls, ["A"])
+        let checked = await h.boot.check("G", limits: nil)
+        XCTAssertEqual(checked.status, outcome.code, "check answers what load answered")
+        XCTAssertEqual(checked.detail, outcome.detail)
         do {
             _ = try await h.loader.load(
-                WarmModelLoadSpec(modelID: "L", estimatedResidentBytes: gib, minimumRowKVBytes: 0, modelFamily: "llama"),
+                WarmModelLoadSpec(modelID: "G", estimatedResidentBytes: gib, minimumRowKVBytes: 0, modelFamily: "glm5_next"),
                 pinned: false)
             XCTFail("conflicting family loaded")
         } catch {
             XCTAssertEqual((error as? WarmModelLoaderError)?.reason, "command_buffer_budget_conflict")
         }
-        let sameBudget = await h.boot.load("D")
-        XCTAssertEqual(sameBudget, .loaded, "a family with the same budget loads")
+        let noRequirement = await h.boot.load("D")
+        XCTAssertEqual(noRequirement, .loaded, "a family with no requirement loads under the process's budget")
+    }
+
+    /// The lab's pair: a glm5_next primary set 64 GiB buffers; a family with
+    /// no requirement loads beside it, and `check` agrees.
+    func testDefaultRequirementMemberLoadsUnderAnExplicitPrimaryBudget() async throws {
+        let h = Harness(limitBytes: 60 * gib + 4 * margin, sizes: ["Q": 15 * gib], supported: ["P", "Q"])
+        h.budget.recordCommandBufferBudget(modelFamily: "glm5_next", megabytes: 65_536)
+        h.families = ["Q": "qwen"]
+        try await h.adoptPrimary("P", bytes: 40 * gib)
+        let checked = await h.boot.check("Q", limits: nil)
+        XCTAssertEqual(checked.status, "fits")
+        let outcomes = await h.boot.bootLoad(["Q"])
+        XCTAssertEqual(outcomes, [.loaded])
+        XCTAssertEqual(h.state, ["P:warm", "Q:warm"])
+        XCTAssertTrue(h.log.contains("event=warm_model_load action=loaded model=Q outcome=loaded pinned=true source=boot"))
     }
 
     // MARK: Shutdown

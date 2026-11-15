@@ -101,17 +101,25 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
         // wants what the primary's family set.
         XCTAssertEqual(AutotuneWarmSetPlan.compute(inputs(ramGiB: 512, workingSetGiB: 400, memberFamily: "deepseek_v4", operatorMB: 1_024)).decision, .fits)
         XCTAssertEqual(AutotuneWarmSetPlan.compute(inputs(ramGiB: 512, workingSetGiB: 400, primaryFamily: "glm5_next", memberFamily: "deepseek_v4")).decision, .fits)
-        XCTAssertEqual(AutotuneWarmSetPlan.compute(inputs(ramGiB: 512, workingSetGiB: 400, primaryFamily: "glm5_next", memberFamily: "llama")).reason,
-                       "command_buffer_budget_conflict")
+        // A family with no requirement runs under the primary's budget (the
+        // lab's glm5_next + qwen pair).
+        XCTAssertEqual(AutotuneWarmSetPlan.compute(inputs(ramGiB: 512, workingSetGiB: 400, primaryFamily: "glm5_next", memberFamily: "qwen")).decision,
+                       .fits)
+        XCTAssertFalse(conflict.summary(memberModelID: "second/model").contains("GPU buffer setting than the loaded model"))
+        XCTAssertTrue(conflict.summary(memberModelID: "second/model").contains("MLX_MAX_MB_PER_BUFFER"))
         // The same answers as the budget a running provider holds.
-        for (primary, member) in [("qwen3", "deepseek_v4"), ("glm5_next", "deepseek_v4"), ("glm5_next", "llama"), ("qwen3", "llama")] {
+        let expected: [(String, String, Bool)] = [
+            ("qwen3", "deepseek_v4", true), ("glm5_next", "deepseek_v4", false), ("glm5_next", "llama", false),
+            ("glm5_next", "qwen", false), ("qwen3", "llama", false),
+        ]
+        for (primary, member, conflicts) in expected {
             let budget = SharedModelMemoryBudget()
             if let mb = ModelRuntime.commandBufferBudgetMBByFamily[primary] {
                 budget.recordCommandBufferBudget(modelFamily: primary, megabytes: mb)
             }
-            XCTAssertEqual(
-                AutotuneWarmSetPlan.commandBufferBudgetConflicts(family: member, primaryFamily: primary, operatorMB: nil),
-                budget.commandBufferBudgetConflict(modelFamily: member) != nil, "\(primary) + \(member)")
+            let planned = AutotuneWarmSetPlan.commandBufferBudgetConflicts(family: member, primaryFamily: primary, operatorMB: nil)
+            XCTAssertEqual(planned, conflicts, "\(primary) + \(member)")
+            XCTAssertEqual(planned, budget.commandBufferBudgetConflict(modelFamily: member) != nil, "\(primary) + \(member)")
         }
     }
 

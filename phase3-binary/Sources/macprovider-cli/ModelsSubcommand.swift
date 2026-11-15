@@ -1756,8 +1756,11 @@ struct ModelsWarmCommand: AsyncParsableCommand {
             switch reply.detail {
             case "not_in_supported_models"?: return "The running provider would not load \(modelID): it is not in supported_models."
             case "model_unavailable"?: return "The running provider would not load \(modelID): it is not available on this Mac."
-            default: return "The running provider would not load \(modelID): it needs a different GPU buffer setting than the loaded models."
+            default: return "The running provider would not load \(modelID): it is not a model this provider can serve\(reply.detail.map { " (\($0))" } ?? "")."
             }
+        case "command_buffer_budget_conflict":
+            return "The running provider would not load \(modelID): its model family requires a GPU command-buffer setting (MLX_MAX_MB_PER_BUFFER) other than the one the provider started with."
+
         default:
             return "The running provider would not load \(modelID) now: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")."
         }

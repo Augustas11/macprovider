@@ -328,14 +328,17 @@ enum SharedModelMemoryRules {
     }
 
     /// MLX reads `MLX_MAX_MB_PER_BUFFER` once, when it creates its Metal
-    /// device. A family that wants another value than the device has would
-    /// run with the wrong budget, so it may not load beside the members
-    /// already there. `effective` is the recorded budget and its owner (nil
-    /// before any member registered); an operator-set value
-    /// (`operatorMB`) is the operator's choice and never conflicts.
+    /// device. A family that explicitly requires a value (`wantedMB`) the
+    /// device does not have would run with the wrong budget, so it may not
+    /// load beside the members already there. A family with no requirement
+    /// (`wantedMB` nil) runs under whatever budget the process has. `effective`
+    /// is the recorded budget and its owner (nil before any member
+    /// registered); an operator-set value (`operatorMB`) is the operator's
+    /// choice and never conflicts.
     static func commandBufferBudgetConflicts(
         family: String, wantedMB: Int?, effective: (family: String?, megabytes: Int?)?, operatorMB: Int?
     ) -> Bool {
+        guard let wantedMB else { return false }
         let owner = effective.map { $0.family } ?? (operatorMB == nil ? nil : "environment")
         let current = effective.map { $0.megabytes } ?? operatorMB
         return owner != "environment" && owner != family && wantedMB != current
@@ -709,8 +712,8 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
         lock.lock()
         if commandBufferBudget == nil { commandBufferBudget = (configured == nil ? nil : "environment", configured.flatMap(Int.init)) }
         let (owner, current) = commandBufferBudget!
-        // An operator-set value is the operator's choice, not a conflict.
-        let conflict = owner != "environment" && owner != modelFamily && wanted != current
+        let conflict = SharedModelMemoryRules.commandBufferBudgetConflicts(
+            family: modelFamily, wantedMB: wanted, effective: (owner, current), operatorMB: nil)
         let line = "event=mlx_max_mb_per_buffer_conflict family=\(modelFamily) wanted_mb=\(wanted.map(String.init) ?? "default") effective_mb=\(current.map(String.init) ?? "default") set_by=\(owner ?? "default")"
         if conflict { commandBufferConflicts.append(line) }
         lock.unlock()

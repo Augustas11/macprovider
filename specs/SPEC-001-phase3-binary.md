@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.62 (2026-11-16, warm-set check post-eviction decision and control-status primary)
+**Version:** 1.9.63 (2026-11-16, warm-set command-buffer rule and its reply code)
+
+**Change log v1.9.63 (2026-11-16, Related: #2338):** §6.16 R017: a model
+family with no explicit command-buffer requirement runs under whatever
+`MLX_MAX_MB_PER_BUFFER` the process's Metal device was created with and
+never conflicts; a conflict exists only when the family explicitly requires
+a value and the process's effective value differs (an operator-set value
+still never conflicts). The loader's decision, `warm_set` `check` and the
+*Fit plan* apply the same rule. A conflict is reported under its own code,
+`command_buffer_budget_conflict`, in the `warm_model_load` event, the
+control-socket reply and `models warm`, no longer as `unsupported_model`. No
+trust tier or attestation label changes.
 
 **Change log v1.9.62 (2026-11-16, Related: #2338):** §6.16 R017: a
 `warm_set` `check` that plans an eviction also makes the decision `load`
@@ -5652,7 +5663,13 @@ every member, and the runtime's existing reserve. Process-global MLX state
 (the buffer cache limit, cache clears, the wired limit, settings read once at
 Metal device creation, and the model liveness tracker) has one owner per
 process; a runtime MUST NOT set or reset it for itself, and a cache clear by
-one runtime MUST NOT free memory another runtime's rows hold. The model
+one runtime MUST NOT free memory another runtime's rows hold. The MLX
+command-buffer budget (`MLX_MAX_MB_PER_BUFFER`) is read once, at Metal device
+creation: a member whose model family has no explicit requirement runs under
+whatever value the process has; a member whose family explicitly requires a
+value MUST NOT load when the process's effective value differs (the device
+kept MLX's default, or another family set another value), unless the
+operator set the value, which never conflicts. The model
 liveness tracker (SPEC-025 §5.2) is fed by buyer inference on any member; it
 does not track a warm-set load, so a member's load neither counts as
 inference nor as a stall.
@@ -5737,9 +5754,10 @@ request and one reply per warm-set action:
   `evict`, the idle unpinned members the load would evict.
 
 `status` is `ok` for `status`. A `load` answers `loaded`, `already_warm`,
-`insufficient_memory`, `unsupported_model` (not in `supported_models`, not on
-this Mac, or a model family that cannot run beside the loaded members) or
-`load_failed`. An `unload` answers `unloaded`, `not_loaded`, `primary` (the
+`insufficient_memory`, `unsupported_model` (not in `supported_models` or not on
+this Mac), `command_buffer_budget_conflict` (the model's family requires a
+command-buffer budget other than the process's, above) or `load_failed`; the
+`warm_model_load` log event's `outcome` carries the same code. An `unload` answers `unloaded`, `not_loaded`, `primary` (the
 primary is never unloaded), `busy` (a request holds the member) or `failed`.
 A missing `model_id` or an unknown action answers `invalid_request` (detail
 `model_id_required` or `unknown_action`), and a `load` whose `context_tokens`
@@ -5759,7 +5777,7 @@ and answers `fits_after_eviction` only when that decision fits without a
 further eviction; otherwise it answers `insufficient_memory` and its `check`
 object carries that second decision. It answers `fits`, `fits_after_eviction`, or
 what a `load` would answer instead (`already_warm`, `insufficient_memory`,
-`unsupported_model`, or `load_failed` with detail `member_loading` or
+`unsupported_model`, `command_buffer_budget_conflict`, or `load_failed` with detail `member_loading` or
 `member_evicting` for a member in transition), with the same `detail`. A
 load run later decides again and can differ when the warm set or memory
 changed in between.

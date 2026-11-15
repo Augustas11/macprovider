@@ -94,7 +94,8 @@ public struct WarmSetCheckReport: Codable, Equatable, Sendable {
 
 /// The reply to every `warm_set_request`. `status` is `ok` for `status`, the
 /// load outcome (`loaded`, `already_warm`, `insufficient_memory`,
-/// `unsupported_model`, `load_failed`), the check outcome (`fits`,
+/// `unsupported_model`, `command_buffer_budget_conflict`, `load_failed`),
+/// the check outcome (`fits`,
 /// `fits_after_eviction`, or the load outcome a load would get), the
 /// unload outcome (`unloaded`, `not_loaded`, `primary`, `busy`, `failed`),
 /// `invalid_request`, or `unavailable` when the process has no warm set.

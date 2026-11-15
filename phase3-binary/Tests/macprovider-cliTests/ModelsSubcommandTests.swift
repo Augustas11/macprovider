@@ -2857,6 +2857,33 @@ extension ModelsSubcommandTests {
         XCTAssertEqual(try String(contentsOf: configURL), original)
     }
 
+    /// A command-buffer budget conflict is reported under its own code, in
+    /// the reply line, the refusal and the check summary, and never saved.
+    func testModelsWarmLoadReportsACommandBufferBudgetConflictUnderItsOwnCode() async throws {
+        let original = "model: main/model\nsupported_models: [main/model, org/second]\n"
+        let configURL = try makeWarmConfig(original)
+        let socketPath = try makeSocketPath()
+        let detail = "command_buffer_budget_conflict model=org/second family=glm5_next wanted_mb=65536 effective_mb=default"
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "main/model"),
+            warmSet: ScriptedWarmSet(load: .commandBufferBudgetConflict(detail: detail)))
+        try await server.start()
+        let command = try ModelsWarmCommand.parse([
+            "load", "org/second", "--save", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stdout.contains("\"status\":\"command_buffer_budget_conflict\""), capture.stdout)
+        XCTAssertTrue(capture.stderr.contains("load refused: command_buffer_budget_conflict"), capture.stderr)
+        XCTAssertEqual(try String(contentsOf: configURL), original)
+        let summary = ModelsWarmCommand.runtimeCheckSummary(
+            WarmSetControlReply(action: "check", status: "command_buffer_budget_conflict", modelID: "org/second", detail: detail, entries: []),
+            modelID: "org/second")
+        XCTAssertTrue(summary.contains("MLX_MAX_MB_PER_BUFFER"), summary)
+    }
+
     /// With serve not running, --save is the whole change; unload --save
     /// takes the model back out.
     func testModelsWarmSaveWithoutServeWritesConfigAndUnloadRemovesIt() async throws {

@@ -234,7 +234,8 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
     }
 
     /// The check a load runs before anything else, against the budget the
-    /// device recorded when the primary loaded: the operator's
+    /// device recorded when the primary loaded (a family with no explicit
+    /// requirement never conflicts): the operator's
     /// `MLX_MAX_MB_PER_BUFFER`, else the value the primary's family set
     /// (`ModelRuntime.applyMLXCommandBufferBudget`), else MLX's default with
     /// no owning family.
@@ -321,7 +322,7 @@ extension AutotuneWarmSetPlan {
             let why: String
             switch reason {
             case "insufficient_memory": why = "there is not enough memory"
-            case "command_buffer_budget_conflict": why = "it needs a different GPU buffer setting than the loaded model"
+            case "command_buffer_budget_conflict": why = "its model family requires a GPU command-buffer setting (MLX_MAX_MB_PER_BUFFER) other than the one the main model's process starts with"
             case "not_on_this_mac": why = "it is not downloaded on this Mac"
             case "not_in_signed_catalog": why = "it is not a verified catalog model"
             case "same_model": why = "it is the main model"

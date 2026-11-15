@@ -58,9 +58,11 @@ enum WarmSetLoadOutcome: Sendable, Equatable {
     case loaded
     case alreadyWarm
     case insufficientMemory(detail: String)
-    /// Not in `supported_models`, not present on this Mac, or a family that
-    /// cannot run beside the loaded members.
+    /// Not in `supported_models`, or not present on this Mac.
     case unsupportedModel(detail: String)
+    /// The model's family requires an `MLX_MAX_MB_PER_BUFFER` value other
+    /// than the one the process's Metal device was created with.
+    case commandBufferBudgetConflict(detail: String)
     case loadFailed(detail: String)
 
     var code: String {
@@ -69,6 +71,7 @@ enum WarmSetLoadOutcome: Sendable, Equatable {
         case .alreadyWarm: return "already_warm"
         case .insufficientMemory: return "insufficient_memory"
         case .unsupportedModel: return "unsupported_model"
+        case .commandBufferBudgetConflict: return "command_buffer_budget_conflict"
         case .loadFailed: return "load_failed"
         }
     }
@@ -76,7 +79,8 @@ enum WarmSetLoadOutcome: Sendable, Equatable {
     var detail: String? {
         switch self {
         case .loaded, .alreadyWarm: return nil
-        case let .insufficientMemory(detail), let .unsupportedModel(detail), let .loadFailed(detail): return detail
+        case let .insufficientMemory(detail), let .unsupportedModel(detail),
+             let .commandBufferBudgetConflict(detail), let .loadFailed(detail): return detail
         }
     }
 }
@@ -119,7 +123,8 @@ protocol WarmSetControl: AnyObject, Sendable {
 
 /// The reply to `warm_set check`. `status` is `fits`, `fits_after_eviction`,
 /// or what `load` would answer instead (`insufficient_memory`,
-/// `unsupported_model`, `already_warm`, `load_failed`), with the same
+/// `unsupported_model`, `command_buffer_budget_conflict`, `already_warm`,
+/// `load_failed`), with the same
 /// `detail`; `report` is the budget's decision when it was reached.
 struct WarmSetCheckOutcome: Sendable, Equatable {
     let status: String
@@ -303,7 +308,8 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
             return WarmSetCheckOutcome(status: "insufficient_memory", detail: error.description, report: report)
         case let .commandBufferBudgetConflict(detail):
             let error = WarmModelLoaderError.commandBufferBudgetConflict(modelID: modelID, detail: detail)
-            return WarmSetCheckOutcome(status: "unsupported_model", detail: error.description, report: nil)
+            return WarmSetCheckOutcome(
+                status: WarmSetLoadOutcome.commandBufferBudgetConflict(detail: "").code, detail: error.description, report: nil)
         case .alreadyLoaded:
             return WarmSetCheckOutcome(status: WarmSetLoadOutcome.alreadyWarm.code, detail: nil, report: nil)
         case .stopping:
@@ -440,7 +446,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         } catch let error as WarmModelLoaderError {
             switch error {
             case .insufficientMemory: return .insufficientMemory(detail: error.description)
-            case .commandBufferBudgetConflict: return .unsupportedModel(detail: error.description)
+            case .commandBufferBudgetConflict: return .commandBufferBudgetConflict(detail: error.description)
             case .stopped: return .loadFailed(detail: error.reason)
             }
         } catch WarmModelTableError.duplicate {
