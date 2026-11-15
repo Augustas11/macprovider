@@ -5747,7 +5747,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-038 v0.3.55 stock order same-order reference rule, cohort throughput passes and one-order run requirement (FR-CB10 exactness probe item 3): unit tests only; not yet run on hardware, no evidence recorded."
+        "rationale": "SPEC-038 v0.3.56 stock order same-order reference rule, cohort throughput passes and one-order run requirement (FR-CB10 exactness probe item 3): unit tests only; not yet run on hardware, no evidence recorded."
       }
     },
     {

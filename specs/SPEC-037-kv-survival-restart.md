@@ -8,9 +8,9 @@ Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + advers
 
 ## Amendment v0.2.7 — stock order small-row route in the decode-path class
 
-Related: (issue to be filed).
+Related: #2389.
 
-SPEC-038 FR-CB9 v0.3.55 adds a third small-row route, `stock_order`. A
+SPEC-038 FR-CB9 v0.3.56 adds a third small-row route, `stock_order`. A
 `serve` process on it writes and expects `decode_path =
 ordinary+stock_order_small_m`. It does not share `ordinary+serial_small_m`:
 a lone stock order row runs the same one-row kernel as the serial-only

@@ -6,7 +6,7 @@ Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.56 (2026-11-15, stock order small-row route, Related: (issue to be filed)):**
+**Change log v0.3.56 (2026-11-15, stock order small-row route, Related: #2389):**
 FR-CB9 adds a third MLX small-row route, `stock_order`
 (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`): one row takes upstream's one-row
 kernel, a forward of exactly two rows an exact kernel whose rows equal the
@@ -26,7 +26,8 @@ row decoded each token beside its whole cohort (each row then keeps one
 forward and one kernel order); a run that may mix orders is a shape not met,
 never a divergence. The gain keeps its end-to-end definition but no longer
 credits prefill overlapping decode at those widths. SPEC-037 v0.2.7 gives the route its own
-disk decode-path class. Not yet run on hardware in the provider.
+disk decode-path class. Run in the provider on an M3 Ultra with one request
+over HTTP only; no batched forward has run on this route in a provider yet.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
 again. An aged long prompt therefore leads one turn and then yields to the
@@ -1898,8 +1899,10 @@ benchmark (`scripts/lab/parity-grid/qmm_layers_bench.py`, every quantized
 linear of a 4-bit model chained once per pass) on an M3 Ultra measured one
 row at 8.76 ms per pass on `stock_order` against 9.96 ms on `row_invariant`
 for Llama 3.1 8B, and 26.45 ms against 30.38 ms for a 27B model; from three
-rows both routes run the same kernel. The provider has not yet been run on
-this route on hardware.
+rows both routes run the same kernel. In the provider, one request over HTTP
+on that Mac measured 0.94-0.97 of stock mlx-lm on Llama 3.1 8B and 1.00-1.02
+on a 27B model on this route; no batched forward has run on it in a provider
+yet.
 
 The MLX core reads the variable once with C `atoi` semantics: unset, or a
 value that parses to neither 0 nor 2, keeps the invariant route; any value
@@ -2063,7 +2066,7 @@ buyer traffic. No extra runtime enable flag is introduced.
    first over the time from that first token to its last, summed over the
    prompts; the batch runs as a cohort, held until every row has prefilled,
    and its rate is the cohort's decode tokens over the common wall-clock
-   span in which every row decoded together. (v0.3.55) On the FR-CB9
+   span in which every row decoded together. (v0.3.56) On the FR-CB9
    `stock_order` route, from three rows, the batch also runs as a cohort
    (exactness probe item 3). The batch rate keeps its definition (every
    generated token over the time from submission to the last row's end),
