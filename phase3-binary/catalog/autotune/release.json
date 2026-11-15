@@ -37,10 +37,10 @@
       "version": "9db150e732d7474e5a7b91879a5c9abeff4b17142c07e994f177b611035b7e53"
     },
     "tier2-catalog.json": {
-      "bytes": 11675,
-      "sha256": "c426d021e82d04d7291e71e15c47fc835c27871974fd003a73c9aa906db52f78",
+      "bytes": 11166,
+      "sha256": "e83dfe323700b375f4a3db997549ac02a71c7e1eda6498cbfad95908302813c7",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-11-15-nemotron-3.5-bolt-v1"
+      "version": "macprovider-tier2-model-catalog-2026-11-12-nemotron-3.5-lightning-v1"
     }
   },
   "generated_at": "2026-11-15T03:40:00Z",
