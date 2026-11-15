@@ -8794,6 +8794,699 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(hello["catalog_release_id"] as? String, "release-a")
     }
 
+    // MARK: - Native-MTP admission delivered by a catalog release
+
+    /// The static-feed origin serving one release's signed admission set,
+    /// counting every member request.
+    private final class NativeMTPAdmissionOriginStub: @unchecked Sendable {
+        static let keyID = "streamvc-autotune-static-test"
+        static let baseURL = URL(string: "https://feed.example.test")!
+        let key = Curve25519.Signing.PrivateKey()
+        private let members: [String: Data]
+        private let lock = NSLock()
+        private var requests = 0
+
+        init(releaseID: String, modelID: String, artifactSHA256: String) throws {
+            let sidecar = Data(
+                #"{"entries":[{"artifact_hash":"\#(artifactSHA256)","model_key":"\#(modelID)"}],"release_id":"\#(releaseID)","signer_key_id":"\#(Self.keyID)"}"#.utf8
+            )
+            let signature = try JSONSerialization.data(withJSONObject: [
+                "alg": "ed25519",
+                "key_id": Self.keyID,
+                "signature": try key.signature(for: sidecar).base64EncodedString(),
+            ])
+            members = [
+                "native-mtp-admission": sidecar,
+                "native-mtp-admission.sig": signature,
+                "native-mtp-artifact-manifest": Data(#"{"manifest":1}"#.utf8),
+                "native-mtp-selftest-bank": Data(#"{"bank":1}"#.utf8),
+                "native-mtp-selftest-bank.sig": Data(#"{"alg":"ed25519"}"#.utf8),
+            ]
+        }
+
+        var trustedPublicKeys: [String: String] {
+            [Self.keyID: key.publicKey.rawRepresentation.base64EncodedString()]
+        }
+
+        var keyring: NativeMTPAdmissionSidecar.TrustedKeyring {
+            NativeMTPAdmissionSidecar.TrustedKeyring(publicKeysByKeyID: trustedPublicKeys, requiredKeyID: Self.keyID)
+        }
+
+        var fetcher: NativeMTPAdmissionFeed.Fetcher {
+            { url, _ in
+                self.lock.lock()
+                self.requests += 1
+                self.lock.unlock()
+                guard let body = self.members[url.lastPathComponent] else {
+                    return NativeMTPAdmissionFeed.FetchResponse(statusCode: 404, body: Data())
+                }
+                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: body)
+            }
+        }
+
+        var requestCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return requests
+        }
+    }
+
+    /// Records what a pickup asked of its hooks and controls their answers.
+    private final class NativeMTPAdmissionPickupProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _checks: [String] = []
+        private var _sleeps: [Double] = []
+        private var _exits = 0
+        private var _claimed: Set<String> = []
+        private var sleepGate: AsyncStream<Void>.Continuation?
+        private var sleepReleased = false
+        var activatable: @Sendable (CoordinatorClient.CatalogEnvelope) async -> NativeMTPAdmissionPickup.Check = { _ in .activatable }
+        var supervised = true
+        var unit = 0.5
+        var holdSleep = false
+        var retryStartupRelease = false
+        var maxWaitSeconds = NativeMTPAdmissionPickup.maxWaitSeconds
+        var store: NativeMTPAdmissionPickupStore?
+
+        private func locked<T>(_ body: () -> T) -> T {
+            lock.lock()
+            defer { lock.unlock() }
+            return body()
+        }
+
+        var checks: [String] { locked { _checks } }
+        var sleeps: [Double] { locked { _sleeps } }
+        var exits: Int { locked { _exits } }
+        var claimed: Set<String> { locked { _claimed } }
+
+        func releaseSleep() {
+            let gate: AsyncStream<Void>.Continuation? = locked {
+                sleepReleased = true
+                return sleepGate
+            }
+            gate?.finish()
+        }
+
+        var hooks: NativeMTPAdmissionPickup.Hooks {
+            var hooks = makeHooks()
+            hooks.retryStartupRelease = retryStartupRelease
+            hooks.maxWaitSeconds = maxWaitSeconds
+            return hooks
+        }
+
+        private func makeHooks() -> NativeMTPAdmissionPickup.Hooks {
+            NativeMTPAdmissionPickup.Hooks(
+                newlyActivatable: { envelope in
+                    self.locked { self._checks.append(envelope.releaseID) }
+                    return await self.activatable(envelope)
+                },
+                claim: { releaseID in
+                    if let store = self.store { return store.claim(releaseID) }
+                    return self.locked { self._claimed.insert(releaseID).inserted }
+                },
+                supervised: { self.supervised },
+                randomUnit: { self.unit },
+                sleep: { seconds in
+                    self.locked { self._sleeps.append(seconds) }
+                    guard self.holdSleep else { return }
+                    let gate = AsyncStream<Void> { continuation in
+                        let released: Bool = self.locked {
+                            self.sleepGate = continuation
+                            return self.sleepReleased
+                        }
+                        if released { continuation.finish() }
+                    }
+                    for await _ in gate {}
+                },
+                requestExit: { self.locked { self._exits += 1 } }
+            )
+        }
+    }
+
+    private func makeAdmissionPickupClient(
+        probe: NativeMTPAdmissionPickupProbe,
+        status: ProviderStatus,
+        recorder: CoordinatorFrameRecorder,
+        refreshed: @escaping @Sendable () async -> CoordinatorClient.CatalogEnvelope? = { CoordinatorClientTests.refreshedCatalogEnvelope() },
+        hooks: NativeMTPAdmissionPickup.Hooks? = nil,
+        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds
+    ) async throws -> CoordinatorClient {
+        try await makeClient(
+            status: status,
+            recorder: recorder,
+            drainTimeoutSeconds: 1,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "model-hash",
+            catalogEnvelopeRefresher: refreshed,
+            catalogEnvelopeRefreshMinimumInterval: 0,
+            nativeMTPAdmissionPickup: hooks ?? probe.hooks,
+            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds
+        )
+    }
+
+    private static func admissionPickupStatus() -> ProviderStatus {
+        ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+    }
+
+    /// One coordinator session accept that reports a newer catalog document,
+    /// which is what makes a running provider refresh its catalog.
+    private static func acceptSessionOnNewerCatalog(_ client: CoordinatorClient) async throws {
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "catalog_release_id": "release-b",
+            "catalog_candidate_sha256": String(repeating: "f", count: 64),
+        ])
+    }
+
+    private static func isDraining(_ frames: [[String: Any]]) -> Bool {
+        frames.contains {
+            $0["type"] as? String == "state_update" && $0["state"] as? String == "draining"
+                && $0["reason"] as? String == NativeMTPAdmissionPickup.drainReason
+        }
+    }
+
+    /// SPEC-048-R013: release-b newly admits native MTP for the loaded model
+    /// and reaches a running provider through the catalog refresh. The
+    /// provider fetches that release's admission set without touching the set
+    /// it runs on, drains and exits for a restart, and the next start admits
+    /// the model. (Before the pickup existed this test asserted the opposite:
+    /// no fetch, no drain, admission only at an unrelated next start.)
+    func testCatalogReleaseAdmittingNativeMTPRestartsRunningProviderIntoAdmission() async throws {
+        let modelSHA256 = String(repeating: "d", count: 64)
+        let origin = try NativeMTPAdmissionOriginStub(releaseID: "release-b", modelID: "model-a", artifactSHA256: modelSHA256)
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-admission-pickup-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
+        let admissionRoot = scratch.appendingPathComponent("admission", isDirectory: true)
+        let probeRoot = scratch.appendingPathComponent("probe", isDirectory: true)
+        @Sendable func admission(root: URL, release: String) -> SmallMRoute.NativeMTPAdmission {
+            SmallMRoute.nativeMTPAdmission(
+                sidecarURL: NativeMTPAdmissionFeed.releaseDirectory(root: root, releaseID: release)
+                    .appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName),
+                modelID: "model-a",
+                modelRevision: modelSHA256,
+                trustedKeyring: origin.keyring
+            )
+        }
+        // This process started on release-a, whose set (still on disk for the
+        // running process) admitted nothing for the model.
+        let runningSet = NativeMTPAdmissionFeed.releaseDirectory(root: admissionRoot, releaseID: "release-a")
+        try FileManager.default.createDirectory(at: runningSet, withIntermediateDirectories: true)
+        XCTAssertEqual(admission(root: admissionRoot, release: "release-a"), .none)
+
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.activatable = { envelope in
+            guard let fetched = try? await NativeMTPAdmissionFeed.fetchAndMaterialize(
+                releaseID: envelope.releaseID,
+                signerKeyID: NativeMTPAdmissionOriginStub.keyID,
+                trustedPublicKeys: origin.trustedPublicKeys,
+                fetcher: origin.fetcher,
+                baseURL: NativeMTPAdmissionOriginStub.baseURL,
+                root: probeRoot
+            ) else { return .unavailable }
+            return SmallMRoute.nativeMTPAdmission(
+                sidecarURL: fetched, modelID: "model-a", modelRevision: modelSHA256, trustedKeyring: origin.keyring
+            ) == .entryForModel ? .activatable : .notActivatable
+        }
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.exits == 1 }
+
+        // The running provider fetched release-b's set (five members) ...
+        XCTAssertEqual(probe.checks, ["release-b"])
+        XCTAssertEqual(origin.requestCount, 5)
+        // ... into the probe root, leaving the set it runs on in place ...
+        XCTAssertTrue(FileManager.default.fileExists(atPath: runningSet.path))
+        XCTAssertEqual(admission(root: admissionRoot, release: "release-b"), .none)
+        // ... waited its delay, refused new work, and asked for the restart.
+        XCTAssertEqual(probe.sleeps, [NativeMTPAdmissionPickup.jitterSeconds(unit: 0.5)])
+        let frames = await recorder.frames
+        XCTAssertTrue(Self.isDraining(frames))
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .waitingForIdle)
+        XCTAssertEqual(probe.claimed, ["release-b"])
+
+        // The simulated restart: the next start fetches release-b's set into
+        // the root the loader reads, finds the entry, and takes the route on
+        // which the drafter loads with the model.
+        let fetched = try await NativeMTPAdmissionFeed.fetchAndMaterialize(
+            releaseID: "release-b",
+            signerKeyID: NativeMTPAdmissionOriginStub.keyID,
+            trustedPublicKeys: origin.trustedPublicKeys,
+            fetcher: origin.fetcher,
+            baseURL: NativeMTPAdmissionOriginStub.baseURL,
+            root: admissionRoot
+        )
+        XCTAssertEqual(fetched.deletingLastPathComponent(), NativeMTPAdmissionFeed.releaseDirectory(root: admissionRoot, releaseID: "release-b"))
+        XCTAssertEqual(admission(root: admissionRoot, release: "release-b"), .entryForModel)
+        let nextStart = SmallMRoute.decide(SmallMRoute.Inputs(
+            continuousBatching: .off,
+            continuousBatchingExplicitlyConfigured: true,
+            nativeMTPMode: .auto,
+            nativeMTPAdmission: admission(root: admissionRoot, release: "release-b"),
+            draftConfigured: false,
+            shardGroupRole: false,
+            autotuneCandidate: false,
+            otherSwitchTargets: false,
+            selfCheckVerdict: .grantsNoBatching
+        ))
+        XCTAssertEqual(nextStart, SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_entry_for_model"))
+        XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: nextStart.route))
+        // A process that starts on release-b never restarts for release-b.
+        let restarted = NativeMTPAdmissionPickupProbe()
+        let restartedClient = try await makeClient(
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-b",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "model-hash",
+            catalogEnvelopeRefresher: { Self.refreshedCatalogEnvelope() },
+            catalogEnvelopeRefreshMinimumInterval: 0,
+            nativeMTPAdmissionPickup: restarted.hooks
+        )
+        defer { Task { await restartedClient.stop() } }
+        try await Self.acceptSessionOnNewerCatalog(restartedClient)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(restarted.checks, [])
+        XCTAssertEqual(restarted.exits, 0)
+    }
+
+    func testAdmissionPickupChecksAReleaseOnceAndRestartsOnce() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let refreshes = ReconnectAttemptRecorder()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            refreshed: {
+                _ = await refreshes.recordAttempt()
+                return CoordinatorClientTests.refreshedCatalogEnvelope()
+            }
+        )
+        defer { Task { await client.stop() } }
+
+        for round in 1...3 {
+            try await Self.acceptSessionOnNewerCatalog(client)
+            try await Self.waitUntil { await refreshes.currentCount() == round }
+        }
+        try await Self.waitUntil { probe.exits == 1 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(probe.checks, ["release-b"], "one release is checked once, however often it is refreshed")
+        XCTAssertEqual(probe.sleeps.count, 1)
+        XCTAssertEqual(probe.exits, 1)
+    }
+
+    func testAdmissionPickupLeavesAProviderAloneWhenNothingNewIsActivatable() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.activatable = { $0.releaseID == "release-never" ? .activatable : .notActivatable }
+        let release = LockedBox("release-b")
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: status,
+            recorder: recorder,
+            refreshed: { CoordinatorClientTests.refreshedCatalogEnvelope(releaseID: release.get()) }
+        )
+        defer { Task { await client.stop() } }
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.checks == ["release-b"] }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // The same release is not checked again once it has a definite answer.
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(probe.checks, ["release-b"])
+        // A later release is still checked: a refused release does not end the pickup.
+        release.set("release-c")
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.checks == ["release-b", "release-c"] }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // The release this process started on is never checked.
+        release.set("release-a")
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(probe.checks, ["release-b", "release-c"])
+        XCTAssertEqual(probe.claimed, [])
+        XCTAssertEqual(probe.sleeps, [])
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertFalse(Self.isDraining(frames))
+        let snapshot = await status.snapshot()
+        XCTAssertNil(snapshot.nativeMTPAdmissionPending)
+        XCTAssertNotEqual(snapshot.status, .draining)
+    }
+
+    /// No loop: a release that already cost one restart never costs another,
+    /// even if a later process again starts on the older release.
+    func testAdmissionPickupRestartsOncePerReleaseAcrossProcessStarts() async throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-admission-pickup-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: storeURL) }
+        var exits: [Int] = []
+        for _ in 1...2 {
+            let probe = NativeMTPAdmissionPickupProbe()
+            probe.store = NativeMTPAdmissionPickupStore(url: storeURL)
+            let status = Self.admissionPickupStatus()
+            let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: CoordinatorFrameRecorder())
+            try await Self.acceptSessionOnNewerCatalog(client)
+            try await Self.waitUntil { probe.checks == ["release-b"] }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            exits.append(probe.exits)
+            if probe.exits == 0 {
+                // The spent release is reported, and the provider keeps serving.
+                let snapshot = await status.snapshot()
+                XCTAssertNotEqual(snapshot.status, .draining)
+                XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .restartRequired)
+                XCTAssertEqual(probe.sleeps, [])
+            }
+            await client.stop()
+        }
+        XCTAssertEqual(exits, [1, 0])
+    }
+
+    /// The random delay comes first, and the provider serves through it.
+    func testAdmissionPickupServesThroughItsBoundedDelay() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.holdSleep = true
+        probe.unit = 1
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        let before = Date()
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.sleeps.count == 1 }
+
+        XCTAssertEqual(probe.sleeps, [NativeMTPAdmissionPickup.jitterRangeSeconds.upperBound])
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .scheduled)
+        let notBefore = try XCTUnwrap(snapshot.nativeMTPAdmissionPending?.drainNotBefore)
+        XCTAssertGreaterThanOrEqual(notBefore.timeIntervalSince(before), NativeMTPAdmissionPickup.jitterRangeSeconds.lowerBound)
+        XCTAssertLessThanOrEqual(notBefore.timeIntervalSince(before), NativeMTPAdmissionPickup.jitterRangeSeconds.upperBound + 5)
+        XCTAssertNotEqual(snapshot.status, .draining)
+        var frames = await recorder.frames
+        XCTAssertFalse(Self.isDraining(frames))
+        let admitted = await status.admitRequest(requestID: "during-delay")
+        guard case .admitted(let startedAt) = admitted else { return XCTFail("the provider serves during the delay") }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        XCTAssertEqual(probe.exits, 0)
+
+        probe.releaseSleep()
+        try await Self.waitUntil { probe.exits == 1 }
+        frames = await recorder.frames
+        XCTAssertTrue(Self.isDraining(frames))
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+    }
+
+    /// Requests in flight are never cut: the wait outlasts `drain_timeout_s`,
+    /// new requests are refused, and the exit comes only at zero in flight.
+    func testAdmissionPickupWaitsForRequestsInFlightPastTheDrainTimeout() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder)
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.status == .draining
+        }
+        let refused = await status.admitRequest(requestID: "new-request")
+        XCTAssertEqual(refused, .pausedOrDraining)
+        // drain_timeout_s is 1 s for this client; wait well past it.
+        try await Task.sleep(nanoseconds: 2_500_000_000)
+        XCTAssertEqual(probe.exits, 0, "the restart must not cut a request at drain_timeout_s")
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsInFlight, 1)
+        XCTAssertEqual(snapshot.status, .draining)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .waitingForIdle)
+        // A coordinator drain or a new session inside the wait does not reopen routing.
+        let framesBeforeReconnect = await recorder.frames.count
+        try await client.drainFromCoordinator(reason: "coordinator_restart")
+        try await Self.acceptSessionOnNewerCatalog(client)
+        snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+        let stillRefused = await status.admitRequest(requestID: "after-reconnect")
+        XCTAssertEqual(stillRefused, .pausedOrDraining)
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertFalse(frames.dropFirst(framesBeforeReconnect).contains {
+            $0["type"] as? String == "state_update" && ["ready", "busy"].contains($0["state"] as? String ?? "")
+        })
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Self.waitUntil { probe.exits == 1 }
+    }
+
+    /// A catalog activation leaves a session with an unchanged row connected,
+    /// so no new session accept arrives: the timer alone must find the release.
+    func testAdmissionPickupFindsAReleaseWithoutANewSession() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            refreshIntervalSeconds: 0.05
+        )
+        defer { Task { await client.stop() } }
+
+        await client.startNativeMTPAdmissionRefreshForTest()
+        try await Self.waitUntil { probe.exits == 1 }
+        XCTAssertEqual(probe.checks, ["release-b"])
+    }
+
+    /// Inputs that cannot be resolved yet (a feed not published everywhere, a
+    /// drafter download that timed out) are checked again; nothing restarts
+    /// until a check says the release is activatable.
+    func testAdmissionPickupChecksAgainAfterUnavailableInputs() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let attempts = LockedBox(0)
+        probe.activatable = { _ in
+            var attempt = 0
+            attempts.update { $0 += 1; attempt = $0 }
+            return attempt < 3 ? .unavailable : .activatable
+        }
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: Self.admissionPickupStatus(),
+            recorder: CoordinatorFrameRecorder(),
+            refreshIntervalSeconds: 0.05
+        )
+        defer { Task { await client.stop() } }
+
+        await client.startNativeMTPAdmissionRefreshForTest()
+        try await Self.waitUntil { probe.exits == 1 }
+        XCTAssertEqual(probe.checks, ["release-b", "release-b", "release-b"])
+        XCTAssertEqual(probe.claimed, ["release-b"])
+    }
+
+    /// A creative-hold release or a finished swap publishes `ready` straight
+    /// from the status; the restart fence keeps the provider draining.
+    func testAdmissionPickupDrainHoldsAgainstDirectReadyTransitions() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: CoordinatorFrameRecorder())
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.status == .draining
+        }
+        await status.setState(.ready, reason: "some_other_path")
+        await status.setState(.busy, reason: "some_other_path")
+        await status.reopenLocalAdmission()
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+        let refused = await status.admitRequest(requestID: "new-request")
+        XCTAssertEqual(refused, .pausedOrDraining)
+        XCTAssertEqual(probe.exits, 0)
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Self.waitUntil { probe.exits == 1 }
+    }
+
+    /// A fetch or transport failure is retried a bounded number of times.
+    func testAdmissionPickupStopsCheckingAReleaseThatStaysUnavailable() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.activatable = { _ in .unavailable }
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe,
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            refreshIntervalSeconds: 0.02
+        )
+        defer { Task { await client.stop() } }
+
+        await client.startNativeMTPAdmissionRefreshForTest()
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
+            probe.checks.count == NativeMTPAdmissionPickup.maxUnavailableChecks
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(probe.checks.count, NativeMTPAdmissionPickup.maxUnavailableChecks)
+        XCTAssertEqual(probe.exits, 0)
+        XCTAssertEqual(probe.claimed, [])
+        // The unresolved release is reported, not dropped silently.
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .checkExhausted)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        XCTAssertNotEqual(snapshot.status, .draining)
+    }
+
+    /// The wait is capped: past the cap the pickup is abandoned, nothing is
+    /// cut, and the provider serves again and reports the pending admission.
+    func testAdmissionPickupAbandonsADrainThatOutlastsItsCap() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.maxWaitSeconds = 0.4
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder)
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "never-ending")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsInFlight, 1, "the capped wait cuts nothing")
+        XCTAssertTrue(snapshot.status == .ready || snapshot.status == .busy)
+        let admitted = await status.admitRequest(requestID: "after-abandon")
+        guard case .admitted(let second) = admitted else { return XCTFail("the provider serves again") }
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertTrue(Self.isDraining(frames))
+
+        // Finishing the requests later does not exit: the pickup was given up.
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        await status.finishRequest(startedAt: second, completion: nil, failed: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(probe.exits, 0)
+        snapshot = await status.snapshot()
+        XCTAssertNotEqual(snapshot.status, .draining)
+        // The same release does not start another pickup in this process.
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(probe.checks, ["release-b"])
+    }
+
+    /// Never restart while the operator pauses or has paused: the pickup
+    /// waits and exits only after the operator resumes.
+    func testAdmissionPickupDoesNotRestartDuringAnOperatorPause() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: CoordinatorFrameRecorder())
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.nativeMTPAdmissionPending?.phase == .waitingForIdle
+        }
+        // The operator pauses during the wait; its own drain is in progress
+        // when the last request ends.
+        let pause = Task { await client.pauseByOperator() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        let pauseResult = await pause.value
+        XCTAssertEqual(pauseResult, .accepted)
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(probe.exits, 0, "no restart while paused")
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .unavailable)
+
+        let resumeResult = await client.resumeByOperator()
+        XCTAssertEqual(resumeResult, .accepted)
+        try await Self.waitUntil { probe.exits == 1 }
+        snapshot = await status.snapshot()
+        XCTAssertNotEqual(snapshot.status, .ready)
+    }
+
+    /// A process whose startup admission fetch failed checks the release it
+    /// started on as well, and that retry is also spent at most once.
+    func testAdmissionPickupRetriesTheStartupReleaseOnceAfterAFailedStartupFetch() async throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-admission-pickup-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: storeURL) }
+        var exits: [Int] = []
+        for _ in 1...2 {
+            let probe = NativeMTPAdmissionPickupProbe()
+            probe.retryStartupRelease = true
+            probe.store = NativeMTPAdmissionPickupStore(url: storeURL)
+            let client = try await makeAdmissionPickupClient(
+                probe: probe,
+                status: Self.admissionPickupStatus(),
+                recorder: CoordinatorFrameRecorder(),
+                refreshed: { CoordinatorClientTests.refreshedCatalogEnvelope(releaseID: "release-a") }
+            )
+            try await Self.acceptSessionOnNewerCatalog(client)
+            try await Self.waitUntil { probe.checks == ["release-a"] }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            exits.append(probe.exits)
+            await client.stop()
+        }
+        XCTAssertEqual(exits, [1, 0])
+        let store = NativeMTPAdmissionPickupStore(url: storeURL)
+        XCTAssertTrue(store.contains(NativeMTPAdmissionPickup.claimKey(releaseID: "release-a", startupRetry: true)))
+        XCTAssertFalse(store.contains("release-a"), "the ordinary record of that release is not spent")
+    }
+
+    func testAdmissionPickupWithoutASupervisorReportsAndKeepsServing() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.supervised = false
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.nativeMTPAdmissionPending != nil
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .restartRequired)
+        XCTAssertNotEqual(snapshot.status, .draining)
+        XCTAssertEqual(probe.claimed, [])
+        XCTAssertEqual(probe.sleeps, [])
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertFalse(Self.isDraining(frames))
+    }
+
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -10684,6 +11377,8 @@ final class CoordinatorClientTests: XCTestCase {
         computeScoreReference: Bool = false,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
+        nativeMTPAdmissionPickup: NativeMTPAdmissionPickup.Hooks? = nil,
+        nativeMTPAdmissionRefreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
         admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
@@ -10770,6 +11465,8 @@ final class CoordinatorClientTests: XCTestCase {
             computeScoreExecutor: computeScoreExecutor,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,
+            nativeMTPAdmissionPickup: nativeMTPAdmissionPickup,
+            nativeMTPAdmissionRefreshIntervalSeconds: nativeMTPAdmissionRefreshIntervalSeconds,
             coordinatorReadiness: coordinatorReadiness,
             coordinatorReadinessAttempts: coordinatorReadinessAttempts,
             coordinatorReadinessRetryNanoseconds: 0,
