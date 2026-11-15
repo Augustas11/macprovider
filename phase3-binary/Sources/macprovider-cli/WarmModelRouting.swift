@@ -29,6 +29,8 @@ protocol WarmModelRouting: AnyObject, Sendable {
     func servingLease(servedModelID: String?) throws -> WarmServingLease
     /// R016 loopback local routing by the body `model`, else the primary.
     func servingLeaseLocal(bodyModel: String?) throws -> WarmServingLease
+    /// The member views, readable without awaiting.
+    var views: WarmModelViewCell { get }
 }
 
 extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {

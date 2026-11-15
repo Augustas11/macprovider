@@ -594,6 +594,8 @@ actor CoordinatorClient {
     private let endpointURL: String?
     private let wsTunneledMode: Bool
     private let modelRuntime: any ModelRuntimeServing
+    /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
+    private let warmModels: (any WarmModelRouting)?
     /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
     /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
     private let runtimeSource: String?
@@ -923,6 +925,7 @@ actor CoordinatorClient {
     init?(
         config: AppConfig,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         runtimeSource: String? = nil,
         sendOverride: SendOverride? = nil,
@@ -1131,6 +1134,7 @@ actor CoordinatorClient {
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.runtimeSource = runtimeSource
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
@@ -2511,6 +2515,7 @@ actor CoordinatorClient {
         tier2Session = session
         inferenceRelay = InferenceRelay(
             modelRuntime: modelRuntime,
+            warmModels: warmModels,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
             catalogModelIDAlias: PoolModelServe.requestAlias(
@@ -2755,6 +2760,8 @@ actor CoordinatorClient {
         // past the budget end the session (reconnect) rather than grow memory.
         let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
         let preflightCell = providerStatus.preflightCell
+        let preflightWarmModels = warmModels?.views
+        let preflightPrimaryNames = preflightPrimaryNames
         let preflightSendOverride = sendOverride
         let preflightInflight = CoordinatorInflightCounter(limit: coordinatorPreflightFastPathLimit)
         let inboundLiveness = inboundLiveness
@@ -2783,7 +2790,10 @@ actor CoordinatorClient {
                                 let ack = Self.preflightAck(
                                     requestID: preflight.requestID,
                                     estimatedTokens: preflight.estimatedTokens,
-                                    view: preflightCell.value
+                                    view: preflightCell.value,
+                                    servedModelID: preflight.servedModelID,
+                                    warmModels: preflightWarmModels?.value,
+                                    primaryNames: preflightPrimaryNames
                                 )
                                 if let preflightSendOverride {
                                     try? await preflightSendOverride(ack)
@@ -6804,12 +6814,75 @@ actor CoordinatorClient {
         try await send(Self.preflightAck(
             requestID: message["request_id"] as? String ?? "",
             estimatedTokens: message["estimated_tokens"] as? Int ?? 0,
-            view: providerStatus.preflightCell.value
+            view: providerStatus.preflightCell.value,
+            servedModelID: Self.preflightServedModelID(message["served_model_id"]),
+            warmModels: warmModels?.views.value,
+            primaryNames: preflightPrimaryNames
         ))
+    }
+
+    /// The names the primary answers to outside the warm set: the boot model
+    /// and its catalog wire id.
+    private var preflightPrimaryNames: [String?] { [loadedModelID, catalogModelIDForCoordinator] }
+
+    /// R016 `served_model_id` on `preflight`: absent or null is the primary;
+    /// any other non-string names no member.
+    static func preflightServedModelID(_ wire: Any?) -> String?? {
+        switch wire {
+        case nil, is NSNull: return .some(nil)
+        case let value as String: return .some(value)
+        default: return .none
+        }
     }
 
     /// Issue #2246: the preflight ack is answered from the status actor's
     /// lock-protected preflight view, never by awaiting the actor or runtime.
+    /// SPEC-001-R016: with a warm set, a `served_model_id` naming a `warm`
+    /// secondary member is answered for that member (its context capacity,
+    /// the process health); one naming no `warm` member is refused
+    /// `model_not_loaded`. Absent, it is today's answer for the primary.
+    /// `servedModelID` is `.none` for a malformed (non-string) id.
+    static func preflightAck(
+        requestID: String,
+        estimatedTokens: Int,
+        view: ProviderPreflightView,
+        servedModelID: String?? = .some(nil),
+        warmModels: [WarmModelMemberView]? = nil,
+        primaryNames: [String?] = []
+    ) -> [String: Any] {
+        guard let warmModels else { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        guard let servedModelID else { return preflightModelNotLoaded(requestID: requestID) }
+        let trimmed = servedModelID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        let key = trimmed.lowercased(with: nil)
+        guard let member = warmModels.first(where: { $0.key == key }) else {
+            let namesPrimary = primaryNames.contains {
+                $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil) == key
+            }
+            return namesPrimary
+                ? preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view)
+                : preflightModelNotLoaded(requestID: requestID)
+        }
+        guard member.state == .warm else { return preflightModelNotLoaded(requestID: requestID) }
+        if member.primary { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        // A secondary whose runtime has published nothing is not yet servable.
+        guard let info = member.info else { return preflightModelNotLoaded(requestID: requestID) }
+        return preflightAck(
+            requestID: requestID,
+            estimatedTokens: estimatedTokens,
+            view: ProviderPreflightView(status: view.status, modelLoaded: true, maxContextTokens: info.maxContextTokens)
+        )
+    }
+
+    private static func preflightModelNotLoaded(requestID: String) -> [String: Any] {
+        [
+            "type": "preflight_ack",
+            "request_id": requestID,
+            "accepted": false,
+            "reason": "model_not_loaded",
+        ]
+    }
+
     static func preflightAck(requestID: String, estimatedTokens: Int, view: ProviderPreflightView) -> [String: Any] {
         if estimatedTokens > view.maxContextTokens {
             return [
@@ -6853,7 +6926,7 @@ actor CoordinatorClient {
     /// ack does not queue behind slower inbound frames. Only short text frames
     /// are parsed; preflight is a few dozen bytes and inference frames can be
     /// megabytes.
-    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int)? {
+    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int, servedModelID: String??)? {
         guard case .string(let text) = message,
               text.utf8.count <= 4096,
               text.contains("\"preflight\""),
@@ -6861,7 +6934,7 @@ actor CoordinatorClient {
               object["type"] as? String == "preflight" else {
             return nil
         }
-        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0)
+        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0, preflightServedModelID(object["served_model_id"]))
     }
 
     func pauseByOperator() async -> ProviderControlCommandResult {
