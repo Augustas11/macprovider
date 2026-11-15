@@ -920,7 +920,7 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if len([]byte(h.Hostname)) > maxHandshakeHostnameBytes {
 		return Hello{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
 	}
-	if err := requireString(raw, "model_id", &h.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &h.ModelID); err != nil {
 		return Hello{}, err.Field, err
 	}
 	if len([]byte(h.ModelID)) > maxHandshakeModelIDBytes {
@@ -1104,7 +1104,7 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if len([]byte(req.Hostname)) > maxHandshakeHostnameBytes {
 		return AuthRequest{}, Spec010Presence{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
 	}
-	if err := requireString(raw, "model_id", &req.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &req.ModelID); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if len([]byte(req.ModelID)) > maxHandshakeModelIDBytes {
@@ -1270,6 +1270,14 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		if len(req.SupportedModels) > 64 {
 			return AuthRequest{}, presence, "supported_models exceeds 64 entries", fieldError{Field: "supported_models exceeds 64 entries"}
 		}
+		// SPEC-002-R011: an entry that is not a well-formed model id
+		// (surrounding whitespace, control or non-canonical characters) is
+		// no model id string.
+		for _, model := range req.SupportedModels {
+			if !wellFormedModelID(model) {
+				return AuthRequest{}, presence, "supported_models must be array of strings", fieldError{Field: "supported_models must be array of strings"}
+			}
+		}
 		seen := make(map[string]struct{}, len(req.SupportedModels))
 		for _, model := range req.SupportedModels {
 			normalized := normalizeSupportedModelEntry(model)
@@ -1366,6 +1374,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 		}
 		if err := json.Unmarshal(v, &req.SupportedModels); err != nil {
 			return AuthRequest{}, presence, "supported_models", err
+		}
+		for _, model := range req.SupportedModels {
+			if !wellFormedModelID(model) {
+				return AuthRequest{}, presence, "supported_models", fmt.Errorf("supported_models entries must be well-formed model ids")
+			}
 		}
 	}
 	if v, ok := raw["publishes_supported_models"]; ok {
@@ -1587,6 +1600,41 @@ func requireString(raw map[string]json.RawMessage, field string, out *string) *f
 		return &fieldError{Field: field}
 	}
 	return nil
+}
+
+// requireModelID is requireString for a model id, which must also be
+// wellFormedModelID (SPEC-002-R011).
+func requireModelID(raw map[string]json.RawMessage, field string, out *string) *fieldError {
+	if err := requireString(raw, field, out); err != nil {
+		return err
+	}
+	if !wellFormedModelID(*out) {
+		return &fieldError{Field: field}
+	}
+	return nil
+}
+
+// wellFormedModelID is the SPEC-002-R011 decode rule for every model id a
+// provider sends (top-level model_id, supported_models entries, warm_models
+// entry ids): not empty, no surrounding whitespace, no control character,
+// and no case or Unicode-form variance beyond ASCII letter case. Every
+// accepted id then has one canonical form, pool.ModelKey, and the ASCII
+// lower() settlement SQL applies to a recorded model id yields exactly that
+// form, so no spelling of a model escapes a sanction keyed on it.
+func wellFormedModelID(s string) bool {
+	if s == "" || s != strings.TrimSpace(s) || containsControlChar(s) {
+		return false
+	}
+	return pool.ModelKey(s) == asciiLower(s)
+}
+
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }
 
 // containsControlChar reports whether s contains any C0 control
@@ -1866,7 +1914,7 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	if err := requireString(raw, "status", &hb.Status); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
-	if err := requireString(raw, "model_id", &hb.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &hb.ModelID); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if len([]byte(hb.ModelID)) > maxHandshakeModelIDBytes {

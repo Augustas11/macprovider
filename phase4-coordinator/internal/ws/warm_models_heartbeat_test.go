@@ -66,6 +66,7 @@ func TestHeartbeatMalformedWarmModelsKeepsPreviousSetAndAppliesTheRest(t *testin
 	for name, mutate := range map[string]func(map[string]any){
 		"entry bound":         func(p map[string]any) { warmModelsEntry(p, 1)["max_context_tokens"] = 20_000_000 },
 		"not supported":       func(p map[string]any) { warmModelsEntry(p, 1)["model_id"] = "model-z" },
+		"whitespace id":       func(p map[string]any) { warmModelsEntry(p, 2)["model_id"] = "model-c " },
 		"primary contradicts": func(p map[string]any) { warmModelsEntry(p, 0)["slots_total"] = 3 },
 	} {
 		server, registry, logs, at := warmHeartbeatServer(t)

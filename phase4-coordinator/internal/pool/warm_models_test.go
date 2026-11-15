@@ -694,3 +694,41 @@ func TestComputeIntegritySuspensionSurvivesRestartAsMember(t *testing.T) {
 		t.Fatal("the member's suspension reached the session")
 	}
 }
+
+// SPEC-010 canonical model id: whitespace, case and Unicode-form variants of
+// one model share one key, so a suspended model stays suspended, keeps its
+// strikes and resolves to its own entry under any spelling.
+func TestModelKeyVariantsShareSanctions(t *testing.T) {
+	if ModelKey(" Model-CI\t") != "model-ci" || ModelKey("model-ci ") != ModelKey("MODEL-CI") || ModelKey("Café ") != ModelKey("café") {
+		t.Fatalf("variants fold apart: %q %q %q", ModelKey(" Model-CI\t"), ModelKey("Café "), ModelKey("café"))
+	}
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	registry.SetComputeIntegritySuspended("p1", "model-b", true)
+	if registry.SetComputeIntegritySuspended("p1", " MODEL-B ", true) {
+		t.Fatal("a whitespace variant made a second suspension")
+	}
+	for _, spelling := range []string{"model-b ", " Model-B", "MODEL-B\t"} {
+		entry, ok := registry.ResolveEntry("p1", "current", spelling)
+		if !ok || !entry.ComputeIntegritySuspended || entry.RoutingEligible() || ModelKey(entry.ServedModelID) != "model-b" {
+			t.Fatalf("%q: ok=%v suspended=%v", spelling, ok, entry.ComputeIntegritySuspended)
+		}
+	}
+	// The member reported under a variant spelling is still suspended.
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a", warmTestMember("Model-B ", WarmModelWarm, 2, 2)))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if b := warmEntry(t, registry, "model-b"); !b.ComputeIntegritySuspended {
+		t.Fatal("re-spelt member escaped its suspension")
+	}
+	registry.SetComputeIntegritySuspended("p1", "model-b ", false)
+	for i, spelling := range []string{"model-b", "model-b ", "MODEL-B"} {
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Duration(i+2)*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))); !ok {
+			t.Fatal("heartbeat failed")
+		}
+		if n, ok := registry.RecordEntryNotLoaded("p1", "current", spelling, at.Add(time.Duration(i+2)*time.Second+time.Millisecond), 2*time.Minute); !ok || n != i+1 {
+			t.Fatalf("%q: strikes=%d ok=%v, want %d", spelling, n, ok, i+1)
+		}
+	}
+}

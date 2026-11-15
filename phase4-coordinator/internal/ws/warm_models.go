@@ -98,7 +98,7 @@ func parseWarmModelEntry(entry map[string]json.RawMessage, top warmModelsTopLeve
 	bounded := !first
 	slotsBounded := !first || !top.slotsReported
 	var model pool.WarmModel
-	if err := requireString(entry, "model_id", &model.ModelID); err != nil {
+	if err := requireModelID(entry, "model_id", &model.ModelID); err != nil {
 		return pool.WarmModel{}, err
 	}
 	if len([]byte(model.ModelID)) > maxHandshakeModelIDBytes {

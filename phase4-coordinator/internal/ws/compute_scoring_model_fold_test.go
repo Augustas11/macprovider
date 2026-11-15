@@ -72,7 +72,7 @@ func TestComputeScoringModelSpellingKeepsOneKeyAndDueTime(t *testing.T) {
 	if !ok {
 		t.Fatal("setup: key a not scheduled")
 	}
-	for i, spelling := range []string{"Model-CI", "MODEL-CI", "model-Ci"} {
+	for i, spelling := range []string{"Model-CI", "MODEL-CI", "model-Ci", "model-ci "} {
 		respell(spelling)
 		h.advance(time.Minute)
 		h.engine.sweep(context.Background(), h.now())

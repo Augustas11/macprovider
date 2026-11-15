@@ -203,3 +203,27 @@ func TestServedModelDispatchSurvivesJournalOutsideDigest(t *testing.T) {
 		t.Fatalf("a mirror that lost the flag must not match: ok=%v err=%v", ok, err)
 	}
 }
+
+// SPEC-002-R011 / SPEC-010 canonical model id: the scoring loop opens a hold
+// on the canonical key (trimmed, NFC, lowercase), and the coordinator only
+// accepts model ids whose ASCII lower() is that key, so an entry credit
+// served under any accepted spelling of the held model is withheld.
+func TestComputeIntegrityHoldWithholdsEverySpellingOfTheServedModel(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	for i, spelling := range []string{"model-held", "Model-Held", "MODEL-HELD"} {
+		request := "entry-" + spelling
+		insertCreditWithOperator(t, store.db, request, "p-a", t0.Add(time.Duration(i+1)*time.Minute), 100)
+		insertServedModelSnapshot(t, store, request, "p-a", spelling, true)
+	}
+	insertCreditWithOperator(t, store.db, "entry-other", "p-a", t0.Add(10*time.Minute), 1000)
+	insertServedModelSnapshot(t, store, "entry-other", "p-a", "model-other", true)
+	end := t0.Add(time.Hour)
+	if _, err := store.OpenComputeIntegrityHold(ctx, "p-a", "model-held", computeintegrity.HoldKindFailure, t0, &end, "confirmed_failure", end); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits`); got != 1000 {
+		t.Fatalf("payable=%d want 1000 (every spelling of model-held withheld)", got)
+	}
+}

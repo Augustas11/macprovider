@@ -87,11 +87,12 @@ type WarmModel struct {
 	refusalHold bool
 }
 
-// ModelKey is the SPEC-010 case-folded model id (NFC, then lowercase): the
-// one folding the pool, buyer entry routing and the routing perf store use
-// to compare model ids.
+// ModelKey is the SPEC-010 canonical model id (surrounding whitespace
+// trimmed, NFC, then lowercase): the one form the pool, buyer entry routing,
+// compute-integrity suspension and scoring, not-loaded strikes, identity
+// pins and the routing perf store key a model on.
 func ModelKey(modelID string) string {
-	return strings.ToLower(norm.NFC.String(modelID))
+	return strings.ToLower(norm.NFC.String(strings.TrimSpace(modelID)))
 }
 
 func warmModelKey(modelID string) string {
