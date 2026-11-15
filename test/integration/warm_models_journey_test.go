@@ -275,22 +275,26 @@ func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 	}
 
 	// The next heartbeat drops the member; its model stays served by the
-	// fallback, and the warm provider's primary entry is untouched.
+	// fallback. The warm provider is left with a warm set of one, which is a
+	// legacy session: one /poolz row without entry fields, still routed.
 	s.waitForWarmEntry(warmID, memberModel, false, nil)
-	s.waitForWarmEntry(warmID, settlementFixtureModelID, true, func(r warmPoolzRow) bool { return r.RoutingEligible })
+	s.waitForWarmEntry(warmID, "", true, func(r warmPoolzRow) bool { return r.RoutingEligible && r.Primary == nil })
 	chat("44444444-4444-4444-8444-444444444444", memberModel)
 	if got := fallback.ServedModels(); len(got) != 2 {
 		t.Fatalf("fallback served models = %v, want the post-eviction request", got)
 	}
 	chat("44444444-4444-4444-8444-444444444445", settlementFixtureModelID)
-	if got := warm.ServedModels(); len(got) != 3 || got[2] != settlementFixtureModelID {
-		t.Fatalf("warm provider served models = %v, want its primary still routed", got)
+	if got := warm.ServedModels(); len(got) != 3 || got[2] != "" {
+		t.Fatalf("warm provider served models = %q, want its primary still routed without a served model", got)
 	}
 
 	snaps = waitForWarmRouteSnapshots(t, s, 5)
 	credits = waitForLedgerCredits(t, s, 5)
 	var fallbackSnaps int
 	for _, snap := range snaps {
+		if snap.ProviderID == warmID && snap.RequestID == "44444444-4444-4444-8444-444444444445" && snap.ServedModelDispatch != 0 {
+			t.Fatalf("one-member route snapshot = %+v, want served_model_dispatch 0", snap)
+		}
 		if snap.ProviderID != fallbackID {
 			continue
 		}
