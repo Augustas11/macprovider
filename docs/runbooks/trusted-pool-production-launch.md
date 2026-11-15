@@ -74,7 +74,7 @@ fail-closed.
 
 Signing happens in CI so the private key never reaches an operator shell.
 
-1. Dispatch `.github/workflows/build-signed-oncall-readiness.yml` from `main`
+1. Dispatch `.github/workflows/signed-journey.yml (journey=oncall-readiness)` from `main`
    (manual dispatch, `production-release` environment) with the launch
    environment id, record version, operator contacts, break-glass path,
    compromise channel, agreement-notification ack, creator emergency mechanism,

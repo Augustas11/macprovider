@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1690
 Execution mode: production-operator-internal-pool
 Run plan: `docs/runbooks/trusted-pool-m1-activation-plan.md` §5A (M1)
 Evidence builder: `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture` writes the redacted evidence, `payload` builds the unsigned journey-result)
-Signer: `.github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml`
+Signer: `.github/workflows/signed-journey.yml (journey=trusted-pool-external-runtime)`
 
 ## Purpose
 

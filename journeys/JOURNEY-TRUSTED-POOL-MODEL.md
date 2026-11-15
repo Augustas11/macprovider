@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1816
 Execution mode: production-operator-internal-pool
 Run plan: `docs/runbooks/pool-scoped-model-admission.md` (§9 is the capture recipe)
 Evidence builder: `scripts/build-trusted-pool-model-journey-result.py` (`capture` writes the redacted evidence, `payload` builds the unsigned journey-result)
-Signer: `.github/workflows/promote-signed-trusted-pool-model-journey.yml`
+Signer: `.github/workflows/signed-journey.yml (journey=trusted-pool-model)`
 
 ## Purpose
 

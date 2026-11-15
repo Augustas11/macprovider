@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-workflow="$root/.github/workflows/promote-signed-buyer-enforce-journey.yml"
+workflow="$root/.github/workflows/signed-journey.yml"
 builder="$root/scripts/build-buyer-enforce-journey-result.py"
 preflight="$root/scripts/preflight-signed-journey-promotion.py"
 
@@ -21,6 +21,28 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+full_workflow = workflow
+
+def _signed_job_slice(text, job_id):
+    marker = "\n  %s:\n" % job_id
+    start = text.find(marker)
+    if start < 0:
+        raise SystemExit("missing job %s" % job_id)
+    rest = text[start + 1 :]
+    nxt = re.search(r"\n  [A-Za-z0-9_]+:\n", rest)
+    end = (start + 1 + nxt.start()) if nxt else len(text)
+    return text[start:end]
+
+_header_at = full_workflow.find("\njobs:\n")
+if _header_at < 0:
+    raise SystemExit("missing jobs")
+_parts = [full_workflow[: _header_at + len("\njobs:\n")]]
+_root = pathlib.Path(sys.argv[1]).resolve().parents[2]
+for _rel in ('scripts/signed-journeys/common/registry.sh', 'scripts/signed-journeys/common/validate.sh', 'scripts/signed-journeys/common/build.sh', 'scripts/signed-journeys/common/preflight.sh', 'scripts/signed-journeys/common/sign.sh', 'scripts/signed-journeys/promote/promote.sh', 'scripts/signed-journeys/promote/verify.sh', 'scripts/signed-journeys/promote/export.sh',):
+    _parts.append((_root / _rel).read_text(encoding="utf-8"))
+for _job_id in ('acceptance_promote',):
+    _parts.append(_signed_job_slice(full_workflow, _job_id))
+workflow = "\n".join(_parts)
 builder = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 
 required_workflow = [
@@ -39,12 +61,12 @@ required_workflow = [
     "tr '[:upper:]' '[:lower:]'",
     "tr ',' '-'",
     'envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"',
-    'payload="$RUNNER_TEMP/buyer-enforce-journey-result-${requirement_slug}.unsigned.json"',
+    'payload_prefix=buyer-enforce-journey-result',
     "scripts/build-buyer-enforce-journey-result.py",
     '--evidence-sha "$EVIDENCE_SHA"',
     "scripts/preflight-signed-journey-promotion.py",
     "Preflight selector freshness before signing",
-    "--journey-id JOURNEY-BUYER-ENFORCE",
+    "journey_id=JOURNEY-BUYER-ENFORCE",
     "scripts/verify-github-release-posture.sh",
     "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}",
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}",
@@ -53,7 +75,7 @@ required_workflow = [
     "scripts/check_spec_governance.py --base-ref origin/main",
     "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     "retention-days: 1",
-    "signed-buyer-enforce-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}",
+    "artifact_prefix=signed-buyer-enforce-journey-promotion",
     "macprovider.signed-buyer-enforce-journey-promotion.v1",
     "JOURNEY-BUYER-ENFORCE",
 ]
@@ -61,10 +83,10 @@ for value in required_workflow:
     if value not in workflow:
         raise SystemExit(f"workflow contract is missing: {value}")
 
-if "\n  push:" in workflow or "\n  pull_request:" in workflow:
+if "\n  push:" in full_workflow or "\n  pull_request:" in full_workflow:
     raise SystemExit("workflow must be manual dispatch only")
 for forbidden in ("contents: write", "pull-requests: write", "git push", "gh pr create", "gh pr merge", "gh release"):
-    if forbidden in workflow:
+    if forbidden in full_workflow:
         raise SystemExit(f"workflow contains an unnecessary write/publication capability: {forbidden}")
 if "cat \"$MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM\"" in workflow:
     raise SystemExit("workflow must not print private key material")

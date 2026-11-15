@@ -1741,6 +1741,132 @@ func TestAggregateStatusNoFreeSlotsIsModelUnavailableNotSystemIdle(t *testing.T)
 	}
 }
 
+// #2371: two providers serving on every slot (routing_eligible false,
+// in_service true) are up, counted as busy, and their model is listed as
+// no_free_slots, not degraded or warming up, even below threshold 2.
+func TestAggregateStatusAllProvidersBusyServingIsUp(t *testing.T) {
+	for _, field := range []string{`"in_service":true`, `"serving_eligible":true`} {
+		out := aggregateStatus(decodePoolz(t, `{
+			"pool":[
+				{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,`+field+`},
+				{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"max_context_tokens":4096,"routing_eligible":false,`+field+`}
+			],
+			"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":0}
+		}`), 2, fixedNow())
+
+		if out.Status != "up" || out.Degraded || out.Pool.Busy != 2 || out.Pool.TotalProviders != 2 || out.Pool.Degraded != 0 {
+			t.Fatalf("%s: status=%q degraded=%t pool=%+v, want up with 2 busy of 2", field, out.Status, out.Degraded, out.Pool)
+		}
+		if len(out.Models) != 1 {
+			t.Fatalf("%s: models=%+v, want one model", field, out.Models)
+		}
+		m := out.Models[0]
+		if m.Degraded || m.Available || m.Availability != "no_free_slots" || m.ProviderCount != 2 || m.TotalSlots != 4 {
+			t.Fatalf("%s: model=%+v, want not degraded, no_free_slots, 2 providers, 4 slots", field, m)
+		}
+	}
+}
+
+// #2371: the five pool counters sum to total_providers across a mixed pool,
+// and a row that is neither routable nor in service is skipped.
+func TestAggregateStatusPoolCountersSumToTotal(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"a","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":true,"in_service":true},
+			{"model_id":"a","state":"busy","slots_free":0,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"b","state":"degraded","slots_free":0,"slots_total":1},
+			{"model_id":"b","state":"draining","slots_free":0,"slots_total":1},
+			{"model_id":"b","state":"unavailable","slots_free":0,"slots_total":1},
+			{"model_id":"c","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":false,"in_service":false}
+		],
+		"summary":{"total_providers":6,"ready":1,"total_slots":7,"free_slots":1}
+	}`), 1, fixedNow())
+
+	p := out.Pool
+	if p.TotalProviders != 5 || p.Ready+p.Busy+p.Degraded+p.Draining+p.Unavailable != p.TotalProviders || p.Busy != 1 || p.Ready != 1 {
+		t.Fatalf("pool=%+v, want 5 counted providers whose counters sum to the total", p)
+	}
+	for _, m := range out.Models {
+		if m.ID == "c" {
+			t.Fatalf("a non-routable, not-in-service row must not list its model: %+v", m)
+		}
+		if m.ID == "a" && (!m.Available || m.Degraded) {
+			t.Fatalf("model a=%+v, want available and not degraded", m)
+		}
+		if m.ID == "b" && (m.Availability != "no_awake_provider" || !m.Degraded) {
+			t.Fatalf("model b=%+v, want no_awake_provider and degraded (every provider faulted)", m)
+		}
+	}
+}
+
+// #2371 re-check: FR-B1 "fewer than half in service" sees a model's
+// unavailable and draining rows, which still list nothing and count in no
+// exposed field. A held provider's free slot is not reported free.
+func TestAggregateStatusModelDegradedCountsFaultedRows(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"busy","slots_free":0,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"draining","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":false,"in_service":false,"auth_state":"self_minted"},
+			{"model_id":"held","state":"busy","slots_free":1,"slots_total":2,"routing_eligible":false,"in_service":true},
+			{"model_id":"gone","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false}
+		],
+		"summary":{"total_providers":7,"ready":0,"total_slots":9,"free_slots":0}
+	}`), 1, fixedNow())
+
+	byID := map[string]statusModel{}
+	for _, m := range out.Models {
+		byID[m.ID] = m
+	}
+	if m := byID["llama"]; !m.Degraded || m.ProviderCount != 1 {
+		t.Fatalf("llama=%+v, want degraded (1 of 4 in service) with provider_count 1", m)
+	}
+	if m := byID["held"]; m.Degraded || m.SlotsFree != 0 || m.Availability != "no_free_slots" {
+		t.Fatalf("held=%+v, want not degraded, slots_free 0, no_free_slots", m)
+	}
+	if _, ok := byID["gone"]; ok {
+		t.Fatalf("a model with no provider in service must not be listed: %+v", out.Models)
+	}
+	if out.Pool.TotalProviders != 2 || out.Pool.Busy != 2 {
+		t.Fatalf("pool=%+v, want only the two in-service rows counted", out.Pool)
+	}
+}
+
+// #2371: a summary-only payload whose providers are all busy is not idle.
+func TestAggregateStatusSummaryOnlyAllBusyIsNotIdle(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"summary":{"total_providers":2,"ready":0,"in_service":2,"total_slots":4,"free_slots":0}
+	}`), 1, fixedNow())
+	if out.Status != "up" || out.Degraded {
+		t.Fatalf("status=%q degraded=%t, want up", out.Status, out.Degraded)
+	}
+	p := out.Pool
+	if p.Busy != 2 || p.Ready+p.Busy+p.Degraded+p.Draining+p.Unavailable != p.TotalProviders {
+		t.Fatalf("pool=%+v, want 2 busy and counters summing to total", p)
+	}
+}
+
+// #2371: a busy provider with a free slot counts as busy and keeps its model
+// out of degraded.
+func TestAggregateStatusBusyProviderCountsAsBusyNotDegraded(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"busy","slots_free":1,"slots_total":2,"max_context_tokens":4096,"routing_eligible":true,"serving_eligible":true},
+			{"model_id":"llama","state":"busy","slots_free":1,"slots_total":2,"max_context_tokens":4096,"routing_eligible":true,"serving_eligible":true}
+		],
+		"summary":{"total_providers":2,"ready":0,"total_slots":4,"free_slots":2}
+	}`), 1, fixedNow())
+
+	if out.Status != "up" || out.Pool.Busy != 2 || out.Pool.Degraded != 0 {
+		t.Fatalf("status=%q pool=%+v, want up with 2 busy", out.Status, out.Pool)
+	}
+	if len(out.Models) != 1 || out.Models[0].Degraded {
+		t.Fatalf("models=%+v, want one non-degraded model", out.Models)
+	}
+}
+
 func TestAggregateStatusL1ByteIdenticalWhenNoProviderPublishes(t *testing.T) {
 	out := aggregateStatus(decodePoolz(t, `{
 		"pool":[
@@ -2042,10 +2168,12 @@ func TestDegradedCalculationMatchesFRB1(t *testing.T) {
 		want  bool
 	}{
 		{name: "no providers", stats: poolzModelStats{}, want: true},
-		{name: "all unavailable", stats: poolzModelStats{TotalProviders: 2, UnavailableOrDraining: 2, Ready: 0, SlotsFreeTotal: 2}, want: true},
-		{name: "less than half ready", stats: poolzModelStats{TotalProviders: 3, UnavailableOrDraining: 1, Ready: 1, SlotsFreeTotal: 2}, want: true},
-		{name: "no free slots", stats: poolzModelStats{TotalProviders: 2, Ready: 2, SlotsFreeTotal: 0}, want: true},
-		{name: "healthy", stats: poolzModelStats{TotalProviders: 2, Ready: 1, SlotsFreeTotal: 1}, want: false},
+		{name: "all unavailable", stats: poolzModelStats{TotalProviders: 2, UnavailableOrDraining: 2}, want: true},
+		{name: "less than half serving", stats: poolzModelStats{TotalProviders: 3, UnavailableOrDraining: 1, Ready: 1, Serving: 1}, want: true},
+		// #2371: zero free slots is capacity, not degradation.
+		{name: "no free slots", stats: poolzModelStats{TotalProviders: 2, Ready: 2, Serving: 2}, want: false},
+		{name: "all busy serving", stats: poolzModelStats{TotalProviders: 2, Serving: 2}, want: false},
+		{name: "healthy", stats: poolzModelStats{TotalProviders: 2, Ready: 1, Serving: 1}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -5441,14 +5569,16 @@ func TestQuotaExhaustedReturns429Not500(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), "quota_exhausted") {
 		t.Fatalf("body missing quota_exhausted: %s", resp.Body.String())
 	}
-	// Round-2 sweep (H-R2 rate_limit_exceeded-family extension): this path
-	// ships X-RateLimit-Reset (a reset header, not a literal Retry-After —
-	// the sweep's rule treats the two as equivalent temporal signals) via
-	// setRateLimitHeaders, so quota_exhausted must be retryable=true.
+	// #2362: the daily quota refills only at the reset, so the code is
+	// retryable=false (as at the coordinator). X-RateLimit-Reset names the
+	// refill; no Retry-After, which agent clients would sleep on for hours.
 	if got := resp.Header().Get("X-RateLimit-Reset"); got == "" {
 		t.Fatalf("X-RateLimit-Reset missing on quota_exhausted 429")
 	}
-	assertBodyRetryable(t, resp.Body.String(), true)
+	if got := resp.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After=%q on quota_exhausted 429, want none", got)
+	}
+	assertBodyRetryable(t, resp.Body.String(), false)
 }
 
 func TestQuotaAdmittedOpaqueErrorRefundsBefore500(t *testing.T) {
@@ -7525,7 +7655,7 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		// true (signup_rate_limited moved to permanent in item 20 — no
 		// header, outside the chat-path clamp).
 		"account_request_rate_exceeded", "account_concurrency_exceeded",
-		"demo_concurrency_exceeded", "quota_exhausted",
+		"demo_concurrency_exceeded",
 		"relay_blind_metadata_rate_limited", "relay_blind_key_expired",
 		"relay_blind_decrypt_failed", "relay_blind_provider_unsupported",
 		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
@@ -7551,6 +7681,9 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"relay_blind_downgrade_rejected", "relay_blind_endpoint_unsupported",
 		"relay_blind_ciphertext_invalid",
 		"relay_blind_committed_failed",
+		// #2362: the daily quota refills only at the next UTC day; agrees
+		// with the coordinator. X-RateLimit-Reset names the refill.
+		"quota_exhausted",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {

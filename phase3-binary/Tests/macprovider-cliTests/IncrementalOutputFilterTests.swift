@@ -46,12 +46,19 @@ final class IncrementalOutputFilterTests: XCTestCase {
         "\u{FFFD}", ControlTextShield.markString, "x", "y", "z", " im_end|>x",
     ]
 
-    private func randomStream(_ rng: inout SeededGenerator, count: Int) -> [String] {
+    /// MiniMax (#2189) reasoning tags and the namespace token, whole and
+    /// split, with whitespace.
+    private let miniMaxPieces: [String] = [
+        "<mm:think>", "</mm:think>", "<mm:", "think>", "</mm:th", "ink>", "]<]minimax[>[", "]<]mini", "max[>[",
+        "]<]minimax[>[<invoke name=\"f\">", "]<]minimax[>[<x>", "]<]minimax[>[</x>", " ", "\n", "  \n", "END",
+    ]
+
+    private func randomStream(_ rng: inout SeededGenerator, count: Int, extra: [String] = []) -> [String] {
         (0..<count).map { _ in
             // Mostly prose so the filter commits; markup often enough to hit
             // every edge.
             if Int.random(in: 0..<3, using: &rng) == 0 {
-                return pieces.randomElement(using: &rng)!
+                return (pieces + extra).randomElement(using: &rng)!
             }
             return ["the", " cat", " sat", " on", " a", " mat", ",", ".", "\n", " 42", " und", " 中文", " ok"].randomElement(using: &rng)!
         }
@@ -80,6 +87,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         seed: UInt64,
         streams: Int,
         length: Int,
+        extra: [String] = [],
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -92,7 +100,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         for streamIndex in 0..<streams {
             let stops = requestStopSets[streamIndex % requestStopSets.count]
             let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: mode)
-            for (step, text) in texts(of: randomStream(&rng, count: length), &rng).enumerated() {
+            for (step, text) in texts(of: randomStream(&rng, count: length, extra: extra), &rng).enumerated() {
                 let expected: (text: String, hitStop: Bool)
                 switch mode {
                 case .streamingSafePrefix(let reasoningOpen):
@@ -128,11 +136,39 @@ final class IncrementalOutputFilterTests: XCTestCase {
     }
 
     func testSafePrefixMatchesReferenceOnRandomStreams() {
-        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: false), seed: 2317, streams: 36, length: 400)
+        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: .whole), seed: 2317, streams: 36, length: 400)
     }
 
     func testReasoningSafePrefixMatchesReferenceOnRandomStreams() {
-        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: true), seed: 23_171, streams: 36, length: 400)
+        assertDifferential(mode: .streamingSafePrefix(reasoningOpen: .afterThink), seed: 23_171, streams: 36, length: 400)
+    }
+
+    func testMiniMaxSafePrefixMatchesReferenceOnRandomStreams() {
+        assertDifferential(
+            mode: .streamingSafePrefix(reasoningOpen: .afterMiniMaxThink), seed: 23_174, streams: 36, length: 400, extra: miniMaxPieces)
+    }
+
+    /// The MiniMax split twin against its reference at every step.
+    func testMiniMaxSplitMatchesReferenceOnRandomStreams() {
+        var rng = SeededGenerator(state: 23_175)
+        var restarts = 0
+        for streamIndex in 0..<36 {
+            var split = IncrementalMiniMaxReasoningSplit()
+            var answerOnly = IncrementalMiniMaxReasoningSplit(keepsReasoning: false)
+            for (step, text) in texts(of: randomStream(&rng, count: 400, extra: miniMaxPieces), &rng).enumerated() {
+                let expected = ReasoningOutput.MiniMax.splitStreamingPrefix(text)
+                guard split.splitStreamingPrefix(text) == expected else {
+                    return XCTFail("stream \(streamIndex) step \(step) differs for \(text.debugDescription)")
+                }
+                // The tool-stop split keeps the answer and drops the reasoning.
+                let answer = answerOnly.splitStreamingPrefix(text)
+                guard answer.answer == expected.answer, answer.closed == expected.closed, answer.reasoning.isEmpty else {
+                    return XCTFail("answer-only stream \(streamIndex) step \(step) differs for \(text.debugDescription)")
+                }
+            }
+            restarts += split.restartCount
+        }
+        XCTAssertLessThan(restarts, 36 * 400 / 4)
     }
 
     func testOutputFiltersMatchReferenceOnRandomStreams() {
@@ -143,7 +179,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
     func testLongStreamsMatchReferenceAcrossManyCommits() {
         var rng = SeededGenerator(state: 23_173)
         let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
-            .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true), .outputFilters,
+            .streamingSafePrefix(reasoningOpen: .whole), .streamingSafePrefix(reasoningOpen: .afterThink), .outputFilters,
         ]
         for (index, mode) in modes.enumerated() {
             let stops = index == 1 ? [] : ["never-matches"]
@@ -191,12 +227,12 @@ final class IncrementalOutputFilterTests: XCTestCase {
         ]
         for (index, testCase) in cases.enumerated() {
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: testCase.reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: .init(testCase.reasoningOpen))
             var text = ""
             for piece in testCase.pieces {
                 text += piece
                 let expected = ModelRuntime.streamingSafePrefix(
-                    text, stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: testCase.reasoningOpen)
+                    text, stopTokenFilter: stopTokens, requestStops: testCase.stops, reasoningOpen: .init(testCase.reasoningOpen))
                 let actual = filter.update(text)
                 XCTAssertEqual(actual.text, expected.text, "case \(index)")
                 XCTAssertEqual(actual.hitStop, expected.hitStop, "case \(index)")
@@ -212,13 +248,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         let scalars = Array(String(repeating: unit, count: 40).unicodeScalars)
         for reasoningOpen in [false, true] {
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .init(reasoningOpen))
             var view = String.UnicodeScalarView()
             for (step, scalar) in scalars.enumerated() {
                 view.append(scalar)
                 let text = String(view)
                 let expected = ModelRuntime.streamingSafePrefix(
-                    text, stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: reasoningOpen)
+                    text, stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .init(reasoningOpen))
                 let actual = filter.update(text)
                 guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                     return XCTFail("reasoningOpen \(reasoningOpen) step \(step)")
@@ -232,13 +268,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         _ text: String, filter stopTokenFilter: StopTokenFilter, stops: [String], reasoningOpen: Bool,
         _ label: String, file: StaticString = #filePath, line: UInt = #line
     ) {
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: .init(reasoningOpen))
         var view = String.UnicodeScalarView()
         for (step, scalar) in text.unicodeScalars.enumerated() {
             view.append(scalar)
             let prefix = String(view)
             let expected = ModelRuntime.streamingSafePrefix(
-                prefix, stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+                prefix, stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: .init(reasoningOpen))
             let actual = filter.update(prefix)
             guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                 return XCTFail("\(label) reasoningOpen \(reasoningOpen) step \(step)", file: file, line: line)
@@ -369,7 +405,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
             let reasoningOpen = streamIndex % 2 == 1
             let decoder = ModelRuntime.WindowedTextDecoder(decode: Self.fakeDecode, lookbackScalars: 16)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: .init(reasoningOpen))
             var ids: [Int] = []
             var previous = ""
             var wholeDecodedTokens = 0
@@ -396,7 +432,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     "stream \(streamIndex) step \(step): unchanged prefix hint")
                 previous = whole
                 let expected = ModelRuntime.streamingSafePrefix(
-                    whole, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+                    whole, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: .init(reasoningOpen))
                 let actual = filter.update(output.text, unchangedPrefixUTF8: output.unchangedPrefixUTF8)
                 guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                     return XCTFail("stream \(streamIndex) step \(step): filter differs for \(whole.debugDescription)")
@@ -436,15 +472,15 @@ final class IncrementalOutputFilterTests: XCTestCase {
                 var reference = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
                 var incremental = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
                 let filter = ModelRuntime.IncrementalStreamFilter(
-                    stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                    stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: .init(reasoningOpen))
                 var stopText = IncrementalToolStopText(observer: incremental)
                 var text = ""
                 for (step, piece) in stream.enumerated() {
                     text += piece
                     let expected = ModelRuntime.observeSerialToolStop(
-                        &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                        &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: .init(reasoningOpen))
                     let actual = ModelRuntime.observeSerialToolStop(
-                        &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: reasoningOpen)
+                        &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: .init(reasoningOpen))
                     guard actual == expected else {
                         return XCTFail("\(testCase.grammar) stream \(streamIndex) step \(step)")
                     }
@@ -465,7 +501,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
     func testSerialToolStopWorkPerStepIsBoundedOnALongGLMBody() {
         func perStep(bodyBytes: Int) -> Double {
             var observer = NativeToolCallStreamEmitter(modelID: "zai-org/GLM-5.3", grammar: .glm, allowedFunctionNames: ["read"])
-            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: true)
+            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .afterThink)
             var stopText = IncrementalToolStopText(observer: observer)
             var text = String(repeating: "thinking. ", count: 50) + "</think>" + String(repeating: "Reading now. ", count: 40)
                 + "<tool_call>read<arg_key>path</arg_key><arg_value>"
@@ -475,7 +511,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                 text += unit
                 steps += 1
                 XCTAssertFalse(ModelRuntime.observeSerialToolStop(
-                    &observer, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: true))
+                    &observer, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: .afterThink))
             }
             return Double(stopText.scannedUTF8 + observer.incrementalScannedUTF8) / Double(steps)
         }
@@ -501,7 +537,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     while text.utf8.count < answerBytes {
                         text += unit
                         steps += 1
-                        let observed = stopText.observedText(text, reasoningOpen: true)
+                        let observed = stopText.observedText(text, reasoningOpen: .afterThink)
                         if steps % 997 == 0 { XCTAssertEqual(observed, String(text.dropFirst(head.count))) }
                     }
                     XCTAssertEqual(stopText.restartCount, 0)
@@ -561,7 +597,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         func work(pieces count: Int, reasoningOpen: Bool) -> (filterPerStep: Double, decodePerStep: Double) {
             var rng = SeededGenerator(state: 9_2317)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: ["END", "\n\n###"], reasoningOpen: reasoningOpen)
+                stopTokenFilter: stopTokens, requestStops: ["END", "\n\n###"], reasoningOpen: .init(reasoningOpen))
             let decoder = ModelRuntime.WindowedTextDecoder(decode: Self.fakeDecode, lookbackScalars: 64)
             let ascii = (0..<Self.vocabulary.count).filter { Self.vocabulary[$0].allSatisfy { $0 < 0x80 } && Self.vocabulary[$0] != Array("END".utf8) }
             var ids: [Int] = []
@@ -578,7 +614,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
         func koreanWork(pieces count: Int) -> Double {
             var rng = SeededGenerator(state: 9_2318)
             let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: ["END"], reasoningOpen: false)
+                stopTokenFilter: stopTokens, requestStops: ["END"], reasoningOpen: .whole)
             let words = [" 안녕하세요", " 반갑습니다", " 오늘은", " 날씨가", " 좋네요"]
             var text = "가"
             for _ in 0..<count {
@@ -610,13 +646,13 @@ final class IncrementalOutputFilterTests: XCTestCase {
         let tokens = (0..<250).map { "<|reserved_special_token_\($0)|>" }
             + ["<|begin_of_text|>", "<|end_of_text|>", "<|eot_id|>", "<|eom_id|>", "<|python_tag|>", "<|finetune_right_pad_id|>"]
         let filter = StopTokenFilter(tokens: tokens)
-        let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+        let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: filter, requestStops: [], reasoningOpen: .whole)
         var text = ""
         var wholeText = 0
         for step in 0..<200 {
             text += "<|reserved_special_token_5|>"
             wholeText += text.utf8.count
-            let expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+            let expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: filter, requestStops: [], reasoningOpen: .whole)
             let actual = incremental.update(text)
             guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
                 return XCTFail("step \(step)")
@@ -722,7 +758,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
 
     /// Dense stop tokens never commit: the row reports its uncommitted tail.
     func testDenseStopTokensReportTheUncommittedTail() {
-        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: false)
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: .whole)
         var text = ""
         for _ in 0..<600 {
             text += "<|eot_id|>"
@@ -748,15 +784,18 @@ final class IncrementalOutputFilterTests: XCTestCase {
             "\u{FE0F}", "\u{1F3FD}", "👍", "가", "\u{1100}", "\u{1161}", "\u{0915}", "\u{094D}", "🇺", "\r",
             "<think>", "</think>", "</th", "ink>", "<tool_call>", "<|eot_id|>", "<|eo", "t_id|>", "STOP", "word ", "prose here ",
             "<div>", "</div>", "</", "<a ", "href=\"x\">", "<?xml", " version=\"1.0\"?>", "\n  <item/>", "<th", "<tool", "<|", "< ",
+            "<mm:think>", "</mm:think>", "</mm:th", "]<]minimax[>[", "]<]mini", "max[>[", "  ",
         ]
         var mismatches = 0
         for stream in 0..<30 {
             let stops = stream % 2 == 0 ? ["STOP"] : []
             let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
-                .outputFilters, .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true),
+                .outputFilters, .streamingSafePrefix(reasoningOpen: .whole), .streamingSafePrefix(reasoningOpen: .afterThink),
+                .streamingSafePrefix(reasoningOpen: .afterMiniMaxThink),
             ]
             let filters = modes.map { ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: $0) }
             var split = IncrementalReasoningSplit()
+            var miniMaxSplit = IncrementalMiniMaxReasoningSplit()
             var stray = IncrementalStrayTagRemoval()
             var text = ""
             for _ in 0..<500 {
@@ -775,6 +814,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
                     if actual.text != expected.text || actual.hitStop != expected.hitStop { mismatches += 1 }
                 }
                 if split.splitStreamingPrefix(text) != ReasoningOutput.splitStreamingPrefix(text) { mismatches += 1 }
+                if miniMaxSplit.splitStreamingPrefix(text) != ReasoningOutput.MiniMax.splitStreamingPrefix(text) { mismatches += 1 }
                 if stray.removingStrayTags(text) != ReasoningOutput.removingStrayTags(text, streaming: true) { mismatches += 1 }
             }
         }

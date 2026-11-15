@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-workflow="$root/.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml"
+workflow="$root/.github/workflows/signed-journey.yml"
 builder="$root/scripts/build-trusted-pool-creator-mvp-journey-result.py"
 preflight="$root/scripts/preflight-signed-journey-promotion.py"
 validator="$root/scripts/validate-signed-journey-result.py"
@@ -23,6 +23,28 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+full_workflow = workflow
+
+def _signed_job_slice(text, job_id):
+    marker = "\n  %s:\n" % job_id
+    start = text.find(marker)
+    if start < 0:
+        raise SystemExit("missing job %s" % job_id)
+    rest = text[start + 1 :]
+    nxt = re.search(r"\n  [A-Za-z0-9_]+:\n", rest)
+    end = (start + 1 + nxt.start()) if nxt else len(text)
+    return text[start:end]
+
+_header_at = full_workflow.find("\njobs:\n")
+if _header_at < 0:
+    raise SystemExit("missing jobs")
+_parts = [full_workflow[: _header_at + len("\njobs:\n")]]
+_root = pathlib.Path(sys.argv[1]).resolve().parents[2]
+for _rel in ('scripts/signed-journeys/common/registry.sh', 'scripts/signed-journeys/common/validate.sh', 'scripts/signed-journeys/common/build.sh', 'scripts/signed-journeys/common/preflight.sh', 'scripts/signed-journeys/common/sign.sh', 'scripts/signed-journeys/evidence/validate-signed.sh', 'scripts/signed-journeys/evidence/verify.sh', 'scripts/signed-journeys/evidence/export.sh',):
+    _parts.append((_root / _rel).read_text(encoding="utf-8"))
+for _job_id in ('acceptance_evidence',):
+    _parts.append(_signed_job_slice(full_workflow, _job_id))
+workflow = "\n".join(_parts)
 builder = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 
 required_workflow = [
@@ -41,12 +63,12 @@ required_workflow = [
     "tr '[:upper:]' '[:lower:]'",
     "tr ',' '-'",
     'envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"',
-    'payload="$RUNNER_TEMP/trusted-pool-creator-mvp-journey-result-${requirement_slug}.unsigned.json"',
+    'payload_prefix=trusted-pool-creator-mvp-journey-result',
     "scripts/build-trusted-pool-creator-mvp-journey-result.py",
     '--evidence-sha "$EVIDENCE_SHA"',
     "scripts/preflight-signed-journey-promotion.py",
     "Preflight selector freshness before signing",
-    "--journey-id JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+    "journey_id=JOURNEY-TRUSTED-POOL-CREATOR-MVP",
     "scripts/verify-github-release-posture.sh",
     "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}",
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}",
@@ -55,7 +77,7 @@ required_workflow = [
     "scripts/check_spec_governance.py --base-ref origin/main",
     "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     "retention-days: 1",
-    "signed-trusted-pool-creator-mvp-journey-evidence-${{ steps.request.outputs.short_sha }}",
+    "artifact_prefix=signed-trusted-pool-creator-mvp-journey-evidence",
     "macprovider.signed-trusted-pool-creator-mvp-journey-evidence.v1",
     "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
 ]
@@ -66,12 +88,16 @@ for value in required_workflow:
 upload_name = "signed-trusted-pool-creator-mvp-journey-evidence-" + ("a" * 12)
 if len(upload_name) > 256:
     raise SystemExit("GitHub Actions artifact names must stay within 256 characters")
-if "steps.request.outputs.requirement_slug }}" in workflow.split("name: signed-trusted-pool-creator-mvp-journey-evidence-", 1)[-1].split("\n", 1)[0]:
+_creator_arm = workflow.split("trusted-pool-creator-mvp)", 1)[1].split(";;", 1)[0]
+if "artifact_mode=short" not in _creator_arm or "requirement_slug" in _creator_arm:
     raise SystemExit("GitHub Actions artifact name must not include the full SPEC-043 requirement slug")
 
-if "\n  push:" in workflow or "\n  pull_request:" in workflow:
+if "\n  push:" in full_workflow or "\n  pull_request:" in full_workflow:
     raise SystemExit("workflow must be manual dispatch only")
-for forbidden in ("contents: write", "pull-requests: write", "git push", "gh pr create", "gh pr merge", "gh release", "scripts/promote-signed-journey-result.py"):
+for forbidden in ("contents: write", "pull-requests: write", "git push", "gh pr create", "gh pr merge", "gh release"):
+    if forbidden in full_workflow:
+        raise SystemExit(f"workflow contains an unnecessary write/publication capability: {forbidden}")
+for forbidden in ("scripts/promote-signed-journey-result.py",):
     if forbidden in workflow:
         raise SystemExit(f"workflow contains an unnecessary write/publication capability: {forbidden}")
 if "cat \"$MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM\"" in workflow:

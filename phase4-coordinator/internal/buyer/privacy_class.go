@@ -251,6 +251,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
 	incapable := false
+	outputGated := false
 	if scope != nil {
 		closest = relayblind.PrivacyRejectPoolNoEligibleMember
 	}
@@ -300,6 +301,11 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 				incapable = true
 				break
 			}
+			// #2189: a provider that cannot split the model's output.
+			if !providerServesModelOutput(provider) {
+				outputGated = true
+				break
+			}
 			providers = append(providers, provider)
 			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
 			break
@@ -310,6 +316,12 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	}
 	if incapable {
 		return privacySelection{}, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported
+	}
+	if outputGated {
+		// SPEC-049-R013/R019: a pre-consume failure is privacy_class_unavailable;
+		// the cause stays in the R030 reason only. The capability 400 above
+		// keeps precedence, as on the relay-blind route.
+		return privacySelection{}, privacyClassUnavailable, relayblind.PrivacyRejectCapabilityUnsupported
 	}
 	switch closest {
 	case relayblind.PrivacyRejectModelNotPrivateCapable:

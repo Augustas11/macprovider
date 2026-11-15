@@ -414,13 +414,13 @@ final class CatalogToolGrammarTests: XCTestCase {
         request.outputState.resolve(RequestOutputTraits(toolGrammar: .glm, reasoningOpen: true))
         // The stop string inside the reasoning does not end the turn.
         let raw = "Count 1, 2, 3, 4 and stop.</think>1, 2, 3, 4, 5"
-        let filtered = ModelRuntime.applyOutputFilters(raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: request.stop, reasoningOpen: true)
+        let filtered = ModelRuntime.applyOutputFilters(raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: request.stop, reasoningOpen: .afterThink)
         XCTAssertTrue(filtered.hitStop)
         let split = ReasoningOutput.split(filtered.text)
         XCTAssertEqual(split.reasoning, "Count 1, 2, 3, 4 and stop.")
         XCTAssertEqual(split.answer, "1, 2, 3, ")
         // A reasoning-only prefix never hits a stop.
-        XCTAssertFalse(ModelRuntime.streamingSafePrefix("Count 1, 2, 3, 4", stopTokenFilter: StopTokenFilter(tokens: []), requestStops: ["4"], reasoningOpen: true).hitStop)
+        XCTAssertFalse(ModelRuntime.streamingSafePrefix("Count 1, 2, 3, 4", stopTokenFilter: StopTokenFilter(tokens: []), requestStops: ["4"], reasoningOpen: .afterThink).hitStop)
     }
 
     func testGLMJSONModeValidatesThePostThinkAnswer() throws {

@@ -7,9 +7,8 @@ used outside tests.
 
 The vector locks key-record framing and signature fields, reservation bindings,
 AAD, transcript digest, X25519 shared secret, HKDF outputs, AES-GCM ciphertext,
-tag, and decrypted UTF-8 chat request. Go tests in both the coordinator and
-gateway modules consume the same file; the Swift provider fixture harness should
-consume it directly as well.
+tag, and decrypted UTF-8 chat request. The shared `relayblind` module consumes
+the file; the Swift provider fixture harness should consume it directly as well.
 
 `privacy-response-v1.json` is the SPEC-049 vector derived from those inputs.
 It locks the response HKDF key and nonce prefix, the per-frame AAD, three
@@ -20,8 +19,8 @@ X25519 key with a 3600-second window, the SPEC-049 maximum. That window is
 shorter than the golden SPEC-041 record, so the privacy digest differs while
 the kid stays the same. The envelope digest is SHA-256 of the compact JSON
 encoding produced by `Envelope.Digest`. Regenerate with
-`MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyGoldenVectorGenerate$'`
-from either relay-blind module.
+`MACPROVIDER_REGEN_FIXTURES=1 go test . -run '^TestPrivacyGoldenVectorGenerate$'`
+from the `relayblind` module.
 
 `privacy-key-rotation-v1.json` is the SPEC-049 §4.12 identity key rotation
 vector. It locks the posture digest and the rotation framing, and carries the

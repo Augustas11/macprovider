@@ -201,7 +201,7 @@ func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing
 	structuredKeys := []string{"response_format", "structured_outputs"}
 	family := []string{openRouterQwen36A3BID, "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "mlx-community/Llama-3.3-70B-Instruct-4bit"}
 	other := []string{"mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/GLM-4.5-Air-4bit",
-		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"}
+		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"}
 	for _, model := range family {
 		if !openRouterToolFamilyModel(model) || !openRouterStructuredOutputModel(model) {
 			t.Fatalf("%s must match both the SPEC-018 §3.8 and SPEC-019 §4 predicates", model)
@@ -616,11 +616,16 @@ func TestOpenRouterModelsHandlerKeepsContextWhenOnlyProviderIsFull(t *testing.T)
 	if row.IsReady {
 		t.Fatalf("is_ready must stay false with no free ready slot")
 	}
-	// /v1/status keeps excluding the non-routable providers.
+	// #2371: /v1/status lists the full provider's model as busy (no free
+	// slots), not degraded; the serving-ineligible row stays excluded.
 	statusResp := httptest.NewRecorder()
 	h.ServeHTTP(statusResp, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
-	if strings.Contains(statusResp.Body.String(), "Qwen3.6") {
-		t.Fatalf("/v1/status gained a non-routable model row: %s", statusResp.Body.String())
+	var status statusResponse
+	if err := json.Unmarshal(statusResp.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(status.Models) != 1 || status.Models[0].ProviderCount != 1 || status.Models[0].Degraded || status.Models[0].Availability != "no_free_slots" || status.Pool.Busy != 1 {
+		t.Fatalf("/v1/status = %s, want one busy no_free_slots model row", statusResp.Body.String())
 	}
 }
 

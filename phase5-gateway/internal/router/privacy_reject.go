@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // privacyRejectMetrics counts SPEC-049-R030 privacy-class refusals the

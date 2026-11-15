@@ -6,8 +6,9 @@
 # available, CB self-check deferred). This pauses ONLY the Studio target: it
 # removes that one row from the runner's targets.json (timestamped backup next
 # to it), restarts the runner so its other targets keep their traffic, and
-# restores the exact backup bytes with one more restart. The whole service is
-# never stopped. Runs lib/buyer-runner-target.py over PEARL_SSH.
+# restores the exact backup bytes with one more restart. If another target
+# changed during the reservation, restore re-adds only the Studio row to the
+# current file (other edits kept). The whole service is never stopped. Runs lib/buyer-runner-target.py over PEARL_SSH.
 #
 # Usage (standalone; sourcing it from an entry point gives the same functions):
 #   MACPROVIDER_OPS_OWNER=<label> scripts/ops/lib/runner-reserve.sh pause-studio
@@ -69,13 +70,22 @@ runner_pause_studio() {
 
 runner_restore_studio() {
   runner_reserve_enabled || return 0
-  runner_reserve_remote reserve-restore >&2 || {
+  local out="" how
+  out="$(runner_reserve_remote reserve-restore)" || {
     local rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
     log "!!! buyer runner Studio target NOT restored: run 'scripts/ops/lib/runner-reserve.sh restore' as owner ${MACPROVIDER_OPS_OWNER:-?}"
     return "$rc"
   }
+  printf '%s\n' "$out" >&2
   RUNNER_RESERVE_ACTIVE=0
-  log "buyer runner: Studio target restored"
+  how="$(printf '%s' "$out" | sed -n 's/.*"restore": "\([a-z]*\)".*/\1/p')"
+  case "$how" in
+    bytes) log "buyer runner: Studio target restored (backup bytes written back)" ;;
+    row) log "buyer runner: Studio target restored (row re-added; other target edits made during the reservation kept)" ;;
+    already) log "buyer runner: Studio target restored (row already present; no write)" ;;
+    *) log "buyer runner: no outstanding reservation; nothing to restore" ;;
+  esac
 }
 
 # runner_set_studio_model MODEL_ID: retarget the Studio row's model (one restart).

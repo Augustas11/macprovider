@@ -138,7 +138,8 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                    &observer,
                    decoded: vocab.decode(generated),
                    stopTokenFilter: Self.stopTokenFilter,
-                   requestStops: request.stop
+                   requestStops: request.stop,
+                   reasoningOpen: .whole
                ) {
                 break
             }

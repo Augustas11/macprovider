@@ -210,7 +210,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertFalse(supported(depth: 2, kinds: [.pagedAttention]))
     }
 
-    /// SPEC-048 0.1.98: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
+    /// SPEC-048 0.1.101: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
     /// drafts 1...3 tokens from one position whatever its decoder depth, owns
     /// no drafter cache, and admits only the exact SPEC-039 v0.1.34 `gemma4`
     /// mixed class with the runtime caches in its config layout.
@@ -380,7 +380,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
     }
 
-    /// SPEC-048-R002 (0.1.98) `gemma4_mtp_v1`: the 8-bit target and bf16
+    /// SPEC-048-R002 (0.1.101) `gemma4_mtp_v1`: the 8-bit target and bf16
     /// assistant pair is recomputed from the observed artifact and matched
     /// field by field; no exceptions are admissible.
     func testGemma4EmbeddedAssistantObservationMustMatchSignedCapability() throws {
@@ -1697,6 +1697,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["STOP"],
+            reasoningOpen: .whole,
             decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() },
             decodeLookbackScalars: 64
         )
@@ -1756,6 +1757,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
+            reasoningOpen: .whole,
             decode: decode,
             decodeLookbackScalars: 64
         )
@@ -1766,6 +1768,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
+            reasoningOpen: .whole,
             decode: decode,
             decodeLookbackScalars: 64
         )
@@ -1779,6 +1782,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: [],
+            reasoningOpen: .whole,
             decode: { tokenIDs in
                 decodeCalls += 1
                 return tokenIDs.map(String.init).joined()

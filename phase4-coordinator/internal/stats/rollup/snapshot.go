@@ -101,9 +101,12 @@ type RoutabilitySummary struct {
 	ModelsTotal             int    `json:"models_total"`
 	ModelsRedundant         int    `json:"models_redundant"`
 	ModelsOperational       int    `json:"models_operational"`
-	ModelsDegraded          int    `json:"models_degraded"`
-	ModelsUnknown           int    `json:"models_unknown"`
-	ModelsOffline           int    `json:"models_offline"`
+	// ModelsDegraded is always 0 since SPEC-017 v0.2.2 (#2371): a model is
+	// never degraded for busy providers. Kept because removing a /v1 field is
+	// a breaking change (SPEC-017 §8.3).
+	ModelsDegraded int `json:"models_degraded"`
+	ModelsUnknown  int `json:"models_unknown"`
+	ModelsOffline  int `json:"models_offline"`
 }
 
 type ModelRoutability struct {

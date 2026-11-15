@@ -16,8 +16,8 @@ import (
 
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 const relayBlindEnvelopeVersionV1 = "relay-blind-request-v1"

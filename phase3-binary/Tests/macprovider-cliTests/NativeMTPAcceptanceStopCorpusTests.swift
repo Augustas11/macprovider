@@ -76,7 +76,7 @@ final class NativeMTPAcceptanceStopCorpusTests: XCTestCase {
             }
             var observer = ModelRuntime.SerialDecodeRequestStopObserver(
                 modelID: request.model, stopTokenFilter: StopTokenFilter(tokens: []),
-                requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                requestStops: request.stop, reasoningOpen: ModelRuntime.reasoningStopScope(request),
                 decode: decode,
                 decodeLookbackScalars: 64
             )
@@ -95,7 +95,7 @@ final class NativeMTPAcceptanceStopCorpusTests: XCTestCase {
             XCTAssertFalse(generated.contains(257))
             let filtered = ModelRuntime.applyOutputFilters(
                 decode(generated), stopTokenFilter: StopTokenFilter(tokens: []),
-                requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen
+                requestStops: request.stop, reasoningOpen: ModelRuntime.reasoningStopScope(request)
             )
             XCTAssertTrue(filtered.hitStop)
             let parsed = try ModelRuntime.parseGeneratedOutput(

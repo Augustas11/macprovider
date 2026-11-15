@@ -327,8 +327,8 @@ laptop.
 
 After the redacted artifacts are on `main`, dispatch:
 
-- `.github/workflows/promote-signed-byom-discovery-journey.yml`
-- `.github/workflows/promote-signed-network-model-admission-journey.yml`
+- `.github/workflows/signed-journey.yml (journey=byom-discovery)`
+- `.github/workflows/signed-journey.yml (journey=network-model-admission)`
 
 Those workflows build, preflight, sign with `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`,
 rewrite `specs/CONFORMANCE.json` in the runner, and export a 1-day artifact. They

@@ -1118,13 +1118,26 @@ check_journey_run() {
   local id="$1" sha="$2" V="$3" info
   [[ "$id" =~ ^[0-9]+$ ]] || refuse "run id must be numeric (got '$id')"
   info="$(gh api "repos/$(gh_repo)/actions/runs/$id" \
-    --jq '{id, conclusion, status, head_sha, path, display_title, html_url}' 2>/dev/null)" ||
+    --jq '{id, conclusion, status, head_sha, path, display_title, name, html_url}' 2>/dev/null)" ||
     refuse "run $id not readable via gh"
   python3 - "$info" "$sha" "$V" <<'PY' || refuse "run $id is not a successful signed journey run"
 import json, re, sys
 d, sha, v = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
 ok = d.get("status") == "completed" and d.get("conclusion") == "success"
-ok = ok and re.fullmatch(r"\.github/workflows/promote-signed-[a-z0-9-]+-journey\.yml", d.get("path") or "")
+path = d.get("path") or ""
+legacy = re.fullmatch(r"\.github/workflows/promote-signed-[a-z0-9-]+-journey\.yml", path) is not None
+label = d.get("display_title") or d.get("name") or ""
+allowed = (
+    "buyer-crash-recovery|buyer-enforce|buyer-paid-path|byom-discovery|"
+    "local-consumer-endpoint|native-mtp-release|native-mtp-serving|"
+    "network-model-admission|payout|privacy-class-beta|provider-prebeta|"
+    "trusted-pool-external-runtime|trusted-pool-model"
+)
+unified = path == ".github/workflows/signed-journey.yml" and (
+    re.fullmatch(rf"signed-journey-(?:{allowed})", label) is not None
+    or re.fullmatch(r"native-mtp-postcut-[0-9a-f]{40}-[0-9a-f]{64}", label) is not None
+)
+ok = ok and (legacy or unified)
 sys.exit(0 if ok else 1)
 PY
   local head title named=""

@@ -1764,6 +1764,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		UptimeS         int64  `json:"uptime_s"`
 		PoolSize        int    `json:"pool_size"`
 		PoolReady       int    `json:"pool_ready"`
+		PoolBusy        int    `json:"pool_busy"`
 		PoolDegraded    int    `json:"pool_degraded"`
 		PoolDraining    int    `json:"pool_draining"`
 		PoolUnavailable int    `json:"pool_unavailable"`
@@ -1782,7 +1783,15 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			if p.CapacityEligible() {
 				resp.PoolReady++
 			}
-		case pool.StateDegraded, pool.StateBusy:
+		case pool.StateBusy:
+			// A busy provider in service is serving, not degraded (#2371); a
+			// busy one that is not (e.g. compute-integrity suspended) is.
+			if p.InService() {
+				resp.PoolBusy++
+			} else {
+				resp.PoolDegraded++
+			}
+		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:
 			resp.PoolDraining++
@@ -1867,10 +1876,9 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// A busy provider is serving with no free slot: report it as busy, not
+	// degraded (#2371).
 	state := p.State
-	if state == pool.StateBusy {
-		state = pool.StateDegraded
-	}
 	s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
 	w.Header().Set("Content-Type", "application/json")
 	response := poolCheckResponse{
@@ -8516,6 +8524,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
+				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
@@ -8564,6 +8575,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
 					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+				}
+				if !providerServesModelOutput(p) {
+					return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -8618,6 +8632,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		providers = toolGrammarEligibleProviders(providers)
 		if before > 0 && len(providers) == 0 {
 			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+		}
+	}
+	// #2189: every MiniMax M3 request, plain chat included, reaches only
+	// native providers that split its reasoning (providerServesModelOutput).
+	if eligible := modelOutputEligibleProviders(providers); len(eligible) < len(providers) {
+		served := anyProviderModelCandidate(providers, req.Model, poolModelClass)
+		providers = eligible
+		if served && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
+			return pool.Provider{}, modelOutputRouteError(req.multiTurnToolHistory)
 		}
 	}
 	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
@@ -10029,6 +10052,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if state != nil && state.multiTurnToolHistory && !providerToolGrammarEligible(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if !providerServesModelOutput(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.

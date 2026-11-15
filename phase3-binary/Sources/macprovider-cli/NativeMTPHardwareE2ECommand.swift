@@ -1324,7 +1324,7 @@ final class NativeMTPHardwareE2ERunner {
             signerKeyID: keyID,
             affineRepresentation: affineRepresentation,
             // The observer's count, as production compares it: Gemma 4's
-            // assistant depth (`mtp_num_hidden_layers`, SPEC-048-R002 0.1.98)
+            // assistant depth (`mtp_num_hidden_layers`, SPEC-048-R002 0.1.101)
             // is not its proposal depth.
             predictionLayerCount: artifactObservation.target.mtpPredictionLayerCount
         )

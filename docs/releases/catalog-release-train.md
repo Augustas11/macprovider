@@ -1,8 +1,8 @@
 # Catalog Release Train — signed SPEC-023 catalog content
 
-> **Current state:** the history below ends at 2026-09-30 and is not rewritten.
-> Live catalog and activation steps since then are recorded in
-> `docs/releases/cli-release-train.md`; read that file for what is live now.
+> **Current state:** see "Current state — 2026-11-14" below. The older history
+> ends at 2026-09-30 and is not rewritten. Per-release activation steps since
+> then are recorded in `docs/releases/cli-release-train.md`.
 
 **This file tracks signed catalog-content and pricing rollouts.** It is the
 release-train companion to `docs/releases/cli-release-train.md` and
@@ -13,7 +13,38 @@ Update this file when a catalog-content or rows-only pricing PR merges, when a
 signed content release goes live, or when a rollout is deliberately held behind
 another gate.
 
-## Live on Pearl
+## Current state — 2026-11-14
+
+Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14.
+
+- **Live:** `published-2026-11-12-nemotron-3.5-lightning-listed-v283`
+  (`live_verified`).
+- **Committed on `main`, not activated:**
+  `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`, from
+  [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`).
+  It moves `minimaxai/minimax-m3.1-flash` from `listed` to `recommendable`.
+  Pending steps: `buyer_ux_conformance`, `catalog_preflight`,
+  `catalog_activation`, `canary_bank`, `live_probe` and `gateway_proof`.
+  After activation, `buyer_ux_conformance_owed` remains for
+  `minimaxai/minimax-m3.1-flash`.
+- **`buyer_serving_e2e` owed:** the GLM-5.3-Flash uncensored artifact (since
+  `published-2026-11-09-glm53-flash-uncensored-recommendable-v281`) and the
+  DeepSeek V4-Flash MXFP4 artifact (since
+  `published-2026-10-23-deepseek-v4-flash-recommendable-v1`).
+- **Signed release manifest,
+  [#2334](https://github.com/Augustas11/macprovider/pull/2334)
+  (`d3b136de1`):** a catalog release may ship `release.json.sig`, one Ed25519
+  signature over `release.json` (SPEC-023 §3.8). The coordinator code that
+  serves it at `/v1/catalog-release`, and its nginx routes, are not live:
+  they ride the next Pearl runtime (live is `v1.8.286`). No tracked
+  `release.json.sig` exists on `main` at `30fdbe2cf`, so the committed MiniMax
+  release carries no manifest signature. #2334 also removes the pre-#2282
+  signed-pair, binding-bundle and `signed-pair-plan.py` activation paths.
+- **Order:** `scripts/ops/README.md` says catalog activation comes before the
+  CLI cut. `cli-release.sh` keeps `candidate_cut` blocked until Pearl serves
+  the catalog release on `origin/main`.
+
+## Live on Pearl (2026-09-30, historical)
 
 | Field | Value |
 |---|---|

@@ -23,6 +23,7 @@ const (
 	toolGrammarHarmony = "harmony"
 	toolGrammarDSML    = "dsml"
 	toolGrammarLFM2    = "lfm2"
+	toolGrammarMiniMax = "minimax"
 )
 
 func toolGrammarFamily(model string) string {
@@ -48,6 +49,9 @@ func toolGrammarFamily(model string) string {
 		return toolGrammarDSML
 	case strings.Contains(id, "lfm2.5-24b-a2b"):
 		return toolGrammarLFM2
+	case strings.Contains(id, "minimax-m3"), strings.Contains(id, "minimax_m3"):
+		// MiniMax M3 / M3.1 (#2189); earlier MiniMax grammars differ.
+		return toolGrammarMiniMax
 	}
 	return ""
 }

@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 func pilotReservationFixture(t *testing.T, stream bool, additionalModels ...string) (relayblind.ReservationResponse, []byte) {

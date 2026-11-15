@@ -1344,7 +1344,7 @@ func (s *Store) StorePrivacyAttestation(ctx context.Context, providerID, kid, di
 	if s == nil || s.db == nil {
 		return ErrStoreUnavailable
 	}
-	if err := attestation.validate(); err != nil {
+	if err := attestation.Validate(); err != nil {
 		return err
 	}
 	if attestation.KeyRecordDigest != digest {
@@ -1390,7 +1390,7 @@ func (s *Store) LookupPrivacyAttestation(ctx context.Context, providerID, kid, d
 	if err := decodeClosed([]byte(raw.String), &attestation, []string{"version", "key_record_digest", "privacy_class", "assurance", "binary_version", "code_cdhash", "not_before_unix", "expires_at_unix"}); err != nil {
 		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: privacy attestation", ErrInvalidPrivacy)
 	}
-	if err := attestation.validate(); err != nil {
+	if err := attestation.Validate(); err != nil {
 		return PrivacyKeyAttestation{}, "", err
 	}
 	if attestation.KeyRecordDigest != digest {

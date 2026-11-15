@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 func relayBlindRecoveryMetadata(t *testing.T, reservation relayblind.ReservationResponse, raw []byte) *storage.RelayBlindMetadata {

@@ -25,6 +25,21 @@ let package = Package(
         // shared-K/V emission) and e198b9b (Gemma 4 layers attend through a
         // cache that owns attention, so batched rows attend only over their
         // own keys), which the provider's gemma4_mtp_v1 adapter needs.
+        // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
+        // DeepSeek V4 prefill can yield between evaluated tiles so other
+        // continuous-batch rows decode while a reference prefill is in
+        // flight. 8f88216 cherry-picks the .62 pause hook (505f368,
+        // DeepseekV4.swift only) onto ef656c59.
+        // Tag 3.32.3-macprovider.61 (#2327) on 3.32.3-macprovider.59:
+        // Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype,
+        // so an image prefill no longer leaves the language model and its KV
+        // cache in float32 (upstream ml-explore/mlx-swift-lm #766); FastVLM
+        // image pixels take the patch-embed weight dtype and Mistral3 drops
+        // its bfloat16 image-feature cast.
+        // Tag 3.32.3-macprovider.59 (#2327) on 3.32.3-macprovider.58:
+        // Qwen2-VL post-vision decode uses fused non-traditional RoPE when
+        // the three M-RoPE axes share one rope delta; per-row deltas and
+        // traditional RoPE stay on the position-id path.
         // Tag 3.32.3-macprovider.58 (#2335) on 3.32.3-macprovider.56: MLX core
         // v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row
         // of a qualifying affine weight takes affine_qmv_mma1, a single-row

@@ -715,7 +715,10 @@ func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
 // was found, whether the SPEC-041-R004 capability gate refused the
 // request (an otherwise eligible provider serves the model and none supports
 // a capability in requires), and the buyer-ownership refusal when the
-// ownership lookup could not answer.
+// ownership lookup could not answer. When the only otherwise eligible
+// providers cannot split the model's output (providerServesModelOutput), they
+// are skipped and the result is not found: the reservation gets the retryable
+// SPEC-041-R007 relay_blind_provider_unsupported (#2189).
 func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool, *routeError) {
 	owned, ownershipErr := s.buyerOwnedProviders(ctx)
 	if ownershipErr != nil {
@@ -747,6 +750,9 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model 
 		if err == nil && len(records) > 0 {
 			if !relayBlindProviderMeetsRequires(provider, requires) {
 				incapable = true
+				continue
+			}
+			if !providerServesModelOutput(provider) {
 				continue
 			}
 			providers = append(providers, provider)

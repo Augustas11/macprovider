@@ -288,7 +288,7 @@ sign, promote, dispatch workflows, or mutate production state.
 Protected manual workflow:
 
 ```text
-.github/workflows/promote-signed-local-consumer-endpoint-journey.yml
+.github/workflows/signed-journey.yml (journey=local-consumer-endpoint)
 ```
 
 Builder:

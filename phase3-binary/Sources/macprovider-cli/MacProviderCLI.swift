@@ -3011,6 +3011,12 @@ struct ServeCommand: AsyncParsableCommand {
         let smallMRouteVerdictStore = SmallMRouteVerdictStore(selfCheckStore: cbSelfCheckStore)
         let startupLoadPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model
         let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+        // The paged-KV pool the MLX runtime is built with; it bounds the
+        // FR-CB10 exactness probe, so the startup identity keys it.
+        let localModelFamily = startupLoadPath.flatMap(ModelRuntime.localModelFamily)
+        let startupPagedKVConfig = resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
+            contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+        )
         let smallMRouteStartupIdentity: String? = startupLoadSHA256.flatMap { sha in
             guard !sha.isEmpty, autoServedSlots != nil else { return nil }
             let machine = MachineFingerprinter().sample()
@@ -3034,6 +3040,7 @@ struct ServeCommand: AsyncParsableCommand {
                 "prefill_step_size": String(resolved.prefillStepSize),
                 "cached_turns": String(resolved.continuousBatchingCachedTurns),
                 "paged_kv": String(resolved.pagedKV.enabled),
+                "paged_kv_pool": SmallMRouteVerdictStore.pagedKVPool(startupPagedKVConfig),
                 "native_mtp_mode": resolved.nativeMTPMode.rawValue,
             ])
         }
@@ -3204,8 +3211,6 @@ struct ServeCommand: AsyncParsableCommand {
             } else {
                 helloRuntimeSource = nil
                 // Before any MLX device use: MLX reads the budget when it creates the device.
-                let localModelFamily = (startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model)
-                    .flatMap(ModelRuntime.localModelFamily)
                 if let family = localModelFamily,
                    let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
                     FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
@@ -3225,9 +3230,7 @@ struct ServeCommand: AsyncParsableCommand {
                     // to serially served requests (SPEC-039 FR-PKV5 v0.1.30).
                     kvBitsOverride: resolved.kvBitsOverride,
                     familyKVQuantDefault: true,
-                    pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
-                        contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
-                    ),
+                    pagedKVConfig: startupPagedKVConfig,
                     prefillStepSize: resolved.prefillStepSize,
                     prefillStepSizeExplicitlyConfigured: resolved.prefillStepSizeExplicitlyConfigured,
                     maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),

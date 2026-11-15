@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // SPEC-049-R020 v0.5.0: the code-bound strings are pinned and the pool

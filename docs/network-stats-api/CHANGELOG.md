@@ -4,6 +4,23 @@ Per SPEC-017 §8.5. Each entry cites the PR(s) that landed the
 delta, the SPEC version delivered, and a one-line summary suitable
 for a partner-facing announcement.
 
+## v0.2.2 — 2026-11-14
+
+`GET /v1/stats/routability`, `/v1/stats/models` and
+`/v1/stats/providers` no longer report busy capacity as degradation.
+A model whose providers are serving on every slot is `redundant` (two
+or more) or `operational` (one); free capacity stays in `slots_free`,
+`slots_total` and `routable_provider_count`. A provider busy on every
+slot or under a thermal or queue-full hold is `online`; one waiting on
+a catalog recheck or handshake acknowledgement is `unknown`. Provider
+`degraded` now means only a compute-integrity suspension or an
+unavailable shard group. Models and the network summary are never
+`degraded`; `summary.models_degraded` is always `0` (kept for
+compatibility). No field added or removed.
+
+Delivered in PR [Augustas11/macprovider#2374][pr2374]. Related:
+Augustas11/macprovider#2371.
+
 ## v0.1.9 — 2026-07-29
 
 Adds `network.capacity_estimate_sources` to
@@ -68,3 +85,4 @@ Structured log event taxonomy: `stats_request_served`,
 
 [pr173]: https://github.com/Augustas11/macprovider/pull/173
 [pr805]: https://github.com/Augustas11/macprovider/pull/805
+[pr2374]: https://github.com/Augustas11/macprovider/pull/2374

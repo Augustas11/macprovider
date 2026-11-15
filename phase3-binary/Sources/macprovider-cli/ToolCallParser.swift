@@ -115,6 +115,8 @@ enum ToolCallParser {
             result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
         case .glm?:
             return parseGLMCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas) ?? none
+        case .minimax?:
+            return parseMiniMaxCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas) ?? none
         case .gemma4?, .llama3?, .dsml?, .lfm2?:
             do {
                 let calls: [ToolCall]
@@ -155,6 +157,7 @@ enum ToolCallParser {
         case .llama3?: return ["<|python_tag|>", "{"]
         case .dsml?: return [DeepseekV4Encoding.toolCallsStart]
         case .lfm2?: return [LFMToolCallParser.startMarker]
+        case .minimax?: return [miniMaxCallsStart]
         case .harmony?, nil: return []
         }
     }
@@ -520,6 +523,287 @@ enum ToolCallParser {
             return .string(raw)
         }
         return try glmValue(raw, type: type)
+    }
+
+    // MARK: MiniMax M3 (#2189)
+
+    /// The namespace token every MiniMax M3 structural tag starts with
+    /// (an added token of the MiniMax-M3.1 vocabulary).
+    static let miniMaxNamespace = "]<]minimax[>["
+    static let miniMaxCallsStart = miniMaxNamespace + "<tool_call>"
+    static let miniMaxCallsEnd = miniMaxNamespace + "</tool_call>"
+    /// The namespace token without its first scalar: every marker the
+    /// incremental stream steps hold their cuts against starts with `<`
+    /// (`IncrementalToolText`), and each namespace token contains this.
+    static let miniMaxMarker = String(miniMaxNamespace.dropFirst())
+    private static let miniMaxInvokeOpen = miniMaxNamespace + "<invoke name=\""
+
+    /// One parsed MiniMax element value: the text between `ns<KEY>` and
+    /// `ns</KEY>`, or the child elements the template expanded a mapping or
+    /// list into.
+    private indirect enum MiniMaxNode {
+        case text(String)
+        case elements([(key: String, value: MiniMaxNode)])
+    }
+
+    /// MiniMax M3 calls, as the `MiniMaxAI/MiniMax-M3.1-Flash` chat template
+    /// writes them (`ns` is `]<]minimax[>[`):
+    ///
+    ///     ns<tool_call>\n
+    ///     ns<invoke name="NAME">ns<KEY>VALUE ns</KEY>…ns</invoke>\n   (per call)
+    ///     ns</tool_call>
+    ///
+    /// The GLM hardening applies (#2220, #2259, #2262): invokes are parsed one
+    /// by one, a malformed one is dropped with a warning and the others are
+    /// kept, each with the declared-function check; byte-cap overflow fails
+    /// the whole output closed; a wrapper whose opener repeats before its
+    /// close begins at the last opener; a final wrapper without its close
+    /// (the end-of-turn token replaced it) keeps only complete invokes and is
+    /// dropped whole when it holds a second opener; prose between or after
+    /// wrappers is dropped; namespaced markup never reaches content. Nil when
+    /// the output holds no namespace token.
+    private static func parseMiniMaxCalls(
+        _ rawOutput: String,
+        modelID: String,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
+    ) -> ParsedToolCalls? {
+        let start = miniMaxCallsStart, end = miniMaxCallsEnd
+        guard let first = rawOutput.range(of: start) else {
+            guard rawOutput.contains(miniMaxNamespace) else { return nil }
+            return ParsedToolCalls(cleanedContent: miniMaxProse(rawOutput), toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+        }
+        var calls: [ToolCall] = []
+        var prose = ""
+        var responseBytes = 0
+        var capFailure: ParseError?
+        var searchFrom = rawOutput.startIndex
+        while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
+            prose += miniMaxStrippingMarkup(rawOutput[searchFrom..<open.lowerBound])
+            var bodyStart = open.upperBound
+            let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
+            let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
+            if close != nil, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
+                bodyStart = last.upperBound
+            }
+            let body = rawOutput[bodyStart..<bodyEnd]
+            if close == nil, body.contains(start) {
+                // The output may have been cut inside an argument that
+                // quotes the opener.
+                glmWarning("dropped unclosed MiniMax tool-call wrapper for \(modelID)", modelID: modelID)
+            } else {
+                for invoke in miniMaxInvokes(body) {
+                    do {
+                        let call = try miniMaxCall(invoke, schemas: schemas)
+                        if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {
+                            throw ParseError.undeclaredFunction
+                        }
+                        let bytes = call.arguments.utf8.count
+                        guard bytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else { throw ParseError.byteCapExceeded }
+                        guard responseBytes + bytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { throw ParseError.responseByteCapExceeded }
+                        responseBytes += bytes
+                        calls.append(call)
+                    } catch ParseError.byteCapExceeded {
+                        capFailure = capFailure ?? .byteCapExceeded
+                    } catch ParseError.responseByteCapExceeded {
+                        capFailure = capFailure ?? .responseByteCapExceeded
+                    } catch {
+                        glmWarning("dropped malformed MiniMax tool call for \(modelID): \(error)", modelID: modelID)
+                    }
+                }
+            }
+            searchFrom = close?.upperBound ?? rawOutput.endIndex
+            if close == nil { break }
+        }
+        prose += miniMaxStrippingMarkup(rawOutput[searchFrom...])
+        if let capFailure {
+            glmWarning("MiniMax tool-call output failed closed for \(modelID): \(capFailure)", modelID: modelID)
+            calls = []
+        }
+        guard calls.isEmpty else {
+            return ParsedToolCalls(cleanedContent: nil, toolCalls: calls, leadingContent: miniMaxProse(rawOutput[..<first.lowerBound]))
+        }
+        return ParsedToolCalls(cleanedContent: isBlank(prose) ? nil : prose, toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+    }
+
+    /// The invokes of one wrapper body, each from its `ns<invoke name="` to
+    /// the next one (or the body's end). Text before the first invoke is
+    /// prose inside the wrapper and is dropped.
+    private static func miniMaxInvokes(_ body: Substring) -> [Substring] {
+        var starts: [Substring.Index] = []
+        var from = body.startIndex
+        while let range = body.range(of: miniMaxInvokeOpen, range: from..<body.endIndex) {
+            starts.append(range.lowerBound)
+            from = range.upperBound
+        }
+        return starts.indices.map { index in
+            body[starts[index]..<(index + 1 < starts.count ? starts[index + 1] : body.endIndex)]
+        }
+    }
+
+    /// One `ns<invoke name="NAME">…ns</invoke>` call. Text after its close
+    /// (up to the next invoke or the wrapper close) is prose inside the
+    /// wrapper and is dropped; namespaced markup there makes the call
+    /// malformed. Values are typed by the declared schema: the template
+    /// writes strings raw, booleans and numbers as their JSON text, and
+    /// mappings and lists as nested elements (`ns<item>` per element).
+    static func miniMaxCall(_ invoke: Substring, schemas: [String: JSONValue]?) throws -> ToolCall {
+        guard invoke.hasPrefix(miniMaxInvokeOpen) else { throw ParseError.invalidShape }
+        let nameStart = invoke.index(invoke.startIndex, offsetBy: miniMaxInvokeOpen.count)
+        guard let quote = invoke[nameStart...].firstIndex(of: "\"") else { throw ParseError.invalidShape }
+        let name = String(invoke[nameStart..<quote])
+        guard isValidToolFunctionName(name) else { throw ParseError.invalidShape }
+        let rest = invoke[invoke.index(after: quote)...]
+        guard rest.hasPrefix(">") else { throw ParseError.invalidShape }
+        let parsed = try miniMaxElements(rest.dropFirst(), closingKey: "/invoke", depth: 1)
+        guard parsed.rest.range(of: miniMaxNamespace) == nil else { throw ParseError.invalidShape }
+        guard parsed.elements.allSatisfy({ isValidToolParameterName($0.key) }) else { throw ParseError.invalidArguments }
+        let value = try miniMaxValue(.elements(parsed.elements), schema: schemas?[name] ?? .object(["type": .string("object")]), depth: 1)
+        guard case .object = value, ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
+        let json = try value.deterministicJSONString()
+        try validateNoDuplicateJSONKeys(json)
+        return ToolCall(id: newCallID(), functionName: name, arguments: json)
+    }
+
+    /// Elements `ns<KEY>VALUE ns</KEY>` up to the `ns<closingKey>` tag,
+    /// which must follow; whitespace between elements is free. Also returns
+    /// the text after that tag.
+    private static func miniMaxElements(
+        _ text: Substring, closingKey: String, depth: Int
+    ) throws -> (elements: [(key: String, value: MiniMaxNode)], rest: Substring) {
+        guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else { throw ParseError.invalidArguments }
+        var elements: [(key: String, value: MiniMaxNode)] = []
+        var rest = text
+        while true {
+            rest = rest.drop(while: \.isWhitespace)
+            if let after = miniMaxTag(rest, is: closingKey) { return (elements, after) }
+            guard let open = miniMaxTag(rest) else {
+                throw rest.isEmpty ? ParseError.missingEndDelimiter : ParseError.invalidShape
+            }
+            let key = open.key
+            guard (1...128).contains(key.count), !key.hasPrefix("/"),
+                  !key.contains(where: { $0 == "\"" || $0.isWhitespace }) else { throw ParseError.invalidShape }
+            let value = open.rest
+            let lead = value.drop(while: \.isWhitespace)
+            if lead.hasPrefix(miniMaxNamespace + "<"), miniMaxTag(lead, is: "/" + key) == nil {
+                let nested = try miniMaxElements(value, closingKey: "/" + key, depth: depth + 1)
+                elements.append((key, .elements(nested.elements)))
+                rest = nested.rest
+            } else {
+                guard let next = value.range(of: miniMaxNamespace) else { throw ParseError.missingEndDelimiter }
+                guard let after = miniMaxTag(value[next.lowerBound...], is: "/" + key) else { throw ParseError.invalidShape }
+                elements.append((key, .text(String(value[..<next.lowerBound]))))
+                rest = after
+            }
+        }
+    }
+
+    /// The tag `ns<KEY>` that starts `text`: its key and the text after it.
+    /// The namespace token is the structure; the tag after it is the key the
+    /// call wrote. MiniMax's vocabulary holds `<filename>`, `<commit_msg>`
+    /// and other code tokens, so a key the model spelled with ordinary
+    /// tokens carries the control-text shield's mark (`ControlTextShield`):
+    /// it is removed from the key.
+    private static func miniMaxTag(_ text: Substring) -> (key: String, rest: Substring)? {
+        guard text.hasPrefix(miniMaxNamespace + "<") else { return nil }
+        let tag = text.dropFirst(miniMaxNamespace.count + 1)
+        guard let end = tag.firstIndex(where: { $0 == ">" || $0 == "<" }), tag[end] == ">" else { return nil }
+        return (ControlTextShield.strip(String(tag[..<end])), tag[tag.index(after: end)...])
+    }
+
+    /// The text after `ns<key>` when `text` starts with that tag.
+    private static func miniMaxTag(_ text: Substring, is key: String) -> Substring? {
+        guard let tag = miniMaxTag(text), tag.key == key else { return nil }
+        return tag.rest
+    }
+
+    /// A node as JSON, typed by `schema` as `glmValue` types GLM values. An
+    /// element list is an array when the schema declares one, or (with no
+    /// declared type) when every child is `item`; otherwise an object. An
+    /// empty value is the empty string, list or mapping of its declared type.
+    private static func miniMaxValue(_ node: MiniMaxNode, schema: JSONValue?, depth: Int) throws -> JSONValue {
+        guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else { throw ParseError.invalidArguments }
+        var declared: [String: JSONValue] = [:]
+        if case .object(let object)? = schema { declared = object }
+        var type: String?
+        var nullable = false
+        switch declared["type"] {
+        case .string(let name)?:
+            type = name
+        case .array(let names)?:
+            nullable = names.contains(.string("null"))
+            // `["string", "null"]`: a value the template wrote raw is text.
+            let declaredNames = names.compactMap { name -> String? in
+                if case .string(let text) = name, text != "null" { return text }
+                return nil
+            }
+            type = declaredNames.contains("string") ? "string" : declaredNames.count == 1 ? declaredNames[0] : nil
+        default:
+            break
+        }
+        switch node {
+        case .text(let raw):
+            // The template omits a None value and writes strings raw, so
+            // `null` for a type that admits text is the literal text; for a
+            // nullable non-string type it is JSON null.
+            if nullable, type != "string", raw.trimmingCharacters(in: .whitespacesAndNewlines) == "null" { return .null }
+            guard raw.isEmpty else { return try glmValue(raw, type: type) }
+            switch type {
+            case "object"?: return .object([:])
+            case "array"?: return .array([])
+            case nil, "string"?: return .string("")
+            default: throw ParseError.invalidArguments
+            }
+        case .elements(let children):
+            guard type == nil || type == "object" || type == "array" else { throw ParseError.invalidArguments }
+            if type == "array" || (type == nil && !children.isEmpty && children.allSatisfy({ $0.key == "item" })) {
+                guard children.allSatisfy({ $0.key == "item" }) else { throw ParseError.invalidArguments }
+                return .array(try children.map { try miniMaxValue($0.value, schema: declared["items"], depth: depth + 1) })
+            }
+            var properties: [String: JSONValue] = [:]
+            if case .object(let object)? = declared["properties"] { properties = object }
+            var object: [String: JSONValue] = [:]
+            for child in children {
+                guard object[child.key] == nil else { throw ParseError.invalidArguments }
+                object[child.key] = try miniMaxValue(child.value, schema: properties[child.key], depth: depth + 1)
+            }
+            return .object(object)
+        }
+    }
+
+    /// `text` with every namespace token removed, together with the tag
+    /// (`<…>` with no `<` inside) that directly follows one.
+    static func miniMaxStrippingMarkup<S: StringProtocol>(_ text: S) -> String {
+        var out = ""
+        var rest = Substring(text)
+        while let ns = rest.range(of: miniMaxNamespace) {
+            out += rest[..<ns.lowerBound]
+            rest = rest[ns.upperBound...]
+            if rest.hasPrefix("<"), let end = rest.dropFirst().firstIndex(where: { $0 == ">" || $0 == "<" }), rest[end] == ">" {
+                rest = rest[rest.index(after: end)...]
+            }
+        }
+        return out + rest
+    }
+
+    private static func miniMaxProse<S: StringProtocol>(_ text: S) -> String? {
+        let prose = miniMaxStrippingMarkup(text)
+        return isBlank(prose) ? nil : prose
+    }
+
+    /// What may stream as content from a MiniMax output prefix, always a
+    /// prefix of the content the final parse returns: the prose before the
+    /// first namespace token. A tail that could still become that token and
+    /// a blank start (dropped when a call follows) are held.
+    static func miniMaxStreamableProse(_ text: String) -> String {
+        let prose: String
+        if let ns = text.range(of: miniMaxNamespace) {
+            prose = String(text[..<ns.lowerBound])
+        } else {
+            let held = (1..<miniMaxNamespace.count).last(where: { text.hasSuffix(miniMaxNamespace.prefix($0)) }) ?? 0
+            prose = String(text.dropLast(held))
+        }
+        return isBlank(prose) ? "" : prose
     }
 
     /// Llama 3.x: the template asks for bare JSON `{"name", "parameters"}`;

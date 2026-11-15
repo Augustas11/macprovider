@@ -24,7 +24,7 @@ public enum GrammarTemplates {
         let schemas = try ToolSelectionPolicy.schemas(request)
         if family == .lfm2 { try ToolSelectionPolicy.validateLFMNames(schemas) }
         for value in schemas.values { try validateRequiredProperties(value) }
-        if family == .glm || family == .dsml || family == .gemma4 {
+        if family == .glm || family == .dsml || family == .gemma4 || family == .minimax {
             for value in schemas.values { try validateTaggedSchema(value) }
         }
         let names = schemas.keys.sorted().filter { name in
@@ -70,6 +70,22 @@ public enum GrammarTemplates {
                 }
             }
             parts.append(.literal(dsml ? "</｜DSML｜invoke></｜DSML｜tool_calls>" : "</tool_call>"))
+            return .sequence(parts)
+        case .minimax:
+            // Strings raw, other values as JSON (as for GLM); the parser also
+            // reads the template's nested-element form.
+            let ns = "]<]minimax[>["
+            var parts: [ByteGrammar] = [.literal(ns + "<tool_call>\n" + ns + "<invoke name=\"" + name + "\">")]
+            if case .object(let object) = parameters, case .object(let properties)? = object["properties"] {
+                for key in properties.keys.sorted() {
+                    let property = properties[key]!
+                    var rawString = false
+                    if case .object(let details) = property { rawString = details["type"] == .string("string") }
+                    parts += [.literal(ns + "<" + key + ">"), rawString ? rawStringGrammar(property) : schema(property),
+                              .literal(ns + "</" + key + ">")]
+                }
+            }
+            parts.append(.literal(ns + "</invoke>\n" + ns + "</tool_call>"))
             return .sequence(parts)
         case .gemma4:
             return .sequence([.literal("<|tool_call>call:" + name), schema(parameters, depth: 0, gemma: true), .literal("<tool_call|>")])

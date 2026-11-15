@@ -142,7 +142,7 @@ Why:
 
 This runbook replaces none of these. Read the pass rule at the source.
 
-- **MSB-01..05** (`docs/runbooks/continuous-batching-enable-gate.md`, SPEC-038 FR-CB14): "MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01, at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory bound". For MSB-03: "the shortest prompt's batched TTFT p95 MUST be at most 2x its serial TTFT p95".
+- **MSB-01..05** (`docs/runbooks/continuous-batching-enable-gate.md`, SPEC-038 FR-CB14): "MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01, at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory bound". For MSB-03: "the shortest prompt's batched TTFT p95 MUST be at most 2x its serial TTFT p95". Since SPEC-038 v0.3.52, a backend whose prefill group runs one forward per row (GLM-5.3-Flash pagedMLA) has an MSB-03 makespan bar of above 1.0x serial instead of 1.2x; the report's `prefillKind` and `makespanBar` fields name the bar used.
 - **R015** (SPEC-048 MTP-15): "the lower bound for aggregate decode throughput improvement over the best ordinary baseline MUST be greater than 0 in each cell at the intended advertised slot count"; "The corrected upper bound for native-MTP p95 TTFT regression MUST be no more than 10%"; "the corrected upper bound for p95 per-output-token latency (TPOT) regression MUST be no more than 0%". MTP-15 also gates chunk gaps, rejections and memory.
 - **CB self-check** (SPEC-038 FR-CB10): it grants a rung "only when that gain is at least 1.2x; otherwise a fresh Mac serves serially" (`ContinuousBatchingSelfCheck.minimumAggregateGain`).
 - **Catalog `bench_gate`** (SPEC-023 §3.2): "`bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection."

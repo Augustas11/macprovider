@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.100
+**Version:** 0.1.103
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.100",
+  "version": "0.1.103",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -430,7 +430,7 @@ do not apply to this adapter; these do:
   target's `mtp[0]` layer, embeddings, and lm_head at each call. It never
   loads the target's weight files a second time. The allowed (adapter,
   `source_layout`) pairs are exactly `(qwen3_5_mtp_v1, separate_artifact)`,
-  `(glm5_next_mtp_v1, checkpoint_mtp)`, and (0.1.97)
+  `(glm5_next_mtp_v1, checkpoint_mtp)`, and (0.1.100)
   `(gemma4_mtp_v1, checkpoint_mtp)`. A `glm5_next_mtp_v1` capability is
   admitted only when all of these hold, else it fails closed with
   `admission_capability_unsupported` and the target serves ordinary decode:
@@ -506,7 +506,7 @@ The same ordering applies to a sidecar that carries a 5- or 6-bit override or
 more than 256 exceptions (SPEC-023 v0.22.27): a CLI that predates 0.1.36
 rejects the whole sidecar. R014 item 10 makes this a release gate.
 
-**Gemma 4 embedded assistant layout (0.1.97).** A target whose `config.json`
+**Gemma 4 embedded assistant layout (0.1.100).** A target whose `config.json`
 has top-level `model_type` `gemma4_unified`, `text_config.model_type`
 `gemma4_unified_text`, and a `text_config.mtp_assistant_config` object, served
 through the text-only `gemma4_unified` loader, uses the `gemma4_mtp_v1` adapter with `source_layout`
@@ -532,7 +532,7 @@ runtime caches in that config layout; otherwise admission fails closed with
 The signed `state_class` is `stageable_rewindable`: sliding-window layers
 hold no recurrent state. R004, R012, R014, and R015 apply unchanged.
 
-**Gemma 4 artifact observation (0.1.98).** For `gemma4_mtp_v1` the observer
+**Gemma 4 artifact observation (0.1.101).** For `gemma4_mtp_v1` the observer
 reads the target and the assistant as one embedded pair with two formats:
 
 1. *Identity.* `config.json` MUST have top-level `model_type`
@@ -666,6 +666,31 @@ hidden-state and shared-K/V emission) and e198b9b (Gemma 4 layers attend
 through a cache that owns attention, so batched rows attend only over their
 own keys), which the provider's gemma4_mtp_v1 adapter needs. The Swift, core
 and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
+(`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
+`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`: DeepSeek V4 prefill can yield
+between evaluated tiles so other continuous-batch rows decode while a
+reference prefill is in flight. Commit `8f88216` is the
+`3.32.3-macprovider.62` pause hook (`505f368`, `DeepseekV4.swift` only)
+cherry-picked onto `ef656c59`, so the Qwen VL dtype fix in `.61` stays.
+The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.61` is on `3.32.3-macprovider.59`
+(`7ee1b3f73d719726c86b39da11a715be5d1c197e`) (#2327), at
+`ef656c59adc2424ddf1f1bcfca0338536befcc25`: Qwen2-VL and Qwen2.5-VL M-RoPE
+cos/sin take the hidden-state dtype, so an image prefill no longer leaves the
+language model and its KV cache in float32 (upstream ml-explore/mlx-swift-lm
+#766); FastVLM image pixels take the patch-embed weight dtype and Mistral3
+drops its bfloat16 image-feature cast. The Swift, core and C rows are
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.59` is on `3.32.3-macprovider.58`
+(`a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e`) (#2327), at
+`7ee1b3f73d719726c86b39da11a715be5d1c197e`: Qwen2-VL post-vision decode uses
+fused non-traditional RoPE when the three M-RoPE axes share one rope delta;
+per-row deltas and traditional RoPE stay on the position-id path. The Swift,
+core and C rows are unchanged.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.58` is on `3.32.3-macprovider.56`
 (`e7a256000dda3278260667e8c3c9c7b48c4dbd38`) (#2335), at
@@ -2644,7 +2669,7 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
 | GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the R003-authorized tagged tuple and the GLM R015 record, which complete the R003 review record. An LFM-only tuple identity change follows MTP-13 and preserves the original measured GLM runtime/source identities. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
-| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.60` carries `b2a45b0` and `e198b9b`). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.98 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
+| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.60` carries `b2a45b0` and `e198b9b`). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.101 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2684,13 +2709,13 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.100 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
+- **0.1.103 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.64` (`5e6c86449e26a1818efbe94804e6d37fd1c1cf57`) on
   `3.32.3-macprovider.60`: one Gemma 4 commit. The two K/V-read layers attend
   through a cache that owns attention and get its keys and values back, so
   native MTP verify columns attend exactly as the decode step at their
   position. Other model sources and the Swift, core and C rows are unchanged.
-- **0.1.99 (2026-11-14, Related: #2328)** — R003 names mlx-swift-lm
+- **0.1.102 (2026-11-14, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.60` (`a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b`) on
   `3.32.3-macprovider.58`: the Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision
   decode uses fused non-traditional RoPE when the three M-RoPE axes share one
@@ -2700,7 +2725,7 @@ requests.
   batched rows attend only over their own keys), which the provider's
   gemma4_mtp_v1 adapter needs. Other model sources and the Swift, core and C
   rows are unchanged.
-- **0.1.98 (2026-11-14, Related: #2328)** — R002 defines the `gemma4_mtp_v1`
+- **0.1.101 (2026-11-14, Related: #2328)** — R002 defines the `gemma4_mtp_v1`
   artifact observation: the exact config identity, an MLX affine 8-bit target
   with bfloat16 scales and no exceptions, the discarded audio/vision
   namespaces, the bfloat16 assistant under `language_model.mtp.` in
@@ -2711,7 +2736,7 @@ requests.
   R015 bench and acceptance policies freeze the target's global width per
   family (`4bit`, `8bit` for `gemma4_mtp_v1`, `mlx_mxfp4_mxfp8` for DeepSeek
   DSpark). R004, R012, R014 and R015 gates are unchanged.
-- **0.1.97 (2026-11-14, Related: #2328)** — adds the `gemma4_mtp_v1` adapter
+- **0.1.100 (2026-11-14, Related: #2328)** — adds the `gemma4_mtp_v1` adapter
   with the embedded `checkpoint_mtp` layout, a drafter loaded from the
   target's `model-mtp.safetensors`, proposal depth 1...3 from one position
   whatever the assistant's decoder depth, no drafter-owned cache, and a
@@ -2722,6 +2747,26 @@ requests.
   own keys) on the R003 row; until a fork tag carries them on
   `3.32.3-macprovider.56`, the R003 tuple is unchanged and the adapter does not
   build against it. The Swift, core and C rows are unchanged.
+- **0.1.99 (2026-11-14, Related: #2352)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.63` (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) on
+  `3.32.3-macprovider.61`: DeepSeek V4 prefill can yield between evaluated
+  tiles so other continuous-batch rows decode while a reference prefill is in
+  flight. `8f88216` cherry-picks the `.62` pause hook (`505f368`,
+  `DeepseekV4.swift` only) onto `ef656c59`. Other model sources and the Swift,
+  core and C rows are unchanged.
+- **0.1.98 (2026-11-14, Related: #2327)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.61` (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) on
+  `3.32.3-macprovider.59`: Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype,
+  so an image prefill no longer leaves the language model and its KV cache in
+  float32 (upstream ml-explore/mlx-swift-lm #766); FastVLM image pixels take
+  the patch-embed weight dtype and Mistral3 drops its bfloat16 image-feature
+  cast. Other model sources and the Swift, core and C rows are unchanged.
+- **0.1.97 (2026-11-14, Related: #2327)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.59` (`7ee1b3f73d719726c86b39da11a715be5d1c197e`) on
+  `3.32.3-macprovider.58`: Qwen2-VL post-vision decode uses fused non-traditional RoPE when
+  the three M-RoPE axes share one rope delta; per-row deltas and traditional
+  RoPE stay on the position-id path. Other model sources and the Swift, core
+  and C rows are unchanged.
 - **0.1.96 (2026-11-14, Related: #2335)** — R003: the serial small-row route
   is decided from resolved state. Native MTP `auto` is inactive when the
   signed admission set the loader reads (the baked feed on an ordinary

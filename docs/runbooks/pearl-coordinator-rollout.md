@@ -16,10 +16,11 @@ outage across four incidents. Mechanics of the updater itself are in
    - **Same fingerprint: about 1–2 minutes of coordinator/gateway restart.**
      The v1.8.285 apply had both back within about 90 s, then the updater ran a
      ~5.5 min rollback-point verification with services up.
-   - **Different or unknown: buyers held with 503 until all serving gates
-     pass, up to about 25 minutes.** The updater keeps the gateway's buyer hold
-     on until the release commits, so a rollback can still restore the
-     databases (SPEC-006-R027).
+   - **Different or unknown: buyers held with 503, typically about 1–2
+     minutes** (last measured: v1.8.286 80 s; v1.8.288 94 s apply, 116 s
+     buyer hold); buyers stay held until the serving gates pass. The updater
+     keeps the gateway's buyer hold on until the release commits, so a
+     rollback can still restore the databases (SPEC-006-R027).
 
    `pearl-runtime.sh` also prints the last measured apply downtime from the
    updater audit log when it can read it. A catalog activation means a

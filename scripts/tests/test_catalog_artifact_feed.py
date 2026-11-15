@@ -123,6 +123,11 @@ CB_POLICY_BYTES = (CATALOG / "continuous-batching-policy.json").read_bytes()
 RATE_CARD_SOURCE_BYTES = (CATALOG / "rate-card-source.json").read_bytes()
 ARTIFACT_SOURCE_BYTES = (CATALOG / "autotune-artifacts-source.json").read_bytes()
 CANDIDATE_OBJ = catalog_release.validate_candidate(CANDIDATE_BYTES)
+# Recommendable keys priced only through their declared rate class (no explicit
+# source row). Every expansion of the committed candidate catalog must carry
+# them, or the §3.3.1 rule 7 check fails on them instead of the case under test.
+# #2189: MiniMax M3.1-Flash is recommendable at the class-120b-moe class rate.
+CLASS_ONLY_RECOMMENDABLE = {"minimaxai/minimax-m3.1-flash": "class-120b-moe"}
 NORMALIZE_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "normalize_model_key_cases.json"
 ROUNDING_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "rate_global_rounding_cases.json"
 
@@ -668,14 +673,12 @@ class RateCardSourceTest(unittest.TestCase):
         # #2231: LFM3 1.7B is listed at its declared class rates.
         # #2154: Ternary-Bonsai-2 2B is listed at class-3b; listing does not
         # admit it for recommendation.
-        # #2189: MiniMax M3.1-Flash is listed at class-120b-moe.
         # #2236: Nemotron 3.5 Lightning 30B-A3B is listed on its own
         # class-30b-moe row at the Nemotron 3 Nano price.
         listed_priced = {
             "ricursiveai/ripple-65b-preview",
             "liquidai/lfm3-1.7b",
             "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
-            "minimaxai/minimax-m3.1-flash",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
         }
         for key in listed_priced:
@@ -689,6 +692,13 @@ class RateCardSourceTest(unittest.TestCase):
         # stays at the cold-start floor and it never outranks the base row.
         self.assertLess(demand["zai-org/glm-5.3-flash-uncensored"]["demand_weight"],
                         demand["zai-org/glm-5.3-flash"]["demand_weight"])
+        # #2189: MiniMax M3.1-Flash is recommendable at its class-120b-moe
+        # class rate, with its demand weight at the cold-start floor.
+        for key, rate_class in CLASS_ONLY_RECOMMENDABLE.items():
+            self.assertIn(key, recommendable)
+            self.assertEqual(classes[key], rate_class)
+            self.assertNotIn(key, json.loads(RATE_CARD_SOURCE_BYTES)["rows"])
+        self.assertEqual(demand["minimaxai/minimax-m3.1-flash"]["demand_weight"], 0.15)
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         expanded = catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ)
         self.assertEqual(expanded, RATE_CARD_BYTES)
@@ -757,7 +767,7 @@ class RateCardSourceTest(unittest.TestCase):
         }
         source = catalog_release.validate_rate_card_source(canonical(source))
         expanded = json.loads(catalog_release.expand_rate_card(
-            source, {"nvidia/nemotron-3-nano-30b-a3b": "class-30b-moe"}, CANDIDATE_OBJ
+            source, {**CLASS_ONLY_RECOMMENDABLE, "nvidia/nemotron-3-nano-30b-a3b": "class-30b-moe"}, CANDIDATE_OBJ
         ))["rows"]
         self.assertNotIn("nvidia/nemotron-3-nano-30b-a3b", expanded)
         self.assertEqual(expanded["nemotron-3-nano-30b-a3b"]["completion_rate_per_mtok"], 5)
@@ -774,12 +784,16 @@ class RateCardSourceTest(unittest.TestCase):
         self.assertEqual(catalog_release.normalize_model_key("mlx-community/qwen3-8b-4bit"), "qwen3-8b")
         with self.assertRaises(catalog_release.CatalogError) as caught:
             catalog_release.expand_rate_card(
-                source, {"qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-3b"}, CANDIDATE_OBJ
+                source,
+                {**CLASS_ONLY_RECOMMENDABLE, "qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-3b"},
+                CANDIDATE_OBJ,
             )
         self.assertIn("both normalize to 'qwen3-8b'", str(caught.exception))
         # The same class under both spellings is one row, published once.
         expanded = json.loads(catalog_release.expand_rate_card(
-            source, {"qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-8b"}, CANDIDATE_OBJ
+            source,
+            {**CLASS_ONLY_RECOMMENDABLE, "qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-8b"},
+            CANDIDATE_OBJ,
         ))["rows"]
         self.assertNotIn("mlx-community/qwen3-8b-4bit", expanded)
         self.assertEqual(expanded["qwen3-8b"], json.loads(RATE_CARD_BYTES)["rows"]["qwen3-8b"])
@@ -810,7 +824,7 @@ class RateCardSourceTest(unittest.TestCase):
         """AC-CAT-8: no `classes` key, no per-row class field, §3.3 projection hash."""
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         published = catalog_release.validate_rate_card(
-            catalog_release.expand_rate_card(source, {}, CANDIDATE_OBJ)
+            catalog_release.expand_rate_card(source, CLASS_ONLY_RECOMMENDABLE, CANDIDATE_OBJ)
         )
         self.assertNotIn("classes", published)
         for row in published["rows"].values():
@@ -822,7 +836,9 @@ class RateCardSourceTest(unittest.TestCase):
         source = json.loads(RATE_CARD_SOURCE_BYTES)
         del source["rows"]["qwen3-8b"]
         source = catalog_release.validate_rate_card_source(canonical(source))
-        expanded = json.loads(catalog_release.expand_rate_card(source, {"qwen3-8b": "class-8b"}, CANDIDATE_OBJ))
+        expanded = json.loads(catalog_release.expand_rate_card(
+            source, {**CLASS_ONLY_RECOMMENDABLE, "qwen3-8b": "class-8b"}, CANDIDATE_OBJ
+        ))
         self.assertEqual(expanded["rows"]["qwen3-8b"], json.loads(RATE_CARD_BYTES)["rows"]["qwen3-8b"])
 
     def test_explicit_row_beats_class_expansion(self):
@@ -832,7 +848,9 @@ class RateCardSourceTest(unittest.TestCase):
             "completion_rate_per_mtok": 1, "prompt_cache_hit_rate_per_mtok": 1, "prompt_rate_per_mtok": 1,
         }
         source = catalog_release.validate_rate_card_source(canonical(source))
-        expanded = json.loads(catalog_release.expand_rate_card(source, {"qwen3-8b": "class-8b"}, CANDIDATE_OBJ))
+        expanded = json.loads(catalog_release.expand_rate_card(
+            source, {**CLASS_ONLY_RECOMMENDABLE, "qwen3-8b": "class-8b"}, CANDIDATE_OBJ
+        ))
         self.assertEqual(expanded["rows"]["qwen3-8b"]["completion_rate_per_mtok"], 27000)
 
     def test_missing_class_rates_fail_the_release_closed(self):
@@ -849,7 +867,7 @@ class RateCardSourceTest(unittest.TestCase):
         del source["rows"]["qwen3-8b"]
         source = catalog_release.validate_rate_card_source(canonical(source))
         with self.assertRaises(catalog_release.CatalogError) as caught:
-            catalog_release.expand_rate_card(source, {}, CANDIDATE_OBJ)
+            catalog_release.expand_rate_card(source, CLASS_ONLY_RECOMMENDABLE, CANDIDATE_OBJ)
         self.assertIn("resolves to no rate-card row", str(caught.exception))
 
     def test_normalized_key_satisfies_the_rule_seven_invariant(self):

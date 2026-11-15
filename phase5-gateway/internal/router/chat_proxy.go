@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 type chatRequest struct {
@@ -586,9 +586,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil && decision.Admitted {
@@ -597,9 +596,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Belt-and-suspenders: if the store returned an unexpected error but the
 	// decision already shows quota exceeded, surface 429 rather than 500.
 	if err != nil && !decision.Admitted && decision.RemainingTokens == 0 && decision.LimitTokens > 0 {
-		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		writeQuotaExhausted(w, decision)
 		return
 	}
 	if err != nil {
@@ -622,7 +620,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          walletSessionAdmissionAuditReason(err),
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 		// Defensive cleanup: if the reservation INSERT committed before the
@@ -707,6 +705,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if relayBlindExecutionFor(r) == nil {
 		cacheKey := promptCacheKeyString(chat.PromptCacheKey)
 		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
+			cacheKey = adapter.promptCacheKey
+		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
 			cacheKey = adapter.promptCacheKey
 		}
 		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools, cacheKey)
@@ -834,7 +835,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"canonical_route": walletCanonicalRouteForRequest(r),
 				"reason":          "dispatch_fence",
 			})
-			s.writeWalletAdmissionError(w, err, sessionDecision)
+			s.writeWalletInferenceAdmissionError(w, r, err, sessionDecision)
 			return
 		}
 	}
@@ -2194,6 +2195,29 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			slog.Warn("anthropic stream finalization buyer write failed", "request_id", requestID(r), "error", adapter.writeErr)
 			poisonDedupeCapture(w)
 			settleCancelled()
+			return
+		}
+	}
+	// #2360: a Responses stream that closed with neither [DONE] nor a
+	// finish_reason is truncated. Fail it, settle it as
+	// invalid_provider_response and keep it out of the dedupe cache, as the
+	// Messages branch above does.
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamTerminal {
+		adapter.drainPendingStreamLine()
+		if adapter.emitTruncatedStreamFailed() {
+			if sw, ok := unwrapStatusWriter(w); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+				sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			if adapter.writeErr != nil {
+				slog.Warn("responses stream truncated-response write failed", "request_id", requestID(r), "error", adapter.writeErr)
+				settleCancelled()
+				return
+			}
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
 			return
 		}
 	}
@@ -3817,7 +3841,8 @@ func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (s
 	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
 }
 
-// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key that partitions the
+// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key (or /v1/messages
+// metadata.user_id) that partitions the
 // auto-prefix tag. Longer or non-string values are ignored, not rejected, so
 // clients that send one keep working with the unpartitioned scaffold key.
 const maxPromptCacheKeyBytes = 256
@@ -3876,7 +3901,8 @@ func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
 //     skips applySticky/stickyStore). Demo MUST NOT receive a key.
 //
-// promptCacheKey is the buyer's OpenAI prompt_cache_key, already bounded by
+// promptCacheKey is the buyer's OpenAI prompt_cache_key or /v1/messages
+// metadata.user_id, already bounded by
 // promptCacheKeyString. When present it partitions the auto-prefix tag
 // (SPEC-006-R014): agent clients send one key per session, and sessions that
 // share a scaffold must not share one provider conversation, which serializes

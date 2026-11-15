@@ -59,9 +59,15 @@ func TestPublicModelAndNetworkState(t *testing.T) {
 		m    modelRollup
 		want string
 	}{
-		{modelRollup{routableProviderCount: 2}, "redundant"},
-		{modelRollup{routableProviderCount: 1}, "operational"},
-		{modelRollup{servingCapableProviderCount: 1, providerCount: 1}, "degraded"},
+		{modelRollup{inServiceProviderCount: 2, routableProviderCount: 2}, "redundant"},
+		{modelRollup{inServiceProviderCount: 1, routableProviderCount: 1}, "operational"},
+		// #2371: two providers serving on every slot (none routable) stay redundant.
+		{modelRollup{providerCount: 2, servingCapableProviderCount: 2, inServiceProviderCount: 2}, "redundant"},
+		{modelRollup{providerCount: 1, servingCapableProviderCount: 1, inServiceProviderCount: 1}, "operational"},
+		// A provider in a transient unknown state (stale heartbeat, pending check).
+		{modelRollup{providerCount: 1, servingCapableProviderCount: 1, unknownProviderCount: 1}, "unknown"},
+		// Serving-capable but fault-held: no provider can take its traffic.
+		{modelRollup{servingCapableProviderCount: 1, providerCount: 1}, "offline"},
 		{modelRollup{providerCount: 1}, "offline"},
 		{modelRollup{declaredOnly: true}, "unknown"},
 		{modelRollup{}, "offline"},
@@ -76,10 +82,10 @@ func TestPublicModelAndNetworkState(t *testing.T) {
 		want string
 	}{
 		{statsrollup.RoutabilitySummary{ModelsRedundant: 1, ModelsOperational: 1}, "redundant"},
-		{statsrollup.RoutabilitySummary{ModelsOperational: 1}, "operational"},
-		{statsrollup.RoutabilitySummary{ModelsDegraded: 1}, "degraded"},
-		{statsrollup.RoutabilitySummary{ProvidersServingCapable: 1}, "degraded"},
-		{statsrollup.RoutabilitySummary{ModelsUnknown: 1}, "unknown"},
+		{statsrollup.RoutabilitySummary{ModelsOperational: 1, ProvidersServingCapable: 1}, "operational"},
+		{statsrollup.RoutabilitySummary{ModelsUnknown: 1, ProvidersServingCapable: 1}, "unknown"},
+		// Never degraded: fault-held serving providers with every model offline.
+		{statsrollup.RoutabilitySummary{ModelsOffline: 1, ProvidersServingCapable: 1}, "offline"},
 		{statsrollup.RoutabilitySummary{}, "offline"},
 	}
 	for _, c := range nets {
@@ -94,28 +100,52 @@ func TestProviderStateAndScore(t *testing.T) {
 	fresh := now.Add(-5 * time.Second)
 	stale := now.Add(-5 * time.Minute)
 	withReceipt := []byte{1}
+	ready := func(mod func(*pool.Provider)) pool.Provider {
+		p := pool.Provider{LastHeartbeatAt: fresh, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2}
+		mod(&p)
+		return p
+	}
 
-	type tc struct {
+	cases := []struct {
+		name         string
+		prov         pool.Provider
+		inShardGroup bool
+		wantState    string
+	}{
+		{"routable", ready(func(*pool.Provider) {}), false, "online"},
+		{"full", ready(func(p *pool.Provider) { p.State = pool.StateBusy; p.SlotsFree = 0 }), false, "online"},
+		{"stale serving", ready(func(p *pool.Provider) { p.LastHeartbeatAt = stale }), false, "unknown"},
+		{"catalog recheck pending", ready(func(p *pool.Provider) { p.CatalogRecheckPending = true }), false, "unknown"},
+		{"handshake ack pending", ready(func(p *pool.Provider) { p.HandshakeAckPending = true }), false, "unknown"},
+		{"no slots reported", ready(func(p *pool.Provider) { p.SlotsFree = 0; p.SlotsTotal = 0 }), false, "unknown"},
+		{"integrity suspended", ready(func(p *pool.Provider) { p.ComputeIntegritySuspended = true }), false, "degraded"},
+		{"shard group unavailable", ready(func(p *pool.Provider) { p.ShardGroupHeadV1 = true }), false, "degraded"},
+		{"shard member, group available", ready(func(p *pool.Provider) { p.ShardMemberV1 = true }), true, "online"},
+		{"shard member, group unavailable", ready(func(p *pool.Provider) { p.ShardMemberV1 = true }), false, "degraded"},
+		{"breaker tripped", ready(func(p *pool.Provider) { p.State = pool.StateDegraded }), false, "offline"},
+		{"draining", ready(func(p *pool.Provider) { p.State = pool.StateDraining }), false, "offline"},
+	}
+	for _, c := range cases {
+		if got := publicProviderState(c.prov, c.prov.ServingCapable(), c.inShardGroup, now); got != c.wantState {
+			t.Errorf("%s: state=%q want %q", c.name, got, c.wantState)
+		}
+	}
+
+	scores := []struct {
 		name      string
 		prov      pool.Provider
 		routable  bool
 		serving   bool
-		wantState string
 		wantScore int
+	}{
+		{"stale serving", pool.Provider{LastHeartbeatAt: stale}, false, true, 50},
+		{"routable healthy", pool.Provider{LastHeartbeatAt: fresh, ReceiptPubkey: withReceipt}, true, true, 100},
+		{"routable no receipt", pool.Provider{LastHeartbeatAt: fresh}, true, true, 75},
+		{"routable stale no receipt", pool.Provider{LastHeartbeatAt: stale}, true, false, 50},
+		{"degraded state", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateDegraded}, false, false, 25},
+		{"offline", pool.Provider{LastHeartbeatAt: fresh}, false, false, 0},
 	}
-	cases := []tc{
-		{"stale serving", pool.Provider{LastHeartbeatAt: stale}, false, true, "unknown", 50},
-		{"routable healthy", pool.Provider{LastHeartbeatAt: fresh, ReceiptPubkey: withReceipt}, true, true, "online", 100},
-		{"routable no receipt", pool.Provider{LastHeartbeatAt: fresh}, true, true, "online", 75},
-		{"routable stale no receipt", pool.Provider{LastHeartbeatAt: stale}, true, false, "online", 50},
-		{"serving fresh", pool.Provider{LastHeartbeatAt: fresh}, false, true, "degraded", 50},
-		{"degraded state", pool.Provider{LastHeartbeatAt: fresh, State: pool.StateDegraded}, false, false, "offline", 25},
-		{"offline", pool.Provider{LastHeartbeatAt: fresh}, false, false, "offline", 0},
-	}
-	for _, c := range cases {
-		if got := publicProviderState(c.prov, c.routable, c.serving, now); got != c.wantState {
-			t.Errorf("%s: state=%q want %q", c.name, got, c.wantState)
-		}
+	for _, c := range scores {
 		if got := publicRoutabilityScore(c.prov, c.routable, c.serving, now); got != c.wantScore {
 			t.Errorf("%s: score=%d want %d", c.name, got, c.wantScore)
 		}

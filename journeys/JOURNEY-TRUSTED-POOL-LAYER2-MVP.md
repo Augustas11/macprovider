@@ -119,7 +119,7 @@ All digest/fingerprint fields MUST be 64-character lowercase hex strings. Stable
 Protected manual workflow:
 
 ```text
-.github/workflows/build-signed-trusted-pool-layer2-journey.yml
+.github/workflows/signed-journey.yml (journey=trusted-pool-layer2)
 ```
 
 Builder:

@@ -174,7 +174,7 @@ Provision (operator only; do not run from an automated agent session):
 Sign a record (dispatch the workflow — the private key never leaves the
 `production-release` environment):
 
-- `.github/workflows/build-signed-oncall-readiness.yml` (manual dispatch from
+- `.github/workflows/signed-journey.yml (journey=oncall-readiness)` (manual dispatch from
   `main`) builds an unsigned record from the record fields, signs it with the
   environment secret via `coordinator-cli trust-pool-oncall sign`, verifies the
   signed record binds the registered key digest, and uploads the signed JSON as a
@@ -263,7 +263,7 @@ That command generates P-256 material in a mode-0700 temporary directory, pipes
 the private key into the environment secret, and registers only the public
 half. Re-running it fails closed once the public key or keyring entry exists.
 
-Dispatch `.github/workflows/build-signed-pool-promotion-transition.yml` from
+Dispatch `.github/workflows/signed-journey.yml (journey=pool-promotion-transition)` from
 reviewed `main` to sign a sibling. Signing a sibling does not consume the
 ledger or fill CONFORMANCE `evidence[]`.
 

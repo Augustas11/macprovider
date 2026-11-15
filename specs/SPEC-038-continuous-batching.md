@@ -1,11 +1,42 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.51
+Version: v0.3.54
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.54 (2026-11-14, DeepSeek V4 prefill yields between tiles, Related: #2352):**
+While a `deepseek_v4` reference chunk stays one forward, ordinary rows that
+are already decoding may take one decode step between evaluated prefill
+tiles. Those steps are separate decode forwards. The prefill token span is
+unchanged, and decode tokens are not part of that forward. Grammar rows,
+native-MTP rows, and rows with a non-zero presence or frequency penalty do
+not take these steps.
+
+**Change log v0.3.53 (2026-11-14, `probe_shape_unavailable` settles the small-row route, Related: #2325):**
+FR-CB9: `probe_shape_unavailable` (configured rows >= 2 but not even two
+exactness-probe rows fit the served context or the paged-KV pool) now settles
+the key, so a Mac that records it, such as an 8 GB Mac on its default
+configuration, takes the serial route from its next start and serves one row.
+The startup identity now also keys the resolved paged-KV block size and pool,
+the last input to that bound it did not cover. Stored verdicts re-key once:
+the next start reads no verdict, runs the invariant route and re-measures.
+
+**Change log v0.3.52 (2026-11-14, FR-CB14 MSB-03 bar for per-row prefill backends, Related: #2331):**
+FR-CB14: on a backend whose prefill group runs one forward per row (its
+flattened-token cap is below the group's tokens, as FR-CB2 v0.3.49 names it),
+batching cannot shorten prefill, so MSB-03's makespan ratio is bounded by
+`(P + D_serial) / (P + D_batched)`. For such a backend the MSB-03 bar is
+short-request TTFT at most 2x serial and makespan above 1.0x serial, with the
+measured ratio recorded per release. Backends that share the prefill forward
+keep the above-1.2x bar. `msb-throughput --scenario msb03` reports the bar and
+the prefill kind. GLM-5.3-Flash (M3 Ultra, prompts 512/1024/1536/2048,
+`--decode-tokens 128 --runs 3`) measured 1.18x and 1.19x, at the lower edge of
+its 1.19x to 1.22x ceiling. msb03's usage check now expects the request's
+`decodeTokens + 1` completion tokens (the prefill's sampled token plus the
+timed decode steps), which the scheduler reports.
+
 **Change log v0.3.51 (2026-11-14, small-row route from resolved state, Related: #2335):**
 FR-CB9 decides the serial small-row route from resolved state instead of
 explicit configuration only. Native MTP `auto` counts as inactive when the
@@ -1190,6 +1221,11 @@ prompt rows in a shared forward, or repartition this row using the generic
 next reference chunk without shortening it; incompatible configured limits
 MUST use serial fallback or a reason-coded refusal. Pooling boundaries are
 part of correctness, so changing this partition requires new exactness proof.
+While that chunk is one forward, ordinary rows already decoding may take one
+decode step between evaluated prefill tiles. Each such step is its own decode
+forward: its tokens are not mixed into the prefill, and the prefill token
+span is unchanged. Grammar rows, native-MTP rows, and rows with a non-zero
+presence or frequency penalty do not take these steps.
 
 DeepSeek decode MUST share model projections across compatible rows while
 each row retains its own absolute token offset, compression-ratio-4 and
@@ -1720,16 +1756,17 @@ these hold:
    environment or CLI (the emergency override, which no signed policy,
    self-check or warm swap lifts), or the FR-CB10 store holds a decided
    verdict serving one row that settles the key (`no_net_gain`, a row
-   divergence or leak, a crash, or `single_row` for a configured single row)
-   on the self-check key this startup identity resolved to, with no
+   divergence or leak, a crash, `single_row` for a configured single row, or
+   `probe_shape_unavailable`, whose probe shape is fixed by the startup
+   identity) on the self-check key this startup identity resolved to, with no
    unfinished step and no re-measurement scheduled. A one-row decision that
    re-runs when the ladder bound grows (`serial_baseline_unavailable`,
-   `probe_shape_unmet_at_<k>`, `probe_shape_unavailable`) keeps the
-   invariant route, the only one on which the self-check can run. The startup
-   identity covers the inputs the key and the ladder bound derive from: model
-   bytes, CLI version, decode-path digest, MLX pins, OS build, chip and memory,
-   signed CB policy, rows, owner pin, queue limit, context, `kv_bits`, prefill
-   chunk, cached turns, paged-KV setting and native-MTP mode;
+   `probe_shape_unmet_at_<k>`) keeps the invariant route, the only one on
+   which the self-check can run. The startup identity covers the inputs the
+   key and the ladder bound derive from: model bytes, CLI version, decode-path
+   digest, MLX pins, OS build, chip and memory, signed CB policy, rows, owner
+   pin, queue limit, context, `kv_bits`, prefill chunk, cached turns, paged-KV
+   setting, paged-KV block size and pool, and native-MTP mode;
 3. no draft model, no shard-group role, no other warm-swap target (it would
    be served without its own self-check), and not an autotune child (a child
    measures candidate configurations that may batch for the incumbent, which
@@ -2335,8 +2372,8 @@ throughput MUST be computed as total decoded tokens over the common wall-clock
 interval, never as a sum of per-request elapsed durations. OPoI/drift MUST NOT
 compare batched aggregate TG against a single-stream per-stream baseline;
 per-stream and aggregate throughput MUST be reported as distinct values. The
-Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01,
-at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
+Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01
+or the v0.3.52 per-row prefill bar below, at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
 bound) are the promotion thresholds; failing them triggers profiling or pivot,
 not a shipped number.
 
@@ -2352,6 +2389,29 @@ one's last token. The gate passes above 1.2x. The decode-interval aggregate
 as a non-gating field. The short-request gate is unchanged: the shortest
 prompt's batched TTFT p95 MUST be at most 2x its serial TTFT p95. Equal-length
 scenarios (MSB-02, MSB-04) keep the decode-interval aggregate and their gates.
+
+**(v0.3.52) MSB-03 on a per-row prefill backend (Related: #2331).** Where a
+backend's prefill group runs one forward per row (its flattened-token cap is
+below the group's tokens, FR-CB2 v0.3.49), the summed prefill time P is the
+same served serially or batched, and batching shortens only decode. The
+makespan ratio is then at most `(P + D_serial) / (P + D_batched)`, with
+D_serial the back-to-back serial decode time and D_batched the same tokens at
+the batched aggregate decode rate. For such a backend MSB-03 passes when the
+short-request TTFT gate passes (unchanged) and the makespan ratio is above
+1.0x serial; the measured ratio is recorded per release. A backend that shares
+the prefill forward across rows keeps the above-1.2x bar. Measured on
+GLM-5.3-Flash (`glm5_next` pagedMLA, 8-token cap), M3 Ultra, `--runs 3
+--decode-tokens 128`: serial makespan aggregate 18.72 tok/s (512 decoded
+tokens in 27.35 s); same-window serial first-token times of 1.55 s (512-token
+prompt), 3.06 s (1024) and 6.01 s (2048) put prefill at 330 to 341 tok/s, so P
+is about 15.1 s for the 5120 prompt tokens and D_serial about 12.2 s;
+equal-length four-row cells in the same window decode at 69.6 tok/s
+(1024-token prompts) and 64.9 tok/s (2048), so D_batched is 7.4 to 7.9 s and
+the ceiling 1.19x to 1.22x. Batched makespan measured 1.18x and 1.19x, at the
+lower edge of that ceiling. Reaching 1.2x would need the mixed-length batch to
+decode at 66.6 tok/s or more; the measured residual is about 65 tok/s (the
+2048-token rate), so scheduling has no room left, and only a backend that
+shares the prefill forward across rows moves it.
 
 **DeepSeek V4 campaign gate (Related: #2111).** For the
 `TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX` artifact on the M3 Ultra

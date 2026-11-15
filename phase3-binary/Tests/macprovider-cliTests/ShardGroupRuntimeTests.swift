@@ -249,6 +249,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
             (["tools": tools] as [String: Any], "shard_group_tools_unsupported"),
             (["presence_penalty": 0.5], "shard_group_sampling_unsupported"),
             (["response_format": ["type": "json_object"]], "shard_group_response_format_unsupported"),
+            (["model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"], "shard_group_model_unsupported"),
         ] {
             do {
                 _ = try await runtime.prepare(try request("x", extra: extra))
@@ -257,8 +258,55 @@ final class ShardGroupRuntimeTests: XCTestCase {
                 XCTAssertEqual(error.code, code)
             }
         }
+        // A MiniMax family the catalog resolved for another model ID is
+        // refused too.
+        let resolved = try request("x", extra: [:])
+        resolved.outputState.resolve(RequestOutputTraits(toolGrammar: .minimax))
+        do {
+            _ = try await runtime.prepare(resolved)
+            XCTFail("expected shard_group_model_unsupported")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "shard_group_model_unsupported")
+        }
         let prepared = try await runtime.prepare(try request("x", extra: ["seed": 7, "temperature": 0.5, "top_p": 0.8]))
         XCTAssertEqual(prepared.control, ShardRequestControl(temperature: 0.5, topP: 0.8, seed: 7))
+        await runtime.stop()
+    }
+
+    /// The MiniMax refusal (#2344) against model IDs whose answer is written
+    /// down here, not derived from `ToolCallGrammar.family`: every MiniMax
+    /// M3 spelling is refused, and nothing else is refused for its model.
+    func testMiniMaxShardRefusalMatchesAnIndependentList() async throws {
+        let (runtime, _) = try await fakeRuntime()
+        let refused = [
+            "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+            "minimaxai/minimax-m3.1-flash",
+            "minimax/minimax-m3.1-flash",
+            "MINIMAXAI/MINIMAX-M3-PREVIEW",
+            "local/minimax_m3_vl-text",
+        ]
+        let allowed = [
+            "MiniMaxAI/MiniMax-M2.5",
+            "MiniMaxAI/MiniMax-Text-01",
+            "mlx-community/Qwen3-30B-A3B-4bit",
+            "zai-org/glm-5.3-flash",
+            "liquidai/lfm2.5-24b-a2b",
+        ]
+        for model in refused {
+            do {
+                _ = try await runtime.prepare(try request("x", extra: ["model": model]))
+                XCTFail("\(model): expected shard_group_model_unsupported")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "shard_group_model_unsupported", model)
+            }
+        }
+        for model in allowed {
+            do {
+                _ = try await runtime.prepare(try request("x", extra: ["model": model]))
+            } catch let error as APIError {
+                XCTAssertNotEqual(error.code, "shard_group_model_unsupported", model)
+            }
+        }
         await runtime.stop()
     }
 

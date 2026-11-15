@@ -560,5 +560,5 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
    It verifies the signed events, then fails on the first unmet expectation
    and names the file and field. Commit the `.redacted.json` and the
    `.manifests/` bundle beside it, in a PR, never the capture directory.
-   After it merges, dispatch `promote-signed-trusted-pool-model-journey.yml`
+   After it merges, dispatch `signed-journey.yml (journey=trusted-pool-model)`
    with the deployed source SHA, the evidence path and the requirement ids.

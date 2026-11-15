@@ -952,6 +952,30 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertTrue(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 2))
     }
 
+    /// #2325: a short served context or a small paged-KV pool caps the ladder
+    /// at 1 with two configured rows, the bound that records
+    /// `probe_shape_unavailable`. Both inputs are in the startup identity.
+    func testShortContextOrSmallPoolLeavesNoProbeShape() throws {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"
+        )
+        let fits = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 2)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: fits, ownerPinned: nil, crashedSlots: nil), 2)
+        let outputTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: key.decodeWindow)
+        let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(
+            count: 2, keyBoundary: fits.probeKeyBoundary, outputTokens: outputTokens
+        )
+        XCTAssertEqual(lengths.count, 2)
+        var shortContext = fits
+        shortContext.maxRequestTokens = lengths.max()! + outputTokens - 1
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: shortContext, ownerPinned: nil, crashedSlots: nil), 1)
+        var smallPool = fits
+        smallPool.poolTokens = try XCTUnwrap(ContinuousBatchingSelfCheck.exactnessRowCost(
+            promptTokens: lengths[0], outputTokens: outputTokens, blockSizeTokens: fits.blockSizeTokens
+        ))
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: smallPool, ownerPinned: nil, crashedSlots: nil), 1)
+    }
+
     /// The store is owner-only: a file other users can read is ignored.
     func testStoreIgnoresAFileReadableByOtherUsers() throws {
         let directory = FileManager.default.temporaryDirectory

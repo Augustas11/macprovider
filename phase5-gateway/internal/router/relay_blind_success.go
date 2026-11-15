@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 const relayBlindValidatedHeader = "X-MacProvider-Relay-Blind-Validated"
@@ -170,7 +170,13 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 		_, retryableCode := gatewayRetryableByCode[wire.Error.Code]
 		_, permanentCode := gatewayPermanentCodes[wire.Error.Code]
 		if retryableCode || permanentCode {
-			writeError(w, resp.StatusCode, "api_error", wire.Error.Code, "Relay-blind transaction rejected; do not reuse its envelope")
+			// Never reuse the envelope; a retryable code (SPEC-041-R007, e.g.
+			// relay_blind_provider_unsupported) invites a fresh reservation.
+			message := "Relay-blind transaction rejected; do not reuse its envelope"
+			if gatewayRetryable(wire.Error.Code) {
+				message = "Relay-blind transaction rejected; retry with a new reservation and envelope"
+			}
+			writeError(w, resp.StatusCode, "api_error", wire.Error.Code, message)
 			return
 		}
 	}
@@ -349,7 +355,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		if sessionAuth != nil {
 			s.writeWalletAdmissionError(w, err, walletDecision)
 		} else if errors.Is(err, storage.ErrQuotaExceeded) {
-			writeError(w, 429, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+			writeQuotaExhausted(w, decision)
 		} else {
 			writeError(w, 409, "invalid_request_error", "duplicate_request_id", "Request cannot reserve quota")
 		}

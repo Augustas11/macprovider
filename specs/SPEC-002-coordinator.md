@@ -1,6 +1,38 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.33 (2026-11-13, served-path label from the provider that served the request)
+**Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
+
+**Change log v1.6.35 (2026-11-14, PR #2374, Related: #2371):** A provider
+that is busy serving is not degraded. FR-B1 defines **in service**
+(`pool.Provider.InService`: routable, or blocked only by capacity: every slot
+in flight, or a thermal or queue-full hold; a provider with no slots is never
+in service), the one definition SPEC-006 §5.6 and SPEC-017 §5.2c count.
+FR-B1 per-model `degraded` counts providers in service and drops the "all
+`slots_free` equal 0" rule. FR-O2 `/poolz` rows gain `in_service` (that
+predicate under the same public gates as `routing_eligible`) and the summary
+gains `in_service`; `serving_eligible` keeps its v1.6.17 meaning because the
+gateway's served-context grant and decode-idle timeout read it. FR-O1
+`/healthz` on both ports adds `pool_busy` (state `busy` and in service); a busy
+provider that is not in service counts in `pool_degraded`, with the pool
+`degraded` state. `GET /v1/pool/check` reports `busy` as `busy`, no longer
+as `degraded`.
+
+**Change log v1.6.34 (2026-11-14, Related: #2189):** The v1.6.24
+`tool_grammar_provider_unavailable` gate was scoped to tool requests and tool
+history. For a family whose reasoning the provider must split off the answer
+(MiniMax M3, SPEC-018 §3.12), every request, plain chat included, reaches
+only a native provider that declares the family for its exact loaded model,
+on selection, sticky and provider pins, queued reconnects, and relay-blind
+and privacy-class reservations alike. On plaintext routes, with none it fails
+503 `tool_grammar_provider_unavailable`, retryable, with the same settlement
+as the tool-request case (SPEC-006 §17.9). A request without tools gets the
+message "No provider serving this model supports its output format yet";
+tool requests keep the tool-grammar message. Encrypted reservations keep
+their closed inventories and fail before any quota hold: a relay-blind
+reservation skips the provider and gets the retryable SPEC-041-R007
+`relay_blind_provider_unsupported`, and a privacy-class reservation gets the
+SPEC-049-R013 pre-consume `privacy_class_unavailable`, which names no
+per-provider cause. External runtimes and other families are unchanged.
 
 **Change log v1.6.33 (2026-11-13, Related: #2341):** `SPEC-002-R007` adds the
 served-path label. A provider's `status: "complete"` `inference_response_end`
@@ -2053,8 +2085,15 @@ answered by routing (slot queue, 429 or 503), not by `/v1/models`.
 A model is `degraded: true` if any of:
 
 - all providers for this model are state `unavailable` or `draining`.
-- fewer than 50% of registered providers for this model are `ready`.
-- all providers' `slots_free` for this model equal 0.
+- fewer than 50% of registered providers for this model are in service.
+
+A provider is **in service** (v1.6.35, `pool.Provider.InService`) when it is
+routing-eligible, or when it passes every routing gate except capacity:
+every slot is in flight, or a capacity hold (thermal pressure or an
+`error_queue_full` refusal) blocks new routes while it keeps streaming. A
+provider with no slots is not in service. `/poolz` reports it per row as
+`in_service`. A model whose providers are all in service with no free slot
+is not degraded: free capacity is not degradation.
 
 Otherwise the model is `degraded: false`. SPEC-006 v0.3 gateway status
 aggregation MUST use these same rules.
@@ -2369,6 +2408,7 @@ match buyer trust requirements to provider attestation levels.
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -2377,6 +2417,10 @@ match buyer trust requirements to provider attestation levels.
   "version": "0.1.0"
 }
 ```
+
+`pool_busy` counts providers in state `busy` that are in service (FR-B1);
+`pool_degraded` counts providers in state `degraded` and busy providers that
+are not in service, such as a compute-integrity suspension (v1.6.35).
 
 Returns HTTP 200 if the coordinator is running. Returns HTTP 503 if
 the coordinator is draining (SIGTERM received).
@@ -2418,6 +2462,9 @@ Response:
       "binary_version": "0.1.0",
       "endpoint_url": "https://m4.malibu.tech",
       "auth_state": "bearer_validated",
+      "routing_eligible": true,
+      "serving_eligible": true,
+      "in_service": true,
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
         "pubkey": "<base64-32-byte-ed25519>",
@@ -2429,6 +2476,7 @@ Response:
   "summary": {
     "total_providers": 2,
     "ready": 2,
+    "in_service": 2,
     "draining": 0,
     "unavailable": 0,
     "total_slots": 4,
@@ -3559,6 +3607,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 3,
   "pool_ready": 2,
+  "pool_busy": 0,
   "pool_degraded": 1,
   "pool_draining": 0,
   "pool_unavailable": 0,
@@ -3575,6 +3624,7 @@ No authentication. Returns coordinator health (FR-O1).
   "uptime_s": 3600,
   "pool_size": 0,
   "pool_ready": 0,
+  "pool_busy": 0,
   "pool_degraded": 0,
   "pool_draining": 3,
   "pool_unavailable": 0,
@@ -3611,8 +3661,9 @@ not a buyer API surface.
 ```
 
 `tier` MUST be `"pinned"`, `"trusted"`, or `"provisional"`. `state`
-MUST be one of `"ready"`, `"draining"`, `"unavailable"`, or
-`"unknown"`.
+MUST be one of `"ready"`, `"busy"`, `"degraded"`, `"draining"`,
+`"unavailable"`, or `"unknown"`. `busy` is a provider serving with no free
+slot; it is reported as `busy`, never as `degraded` (v1.6.35).
 
 Unknown providers return the same 200 shape with `"state": "unknown"`.
 
@@ -4666,7 +4717,7 @@ A mock Phase 3 binary connects via WebSocket, exchanges hello/hello_ack,
 sends 5 heartbeats at the configured interval, receives a drain command
 on coordinator shutdown, sends drain_status, and closes cleanly.
 
-Run by: `phase4-coordinator/scripts/test-provider-lifecycle.sh`
+Run by: `phase4-coordinator/scripts/test-provider-lifecycle.sh` (The named script is not in the tree.)
 
 **AC-2. Cooperative batch through coordinator.**
 The buyer harness (`beta/harness.py`) with `tunnel_url` pointing at the
@@ -4679,6 +4730,8 @@ Run by:
 cd beta && python harness.py --config config-coord-test.yaml \
   --batch cooperative --verbose
 ```
+
+The named script is not in the tree.
 
 The build session creates `config-coord-test.yaml` pointing
 `tunnel_url` at the coordinator.
@@ -4697,13 +4750,15 @@ cd beta && python harness.py --config config-coord-test.yaml \
   --batch adversarial --verbose
 ```
 
+The named script is not in the tree.
+
 **AC-4. Provider disconnect mid-buyer-request.**
 During an in-flight streaming buyer request, the serving provider's
 WebSocket disconnects. The coordinator returns a clean error SSE event
 to the buyer and closes the stream (not a hang, not a silent retry).
 The coordinator remains healthy.
 
-Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh`
+Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh` (The named script is not in the tree.)
 
 **AC-5. Auth flow.**
 1. Issue a token via `coordinator-cli issue-token --provider-id <provider_id>`.
@@ -4715,7 +4770,7 @@ Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh`
    while sending the original provider's `hello.provider_id` — rejected
    with WS close 4005 `invalid_token`.
 
-Run by: `phase4-coordinator/scripts/test-auth-flow.sh`
+Run by: `phase4-coordinator/scripts/test-auth-flow.sh` (The named script is not in the tree.)
 
 **AC-6. Graceful SIGTERM drain.**
 With 3 in-flight buyer requests (streaming), sending SIGTERM to the
@@ -4731,6 +4786,7 @@ Run by: `phase4-coordinator/scripts/test-sigterm-drain.sh` — script the
 build session must produce as part of AC delivery. Fires 3 streaming
 requests, captures PID, sends SIGTERM, asserts all 3 complete and
 process exits 0 within 35s.
+(The named script is not in the tree.)
 
 **AC-7. 502 degraded recovery.**
 1. Mock provider is serving traffic normally.
@@ -4740,7 +4796,7 @@ process exits 0 within 35s.
    accepts.
 5. Coordinator marks provider as `ready`, resumes routing.
 
-Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh`
+Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh` (The named script is not in the tree.)
 
 **AC-8. 530 reconnection.**
 1. Mock provider is serving traffic normally.
@@ -4751,7 +4807,7 @@ Run by: `phase4-coordinator/scripts/test-degraded-recovery.sh`
 6. After grace period (second test): coordinator removes provider
    from pool.
 
-Run by: `phase4-coordinator/scripts/test-reconnection.sh`
+Run by: `phase4-coordinator/scripts/test-reconnection.sh` (The named script is not in the tree.)
 
 **AC-8b. Warm-up dispatch on wake.**
 1. Mock provider connects, runs normally for 2 minutes (heartbeats every 30s).
@@ -4769,7 +4825,7 @@ Run by: `phase4-coordinator/scripts/test-reconnection.sh`
    receives 503 `no_provider_available` until this provider exits
    degraded state.
 
-Run by: `phase4-coordinator/scripts/test-warmup-dispatch.sh`
+Run by: `phase4-coordinator/scripts/test-warmup-dispatch.sh` (The named script is not in the tree.)
 
 **AC-9. Capacity preference routing.**
 Pool has 2 mock providers:
@@ -4782,7 +4838,7 @@ Both serve the same model ID for testing purposes.
 2. Request with `X-MacProvider-Pref: accurate` routes to Provider B.
 3. Request with no preference routes per utilization (FR-R1).
 
-Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
+Run by: `phase4-coordinator/scripts/test-routing-preference.sh` (The named script is not in the tree.)
 
 **AC-10. Operator endpoints.**
 1. `GET /healthz` returns 200 with pool size.
@@ -4801,7 +4857,7 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
      and the entry disappears from `/poolz` entirely.
 6. POSTing `/admin/blacklist` with an unknown `provider_id` returns 404.
 
-Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
+Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh` (The named script is not in the tree.)
 
 **AC-FR-B9-MULTI. request_log permits one row per provider attempt.**
 A deterministic fixture sends one logical request through two SPEC-004 retry attempts (single account). The assertion is two `request_log` rows sharing the same `(account_id, request_id)` group, with distinct auto-increment `id` values, provider attribution per attempt, and row order within that group defined by `id ASC` under SQLite `IS` clustering (so legacy NULL-`account_id` fixtures cluster identically). No uniqueness constraint may reject the repeated `request_id` within an account.
@@ -4830,21 +4886,21 @@ containing `tier: "provisional"`. `GET /poolz` shows the provider with
 `tier: "provisional"`. Buyer requests are routed to it (with reduced
 weight).
 
-Run by: `phase4-coordinator/scripts/test-provisional.sh`
+Run by: `phase4-coordinator/scripts/test-provisional.sh` (The named script is not in the tree.)
 
 **AC-12. Provisional rate limit.**
 Configure `admission.provisional_admission_rate_per_hour: 10`. Connect 11
 provisional providers within 60 seconds. First 10 get `hello_ack`.
 11th gets WS close code 4008.
 
-Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh` (The named script is not in the tree.)
 
 **AC-13. admin/promote.**
 Connect a provisional provider. `POST /admin/promote/{provider_id}`.
 Provider's tier changes to pinned in `/poolz`. Routing weight upgrades
 to 1.0 immediately.
 
-Run by: `phase4-coordinator/scripts/test-promote.sh`
+Run by: `phase4-coordinator/scripts/test-promote.sh` (The named script is not in the tree.)
 
 **AC-13a. Rewards-trusted quota elevation.**
 Given a provider with durable rewards trust
@@ -4875,7 +4931,7 @@ Connect a provisional provider. `POST /admin/reject/{provider_id}`.
 Provider receives drain. WS closes. `provider_id` in
 `rejected_providers`. Subsequent hello → WS close 4009.
 
-Run by: `phase4-coordinator/scripts/test-reject.sh`
+Run by: `phase4-coordinator/scripts/test-reject.sh` (The named script is not in the tree.)
 
 **AC-15. Routing-mode fallback on nak.**
 Coordinator dispatches `inference_request` to a mock provider that
@@ -4884,7 +4940,7 @@ routing mode `http_forwarding_only`, returns HTTP 503 to buyer.
 Subsequent requests to that provider's model are NOT dispatched via
 § 6.6 for the remainder of the WS session.
 
-Run by: `phase4-coordinator/scripts/test-nak-fallback.sh`
+Run by: `phase4-coordinator/scripts/test-nak-fallback.sh` (The named script is not in the tree.)
 
 **AC-X1 (PG-1). Public-launch provider token gate.**
 Deploy the coordinator with `auth.require_provider_tokens=true`.
@@ -4924,7 +4980,7 @@ With `admission.provisional_admission_rate_per_hour=10`, the 11th new
 provisional provider admission in one hour MUST be rejected with WS
 close 4008 `provisional_rate_limited`.
 
-Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh` (The named script is not in the tree.)
 
 Expected result: first 10 unknown provider IDs get `hello_ack`; the
 11th gets close code 4008.
@@ -4939,6 +4995,8 @@ Run by:
 phase4-coordinator/scripts/test-provisional.sh \
   --pinned-only --expect-close-code 4009 --expect-no-record
 ```
+
+The named script is not in the tree.
 
 Expected result: close code 4009 and no new row in the provisional
 provider listing.
@@ -4955,6 +5013,8 @@ phase4-coordinator/scripts/test-rate-limit.sh --count 6 --limit 10
 journalctl -u macprovider-coordinator --since -10m \
   | grep 'provisional_admission_pressure'
 ```
+
+The named script is not in the tree.
 
 Expected result: a WARN-level log line containing
 `provisional_admission_pressure`, `rolling_10m_count`, `limit_per_hour`,

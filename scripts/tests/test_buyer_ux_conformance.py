@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -276,6 +278,37 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertTrue(bux.advertised_capabilities("openai/gpt-oss-20b")["reasoning"])
         deepseek = bux.advertised_capabilities("deepseek/deepseek-v4-flash")
         self.assertEqual((deepseek["tools"], deepseek["tool_choice"], deepseek["reasoning"]), (True, ["auto", "none"], True))
+        # #2189: MiniMax M3 has a tool grammar; its thinking is adaptive, so
+        # reasoning is not advertised.
+        for model in ("mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp", "minimaxai/minimax-m3.1-flash"):
+            self.assertEqual(bux.tool_grammar_family(model), "minimax")
+            minimax = bux.advertised_capabilities(model)
+            self.assertEqual((minimax["tools"], minimax["tool_choice"], minimax["reasoning"]), (True, ["auto", "none"], False))
+        self.assertEqual(bux.tool_grammar_family("MiniMaxAI/MiniMax-M2.5"), "")
+
+    def test_tool_grammar_family_matches_the_shared_fixture(self):
+        """#2355: one fixture for the Swift, Go, gateway and Python copies."""
+        fixture = json.loads((ROOT / "testdata" / "tool-grammar-families.json").read_text())
+        self.assertEqual(fixture["schema"], "macprovider.tool-grammar-families.v1")
+        self.assertTrue(fixture["cases"])
+        for case in fixture["cases"]:
+            self.assertEqual(bux.tool_grammar_family(case["model"]), case["family"], case["model"])
+        # Every family this copy can return has at least one fixture case.
+        returned = set(re.findall(r'return "([a-z0-9]+)"', inspect.getsource(bux.tool_grammar_family)))
+        self.assertTrue(returned)
+        self.assertLessEqual(returned, {case["family"] for case in fixture["cases"]})
+
+    def test_minimax_reasoning_markup_is_a_leak(self):
+        """#2189: <mm:think> in content is a leak, whole or split across deltas."""
+        for content in ("<mm:think>2+2 is 4.</mm:think>4", "2+2 is 4.</mm:think>4", "<mm:think>still thinking"):
+            leak = chat({"content": content}, "stop")
+            self.assertEqual(self.run_with(plain=leak)["checks"]["no_reasoning_leak"]["status"], bux.FAIL, content)
+        events = list(GOOD["stream"].sse())
+        split = [{"choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}]} for part in ("Two files.</mm:th", "ink>")]
+        result = self.run_with(stream=sse(*(events[:1] + split + events[1:])))
+        self.assertEqual(result["checks"]["stream_tool_deltas"]["status"], bux.FAIL)
+        self.assertIn("reasoning markup", result["checks"]["stream_tool_deltas"]["detail"])
+        self.assertFalse(bux._leaks_reasoning("The tag is mm:think without brackets."))
 
 
 class RetryAndSamplingTests(unittest.TestCase):

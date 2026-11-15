@@ -5639,7 +5639,7 @@ response content non-empty, throughput within 10% of Phase 2 baseline
 for the same model and hardware. Baseline values are in
 `beta/DECISION_CRITERIA.md` pre-launch facts table.
 
-**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch cooperative --verbose`
+**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch cooperative --verbose` (The named script is not in the tree.)
 where `config-phase3-test.yaml` points `tunnel_url` at the binary's local endpoint.
 The build session creates this fixture file.
 
@@ -5657,7 +5657,7 @@ must remain healthy (passes `GET /v1/health` with 200) within 30
 seconds of workload completion. Any 500 response or process crash is
 a hard failure of AC-2.
 
-**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch adversarial --verbose`
+**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch adversarial --verbose` (The named script is not in the tree.)
 
 **AC-3. 24-hour soak test.**
 On M4 hardware with a 7B 4-bit model, the binary runs for 24 hours
@@ -5669,6 +5669,7 @@ in throughput beyond 5% from hour-1 to hour-24.
 **Run by:** `phase3-binary/scripts/soak-test.sh` — created during the
 build session. Wraps a long-running harness invocation with a
 memory-pressure monitor that samples RSS every 60 seconds.
+(The named script is not in the tree.)
 
 **AC-4. Harness swap compatibility.**
 `beta/harness.py` can be configured (by changing `tunnel_url` in
@@ -5695,6 +5696,7 @@ would instead run the v2 `auth_request` handshake — R-6.7.8) and successfully:
 **Run by:** `phase3-binary/scripts/test-coordinator.sh` — created during
 the build session. Spins up a mock WebSocket server that exchanges
 handshake, 5 heartbeats, a preflight check, and a drain command.
+(The named script is not in the tree.)
 
 **AC-6. Graceful SIGTERM drain (with FR-12 exit-code gating).**
 With 3 in-flight streaming requests, sending SIGTERM causes the binary to drain
@@ -5757,7 +5759,7 @@ the WebSocket. The binary processes it through the existing inference
 pipeline, returns `inference_response_chunk` with the complete response
 and `inference_response_end` with `status: "complete"`.
 
-**Run by:** `phase3-binary/scripts/test-ws-inference.sh`
+**Run by:** `phase3-binary/scripts/test-ws-inference.sh` (The named script is not in the tree.)
 
 **AC-12. WS-tunneled inference (streaming).**
 A mock coordinator sends `inference_request` with `stream: true`. The
@@ -5766,7 +5768,7 @@ SSE event) with monotonically increasing `seq` values, followed by
 `inference_response_end`. Time-to-first-chunk is within 100 ms of the
 local HTTP streaming baseline.
 
-**Run by:** `phase3-binary/scripts/test-ws-streaming.sh`
+**Run by:** `phase3-binary/scripts/test-ws-streaming.sh` (The named script is not in the tree.)
 
 **AC-13. Cancellation acknowledgement.**
 A mock coordinator sends `inference_request` then `cancel_request`
@@ -5774,7 +5776,7 @@ after 2 chunks are received. The binary aborts inference and sends
 `inference_response_end` with `status: "cancelled"` within 5 seconds.
 The request slot is freed (verifiable via `/v1/health`).
 
-**Run by:** `phase3-binary/scripts/test-ws-cancellation.sh`
+**Run by:** `phase3-binary/scripts/test-ws-cancellation.sh` (The named script is not in the tree.)
 
 **AC-14. WS advertised-capacity admission and overflow rejection (reconciled v1.9.19).**
 Required behavior: with default advertised capacity 1, a second WebSocket
@@ -5804,7 +5806,7 @@ binary running in HTTP-forwarding mode (or a v1.1.x binary). The
 binary responds with `nak code=unknown_message_type` per § 6.5 nak
 semantics. The binary remains healthy and continues heartbeating.
 
-**Run by:** `phase3-binary/scripts/test-ws-nak-fallback.sh`
+**Run by:** `phase3-binary/scripts/test-ws-nak-fallback.sh` (The named script is not in the tree.)
 
 **AC-16. Post-drain reconnect.**
 With the binary running and joined to a local coordinator at

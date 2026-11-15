@@ -546,6 +546,11 @@ type WalletSessionAdmissionDecision struct {
 	SessionUsed      int64
 	SessionReserved  int64
 	SessionRemaining int64
+	// SessionSettledExhausted is set on ErrWalletSessionCapExceeded when the
+	// session's settled usage alone leaves no room for the request, so no
+	// in-flight reservation can free budget and a retry cannot succeed
+	// (#2361). It is false when only in-flight reservations block it.
+	SessionSettledExhausted bool
 }
 
 type WalletSessionMetadataAdmissionRequest struct {

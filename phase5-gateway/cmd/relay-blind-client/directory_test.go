@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/augstar/macprovider-gateway/internal/relayblind"
+	"github.com/augstar/macprovider-relayblind"
 )
 
 // SPEC-049-R028: with no --identity-pin, the client pins the provider from

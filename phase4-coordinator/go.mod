@@ -3,6 +3,7 @@ module github.com/augstar/macprovider-coordinator
 go 1.26.9
 
 require (
+	github.com/augstar/macprovider-relayblind v0.0.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/gobwas/ws v1.4.0
@@ -84,3 +85,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/augstar/macprovider-relayblind => ../relayblind
