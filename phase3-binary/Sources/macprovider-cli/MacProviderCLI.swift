@@ -646,6 +646,9 @@ struct ServeCommand: AsyncParsableCommand {
         let loadPath: String?
         let artifactSHA256: String?
         let catalogRevision: String?
+        /// The signed catalog row's key: what the member's native-MTP
+        /// admission is resolved for (SPEC-001-R019).
+        var catalogKey: String? = nil
 
         static let unbound = WarmSetMemberBinding(loadPath: nil, artifactSHA256: nil, catalogRevision: nil)
     }
@@ -657,12 +660,14 @@ struct ServeCommand: AsyncParsableCommand {
     static func warmSetMemberBinding(
         modelID: String,
         authorities: [String: ModelRuntimeTargetAuthority],
+        catalogKeys: [String: String] = [:],
         primaryVerified: Bool
     ) throws -> WarmSetMemberBinding {
         if let authority = authorities[modelID] ?? authorities[modelID.lowercased(with: nil)] {
             return WarmSetMemberBinding(
                 loadPath: authority.modelArgument, artifactSHA256: authority.artifactSHA256,
-                catalogRevision: authority.catalogRevision)
+                catalogRevision: authority.catalogRevision,
+                catalogKey: catalogKeys[modelID] ?? catalogKeys[modelID.lowercased(with: nil)])
         }
         guard !primaryVerified else {
             throw ModelRuntimeLoadError(target: modelID, reason: "signed catalog identity unavailable")
@@ -680,13 +685,43 @@ struct ServeCommand: AsyncParsableCommand {
         let contextProvenanceModelIDs: Set<String>
     }
 
+    /// SPEC-001-R019: a further member's native-MTP inputs, as `serve`
+    /// gives the boot model's: the configured mode, and the signed admission
+    /// set and artifact authority resolved for the member's own catalog row
+    /// and verified artifact. The runtime admits native MTP only for a tuple
+    /// that set admits; otherwise it serves exactly as a single-model
+    /// provider of that model would.
+    struct WarmSetMemberNativeMTP {
+        let mode: NativeMTPMode
+        var sidecarPath: String? = nil
+        var artifactRoot: String? = nil
+        var authority: NativeMTPResolvedArtifactAuthority? = nil
+    }
+
+    static func warmSetMemberNativeMTP(
+        config: AppConfig,
+        binding: WarmSetMemberBinding,
+        catalogTrust: CatalogRuntimeTrust?,
+        resolve: (_ catalogTrust: CatalogRuntimeTrust, _ modelKey: String, _ authorityPath: String, _ authoritySHA256: String) async -> NativeMTPResolvedAdmission?
+    ) async -> WarmSetMemberNativeMTP {
+        var inputs = WarmSetMemberNativeMTP(mode: config.nativeMTPMode)
+        guard config.nativeMTPMode == .auto, let catalogTrust, let modelKey = binding.catalogKey,
+              let authorityPath = binding.loadPath, let sha256 = binding.artifactSHA256,
+              let resolved = await resolve(catalogTrust, modelKey, authorityPath, sha256) else { return inputs }
+        inputs.sidecarPath = resolved.sidecarPath
+        inputs.artifactRoot = resolved.artifactRoot
+        inputs.authority = resolved.authority
+        return inputs
+    }
+
     /// SPEC-001-R016: a further warm member, built from the configuration
     /// the primary is built from and loaded from its own catalog binding:
     /// the runtime verifies the loaded artifact against the bound hash, as
-    /// it does the primary's, and reports that hash. It gets no draft model
-    /// and no native MTP (per-member signed admission is not built), cannot
-    /// be switched until it is promoted to primary (SPEC-011 R-3.10.3),
-    /// never receives the provider status, and gets no KV disk tier.
+    /// it does the primary's, and reports that hash. It gets no draft model,
+    /// native MTP only through its own signed admission (SPEC-001-R019),
+    /// cannot be switched until it is promoted to primary (SPEC-011
+    /// R-3.10.3), never receives the provider status, and gets no KV disk
+    /// tier.
     static func makeWarmSetMemberRuntime(
         modelID: String,
         family: String?,
@@ -696,7 +731,8 @@ struct ServeCommand: AsyncParsableCommand {
         policy: ContinuousBatchingPolicyLoadResult,
         emergencyOffOverride: Bool,
         autotuneCandidate: Bool,
-        switchTargets: WarmSetSwitchTargets
+        switchTargets: WarmSetSwitchTargets,
+        nativeMTP: WarmSetMemberNativeMTP
     ) async throws -> ModelRuntime {
         let context = ProviderCapacity(maxContextOverride: config.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
         return try await ModelRuntime(
@@ -721,7 +757,11 @@ struct ServeCommand: AsyncParsableCommand {
             continuousBatchingPolicyLoadResult: policy,
             continuousBatchingEmergencyOffOverride: emergencyOffOverride,
             continuousBatchingModeExplicitlyConfigured: config.continuousBatchingExplicitlyConfigured,
-            nativeMTPMode: .off,
+            nativeMTPMode: nativeMTP.mode,
+            nativeMTPAdmissionSidecarPath: nativeMTP.sidecarPath,
+            nativeMTPAdmissionArtifactRoot: nativeMTP.artifactRoot,
+            nativeMTPResolvedArtifactAuthority: nativeMTP.authority,
+            nativeMTPAdmissionEventModelID: modelID,
             warmSwapEnabled: false,
             swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds,
             verifiedModelArtifactSHA256: binding.artifactSHA256,
@@ -1367,6 +1407,7 @@ struct ServeCommand: AsyncParsableCommand {
             )
             let nativeMTPResolvedAdmission = await resolveNativeMTPArtifactAuthority(
                 config: resolved,
+                modelKey: resolved.modelCatalogKey,
                 catalogTrust: catalogTrust,
                 authorityPath: canonicalAuthorityPath,
                 authoritySHA256: actual,
@@ -1430,8 +1471,11 @@ struct ServeCommand: AsyncParsableCommand {
                 loadSHA256: expectedSHA256, nativeMTPResolvedArtifactAuthority: nil))
     }
 
-    private static func resolveNativeMTPArtifactAuthority(
+    /// `modelKey` is the served model's signed catalog key: the boot
+    /// model's `model_catalog_key`, or a further warm member's own row.
+    static func resolveNativeMTPArtifactAuthority(
         config: AppConfig,
+        modelKey: String?,
         catalogTrust: CatalogRuntimeTrust,
         authorityPath: String,
         authoritySHA256: String,
@@ -1439,7 +1483,7 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver
     ) async -> NativeMTPResolvedAdmission? {
         guard config.nativeMTPMode == .auto,
-              let modelKey = config.modelCatalogKey,
+              let modelKey,
               !modelKey.isEmpty,
               !authoritySHA256.isEmpty
         else {
@@ -3057,6 +3101,9 @@ struct ServeCommand: AsyncParsableCommand {
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
+        // SPEC-001-R019: each verified target's signed catalog key, for a
+        // further warm member's own native-MTP admission.
+        var memberCatalogKeys: [String: String] = [:]
         // Switch targets start from the rows planned before the startup
         // model's signed ceiling; each target's own memory fit and ceiling
         // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
@@ -3068,6 +3115,9 @@ struct ServeCommand: AsyncParsableCommand {
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
             onVerifiedTarget: { ids, row, artifact in
+                if let key = ids.last {
+                    for id in ids { memberCatalogKeys[id] = key; memberCatalogKeys[id.lowercased(with: nil)] = key }
+                }
                 guard resolved.maxContextSource == .recommendationApply else { return }
                 let knobs = ModelSwitchContext.recomputedServeKnobs(
                     memoryGB: switchMemoryGB,
@@ -3641,10 +3691,13 @@ struct ServeCommand: AsyncParsableCommand {
                 maxBatchByTarget: switchMaxBatchByTarget,
                 contextProvenanceModelIDs: switchContextProvenanceModelIDs)
             let primaryVerified = resolved.modelArtifactSHA256 != nil
-            let memberBinding: @Sendable (String) throws -> WarmSetMemberBinding = { [targetAuthorities] modelID in
+            let memberBinding: @Sendable (String) throws -> WarmSetMemberBinding = { [targetAuthorities, memberCatalogKeys] modelID in
                 try Self.warmSetMemberBinding(
-                    modelID: modelID, authorities: targetAuthorities, primaryVerified: primaryVerified)
+                    modelID: modelID, authorities: targetAuthorities, catalogKeys: memberCatalogKeys,
+                    primaryVerified: primaryVerified)
             }
+            let memberCatalogTrust = startupPreflight.catalogTrust
+            let memberArtifactResolver = targetResolver
             let table = WarmModelTable<ModelRuntime>()
             // SPEC-001-R019: each further member runs its own self-check
             // against its own tuple, from the store, plan and signed
@@ -3659,12 +3712,21 @@ struct ServeCommand: AsyncParsableCommand {
             let boot = WarmSetBoot(
                 table: table,
                 loader: WarmModelLoader(table: table, factory: { spec in
+                    let binding = try memberBinding(spec.modelID)
+                    let nativeMTP = await Self.warmSetMemberNativeMTP(
+                        config: config, binding: binding, catalogTrust: memberCatalogTrust,
+                        resolve: { trust, key, path, sha256 in
+                            await Self.resolveNativeMTPArtifactAuthority(
+                                config: config, modelKey: key, catalogTrust: trust,
+                                authorityPath: path, authoritySHA256: sha256,
+                                staticInputs: AutotuneStaticInputs(), artifactResolver: memberArtifactResolver)
+                        })
                     let runtime = try await Self.makeWarmSetMemberRuntime(
-                        modelID: spec.modelID, family: spec.modelFamily, binding: try memberBinding(spec.modelID),
+                        modelID: spec.modelID, family: spec.modelFamily, binding: binding,
                         config: config,
                         acceptedTuples: acceptedTuples, policy: policy,
                         emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
-                        switchTargets: switchTargets)
+                        switchTargets: switchTargets, nativeMTP: nativeMTP)
                     let memberID = runtime.memoryBudgetMemberID
                     let driver = await WarmSetMemberServices.configureMemberSelfCheck(
                         runtime: runtime, plan: memberPlan, serialOnlyRoute: memberSerialOnly,

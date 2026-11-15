@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import macprovider_cli
+import MacProviderCore
 
 /// SPEC-001-R019: each warm member's continuous-batching self-check and
 /// admission are its own, and another member's load, eviction, promotion or
@@ -332,6 +333,59 @@ final class WarmMemberPolicyTests: XCTestCase {
         await turn.release()
         let held = await turn.isHeld
         XCTAssertFalse(held)
+    }
+
+    // MARK: Native MTP per member
+
+    func testAMembersNativeMTPIsResolvedForItsOwnSignedRowAndArtifact() async throws {
+        let authority = ModelRuntimeTargetAuthority(
+            modelArgument: "/verified/model-b", artifactSHA256: String(repeating: "b", count: 64), catalogRevision: "r7")
+        let binding = try ServeCommand.warmSetMemberBinding(
+            modelID: "Model-B", authorities: ["model-b": authority],
+            catalogKeys: ["model-b": "family/model-b-4bit"], primaryVerified: true)
+        XCTAssertEqual(binding.catalogKey, "family/model-b-4bit")
+        let trust = ServeCommand.CatalogRuntimeTrust(
+            state: "trusted", releaseID: "rel-1", digest: String(repeating: "d", count: 64), signerKeyID: "k", source: "baked")
+        let calls = OrderLog()
+        let resolve: (ServeCommand.CatalogRuntimeTrust, String, String, String) async -> ServeCommand.NativeMTPResolvedAdmission? = { trust, key, path, sha in
+            calls.append("\(trust.releaseID)|\(key)|\(path)|\(sha)")
+            return nil
+        }
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.nativeMTPMode = .auto
+        let resolved = await ServeCommand.warmSetMemberNativeMTP(
+            config: config, binding: binding, catalogTrust: trust, resolve: resolve)
+        XCTAssertEqual(calls.all, ["rel-1|family/model-b-4bit|/verified/model-b|\(authority.artifactSHA256)"])
+        XCTAssertEqual(resolved.mode, .auto, "the member gets the configured mode, as the boot model does")
+        XCTAssertNil(resolved.authority, "no signed admission resolved: none is claimed")
+
+        // No resolution without the member's own signed row, a catalog trust, or with the mode off.
+        var unkeyed = binding
+        unkeyed.catalogKey = nil
+        var off = config
+        off.nativeMTPMode = .off
+        for (cfg, bind, trusted) in [(config, unkeyed, trust as ServeCommand.CatalogRuntimeTrust?), (config, binding, nil), (off, binding, trust)] {
+            let inputs = await ServeCommand.warmSetMemberNativeMTP(config: cfg, binding: bind, catalogTrust: trusted, resolve: resolve)
+            XCTAssertEqual(inputs.mode, cfg.nativeMTPMode)
+            XCTAssertNil(inputs.authority)
+            XCTAssertNil(inputs.sidecarPath)
+        }
+        XCTAssertEqual(calls.all.count, 1)
+    }
+
+    func testOnlyAMembersServePathAdmissionEventNamesItsModel() throws {
+        let member = ModelRuntime.nativeMTPServePathRejectionLogLine(
+            reasonCode: "target_directory_unavailable", artifactRole: "target", modelID: "model-b")
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(member.utf8)) as? [String: String])
+        XCTAssertEqual(object["model_id"], "model-b")
+        XCTAssertEqual(object["event"], "native_mtp_serve_path_admission")
+        let single = ModelRuntime.nativeMTPServePathRejectionLogLine(
+            reasonCode: "target_directory_unavailable", artifactRole: "target")
+        XCTAssertEqual(
+            single,
+            #"{"artifact_role":"target","event":"native_mtp_serve_path_admission","reason_code":"target_directory_unavailable","status":"rejected"}"# + "\n",
+            "a single-model provider's event is unchanged")
     }
 
     private final class OrderLog: @unchecked Sendable {

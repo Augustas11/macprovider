@@ -4085,6 +4085,9 @@ maxTokens: 1,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
+        // SPEC-001-R019: a further warm member names its model on its
+        // native-MTP serve-path admission events; nil keeps them as today.
+        nativeMTPAdmissionEventModelID: String? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -4327,13 +4330,15 @@ maxTokens: 1,
                     targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
                     selfTestRunner: self.nativeMTPSelfTestRunner,
                     route: self.smallMRoute,
+                    eventModelID: nativeMTPAdmissionEventModelID,
                     rejectionObserver: rejectionRecorder.record
                 )
                 candidateNativeMTPDisabledReason = rejectionRecorder.statusReason ?? .tupleNotAdmitted
             } else {
                 candidateNativeMTPLoad = Self.rejectNativeMTPServePath(
                     reasonCode: "target_directory_unavailable",
-                    artifactRole: "target"
+                    artifactRole: "target",
+                    modelID: nativeMTPAdmissionEventModelID
                 )
                 candidateNativeMTPDisabledReason = .tupleNotAdmitted
             }
@@ -13583,11 +13588,12 @@ maxTokens: maxTokens,
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner,
         route: SmallMRoute = SmallMRoute.processRoute,
+        eventModelID: String? = nil,
         rejectionObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> NativeMTPRuntimeLoadResult? {
         func reject(reasonCode: String, artifactRole: String) -> NativeMTPRuntimeLoadResult? {
             rejectionObserver(reasonCode)
-            return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole)
+            return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole, modelID: eventModelID)
         }
         if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
             return reject(reasonCode: reasonCode, artifactRole: "runtime")
@@ -13897,9 +13903,10 @@ maxTokens: maxTokens,
 
     private static func rejectNativeMTPServePath(
         reasonCode: String,
-        artifactRole: String
+        artifactRole: String,
+        modelID: String? = nil
     ) -> NativeMTPRuntimeLoadResult? {
-        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole)
+        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole, modelID: modelID)
         return nil
     }
 
@@ -13908,25 +13915,28 @@ maxTokens: maxTokens,
         return nil
     }
 
-    private static func logNativeMTPServePathRejection(reasonCode: String, artifactRole: String) {
+    private static func logNativeMTPServePathRejection(reasonCode: String, artifactRole: String, modelID: String? = nil) {
         FileHandle.standardError.write(Data(nativeMTPServePathRejectionLogLine(
             reasonCode: reasonCode,
-            artifactRole: artifactRole
+            artifactRole: artifactRole,
+            modelID: modelID
         ).utf8))
     }
 
     /// One sorted-key JSON object per rejection, terminated by a single newline.
-    static func nativeMTPServePathRejectionLogLine(reasonCode: String, artifactRole: String) -> String {
-        let payload: [String: String] = [
+    /// `modelID` is set only for a further warm-set member (SPEC-001-R019).
+    static func nativeMTPServePathRejectionLogLine(reasonCode: String, artifactRole: String, modelID: String? = nil) -> String {
+        var payload: [String: String] = [
             "artifact_role": artifactRole,
             "event": "native_mtp_serve_path_admission",
             "reason_code": reasonCode,
             "status": "rejected",
         ]
+        if let modelID { payload["model_id"] = modelID }
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
             return String(decoding: data, as: UTF8.self) + "\n"
         }
-        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
+        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\(modelID.map { " model_id=\($0)" } ?? "")\n"
     }
 
     struct NativeMTPHardwareE2EServePathLoad: @unchecked Sendable {
