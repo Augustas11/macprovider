@@ -18,28 +18,25 @@ another gate.
 Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14; the Live
 entry is updated for the 2026-11-15 MiniMax activation.
 
-- **Live:** `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`
-  (activated 2026-11-15 through `scripts/ops/catalog-activate.sh`, no
+- **Live:** `published-2026-11-15-nemotron-3.5-bolt-listed-v289`
+  (activated 2026-11-16 through `scripts/ops/catalog-activate.sh`, no
   coordinator restart), from
-  [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`).
-  It moves `minimaxai/minimax-m3.1-flash` from `listed` to `recommendable`.
-  Evidence (a)-(d) passed; (e) is owed for the MiniMax M3.1-Flash artifact
-  because no connected provider served it. The previous live release was
-  `published-2026-11-12-nemotron-3.5-lightning-listed-v283`.
-  `buyer_ux_conformance_owed` remains for `minimaxai/minimax-m3.1-flash`
-  (no conformance record yet), and the activation tool still lists
-  `live_probe` as pending: the canary serves the uncensored GLM-5.3-Flash
-  build, which has no native-MTP admission entry (#2382).
-- **Committed, not live:** `published-2026-11-15-nemotron-3.5-bolt-listed-v289`
-  from [PR 2385](https://github.com/Augustas11/macprovider/pull/2385)
-  (`61c3d02c3`): a `listed` row for Nemotron 3.5 Bolt 74B-A9B, serial
-  serving, `min_ram_gb` 84, rate class `class-120b-moe`. Order of live
-  steps: first a Pearl runtime release that carries the Bolt billing alias
-  (`scripts/ops/pearl-runtime.sh status`, then `next --run`), then
-  `scripts/ops/catalog-activate.sh status` and `next --run`. The activation
-  tool refuses this release until the running coordinator has the alias.
-  Live probe: one buyer request served on the Bolt row and billed at the
-  class rate, once a provider with at least 84 GB serves it.
+  [PR 2385](https://github.com/Augustas11/macprovider/pull/2385)
+  (`61c3d02c3`). It adds a `listed` row for Nemotron 3.5 Bolt 74B-A9B:
+  serial serving, `min_ram_gb` 84, rate class `class-120b-moe`, with the
+  rate-card row `nemotron-3.5-bolt-74b-a9b` (68,000 / 17,000 / 136,000
+  credits per million prompt / cache-hit / completion tokens; the operator
+  acknowledged the price table). Evidence (a)-(d) passed; (e) was not
+  required because the buyer-serving set adds or re-hashes nothing. The
+  gateway serves the release rate card. The previous live release was
+  `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`.
+  Not yet done: the buyer probe on the Bolt row (one request served and
+  billed at the class rate), which needs a provider with at least 84 GB
+  serving it. `buyer_ux_conformance_owed` remains for
+  `minimaxai/minimax-m3.1-flash` (no conformance record yet), and the
+  activation tool still lists `live_probe` and `gateway_proof` as pending:
+  the canary serves the uncensored GLM-5.3-Flash build, which has no
+  native-MTP admission entry (#2382).
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since
