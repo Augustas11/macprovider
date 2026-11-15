@@ -1435,6 +1435,12 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertNil(AutotuneModelContextCap.kvCacheBytesPerToken(configData: notList))
     }
 
+    /// #2329: a vision-wrapped config carries the stack under `text_config`.
+    func testLayersBlockTypeUnderTextConfigCountsOnlyAttention() {
+        let nested = Data(#"{"text_config": {"hidden_size": 1024, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 128, "layers_block_type": ["mamba", "attention", "moe", "attention"]}}"#.utf8)
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: nested), 2 * 2 * 128 * 2 * 2)
+    }
+
     func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {
         // SPEC-023-R018 item 5: a complete layer_types stack counts only its
         // full_attention layers. Zero of them means no per-token KV cache, so

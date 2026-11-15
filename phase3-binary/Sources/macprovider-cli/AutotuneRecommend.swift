@@ -712,9 +712,11 @@ enum AutotuneModelContextCap {
         ])
         // nemotron_h_puzzle configs (Nemotron 3.5 Bolt, #2329) declare no
         // layer count; their stack is `layers_block_type`, and only its
-        // `attention` entries hold a KV cache. A declared count still wins.
+        // `attention` entries hold a KV cache (top level or under
+        // `text_config`). A declared count still wins.
         let blockTypes = declaredCount == nil
-            ? (root["layers_block_type"] as? [Any])?.compactMap { $0 as? String }
+            ? ((root["layers_block_type"] ?? (root["text_config"] as? [String: Any])?["layers_block_type"]) as? [Any])?
+                .compactMap { $0 as? String }
             : nil
         guard let declaredLayers = declaredCount ?? blockTypes?.count,
             let hiddenSize = firstInt(in: root, paths: [
