@@ -27,6 +27,7 @@ import statistics
 import sys
 import threading
 import time
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prompts  # noqa: E402
@@ -118,7 +119,9 @@ def run_request(port, model, messages, max_tokens, stream_options=True, timeout=
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
-                     headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+                     # The provider batches only requests that carry a stable id.
+                     headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                              "X-Request-ID": uuid.uuid4().hex})
         resp = conn.getresponse()
         if resp.status != 200:
             detail = resp.read(2000).decode("utf-8", "replace")
