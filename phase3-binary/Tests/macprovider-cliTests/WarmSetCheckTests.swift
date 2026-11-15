@@ -199,6 +199,82 @@ final class WarmSetCheckTests: XCTestCase {
         XCTAssertEqual(rig.loads, 0)
     }
 
+    /// No injected limit: the pinned main model's reserved rows leave no room
+    /// for the load even once the idle member is gone. With 8 reserved rows
+    /// the check plans that eviction and its post-eviction decision fits; with
+    /// 10 the same eviction no longer covers the load and the check refuses,
+    /// as `load` does, unloading nothing.
+    func testReservedRowsOfThePinnedMainModelRefuseEvenAfterThePlannedEviction() async throws {
+        let limit = 48 * gib
+        let fitting = try WarmSetCheckRig(limitBytes: limit, primaryActiveBytes: 16 * gib, primarySlots: 8)
+        try fitting.addThirdMember(gib: 4, pinned: false)
+        let evicting = await fitting.check()
+        XCTAssertEqual(evicting.status, "fits_after_eviction")
+        XCTAssertEqual(evicting.check?.evict, ["model-c"])
+        XCTAssertEqual(evicting.check?.limitBytes, limit)
+
+        let rig = try WarmSetCheckRig(limitBytes: limit, primaryActiveBytes: 16 * gib, primarySlots: 10)
+        try rig.addThirdMember(gib: 4, pinned: false)
+        let before = rig.state()
+        let reply = await rig.check()
+        XCTAssertEqual(reply.status, "insufficient_memory")
+        XCTAssertEqual(reply.check?.evict, [])
+        XCTAssertEqual(reply.check?.limitBytes, limit)
+        XCTAssertGreaterThan(try XCTUnwrap(reply.check?.requiredBytes), limit)
+        XCTAssertEqual(rig.state(), before, "model-c is still warm")
+        let load = await ControlSocketServer.handleWarmSetRequest(action: "load", modelID: "org/second", warmSet: rig.boot)
+        XCTAssertEqual(load.status, reply.status)
+        XCTAssertEqual(load.detail, reply.detail)
+        XCTAssertEqual(rig.state(), before, "load evicted nothing for a refused load")
+        XCTAssertEqual(rig.loads, 0)
+    }
+
+    /// The second decision on its natural path: whenever the first plans an
+    /// eviction, the decision with those members gone fits without a further
+    /// eviction (each evicted member frees exactly its weights, minimum row
+    /// and margin, which the decision charged). Over a grid of loaded sets,
+    /// reserved rows and limits the simulation never disagrees with the plan,
+    /// so a post-eviction refusal needs the state or limit to change between
+    /// the decisions (the injected-limit test above).
+    func testThePostEvictionDecisionFitsWheneverThePlanIsSatisfied() {
+        typealias Rules = SharedModelMemoryRules
+        var planned = 0
+        for limitGiB in [24, 32, 48, 64] {
+            for reservedRows in [0, 2, 8, 10] {
+                for idleGiB in [1, 4, 12] {
+                    for secondIdleGiB in [0, 2, 6] {
+                        var primary = SharedModelMemoryMember(label: "model-a")
+                        primary.loaded = true
+                        primary.residentBytes = 16 * gib
+                        primary.kvBytesPerToken = 100_000
+                        primary.pinned = true
+                        primary.reservedRowKVBytes = MLXMemoryBudget.kvBytes(tokens: reservedRows * 32_768, bytesPerToken: 100_000)
+                        var members = [1: primary]
+                        for (id, size) in [(3, idleGiB), (4, secondIdleGiB)] where size > 0 {
+                            var idle = SharedModelMemoryMember(label: "m\(id)")
+                            idle.loaded = true
+                            idle.residentBytes = size * gib
+                            idle.kvBytesPerToken = 10_000
+                            idle.lastAdmissionAt = UInt64(id)
+                            members[id] = idle
+                        }
+                        let newRow = MLXMemoryBudget.kvBytes(tokens: Rules.minimumRowTokens, bytesPerToken: 50_000)
+                        let first = Rules.loadDecision(
+                            limitBytes: limitGiB * gib, members: members, estimatedResidentBytes: 4 * gib, newMinimumRowKVBytes: newRow)
+                        guard let plan = first.eviction, !plan.evict.isEmpty else { continue }
+                        planned += 1
+                        let after = Rules.loadDecision(
+                            limitBytes: limitGiB * gib, members: members.filter { !plan.evict.contains($0.key) },
+                            estimatedResidentBytes: 4 * gib, newMinimumRowKVBytes: newRow)
+                        XCTAssertTrue(after.admitted && after.eviction == nil,
+                                      "limit=\(limitGiB) reserved=\(reservedRows) idle=\(idleGiB)+\(secondIdleGiB): \(after)")
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(planned, 0, "the grid plans evictions")
+    }
+
     /// SPEC-001-R016: status names the member the wire names primary. At a
     /// promotion the provider status switches first; status follows it, not
     /// the table's flag, and lists that member first.
