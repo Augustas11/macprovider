@@ -145,8 +145,8 @@ final class LFMToolRuntimeTests: XCTestCase {
         let call = "<|tool_call_start|>[weather(city='Oslo')]<|tool_call_end|>"
         var emitter = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["weather"])
         let filter = ModelRuntime.toolAwareStopTokenFilter(StopTokenFilter(tokens: ["<|tool_call_start|>", "<|tool_call_end|>"]), grammar: .lfm2)
-        XCTAssertFalse(ModelRuntime.observeSerialToolStop(&emitter, decoded: call, stopTokenFilter: filter, requestStops: [], reasoningOpen: true))
-        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&emitter, decoded: "Plan.</think>" + call, stopTokenFilter: filter, requestStops: [], reasoningOpen: true))
+        XCTAssertFalse(ModelRuntime.observeSerialToolStop(&emitter, decoded: call, stopTokenFilter: filter, requestStops: [], reasoningOpen: .afterThink))
+        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&emitter, decoded: "Plan.</think>" + call, stopTokenFilter: filter, requestStops: [], reasoningOpen: .afterThink))
     }
 
     func testSpecialTokenFilteringPreservesNativeFramingButRequestStopsStillApply() {
@@ -156,9 +156,9 @@ final class LFMToolRuntimeTests: XCTestCase {
         let result = ModelRuntime.applyOutputFilters(text + "<|im_end|>", stopTokenFilter: filter, requestStops: [])
         XCTAssertEqual(result.text, text)
         var emitter = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["weather"])
-        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&emitter, decoded: text, stopTokenFilter: filter, requestStops: []))
+        XCTAssertTrue(ModelRuntime.observeSerialToolStop(&emitter, decoded: text, stopTokenFilter: filter, requestStops: [], reasoningOpen: .whole))
         var stopped = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["weather"])
-        XCTAssertFalse(ModelRuntime.observeSerialToolStop(&stopped, decoded: text, stopTokenFilter: filter, requestStops: ["Oslo"]))
+        XCTAssertFalse(ModelRuntime.observeSerialToolStop(&stopped, decoded: text, stopTokenFilter: filter, requestStops: ["Oslo"], reasoningOpen: .whole))
         let raw = StopTokenFilter(tokens: ["<|tool_call_start|>", "<|im_end|>"])
         let other = ModelRuntime.toolAwareStopTokenFilter(raw, grammar: .qwen)
         XCTAssertEqual(other.tokens, raw.tokens)

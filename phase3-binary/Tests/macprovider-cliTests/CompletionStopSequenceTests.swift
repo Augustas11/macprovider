@@ -40,19 +40,19 @@ final class CompletionStopSequenceTests: XCTestCase {
     func testMetadataMatchesFilterOrderingButExcludesReasoningModelStopsAndTools() {
         let filter = StopTokenFilter(tokens: ["<eos>"])
         XCTAssertEqual(ModelRuntime.matchedRequestStop(in: "aENDxSTOP", stopTokenFilter: filter,
-                                                      requestStops: ["STOP", "END", "EN"]), "END")
+                                                      requestStops: ["STOP", "END", "EN"], reasoningOpen: .whole), "END")
         XCTAssertEqual(ModelRuntime.matchedRequestStop(in: "aEND", stopTokenFilter: filter,
-                                                      requestStops: ["EN", "END"]), "EN")
+                                                      requestStops: ["EN", "END"], reasoningOpen: .whole), "EN")
         XCTAssertNil(ModelRuntime.matchedRequestStop(in: "hidden END", stopTokenFilter: filter,
-                                                    requestStops: ["END"], reasoningOpen: true))
+                                                    requestStops: ["END"], reasoningOpen: .afterThink))
         XCTAssertNil(ModelRuntime.matchedRequestStop(in: "hidden END</think>answer", stopTokenFilter: filter,
-                                                    requestStops: ["END"], reasoningOpen: true))
+                                                    requestStops: ["END"], reasoningOpen: .afterThink))
         XCTAssertEqual(ModelRuntime.matchedRequestStop(in: "hidden END</think>answer STOP", stopTokenFilter: filter,
-                                                      requestStops: ["END", "STOP"], reasoningOpen: true), "STOP")
+                                                      requestStops: ["END", "STOP"], reasoningOpen: .afterThink), "STOP")
         XCTAssertNil(ModelRuntime.matchedRequestStop(in: "answer<eos>", stopTokenFilter: filter,
-                                                    requestStops: ["<eos>"]))
+                                                    requestStops: ["<eos>"], reasoningOpen: .whole))
         XCTAssertNil(ModelRuntime.matchedRequestStop(in: #"{"argument":"END"}"#, stopTokenFilter: filter,
-                                                    requestStops: ["END"], hasToolCalls: true))
+                                                    requestStops: ["END"], reasoningOpen: .whole, hasToolCalls: true))
     }
 
     func testHarmonyMetadataOnlyMatchesVisibleFinalContent() throws {

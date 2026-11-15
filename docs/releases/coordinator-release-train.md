@@ -22,11 +22,48 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
-## Next Pearl runtime v1.8.288 — contents (tracked 2026-11-14)
+## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, rides the next Pearl runtime
 
-Live on 2026-11-14 (`scripts/ops/pearl-runtime.sh status`): coordinator and
-gateway `v1.8.286`, `code_changed_vs_live` true, gateway buyer hold off. Next
-step `signed_tag`: `v1.8.288` is the next unused tag on origin (see the
+PR #2377 (`589fd8d24`), issue #2365. Not live: v1.8.288 does not carry it.
+
+- Gateway: `/v1/messages` partitions the auto-prefix conversation-cache key by `metadata.user_id` (trimmed, 1–256 bytes), as Chat and Responses partition by `prompt_cache_key`. Lab, GLM, 16 sessions on one system prompt: follow-up first-token median 138.4 s to 34.6 s, conversation-cache hits 0 to 48.
+- Gateway: `/v1/messages` usage reports observed cached prompt tokens as `cache_read_input_tokens`; `input_tokens` excludes them. Billing is unchanged.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: two `/v1/messages` turns with the same `metadata.user_id` and a shared system prompt; the second reports a non-zero `cache_read_input_tokens`.
+
+## Relay-blind retry message and LFM tool feed (SPEC-041-R007, SPEC-018) — merged 2026-11-14, rides the next Pearl runtime
+
+PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
+
+- Gateway: a retryable relay-blind refusal (`relay_blind_provider_unsupported`, `key_expired`, `decrypt_failed`, `metadata_rate_limited`) tells the buyer to retry with a new reservation and envelope; permanent codes keep "do not reuse its envelope". Status, `retryable`, `Retry-After` and `retry_action` are unchanged.
+- Gateway: the OpenRouter model feed advertises `tools` for `lfm2.5-24b-a2b`, matching the coordinator's tool-grammar family.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
+
+## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — merged 2026-11-14, rides the next Pearl runtime
+
+PR #2374 (`cdf46f633`), issue #2371. Not live: v1.8.288 does not carry it.
+
+- Stats routability: a provider that is in service (routable, busy on every slot, or in a thermal or queue-full hold) is `online`; models are `redundant`, `operational`, `unknown` or `offline`; models and the network are never `degraded`.
+- Coordinator `/healthz` gains `pool_busy`; `/poolz` gains `in_service`; `/v1/pool/check` reports busy as `busy`.
+- Gateway `/v1/status` gains `pool.busy`; an all-busy network is `up` and an all-busy model is `no_free_slots`. A wallet-session allowlist naming an all-busy model is accepted (it was refused with 403).
+
+Live step: cut and apply the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run`. Gateway source changes; no schema change, so about 1-2 minutes. Live probe: with every slot of a model's providers busy, `GET /v1/stats/routability` reports the model `operational` or `redundant` with `slots_free: 0`, `/v1/status` reports `up` and `pool.busy`, `/healthz` reports `pool_busy`.
+
+## Pearl runtime v1.8.288 (2026-11-14)
+
+Live. Signed tag `v1.8.288` on `e955d0761`, [runtime release run 43580106254](https://github.com/Augustas11/macprovider/actions/runs/43580106254), applied with `scripts/ops/pearl-runtime.sh` (`status`, then `next --run` per step).
+
+Measured from the updater audit log (UTC): gateway stop 09:29:03 to gateway start 09:30:37, apply downtime 94 s; buyer hold 09:28:57 to release 09:30:53, buyer-visible downtime 116 s. The candidate changed the schema fingerprint, so buyers were held until the serving gates passed. Rollback-point verification ran afterwards with services up and ended 09:37:50.
+
+After the apply: coordinator and gateway `/healthz` report `v1.8.288`, `buyer_hold` false; a buyer chat completion through the gateway returned HTTP 200; `demand_events` carries the new serving-telemetry and serving-path columns (#2340, #2342). The provider-reported timing fields and the serving-path label fill once providers run the next CLI. `/v1/catalog-release` answers 404 until a catalog release ships a signed manifest (#2334).
+
+Carried by this runtime: #2334, #2339, #2340, #2342, #2344, #2368 (and the test-only and template-only parts of #2151 and #2316); see the contents table below.
+
+## Pearl runtime v1.8.288 — contents (live 2026-11-14)
+
+Tracked before the release (`scripts/ops/pearl-runtime.sh status` on 2026-11-14): coordinator and
+gateway were on `v1.8.286` and `v1.8.288` was the next unused tag on origin (see the
 Consumed identities row in `cli-release-train.md`).
 
 Order agreed on 2026-11-14: Pearl runtime `v1.8.288` first, then the catalog
@@ -46,8 +83,9 @@ No change touches `phase7-verify/`.
 Schema: `scripts/pearl-database-schema-fingerprint.py` gives `e8cb7479…` at
 `v1.8.286` and `11d078bf…` at `30fdbe2cf`. Per
 `docs/runbooks/pearl-coordinator-rollout.md`, a different fingerprint means
-buyers are held with 503 until all serving gates pass, up to about 25 minutes.
-State that figure before the apply. No numbered migration or `.sql` file
+buyers are held with 503, typically about 1-2 minutes (last measured:
+v1.8.286 80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers stay held
+until the serving gates pass. State that before the apply. No numbered migration or `.sql` file
 changes. The gateway adds nullable `demand_events` columns at startup in
 `phase5-gateway/internal/storage/sqlite/migrate.go`.
 
@@ -56,11 +94,12 @@ changes. The gateway adds nullable `demand_events` columns at startup in
 | [#2151](https://github.com/Augustas11/macprovider/pull/2151) (`2a07d60d5`) | Test only: `phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh` pins its catalog fixture to the commit of the published `release.json`. No coordinator or gateway code. | none | none | none |
 | [#2316](https://github.com/Augustas11/macprovider/pull/2316) (`6df6ac945`) | Checked-in config templates only: `latest_binary_version` 1.8.281 to 1.8.283 in `phase4-coordinator/coordinator.yaml.example`, `dist/coordinator.yaml` and `dist/coordinator.yaml.example`. No code. Live already recommends 1.8.287 (`cli-release.sh status`). | none | template value only | none |
 | [#2334](https://github.com/Augustas11/macprovider/pull/2334) (`d3b136de1`) | Coordinator verifies an optional signed catalog release manifest (`release.json.sig`, SPEC-023 §3.8) and serves `GET /v1/catalog-release` and `/v1/catalog-release.sig`. A manifest rejected at boot is logged and treated as absent; a SIGHUP reload rejects it. `deploy-pearl-vps.sh` stages the signature when the tag carries one. | none | nginx: two `location =` blocks for `/v1/catalog-release` (+ `.sig`) in `dist/nginx-coordinator.malibu.tech.conf` | Per the CLI train row: a provider on the next CLI verifies a feed through the signed manifest. That needs a catalog release that carries `release.json.sig`. No tracked file has that name on `main` at `30fdbe2cf`. |
-| [#2340](https://github.com/Augustas11/macprovider/pull/2340) (`af2d17d7a`) | [Gateway serving telemetry](#gateway-serving-telemetry-spec-006-r028--pending-runtime-inclusion-2026-11-13). The gateway also reads the provider usage fields `macprovider_queue_ms`, `macprovider_first_token_ms`, `macprovider_first_answer_ms` and `macprovider_decode_ms` (from #2332). | Gateway `demand_events`: `gw_first_reasoning_ms`, `gw_first_answer_ms`, `gw_output_tps_millitokens`, `streaming_mode`, `serving_engine`, `provider_reported_queue_ms`, `provider_reported_first_token_ms`, `provider_reported_first_answer_ms`, `provider_reported_decode_ms` | none | `/admin/demand-latency?window=24h` shows a sample for the model of one streamed request |
-| [#2339](https://github.com/Augustas11/macprovider/pull/2339) (`ba2732c4c`) | [Measured decode reorder and routed-throughput floor](#measured-decode-reorder-and-routed-throughput-floor-spec-002-r005--pending-runtime-inclusion-2026-11-13). The measured decode signal comes from the coordinator's own request phase timing. It does not come from the heartbeat. | none | none (wiring in `cmd/coordinator/main.go` only) | `/poolz` rows carry `routed_throughput_source` |
-| [#2342](https://github.com/Augustas11/macprovider/pull/2342) (`423f49ded`) | [Serving-path label](#serving-path-label-on-the-internal-gateway-hop-spec-002-r007-spec-006-r028--pending-runtime-inclusion-2026-11-14). The coordinator adds `served_path` (raw JSON, `omitempty`) to `InferenceResponseEnd` and checks it. An absent report gives no header. | Gateway `demand_events`: `served_path`, `served_rows` | none | `served_path_cells` entry in `/admin/demand-latency?window=24h` once providers run the next CLI |
+| [#2340](https://github.com/Augustas11/macprovider/pull/2340) (`af2d17d7a`) | [Gateway serving telemetry](#gateway-serving-telemetry-spec-006-r028--live-in-v18288-merged-2026-11-13). The gateway also reads the provider usage fields `macprovider_queue_ms`, `macprovider_first_token_ms`, `macprovider_first_answer_ms` and `macprovider_decode_ms` (from #2332). | Gateway `demand_events`: `gw_first_reasoning_ms`, `gw_first_answer_ms`, `gw_output_tps_millitokens`, `streaming_mode`, `serving_engine`, `provider_reported_queue_ms`, `provider_reported_first_token_ms`, `provider_reported_first_answer_ms`, `provider_reported_decode_ms` | none | `/admin/demand-latency?window=24h` shows a sample for the model of one streamed request |
+| [#2339](https://github.com/Augustas11/macprovider/pull/2339) (`ba2732c4c`) | [Measured decode reorder and routed-throughput floor](#measured-decode-reorder-and-routed-throughput-floor-spec-002-r005--live-in-v18288-merged-2026-11-13). The measured decode signal comes from the coordinator's own request phase timing. It does not come from the heartbeat. | none | none (wiring in `cmd/coordinator/main.go` only) | `/poolz` rows carry `routed_throughput_source` |
+| [#2342](https://github.com/Augustas11/macprovider/pull/2342) (`423f49ded`) | [Serving-path label](#serving-path-label-on-the-internal-gateway-hop-spec-002-r007-spec-006-r028--live-in-v18288-merged-2026-11-14). The coordinator adds `served_path` (raw JSON, `omitempty`) to `InferenceResponseEnd` and checks it. An absent report gives no header. | Gateway `demand_events`: `served_path`, `served_rows` | none | `served_path_cells` entry in `/admin/demand-latency?window=24h` once providers run the next CLI |
 | [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`) | MiniMax M3 tool grammar `minimax` in the coordinator. Every MiniMax M3 request, plain chat included, goes only to providers that serve its model output (`providerServesModelOutput`). The same gate covers relay-blind and privacy-class reservations. The gateway's OpenRouter tool-family list adds `minimax-m3` / `minimax_m3`. | none | none | Per the CLI train row: a MiniMax request served by a provider on the next CLI. A provider on 1.8.287 gets no MiniMax traffic once this runtime is live (retryable 503 `tool_grammar_provider_unavailable`). |
-|## Agent-client terminal and retry shapes (SPEC-006 v0.9.79, SPEC-040 v0.1.10) — pending runtime inclusion (2026-11-14)
+| [#2368](https://github.com/Augustas11/macprovider/pull/2368) (`0f25e99cd`) | [Agent-client terminal and retry shapes](#agent-client-terminal-and-retry-shapes-spec-006-v0979-spec-040-v0110--live-in-v18288-merged-2026-11-14). Gateway: Responses truncated stream fails, `quota_exhausted` permanent, wallet cap `budget_reached` on `/v1/responses`, `reasoning.effort` `max`. Coordinator: test only. | none | none | one `/v1/responses` request with `reasoning.effort: "max"` reaches the provider as `reasoning_effort: "max"` (provider request log) |
+|## Agent-client terminal and retry shapes (SPEC-006 v0.9.79, SPEC-040 v0.1.10) — live in v1.8.288 (merged 2026-11-14)
 
 Related: #2360, #2361, #2362, #2363. PR #2368 merged as `0f25e99cd`.
 - `/v1/responses` stream that closes with neither `[DONE]` nor a
@@ -76,13 +115,10 @@ Related: #2360, #2361, #2362, #2363. PR #2368 merged as `0f25e99cd`.
 Audit: four lanes, gate met after one fix round. Conformance: SPEC-006-R002
 is `pending` until its commit evidence is renewed from `0f25e99cd`.
 
-Live step: the next Pearl runtime release, through
-`scripts/ops/pearl-runtime.sh status`, then `next --run`. Gateway source
-changes, so the buyer-hold path applies. No schema change.
+Live in Pearl runtime v1.8.288 (2026-11-14).
 
- [#2368](https://github.com/Augustas11/macprovider/pull/2368) (`0f25e99cd`) | [Agent-client terminal and retry shapes](#agent-client-terminal-and-retry-shapes-spec-006-v0979-spec-040-v0110--pending-runtime-inclusion-2026-11-14). Gateway: Responses truncated stream fails, `quota_exhausted` permanent, wallet cap `budget_reached` on `/v1/responses`, `reasoning.effort` `max`. Coordinator: test only. | none | none | one `/v1/responses` request with `reasoning.effort: "max"` reaches the provider as `reasoning_effort: "max"` (provider request log) |
 
-## Serving-path label on the internal gateway hop (SPEC-002-R007, SPEC-006-R028) — pending runtime inclusion (2026-11-14)
+## Serving-path label on the internal gateway hop (SPEC-002-R007, SPEC-006-R028) — live in v1.8.288 (merged 2026-11-14)
 
 Related: #2341. PR #2342 merged as `423f49ded`. A provider may report
 `served_path` (path and mean active rows) on its end frame; the coordinator
@@ -97,13 +133,13 @@ Audit: four lanes, gate met.
 
 Live step: the same Pearl runtime release as the two entries below, through
 `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source
-changes, so the buyer-hold path applies: "up to about 25 minutes"). Labels
+changes, so the buyer-hold path applies: typically about 1-2 minutes). Labels
 stay NULL until providers run a CLI that carries the provider side (next
 CLI cut, see `cli-release-train.md`). After both: one streamed request
 through the gateway, then `/admin/demand-latency?window=24h` shows a
 `served_path_cells` entry for its model.
 
-## Measured decode reorder and routed-throughput floor (SPEC-002-R005) — pending runtime inclusion (2026-11-13)
+## Measured decode reorder and routed-throughput floor (SPEC-002-R005) — live in v1.8.288 (merged 2026-11-13)
 
 Related: #2321. PR #2339 merged as `ba2732c4c`. The objective sort still
 runs on the heartbeat estimate; candidates whose measured decode signal is
@@ -127,7 +163,7 @@ buyer-hold path. After the apply: `/poolz` rows carry
 `routed_throughput_source`, and the routing-decision log shows
 `throughput_source: "measured"` for a provider with fresh samples.
 
-## Gateway serving telemetry (SPEC-006-R028) — pending runtime inclusion (2026-11-13)
+## Gateway serving telemetry (SPEC-006-R028) — live in v1.8.288 (merged 2026-11-13)
 
 Related: #2320, #2341. PR #2340 merged as `af2d17d7a`. The gateway records
 time to first reasoning delta, time to first answer delta and an answer
@@ -144,8 +180,9 @@ Live step: the next Pearl runtime release through
 `scripts/ops/pearl-runtime.sh status`, then `next --run`. This changes
 `phase5-gateway/` source, so the database schema fingerprint changes; per
 `docs/runbooks/pearl-coordinator-rollout.md` that is the path where buyers
-are held with 503 until all serving gates pass, up to about 25 minutes.
-State that figure to the operator before the apply. The added columns are
+are held with 503, typically about 1-2 minutes (last measured: v1.8.286
+80 s; v1.8.288 94 s apply, 116 s buyer hold); buyers stay held until the
+serving gates pass. State that to the operator before the apply. The added columns are
 nullable, so a rollback to the previous binary keeps working. After the
 apply: one streamed request through the gateway, then
 `/admin/demand-latency?window=24h` shows a sample for its model.
@@ -499,8 +536,8 @@ v1.8.246; #2023 (#1355) in v1.8.246; #2024 (#1911/#2017) in v1.8.247.
 ## How to track the next coordinator release
 
 The table below is the net change against the **live** Pearl coordinator/gateway.
-The current one is "Next Pearl runtime v1.8.288 — contents" at the top of this
-file (live `v1.8.286` per `scripts/ops/pearl-runtime.sh status` on 2026-11-14).
+The latest one is "Pearl runtime v1.8.288 — contents" at the top of this
+file (live `v1.8.288` per `scripts/ops/pearl-runtime.sh status` on 2026-11-14).
 
 1. A PR that changes what Pearl runs **merges**. Add one row the same day,
    with status `merged`. That covers:
@@ -571,8 +608,8 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 ## Live on Pearl
 
 Current state, 2026-11-14 (`scripts/ops/pearl-runtime.sh status`): coordinator
-and gateway **v1.8.286** (release run 43170001669), `/healthz` 200, gateway
-buyer hold off, `code_changed_vs_live` true. The rollout narratives and the
+and gateway **v1.8.288** (release run 43580106254), `/healthz` 200, gateway
+buyer hold off, no coordinator or gateway change on `main` after the tag. The rollout narratives and the
 v1.8.236 table below are historical.
 
 ### Runtime rollout — 2026-10-06

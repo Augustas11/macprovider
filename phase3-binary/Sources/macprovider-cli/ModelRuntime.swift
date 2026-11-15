@@ -14591,7 +14591,7 @@ maxTokens: maxTokens,
         in text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: ReasoningOutput.StopScope = false,
+        reasoningOpen: ReasoningOutput.StopScope,
         hasToolCalls: Bool = false
     ) -> String? {
         guard !hasToolCalls else { return nil }
@@ -15354,7 +15354,7 @@ maxTokens: maxTokens,
             modelID: String,
             stopTokenFilter: StopTokenFilter,
             requestStops: [String],
-            reasoningOpen: ReasoningOutput.StopScope = false,
+            reasoningOpen: ReasoningOutput.StopScope,
             allowedFunctionNames: Set<String>? = nil,
             decode: @escaping ([Int]) -> String,
             decodeLookbackScalars: Int,
@@ -15647,10 +15647,12 @@ maxTokens: maxTokens,
             hitStop: filteredVisible.hitStop,
             isTerminal: parsed.status == .parsed
         )
+        // The Harmony final channel holds no reasoning: stops run over all of it.
         output.stopSequence = matchedRequestStop(
             in: parsed.content ?? "",
             stopTokenFilter: stopTokenFilter,
             requestStops: requestStops,
+            reasoningOpen: .whole,
             hasToolCalls: !toolCalls.isEmpty
         )
         // SPEC-018 §3.10 rule 1a: the analysis channel is the reasoning.
@@ -15750,7 +15752,7 @@ maxTokens: maxTokens,
         decoded: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
-        reasoningOpen: ReasoningOutput.StopScope = false,
+        reasoningOpen: ReasoningOutput.StopScope,
         guaranteedSelection: Bool = false
     ) -> Bool {
         guard !guaranteedSelection else { return false }
@@ -15776,7 +15778,7 @@ maxTokens: maxTokens,
         unchangedPrefixUTF8: Int? = nil,
         filter: IncrementalStreamFilter,
         stopText: inout IncrementalToolStopText,
-        reasoningOpen: ReasoningOutput.StopScope = false,
+        reasoningOpen: ReasoningOutput.StopScope,
         guaranteedSelection: Bool = false
     ) -> Bool {
         guard !guaranteedSelection else { return false }

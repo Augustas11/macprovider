@@ -2730,6 +2730,13 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
         try await inner.prefill(rows: rows)
     }
 
+    func armPrefillDecodePause(
+        _ rows: [ContinuousBatchPrefillPauseRow],
+        sink: @escaping @Sendable ([ContinuousBatchPrefillPauseStep]) -> Void
+    ) async {
+        await inner.armPrefillDecodePause(rows, sink: sink)
+    }
+
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
         recordDecodeCall()
         let started = DispatchTime.now().uptimeNanoseconds

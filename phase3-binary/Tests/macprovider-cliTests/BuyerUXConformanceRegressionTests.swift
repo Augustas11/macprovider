@@ -160,7 +160,7 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
             var stoppedPrefix: String?
             for end in 1...output.count {
                 let prefix = String(output.prefix(end))
-                if ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []) {
+                if ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole) {
                     stoppedPrefix = prefix
                     break
                 }
@@ -183,7 +183,7 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         ] {
             var observer = NativeToolCallStreamEmitter(modelID: request.model, grammar: .qwen, allowedFunctionNames: ["read_file"])
             for end in 1...output.count {
-                XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: String(output.prefix(end)), stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []), output)
+                XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: String(output.prefix(end)), stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole), output)
             }
         }
     }

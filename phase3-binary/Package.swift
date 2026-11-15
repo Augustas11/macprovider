@@ -17,6 +17,17 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
+        // DeepSeek V4 prefill can yield between evaluated tiles so other
+        // continuous-batch rows decode while a reference prefill is in
+        // flight. 8f88216 cherry-picks the .62 pause hook (505f368,
+        // DeepseekV4.swift only) onto ef656c59.
+        // Tag 3.32.3-macprovider.61 (#2327) on 3.32.3-macprovider.59:
+        // Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype,
+        // so an image prefill no longer leaves the language model and its KV
+        // cache in float32 (upstream ml-explore/mlx-swift-lm #766); FastVLM
+        // image pixels take the patch-embed weight dtype and Mistral3 drops
+        // its bfloat16 image-feature cast.
         // Tag 3.32.3-macprovider.59 (#2327) on 3.32.3-macprovider.58:
         // Qwen2-VL post-vision decode uses fused non-traditional RoPE when
         // the three M-RoPE axes share one rope delta; per-row deltas and
@@ -155,7 +166,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "7ee1b3f73d719726c86b39da11a715be5d1c197e"
+            revision: "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

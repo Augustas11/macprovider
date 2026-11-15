@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -283,6 +285,18 @@ class BuyerUXConformanceTests(unittest.TestCase):
             minimax = bux.advertised_capabilities(model)
             self.assertEqual((minimax["tools"], minimax["tool_choice"], minimax["reasoning"]), (True, ["auto", "none"], False))
         self.assertEqual(bux.tool_grammar_family("MiniMaxAI/MiniMax-M2.5"), "")
+
+    def test_tool_grammar_family_matches_the_shared_fixture(self):
+        """#2355: one fixture for the Swift, Go, gateway and Python copies."""
+        fixture = json.loads((ROOT / "testdata" / "tool-grammar-families.json").read_text())
+        self.assertEqual(fixture["schema"], "macprovider.tool-grammar-families.v1")
+        self.assertTrue(fixture["cases"])
+        for case in fixture["cases"]:
+            self.assertEqual(bux.tool_grammar_family(case["model"]), case["family"], case["model"])
+        # Every family this copy can return has at least one fixture case.
+        returned = set(re.findall(r'return "([a-z0-9]+)"', inspect.getsource(bux.tool_grammar_family)))
+        self.assertTrue(returned)
+        self.assertLessEqual(returned, {case["family"] for case in fixture["cases"]})
 
     def test_minimax_reasoning_markup_is_a_leak(self):
         """#2189: <mm:think> in content is a leak, whole or split across deltas."""

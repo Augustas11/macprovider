@@ -1182,6 +1182,7 @@ type coordinatorStatus struct {
 type statusPool struct {
 	TotalProviders int `json:"total_providers"`
 	Ready          int `json:"ready"`
+	Busy           int `json:"busy"`
 	Degraded       int `json:"degraded"`
 	Draining       int `json:"draining"`
 	Unavailable    int `json:"unavailable"`
@@ -1254,8 +1255,12 @@ type poolzProviderRow struct {
 	RoutingEligible *bool `json:"routing_eligible,omitempty"`
 	// serving_eligible is routing_eligible apart from the free-slot term
 	// (#1570). Omitted on older coordinators.
-	ServingEligible *bool  `json:"serving_eligible,omitempty"`
-	AuthState       string `json:"auth_state,omitempty"`
+	ServingEligible *bool `json:"serving_eligible,omitempty"`
+	// in_service is pool.Provider.InService under the public gates: routable,
+	// or busy on every slot or under a capacity hold (#2371). Status counts
+	// read it; older coordinators omit it.
+	InService *bool  `json:"in_service,omitempty"`
+	AuthState string `json:"auth_state,omitempty"`
 }
 
 type poolzResponse struct {
@@ -1263,8 +1268,10 @@ type poolzResponse struct {
 	Summary struct {
 		TotalProviders int `json:"total_providers"`
 		Ready          int `json:"ready"`
-		TotalSlots     int `json:"total_slots"`
-		FreeSlots      int `json:"free_slots"`
+		// InService is omitted by coordinators older than #2371.
+		InService  *int `json:"in_service,omitempty"`
+		TotalSlots int  `json:"total_slots"`
+		FreeSlots  int  `json:"free_slots"`
 	} `json:"summary"`
 }
 
@@ -1330,7 +1337,19 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Status:      "up",
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
+	// servingProviders counts providers in service, including one that is
+	// busy with every slot in flight (routing_eligible false, #2371).
+	servingProviders := 0
+	// faulted holds, per model, rows that are neither routable nor in service
+	// because they are unavailable, draining or degraded. They never list a
+	// model or count in an exposed field; they only let FR-B1's "fewer than
+	// half in service" see the model's real provider total.
+	faulted := map[string]poolzModelStats{}
 	for _, p := range poolz.Pool {
+		inService := poolzProviderInService(p)
+		if inService {
+			servingProviders++
+		}
 		if poolzProviderServesContext(p) && p.ModelID != "" {
 			if out.ServingToolChoiceModes == nil {
 				out.ServingToolChoiceModes = map[string][]string{}
@@ -1349,15 +1368,27 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		// SPEC-003 v0.8.3 FR-C9.4 + pool.Provider.RoutingEligible() — sessions
 		// admitted to /poolz for operator visibility but excluded from buyer
 		// routing (self_minted, bearerless_duplicate, pending receipt rotation,
-		// etc.) MUST NOT contribute to buyer-facing capacity counts.
-		if !poolzProviderCountsTowardBuyerCapacity(p) {
+		// etc.) MUST NOT contribute to buyer-facing capacity counts. A
+		// provider in service but full still counts (#2371).
+		routable := poolzProviderCountsTowardBuyerCapacity(p)
+		if !routable && !inService {
+			if p.ModelID != "" && poolzProviderFaulted(p) {
+				f := faulted[p.ModelID]
+				f.TotalProviders++
+				if p.State == "unavailable" || p.State == "draining" {
+					f.UnavailableOrDraining++
+				}
+				faulted[p.ModelID] = f
+			}
 			continue
 		}
 		out.Pool.TotalProviders++
 		switch p.State {
 		case "ready":
 			out.Pool.Ready++
-		case "degraded", "busy":
+		case "busy":
+			out.Pool.Busy++
+		case "degraded":
 			out.Pool.Degraded++
 		case "draining":
 			out.Pool.Draining++
@@ -1371,8 +1402,12 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		m.ID = p.ModelID
 		m.ProviderCount++
 		m.TotalSlots += p.SlotsTotal
-		m.SlotsFree += p.SlotsFree
-		if p.State == "ready" {
+		// Free slots and the ready capacity the OpenRouter document reads
+		// come only from routable rows: a held provider's slots are not free.
+		if routable {
+			m.SlotsFree += p.SlotsFree
+		}
+		if p.State == "ready" && routable {
 			m.ReadyProviderCount++
 			m.ReadySlotsTotal += p.SlotsTotal
 			m.ReadySlotsFree += p.SlotsFree
@@ -1391,10 +1426,14 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		}
 		st := stats[p.ModelID]
 		st.TotalProviders++
-		st.SlotsFreeTotal += p.SlotsFree
 		if p.State == "ready" {
 			st.Ready++
-			st.ReadySlotsFree += p.SlotsFree
+		}
+		if inService {
+			st.Serving++
+		}
+		if routable && (p.State == "ready" || p.State == "busy") {
+			st.RoutableSlotsFree += p.SlotsFree
 		}
 		if p.State == "unavailable" || p.State == "draining" {
 			st.UnavailableOrDraining++
@@ -1413,11 +1452,28 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	if len(poolz.Pool) == 0 && poolz.Summary.TotalProviders > 0 {
 		out.Pool.TotalProviders = poolz.Summary.TotalProviders
 		out.Pool.Ready = poolz.Summary.Ready
+		if poolz.Summary.InService != nil && *poolz.Summary.InService > servingProviders {
+			servingProviders = *poolz.Summary.InService
+		}
+		// The summary carries ready and in_service only: busy is the in-service
+		// remainder and the rest is unavailable, so the five counters still sum
+		// to total_providers (SPEC-006 §5.6).
+		if busy := servingProviders - out.Pool.Ready; busy > 0 {
+			out.Pool.Busy = busy
+		}
+		if rest := out.Pool.TotalProviders - out.Pool.Ready - out.Pool.Busy; rest > 0 {
+			out.Pool.Unavailable = rest
+		}
 	}
-	if out.Pool.Ready == 0 {
+	// SPEC-006 §5.6: idle and degraded are decided by serving providers, so
+	// a pool whose providers are all busy serving is up, not idle or degraded.
+	if out.Pool.Ready > servingProviders {
+		servingProviders = out.Pool.Ready
+	}
+	if servingProviders == 0 {
 		out.Status = "idle"
 		out.Degraded = false
-	} else if out.Pool.Ready < readyThreshold {
+	} else if servingProviders < readyThreshold {
 		out.Status = "degraded"
 		out.Degraded = true
 	}
@@ -1431,12 +1487,43 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	}
 	for _, model := range models {
 		model.ToolChoiceModes = out.ServingToolChoiceModes[model.ID]
+		st := stats[model.ID]
+		if f, ok := faulted[model.ID]; ok {
+			st.TotalProviders += f.TotalProviders
+			st.UnavailableOrDraining += f.UnavailableOrDraining
+			stats[model.ID] = st
+		}
 		model.Degraded = computeDegraded(stats[model.ID])
 		model.Available, model.Availability = computeAvailability(stats[model.ID])
 		out.Models = append(out.Models, model)
 	}
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ID < out.Models[j].ID })
 	return out
+}
+
+// poolzProviderFaulted reports a row excluded from buyer capacity because of
+// its own state (unavailable, draining, degraded), not because its session
+// failed credential trust; the latter never counts toward a model (FR-C9.4).
+func poolzProviderFaulted(p poolzProviderRow) bool {
+	switch p.AuthState {
+	case authStateBearerlessDuplicate, authStateSelfMinted, authStateMintFailed:
+		return false
+	}
+	return p.State == "unavailable" || p.State == "draining" || p.State == "degraded"
+}
+
+// poolzProviderInService reports a ready or busy row the coordinator marks
+// in_service (#2371): routable, or full with every other gate passed. Older
+// coordinators omit in_service; the row falls back to serving_eligible, then
+// to the routing predicate.
+func poolzProviderInService(p poolzProviderRow) bool {
+	if p.State != "ready" && p.State != "busy" {
+		return false
+	}
+	if p.InService != nil {
+		return *p.InService
+	}
+	return poolzProviderServesContext(p)
 }
 
 // poolzProviderCountsTowardBuyerCapacity mirrors pool.Provider.RoutingEligible()
@@ -1471,8 +1558,8 @@ type poolzModelStats struct {
 	TotalProviders        int
 	UnavailableOrDraining int
 	Ready                 int
-	SlotsFreeTotal        int
-	ReadySlotsFree        int
+	Serving               int
+	RoutableSlotsFree     int
 }
 
 func computeDegraded(modelStats poolzModelStats) bool {
@@ -1482,20 +1569,19 @@ func computeDegraded(modelStats poolzModelStats) bool {
 	if modelStats.UnavailableOrDraining == modelStats.TotalProviders {
 		return true
 	}
-	if (2 * modelStats.Ready) < modelStats.TotalProviders {
-		return true
-	}
-	if modelStats.SlotsFreeTotal == 0 {
-		return true
-	}
-	return false
+	// SPEC-002 FR-B1: busy providers are serving, and zero free slots is
+	// capacity (reported by availability), not degradation (#2371).
+	return (2 * modelStats.Serving) < modelStats.TotalProviders
 }
 
+// computeAvailability (SPEC-006 §5.6): no provider in service is
+// no_awake_provider; providers in service with no routable free slot is
+// no_free_slots, so a model whose providers are all busy is not "warming up".
 func computeAvailability(modelStats poolzModelStats) (bool, string) {
-	if modelStats.Ready == 0 {
+	if modelStats.Serving == 0 {
 		return false, "no_awake_provider"
 	}
-	if modelStats.ReadySlotsFree == 0 {
+	if modelStats.RoutableSlotsFree == 0 {
 		return false, "no_free_slots"
 	}
 	return true, "available"

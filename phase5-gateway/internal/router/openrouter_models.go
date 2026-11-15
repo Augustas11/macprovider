@@ -477,7 +477,8 @@ func openRouterSupportedParameters(modelID string, maxTokens int, caps *openRout
 
 // openRouterToolFamilyModel mirrors the coordinator's toolGrammarFamily
 // (SPEC-018 §3.1, #2107): every catalog family whose chat template has a tool
-// grammar, which the provider both parses and renders as history.
+// grammar, which the provider both parses and renders as history. The shared
+// fixture testdata/tool-grammar-families.json keeps the copies in step (#2355).
 func openRouterToolFamilyModel(modelID string) bool {
 	id := strings.ToLower(modelID)
 	if strings.Contains(id, "qwen2-vl") || strings.Contains(id, "qwen2vl") {
@@ -485,7 +486,7 @@ func openRouterToolFamilyModel(modelID string) bool {
 	}
 	for _, family := range []string{"gpt-oss", "glm-4.5", "glm-4.6", "glm-4.7", "glm-5", "llama-3.1", "llama-3.2", "llama-3.3",
 		"llama3.1", "llama3.2", "llama3.3", "gemma-4", "gemma4", "nemotron-3", "nemotron3", "qwen2.5", "qwen3",
-		"deepseek-v4", "deepseek_v4", "minimax-m3", "minimax_m3"} {
+		"deepseek-v4", "deepseek_v4", "lfm2.5-24b-a2b", "minimax-m3", "minimax_m3"} {
 		if strings.Contains(id, family) {
 			return true
 		}

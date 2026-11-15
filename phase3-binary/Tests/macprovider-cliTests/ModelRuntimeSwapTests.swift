@@ -1532,6 +1532,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["STOP"],
+            reasoningOpen: .whole,
             decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() },
             decodeLookbackScalars: 64
         )
@@ -1591,6 +1592,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
+            reasoningOpen: .whole,
             decode: decode,
             decodeLookbackScalars: 64
         )
@@ -1601,6 +1603,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
+            reasoningOpen: .whole,
             decode: decode,
             decodeLookbackScalars: 64
         )
@@ -1614,6 +1617,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: [],
+            reasoningOpen: .whole,
             decode: { tokenIDs in
                 decodeCalls += 1
                 return tokenIDs.map(String.init).joined()

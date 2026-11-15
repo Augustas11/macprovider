@@ -164,10 +164,17 @@ enum ReasoningOutput {
             private(set) var reasoning = ""
             private(set) var answer = ""
             private var dropsWhitespace = true
+            /// False on the tool-stop path, which reads only the answer:
+            /// reasoning text is dropped instead of copied on every step.
+            private let keepsReasoning: Bool
+
+            init(keepsReasoning: Bool = true) {
+                self.keepsReasoning = keepsReasoning
+            }
 
             mutating func append<S: StringProtocol>(_ text: S) {
                 if inside {
-                    reasoning += text
+                    if keepsReasoning { reasoning += text }
                     return
                 }
                 var rest = Substring(text)
@@ -298,9 +305,9 @@ enum ReasoningOutput {
         }
     }
 
-    /// Which output text request stops run over (SPEC-018 §3.12). A Bool
-    /// literal reads as `reasoningOpen`.
-    enum StopScope: Equatable, ExpressibleByBooleanLiteral {
+    /// Which output text request stops run over (SPEC-018 §3.12). Callers
+    /// pass it explicitly; there is no Bool-literal or default scope.
+    enum StopScope: Equatable {
         /// The whole output.
         case whole
         /// The prompt left `<think>` open: the text after the first `</think>`.
@@ -309,8 +316,6 @@ enum ReasoningOutput {
         /// reply leads with answer text (`MiniMax.lead`), then the whole
         /// output. An undecided lead is still reasoning.
         case afterMiniMaxThink
-
-        init(booleanLiteral value: Bool) { self.init(value) }
 
         init(_ reasoningOpen: Bool) { self = reasoningOpen ? .afterThink : .whole }
 

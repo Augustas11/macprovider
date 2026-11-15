@@ -89,7 +89,7 @@ final class QwenAutoToolArgumentTests: XCTestCase {
                 prefix.append(character)
                 emitted += argumentFragments(emitter.observe(prefix))
                 let stopped = ModelRuntime.observeSerialToolStop(
-                    &observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+                    &observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole
                 )
                 XCTAssertEqual(stopped, prefix.contains("</function>"))
             }
@@ -135,7 +135,7 @@ final class QwenAutoToolArgumentTests: XCTestCase {
                 finalArguments = arguments(raw, schemas: schema)
                 events = emitter.observe(raw)
                 serialStopped = ModelRuntime.observeSerialToolStop(
-                    &observer, decoded: raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+                    &observer, decoded: raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole
                 )
             }
             XCTAssertNil(finalArguments)
@@ -177,7 +177,7 @@ final class QwenAutoToolArgumentTests: XCTestCase {
         XCTAssertFalse(emitter.hasCompletedValidToolCall, file: file, line: line)
         var observer = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: schemas)
         XCTAssertFalse(ModelRuntime.observeSerialToolStop(
-            &observer, decoded: raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+            &observer, decoded: raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: [], reasoningOpen: .whole
         ), file: file, line: line)
     }
 

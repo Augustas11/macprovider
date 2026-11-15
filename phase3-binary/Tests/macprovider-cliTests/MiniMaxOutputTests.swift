@@ -519,7 +519,7 @@ final class MiniMaxOutputTests: XCTestCase {
         for spelled in [Set<String>(), ["<filename>", "<file_content>", "<commit_msg>", "<filepath>"]] {
             let decoded = shieldedDecode(pieces, control: control, spelled: spelled)
             XCTAssertEqual(decoded.unicodeScalars.contains(ControlTextShield.mark), !spelled.isEmpty)
-            let filtered = ModelRuntime.applyOutputFilters(decoded, stopTokenFilter: stop, requestStops: [], reasoningOpen: false)
+            let filtered = ModelRuntime.applyOutputFilters(decoded, stopTokenFilter: stop, requestStops: [], reasoningOpen: .whole)
             let parsed = ToolCallParser.parseToolCalls(rawOutput: filtered.text, grammar: .minimax, modelID: Self.model,
                                                        allowedFunctionNames: ["write_file"], schemas: schemas)
             let call = try XCTUnwrap(parsed.toolCalls.first, "\(spelled)")
@@ -528,19 +528,19 @@ final class MiniMaxOutputTests: XCTestCase {
             XCTAssertEqual(parsed.leadingContent, "Writing.\n")
             // The incremental stream filter agrees with the whole-text filter
             // at every prefix: no cut separates a kept tag from its namespace.
-            let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stop, requestStops: [], reasoningOpen: false)
+            let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stop, requestStops: [], reasoningOpen: .whole)
             for end in stride(from: 1, through: decoded.unicodeScalars.count, by: 2) {
                 var view = String.UnicodeScalarView()
                 view.append(contentsOf: decoded.unicodeScalars.prefix(end))
                 let prefix = String(view)
                 XCTAssertEqual(incremental.update(prefix).text,
-                               ModelRuntime.streamingSafePrefix(prefix, stopTokenFilter: stop, requestStops: [], reasoningOpen: false).text,
+                               ModelRuntime.streamingSafePrefix(prefix, stopTokenFilter: stop, requestStops: [], reasoningOpen: .whole).text,
                                "\(spelled) \(end)")
             }
         }
         // A special tag outside namespaced markup is still stripped.
         let prose = shieldedDecode(["See ", "<filename>", " here", "]~b]"], control: control)
-        XCTAssertEqual(ControlTextShield.strip(ModelRuntime.applyOutputFilters(prose, stopTokenFilter: stop, requestStops: [], reasoningOpen: false).text),
+        XCTAssertEqual(ControlTextShield.strip(ModelRuntime.applyOutputFilters(prose, stopTokenFilter: stop, requestStops: [], reasoningOpen: .whole).text),
                        "See  here")
         // Other families keep stripping every special token.
         XCTAssertEqual(ModelRuntime.toolAwareStopTokenFilter(StopTokenFilter(tokens: ["<filename>"]), grammar: .glm)
