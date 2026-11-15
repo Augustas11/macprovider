@@ -1056,6 +1056,67 @@ final class ControlSocketTests: XCTestCase {
         await server.stop()
     }
 
+    func testIdleTimeoutClosesQuietlyButMalformedFrameStillLogs() async throws {
+        let idleLog = try await captureStderr {
+            let socketPath = try makeSocketPath()
+            let server = ControlSocketServer(
+                socketPath: socketPath,
+                modelRuntime: makeRuntime(modelID: "ready-model"),
+                idleTimeoutSeconds: 0.2
+            )
+            try await server.start()
+            let fd = try rawConnect(socketPath: socketPath)
+            defer { close(fd) }
+            XCTAssertTrue(try waitForEOF(fd: fd, timeout: 1.0))
+            await server.stop()
+        }
+        XCTAssertFalse(idleLog.contains("control socket error"), idleLog)
+
+        let partialLog = try await captureStderr {
+            let socketPath = try makeSocketPath()
+            let server = ControlSocketServer(
+                socketPath: socketPath,
+                modelRuntime: makeRuntime(modelID: "ready-model"),
+                idleTimeoutSeconds: 0.2
+            )
+            try await server.start()
+            let fd = try rawConnect(socketPath: socketPath)
+            defer { close(fd) }
+            try writeAll(Data(#"{"type":"status_request""#.utf8), to: fd)
+            XCTAssertTrue(try waitForEOF(fd: fd, timeout: 1.0))
+            await server.stop()
+        }
+        XCTAssertTrue(partialLog.contains("control socket error: timedOut"), partialLog)
+
+        let malformedLog = try await captureStderr {
+            let socketPath = try makeSocketPath()
+            let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+            try await server.start()
+            let fd = try rawConnect(socketPath: socketPath)
+            defer { close(fd) }
+            try writeAll(Data("not json\n".utf8), to: fd)
+            XCTAssertTrue(try waitForEOF(fd: fd, timeout: 2.0))
+            await server.stop()
+        }
+        XCTAssertTrue(malformedLog.contains("control socket error:"), malformedLog)
+    }
+
+    private func captureStderr(_ body: () async throws -> Void) async throws -> String {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("stderr-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = try FileHandle(forWritingTo: url)
+        let saved = dup(STDERR_FILENO)
+        dup2(file.fileDescriptor, STDERR_FILENO)
+        do { try await body() } catch {
+            dup2(saved, STDERR_FILENO); close(saved)
+            throw error
+        }
+        dup2(saved, STDERR_FILENO); close(saved)
+        try file.close()
+        return String(decoding: try Data(contentsOf: url), as: UTF8.self)
+    }
+
     func testServerStopCancelsActiveClientTasks() async throws {
         let socketPath = try makeSocketPath()
         let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
