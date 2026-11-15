@@ -23,7 +23,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   exit after prefetch; a switch clears `draft_model`; a signed CB or
   native-MTP admission is never traded away; `--no-join` serves start no
   check; a source fallback does not charge the budget twice; `update`
-  re-tunes with the canonical binary and its config path.
+  re-tunes with the canonical binary and its config path. Audit round 2:
+  only the serve the child would stop starts a check (by pid; never an
+  `--isolate-lifecycle` serve), and the child refuses any other provider;
+  an unverified CB policy or native-MTP set keeps the incumbent; every
+  `--upgrade` mode takes the lock (attended runs wait); cleanup keeps the
+  row the config names when it runs; a keep that wrote no row is recorded
+  so its inputs are not re-run; an unreadable lifecycle state counts as
+  paused; a lost lease blocks the apply; evidence is submitted after apply.
   Prefetch fetches the likely winners first under the free-space reserve,
   records what the run downloaded, and the run removes its unselected
   downloads. A foreground provider is restarted on every exit. Registers `SPEC-023-R029`
@@ -3255,18 +3262,21 @@ use it.
    content-addressed path. The incumbent's
    artifact MUST verify; otherwise the run fails before the provider is
    stopped.
-3. **Drain.** `--upgrade --apply` without a receipt holds an exclusive
-   lock on `~/.config/macprovider/model-upgrade.lock` for the whole run,
-   attended or unattended; when another run holds it, the run exits 75
-   before any download. When a provider is running, the run waits until it
+3. **Drain.** Every `--upgrade` run (with or without a receipt, prefetch or
+   apply) holds an exclusive lock on `~/.config/macprovider/model-upgrade.lock`
+   for the whole process. An attended run waits for it; an unattended run
+   exits 75 before any download when another run holds it. When a provider is running, the run waits until it
    reports zero `requests_in_flight` and zero `requests_queued`, for at most
    600 seconds (the upper bound of `swap_drain_timeout_seconds`). A status
    read that fails is not idle. A provider never confirmed idle is not
    stopped; the run exits 75 and retries later. Right before the stop the
-   run re-reads the persisted operator pause (the lifecycle state record)
+   run re-reads the persisted operator pause (the lifecycle state record;
+   a record that exists but cannot be read counts as paused)
    and takes the SPEC-020 `maintenance` lifecycle lease, as an autoupdate
    does; a paused provider or a lease held by another operation is not
-   stopped, and the run exits 75. The lease is renewed while held and
+   stopped, and the run exits 75. The lease is renewed while held; a failed
+   renewal marks it lost, and a run whose lease was lost writes no config
+   (exit 75, the incumbent is restored). The lease is
    released right before the restart (the restarted provider takes its own
    startup lease) and on every exit. `SPEC-023-R022` residency then stops the provider
    through its normal SIGTERM drain and restores it on every exit: success,
@@ -3296,7 +3306,10 @@ use it.
    live-verified continuous-batching policy, or an entry in the release's
    signed native-MTP admission set (matched by served model and artifact
    hash), and S does not (keep reason
-   `challenger_lacks_incumbent_acceleration`).
+   `challenger_lacks_incumbent_acceleration`). When the CB policy is not
+   live-verified, or the native-MTP set cannot be read from the feed or this
+   Mac's materialized copy, no switch is made (keep reason
+   `acceleration_admission_unverified`).
    When no challenger qualifies, I is kept.
 6. **Apply.** On a switch, `ConfigApplier` writes S's row and removes
    `draft_model`, `draft_model_artifact_sha256` and `num_draft_tokens`: the
@@ -3304,13 +3317,15 @@ use it.
    tokenizer. On a keep, the model does not change. When I passed admission
    in this run, I's own benchmarked row is re-applied, as the pre-v0.22.43
    re-tune did. Recommendation state and hardware evidence are written after
-   the decision and name the row served: S on a switch, I on a keep when I
+   the config apply and name the row served: S on a switch, I on a keep when I
    passed admission, and no model otherwise (the state stays stale). When any
    step fails (prefetch of I, drain, benchmark, decision or apply), the run
    writes no config and the provider is restored on its incumbent. On every
    exit after prefetch (including an exit 75, a failed stop, a receipt or
    input load failure and an interrupt), the run removes each artifact it
-   downloaded (`downloaded_by_run`) except I's and an applied target's. A removal is
+   downloaded (`downloaded_by_run`) except I's, an applied target's and the
+   row the config file names when the cleanup runs (re-read then). A prefetch
+   that ends in an error removes what it downloaded under the same rules. A removal is
    limited to the row's exact durable content-addressed path under the
    current signed row and never touches a path a kept row uses; the
    incumbent's artifact and any copy that existed before the run are never
@@ -3340,13 +3355,25 @@ use it.
    `autotune --recommend --upgrade --apply --unattended` in its own session
    (so the step 3 stop of the provider's launchd job does not end it), with
    output appended to `~/Library/Logs/macprovider/model-upgrade.log`. No
-   check starts for an autotune candidate serve, a `--no-join` serve,
-   `donor_mode`, a `pool_model_id` or an operator-paused provider. Only the
+   check starts for an autotune candidate serve, a `--no-join` serve, an
+   `--isolate-lifecycle` serve, `donor_mode`, a `pool_model_id` or an
+   operator-paused provider, nor from a serve that is not the provider
+   `ProviderConflictDetector` would stop (the `live.malibu.provider` job,
+   else the first foreground serve), compared by pid. The serve passes its
+   pid (`--upgrade-parent-pid`, required with `--unattended`); the child
+   exits 75 with nothing downloaded or stopped when the detected provider
+   is not that pid, checked before prefetch and again at the stop. Only the
    canonical installed binary is spawned. `--unattended` requires
-   `--upgrade --apply` without a receipt and adds two gates after the
+   `--upgrade --apply` without a receipt and adds three gates after the
    freshness and pin checks:
+   - **Recorded keep.** A completed run that kept I without writing a
+     benchmarked row (so §9 state stays stale) records the inputs key; an
+     unattended run for a recorded key exits 0 until the inputs change. A
+     keep for `acceleration_admission_unverified` is not recorded.
    - **Stagger.** The inputs key is the SHA-256 over the signed candidate
-     catalog, rate card and demand rank digests and the binary version,
+     catalog, rate card and demand rank content digests (each feed's JSON
+     without its top-level `generated_at` and `version`, keys sorted, so a
+     pure re-stamp keeps the key) and the binary version,
      every input whose change makes §9 stale. The run acts only from
      `anchor + offset`. `anchor` is the newest of the three feeds'
      `generated_at` and the time this binary version was first seen by the
@@ -3531,9 +3558,17 @@ idle (a status error is not idle) exits 75 without a stop. This run's
 unselected downloads are removed after a failed stop too. A keep writes state
 naming the incumbent, a challenger lacking the incumbent's signed CB or
 native-MTP admission is not switched to, a switch removes `draft_model`, and
-a source fallback charges the download budget once. The serve trigger is
-suppressed for donor, pool, operator-paused, `--no-join` and
-autotune-candidate serves, and its child leads its own session.
+a source fallback charges the download budget once and a source failure with
+no further source to try keeps its charge. The serve trigger is
+suppressed for donor, pool, operator-paused, `--no-join`,
+`--isolate-lifecycle` and autotune-candidate serves and for a serve that is
+not the detected provider; its child leads its own session and exits 75
+without a stop when the detected provider is not its parent pid. An
+unverified CB policy or unreadable native-MTP set keeps the incumbent. The
+installer's receipt steps take the upgrade lock and wait for it. Cleanup
+keeps the row the config names at cleanup time. A keep that wrote no row
+holds its inputs until their content or the binary changes. An unreadable
+lifecycle state counts as paused, and a lost lease blocks the apply.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

@@ -152,12 +152,14 @@ enum AutotuneModelUpgrade {
     /// the eligible rows the engine orders ahead of the incumbent (every
     /// eligible row when the incumbent is not eligible), in that order; the
     /// first one that clears the hard bench gate and beats the incumbent wins.
+    /// When either acceleration admission set could not be verified, no
+    /// switch is made (`acceleration_admission_unverified`).
     static func decide(
         result: AutotuneRecommendResult,
         incumbentKey: String,
         benchmarks: [String: CandidateBenchmark],
         catalog: CandidateCatalog,
-        acceleration: AccelerationAdmissions = AccelerationAdmissions()
+        acceleration: AccelerationAdmissions
     ) -> Decision {
         guard let selected = result.selectedCandidate else {
             return .keep(reason: "no_eligible_candidate")
@@ -176,7 +178,11 @@ enum AutotuneModelUpgrade {
             }
             let to = challenger.catalogKey
             // Operator rule: an automatic switch never gives up a signed CB
-            // or native-MTP admission the incumbent holds.
+            // or native-MTP admission the incumbent holds. Unknown admission
+            // sets fail closed: the incumbent is kept.
+            if !acceleration.unverified.isEmpty {
+                return .keep(reason: "acceleration_admission_unverified")
+            }
             if acceleration.trades(from: incumbentKey, to: to) {
                 tradesAcceleration = true
                 continue
@@ -202,9 +208,13 @@ enum AutotuneModelUpgrade {
     /// The catalog keys holding a signed acceleration admission an automatic
     /// switch must keep: a positive, unrevoked continuous-batching policy
     /// entry, or an entry in the release's signed native-MTP admission set.
+    /// `unverified` names each set that could not be established (a CB policy
+    /// that is not live-verified, or no signed native-MTP set from the feed or
+    /// this Mac's copy); any entry blocks every switch.
     struct AccelerationAdmissions: Equatable {
         var continuousBatching: Set<String> = []
         var nativeMTP: Set<String> = []
+        var unverified: Set<String> = []
 
         func trades(from incumbent: String, to challenger: String) -> Bool {
             (continuousBatching.contains(incumbent) && !continuousBatching.contains(challenger))
@@ -263,9 +273,19 @@ enum AutotuneModelUpgrade {
     static func loadAccelerationAdmissions(
         catalog: AutotuneStaticSelection<CandidateCatalog>,
         rateCard: RateCardProjection,
-        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs()
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        loadCBPolicy: ((AutotuneStaticSelection<CandidateCatalog>) async -> ContinuousBatchingPolicyLoadResult)? = nil,
+        fetchNativeMTPMembers: () async throws -> NativeMTPAdmissionFeed.Members = {
+            try await NativeMTPAdmissionFeed.fetchMembers(baseURL: NativeMTPAdmissionFeed.productionBaseURL)
+        },
+        nativeMTPRoot: URL = NativeMTPAdmissionFeed.defaultRoot()
     ) async -> AccelerationAdmissions {
-        let policy = await staticInputs.loadContinuousBatchingPolicy(candidateCatalog: catalog)
+        let policy: ContinuousBatchingPolicyLoadResult
+        if let loadCBPolicy {
+            policy = await loadCBPolicy(catalog)
+        } else {
+            policy = await staticInputs.loadContinuousBatchingPolicy(candidateCatalog: catalog)
+        }
         var servedNames: [String: String] = [:]
         for key in catalog.value.rows.keys {
             if let match = rateCard.rowForRecommendation(modelKey: key) {
@@ -274,7 +294,7 @@ enum AutotuneModelUpgrade {
         }
         let releaseID = catalog.value.version
         var sidecar: Data?
-        if let members = try? await NativeMTPAdmissionFeed.fetchMembers(baseURL: NativeMTPAdmissionFeed.productionBaseURL),
+        if let members = try? await fetchNativeMTPMembers(),
            (try? NativeMTPAdmissionFeed.precheck(
                members,
                releaseID: releaseID,
@@ -283,7 +303,7 @@ enum AutotuneModelUpgrade {
            )) != nil {
             sidecar = members.sidecar
         } else {
-            let directory = NativeMTPAdmissionFeed.releaseDirectory(root: NativeMTPAdmissionFeed.defaultRoot(), releaseID: releaseID)
+            let directory = NativeMTPAdmissionFeed.releaseDirectory(root: nativeMTPRoot, releaseID: releaseID)
             if let local = try? Data(contentsOf: directory.appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName)),
                let signature = try? Data(contentsOf: directory.appendingPathComponent(NativeMTPAdmissionFeed.signatureFileName)),
                (try? NativeMTPAdmissionFeed.precheck(
@@ -294,12 +314,21 @@ enum AutotuneModelUpgrade {
                )) != nil {
                 sidecar = local
             } else {
-                FileHandle.standardError.write(Data("model_upgrade: no signed native-MTP admission set for this release\n".utf8))
+                FileHandle.standardError.write(Data("model_upgrade: no signed native-MTP admission set for this release; no switch is made\n".utf8))
             }
+        }
+        var unverified = Set<String>()
+        if policy.status != .liveVerified {
+            FileHandle.standardError.write(Data("model_upgrade: CB policy is \(policy.status.rawValue); no switch is made\n".utf8))
+            unverified.insert("continuous_batching")
+        }
+        if sidecar == nil {
+            unverified.insert("native_mtp")
         }
         return AccelerationAdmissions(
             continuousBatching: continuousBatchingAdmittedKeys(policy, catalog: catalog.value),
-            nativeMTP: sidecar.map { nativeMTPAdmittedKeys(sidecar: $0, catalog: catalog.value, servedModelNames: servedNames) } ?? []
+            nativeMTP: sidecar.map { nativeMTPAdmittedKeys(sidecar: $0, catalog: catalog.value, servedModelNames: servedNames) } ?? [],
+            unverified: unverified
         )
     }
 
@@ -414,19 +443,32 @@ enum AutotuneModelUpgrade {
 
     /// R029 step 6: runs `body` and then, on every exit (success, a thrown
     /// error, exit 75 or an interrupt), removes this run's downloads except
-    /// the incumbent and an applied target.
+    /// the incumbent, an applied target and the row the config file names
+    /// at cleanup time (`configuredKey`, re-read then), so a config changed
+    /// during the run never loses its served model.
     static func withRunDownloadCleanup<T>(
         _ artifacts: [PrefetchedModelArtifact],
         incumbentKey: String,
         catalog: CandidateCatalog,
         resolver: CachedModelArtifactResolver,
+        configuredKey: () -> String?,
         body: (RunKeep) async throws -> T
     ) async rethrows -> T {
         let keep = RunKeep([incumbentKey])
         defer {
-            removeUnselectedRunDownloads(artifacts, keepModelKeys: keep.keys, catalog: catalog, resolver: resolver)
+            removeUnselectedRunDownloads(
+                artifacts,
+                keepModelKeys: keep.keys.union(configuredKey().map { [$0] } ?? []),
+                catalog: catalog,
+                resolver: resolver
+            )
         }
         return try await body(keep)
+    }
+
+    /// The signed row the config file names right now, re-read from disk.
+    static func configuredCatalogKey(configPath: String?, catalog: CandidateCatalog) -> String? {
+        incumbentCatalogKey(config: try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)), catalog: catalog)
     }
 
     /// R029 step 3: wait for zero in-flight and queued requests. A status
@@ -452,10 +494,13 @@ enum AutotuneModelUpgrade {
         }
     }
 
-    static func afterUpdateArguments(configPath: String?, unattended: Bool = false) -> [String] {
+    static func afterUpdateArguments(configPath: String?, unattended: Bool = false, parentPID: Int32? = nil) -> [String] {
         var arguments = ["autotune", "--recommend", "--upgrade", "--apply"]
         if unattended {
             arguments.append("--unattended")
+            if let parentPID {
+                arguments += ["--upgrade-parent-pid", String(parentPID)]
+            }
         }
         if let configPath {
             arguments += ["--config", configPath]
@@ -478,11 +523,54 @@ enum AutotuneModelUpgrade {
     static let staggerWindowSeconds: UInt64 = 48 * 3600
 
     /// One digest over every input whose change makes the recommendation
-    /// stale: the signed catalog, rate card and demand rank bytes and the
-    /// binary version. It keys both the stagger offset and the retry record.
+    /// stale: the signed catalog, rate card and demand rank content and the
+    /// binary version. It keys the stagger offset, the retry record and the
+    /// recorded keep.
     static func inputsKey(inputDigests: [String], binaryVersion: String) -> String {
         let text = (inputDigests + ["binary=\(binaryVersion)"]).joined(separator: "\n")
         return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Top-level feed fields a re-publish restamps without changing what the
+    /// decision reads.
+    static let restampFields: Set<String> = ["generated_at", "version"]
+
+    /// SHA-256 of a feed's content: its JSON with the restamp fields removed,
+    /// re-serialized with sorted keys, so a pure re-stamp keeps the digest.
+    /// Bytes that are not a JSON object hash as they are.
+    static func contentDigest(_ bytes: Data) -> String {
+        var canonical = bytes
+        if var object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any] {
+            for field in restampFields { object.removeValue(forKey: field) }
+            if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
+                canonical = data
+            }
+        }
+        return SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func upgradeInputDigests(catalog: Data, rateCard: Data, demandRank: Data) -> [String] {
+        [
+            "candidate_catalog=" + contentDigest(catalog),
+            "rate_card=" + contentDigest(rateCard),
+            "demand_rank=" + contentDigest(demandRank),
+        ]
+    }
+
+    /// Whether a keep is recorded so the unattended check skips these inputs:
+    /// a keep that wrote no benchmarked row (so the state stays stale), but
+    /// not one caused by an admission set that could not be read, which a
+    /// later check may resolve.
+    static func recordsKeep(_ decision: Decision, wroteRow: Bool) -> Bool {
+        guard case let .keep(reason) = decision else { return false }
+        return !wroteRow && reason != "acceleration_admission_unverified"
+    }
+
+    /// Adds a keep for `inputsKey` to the record at `url`.
+    static func recordKeep(inputsKey: String, at date: Date, url: URL = attemptRecordURL) throws {
+        var record = readAttempt(from: url) ?? AttemptRecord()
+        record.recordKeep(inputsKey: inputsKey, at: date)
+        try writeAttempt(record, to: url)
     }
 
     /// A fixed per-provider offset into the stagger window. It is derived
@@ -522,11 +610,38 @@ enum AutotuneModelUpgrade {
         var binaryVersion: String?
         var binaryFirstSeenAt: Date?
         var attempts: [Attempt] = []
+        /// Inputs a completed run kept the incumbent for without writing a
+        /// benchmarked row; the unattended check skips them until they change.
+        var keeps: [Attempt] = []
 
         enum CodingKeys: String, CodingKey {
             case binaryVersion = "binary_version"
             case binaryFirstSeenAt = "binary_first_seen_at"
             case attempts
+            case keeps
+        }
+
+        init(binaryVersion: String? = nil, binaryFirstSeenAt: Date? = nil, attempts: [Attempt] = [], keeps: [Attempt] = []) {
+            self.binaryVersion = binaryVersion
+            self.binaryFirstSeenAt = binaryFirstSeenAt
+            self.attempts = attempts
+            self.keeps = keeps
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            binaryVersion = try c.decodeIfPresent(String.self, forKey: .binaryVersion)
+            binaryFirstSeenAt = try c.decodeIfPresent(Date.self, forKey: .binaryFirstSeenAt)
+            attempts = try c.decodeIfPresent([Attempt].self, forKey: .attempts) ?? []
+            keeps = try c.decodeIfPresent([Attempt].self, forKey: .keeps) ?? []
+        }
+
+        mutating func recordKeep(inputsKey: String, at date: Date) {
+            keeps.removeAll { $0.inputsKey == inputsKey }
+            keeps.append(Attempt(inputsKey: inputsKey, attemptedAt: date))
+            if keeps.count > AutotuneModelUpgrade.attemptHistoryLimit {
+                keeps.removeFirst(keeps.count - AutotuneModelUpgrade.attemptHistoryLimit)
+            }
         }
 
         mutating func recordAttempt(inputsKey: String, at date: Date) {
@@ -561,6 +676,8 @@ enum AutotuneModelUpgrade {
 
     enum UnattendedGate: Equatable {
         case proceed
+        /// A completed run already kept the incumbent for these inputs.
+        case kept(since: Date)
         case staggered(until: Date)
         case retryLater(until: Date)
         /// The record could not be written, so the run cannot bound its
@@ -593,6 +710,9 @@ enum AutotuneModelUpgrade {
             }
         }
         let key = inputsKey(inputDigests: inputDigests, binaryVersion: binaryVersion)
+        if let kept = record.keeps.last(where: { $0.inputsKey == key }) {
+            return .kept(since: kept.attemptedAt)
+        }
         let notBefore = staggerAnchor(feedGeneratedAt: feedGeneratedAt, binaryFirstSeenAt: record.binaryFirstSeenAt)
             .addingTimeInterval(staggerOffsetSeconds(providerKey: providerKey, inputsKey: key))
         if now < notBefore {
@@ -615,8 +735,10 @@ enum AutotuneModelUpgrade {
 
     // MARK: - Single run, lifecycle lease and operator pause
 
-    /// Held for the whole run by `--upgrade --apply`, attended or not, so two
-    /// upgrade runs never download or stop the provider at once.
+    /// Held for the whole run by every `--upgrade` mode (the in-process run,
+    /// the installer's `--prefetch` and `--apply --prefetch-receipt` steps),
+    /// so two upgrade runs never download or stop the provider at once.
+    /// Attended runs wait for it; the unattended check never waits.
     final class RunLock {
         private var fd: Int32
 
@@ -638,21 +760,35 @@ enum AutotuneModelUpgrade {
         attemptRecordURL.deletingLastPathComponent().appendingPathComponent("model-upgrade.lock")
     }
 
-    /// nil when another run holds the lock or the lock file cannot be opened.
-    static func acquireRunLock(at url: URL = runLockURL) -> RunLock? {
+    enum RunLockAcquisition {
+        case acquired(RunLock)
+        /// Another run holds the lock (non-blocking acquisition only).
+        case busy
+        /// The lock file could not be opened or locked.
+        case failed(String)
+    }
+
+    static func acquireRunLock(at url: URL = runLockURL, blocking: Bool = false) -> RunLockAcquisition {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let fd = open(url.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { return nil }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            close(fd)
-            return nil
+        guard fd >= 0 else {
+            return .failed("open \(url.path): \(String(cString: strerror(errno)))")
         }
-        return RunLock(fd: fd)
+        while flock(fd, blocking ? LOCK_EX : LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            close(fd)
+            if code == EWOULDBLOCK { return .busy }
+            return .failed("flock \(url.path): \(String(cString: strerror(code)))")
+        }
+        return .acquired(RunLock(fd: fd))
     }
 
     /// The SPEC-020 lifecycle lease the upgrade holds from the stop through
     /// the benchmark and apply, like an autoupdate, up to the restart. It is
     /// renewed while held, since a benchmark can outlast one lease window.
+    /// A failed renewal marks the lease lost for good; a run whose lease was
+    /// lost does not apply config (`confirmHeld`).
     final class MaintenanceLease: @unchecked Sendable {
         let store: ProviderLifecycleLeaseStore
         let record: ProviderLifecycleLeaseRecord
@@ -661,18 +797,49 @@ enum AutotuneModelUpgrade {
         init(store: ProviderLifecycleLeaseStore, record: ProviderLifecycleLeaseRecord) {
             self.store = store
             self.record = record
-            let leaseID = record.leaseID
-            renewal = Task.detached(priority: .utility) {
+            renewal = Task.detached(priority: .utility) { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.maintenanceLeaseRenewSeconds * 1_000_000_000)
                     if Task.isCancelled { return }
-                    _ = try? store.renew(leaseID: leaseID, duration: AutotuneModelUpgrade.maintenanceLeaseSeconds)
+                    guard let self else { return }
+                    _ = self.renewNow()
                 }
             }
         }
 
         private let lock = NSLock()
         private var released = false
+        private var lost_ = false
+
+        var lost: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return lost_
+        }
+
+        /// Renews once; false (and lost from then on) when the renewal fails.
+        @discardableResult
+        func renewNow() -> Bool {
+            do {
+                _ = try store.renew(leaseID: record.leaseID, duration: AutotuneModelUpgrade.maintenanceLeaseSeconds)
+                return !lost
+            } catch {
+                lock.lock()
+                let first = !lost_
+                lost_ = true
+                lock.unlock()
+                if first {
+                    FileHandle.standardError.write(Data("[warn] model_upgrade: lost the lifecycle lease: \(error)\n".utf8))
+                }
+                return false
+            }
+        }
+
+        /// The pre-apply check: renews now and reports whether the lease was
+        /// held without a gap for the whole run.
+        func confirmHeld() -> Bool {
+            renewNow()
+        }
 
         /// Idempotent.
         func release() {
@@ -683,6 +850,17 @@ enum AutotuneModelUpgrade {
             renewal?.cancel()
             renewal = nil
             _ = try? store.clear(ifLeaseID: record.leaseID)
+        }
+    }
+
+    /// The lease an in-process run took, for the pre-apply check.
+    final class LeaseSlot: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lease_: MaintenanceLease?
+
+        var lease: MaintenanceLease? {
+            get { lock.lock(); defer { lock.unlock() }; return lease_ }
+            set { lock.lock(); lease_ = newValue; lock.unlock() }
         }
     }
 
@@ -710,10 +888,17 @@ enum AutotuneModelUpgrade {
     }
 
     /// The persisted operator pause, which the serving provider writes and
-    /// keeps across restarts.
+    /// keeps across restarts. A state file that exists but cannot be read
+    /// counts as paused.
     static func operatorPausePersisted(store: ProviderLifecycleStateStore = ProviderLifecycleStateStore()) -> Bool {
-        guard case .valid(let record) = store.inspect() else { return false }
-        return record.operatorPauseRequested
+        switch store.inspect() {
+        case .missing:
+            return false
+        case .valid(let record):
+            return record.operatorPauseRequested
+        case .invalid:
+            return true
+        }
     }
 
     // MARK: - Unattended trigger
@@ -729,11 +914,14 @@ enum AutotuneModelUpgrade {
         poolModelID: String?,
         autotuneCandidate: Bool,
         noJoin: Bool,
+        isolateLifecycle: Bool,
         operatorPaused: Bool
     ) -> String? {
         if autotuneCandidate { return "autotune_candidate" }
-        // A lab `serve --no-join` must never stop this Mac's launchd provider.
+        // A lab `serve --no-join` or `--isolate-lifecycle` serve must never
+        // stop this Mac's launchd provider.
         if noJoin { return "no_join" }
+        if isolateLifecycle { return "isolate_lifecycle" }
         if donorMode { return "donor_mode" }
         if let poolModelID, !poolModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "pool_model_id"
@@ -742,14 +930,35 @@ enum AutotuneModelUpgrade {
         return nil
     }
 
+    /// Why the provider the R022 isolation would stop (`ProviderConflictDetector`)
+    /// is not the process `expectedPID`: the serve that starts the check
+    /// passes its own pid, and the unattended child refuses any other
+    /// provider. A provider whose pid is unknown never matches.
+    static func providerMismatch(_ conflict: ProviderConflict, expectedPID: Int32?) -> String? {
+        guard let expectedPID else { return "no_parent_pid" }
+        switch conflict {
+        case .none:
+            return "no_detected_provider"
+        case let .launchdManaged(pid):
+            return pid == expectedPID ? nil : "detected_provider_is_not_the_parent"
+        case let .foreground(pid, _):
+            return pid == expectedPID ? nil : "detected_provider_is_not_the_parent"
+        }
+    }
+
     /// Starts `autotune --recommend --upgrade --apply --unattended` in its own
     /// session, so the R022 stop of this provider's launchd job does not take
     /// the child with it. stdin is /dev/null; stdout and stderr append to
     /// `logPath`. The child is not waited on: it outlives the serve process
     /// that started it, and it restarts the provider on every exit.
     @discardableResult
-    static func spawnDetachedUnattendedUpgrade(executable: URL, configPath: String?, logPath: String) -> pid_t? {
-        let arguments = [executable.path] + afterUpdateArguments(configPath: configPath, unattended: true)
+    static func spawnDetachedUnattendedUpgrade(
+        executable: URL,
+        configPath: String?,
+        logPath: String,
+        parentPID: Int32 = getpid()
+    ) -> pid_t? {
+        let arguments = [executable.path] + afterUpdateArguments(configPath: configPath, unattended: true, parentPID: parentPID)
         rotateUnattendedLog(atPath: logPath)
         var fileActions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&fileActions)

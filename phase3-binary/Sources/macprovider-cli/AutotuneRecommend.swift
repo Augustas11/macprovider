@@ -4362,6 +4362,12 @@ struct HuggingFaceSnapshotDownloader {
         func refundFailedSource() {
             if let budgetMark { runDownloadBudget?.refund(toSpent: budgetMark) }
         }
+        // A content-addressed source without the signed hash is skipped, so
+        // it is never "the next source" a refund is made for.
+        func willTry(_ source: ModelArtifactSource) -> Bool {
+            if case .contentAddressed = source { return expectedSHA256 != nil }
+            return true
+        }
         if !huggingFaceLast {
             do {
                 try await downloadHuggingFaceSnapshot(
@@ -4379,7 +4385,9 @@ struct HuggingFaceSnapshotDownloader {
                 if error is URLError {
                     reachability.markHuggingFaceUnreachable()
                 }
-                refundFailedSource()
+                if fallbackSources.contains(where: willTry) {
+                    refundFailedSource()
+                }
                 failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
             }
         }
@@ -4414,7 +4422,7 @@ struct HuggingFaceSnapshotDownloader {
                 if Self.stopsSourceWalk(error) {
                     throw error
                 }
-                if huggingFaceLast || index < fallbackSources.count - 1 {
+                if huggingFaceLast || fallbackSources[(index + 1)...].contains(where: willTry) {
                     refundFailedSource()
                 }
                 failures.append("\(source.label): \(Self.sourceFailureSummary(error))")
@@ -5555,11 +5563,15 @@ struct AutotuneRecommendationBenchmarker {
 
     /// `modelKeyOrder` sets the download order (rows it omits follow in key
     /// order). Every download keeps the downloader's free-space reserve.
+    /// With `removeRunDownloadsOnFailureKeeping` (a model upgrade), an error
+    /// that ends the prefetch first removes what this call downloaded, under
+    /// the R029 cleanup rules, except the model keys the closure returns.
     func prefetchArtifacts(
         candidateCatalog: CandidateCatalog,
         hardware: AutotuneRecommendHardware,
         candidateModelIDs: Set<String>,
-        modelKeyOrder: [String] = []
+        modelKeyOrder: [String] = [],
+        removeRunDownloadsOnFailureKeeping: (() -> Set<String>)? = nil
     ) async throws -> ArtifactPrefetchOutcomes {
         var matchedModelKeysByID: [String: [String]] = [:]
         for modelKey in candidateCatalog.rows.keys.sorted() {
@@ -5584,6 +5596,17 @@ struct AutotuneRecommendationBenchmarker {
         var artifacts: [PrefetchedModelArtifact] = []
         var diagnostics: [PrefetchDiagnostic] = []
         var matchedModelIDs = Set<String>()
+        var completed = false
+        defer {
+            if !completed, let keep = removeRunDownloadsOnFailureKeeping {
+                AutotuneModelUpgrade.removeUnselectedRunDownloads(
+                    artifacts,
+                    keepModelKeys: keep(),
+                    catalog: candidateCatalog,
+                    resolver: artifactResolver
+                )
+            }
+        }
         let ordered = modelKeyOrder.filter { candidateCatalog.rows[$0] != nil }
         let orderedSet = Set(ordered)
         let modelKeys = ordered + candidateCatalog.rows.keys.sorted().filter { !orderedSet.contains($0) }
@@ -5643,6 +5666,7 @@ struct AutotuneRecommendationBenchmarker {
                 diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: reason))
             }
         }
+        completed = true
         return ArtifactPrefetchOutcomes(
             artifacts: artifacts,
             diagnostics: diagnostics,

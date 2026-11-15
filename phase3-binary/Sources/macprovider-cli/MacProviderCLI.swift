@@ -4262,26 +4262,38 @@ struct ServeCommand: AsyncParsableCommand {
         )
         let upgradeTriggerCandidate = autotuneCandidate
         let upgradeTriggerNoJoin = noJoin
-        // A candidate or `--no-join` serve never starts a check: its child
-        // would stop this Mac's launchd provider.
+        let upgradeTriggerIsolated = isolateLifecycle
+        // A candidate, `--no-join` or `--isolate-lifecycle` serve never starts
+        // a check: its child would stop this Mac's launchd provider.
         let upgradeTriggerStaticSuppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
             donorMode: false,
             poolModelID: nil,
             autotuneCandidate: upgradeTriggerCandidate,
             noJoin: upgradeTriggerNoJoin,
+            isolateLifecycle: upgradeTriggerIsolated,
             operatorPaused: false
         )
         let modelUpgradeTask: Task<Void, Never>? = upgradeTriggerStaticSuppression != nil ? nil : Task.detached(priority: .utility) {
             [providerStatus, resolved] in
             try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedFirstCheckDelaySeconds * 1_000_000_000)
             while !Task.isCancelled {
+                // Only the provider the child would stop (launchd job first,
+                // then the first foreground serve) starts a check: a second
+                // serve on this Mac never does.
+                let providerMismatch: String?
+                if let detected = try? ProviderConflictDetector().detect() {
+                    providerMismatch = AutotuneModelUpgrade.providerMismatch(detected, expectedPID: getpid())
+                } else {
+                    providerMismatch = "provider_detection_failed"
+                }
                 let suppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
                     donorMode: resolved.donorMode,
                     poolModelID: resolved.poolModelID,
                     autotuneCandidate: upgradeTriggerCandidate,
                     noJoin: upgradeTriggerNoJoin,
+                    isolateLifecycle: upgradeTriggerIsolated,
                     operatorPaused: await providerStatus.operatorPauseFence
-                )
+                ) ?? providerMismatch
                 if let suppression {
                     FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=\(suppression)\n".utf8))
                 } else if let modelUpgradeExecutable {

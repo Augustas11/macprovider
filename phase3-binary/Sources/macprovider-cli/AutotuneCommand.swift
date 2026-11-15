@@ -116,6 +116,11 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --upgrade, run as the provider's unattended check: wait for this provider's stagger offset after a catalog release, and retry the same catalog and binary at most once a day.")
     var unattended = false
 
+    /// The pid of the serve process that started this unattended check. The
+    /// check stops nothing unless that process is the provider it would stop.
+    @Option(name: .customLong("upgrade-parent-pid"), help: .private)
+    var upgradeParentPID: Int32?
+
     @Flag(help: "With --recommend --check-only, emit model_recommendation_check_event.v1 progress frames before the final recommendation JSON.")
     var progressJSON = false
 
@@ -190,6 +195,8 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     func run(dependencies: AutotuneRunDependencies) async throws {
+        let upgradeRunLock = try acquireUpgradeRunLock(dependencies: dependencies)
+        defer { upgradeRunLock?.release() }
         if recommend {
             if recoverHardwareAdmission {
                 try await runHardwareAdmissionRecovery()
@@ -944,6 +951,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         if unattended && (!upgrade || !apply || prefetchReceipt != nil) {
             throw ValidationError("--unattended requires --upgrade --apply without --prefetch-receipt")
         }
+        if unattended != (upgradeParentPID != nil) {
+            throw ValidationError("--unattended and --upgrade-parent-pid are used together")
+        }
         if checkOnly && !recommend {
             throw ValidationError("--check-only requires --recommend")
         }
@@ -1082,7 +1092,8 @@ struct AutotuneCommand: AsyncParsableCommand {
     private func runAutotuneRecommend(
         upgradeReceipt: AutotuneArtifactPrefetchReceipt? = nil,
         upgradeKeep: AutotuneModelUpgrade.RunKeep? = nil,
-        upgradeAcceleration: AutotuneModelUpgrade.AccelerationAdmissions? = nil
+        upgradeAcceleration: AutotuneModelUpgrade.AccelerationAdmissions? = nil,
+        upgradeLeaseHeld: (() -> Bool)? = nil
     ) async throws {
         // ARCH-M-1 orphan-child fix: become process-group leader BEFORE
         // spawning any CandidateProviderRunner subprocess. Combined with the
@@ -1165,11 +1176,13 @@ struct AutotuneCommand: AsyncParsableCommand {
         // in-process upgrade owns that cleanup itself (`upgradeKeep`), so it
         // also covers the exits before this point.
         let upgradeRunKeep = upgradeKeep ?? AutotuneModelUpgrade.RunKeep(Set(upgradeIncumbentKey.map { [$0] } ?? []))
+        let configPathForCleanup = config
         defer {
             if upgrade, upgradeKeep == nil, let receipt, upgradeIncumbentKey != nil {
+                let configured = AutotuneModelUpgrade.configuredCatalogKey(configPath: configPathForCleanup, catalog: catalog.value)
                 AutotuneModelUpgrade.removeUnselectedRunDownloads(
                     receipt.artifacts,
-                    keepModelKeys: upgradeRunKeep.keys,
+                    keepModelKeys: upgradeRunKeep.keys.union(configured.map { [$0] } ?? []),
                     catalog: catalog.value,
                     resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
                 )
@@ -1313,6 +1326,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         var selectedForConfig = paidSelected ?? donorSelected
         var applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
         var upgradeSwitching = false
+        var upgradeKeepToRecord = false
         if let upgradeIncumbentKey, !donorMode {
             let acceleration: AutotuneModelUpgrade.AccelerationAdmissions
             if let upgradeAcceleration {
@@ -1336,10 +1350,16 @@ struct AutotuneCommand: AsyncParsableCommand {
                 incumbentKey: upgradeIncumbentKey,
                 benchmarks: request.benchmarks
             )
+            upgradeKeepToRecord = AutotuneModelUpgrade.recordsKeep(decision, wroteRow: selectedForConfig != nil)
             applyingDonorFallback = false
             switch decision {
             case let .switchModel(from, to, reason):
                 FileHandle.standardError.write(Data("model_upgrade: switch from=\(from) to=\(to) reason=\(reason)\n".utf8))
+                if ProcessInfo.processInfo.environment["MACPROVIDER_DRAFT_MODEL"] != nil {
+                    FileHandle.standardError.write(Data(
+                        "[warn] model_upgrade: MACPROVIDER_DRAFT_MODEL is set in this environment; the switch clears draft_model in the config, but a serve that inherits this variable loads that drafter for \(to)\n".utf8
+                    ))
+                }
             case let .keep(reason):
                 let action = selectedForConfig == nil ? "config unchanged" : "re-applying the incumbent row"
                 FileHandle.standardError.write(Data("model_upgrade: keep \(upgradeIncumbentKey) reason=\(reason); \(action)\n".utf8))
@@ -1349,7 +1369,6 @@ struct AutotuneCommand: AsyncParsableCommand {
                 servedKey: selectedForConfig?.catalogKey ?? upgradeIncumbentKey,
                 benchmarks: request.benchmarks
             )
-            try await submitHardwareEvidenceIfNeeded()
         }
         // A switch clears `draft_model`: the incumbent's drafter does not
         // match the new model's tokenizer, and the benchmark ran without it.
@@ -1594,6 +1613,13 @@ struct AutotuneCommand: AsyncParsableCommand {
             guard let core = serveConfig else {
                 throw ValidationError("selected recommendation lacks serve config")
             }
+            // R029: a run that lost its maintenance lease while the provider
+            // was stopped does not write config; the restart serves the
+            // unchanged incumbent.
+            if upgrade, let upgradeLeaseHeld, !upgradeLeaseHeld() {
+                FileHandle.standardError.write(Data("model_upgrade: the lifecycle lease was lost during the run; the config is unchanged\n".utf8))
+                throw ExitCode(75)
+            }
             let applied = try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
                 recommendation: core,
                 now: now,
@@ -1615,6 +1641,24 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         if upgradeDecides {
             try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+            // Evidence names the served row, so it is submitted only once
+            // that row is in the config.
+            try await submitHardwareEvidenceIfNeeded()
+            if upgradeKeepToRecord {
+                let key = AutotuneModelUpgrade.inputsKey(
+                    inputDigests: AutotuneModelUpgrade.upgradeInputDigests(
+                        catalog: catalog.selectedBytes,
+                        rateCard: rateCard.selectedBytes,
+                        demandRank: demand.selectedBytes
+                    ),
+                    binaryVersion: CoordinatorClient.binaryVersion
+                )
+                do {
+                    try AutotuneModelUpgrade.recordKeep(inputsKey: key, at: Date())
+                } catch {
+                    FileHandle.standardError.write(Data("[warn] model_upgrade: could not record the keep: \(error)\n".utf8))
+                }
+            }
         }
         if emitJSON {
             print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
@@ -1913,6 +1957,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 demandRank: inputs.demand.value,
                 rateCard: inputs.rateCard.value,
                 resolvedConfig: resolvedConfig,
+                configPath: config,
                 hardware: hardware
             )
             try receipt.write(to: URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt)))
@@ -1965,16 +2010,30 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
+    /// SPEC-023-R029: every `--upgrade` mode holds the run lock for the whole
+    /// process. Attended runs (the installer steps, `malibu-cli update`) wait
+    /// for it; the unattended check exits 75 when another run holds it.
+    func acquireUpgradeRunLock(
+        dependencies: AutotuneRunDependencies,
+        at url: URL = AutotuneModelUpgrade.runLockURL
+    ) throws -> AutotuneModelUpgrade.RunLock? {
+        guard upgrade else { return nil }
+        switch AutotuneModelUpgrade.acquireRunLock(at: url, blocking: !unattended) {
+        case let .acquired(lock):
+            return lock
+        case .busy:
+            dependencies.writeStderr("model_upgrade: another model upgrade run holds \(url.path); nothing was downloaded or stopped\n")
+            throw ExitCode(75)
+        case let .failed(reason):
+            throw ValidationError("model upgrade: could not take the run lock: \(reason)")
+        }
+    }
+
     /// SPEC-023-R029 in one process (`malibu-cli update`): freshness, pins,
     /// prefetch while the incumbent serves, idle wait, then the R022-isolated
     /// benchmark and guarded apply over the verified artifacts only.
     private func runModelUpgrade(dependencies: AutotuneRunDependencies) async throws {
-        // One upgrade run at a time, attended or unattended, for the whole run.
-        guard let runLock = AutotuneModelUpgrade.acquireRunLock() else {
-            dependencies.writeStderr("model_upgrade: another model upgrade run holds \(AutotuneModelUpgrade.runLockURL.path); nothing was downloaded or stopped\n")
-            throw ExitCode(75)
-        }
-        defer { runLock.release() }
+        // The run lock is already held (`acquireUpgradeRunLock`).
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
         let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
         switch status {
@@ -2010,6 +2069,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig.providerID)
         if unattended {
+            // Refuse before any download when the provider this run would
+            // stop is not the serve that started it.
+            if let reason = AutotuneModelUpgrade.providerMismatch(try dependencies.detectConflict(), expectedPID: upgradeParentPID) {
+                dependencies.writeStderr("model_upgrade: unattended check refused reason=\(reason); nothing was downloaded or stopped\n")
+                throw ExitCode(75)
+            }
             let gate = AutotuneModelUpgrade.unattendedGate(
                 now: Date(),
                 feedGeneratedAt: [
@@ -2017,17 +2082,20 @@ struct AutotuneCommand: AsyncParsableCommand {
                     inputs.rateCard.value.generatedAt,
                     inputs.demand.value.generatedAt,
                 ],
-                inputDigests: [
-                    "candidate_catalog=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes),
-                    "rate_card=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.rateCard.selectedBytes),
-                    "demand_rank=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.demand.selectedBytes),
-                ],
+                inputDigests: AutotuneModelUpgrade.upgradeInputDigests(
+                    catalog: inputs.candidate.selectedBytes,
+                    rateCard: inputs.rateCard.selectedBytes,
+                    demandRank: inputs.demand.selectedBytes
+                ),
                 binaryVersion: CoordinatorClient.binaryVersion,
                 providerKey: identity.diversificationID,
                 readRecord: { AutotuneModelUpgrade.readAttempt() },
                 writeRecord: { try AutotuneModelUpgrade.writeAttempt($0) }
             )
             switch gate {
+            case let .kept(since):
+                print("model_upgrade: kept the current model for these inputs at \(ISO8601DateFormatter.autotuneInternet.string(from: since)); nothing to re-check until they change")
+                return
             case let .staggered(until):
                 print("model_upgrade: staggered until \(ISO8601DateFormatter.autotuneInternet.string(from: until)); the current model keeps serving")
                 return
@@ -2046,31 +2114,40 @@ struct AutotuneCommand: AsyncParsableCommand {
             demandRank: inputs.demand.value,
             rateCard: inputs.rateCard.value,
             resolvedConfig: resolvedConfig,
+            configPath: config,
             hardware: AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         )
         guard let incumbentKey = AutotuneModelUpgrade.incumbentCatalogKey(config: resolvedConfig, catalog: inputs.candidate.value) else {
             throw ValidationError("model upgrade: the configured model has no signed catalog row")
         }
+        let configPath = config
         try await AutotuneModelUpgrade.withRunDownloadCleanup(
             receipt.artifacts,
             incumbentKey: incumbentKey,
             catalog: inputs.candidate.value,
-            resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+            resolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
+            configuredKey: { AutotuneModelUpgrade.configuredCatalogKey(configPath: configPath, catalog: inputs.candidate.value) }
         ) { keep in
             let acceleration = await AutotuneModelUpgrade.loadAccelerationAdmissions(
                 catalog: inputs.candidate,
                 rateCard: inputs.rateCard.value
             )
+            let heldLease = AutotuneModelUpgrade.LeaseSlot()
             try await drainThenIsolate(
                 dependencies: dependencies,
                 waitForIdle: { await AutotuneModelUpgrade.waitForLocalProviderIdle(port: resolvedConfig.port) },
                 isOperatorPaused: { AutotuneModelUpgrade.operatorPausePersisted() },
-                acquireLease: { AutotuneModelUpgrade.acquireMaintenanceLease() }
+                acquireLease: {
+                    let acquisition = AutotuneModelUpgrade.acquireMaintenanceLease()
+                    if case let .acquired(lease) = acquisition { heldLease.lease = lease }
+                    return acquisition
+                }
             ) {
                 try await runAutotuneRecommend(
                     upgradeReceipt: receipt,
                     upgradeKeep: keep,
-                    upgradeAcceleration: acceleration
+                    upgradeAcceleration: acceleration,
+                    upgradeLeaseHeld: { heldLease.lease?.confirmHeld() ?? false }
                 )
             }
         }
@@ -2092,8 +2169,18 @@ struct AutotuneCommand: AsyncParsableCommand {
         },
         operation: () async throws -> Void
     ) async throws {
+        let conflict = try dependencies.detectConflict()
+        // The unattended check stops only the serve that started it.
+        func refuseForeignProvider(_ conflict: ProviderConflict) throws {
+            guard unattended,
+                  let reason = AutotuneModelUpgrade.providerMismatch(conflict, expectedPID: upgradeParentPID)
+            else { return }
+            dependencies.writeStderr("model_upgrade: unattended check refused reason=\(reason); the provider was not stopped and the config is unchanged\n")
+            throw ExitCode(75)
+        }
+        try refuseForeignProvider(conflict)
         // No live provider: there is no in-flight work to wait for.
-        if try dependencies.detectConflict() != .none {
+        if conflict != .none {
             guard await waitForIdle() else {
                 dependencies.writeStderr(
                     "model_upgrade: the provider was not confirmed idle within \(AutotuneModelUpgrade.idleWaitCeilingSeconds) s; it was not stopped and the config is unchanged\n"
@@ -2118,6 +2205,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         // maintenance lease refuses, so the lease is released right before
         // the restart.
         var isolated = dependencies
+        let detect = dependencies.detectConflict
+        isolated.detectConflict = {
+            let current = try detect()
+            try refuseForeignProvider(current)
+            return current
+        }
         let restore = dependencies.restoreConflict
         isolated.restoreConflict = { conflict, restartForeground in
             lease.release()
@@ -2138,6 +2231,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         demandRank: DemandRank,
         rateCard: RateCardProjection,
         resolvedConfig: AppConfig?,
+        configPath: String?,
         hardware: AutotuneRecommendHardware,
         probeCache: AutotuneProbeCacheStore = AutotuneProbeCacheStore(),
         benchmarker: AutotuneRecommendationBenchmarker? = nil
@@ -2180,6 +2274,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         ))
         let prefetcher = Self.budgetedUpgradePrefetcher(benchmarker, resolvedConfig: resolvedConfig, memoryGB: hardware.memoryGB)
         let resolver = prefetcher.artifactResolver
+        // The incumbent and the row the config names when cleanup runs.
+        let keepOnCleanup = {
+            Set([incumbentKey] + (AutotuneModelUpgrade.configuredCatalogKey(configPath: configPath, catalog: catalog.value).map { [$0] } ?? []))
+        }
         let outcome = try await prefetcher.prefetchArtifacts(
             candidateCatalog: catalog.value,
             hardware: hardware,
@@ -2188,7 +2286,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 request: planning,
                 incumbentKey: incumbentKey,
                 cachedBenchmarks: cachedBenchmarks
-            )
+            ),
+            removeRunDownloadsOnFailureKeeping: keepOnCleanup
         )
         for diagnostic in outcome.diagnostics.sorted(by: { $0.modelID < $1.modelID }) {
             FileHandle.standardError.write(Data("model_upgrade: dropped \(diagnostic.modelID): \(diagnostic.reason)\n".utf8))
@@ -2199,7 +2298,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         } catch {
             AutotuneModelUpgrade.removeUnselectedRunDownloads(
                 outcome.artifacts,
-                keepModelKeys: [incumbentKey],
+                keepModelKeys: keepOnCleanup(),
                 catalog: catalog.value,
                 resolver: resolver
             )
