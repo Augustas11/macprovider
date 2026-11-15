@@ -474,6 +474,10 @@ private final class LimitsRecordingWarmSet: WarmSetControl, @unchecked Sendable 
     private var recorded: [String: WarmModelLimits?] = [:]
     var loads: [String: WarmModelLimits?] { lock.lock(); defer { lock.unlock() }; return recorded }
     func controlEntries() async -> [WarmSetControlEntry] { [] }
+    func check(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetCheckOutcome {
+        WarmSetCheckOutcome(status: "fits", detail: nil, report: nil)
+    }
+
     func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
         lock.lock(); recorded[modelID] = limits; lock.unlock()
         return .loaded

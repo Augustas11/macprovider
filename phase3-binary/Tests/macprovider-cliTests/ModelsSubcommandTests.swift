@@ -2894,11 +2894,59 @@ extension ModelsSubcommandTests {
             with: Data(ModelsWarmCommand.checkJSON(plan, modelID: "org/second").utf8)) as? [String: Any])
         XCTAssertEqual(object["schema_version"] as? String, "models_warm_check.v1")
         XCTAssertEqual(object["model_id"] as? String, "org/second")
+        XCTAssertEqual(object["source"] as? String, "estimate")
+        XCTAssertEqual(object["estimate"] as? Bool, true)
         XCTAssertEqual(object["decision"] as? String, "fits")
         XCTAssertEqual((object["members"] as? [[String: Any]])?.last?["slots"] as? Int, 2)
         XCTAssertNil(object["primary_fit"])
         XCTAssertEqual(plan.summary(memberModelID: "org/second"),
                        "org/second fits beside main/model: 16384 tokens of context, 2 slots.")
+    }
+
+    /// With a provider running, `models warm check` prints that provider's
+    /// own decision: here the main model holds more memory than its files
+    /// say, so the estimate would say fits and the provider says no.
+    func testModelsWarmCheckAsksTheRunningProviderAndPrintsItsDecision() async throws {
+        let gib = WarmSetCheckRig.gib
+        let rig = try WarmSetCheckRig(limitBytes: 44 * gib, primaryActiveBytes: 40 * gib)
+        let configURL = try makeWarmConfig("model: model-a\nsupported_models: [model-a, org/second]\n")
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "model-a"), warmSet: rig.boot)
+        try await server.start()
+        let json = try ModelsWarmCommand.parse([
+            "check", "org/second", "--json", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let jsonCapture = await captureOutput { try await json.run() }
+        let text = try ModelsWarmCommand.parse([
+            "check", "org/second", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let textCapture = await captureOutput { try await text.run() }
+        await server.stop()
+
+        XCTAssertNil(jsonCapture.error)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(jsonCapture.stdout.utf8)) as? [String: Any], jsonCapture.stdout)
+        XCTAssertEqual(object["source"] as? String, "running_provider")
+        XCTAssertEqual(object["estimate"] as? Bool, false)
+        XCTAssertEqual(object["status"] as? String, "insufficient_memory")
+        XCTAssertEqual((object["check"] as? [String: Any])?["loaded_resident_bytes"] as? Int, 40 * gib)
+        XCTAssertNil(textCapture.error)
+        XCTAssertTrue(textCapture.stdout.hasPrefix("The running provider would not load org/second"), textCapture.stdout)
+        XCTAssertEqual(rig.loads, 0)
+    }
+
+    /// With no provider running, the estimate, labelled as one.
+    func testModelsWarmCheckWithoutAProviderPrintsALabelledEstimate() async throws {
+        let configURL = try makeWarmConfig(
+            "model: main/model\nsupported_models: [main/model, org/second]\nmax_context_override: 8192\nmax_concurrency_override: 2\n")
+        let socketPath = try makeSocketPath()
+        let command = try ModelsWarmCommand.parse([
+            "check", "org/second", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let capture = await captureOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        XCTAssertTrue(capture.stdout.hasPrefix(AutotuneWarmSetPlan.estimateLabel), capture.stdout)
     }
 
     private func makeWarmConfig(_ text: String) throws -> URL {
@@ -2922,6 +2970,10 @@ private final class ScriptedWarmSet: WarmSetControl, @unchecked Sendable {
 
     func controlEntries() async -> [WarmSetControlEntry] {
         [WarmSetControlEntry(modelID: "main/model", state: "warm", primary: true, pinned: true, leases: 0, slotsTotal: 4, slotsFree: 4)]
+    }
+
+    func check(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetCheckOutcome {
+        WarmSetCheckOutcome(status: "fits", detail: nil, report: nil)
     }
 
     func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {

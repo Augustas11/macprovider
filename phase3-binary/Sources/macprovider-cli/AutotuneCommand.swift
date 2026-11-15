@@ -122,7 +122,7 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "Private receipt path written by --prefetch and required by a cache-only constrained --apply.")
     var prefetchReceipt: String?
 
-    @Option(name: .customLong("warm-set"), help: "With --recommend, also work out whether this model fits in memory beside the recommended model, and with how much context and how many slots. Nothing is loaded.")
+    @Option(name: .customLong("warm-set"), help: "With --recommend, also estimate whether this model fits in memory beside the recommended model, and with how much context and how many slots. Nothing is loaded; a running provider decides again when it loads the model (see models warm check).")
     var warmSet: String?
 
     @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
@@ -186,7 +186,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         try await run(dependencies: .production)
     }
 
-    /// `--warm-set`: the arithmetic plan for that model beside the
+    /// `--warm-set`: the arithmetic estimate for that model beside the
     /// recommended one at its recommended context and slots; nil without the
     /// flag or a recommendation.
     func warmSetPlan(beside core: RecommendationCore?) -> AutotuneWarmSetPlan? {
@@ -1532,7 +1532,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         } else {
             print(result.humanTranscript(configurationApplied: configurationApplied))
         }
-        if !emitJSON, let warmSet, let plannedWarmSet { print(plannedWarmSet.summary(memberModelID: warmSet)) }
+        if !emitJSON, let warmSet, let plannedWarmSet {
+            print(AutotuneWarmSetPlan.estimateLabel + " " + plannedWarmSet.summary(memberModelID: warmSet))
+        }
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
         }

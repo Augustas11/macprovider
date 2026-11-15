@@ -2,16 +2,24 @@ import Foundation
 import MLX
 import MacProviderCore
 
-/// SPEC-001-R017: whether a named second model fits beside the primary, and
-/// the context and slots it would get, from arithmetic alone: no model is
-/// loaded, measured, evicted or downloaded, and the primary is never lowered.
+/// SPEC-001-R017: an estimate of whether a named second model fits beside
+/// the primary, and the context and slots it would get, from arithmetic
+/// alone: no model is loaded, measured, evicted or downloaded, and the
+/// primary is never lowered.
 ///
-/// The decision is the runtime's own: `SharedModelMemoryRules.loadDecision`
-/// against the process memory limit the primary's runtime applies, with the
-/// primary pinned at its current row reservation, and the command-buffer
-/// budget check a load runs first. The second model's rows come out of what
-/// that limit leaves, never more than the autotune memory envelope for the
-/// two models together allows, and never below the runtime's minimum row.
+/// It applies the runtime's rule (`SharedModelMemoryRules.loadDecision` and
+/// the command-buffer budget check a load runs first) to inputs read from
+/// files: the primary's weights as its safetensors size, the limit the
+/// primary's runtime would apply, the primary pinned at its row
+/// reservation, and no other member. A running provider decides from what
+/// it measures instead: MLX active memory, which includes a draft model or
+/// native-MTP drafter, the limit it applied, and every member it has
+/// loaded. So the plan is an estimate (`estimate`, always true) and the
+/// provider decides again at load time; `models warm check` asks a running
+/// provider for that decision (`warm_set check`). The second model's rows
+/// come out of what the limit leaves, never more than the autotune memory
+/// envelope for the two models together allows, and never below the
+/// runtime's minimum row.
 struct AutotuneWarmSetPlan: Equatable, Encodable {
     enum Decision: String, Encodable {
         case fits
@@ -85,10 +93,17 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
     let primaryFit: PrimaryFit?
     let limitBytes: Int?
     let requiredBytes: Int?
+    /// Always true: the running provider decides again when it loads the
+    /// model. Encoded so a JSON reader cannot take the plan for that decision.
+    let estimate = true
 
     enum CodingKeys: String, CodingKey {
         case decision, reason, members, primaryFit = "primary_fit", limitBytes = "limit_bytes", requiredBytes = "required_bytes"
+        case estimate
     }
+
+    /// The label printed before the plan's summary.
+    static let estimateLabel = "Estimate, nothing loaded (the provider decides again when it loads the model):"
 
     /// The smallest row the runtime admits and reserves for a load.
     static let minimumContextTokens = SharedModelMemoryRules.minimumRowTokens

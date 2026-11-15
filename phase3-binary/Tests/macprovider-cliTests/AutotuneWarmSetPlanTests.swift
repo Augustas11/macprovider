@@ -4,7 +4,8 @@ import XCTest
 @testable import macprovider_cli
 
 /// SPEC-001-R017 arithmetic for a second model beside the primary: no model
-/// is loaded. The plan must say what the runtime's load decision says.
+/// is loaded. The plan is an estimate from files; a running provider's own
+/// decision is `warm_set check` (`WarmSetCheckTests`).
 final class AutotuneWarmSetPlanTests: XCTestCase {
     private let gib = 1 << 30
     private let margin = SharedModelMemoryRules.perMemberMarginBytes
@@ -26,27 +27,6 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
                           declaredMaxContextTokens: memberDeclaredMax, family: memberFamily, catalogMinRAMGB: 8,
                           catalogBound: memberBound),
             operatorCommandBufferMB: operatorMB)
-    }
-
-    /// The runtime's own decision for the same inputs: a real shared budget
-    /// holding the primary pinned at its reservation, asked `canLoad` with
-    /// the spec `serve` builds for the second model.
-    private func runtimeAdmits(_ input: AutotuneWarmSetPlan.Inputs, limit: Int) -> Bool {
-        let budget = SharedModelMemoryBudget()
-        if let family = input.primary.family, let mb = ModelRuntime.commandBufferBudgetMBByFamily[family] {
-            budget.recordCommandBufferBudget(modelFamily: family, megabytes: mb)
-        }
-        _ = budget.recordLoaded(
-            memberID: 7, label: input.primary.modelID, modelFamily: input.primary.family ?? "x", wires: false,
-            activeBytes: input.primary.artifactBytes ?? 0, weightBytes: nil,
-            kvBytesPerToken: input.primary.kvBytesPerToken, pinned: true)
-        budget.reserveRows(memberID: 7, rows: input.primarySlots, tokensPerRow: input.primaryContextTokens)
-        if let family = input.member.family, budget.commandBufferBudgetConflict(modelFamily: family) != nil { return false }
-        let decision = budget.canLoad(
-            estimatedResidentBytes: input.member.artifactBytes ?? 0,
-            minimumRowKVBytes: MLXMemoryBudget.kvBytes(tokens: SharedModelMemoryRules.minimumRowTokens, bytesPerToken: input.member.kvBytesPerToken),
-            limitBytes: limit)
-        return decision.admitted && decision.eviction == nil
     }
 
     func testFitsGivesTheSecondModelThePrimarysShapeWhenThereIsRoom() throws {
@@ -98,13 +78,12 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
         XCTAssertEqual(fit.contextTokens, 32_768)
         XCTAssertGreaterThanOrEqual(fit.slots, 1)
         XCTAssertLessThan(fit.slots, 8)
-        // The suggested reservation lets the runtime load it; one more slot does not.
+        // The suggested reservation is the largest the plan admits.
         var shrunk = input
         shrunk.primarySlots = fit.slots
-        XCTAssertTrue(runtimeAdmits(shrunk, limit: try XCTUnwrap(plan.limitBytes)))
         XCTAssertEqual(AutotuneWarmSetPlan.compute(shrunk).decision, .fits)
         shrunk.primarySlots = fit.slots + 1
-        XCTAssertFalse(runtimeAdmits(shrunk, limit: try XCTUnwrap(plan.limitBytes)))
+        XCTAssertEqual(AutotuneWarmSetPlan.compute(shrunk).decision, .primaryMustShrink)
     }
 
     func testDoesNotFitWhenEvenTheSmallestPrimaryLeavesNoRoom() {
@@ -146,11 +125,11 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
         XCTAssertEqual(AutotuneWarmSetPlan.compute(same).reason, "same_model")
     }
 
-    /// The plan and the runtime agree over a table of Macs and models: it
-    /// says `fits` exactly when the runtime's load decision admits the load
-    /// with the primary pinned at its current rows, and then the second
-    /// model's planned rows fit the same limit beside the primary's.
-    func testAgreesWithTheRuntimeLoadDecisionOverATable() throws {
+    /// Over a table of Macs and models the plan reaches every decision, and
+    /// whenever it says `fits`, the second model's planned rows fit the
+    /// limit beside the primary's. (Whether a running provider would load
+    /// it is that provider's own decision: `WarmSetCheckTests`.)
+    func testPlannedRowsFitTheLimitOverATable() throws {
         var checked = 0
         var decisions: [AutotuneWarmSetPlan.Decision: Int] = [:]
         for (ram, workingSet) in [(16, 11), (24, 16), (36, 27), (64, 48), (128, 96), (192, 144), (512, 400)] {
@@ -164,8 +143,6 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
                             let plan = AutotuneWarmSetPlan.compute(input)
                             let limit = try XCTUnwrap(plan.limitBytes)
                             decisions[plan.decision, default: 0] += 1
-                            let admitted = runtimeAdmits(input, limit: limit)
-                            XCTAssertEqual(plan.decision == .fits, admitted, "\(ram) GB \(primaryGiB)+\(memberGiB) GiB \(primarySlots) slots kv \(memberKV)")
                             if plan.decision == .fits {
                                 let primaryRows = max(
                                     MLXMemoryBudget.kvBytes(tokens: primarySlots * 16_384, bytesPerToken: 100_000),
@@ -197,6 +174,7 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
         XCTAssertTrue(text.contains("\"primary_fit\":{\"context_tokens\":32768"), text)
         XCTAssertTrue(text.contains("\"model_id\":\"second\\/model\""), text)
         XCTAssertTrue(text.contains("\"role\":\"member\""), text)
+        XCTAssertTrue(text.contains("\"estimate\":true"), text)
     }
 
     /// Golden: the several-artifact envelope with one artifact is today's

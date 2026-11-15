@@ -512,6 +512,13 @@ final class AutotuneRecommendTests: XCTestCase {
                        Set(try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]).keys))
         let noPlan = AutotuneCommand.addingWarmSet("null", to: json)
         XCTAssertTrue(noPlan.hasSuffix(",\"warm_set\":null}"))
+        // The plan's own block says it is an estimate.
+        let plan = AutotuneWarmSetPlan(
+            decision: .fits, reason: "fits", members: [], primaryFit: nil, limitBytes: 1, requiredBytes: 1)
+        let estimated = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(AutotuneCommand.addingWarmSet(plan.jsonString, to: json).utf8)) as? [String: Any])
+        XCTAssertEqual((estimated["warm_set"] as? [String: Any])?["estimate"] as? Bool, true)
+        XCTAssertTrue(AutotuneWarmSetPlan.estimateLabel.hasPrefix("Estimate"))
     }
 
     func testRecommendationJSONIncludesApplyReadyServeConfigWhenProvided() throws {

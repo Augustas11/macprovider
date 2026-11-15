@@ -1510,8 +1510,10 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         abstract: "Show, check, load or unload the extra models kept loaded beside the main model.",
         discussion: """
         status lists every loaded model with its state and active requests. \
-        check works out whether a model fits in memory beside the main model, \
-        and with how much context and how many slots, without loading it. \
+        check asks the running provider whether it would load a model now, \
+        beside every model it has loaded, without loading it; with no \
+        provider running it prints an estimate from the files on this Mac, \
+        which the provider decides again when it loads the model. \
         load adds a supported model if it fits in memory beside the loaded ones. \
         unload removes an extra model; the main model and a model that is \
         serving a request are never unloaded. With --save, load and unload \
@@ -1526,10 +1528,10 @@ struct ModelsWarmCommand: AsyncParsableCommand {
     @Argument(help: "HuggingFace model ID or local path to check, load or unload.")
     var targetModelID: String?
 
-    @Option(name: .customLong("context"), help: "With load: the context in tokens for this model. Default: the main model's.")
+    @Option(name: .customLong("context"), help: "With load or check: the context in tokens for this model. Default: the main model's.")
     var contextTokens: Int?
 
-    @Option(help: "With load: how many requests this model serves at once. Default: the main model's.")
+    @Option(help: "With load or check: how many requests this model serves at once. Default: the main model's.")
     var slots: Int?
 
     @Flag(help: "With load or unload: also write the change to config.yaml.")
@@ -1554,8 +1556,8 @@ struct ModelsWarmCommand: AsyncParsableCommand {
             }
         }
         if save, action != .load, action != .unload { throw ValidationError("--save works with load and unload") }
-        if contextTokens != nil || slots != nil, action != .load {
-            throw ValidationError("--context and --slots work with load")
+        if contextTokens != nil || slots != nil, action != .load, action != .check {
+            throw ValidationError("--context and --slots work with load and check")
         }
         if let contextTokens, contextTokens < 1 { throw ValidationError("--context must be at least 1") }
         if let slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
@@ -1653,8 +1655,12 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         writeStderr("saved to \(configURL.path)")
     }
 
-    /// Arithmetic only: the main model's context and slots come from the
-    /// running provider when there is one, else from config.yaml.
+    /// With a provider running, its own answer: the `warm_set check`
+    /// control action runs the load decision `load` would make now, against
+    /// the memory the loaded models really hold, the limit the process
+    /// applies and every model it has loaded. With none running (or one too
+    /// old to answer), an estimate from the files on this Mac, labelled as
+    /// one: the provider decides again when it loads the model.
     private func runCheck(resolved: AppConfig, socketPath: URL) async throws {
         guard let member = targetModelID?.trimmingCharacters(in: .whitespacesAndNewlines),
               let primary = resolved.model, !primary.isEmpty else {
@@ -1664,9 +1670,23 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         var primaryContext = resolved.maxContextOverride
         var primarySlots = resolved.maxConcurrencyOverride
         if let connection = try? await ControlSocketClient.connect(socketPath: socketPath) {
-            if (try? await connection.send(.warmSetRequest(action: "status", modelID: nil))) != nil,
-               case let .warmSetResponse(reply)? = try? await connection.receive(timeout: 10),
-               let entry = reply.entries.first(where: \.primary) {
+            let checked = await Self.request(
+                .warmSetRequest(action: "check", modelID: member, contextTokens: contextTokens, slots: slots),
+                on: connection)
+            if let checked, checked.status == "unavailable" {
+                await connection.close()
+                writeStderr("this provider serves its model through another runtime and cannot load extra models")
+                throw ExitCode(4)
+            }
+            if let checked, !(checked.status == "invalid_request" && checked.detail == "unknown_action") {
+                await connection.close()
+                print(emitJSON ? Self.runtimeCheckJSON(checked, modelID: member) : Self.runtimeCheckSummary(checked, modelID: member))
+                return
+            }
+            // A provider that predates the check action: estimate around
+            // its main model's live context and slots.
+            if let status = await Self.request(.warmSetRequest(action: "status", modelID: nil), on: connection),
+               let entry = status.entries.first(where: \.primary) {
                 primaryContext = entry.maxContextTokens ?? primaryContext
                 primarySlots = entry.slotsTotal > 0 ? entry.slotsTotal : primarySlots
             }
@@ -1683,14 +1703,70 @@ struct ModelsWarmCommand: AsyncParsableCommand {
             primarySlots: primarySlots,
             primaryVerified: resolved.modelArtifactSHA256 != nil,
             memberModelID: member))
-        print(emitJSON ? Self.checkJSON(plan, modelID: member) : plan.summary(memberModelID: member))
+        print(emitJSON ? Self.checkJSON(plan, modelID: member) : AutotuneWarmSetPlan.estimateLabel + " " + plan.summary(memberModelID: member))
     }
 
+    private static func request(_ frame: ControlSocketFrame, on connection: ControlSocketConnection) async -> WarmSetControlReply? {
+        guard (try? await connection.send(frame)) != nil,
+              case let .warmSetResponse(reply)? = try? await connection.receive(timeout: 10) else { return nil }
+        return reply
+    }
+
+    /// The estimate, as JSON: `source` is `estimate` (and the plan's own
+    /// `estimate` is true).
     static func checkJSON(_ plan: AutotuneWarmSetPlan, modelID: String) -> String {
+        "{\"schema_version\":\"models_warm_check.v1\",\"model_id\":\(quoted(modelID)),\"source\":\"estimate\"," + plan.jsonString.dropFirst()
+    }
+
+    /// The running provider's answer, as JSON: `source` is
+    /// `running_provider`, `estimate` is false, and `status`, `detail` and
+    /// `check` are the control reply's.
+    static func runtimeCheckJSON(_ reply: WarmSetControlReply, modelID: String) -> String {
+        var object: [String: Any] = [
+            "schema_version": "models_warm_check.v1",
+            "model_id": modelID,
+            "source": "running_provider",
+            "estimate": false,
+            "status": reply.status,
+        ]
+        if let detail = reply.detail { object["detail"] = detail }
+        if let check = reply.check,
+           let data = try? JSONEncoder().encode(check),
+           let value = try? JSONSerialization.jsonObject(with: data) {
+            object["check"] = value
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// One line for a person, from the running provider's answer.
+    static func runtimeCheckSummary(_ reply: WarmSetControlReply, modelID: String) -> String {
+        func gb(_ bytes: Int?) -> String { bytes.map { String(format: "%.1f GB", Double($0) / 1e9) } ?? "an unknown amount" }
+        switch reply.status {
+        case "fits":
+            return "The running provider can load \(modelID) now, beside the models it has loaded."
+        case "fits_after_eviction":
+            let evict = reply.check?.evict ?? []
+            return "The running provider can load \(modelID) after unloading \(evict.isEmpty ? "idle models" : evict.joined(separator: ", ")), which \(evict.count == 1 ? "is" : "are") not serving requests."
+        case "insufficient_memory":
+            return "The running provider would not load \(modelID): it needs \(gb(reply.check?.requiredBytes)) and this Mac allows \(gb(reply.check?.limitBytes)) beside the models it has loaded."
+        case "already_warm":
+            return "\(modelID) is already loaded."
+        case "unsupported_model":
+            switch reply.detail {
+            case "not_in_supported_models"?: return "The running provider would not load \(modelID): it is not in supported_models."
+            case "model_unavailable"?: return "The running provider would not load \(modelID): it is not available on this Mac."
+            default: return "The running provider would not load \(modelID): it needs a different GPU buffer setting than the loaded models."
+            }
+        default:
+            return "The running provider would not load \(modelID) now: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")."
+        }
+    }
+
+    private static func quoted(_ text: String) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .withoutEscapingSlashes
-        let quotedID = String(decoding: (try? encoder.encode(modelID)) ?? Data("null".utf8), as: UTF8.self)
-        return "{\"schema_version\":\"models_warm_check.v1\",\"model_id\":\(quotedID)," + plan.jsonString.dropFirst()
+        return String(decoding: (try? encoder.encode(text)) ?? Data("null".utf8), as: UTF8.self)
     }
 }
 

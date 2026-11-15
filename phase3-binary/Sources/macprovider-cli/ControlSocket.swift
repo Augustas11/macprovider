@@ -68,18 +68,45 @@ public struct WarmSetControlEntry: Codable, Equatable, Sendable {
     }
 }
 
+/// The running process's own load decision for a `warm_set check`
+/// (`SharedModelMemoryRules.LoadDecision`): the measured resident bytes of
+/// the loaded members, the new model's estimate, what the load needs in
+/// all and the limit it is held to, and the members it would unload first.
+public struct WarmSetCheckReport: Codable, Equatable, Sendable {
+    /// `fits`, `fits_after_eviction`, `insufficient_memory` or
+    /// `limit_unavailable`.
+    public var decision: String
+    public var limitBytes: Int?
+    public var requiredBytes: Int
+    public var loadedResidentBytes: Int
+    public var estimatedResidentBytes: Int
+    public var evict: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case decision
+        case limitBytes = "limit_bytes"
+        case requiredBytes = "required_bytes"
+        case loadedResidentBytes = "loaded_resident_bytes"
+        case estimatedResidentBytes = "estimated_resident_bytes"
+        case evict
+    }
+}
+
 /// The reply to every `warm_set_request`. `status` is `ok` for `status`, the
 /// load outcome (`loaded`, `already_warm`, `insufficient_memory`,
-/// `unsupported_model`, `load_failed`) or the unload outcome (`unloaded`,
-/// `not_loaded`, `primary`, `busy`, `failed`), `invalid_request`, or
-/// `unavailable` when the process has no warm set. `entries` is the warm
-/// set after the action.
+/// `unsupported_model`, `load_failed`), the check outcome (`fits`,
+/// `fits_after_eviction`, or the load outcome a load would get), the
+/// unload outcome (`unloaded`, `not_loaded`, `primary`, `busy`, `failed`),
+/// `invalid_request`, or `unavailable` when the process has no warm set.
+/// `entries` is the warm set after the action; `check` rides on a check
+/// that reached the memory decision.
 public struct WarmSetControlReply: Codable, Equatable, Sendable {
     public var action: String
     public var status: String
     public var modelID: String?
     public var detail: String?
     public var entries: [WarmSetControlEntry]
+    public var check: WarmSetCheckReport? = nil
 
     enum CodingKeys: String, CodingKey {
         case action
@@ -87,6 +114,7 @@ public struct WarmSetControlReply: Codable, Equatable, Sendable {
         case modelID = "model_id"
         case detail
         case entries
+        case check
     }
 }
 
@@ -1867,24 +1895,26 @@ actor ControlSocketServer {
     /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
     /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
     /// the CLI, and hide surviving disk residue.
-    /// `warm_set status | load <model> | unload <model>`. A load goes through
-    /// the warm-set loader and the shared memory budget; an unload refuses
-    /// the primary and a member holding a request.
+    /// `warm_set status | load <model> | check <model> | unload <model>`. A
+    /// load goes through the warm-set loader and the shared memory budget; a
+    /// check asks the loader for the decision that load would get now and
+    /// changes nothing; an unload refuses the primary and a member holding a
+    /// request.
     nonisolated static func handleWarmSetRequest(
         action: String, modelID: String?, warmSet: (any WarmSetControl)?,
         contextTokens: Int? = nil, slots: Int? = nil
     ) async -> WarmSetControlReply {
-        func reply(_ status: String, detail: String? = nil) async -> WarmSetControlReply {
+        func reply(_ status: String, detail: String? = nil, check: WarmSetCheckReport? = nil) async -> WarmSetControlReply {
             WarmSetControlReply(
                 action: action, status: status, modelID: modelID, detail: detail,
-                entries: await warmSet?.controlEntries() ?? [])
+                entries: await warmSet?.controlEntries() ?? [], check: check)
         }
         guard let warmSet else { return await reply("unavailable", detail: "no_warm_set") }
         let target = modelID?.trimmingCharacters(in: .whitespacesAndNewlines)
         switch action {
         case "status":
             return await reply("ok")
-        case "load":
+        case "load", "check":
             guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
             // The same bounds `warm_model_limits` has in config.yaml.
             if let contextTokens, contextTokens < 1 { return await reply("invalid_request", detail: "invalid_limits") }
@@ -1893,6 +1923,10 @@ actor ControlSocketServer {
             }
             let limits = contextTokens == nil && slots == nil
                 ? nil : WarmModelLimits(contextTokens: contextTokens, slots: slots)
+            if action == "check" {
+                let outcome = await warmSet.check(target, limits: limits)
+                return await reply(outcome.status, detail: outcome.detail, check: outcome.report)
+            }
             let outcome = await warmSet.load(target, limits: limits)
             return await reply(outcome.code, detail: outcome.detail)
         case "unload":

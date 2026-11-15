@@ -47,6 +47,25 @@ enum WarmModelLoaderError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// What `WarmModelLoader.checkLoad` found: the answer `load` would give now.
+struct WarmModelLoadCheck: Sendable, Equatable {
+    enum Outcome: Sendable, Equatable {
+        case fits
+        /// Fits once the idle, unpinned members in `evict` are unloaded.
+        case fitsAfterEviction
+        case insufficientMemory
+        case commandBufferBudgetConflict(detail: String)
+        case alreadyLoaded
+        case stopping
+    }
+
+    let outcome: Outcome
+    /// The budget's decision; nil when a refusal came before it.
+    let decision: SharedModelMemoryRules.LoadDecision?
+    /// The model ids the load would unload first, least recently used first.
+    let evict: [String]
+}
+
 /// SPEC-001-R017 load, eviction and unload of warm-set members. One load,
 /// evict, unload or swap runs at a time (`exclusive`); the table's lock is
 /// never held across a load or an unload.
@@ -108,6 +127,34 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         await acquireTurn()
         defer { releaseTurn() }
         return try await loadExclusive(spec, pinned: pinned)
+    }
+
+    /// R017 *Load*'s decision for `spec` as `load` would make it now, with
+    /// nothing loaded, evicted or reserved: the same refusals in the same
+    /// order, the same `canLoad` call on the shared budget (the members'
+    /// measured resident bytes, every current member's rows, models still
+    /// loading) under the same live limit, and the same eviction rules.
+    /// It does not wait for the turn: a load in flight is charged as it is.
+    func checkLoad(_ spec: WarmModelLoadSpec) -> WarmModelLoadCheck {
+        if stopped { return WarmModelLoadCheck(outcome: .stopping, decision: nil, evict: []) }
+        if table.entry(modelID: spec.modelID) != nil {
+            return WarmModelLoadCheck(outcome: .alreadyLoaded, decision: nil, evict: [])
+        }
+        if let family = spec.modelFamily, let detail = budget.commandBufferBudgetConflict(modelFamily: family) {
+            return WarmModelLoadCheck(outcome: .commandBufferBudgetConflict(detail: detail), decision: nil, evict: [])
+        }
+        let decision = decide(spec)
+        guard decision.admitted else { return WarmModelLoadCheck(outcome: .insufficientMemory, decision: decision, evict: []) }
+        guard let plan = decision.eviction, !plan.evict.isEmpty else {
+            return WarmModelLoadCheck(outcome: .fits, decision: decision, evict: [])
+        }
+        // `load` marks every planned member or refuses; a member with a row
+        // in flight makes it refuse too.
+        guard let evict = table.evictableModelIDs(memberIDs: plan.evict),
+              !plan.evict.contains(where: { budget.busyRows(memberID: $0) > 0 }) else {
+            return WarmModelLoadCheck(outcome: .insufficientMemory, decision: decision, evict: [])
+        }
+        return WarmModelLoadCheck(outcome: .fitsAfterEviction, decision: decision, evict: evict)
     }
 
     /// R017 *Eviction* of one member by id: refused for the primary, a

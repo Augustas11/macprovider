@@ -303,6 +303,19 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         return indexes.map { snapshot(members[$0]) }
     }
 
+    /// The model ids of the listed budget members when `beginEvicting`
+    /// would mark every one of them, nil otherwise; changes nothing.
+    func evictableModelIDs(memberIDs: [Int]) -> [String]? {
+        lock.lock(); defer { lock.unlock() }
+        var ids: [String] = []
+        for memberID in memberIDs {
+            guard let index = members.firstIndex(where: { $0.memberID == memberID }),
+                  (try? checkEvictableLocked(index, allowPinned: false)) != nil else { return nil }
+            ids.append(members[index].modelID)
+        }
+        return ids
+    }
+
     /// Returns an `evicting` member to `warm` (its eviction was abandoned).
     func cancelEvicting(token: UInt64) {
         lock.lock(); defer { lock.unlock() }

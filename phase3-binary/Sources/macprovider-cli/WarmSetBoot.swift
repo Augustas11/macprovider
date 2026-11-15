@@ -112,6 +112,19 @@ protocol WarmSetControl: AnyObject, Sendable {
     /// `limits` replaces the configured `warm_model_limits` for this load.
     func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome
     func unload(_ modelID: String) async -> WarmSetUnloadOutcome
+    /// What `load` of `modelID` would do now, decided by the loader's own
+    /// load decision; nothing is loaded, evicted or reserved.
+    func check(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetCheckOutcome
+}
+
+/// The reply to `warm_set check`. `status` is `fits`, `fits_after_eviction`,
+/// or what `load` would answer instead (`insufficient_memory`,
+/// `unsupported_model`, `already_warm`, `load_failed`), with the same
+/// `detail`; `report` is the budget's decision when it was reached.
+struct WarmSetCheckOutcome: Sendable, Equatable {
+    let status: String
+    let detail: String?
+    let report: WarmSetCheckReport?
 }
 
 /// SPEC-001-R016/R017 in `serve`: the primary adopted into the warm set, the
@@ -246,6 +259,51 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     }
 
     // MARK: WarmSetControl
+
+    /// `load`'s steps up to its memory decision, in the same order, then the
+    /// loader's own decision (`WarmModelLoader.checkLoad`).
+    func check(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetCheckOutcome {
+        if let entry = table.entry(modelID: modelID) {
+            return entry.state == .warm
+                ? WarmSetCheckOutcome(status: WarmSetLoadOutcome.alreadyWarm.code, detail: nil, report: nil)
+                : WarmSetCheckOutcome(status: "load_failed", detail: "member_\(entry.state.rawValue)", report: nil)
+        }
+        guard isSupported(modelID) else {
+            return WarmSetCheckOutcome(status: "unsupported_model", detail: "not_in_supported_models", report: nil)
+        }
+        var spec: WarmModelLoadSpec
+        do {
+            spec = try loadSpec(modelID)
+        } catch {
+            return WarmSetCheckOutcome(status: "unsupported_model", detail: "model_unavailable", report: nil)
+        }
+        if let limits { spec.limits = limits }
+        let check = await loader.checkLoad(spec)
+        let report = check.decision.map {
+            WarmSetCheckReport(
+                decision: $0.reason, limitBytes: $0.limitBytes, requiredBytes: $0.requiredBytes,
+                loadedResidentBytes: $0.loadedResidentBytes, estimatedResidentBytes: $0.estimatedResidentBytes,
+                evict: check.evict)
+        }
+        switch check.outcome {
+        case .fits:
+            return WarmSetCheckOutcome(status: "fits", detail: nil, report: report)
+        case .fitsAfterEviction:
+            return WarmSetCheckOutcome(status: "fits_after_eviction", detail: nil, report: report)
+        case .insufficientMemory:
+            let error = WarmModelLoaderError.insufficientMemory(
+                modelID: modelID, reason: check.decision.map { $0.admitted ? "insufficient_memory" : $0.reason } ?? "insufficient_memory",
+                requiredBytes: check.decision?.requiredBytes ?? 0, limitBytes: check.decision?.limitBytes)
+            return WarmSetCheckOutcome(status: "insufficient_memory", detail: error.description, report: report)
+        case let .commandBufferBudgetConflict(detail):
+            let error = WarmModelLoaderError.commandBufferBudgetConflict(modelID: modelID, detail: detail)
+            return WarmSetCheckOutcome(status: "unsupported_model", detail: error.description, report: nil)
+        case .alreadyLoaded:
+            return WarmSetCheckOutcome(status: WarmSetLoadOutcome.alreadyWarm.code, detail: nil, report: nil)
+        case .stopping:
+            return WarmSetCheckOutcome(status: "load_failed", detail: "stopping model=\(modelID)", report: nil)
+        }
+    }
 
     /// The primary, and a member whose runtime has not published its info
     /// yet, is asked for it here.
