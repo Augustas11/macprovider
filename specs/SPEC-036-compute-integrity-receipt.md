@@ -1,9 +1,19 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.1-draft
-**Date:** 2026-11-13
+**Status:** v0.3.2-draft
+**Date:** 2026-11-15
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.2 (2026-11-15, Related: #2338 — the hold as built):**
+FR-23's earnings hold for a multi-model session follows SPEC-022 R-16.2a as
+built: a credit of an attempt dispatched to a warm entry (route snapshot flag
+`served_model_dispatch`) is held only by a hold for its served model,
+compared with the database `lower()` (ASCII case folding only); every other
+credit, including one of a pool-model route and one whose route snapshot is
+no longer in the hot store, keeps the provider-wide hold. The v0.3.1 phrase
+"the key's model only" is narrowed accordingly. No scorer, threshold, trust
+tier or attestation label changes.
 
 **Change log v0.3.1 (2026-11-13, Related: #2338 — several warm models per session):**
 FR-19 no longer relies on a session serving one model. A provider session may
@@ -2532,7 +2542,13 @@ Consequences of `failed`:
   provider learns its state from the status surface below.
 - Its unsettled earnings inside the affected window are held under SPEC-022
   R-16, whatever model string the buyer requested, because a credit records
-  the requested model, which may be an alias of the served one. Nothing is burned. A hold has no expiry and is released
+  the requested model, which may be an alias of the served one. For a
+  multi-model session the hold is narrowed by SPEC-022 R-16.2a: a credit
+  whose attempt was dispatched to a warm entry (`served_model_dispatch`) is
+  held only when its served model equals the key's model under the database
+  `lower()` (ASCII case folding only); any other credit of the provider in
+  the window, including a pool-model route's and one whose route snapshot is
+  no longer in the hot store, is held provider-wide. Nothing is burned. A hold has no expiry and is released
   only by FR-23 recovery (recovery hold) or by an operator (any hold).
 
 Visibility:

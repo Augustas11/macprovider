@@ -1,11 +1,21 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.10
+Version: v0.4.11
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.11
+
+Related: #2338. R-16.2a states the predicate as built: the route snapshot
+records `served_model_dispatch` beside the snapshot, set for every attempt
+dispatched to a warm-set entry and never for a pool-model route; the
+served-model comparison is the database `lower()`, which folds ASCII letters
+only; and a flagged credit whose route snapshot is no longer in the hot store
+falls back to the provider-wide R-16.2 match. No money-positive path, payout
+or trust tier changes.
 
 ### v0.4.10
 
@@ -2562,13 +2572,31 @@ the verified model the hold was opened for. Because a held credit is not
 payable, R-15.2 does not archive its evidence while the
 hold is `held`.
 
-R-16.2a. (v0.4.10) A credit whose attempt was dispatched with a
-`served_model_id` (SPEC-002-R011) matches a hold only when that served model,
-as recorded in the attempt's route snapshot `model_id`, equals the hold's
-`model_id` (case-folded). The served model is the warm entry the coordinator
+R-16.2a. (v0.4.10, amended v0.4.11) A credit whose attempt was dispatched
+with a `served_model_id` (SPEC-002-R011) matches a hold only when that served
+model, as recorded in the attempt's route snapshot `model_id`, equals the
+hold's `model_id`. The served model is the warm entry the coordinator
 selected, never the buyer's requested string, so alias routing cannot escape
-the hold. A credit without a recorded served model, and every credit of an
-attempt dispatched without `served_model_id`, keeps the R-16.2 predicate.
+the hold. As built:
+
+- The route snapshot row carries `served_model_dispatch` (0 or 1), stored
+  beside the snapshot and outside its digested preimage. It is 1 for every
+  attempt dispatched to a warm-set entry (the primary entry included) and 0
+  for every other attempt, including every pool-model route, which reads the
+  session and dispatches without `served_model_id`.
+- The predicate withholds a credit unless a route snapshot for the same
+  request, attempt and provider has `served_model_dispatch = 1` and a
+  `model_id` that differs from the hold's under the database `lower()`.
+  `lower()` folds ASCII letters only, so two ids that differ only in
+  non-ASCII case compare as different and the credit is not held by that
+  hold.
+- A credit whose route snapshot is no longer in the hot store (archived
+  before the hold opened) has no flag to read and keeps the provider-wide
+  R-16.2 match, as does every credit of an attempt dispatched without
+  `served_model_id`. R-15.2 does not archive the evidence of a credit a
+  `held` hold covers, so a flagged snapshot is not archived from under a
+  held hold.
+- The held-credit total a hold reports applies the same predicate.
 
 R-16.3. Credits already settled into a payout (`settled = 1`) are never
 withheld, so a hold can neither claw back a payout nor invalidate or strand a

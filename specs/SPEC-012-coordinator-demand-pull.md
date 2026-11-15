@@ -1,6 +1,6 @@
 # SPEC-012 — Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility
 
-**Version:** 0.4
+**Version:** 0.4.1
 **Status:** Draft (round-three audit failed; not ready to lock)
 **Owner:** @Augustas11
 **Authority:** The still-unique normative requirements in §4 own coordinator-initiated
@@ -17,6 +17,20 @@ MAJOR findings and a NOT READY TO LOCK verdict, so `CONFORMANCE.json` records
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
+
+**Change log v0.4.1 (2026-11-15, Related: #2338):** Conformance notes
+only; no requirement text is removed. The coordinator in this release has no
+demand-pull implementation: it never sends `set_model`, so it never sends
+`mode: "add"` (R-4.4.10) and runs no cold-wake (§4.5.3). A warm set grows only
+by the provider's boot `warm_models` and its operator control socket
+(SPEC-001-R017), and changes its primary only by an operator-pushed swap
+(SPEC-011). The L-3 and L-4 amendments describe the provider wire as built
+(SPEC-001-R016, SPEC-002-R011).
+
+> **Conformance note (v0.4.1).** §4 of this SPEC is specified but not
+> implemented by the coordinator: there is no `set_model` sender, no
+> `mode: "add"` and no cold-wake path. `CONFORMANCE.json` keeps this SPEC at
+> `pending-reconciliation`.
 
 **Change log v0.4 (2026-11-13, Related: #2338):** L-3 is lifted: a provider
 process may keep a set of warm models (SPEC-001-R016, coordinator
@@ -405,6 +419,10 @@ Note: `drain_timeout` is intentionally NOT in the failure
   coordinator MUST try `add` first and MAY fall back to `replace` after an
   `insufficient_memory` reject, subject to R-4.4.2. Events and the cooldown
   of R-4.4.2 and R-4.4.9 are per provider for both modes.
+
+  > **Conformance note (v0.4.1).** R-4.4.10 is specified, not built: the
+  > coordinator never sends `set_model`, with or without `mode`, so no
+  > provider receives an `add`.
 
 ### 4.5 Router: candidate filter + cold-supported wake path
 

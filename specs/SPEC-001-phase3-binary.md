@@ -1,6 +1,22 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.58 (2026-11-15, warm-set control frames, member catalog binding, promotion)
+**Version:** 1.9.59 (2026-11-15, warm-set wire, contended throughput and per-member reports as built)
+
+**Change log v1.9.59 (2026-11-15, Related: #2338):** §6.16 says what the
+code does. R016: the top-level fields that describe the primary are written
+from the primary's `warm_models` entry, field by field (listed), so they
+always agree, including the contended `throughput_tps_estimate`;
+`warm_models` is sent by every process that loads its model itself, also for
+one model, and never by an external loopback runtime or a shard group; a
+member outside the session's declared models is left out, and a primary
+outside them sends no `warm_models`. Per-member entries also carry
+`tool_selection_capabilities` and `vision_runtime_capabilities`. R017: the
+model liveness tracker does not track warm-set loads. The SPEC-012 R-4.4.10
+`add` the §6.16 introduction names is marked as not built. R018: the contended
+estimate formula as built, with its current limits after a promotion. R019:
+member self-checks run one at a time across the process; the SPEC-047
+admission binding and the native-MTP canary stay per session. No trust tier or
+attestation label changes.
 
 **Change log v1.9.58 (2026-11-15, Related: #2338):** §6.16 matches what is
 built. R016: a switch to a warm member promotes it (SPEC-011 R-3.10.3) and the
@@ -5453,7 +5469,8 @@ each served concurrently. `supported_models` (SPEC-010) keeps meaning
 willingness only; the warm set is what is loaded now and is always a subset of
 it. A provider with one warm model is a warm set of one and stays valid
 unchanged on the wire. The coordinator side is `SPEC-002-R011`; adding a
-model through demand-pull is SPEC-012 R-4.4.10; replacing a member by warm
+model through demand-pull is SPEC-012 R-4.4.10, which is specified but not
+built (the coordinator never sends `set_model`); replacing a member by warm
 swap is SPEC-011 §3.10.
 
 **SPEC-001-R016 — Warm set state and wire.** Each warm-set member has its own
@@ -5463,7 +5480,8 @@ runtime by model id, never by arrival order.
 
 *Primary model.* Exactly one warm member is the **primary**: the boot
 `model`, the target of the latest SPEC-011 swap of the primary, or the warm
-member the latest switch promoted (SPEC-011 R-3.10.3). The
+member the latest switch promoted (SPEC-011 R-3.10.3), and the top-level
+`model_id` is always its id. The
 existing single-model fields of `hello`, the v2 `auth_request`, `heartbeat`,
 `state_update.metrics_snapshot` and `/v1/status` (`model_id`, `model_hash`,
 `model_hash_algorithm`, `weights_manifest_sha256`,
@@ -5476,6 +5494,21 @@ provider status, the preflight answer and the idle prewarmer, to the promoted
 member. The KV disk tier (SPEC-037) stays with the runtime the process
 started, whether or not it is still the primary.
 
+*Primary entry and top level.* On a coordinator handshake and heartbeat the
+primary's `warm_models` entry and the top-level fields are built together:
+the entry takes the top-level values, and then each of `model_id`,
+`max_context_tokens`, `throughput_tps_estimate`, `model_hash`,
+`model_hash_algorithm`, `weights_manifest_sha256`,
+`weights_manifest_algorithm`, `model_params_b`, `cb_self_check` and
+`engine_profile` that the entry carries is written back to the top level. The
+two are therefore identical for every one of these fields; in particular the
+top-level `throughput_tps_estimate` is the primary's contended estimate
+(R018), which equals its solo rate when no sibling is busy. The primary
+entry's `slots_total` and `slots_free` are the top-level `slots_total` and
+`slots_free`, and its `state` is `loading` exactly when the top-level
+`loading` is true (a `loading` primary entry carries no `slots_free`). The
+coordinator rejects a frame where any of these disagree (SPEC-002-R011).
+
 *Member binding.* A further member loads from the signed catalog row and the
 locally verified artifact a switch to that model would load (SPEC-011), and
 its runtime verifies the loaded artifact against that hash exactly as it does
@@ -5484,12 +5517,20 @@ bound to a verified catalog artifact, a member without such a binding, or one
 that fails artifact verification, is refused and never becomes `warm`. An
 unbound primary's members load by model id, as the primary does.
 
-*`warm_models`.* A provider that implements this section MUST send
-`warm_models` on the v2 `auth_request` initial stage, on the legacy `hello`,
-and on every `heartbeat`, also while its warm set has one member, because the
-field is what tells the coordinator it may add models (SPEC-012 R-4.4.10).
-It is an array with one entry per member, the primary included and listed
-first:
+*`warm_models`.* A provider process that loads its primary model itself (an
+MLX runtime in this process) has a warm set and MUST send `warm_models` on
+the v2 `auth_request` initial stage, on the legacy `hello`, and on every
+`heartbeat`, also while its warm set has one member. A process whose model is
+served by an external loopback runtime (SPEC-046) or that is a shard-group
+head or member has no warm set and never sends the field; such a process
+refuses a `warm_models` configuration at start. Only models in the
+session's declared `supported_models` are listed (for a legacy `hello`, which
+declares none, only the top-level model): a further member outside them is
+left out, and when the primary itself is outside them (a warm swap to a model
+the session never declared) the frame carries no `warm_models` at all, which
+the coordinator reads as a warm set of one built from the top-level fields.
+It is an array with one entry per listed member, the primary included and
+listed first:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -5503,12 +5544,17 @@ first:
 | `model_hash`, `model_hash_algorithm`, `weights_manifest_sha256`, `weights_manifest_algorithm` | string | This member's identity, with the SPEC-010 §3.7 semantics. |
 | `model_params_b` | number | As the top-level field. |
 | `cb_self_check`, `engine_profile` | object | This member's values, same schema as the top-level fields. |
+| `tool_selection_capabilities`, `vision_runtime_capabilities` | array | Further members only: this member's own lists, same schema as the top-level lists (R019). |
 
 A `loading` or `evicting` entry carries no `slots_free` (absent means zero).
 `supported_models` MUST contain every entry's `model_id`. The array is at most
-`supported_models` long and each entry is bounded like its top-level
-counterpart. An entry changes state only through R017 (load, evict) or SPEC-011
-/ SPEC-012 (swap, add); the next heartbeat reports the change.
+`supported_models` long and each entry is bounded as SPEC-002-R011 states.
+A further member's identity, context, throughput and per-member objects are
+absent until its runtime has published them. Its `engine_profile` carries its
+own continuous-batching and native-MTP state and the chip and memory classes
+of the primary's profile, and is sent only when the primary sends one. An entry changes state only through R017 (load, evict) or SPEC-011
+(swap; the SPEC-012 `add` is not built); the next heartbeat reports the
+change.
 
 *Request routing.* `preflight` and `inference_request` (§6.6) gain an
 optional `served_model_id`; an HTTP-forwarded dispatch carries the same value
@@ -5550,7 +5596,10 @@ every member, and the runtime's existing reserve. Process-global MLX state
 (the buffer cache limit, cache clears, the wired limit, settings read once at
 Metal device creation, and the model liveness tracker) has one owner per
 process; a runtime MUST NOT set or reset it for itself, and a cache clear by
-one runtime MUST NOT free memory another runtime's rows hold.
+one runtime MUST NOT free memory another runtime's rows hold. The model
+liveness tracker (SPEC-025 §5.2) is fed by buyer inference on any member; it
+does not track a warm-set load, so a member's load neither counts as
+inference nor as a stall.
 
 - *Row admission.* A row of any member is admitted only if its KV growth to
   the request's token bound fits the shared budget at admission. A row that
@@ -5616,10 +5665,30 @@ sibling busy.
   member's prefill MUST be chunked so that decode steps of busy members run
   between chunks. Chunk size and the share of GPU time owed to decode are
   implementation constants fixed by measurement, not by this SPEC.
-- *Advertised capacity.* Each member's `throughput_tps_estimate` MUST reflect
-  contention: while sibling members are busy it is the decode rate the member
-  achieves under that load (measured, or its solo rate scaled by the measured
-  share), never its solo rate.
+- *Advertised capacity.* Each entry's `throughput_tps_estimate` is the
+  member's solo rate times the GPU share it measurably gets while sibling
+  members are busy (rounded to 0.1 token/s when scaled), never above the
+  solo rate:
+  - *Window.* The share is read from the process's GPU turn counters (GPU
+    time each member held and waited for) over the last completed window of
+    at least 5 s. Before the first window completes the solo rate stands.
+  - *No contention.* With a warm set of one, or when no other member held
+    the GPU during the window, the estimate is the solo rate unchanged.
+  - *Busy member.* A member that held or waited for the GPU in the window
+    gets `held / (held + waited)`.
+  - *Idle member.* A member that neither held nor waited gets the GPU time
+    its busy siblings left, `1 - (siblings' held time / window)`, but never
+    less than an even split with them, `1 / (busy siblings + 1)`.
+  - *Solo rate.* The primary's solo rate is the top-level estimate from the
+    start-up throughput probe the process runs for its boot model. A further member's is a start-up probe run once
+    when it loads, before it serves; when a sibling was busy during that
+    probe, the measured rate is divided by the share the probe held. A
+    member loaded in autotune-candidate mode runs no probe and reports 0.
+  - *Current limits.* After a promotion (SPEC-011 R-3.10.3) the top-level
+    `throughput_tps_estimate`, and so the new primary's entry, keeps the
+    start-up estimate measured for the original boot model, scaled by the new
+    primary's share; and the demoted boot model's entry reports 0, because no
+    member probe ran for it. A promotion re-measures neither.
 
 **SPEC-001-R019 — Per-member policy, self-check and settlement.** Signed
 continuous-batching admission (SPEC-038), signed native-MTP admission
@@ -5630,6 +5699,23 @@ or native MTP off for a warm member, or change its admitted tuple. A receipt
 (SPEC-015) and its usage bind the `model_id` and `model_hash` of the member
 that served the request, read from that member's own hash-tracking state
 (SPEC-015 §M.2.4); a request never settles against another member.
+
+- *Per-member report.* A further member's `warm_models` entry carries its own
+  `tool_selection_capabilities` (always, by the rule the top-level list
+  follows for the primary), its own `vision_runtime_capabilities` (one
+  object, only when the member's runtime serves a qualified vision profile),
+  its own `cb_self_check`, its own `engine_profile` and its own hash fields.
+  The primary's values are the top-level fields (R016).
+- *One self-check at a time.* The continuous-batching self-checks of all
+  members, the primary's included, take one process-wide turn, first come
+  first served, so no two checks share the GPU or the self-check journal. A
+  further member's check acts only while every member is `warm` and no
+  warm-set load, eviction or swap runs; a check never holds up a load.
+- *Per-session coordinator state.* The SPEC-047 session-to-candidate model
+  admission binding and the SPEC-031-R033 native-MTP canary state belong to
+  the session and describe the primary only. The coordinator clears both on
+  a further member's entry (SPEC-002-R011), so a further member fails closed
+  wherever either is required.
 
 ---
 
