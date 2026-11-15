@@ -13,7 +13,8 @@ final class WarmModelRoutingTests: XCTestCase {
     private final class Harness: @unchecked Sendable {
         let table = WarmModelTable<WarmFakeRuntime>()
         let primary = WarmFakeRuntime(memberID: 7_101, modelID: "model-a", hash: String(repeating: "a", count: 64))
-        let member = WarmFakeRuntime(memberID: 7_102, modelID: "model-b", hash: String(repeating: "b", count: 64))
+        // The member reports a different usage, so a receipt shows whose it binds.
+        let member = WarmFakeRuntime(memberID: 7_102, modelID: "model-b", hash: String(repeating: "b", count: 64), completionTokens: 2)
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -176,13 +177,37 @@ final class WarmModelRoutingTests: XCTestCase {
         let harness = try Harness()
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let relay = harness.relay(receiptBuilder: ReceiptBuilder(keyStore: WarmFixedReceiptKeyStore(key: key)))
-        for (model, hash) in [("model-b", String(repeating: "b", count: 64)), ("model-a", String(repeating: "a", count: 64))] {
+        for (model, hash, tokens) in [("model-b", String(repeating: "b", count: 64), 2), ("model-a", String(repeating: "a", count: 64), 1)] {
             try await relay.handleInferenceRequest(inference("h-\(model)", model: model, served: model))
             let end = try await endFrame(harness, "h-\(model)")
-            let receipt = try XCTUnwrap(end["receipt"] as? String)
-            let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(receipt.split(separator: ".")[0])))
-            let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+            let tuple = try receiptTuple(end["receipt"] as? String)
             XCTAssertEqual(tuple["model_hash"] as? String, hash, model)
+            XCTAssertEqual(tuple["model_id"] as? String, model, model)
+            XCTAssertEqual(tuple["tokens_out"] as? Int, tokens, model)
+            XCTAssertEqual((end["usage"] as? [String: Any])?["completion_tokens"] as? Int, tokens, model)
+        }
+    }
+
+    /// SPEC-001-R019: a request routed before a promotion settles against
+    /// the member that served it, whichever member is primary when it ends.
+    func testRelayRequestInFlightAcrossAPromotionSettlesAgainstItsMember() async throws {
+        for (model, runtime) in [("model-b", \Harness.member), ("model-a", \Harness.primary)] {
+            let harness = try Harness()
+            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+            let relay = harness.relay(receiptBuilder: ReceiptBuilder(keyStore: WarmFixedReceiptKeyStore(key: key)))
+            let serving = harness[keyPath: runtime]
+            try await relay.handleInferenceRequest(inference("p-\(model)", model: model, content: "hold", served: model))
+            try await warmEventually { await serving.entered }
+            _ = try harness.table.promote(modelID: "model-b")
+            XCTAssertEqual(harness.table.entry(modelID: "model-b")?.primary, true)
+            await serving.releaseHold()
+            let end = try await endFrame(harness, "p-\(model)")
+            XCTAssertEqual(end["status"] as? String, "complete", model)
+            let tuple = try receiptTuple(end["receipt"] as? String)
+            XCTAssertEqual(tuple["model_id"] as? String, model, model)
+            XCTAssertEqual(tuple["model_hash"] as? String, String(repeating: model == "model-b" ? "b" : "a", count: 64), model)
+            XCTAssertEqual(tuple["tokens_out"] as? Int, model == "model-b" ? 2 : 1, model)
+            try await warmEventually { harness.leases(model) == 0 }
         }
     }
 
@@ -247,13 +272,46 @@ final class WarmModelRoutingTests: XCTestCase {
             for (model, hash) in [("model-b", String(repeating: "b", count: 64)), ("model-a", String(repeating: "a", count: 64))] {
                 let response = try await warmPost(port: port, model: model, headers: [WarmModelRoute.servedModelHeaderName: model])
                 XCTAssertEqual(response.status, 200, response.body)
-                let receipt = try XCTUnwrap(response.receipt, model)
-                let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(receipt.split(separator: ".")[0])))
-                let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+                let tuple = try receiptTuple(response.receipt)
                 XCTAssertEqual(tuple["model_hash"] as? String, hash, model)
                 XCTAssertEqual(tuple["model_id"] as? String, model, model)
+                XCTAssertEqual(tuple["tokens_out"] as? Int, model == "model-b" ? 2 : 1, model)
+                let usage = (try? JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])?["usage"]
+                XCTAssertEqual((usage as? [String: Any])?["completion_tokens"] as? Int, model == "model-b" ? 2 : 1, model)
             }
         }
+    }
+
+    /// SPEC-001-R019 over HTTP: a request in flight across a promotion
+    /// settles against the member that served it.
+    func testHTTPRequestInFlightAcrossAPromotionSettlesAgainstItsMember() async throws {
+        for (model, runtime) in [("model-b", \Harness.member), ("model-a", \Harness.primary)] {
+            let harness = try Harness()
+            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+            let builder = ReceiptBuilder(keyStore: WarmFixedReceiptKeyStore(key: key))
+            let serving = harness[keyPath: runtime]
+            try await withWarmHTTPServer(harness, receiptBuilder: builder) { port in
+                let pending = Task {
+                    try await warmPost(port: port, model: model, content: "hold", headers: [WarmModelRoute.servedModelHeaderName: model])
+                }
+                try await warmEventually { await serving.entered }
+                _ = try harness.table.promote(modelID: "model-b")
+                await serving.releaseHold()
+                let response = try await pending.value
+                XCTAssertEqual(response.status, 200, response.body)
+                let tuple = try receiptTuple(response.receipt)
+                XCTAssertEqual(tuple["model_id"] as? String, model, model)
+                XCTAssertEqual(tuple["model_hash"] as? String, String(repeating: model == "model-b" ? "b" : "a", count: 64), model)
+                XCTAssertEqual(tuple["tokens_out"] as? Int, model == "model-b" ? 2 : 1, model)
+            }
+            try await warmEventually { harness.leases(model) == 0 }
+        }
+    }
+
+    private func receiptTuple(_ receipt: String?, file: StaticString = #filePath, line: UInt = #line) throws -> [String: Any] {
+        let envelope = try XCTUnwrap(receipt, file: file, line: line)
+        let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(envelope.split(separator: ".")[0])), file: file, line: line)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any], file: file, line: line)
     }
 
     private func withWarmHTTPServer(
@@ -305,11 +363,13 @@ actor WarmFakeRuntime: ModelRuntimeServing, WarmModelRuntime {
     private(set) var entered = false
     private(set) var unloaded = false
     private var holdReleased = false
+    private let completionTokens: Int
 
-    init(memberID: Int, modelID: String, hash: String) {
+    init(memberID: Int, modelID: String, hash: String, completionTokens: Int = 1) {
         self.memoryBudgetMemberID = memberID
         self.modelID = modelID
         self.hash = hash
+        self.completionTokens = completionTokens
     }
 
     var loadedModelHash: String? { hash }
@@ -372,7 +432,9 @@ actor WarmFakeRuntime: ModelRuntimeServing, WarmModelRuntime {
         default:
             break
         }
-        return CompletionResult(content: "answer", finishReason: "stop", promptTokens: 3, completionTokens: 1, settlementDisposition: .eligibleOwner)
+        return CompletionResult(
+            content: "answer", finishReason: "stop", promptTokens: 3, completionTokens: completionTokens,
+            settlementDisposition: .eligibleOwner)
     }
 }
 
