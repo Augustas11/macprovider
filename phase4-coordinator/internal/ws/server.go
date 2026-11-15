@@ -3801,6 +3801,11 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
 		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
 	}
+	entry.WarmModels = s.warmModelsForPool(hello.WarmModels, func(modelID string) string {
+		member := hello
+		member.ModelID = modelID
+		return s.expectedAdmissionModelHashWithCatalog(member, catalogAdmissionMode, admissionCurrent, admissionCompatible)
+	})
 	if s.proofOfWeightsConfig().RequireAutotuneHelloGate {
 		entry.AdmissionCeilingExcluded = s.admissionCeilingRouteVerdict(*entry).excluded
 		entry.AdmissionSandboxed = admissionSandboxed
@@ -6756,6 +6761,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
+	warmModels := s.warmModelsForPool(hb.WarmModels, func(modelID string) string {
+		return s.expectedProviderModelHash(providerID, assignedID, modelID)
+	})
 	// SPEC-047-R006(a)/(d): the registry mutation and the drift evaluation of
 	// the bound candidate are one linearization point under the provider's
 	// section (section → registry), so no decision or binding refresh
@@ -6798,6 +6806,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
 			SafetyTelemetry:           hb.SafetyTelemetry,
 			ConversationCache:         hb.ConversationCache,
+			WarmModels:                warmModels,
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {

@@ -246,3 +246,25 @@ func validateWarmModelsSupported(models []pool.WarmModel, supported []string, to
 	}
 	return nil
 }
+
+// warmModelsForPool readies a validated warm set for the registry: each
+// further member's seats are clamped by the operator ceiling like the
+// top-level ones (issue #764), and each carries the catalog hash expected for
+// its own model. The primary entry is the session's top-level fields.
+func (s *Server) warmModelsForPool(models []pool.WarmModel, expectedHash func(modelID string) string) []pool.WarmModel {
+	if models == nil {
+		return nil
+	}
+	out := append([]pool.WarmModel(nil), models...)
+	ceiling := s.maxConcurrencyCeiling()
+	for i := range out {
+		if out[i].Primary {
+			continue
+		}
+		capacity := pool.ClampCapacity(out[i].SlotsTotal, out[i].SlotsTotal, out[i].SlotsFree, ceiling)
+		out[i].SlotsTotal = capacity.SlotsTotal
+		out[i].SlotsFree = capacity.SlotsFree
+		out[i].ExpectedModelHash = expectedHash(out[i].ModelID)
+	}
+	return out
+}

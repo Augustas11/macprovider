@@ -478,6 +478,15 @@ type Provider struct {
 
 	NativeMTPCanary *NativeMTPCanaryDiagnostics `json:"native_mtp_canary,omitempty"`
 
+	// WarmModels is the session's SPEC-001-R016 warm set, primary first, as
+	// the latest handshake or heartbeat reported it (SPEC-002-R011); nil for a
+	// provider without one. The top-level model fields describe the primary.
+	WarmModels []WarmModel `json:"-"`
+	// ServedModelID is set only on a per-entry view (EntrySnapshot,
+	// ResolveEntry) of a session with a warm set: the member that view
+	// describes and that a dispatch to it names as served_model_id.
+	ServedModelID string `json:"-"`
+
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
@@ -1007,8 +1016,17 @@ func (p Provider) IsWSTunneled() bool {
 // #274). AssignedID is a coordinator-issued UUID and similarly may
 // not contain "/"; if the AssignedID format ever changes, this
 // docstring AND the key encoding must be revisited.
+//
+// A per-entry view of a warm-set session (SPEC-002-R011) appends
+// `#<case-folded ServedModelID>`, so each (provider, model) entry is its own
+// routing candidate. The provider-ID grammar and the UUID AssignedID both
+// exclude "#", so the first "#" always starts the model.
 func (p Provider) SortKey() string {
-	return p.ProviderID + "/" + p.AssignedID
+	key := p.ProviderID + "/" + p.AssignedID
+	if p.ServedModelID != "" {
+		key += "#" + warmModelKey(p.ServedModelID)
+	}
+	return key
 }
 
 type Registry struct {
@@ -1402,6 +1420,9 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 			p.InferencePath = InferencePathWSTunneled
 		}
 	}
+	// SPEC-002-R011: the handshake's warm set, each further member verified
+	// for its own model when the session's own model was.
+	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, p.HashStatus != "")
 	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
 	// session's authority from its first heartbeat on, not from the first
 	// heartbeat that happens to verify.
@@ -1995,6 +2016,10 @@ func (r *Registry) ConsumeForwardedSlotDetailed(providerID, assignedID string) (
 	if p == nil || p.AssignedID != assignedID {
 		return false, false
 	}
+	return r.consumeForwardedSlotLocked(p)
+}
+
+func (r *Registry) consumeForwardedSlotLocked(p *Provider) (ok, unconfirmed bool) {
 	unconfirmed = p.forwardedInFlight > 0 || p.awaitingReadyOccupancy
 	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
@@ -2046,7 +2071,14 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
-	if p == nil || p.AssignedID != assignedID || p.SlotsTotal <= 0 {
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	return r.restoreForwardedSlotLocked(p)
+}
+
+func (r *Registry) restoreForwardedSlotLocked(p *Provider) bool {
+	if p.SlotsTotal <= 0 {
 		return false
 	}
 	if p.forwardedInFlight > 0 {
@@ -2099,6 +2131,10 @@ func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string, refusedS
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	return r.markForwardedSlotFullLocked(p, refusedSeatConsumed)
+}
+
+func (r *Registry) markForwardedSlotFullLocked(p *Provider, refusedSeatConsumed bool) bool {
 	thermalHold := p.capacitySafetyHold && !p.queueFullHold
 	if refusedSeatConsumed {
 		if p.forwardedInFlight > 0 {
@@ -3207,7 +3243,11 @@ type HeartbeatUpdate struct {
 	HardwareCapacity    *ProviderHardwareCapacity
 	SafetyTelemetry     *ProviderSafetyTelemetry
 	ConversationCache   *ConversationCacheTelemetry
-	At                  time.Time
+	// WarmModels is the heartbeat's SPEC-001-R016 warm set, already validated
+	// (nil: the provider reports none). Each further member carries its own
+	// ExpectedModelHash.
+	WarmModels []WarmModel
+	At         time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -3297,6 +3337,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorIdentity := sessionIdentityFingerprint(p)
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
+	warmInFlight := warmInFlightLocked(p)
+	promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
 	p.LastHeartbeatAt = hb.At
 	p.recordConversationCache(hb.ConversationCache, hb.At)
 	if hb.ConversationCache.Valid() {
@@ -3378,6 +3420,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
 	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
+	r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true)
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
 	}
@@ -3808,16 +3851,21 @@ func (r *Registry) Snapshot() []Provider {
 	defer r.mu.RUnlock()
 	out := make([]Provider, 0, len(r.providers))
 	for _, p := range r.providers {
-		cp := *p
-		cp.conn = nil
-		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
-		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
-		cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
-		cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
-		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
-		out = append(out, cp)
+		out = append(out, snapshotProviderLocked(p))
 	}
 	return out
+}
+
+func snapshotProviderLocked(p *Provider) Provider {
+	cp := *p
+	cp.conn = nil
+	cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
+	cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
+	cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
+	cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
+	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
+	cp.WarmModels = cloneWarmModels(p.WarmModels)
+	return cp
 }
 
 type RegistryOption func(*Registry)

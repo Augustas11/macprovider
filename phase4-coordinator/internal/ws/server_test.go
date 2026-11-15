@@ -5028,6 +5028,10 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 		p, ok := h.Registry.Resolve("m4-anon", assignedID)
 		return ok && p.State == pool.StateBusy && p.SlotsFree == 0
 	})
+	// The full primary leaves its warm sibling routable.
+	if member, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b"); !ok || member.State != pool.StateReady || member.SlotsFree != 2 || member.ServedModelID != "model-b" {
+		t.Fatalf("model-b entry = %+v ok=%v", member, ok)
+	}
 
 	bad := heartbeat()
 	bad["warm_models"] = []any{warmModelsPrimaryEntry(), map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1}}
