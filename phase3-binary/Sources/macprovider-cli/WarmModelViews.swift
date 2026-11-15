@@ -53,6 +53,9 @@ struct WarmModelMemberView: Sendable, Equatable {
     let inFlight: Int
     /// Nil until the member's runtime has published it.
     let info: WarmModelMemberInfo?
+    /// The member's GPU turn participant (its budget id), for its
+    /// contended `throughput_tps_estimate` (SPEC-001-R018).
+    var memberID: Int? = nil
 
     /// Rows the member may admit now; nil unless `warm` (absent on the wire
     /// means zero).

@@ -3728,6 +3728,19 @@ struct ServeCommand: AsyncParsableCommand {
                         emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
                         switchTargets: switchTargets, nativeMTP: nativeMTP)
                     let memberID = runtime.memoryBudgetMemberID
+                    // SPEC-001-R018: the member's solo rate from the probe the
+                    // boot model runs at start, before it serves; a sibling
+                    // busy during the probe is divided out by the GPU share
+                    // the probe held.
+                    if !autotuneCandidate {
+                        let before = GPUTurnArbiter.shared.snapshot().counters[memberID] ?? GPUTurnParticipantCounters()
+                        let measured = await runtime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
+                        let after = GPUTurnArbiter.shared.snapshot().counters[memberID] ?? GPUTurnParticipantCounters()
+                        memberServices.setSoloThroughput(memberID: memberID, WarmSetContentionMeter.soloRate(
+                            measured: measured,
+                            busyNanoseconds: after.busyNanoseconds &- before.busyNanoseconds,
+                            waitNanoseconds: after.waitNanoseconds &- before.waitNanoseconds))
+                    }
                     let driver = await WarmSetMemberServices.configureMemberSelfCheck(
                         runtime: runtime, plan: memberPlan, serialOnlyRoute: memberSerialOnly,
                         store: memberStore, provisional: memberProvisional,
@@ -3764,6 +3777,7 @@ struct ServeCommand: AsyncParsableCommand {
                     let snapshot = await runtime.currentSnapshot()
                     return WarmModelMemberInfo(
                         maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows,
+                        throughputTPSEstimate: memberServices.soloThroughput(memberID: runtime.memoryBudgetMemberID),
                         modelHash: await runtime.loadedModelHash,
                         modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
                         weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256,

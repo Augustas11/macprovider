@@ -19,6 +19,7 @@ extension WarmSetBoot: WarmSetMemberGate {}
 final class WarmSetMemberServices: @unchecked Sendable {
     private let lock = NSLock()
     private var tasks: [Int: [Task<Void, Never>]] = [:]
+    private var soloThroughput: [Int: Double] = [:]
     private weak var gateStorage: (any WarmSetMemberGate)?
 
     /// Set once the warm set exists; until then no member work may act.
@@ -41,6 +42,17 @@ final class WarmSetMemberServices: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// SPEC-001-R018: the member's solo decode rate, measured once when its
+    /// runtime is built; the wire scales it by the measured contention.
+    func setSoloThroughput(memberID: Int, _ tps: Double) {
+        lock.lock(); soloThroughput[memberID] = tps; lock.unlock()
+    }
+
+    func soloThroughput(memberID: Int) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return soloThroughput[memberID] ?? 0
+    }
+
     /// Members with running work.
     func memberIDs() -> Set<Int> {
         lock.lock(); defer { lock.unlock() }
@@ -57,6 +69,7 @@ final class WarmSetMemberServices: @unchecked Sendable {
 
     private func take(memberID: Int) -> [Task<Void, Never>] {
         lock.lock(); defer { lock.unlock() }
+        soloThroughput[memberID] = nil
         return tasks.removeValue(forKey: memberID) ?? []
     }
 }

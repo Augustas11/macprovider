@@ -335,7 +335,7 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         (members.filter(\.primary) + members.filter { !$0.primary }).map {
             WarmModelMemberView(
                 modelID: $0.modelID, key: $0.key, state: $0.state, primary: $0.primary, pinned: $0.pinned,
-                inFlight: $0.leases, info: $0.info)
+                inFlight: $0.leases, info: $0.info, memberID: $0.memberID)
         }
     }
 

@@ -24,12 +24,15 @@ enum WarmModelsWire {
     /// fields describe the primary); `primarySlotsTotal` and
     /// `primarySlotsFree` are the primary's rows, as the top-level
     /// `slots_total` / `slots_free` report them. A `loading` or `evicting`
-    /// entry carries no `slots_free`.
+    /// entry carries no `slots_free`. Each entry's `throughput_tps_estimate`
+    /// is its member's rate under the measured `contention` (SPEC-001-R018);
+    /// the top-level estimate stays the primary's own.
     static func entries(
         primaryFields: [String: Any],
         primarySlotsTotal: Int,
         primarySlotsFree: Int,
-        views: [WarmModelMemberView]
+        views: [WarmModelMemberView],
+        contention: WarmSetContentionWindow? = WarmSetContentionMeter.shared.window()
     ) -> [[String: Any]] {
         let primaryLoading = primaryFields["loading"] as? Bool == true
         var primary: [String: Any] = [
@@ -46,8 +49,19 @@ enum WarmModelsWire {
                 primary[key] = value
             }
         }
+        let members = Set(views.compactMap(\.memberID))
+        if let contention, let solo = primary["throughput_tps_estimate"] as? Double {
+            primary["throughput_tps_estimate"] = contention.estimate(
+                solo: solo, memberID: views.first(where: \.primary)?.memberID, members: members)
+        }
         let primaryEngineProfile = primaryFields["engine_profile"] as? [String: Any]
-        return [primary] + views.filter { !$0.primary }.map { secondaryEntry($0, primaryEngineProfile: primaryEngineProfile) }
+        return [primary] + views.filter { !$0.primary }.map { view in
+            var entry = secondaryEntry(view, primaryEngineProfile: primaryEngineProfile)
+            if let contention, let solo = entry["throughput_tps_estimate"] as? Double {
+                entry["throughput_tps_estimate"] = contention.estimate(solo: solo, memberID: view.memberID, members: members)
+            }
+            return entry
+        }
     }
 
     /// `primaryEngineProfile` is the primary's `engine_profile`: a member's
