@@ -13355,7 +13355,15 @@
         "phase4-coordinator/internal/billing/earnings_rollup_test.go:TestProviderEarningsRollupMatchesViewOnSeededData",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHoldWriteFailureDefersFailure",
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor",
-        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldsListEveryHeldHold"
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldsListEveryHeldHold",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneRouteSnapshotFlagIsZero",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsOnlyTheServedModel",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldOtherModelSymmetric",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchColumnMigrationIsAdditiveAndIdempotent",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchSurvivesJournalOutsideDigest",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMultiModelNeedsTwoWarmVerifiedMembers",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion"
       ],
       "journeys": [],
       "evidence": [],
@@ -13363,7 +13371,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-022 v0.4.11 (#2338): R-16.2a served-model scoping of holds for credits whose route snapshot carries served_model_dispatch is implemented and unit-tested."
+        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-022 v0.4.11 (#2338): R-16.2a served-model scoping of holds for credits whose route snapshot carries served_model_dispatch is implemented and unit-tested. SPEC-022 v0.4.13 (#2338): served_model_dispatch is 1 only for a multi-model session (at least two warm, hash_verified members); a session whose second member is loading or unverified records 0 and keeps the provider-wide match."
       }
     },
     {
@@ -15977,7 +15985,23 @@
         "phase4-coordinator/internal/buyer/warm_entry_not_loaded_fault_test.go:TestWarmEntryRepeatedModelNotLoadedIsABreakerFault",
         "phase4-coordinator/internal/ws/warm_models_heartbeat_test.go:TestHeartbeatMalformedWarmModelsKeepsPreviousSetAndAppliesTheRest",
         "phase4-coordinator/internal/explorer/handlers_test.go:TestModelsAvailableSkipsFailedHashAndOutOfService",
-        "phase4-coordinator/internal/billing/credits_by_model_unattributed_test.go:TestPayableTotalsNullModelIsUnattributed"
+        "phase4-coordinator/internal/billing/credits_by_model_unattributed_test.go:TestPayableTotalsNullModelIsUnattributed",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmShrinkToLegacyIgnoresDepartedMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmPromotionOnlyFromAFurtherMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLegacyModelDemotedToFurtherMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLegacyGrowthKeepsPrimary",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringModelSpellingKeepsOneKeyAndDueTime",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringProbeInFlightSurvivesSpellingChange",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringRestoreFoldsStoredSpellings",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmEntryNotLoadedSingleRaceStaysOneStrike",
+        "phase4-coordinator/internal/buyer/warm_entry_not_loaded_fault_test.go:TestWarmEntryNotLoadedCycleThroughLoadingIsABreakerFault",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMultiModelNeedsTwoWarmVerifiedMembers",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel",
+        "phase4-coordinator/internal/ws/server_test.go:TestHelloWarmModelsHandshake",
+        "phase4-coordinator/internal/ws/server_test.go:TestAuthV2MalformedWarmModelsProceedsAsLegacy",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmKeptListDroppedAfterThreeRejections",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionSurvivesRestartAsMember"
       ],
       "journeys": [],
       "evidence": [],
@@ -15985,7 +16009,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2338",
-        "rationale": "SPEC-002 v1.6.39 (#2338) multi-model providers (a warm set of one is a legacy session; malformed heartbeat warm_models keeps the previous set; per-member identity pin and refusal hold; repeated model_not_loaded is a breaker fault): strict warm_models decoding, registration, heartbeat, per-entry views, slot accounting, routing, model_not_loaded failover, pool and explorer views and route snapshots per (provider, model), provider earnings per model. Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+        "rationale": "SPEC-002 v1.6.40 (#2338) multi-model providers (a session is multi-model only with at least two warm, hash_verified members, otherwise legacy; a departed member never resolves to the legacy session and a demoted legacy model keeps its open dispatches; a malformed handshake warm_models is dropped and the session proceeds as legacy; the heartbeat warning is rate-limited and a kept set is dropped after three rejections; model_not_loaded strikes survive state changes; scoring keys fold the model id; malformed heartbeat warm_models keeps the previous set; per-member identity pin and refusal hold; repeated model_not_loaded is a breaker fault): strict warm_models decoding, registration, heartbeat, per-entry views, slot accounting, routing, model_not_loaded failover, pool and explorer views and route snapshots per (provider, model), provider earnings per model. Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     }
   ]
