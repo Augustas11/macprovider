@@ -8794,6 +8794,159 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(hello["catalog_release_id"] as? String, "release-a")
     }
 
+    // MARK: - Native-MTP admission delivered by a catalog release
+
+    /// The static-feed origin serving one release's signed admission set,
+    /// counting every member request.
+    private final class NativeMTPAdmissionOriginStub: @unchecked Sendable {
+        static let keyID = "streamvc-autotune-static-test"
+        static let baseURL = URL(string: "https://feed.example.test")!
+        let key = Curve25519.Signing.PrivateKey()
+        private let members: [String: Data]
+        private let lock = NSLock()
+        private var requests = 0
+
+        init(releaseID: String, modelID: String, artifactSHA256: String) throws {
+            let sidecar = Data(
+                #"{"entries":[{"artifact_hash":"\#(artifactSHA256)","model_key":"\#(modelID)"}],"release_id":"\#(releaseID)","signer_key_id":"\#(Self.keyID)"}"#.utf8
+            )
+            let signature = try JSONSerialization.data(withJSONObject: [
+                "alg": "ed25519",
+                "key_id": Self.keyID,
+                "signature": try key.signature(for: sidecar).base64EncodedString(),
+            ])
+            members = [
+                "native-mtp-admission": sidecar,
+                "native-mtp-admission.sig": signature,
+                "native-mtp-artifact-manifest": Data(#"{"manifest":1}"#.utf8),
+                "native-mtp-selftest-bank": Data(#"{"bank":1}"#.utf8),
+                "native-mtp-selftest-bank.sig": Data(#"{"alg":"ed25519"}"#.utf8),
+            ]
+        }
+
+        var trustedPublicKeys: [String: String] {
+            [Self.keyID: key.publicKey.rawRepresentation.base64EncodedString()]
+        }
+
+        var keyring: NativeMTPAdmissionSidecar.TrustedKeyring {
+            NativeMTPAdmissionSidecar.TrustedKeyring(publicKeysByKeyID: trustedPublicKeys, requiredKeyID: Self.keyID)
+        }
+
+        var fetcher: NativeMTPAdmissionFeed.Fetcher {
+            { url, _ in
+                self.lock.lock()
+                self.requests += 1
+                self.lock.unlock()
+                guard let body = self.members[url.lastPathComponent] else {
+                    return NativeMTPAdmissionFeed.FetchResponse(statusCode: 404, body: Data())
+                }
+                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: body)
+            }
+        }
+
+        var requestCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return requests
+        }
+    }
+
+    /// Gap demonstration: release-b newly admits native MTP for the loaded
+    /// model and reaches a running provider through the catalog refresh. The
+    /// provider sees the release, but nothing fetches its admission set and
+    /// nothing restarts, so native MTP stays off until an unrelated process
+    /// start, which would admit it.
+    func testCatalogReleaseAdmittingNativeMTPIsNotPickedUpByRunningProvider() async throws {
+        let modelSHA256 = String(repeating: "d", count: 64)
+        let origin = try NativeMTPAdmissionOriginStub(releaseID: "release-b", modelID: "model-a", artifactSHA256: modelSHA256)
+        let admissionRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-admission-gap-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: admissionRoot) }
+        func admission(release: String) -> SmallMRoute.NativeMTPAdmission {
+            SmallMRoute.nativeMTPAdmission(
+                sidecarURL: NativeMTPAdmissionFeed.releaseDirectory(root: admissionRoot, releaseID: release)
+                    .appendingPathComponent(NativeMTPAdmissionFeed.sidecarFileName),
+                modelID: "model-a",
+                modelRevision: modelSHA256,
+                trustedKeyring: origin.keyring
+            )
+        }
+        // This process started on release-a, which admitted nothing.
+        XCTAssertEqual(admission(release: "release-a"), .none)
+
+        let recorder = CoordinatorFrameRecorder()
+        let refreshCalls = ReconnectAttemptRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "model-hash",
+            catalogEnvelopeRefresher: {
+                _ = await refreshCalls.recordAttempt()
+                return Self.refreshedCatalogEnvelope()
+            }
+        )
+        defer { Task { await client.stop() } }
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "catalog_release_id": "release-b",
+            "catalog_candidate_sha256": String(repeating: "c", count: 64),
+        ])
+        try await Self.waitUntil { await refreshCalls.currentCount() == 1 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // The running provider saw release-b ...
+        let hello = await client.helloMessage()
+        XCTAssertEqual(hello["catalog_release_id"] as? String, "release-b")
+        // ... but its admission set was never fetched ...
+        XCTAssertEqual(origin.requestCount, 0)
+        XCTAssertEqual(admission(release: "release-b"), .none)
+        // ... and the provider neither drains nor restarts to load the drafter.
+        let frames = await recorder.frames
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "state_update" && $0["state"] as? String == "draining" })
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "drain_status" })
+        let snapshot = await status.snapshot()
+        XCTAssertNotEqual(snapshot.status, .draining)
+
+        // A process start on release-b fetches the set and admits the model:
+        // the admission only waits for the next start.
+        let fetched = try await NativeMTPAdmissionFeed.fetchAndMaterialize(
+            releaseID: "release-b",
+            signerKeyID: NativeMTPAdmissionOriginStub.keyID,
+            trustedPublicKeys: origin.trustedPublicKeys,
+            fetcher: origin.fetcher,
+            baseURL: NativeMTPAdmissionOriginStub.baseURL,
+            root: admissionRoot
+        )
+        XCTAssertEqual(fetched.deletingLastPathComponent(), NativeMTPAdmissionFeed.releaseDirectory(root: admissionRoot, releaseID: "release-b"))
+        XCTAssertEqual(admission(release: "release-b"), .entryForModel)
+        let nextStart = SmallMRoute.decide(SmallMRoute.Inputs(
+            continuousBatching: .off,
+            continuousBatchingExplicitlyConfigured: true,
+            nativeMTPMode: .auto,
+            nativeMTPAdmission: admission(release: "release-b"),
+            draftConfigured: false,
+            shardGroupRole: false,
+            autotuneCandidate: false,
+            otherSwitchTargets: false,
+            selfCheckVerdict: .absent
+        ))
+        XCTAssertEqual(nextStart, SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_entry_for_model"))
+    }
+
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
