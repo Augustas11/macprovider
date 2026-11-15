@@ -22,9 +22,9 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
-## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, rides the next Pearl runtime
+## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, live in v1.8.290
 
-PR #2377 (`589fd8d24`), issue #2365. Not live: v1.8.288 does not carry it.
+PR #2377 (`589fd8d24`), issue #2365. Live in v1.8.290 (2026-11-15 14:17 WITA); its own live probe (a follow-up Messages turn reporting `cache_read_input_tokens`) is not recorded here yet.
 
 - Gateway: `/v1/messages` partitions the auto-prefix conversation-cache key by `metadata.user_id` (trimmed, 1–256 bytes), as Chat and Responses partition by `prompt_cache_key`. Lab, GLM, 16 sessions on one system prompt: follow-up first-token median 138.4 s to 34.6 s, conversation-cache hits 0 to 48.
 - Gateway: `/v1/messages` usage reports observed cached prompt tokens as `cache_read_input_tokens`; `input_tokens` excludes them. Billing is unchanged.
@@ -40,18 +40,26 @@ PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
 
-## Nemotron 3.5 Bolt billing alias and gateway model key — merged 2026-11-15, rides the next Pearl runtime
+## Pearl runtime v1.8.290 (2026-11-15)
 
-PR 2385 (`61c3d02c3`), Related: #2329. Not live: v1.8.288 does not carry it.
+**Live 2026-11-15 14:17 WITA** (tag `v1.8.290` at `5b02aa48b`, release run 43683666990, applied through `scripts/ops/pearl-runtime.sh`). It carries PR 2385 (Nemotron 3.5 Bolt billing alias and gateway model key), PR 2374 (busy providers are not degraded), PR 2377 (Messages sessions partitioned by `metadata.user_id`, `cache_read_input_tokens` reported) and PR 2375 (MiniMax M3.1-Flash follow-ups).
+
+Measured from the updater audit log (UTC): buyer hold set 06:15:43, coordinator stop 06:15:58, coordinator start 06:17:00, gateway start 06:17:07, buyer hold removed 06:17:09. Coordinator down 62 s; buyers held about 86 s.
+
+Live probe for PR 2374, taken 14:25 WITA with every slot of a model's two providers busy: `GET /v1/stats/routability` reported that model `redundant` with `slots_free: 0` and the summary `models_degraded: 0`; gateway `/v1/status` reported `up`, `pool.busy: 2`, `pool.degraded: 0` and the model `no_free_slots`; coordinator `/healthz` reported `pool_busy: 2`.
+
+## Nemotron 3.5 Bolt billing alias and gateway model key — live in v1.8.290 (merged 2026-11-15)
+
+PR 2385 (`61c3d02c3`), Related: #2329. Live in v1.8.290.
 
 - Coordinator: the served artifact id of Nemotron 3.5 Bolt resolves to its rate-card row (`class-120b-moe`) in `internal/billing/formula.go`.
 - Gateway: the same model key in `internal/config/model_key.go`, the demand-telemetry allowlist and the store allowlist.
 
-Live step: the next Pearl runtime release, through `scripts/ops/pearl-runtime.sh status`, then `next --run`. It must be live before the Bolt catalog release is activated; `scripts/ops/catalog-activate.sh` enforces that order. The same runtime carries PR 2374 and PR 2377 below.
+Remaining live step: the Bolt catalog activation through `scripts/ops/catalog-activate.sh status`, then `next --run`; it needs the canary provider serving.
 
-## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — merged 2026-11-14, rides the next Pearl runtime
+## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — live in v1.8.290 (merged 2026-11-14)
 
-PR #2374 (`cdf46f633`), issue #2371. Not live: v1.8.288 does not carry it.
+PR #2374 (`cdf46f633`), issue #2371. Live in v1.8.290; the live probe is recorded in the v1.8.290 section above.
 
 - Stats routability: a provider that is in service (routable, busy on every slot, or in a thermal or queue-full hold) is `online`; models are `redundant`, `operational`, `unknown` or `offline`; models and the network are never `degraded`.
 - Coordinator `/healthz` gains `pool_busy`; `/poolz` gains `in_service`; `/v1/pool/check` reports busy as `busy`.
