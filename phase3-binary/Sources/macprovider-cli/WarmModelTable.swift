@@ -299,10 +299,18 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         members[old].pinned = false
         members[target].primary = true
         members[target].pinned = true
-        // The primary's info lives in the top-level fields; the demoted
-        // member republishes its own.
-        members[target].info = nil
+        // The new primary keeps its info: until the provider status names
+        // it primary, the wire still lists it as a further member
+        // (`WarmModelsWire.entries`). Once it is primary its entry comes
+        // from the top-level fields and this info is not read.
         return (snapshot(members[old]), snapshot(members[target]))
+    }
+
+    /// The runtime of the member `memberKey` names (`memberKey(token:)`),
+    /// whatever its role; nil when no member has it.
+    func runtime(memberKey: String) -> Runtime? {
+        lock.lock(); defer { lock.unlock() }
+        return members.first { Self.memberKey(token: $0.token) == memberKey }?.runtime
     }
 
     /// The runtime of the current primary, nil without one.
@@ -335,7 +343,7 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         (members.filter(\.primary) + members.filter { !$0.primary }).map {
             WarmModelMemberView(
                 modelID: $0.modelID, key: $0.key, state: $0.state, primary: $0.primary, pinned: $0.pinned,
-                inFlight: $0.leases, info: $0.info, memberID: $0.memberID)
+                inFlight: $0.leases, info: $0.info, memberID: $0.memberID, memberKey: Self.memberKey(token: $0.token))
         }
     }
 

@@ -989,7 +989,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let providerStatus = providerStatus
         // SPEC-011 R-3.10.3: the top-level fields describe the current
         // primary, which a promotion moves off the boot runtime.
-        let modelRuntime = warmModels?.primaryServingRuntime() ?? self.modelRuntime
+        let tablePrimaryRuntime = warmModels?.primaryServingRuntime() ?? self.modelRuntime
         // The KV disk tier stays attached to the boot runtime.
         let bootRuntime = self.modelRuntime
         let warmSwapEnabled = warmSwapEnabled
@@ -1002,8 +1002,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let lifecycleLeaseStore = lifecycleLeaseStore
         let compatibilitySetManifest = compatibilitySetManifest
         let warmModels = warmModels
-        Task.detached { @Sendable [images, providerStatus, modelRuntime, bootRuntime, warmModels, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
+        Task.detached { @Sendable [images, providerStatus, tablePrimaryRuntime, bootRuntime, warmModels, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
             let snapshot = await providerStatus.snapshot()
+            // The member the snapshot names primary, as the heartbeat reads it.
+            let modelRuntime = snapshot.primaryWarmMemberKey.flatMap { warmModels?.servingRuntime(memberKey: $0) } ?? tablePrimaryRuntime
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
             let checkedAssignedID = snapshot.coordinatorAssignedID
@@ -2977,6 +2979,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 primaryFields: primaryFields,
                 primarySlotsTotal: snapshot.slotsTotal,
                 primarySlotsFree: snapshot.slotsFree,
+                primaryMemberKey: snapshot.primaryWarmMemberKey,
                 views: warmModels
             )
         }

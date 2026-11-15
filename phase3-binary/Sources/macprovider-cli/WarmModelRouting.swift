@@ -48,6 +48,11 @@ protocol WarmModelRouting: AnyObject, Sendable {
     /// The current primary's runtime (SPEC-011 R-3.10.3 moves it): what the
     /// top-level status, handshake and heartbeat fields describe.
     func primaryServingRuntime() -> (any ModelRuntimeServing)?
+    /// The runtime of the member `memberKey` names. The wire reads the
+    /// primary's runtime through the member key the provider status holds,
+    /// so the top-level fields and `warm_models` agree on the primary at
+    /// every instant of a promotion.
+    func servingRuntime(memberKey: String) -> (any ModelRuntimeServing)?
 }
 
 extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {
@@ -60,6 +65,8 @@ extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {
     }
 
     func primaryServingRuntime() -> (any ModelRuntimeServing)? { primaryRuntime() }
+
+    func servingRuntime(memberKey: String) -> (any ModelRuntimeServing)? { runtime(memberKey: memberKey) }
 
     private static func serving(_ lease: WarmModelLease<Runtime>) -> WarmServingLease {
         WarmServingLease(

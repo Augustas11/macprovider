@@ -486,6 +486,10 @@ struct ProviderSnapshot: Sendable {
     /// SPEC-001-R016: network requests in flight on each secondary warm
     /// member, by routing key. `requestsInFlight` counts them too.
     var secondaryRequestsInFlight: [String: Int] = [:]
+    /// SPEC-001-R016: the member key of the warm member every top-level
+    /// field describes, read in the same step as them. The wire picks the
+    /// primary `warm_models` entry and the top-level runtime by it.
+    var primaryWarmMemberKey: String? = nil
 
     /// Network requests in flight on the primary, the model every top-level
     /// capacity field describes.
@@ -1027,6 +1031,10 @@ actor ProviderStatus {
         maxContextTokens: Int,
         maxConcurrency: Int
     ) async {
+        // The member key, identity and capacity switch before any
+        // suspension (`completeTargetSwap` sets them synchronously), so no
+        // snapshot sees one without the others: the wire's primary switches
+        // in this one step (SPEC-001-R016).
         primaryMemberKey = memberKey
         servedSlotsStamp = nil
         await completeTargetSwap(
@@ -1311,6 +1319,7 @@ actor ProviderStatus {
         )
         snapshot.localUsage = currentLocalUsage()
         snapshot.secondaryRequestsInFlight = secondaryInFlight
+        snapshot.primaryWarmMemberKey = primaryMemberKey
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0

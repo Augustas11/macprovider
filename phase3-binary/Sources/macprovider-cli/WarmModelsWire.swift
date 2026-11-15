@@ -42,6 +42,7 @@ enum WarmModelsWire {
         to message: inout [String: Any],
         primarySlotsTotal: Int,
         primarySlotsFree: Int,
+        primaryMemberKey: String? = nil,
         views: [WarmModelMemberView],
         sessionModels: [String]?,
         contention: WarmSetContentionWindow?
@@ -51,15 +52,32 @@ enum WarmModelsWire {
             let primaryKey = (message["model_id"] as? String).map(key)
             let declared = sessionModels.isEmpty ? Set(primaryKey.map { [$0] } ?? []) : Set(sessionModels.map(key))
             guard let primaryKey, declared.contains(primaryKey) else { return }
-            members = views.filter { $0.primary || declared.contains($0.key) }
+            let primaryIndex = primaryViewIndex(views, primaryMemberKey: primaryMemberKey, primaryKey: primaryKey)
+            members = views.indices.filter { $0 == primaryIndex || declared.contains(views[$0].key) }.map { views[$0] }
         }
         let entries = entries(
             primaryFields: message, primarySlotsTotal: primarySlotsTotal, primarySlotsFree: primarySlotsFree,
-            views: members, contention: contention)
+            primaryMemberKey: primaryMemberKey, views: members, contention: contention)
         for field in primaryFieldKeys {
             if let value = entries[0][field] { message[field] = value }
         }
         message["warm_models"] = entries
+    }
+
+    /// The view the top-level fields describe. `primaryMemberKey` is the
+    /// member the provider status names primary, read in the same snapshot
+    /// as the top-level identity and capacity, so it is the one source of
+    /// "who is primary" on the wire: a promotion switches it in one step
+    /// (`ProviderStatus.promoteWarmPrimary`). Without it, the view with the
+    /// top-level model id, else the view the table marks primary.
+    static func primaryViewIndex(_ views: [WarmModelMemberView], primaryMemberKey: String?, primaryKey: String?) -> Int? {
+        if let primaryMemberKey, let index = views.firstIndex(where: { $0.memberKey == primaryMemberKey }) {
+            return index
+        }
+        if let primaryKey, let index = views.firstIndex(where: { $0.key == primaryKey }) {
+            return index
+        }
+        return views.firstIndex(where: \.primary)
     }
 
     /// `primaryFields` is the message the entries ride on (its top-level
@@ -71,20 +89,25 @@ enum WarmModelsWire {
     /// a coordinator frame takes the primary's back to the top level
     /// (`attach`).
     ///
-    /// The primary entry is the top-level `model_id`, whatever the views
-    /// say: a promotion marks the new primary in the views before the
-    /// top-level fields follow it, so no view with the top-level id and no
-    /// view marked primary is listed again as a further member.
+    /// The primary entry is the top-level fields, and the view they
+    /// describe is `primaryViewIndex`; every other view is listed once as a
+    /// further member, whatever its `primary` flag says. A promotion marks
+    /// the new primary in the table before the provider status names it, so
+    /// for that moment the new primary is a further member here and the old
+    /// one is still the primary entry: no member is ever dropped, and there
+    /// is exactly one primary, the one the top-level fields describe.
     static func entries(
         primaryFields: [String: Any],
         primarySlotsTotal: Int,
         primarySlotsFree: Int,
+        primaryMemberKey: String? = nil,
         views: [WarmModelMemberView],
         contention: WarmSetContentionWindow? = WarmSetContentionMeter.shared.window()
     ) -> [[String: Any]] {
         let primaryLoading = primaryFields["loading"] as? Bool == true
         let primaryKey = (primaryFields["model_id"] as? String).map(key)
-        let primaryView = views.first { $0.key == primaryKey } ?? views.first(where: \.primary)
+        let primaryIndex = primaryViewIndex(views, primaryMemberKey: primaryMemberKey, primaryKey: primaryKey)
+        let primaryView = primaryIndex.map { views[$0] }
         var primary: [String: Any] = [
             "state": primaryLoading ? WarmModelState.loading.rawValue : WarmModelState.warm.rawValue,
             "primary": true,
@@ -105,7 +128,7 @@ enum WarmModelsWire {
                 solo: solo, memberID: primaryView?.memberID, members: members)
         }
         let primaryEngineProfile = primaryFields["engine_profile"] as? [String: Any]
-        return [primary] + views.filter { !$0.primary && $0.key != primaryKey }.map { view in
+        return [primary] + views.indices.filter { $0 != primaryIndex }.map { views[$0] }.map { view in
             var entry = secondaryEntry(view, primaryEngineProfile: primaryEngineProfile)
             if let contention, let solo = entry["throughput_tps_estimate"] as? Double {
                 entry["throughput_tps_estimate"] = contention.estimate(solo: solo, memberID: view.memberID, members: members)

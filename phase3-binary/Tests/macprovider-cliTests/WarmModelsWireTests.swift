@@ -121,7 +121,8 @@ final class WarmModelsWireTests: XCTestCase {
 
     // SPEC-011 R-3.10.3: a promotion marks the new primary in the views
     // before the top-level fields follow it. The frame built in between
-    // keeps the top-level model as the only primary and lists it once.
+    // keeps the top-level model as the only primary, lists it once, and
+    // still lists the member being promoted, as a further member.
     func testAPromotionInFlightNeverListsTheTopLevelModelTwice() {
         let info = WarmModelMemberInfo(maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 12)
         let views = [
@@ -133,8 +134,8 @@ final class WarmModelsWireTests: XCTestCase {
         WarmModelsWire.attach(
             to: &message, primarySlotsTotal: 2, primarySlotsFree: 2, views: views, sessionModels: nil, contention: nil)
         let entries = try? XCTUnwrap(message["warm_models"] as? [[String: Any]])
-        XCTAssertEqual(entries?.map { $0["model_id"] as? String }, ["model-a", "model-c"])
-        XCTAssertEqual(entries?.map { $0["primary"] as? Bool }, [true, false])
+        XCTAssertEqual(entries?.map { $0["model_id"] as? String }, ["model-a", "model-b", "model-c"])
+        XCTAssertEqual(entries?.map { $0["primary"] as? Bool }, [true, false, false])
         XCTAssertEqual(entries?.first?["pinned"] as? Bool, false, "the demoted member's own pin")
     }
 
@@ -384,6 +385,53 @@ final class WarmModelsWireTests: XCTestCase {
         XCTAssertEqual(entries.map { $0["pinned"] as? Bool }, [true, false])
         XCTAssertEqual(entries.map { $0["model_hash"] as? String }, ["bb", "aa"])
         XCTAssertEqual(entries[1]["slots_free"] as? Int, 2)
+    }
+
+    /// A frame reads the provider status (top-level fields and the primary
+    /// member key) and the table's views at different instants. Whichever
+    /// view of a promotion it reads, beside whichever status, the entries
+    /// list every member exactly once with one primary: the member the
+    /// status names, which is the top-level model.
+    func testEntriesKeepEveryMemberWhateverPromotionStepTheViewsShow() throws {
+        let table = WarmModelTable<WarmFakeRuntime>()
+        let tokenA = try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 1, modelID: "model-a", hash: "aa"))
+        let tokenB = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: tokenB, runtime: WarmFakeRuntime(memberID: 2, modelID: "model-b", hash: "bb"))
+        table.updateInfo(token: tokenB, WarmModelMemberInfo(maxContextTokens: 8_000, slotsTotal: 3, modelHash: "bb"))
+        let tokenC = try table.beginLoading(modelID: "model-c", pinned: false)
+        let tokenD = try table.beginLoading(modelID: "model-d", pinned: false)
+        try table.finishLoading(token: tokenD, runtime: WarmFakeRuntime(memberID: 4, modelID: "model-d", hash: "dd"))
+        _ = try table.beginEvicting(modelID: "model-d", allowPinned: false)
+        var stages = [("before", table.views.value)]
+        _ = try table.promote(modelID: "model-b")
+        stages.append(("table_promoted", table.views.value))
+        table.updateInfo(token: tokenA, WarmModelMemberInfo(maxContextTokens: 4_000, slotsTotal: 2, modelHash: "aa"))
+        stages.append(("demoted_info_published", table.views.value))
+        let key = { WarmModelTable<WarmFakeRuntime>.memberKey(token: $0) }
+        let statuses: [(String, [String: Any])] = [
+            (key(tokenA), ["model_id": "model-a", "model_hash": "aa"]),
+            (key(tokenB), ["model_id": "model-b", "model_hash": "bb"]),
+        ]
+        XCTAssertNotNil(tokenC)
+        for (stage, views) in stages {
+            for (memberKey, fields) in statuses {
+                for sessionModels in [nil, ["model-a", "model-b", "model-c", "model-d"]] as [[String]?] {
+                    var message = fields
+                    WarmModelsWire.attach(
+                        to: &message, primarySlotsTotal: 2, primarySlotsFree: 2, primaryMemberKey: memberKey,
+                        views: views, sessionModels: sessionModels, contention: nil)
+                    let label = "\(stage) status=\(fields["model_id"]!) declared=\(sessionModels != nil)"
+                    let entries = try XCTUnwrap(message["warm_models"] as? [[String: Any]], label)
+                    let ids = entries.compactMap { $0["model_id"] as? String }
+                    XCTAssertEqual(ids.sorted(), ["model-a", "model-b", "model-c", "model-d"], label)
+                    XCTAssertEqual(entries.filter { $0["primary"] as? Bool == true }.count, 1, label)
+                    XCTAssertEqual(ids.first, fields["model_id"] as? String, label)
+                    XCTAssertEqual(entries.first?["model_hash"] as? String, fields["model_hash"] as? String, label)
+                    XCTAssertEqual(entries.first { $0["model_id"] as? String == "model-c" }?["state"] as? String, "loading", label)
+                    XCTAssertEqual(entries.first { $0["model_id"] as? String == "model-d" }?["state"] as? String, "evicting", label)
+                }
+            }
+        }
     }
 
     // MARK: Control-socket load limits (SPEC-001-R017 warm_model_limits)

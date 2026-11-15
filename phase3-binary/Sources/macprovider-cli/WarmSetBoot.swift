@@ -247,14 +247,14 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
 
     // MARK: WarmSetControl
 
-    /// A member whose runtime has not published its info yet (the primary)
-    /// is asked for it here.
+    /// The primary, and a member whose runtime has not published its info
+    /// yet, is asked for it here.
     func controlEntries() async -> [WarmSetControlEntry] {
         let views = table.views.value
         var result: [WarmSetControlEntry] = []
         for entry in table.entries() {
             let view = views.first { $0.key == entry.key }
-            var info = view?.info
+            var info = entry.primary ? nil : view?.info
             if info == nil, entry.state == .warm, let runtime = entry.runtime {
                 info = await memberInfo(runtime)
             }
@@ -292,10 +292,17 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
 
     func promoteInSwapTurn(_ modelID: String) async throws {
         let promoted = try await loader.promoteInTurn(modelID)
+        // The demoted member becomes a further member on the wire the
+        // moment the handoff switches the provider status: its info is
+        // published first, so no frame built in between lists it without.
+        if let runtime = promoted.old.runtime {
+            table.updateInfo(token: promoted.old.token, await memberInfo(runtime))
+        }
         await primaryHandoff(promoted.old, promoted.new)
         setPrimaryModelID(promoted.new.modelID)
-        // The demoted member is a secondary now: its wire entry and
-        // preflight answer come from the info it publishes.
+        // Published again: the handoff moved its solo rate and every
+        // primary-only attachment, which its wire entry and preflight
+        // answer now report.
         if let runtime = promoted.old.runtime {
             table.updateInfo(token: promoted.old.token, await memberInfo(runtime))
         }

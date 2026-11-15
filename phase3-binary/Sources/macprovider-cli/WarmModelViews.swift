@@ -77,6 +77,10 @@ struct WarmModelMemberView: Sendable, Equatable {
     /// The member's GPU turn participant (its budget id), for its
     /// contended `throughput_tps_estimate` (SPEC-001-R018).
     var memberID: Int? = nil
+    /// The `ProviderStatus` member key (`WarmModelTable.memberKey`), stable
+    /// across a re-key and a promotion: how the wire finds the member the
+    /// top-level fields describe.
+    var memberKey: String? = nil
 
     /// Rows the member may admit now; nil unless `warm` (absent on the wire
     /// means zero).

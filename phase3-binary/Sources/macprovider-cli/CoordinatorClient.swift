@@ -612,6 +612,14 @@ actor CoordinatorClient {
     private var modelRuntime: any ModelRuntimeServing {
         warmModels?.primaryServingRuntime() ?? bootModelRuntime
     }
+    /// The runtime of the member `snapshot` names primary: what a
+    /// handshake or heartbeat built from that snapshot describes at the top
+    /// level. The table marks a promoted member primary a few awaits before
+    /// the provider status does; reading both through the snapshot keeps
+    /// the top-level fields and `warm_models` on one primary.
+    private func topLevelRuntime(for snapshot: ProviderSnapshot) -> any ModelRuntimeServing {
+        snapshot.primaryWarmMemberKey.flatMap { warmModels?.servingRuntime(memberKey: $0) } ?? modelRuntime
+    }
     /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
     /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
     private let runtimeSource: String?
@@ -8167,6 +8175,7 @@ actor CoordinatorClient {
 
     private func buildHeartbeatPayload(resetWindow: Bool) async throws -> BuiltHeartbeat {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
+        let modelRuntime = topLevelRuntime(for: snapshot)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
         var payload: [String: Any] = [
             "type": "heartbeat",
@@ -9023,6 +9032,7 @@ actor CoordinatorClient {
     ) async -> [String: Any] {
         lastAdmissionProofPublicKey = nil
         let snapshot = await providerStatus.snapshot()
+        let modelRuntime = topLevelRuntime(for: snapshot)
         // Issue #203: when warm-swap is enabled, the authoritative
         // post-swap model metadata lives in `ModelRuntime.currentSnapshot()`,
         // not in `ProviderStatus` (which carries boot-time / pre-swap
@@ -9203,6 +9213,7 @@ actor CoordinatorClient {
 
     func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
+        let modelRuntime = topLevelRuntime(for: snapshot)
         // A hello declares no supported_models: its session serves the
         // top-level model alone.
         warmModelsSessionModels = []
@@ -9296,6 +9307,7 @@ actor CoordinatorClient {
             to: &message,
             primarySlotsTotal: snapshot.slotsTotal,
             primarySlotsFree: snapshot.slotsFree,
+            primaryMemberKey: snapshot.primaryWarmMemberKey,
             views: warmModels.views.value,
             sessionModels: warmModelsSessionModels,
             contention: warmSetContention()
