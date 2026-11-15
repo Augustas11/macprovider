@@ -26,8 +26,8 @@
 #        r005  the 200-case SPEC-048-R005 acceptance corpus: exact native
 #              versus ordinary token parity per case;
 #        r015  the formal SPEC-048-R015 matrix at one native row (s1 cells,
-#              the s2 gated cell at qualified_slots 2) and the 1800 s
-#              sustained window, then the analyzer.
+#              the gated s2 and s4 cells at qualified_slots 4) and the 1800 s
+#              sustained window on s4-p1536-o512, then the analyzer.
 #   gemma4-12b-mtp-window.sh validate
 #        `--validate-policy-only` of the step-1 policy (no MLX use).
 #
@@ -61,8 +61,10 @@ LOCK=$HOME/.gemma4-mtp-window.lock
 RELEASE_METALLIB_SHA256=41863424710154758311c118db69a23231eadb0cc542abded55ac5859b51e3b2
 MODEL_ID=google/gemma-4-12b-it
 ROOT=${ROOT:-$LAB/fixtures/gemma4}
-# SPEC-048 sidecar floor; the gemma4_mtp_v1 native row ceiling is 1.
-QUALIFIED_SLOTS=2
+# The R005 corpus (qualified_slots 4...4), the R005 redaction and the
+# binding bundle all pin four slots, as the Qwen tuple; the gemma4_mtp_v1
+# native row ceiling is 1.
+QUALIFIED_SLOTS=4
 TEMPLATE=$SRC/scripts/lab/cb-studio/gemma4-12b-mtp/gemma4-step1-d1.json
 
 live_absent() {
@@ -189,15 +191,15 @@ environment = {k: base[k] for k in ("model_id", "target_sha256", "mtp_sha256", "
     "provider_commit", "mlx_fork_revision")}
 acceptance = dict(environment, schema="macprovider.native-mtp-acceptance-policy.v1",
     corpus_sha256=hashlib.sha256(open(corpus, "rb").read()).hexdigest())
-# The approved Qwen R015 contract at one native row and the sidecar's
-# two-slot floor: s1 cells, gated s2, sustained on the gated cell.
+# The approved Qwen R015 contract at one native row and four qualified
+# slots: s1 cells, gated s2 and s4, sustained on s4-p1536-o512.
 r015 = dict(environment, schema="macprovider.native-mtp-r015-policy.v1", proposal_depth=1,
     run_order="seeded_random_counterbalanced", prompt_corpus="deterministic_synthetic_unique_v2",
     exclusion_rules="none", confidence_method="paired_block_bootstrap_holm_v1",
-    qualified_slots=2, max_native_active_rows=1, arrival_interval_ms=250, slots=[1],
+    qualified_slots=4, max_native_active_rows=1, arrival_interval_ms=250, slots=[1],
     maximum_prompt_tokens=4096, prompt_tokens=[1536, 4096], max_tokens=[128, 512],
-    gated_cells=["s2-p1536-o512"], warmup_runs=1, blocks=10, seed=20261107,
-    sustained_seconds=1800, sustained_cell_id="s2-p1536-o512", memory_safety_margin_bytes=8589934592,
+    gated_cells=["s2-p1536-o512", "s4-p1536-o512"], warmup_runs=1, blocks=10, seed=20261107,
+    sustained_seconds=1800, sustained_cell_id="s4-p1536-o512", memory_safety_margin_bytes=8589934592,
     thresholds=base["thresholds"])
 for path, doc in ((acceptance_out, acceptance), (r015_out, r015)):
     with open(path, "w") as fh:
@@ -228,7 +230,7 @@ leg_r005() {
 leg_r015() {
   local d=$1 rc=0 arc=0 status=MISSING
   cells $FORMAL/gemma4-r015-policy.json $d r015 \
-    s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s2-p1536-o512 sustained || rc=$?
+    s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s2-p1536-o512 s4-p1536-o512 sustained || rc=$?
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py $d/r015.jsonl $FORMAL/gemma4-r015-policy.json \
     > $d/r015-analysis.json 2> $d/r015-analysis.err || arc=$?
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py --format markdown $d/r015.jsonl $FORMAL/gemma4-r015-policy.json \
