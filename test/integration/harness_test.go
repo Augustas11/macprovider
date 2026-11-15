@@ -1766,6 +1766,9 @@ type fakeProvider struct {
 	// initial and every heartbeat. warmMu guards the members once started.
 	warmMu      sync.Mutex
 	warmMembers []*fakeWarmMember
+	// warmSetOfOne makes the provider report warm_models with only its
+	// primary entry, as every new CLI does for a single model.
+	warmSetOfOne bool
 	// primaryThroughput, when set, replaces the primary's advertised
 	// throughput on a warm-set session so routing between primaries is
 	// deterministic.
@@ -1817,7 +1820,7 @@ func (p *fakeProvider) supportedModelIDs() []string {
 func (p *fakeProvider) addWarmModels(msg map[string]any, slotsTotal, slotsFree int) {
 	p.warmMu.Lock()
 	defer p.warmMu.Unlock()
-	if len(p.warmMembers) == 0 {
+	if len(p.warmMembers) == 0 && !p.warmSetOfOne {
 		return
 	}
 	if p.primaryThroughput > 0 {

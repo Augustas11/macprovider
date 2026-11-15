@@ -306,3 +306,51 @@ func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 		t.Fatalf("fallback route snapshots = %d, want 2", fallbackSnaps)
 	}
 }
+
+// SPEC-002-R011: a new CLI with one model sends warm_models with only its
+// primary entry. That warm set of one is a legacy session end to end: one
+// /poolz row without entry fields, a dispatch without a served model, and a
+// route snapshot that is not a served-model dispatch.
+func TestJourneyWarmSetOfOneIsLegacy(t *testing.T) {
+	const providerID = "prov-warm-one"
+	s := newScenario(t, scenarioOpts{
+		seedAccount:               true,
+		settlementReceiptProvider: true,
+		providerID:                providerID,
+		providerSetup:             func(fp *fakeProvider) { fp.warmSetOfOne = true },
+	})
+	prov := s.fakeProvs[0]
+	var row warmPoolzRow
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var rows []warmPoolzRow
+		for _, r := range s.warmPoolzRows() {
+			if r.ProviderID == providerID {
+				rows = append(rows, r)
+			}
+		}
+		if len(rows) == 1 && rows[0].RoutingEligible {
+			row = rows[0]
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("one-member provider /poolz rows = %+v, want one routable row", rows)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if row.ServedModel != "" || row.Primary != nil || row.WarmState != "" {
+		t.Fatalf("one-member /poolz row = %+v, want a legacy row without entry fields", row)
+	}
+	status, _, body := s.chatRequest(map[string]string{"X-Request-ID": "55555555-5555-4555-8555-555555555551"},
+		fmt.Sprintf(`{"model":%q,"max_tokens":32,"messages":[{"role":"user","content":"warm set of one"}]}`, settlementFixtureModelID))
+	if status != http.StatusOK {
+		t.Fatalf("chat status=%d body=%s", status, body)
+	}
+	if got := prov.ServedModels(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("served-model headers = %q, want one request without a served model", got)
+	}
+	snaps := waitForWarmRouteSnapshots(t, s, 1)
+	if snaps[0].ProviderID != providerID || snaps[0].ModelID != settlementFixtureModelID || snaps[0].ServedModelDispatch != 0 {
+		t.Fatalf("route snapshot = %+v, want the legacy provider-wide snapshot (served_model_dispatch 0)", snaps[0])
+	}
+}
