@@ -2772,3 +2772,162 @@ private func captureOutput(_ body: () async throws -> Void) async -> CapturedOut
         error: error
     )
 }
+
+// MARK: - models warm check / --save
+
+extension ModelsSubcommandTests {
+    func testModelsWarmFlagsBelongToTheirActions() throws {
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["check"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["status", "--save"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["check", "org/second", "--save"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["unload", "org/second", "--context", "8192"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["load", "org/second", "--slots", "\(AppConfig.warmModelSlotsLimit + 1)"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["load", "org/second", "--context", "0"]))
+        XCTAssertThrowsError(try ModelsWarmCommand.parse(["load", "org/second", "--json"]))
+        XCTAssertNoThrow(try ModelsWarmCommand.parse(["load", "org/second", "--save", "--context", "8192", "--slots", "2"]))
+        XCTAssertNoThrow(try ModelsWarmCommand.parse(["check", "org/second", "--json"]))
+    }
+
+    /// A load with --save sends the limits and, once serve loaded the model,
+    /// writes it to config.yaml; without --save the file is untouched.
+    func testModelsWarmLoadSaveWritesConfigOnlyAfterTheLoad() async throws {
+        let configURL = try makeWarmConfig("model: main/model\nsupported_models: [main/model, org/second]\n")
+        let warmSet = ScriptedWarmSet(load: .loaded)
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "main/model"), warmSet: warmSet)
+        try await server.start()
+
+        let plain = try ModelsWarmCommand.parse(["load", "org/second", "--config", configURL.path, "--ctl-socket-path", socketPath.path])
+        let plainCapture = await captureOutput { try await plain.run() }
+        XCTAssertNil(plainCapture.error)
+        XCTAssertEqual(try String(contentsOf: configURL), "model: main/model\nsupported_models: [main/model, org/second]\n")
+
+        let saving = try ModelsWarmCommand.parse([
+            "load", "org/second", "--save", "--context", "8192", "--slots", "2",
+            "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let capture = await captureOutput { try await saving.run() }
+        await server.stop()
+
+        XCTAssertNil(capture.error)
+        XCTAssertTrue(capture.stdout.contains("\"status\":\"loaded\""))
+        XCTAssertEqual(warmSet.loads.last?.limits, WarmModelLimits(contextTokens: 8192, slots: 2))
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:])
+        XCTAssertEqual(loaded.warmModels, ["org/second"])
+        XCTAssertEqual(loaded.warmModelLimits(for: "org/second"), WarmModelLimits(contextTokens: 8192, slots: 2))
+    }
+
+    /// A model serve did not support at start is saved (with
+    /// supported_models), and the command says a restart is needed.
+    func testModelsWarmLoadSaveOfAModelServeDoesNotSupportAsksForARestart() async throws {
+        let configURL = try makeWarmConfig("model: main/model\nsupported_models: [main/model]\n")
+        let warmSet = ScriptedWarmSet(load: .unsupportedModel(detail: "not_in_supported_models"))
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "main/model"), warmSet: warmSet)
+        try await server.start()
+        let command = try ModelsWarmCommand.parse([
+            "load", "org/second", "--save", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertNil(capture.error)
+        XCTAssertTrue(capture.stderr.contains("Restart the provider to use it."))
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:])
+        XCTAssertEqual(loaded.warmModels, ["org/second"])
+        XCTAssertEqual(loaded.supportedModels, ["main/model", "org/second"])
+    }
+
+    /// A refused load is never saved, --save or not.
+    func testModelsWarmLoadSaveDoesNotSaveARefusedLoad() async throws {
+        let original = "model: main/model\nsupported_models: [main/model, org/second]\n"
+        let configURL = try makeWarmConfig(original)
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "main/model"),
+            warmSet: ScriptedWarmSet(load: .insufficientMemory(detail: "needs 9 GiB")))
+        try await server.start()
+        let command = try ModelsWarmCommand.parse([
+            "load", "org/second", "--save", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertEqual(try String(contentsOf: configURL), original)
+    }
+
+    /// With serve not running, --save is the whole change; unload --save
+    /// takes the model back out.
+    func testModelsWarmSaveWithoutServeWritesConfigAndUnloadRemovesIt() async throws {
+        let configURL = try makeWarmConfig("model: main/model\nsupported_models: [main/model, org/second]\n")
+        let socketPath = try makeSocketPath()
+        let load = try ModelsWarmCommand.parse([
+            "load", "org/second", "--save", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let loadCapture = await captureOutput { try await load.run() }
+        XCTAssertNil(loadCapture.error)
+        XCTAssertTrue(loadCapture.stderr.contains("when the provider starts"))
+        XCTAssertEqual(try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:]).warmModels, ["org/second"])
+
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "main/model"), warmSet: ScriptedWarmSet(load: .loaded))
+        try await server.start()
+        let unload = try ModelsWarmCommand.parse([
+            "unload", "org/second", "--save", "--config", configURL.path, "--ctl-socket-path", socketPath.path,
+        ])
+        let unloadCapture = await captureOutput { try await unload.run() }
+        await server.stop()
+        XCTAssertNil(unloadCapture.error)
+        XCTAssertEqual(try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:]).warmModels, [])
+    }
+
+    func testModelsWarmCheckJSONIsOneObjectWithThePlan() throws {
+        let plan = AutotuneWarmSetPlan(
+            decision: .fits, reason: "fits",
+            members: [
+                .init(modelID: "main/model", role: "primary", contextTokens: 32_768, slots: 4, bytes: 1),
+                .init(modelID: "org/second", role: "member", contextTokens: 16_384, slots: 2, bytes: 2),
+            ],
+            primaryFit: nil, limitBytes: 3, requiredBytes: 4)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(ModelsWarmCommand.checkJSON(plan, modelID: "org/second").utf8)) as? [String: Any])
+        XCTAssertEqual(object["schema_version"] as? String, "models_warm_check.v1")
+        XCTAssertEqual(object["model_id"] as? String, "org/second")
+        XCTAssertEqual(object["decision"] as? String, "fits")
+        XCTAssertEqual((object["members"] as? [[String: Any]])?.last?["slots"] as? Int, 2)
+        XCTAssertNil(object["primary_fit"])
+        XCTAssertEqual(plan.summary(memberModelID: "org/second"),
+                       "org/second fits beside main/model: 16384 tokens of context, 2 slots.")
+    }
+
+    private func makeWarmConfig(_ text: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("warm-save-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("config.yaml")
+        try Data(text.utf8).write(to: url)
+        return url
+    }
+}
+
+private final class ScriptedWarmSet: WarmSetControl, @unchecked Sendable {
+    private let lock = NSLock()
+    private let loadOutcome: WarmSetLoadOutcome
+    private var recorded: [(modelID: String, limits: WarmModelLimits?)] = []
+    var loads: [(modelID: String, limits: WarmModelLimits?)] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    init(load: WarmSetLoadOutcome) { loadOutcome = load }
+
+    func controlEntries() async -> [WarmSetControlEntry] {
+        [WarmSetControlEntry(modelID: "main/model", state: "warm", primary: true, pinned: true, leases: 0, slotsTotal: 4, slotsFree: 4)]
+    }
+
+    func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
+        lock.lock(); recorded.append((modelID, limits)); lock.unlock()
+        return loadOutcome
+    }
+
+    func unload(_ modelID: String) async -> WarmSetUnloadOutcome { .unloaded }
+}

@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import MacProviderCore
 
 /// SPEC-001-R017: whether a named second model fits beside the primary, and
@@ -234,5 +235,85 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
         return SharedModelMemoryRules.commandBufferBudgetConflicts(
             family: family, wantedMB: ModelRuntime.commandBufferBudgetMBByFamily[family],
             effective: effective, operatorMB: operatorMB)
+    }
+}
+
+extension AutotuneWarmSetPlan {
+    /// The plan's inputs as this Mac has them: weights, KV per token,
+    /// declared context and family from each model's local files (the
+    /// verified catalog artifact when there is one), memory from the OS and
+    /// Metal. Nothing is downloaded or loaded.
+    static func localInputs(
+        primaryModelID: String,
+        primaryLoadPath: String?,
+        primaryContextTokens: Int,
+        primarySlots: Int,
+        primaryVerified: Bool,
+        memberModelID: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Inputs {
+        var rows: [String: CandidateCatalog.Row] = [:]
+        let authorities = ServeCommand.localRuntimeTargetAuthorities(
+            supportedModels: [primaryModelID, memberModelID],
+            onVerifiedTarget: { ids, row, _ in for id in ids { rows[id.lowercased(with: nil)] = row } })
+        func authority(_ id: String) -> ModelRuntimeTargetAuthority? {
+            authorities[id] ?? authorities[id.lowercased(with: nil)]
+        }
+        func facts(_ id: String, loadPath: String) -> ModelFacts {
+            var facts = ModelFacts(modelID: id)
+            facts.catalogBound = authority(id) != nil
+            facts.catalogMinRAMGB = rows[id.lowercased(with: nil)]?.minRAMGB ?? 1
+            guard let directory = try? ModelRuntime.localModelDirectory(for: loadPath) else { return facts }
+            facts.artifactBytes = SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: directory)
+            facts.kvBytesPerToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory) ?? 0
+            if let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")) {
+                facts.declaredMaxContextTokens = AutotuneModelContextCap.declaredMaxContextTokens(configData: data)
+            }
+            facts.family = ModelRuntime.localModelFamily(loadPath)
+            return facts
+        }
+        return Inputs(
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes(),
+            primary: facts(primaryModelID, loadPath: primaryLoadPath ?? authority(primaryModelID)?.modelArgument ?? primaryModelID),
+            primaryContextTokens: primaryContextTokens,
+            primarySlots: primarySlots,
+            primaryVerified: primaryVerified,
+            member: facts(memberModelID, loadPath: authority(memberModelID)?.modelArgument ?? memberModelID),
+            operatorCommandBufferMB: environment["MLX_MAX_MB_PER_BUFFER"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+    }
+
+    /// One JSON object, keys sorted.
+    var jsonString: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return String(decoding: (try? encoder.encode(self)) ?? Data("{}".utf8), as: UTF8.self)
+    }
+
+    /// One line for a person.
+    func summary(memberModelID: String) -> String {
+        let member = members.count > 1 ? members[1] : nil
+        let primaryName = members.first?.modelID ?? "the main model"
+        switch decision {
+        case .fits:
+            guard let member else { return "\(memberModelID) fits beside \(primaryName)." }
+            return "\(member.modelID) fits beside \(primaryName): \(member.contextTokens) tokens of context, \(member.slots) \(member.slots == 1 ? "slot" : "slots")."
+        case .primaryMustShrink:
+            let name = memberModelID
+            guard let primaryFit else { return "\(name) fits only if \(primaryName) serves less." }
+            return "\(name) fits only if \(primaryName) is lowered to \(primaryFit.contextTokens) tokens of context, \(primaryFit.slots) \(primaryFit.slots == 1 ? "slot" : "slots")."
+        case .doesNotFit:
+            let why: String
+            switch reason {
+            case "insufficient_memory": why = "there is not enough memory"
+            case "command_buffer_budget_conflict": why = "it needs a different GPU buffer setting than the loaded model"
+            case "not_on_this_mac": why = "it is not downloaded on this Mac"
+            case "not_in_signed_catalog": why = "it is not a verified catalog model"
+            case "same_model": why = "it is the main model"
+            case "memory_limit_unavailable": why = "the memory limit of this Mac could not be read"
+            default: why = reason
+            }
+            return "\(memberModelID) does not fit beside \(primaryName): \(why)."
+        }
     }
 }

@@ -122,6 +122,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "Private receipt path written by --prefetch and required by a cache-only constrained --apply.")
     var prefetchReceipt: String?
 
+    @Option(name: .customLong("warm-set"), help: "With --recommend, also work out whether this model fits in memory beside the recommended model, and with how much context and how many slots. Nothing is loaded.")
+    var warmSet: String?
+
     @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
     var donorMode = false
 
@@ -181,6 +184,27 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     func run() async throws {
         try await run(dependencies: .production)
+    }
+
+    /// `--warm-set`: the arithmetic plan for that model beside the
+    /// recommended one at its recommended context and slots; nil without the
+    /// flag or a recommendation.
+    func warmSetPlan(beside core: RecommendationCore?) -> AutotuneWarmSetPlan? {
+        guard let warmSet, let core else { return nil }
+        return AutotuneWarmSetPlan.compute(AutotuneWarmSetPlan.localInputs(
+            primaryModelID: core.model,
+            primaryLoadPath: core.modelArtifactPath,
+            primaryContextTokens: core.knobs.maxContext,
+            primarySlots: core.knobs.maxBatch,
+            primaryVerified: core.modelArtifactSHA256 != nil,
+            memberModelID: warmSet.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
+    /// `json` (one object) with a `warm_set` member set to `block` added
+    /// last; `json` itself, byte for byte, when `block` is nil.
+    static func addingWarmSet(_ block: String?, to json: String) -> String {
+        guard let block, json.hasSuffix("}") else { return json }
+        return String(json.dropLast()) + ",\"warm_set\":\(block)}"
     }
 
     func run(dependencies: AutotuneRunDependencies) async throws {
@@ -890,6 +914,15 @@ struct AutotuneCommand: AsyncParsableCommand {
         if prefetch && !recommend {
             throw ValidationError("--prefetch requires --recommend")
         }
+        if let warmSet {
+            if !recommend { throw ValidationError("--warm-set requires --recommend") }
+            if prefetch || freshnessCheck || recoverHardwareAdmission {
+                throw ValidationError("--warm-set cannot be combined with --prefetch, --freshness-check, or --recover-hardware-admission")
+            }
+            if warmSet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError("--warm-set needs a model")
+            }
+        }
         if prefetch && freshnessCheck {
             throw ValidationError("--prefetch cannot be combined with --freshness-check")
         }
@@ -1489,13 +1522,17 @@ struct AutotuneCommand: AsyncParsableCommand {
                 print(applied.summary)
             }
         }
+        let plannedWarmSet = warmSetPlan(beside: serveConfig)
         if emitJSON {
-            print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
+            print(Self.addingWarmSet(
+                warmSet == nil ? nil : plannedWarmSet?.jsonString ?? "null",
+                to: result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback)))
         } else if calibrationActive {
             print(result.calibrationHumanTranscript(configurationApplied: configurationApplied))
         } else {
             print(result.humanTranscript(configurationApplied: configurationApplied))
         }
+        if !emitJSON, let warmSet, let plannedWarmSet { print(plannedWarmSet.summary(memberModelID: warmSet)) }
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
         }
@@ -1655,7 +1692,9 @@ struct AutotuneCommand: AsyncParsableCommand {
             } else {
                 serveConfig = nil
             }
-            print(result.jsonString(serveConfig: serveConfig, donorMode: false))
+            print(Self.addingWarmSet(
+                warmSet == nil ? nil : warmSetPlan(beside: serveConfig)?.jsonString ?? "null",
+                to: result.jsonString(serveConfig: serveConfig, donorMode: false)))
             try emitEvent("completed", phase: "completed", stagingDiscarded: true)
         } catch {
             if !terminalEventEmitted {

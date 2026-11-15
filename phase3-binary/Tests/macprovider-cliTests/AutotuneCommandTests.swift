@@ -21,6 +21,16 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertThrowsError(try AutotuneCommand.parse(["--gate-ttft-ms", "-1", "--dry-run"]))
     }
 
+    func testWarmSetNeedsRecommendAndAModel() throws {
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--warm-set", "org/second", "--dry-run"]))
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--warm-set", " "]))
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--prefetch", "--candidate-models", "a", "--warm-set", "org/second"]))
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--freshness-check", "--warm-set", "org/second"]))
+        XCTAssertEqual(try AutotuneCommand.parse(["--recommend", "--json", "--warm-set", "org/second"]).warmSet, "org/second")
+        XCTAssertEqual(try AutotuneCommand.parse(["--recommend", "--check-only", "--no-submit-hardware-evidence", "--json", "--warm-set", "org/second"]).warmSet, "org/second")
+        XCTAssertNil(try AutotuneCommand.parse(["--recommend", "--json"]).warmSet)
+    }
+
     func testDefaultCandidatePlanIsLargestFirst() throws {
         let command = try AutotuneCommand.parse(["--dry-run"])
         let plan = try command.candidatePlan()

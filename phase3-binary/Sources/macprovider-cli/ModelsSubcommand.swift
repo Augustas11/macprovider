@@ -1501,26 +1501,42 @@ enum ModelsWarmAction: String, CaseIterable, ExpressibleByArgument {
     case status
     case load
     case unload
+    case check
 }
 
 struct ModelsWarmCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "warm",
-        abstract: "Show, load or unload the extra models kept loaded beside the main model.",
+        abstract: "Show, check, load or unload the extra models kept loaded beside the main model.",
         discussion: """
         status lists every loaded model with its state and active requests. \
+        check works out whether a model fits in memory beside the main model, \
+        and with how much context and how many slots, without loading it. \
         load adds a supported model if it fits in memory beside the loaded ones. \
         unload removes an extra model; the main model and a model that is \
-        serving a request are never unloaded. Use models switch to change the \
-        main model.
+        serving a request are never unloaded. With --save, load and unload \
+        also change config.yaml, so the change lasts after a restart. Use \
+        models switch to change the main model.
         """
     )
 
-    @Argument(help: "status, load or unload.")
+    @Argument(help: "status, check, load or unload.")
     var action: ModelsWarmAction
 
-    @Argument(help: "HuggingFace model ID or local path to load or unload.")
+    @Argument(help: "HuggingFace model ID or local path to check, load or unload.")
     var targetModelID: String?
+
+    @Option(name: .customLong("context"), help: "With load: the context in tokens for this model. Default: the main model's.")
+    var contextTokens: Int?
+
+    @Option(help: "With load: how many requests this model serves at once. Default: the main model's.")
+    var slots: Int?
+
+    @Flag(help: "With load or unload: also write the change to config.yaml.")
+    var save = false
+
+    @Flag(name: .customLong("json"), help: "With check: print the result as JSON.")
+    var emitJSON = false
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
     var config: String?
@@ -1532,20 +1548,40 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         switch action {
         case .status:
             if targetModelID != nil { throw ValidationError("status takes no model") }
-        case .load, .unload:
+        case .load, .unload, .check:
             if (targetModelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw ValidationError("\(action.rawValue) needs a model")
             }
         }
+        if save, action != .load, action != .unload { throw ValidationError("--save works with load and unload") }
+        if contextTokens != nil || slots != nil, action != .load {
+            throw ValidationError("--context and --slots work with load")
+        }
+        if let contextTokens, contextTokens < 1 { throw ValidationError("--context must be at least 1") }
+        if let slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
+            throw ValidationError("--slots must be from 1 to \(AppConfig.warmModelSlotsLimit)")
+        }
+        if emitJSON, action != .check { throw ValidationError("--json works with check") }
     }
 
     func run() async throws {
         let resolved = try loadModelsConfig(config: config, model: nil, supportedModels: nil, ctlSocketPath: ctlSocketPath)
         let socketPath = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+        if action == .check {
+            try await runCheck(resolved: resolved, socketPath: socketPath)
+            return
+        }
+        let target = targetModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
         let connection: ControlSocketConnection
         do {
             connection = try await ControlSocketClient.connect(socketPath: socketPath)
         } catch ControlSocketConnectError.socketAbsent(let path) {
+            if save, let target {
+                // Nothing is running to change: the saved config is the change.
+                try saveChange(target, resolved: resolved)
+                writeStderr("malibu-cli serve is not running; \(target) will be \(action == .load ? "loaded" : "left out") when the provider starts.")
+                return
+            }
             writeStderr("malibu-cli serve is not running on this host (no control socket at \(path))")
             throw ExitCode(4)
         } catch ControlSocketConnectError.connectionRefused(let path) {
@@ -1557,7 +1593,8 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         let timeout: TimeInterval = action == .status ? 10 : 3_600
         let frame: ControlSocketFrame
         do {
-            try await connection.send(.warmSetRequest(action: action.rawValue, modelID: targetModelID))
+            try await connection.send(.warmSetRequest(
+                action: action.rawValue, modelID: targetModelID, contextTokens: contextTokens, slots: slots))
             frame = try await connection.receive(timeout: timeout)
         } catch {
             await connection.close()
@@ -1571,7 +1608,19 @@ struct ModelsWarmCommand: AsyncParsableCommand {
         }
         print(String(decoding: try ControlSocketCodec.encode(frame).dropLast(), as: UTF8.self))
         switch reply.status {
-        case "ok", "loaded", "already_warm", "unloaded":
+        case "ok":
+            return
+        case "loaded", "already_warm", "unloaded":
+            if save, let target { try saveChange(target, resolved: resolved) }
+            return
+        case "not_loaded" where save:
+            if let target { try saveChange(target, resolved: resolved) }
+            return
+        case "unsupported_model" where save && reply.detail == "not_in_supported_models":
+            // serve read supported_models when it started; the saved config
+            // adds the model, and a restart reads it.
+            if let target { try saveChange(target, resolved: resolved) }
+            writeStderr("Restart the provider to use it.")
             return
         case "unavailable":
             writeStderr("this provider serves its model through another runtime and cannot load extra models")
@@ -1586,6 +1635,62 @@ struct ModelsWarmCommand: AsyncParsableCommand {
             writeStderr("\(action.rawValue) refused: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")")
             throw ExitCode(2)
         }
+    }
+
+    /// Writes this load or unload to config.yaml through the config writer.
+    private func saveChange(_ modelID: String, resolved: AppConfig) throws {
+        let configURL = ModelsAdoptRecommendationCommand.effectiveConfigURL(explicit: config)
+        let change: ConfigApplier.WarmSetChange = action == .load
+            ? .keep(modelID: modelID, limits: contextTokens == nil && slots == nil
+                ? nil : WarmSetConfigLimits(contextTokens: contextTokens, slots: slots))
+            : .remove(modelID: modelID)
+        do {
+            try ConfigApplier(configPath: configURL).setWarmSet(change, now: Date())
+        } catch {
+            writeStderr("could not save the change to \(configURL.path): \(error)")
+            throw ExitCode(2)
+        }
+        writeStderr("saved to \(configURL.path)")
+    }
+
+    /// Arithmetic only: the main model's context and slots come from the
+    /// running provider when there is one, else from config.yaml.
+    private func runCheck(resolved: AppConfig, socketPath: URL) async throws {
+        guard let member = targetModelID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let primary = resolved.model, !primary.isEmpty else {
+            writeStderr("config.yaml names no main model")
+            throw ExitCode(2)
+        }
+        var primaryContext = resolved.maxContextOverride
+        var primarySlots = resolved.maxConcurrencyOverride
+        if let connection = try? await ControlSocketClient.connect(socketPath: socketPath) {
+            if (try? await connection.send(.warmSetRequest(action: "status", modelID: nil))) != nil,
+               case let .warmSetResponse(reply)? = try? await connection.receive(timeout: 10),
+               let entry = reply.entries.first(where: \.primary) {
+                primaryContext = entry.maxContextTokens ?? primaryContext
+                primarySlots = entry.slotsTotal > 0 ? entry.slotsTotal : primarySlots
+            }
+            await connection.close()
+        }
+        guard let primaryContext, let primarySlots else {
+            writeStderr("the provider is not running and config.yaml sets no max_context_override and max_concurrency_override for \(primary)")
+            throw ExitCode(4)
+        }
+        let plan = AutotuneWarmSetPlan.compute(AutotuneWarmSetPlan.localInputs(
+            primaryModelID: primary,
+            primaryLoadPath: resolved.modelArtifactPath,
+            primaryContextTokens: primaryContext,
+            primarySlots: primarySlots,
+            primaryVerified: resolved.modelArtifactSHA256 != nil,
+            memberModelID: member))
+        print(emitJSON ? Self.checkJSON(plan, modelID: member) : plan.summary(memberModelID: member))
+    }
+
+    static func checkJSON(_ plan: AutotuneWarmSetPlan, modelID: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        let quotedID = String(decoding: (try? encoder.encode(modelID)) ?? Data("null".utf8), as: UTF8.self)
+        return "{\"schema_version\":\"models_warm_check.v1\",\"model_id\":\(quotedID)," + plan.jsonString.dropFirst()
     }
 }
 
@@ -2659,7 +2764,7 @@ extension ModelsAdoptRecommendationCommand {
         }
     }
 
-    fileprivate static func effectiveConfigURL(explicit: String?) -> URL {
+    static func effectiveConfigURL(explicit: String?) -> URL {
         let path = explicit
             ?? ProcessInfo.processInfo.environment["MACPROVIDER_CONFIG"]
             ?? AppConfig.defaultConfigPath
