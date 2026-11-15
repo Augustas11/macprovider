@@ -1,0 +1,97 @@
+import Foundation
+import MacProviderCore
+
+/// One request's hold on the warm member that serves it (SPEC-001-R016), as
+/// `HTTPServer` and `InferenceRelay` see it. Taken before the runtime's
+/// request handle and released at the request's terminal point; `release()`
+/// is idempotent and a lease dropped without it is released when freed.
+final class WarmServingLease: @unchecked Sendable {
+    /// The member's table id.
+    let modelID: String
+    /// The member was the primary when the lease was taken.
+    let primary: Bool
+    let runtime: any ModelRuntimeServing
+    private let onRelease: @Sendable () -> Void
+
+    init(modelID: String, primary: Bool, runtime: any ModelRuntimeServing, onRelease: @escaping @Sendable () -> Void) {
+        self.modelID = modelID
+        self.primary = primary
+        self.runtime = runtime
+        self.onRelease = onRelease
+    }
+
+    func release() { onRelease() }
+}
+
+/// The routing face of a warm set, free of the table's runtime type.
+protocol WarmModelRouting: AnyObject, Sendable {
+    /// R016 `served_model_id` routing; throws `WarmModelTableError.notLoaded`.
+    func servingLease(servedModelID: String?) throws -> WarmServingLease
+    /// R016 loopback local routing by the body `model`, else the primary.
+    func servingLeaseLocal(bodyModel: String?) throws -> WarmServingLease
+}
+
+extension WarmModelTable: WarmModelRouting where Runtime: ModelRuntimeServing {
+    func servingLease(servedModelID: String?) throws -> WarmServingLease {
+        Self.serving(try lease(servedModelID: servedModelID))
+    }
+
+    func servingLeaseLocal(bodyModel: String?) throws -> WarmServingLease {
+        Self.serving(try leaseLocal(bodyModel: bodyModel))
+    }
+
+    private static func serving(_ lease: WarmModelLease<Runtime>) -> WarmServingLease {
+        WarmServingLease(modelID: lease.modelID, primary: lease.primary, runtime: lease.runtime) { lease.release() }
+    }
+}
+
+enum WarmModelRoute {
+    /// `X-MacProvider-Served-Model`: the HTTP-forwarded `served_model_id`.
+    static let servedModelHeaderName = "X-MacProvider-Served-Model"
+
+    /// R016: the served id names no `warm` member. Nothing ran and nothing
+    /// settles, so the coordinator may send the request elsewhere.
+    static let notLoadedError = APIError(
+        status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded", retryable: true
+    )
+
+    /// Leases the member a coordinator dispatch names. A blank id is absent
+    /// (the primary). An id that is no member but names the primary as this
+    /// provider advertises it outside the warm set (`primaryNames`: the boot
+    /// model and its catalog alias) is the primary. Anything else not `warm`
+    /// throws `notLoadedError`.
+    static func lease(
+        _ router: any WarmModelRouting,
+        servedModelID: String?,
+        primaryNames: [String?]
+    ) throws -> WarmServingLease {
+        let trimmed = servedModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let served = trimmed?.isEmpty == false ? trimmed : nil
+        do {
+            return try router.servingLease(servedModelID: served)
+        } catch {
+            guard let served, primaryNames.contains(where: { $0.map(key) == key(served) }) else {
+                throw notLoadedError
+            }
+            do {
+                return try router.servingLease(servedModelID: nil)
+            } catch {
+                throw notLoadedError
+            }
+        }
+    }
+
+    /// A loopback local request: the member named by the body `model`, else
+    /// the primary.
+    static func leaseLocal(_ router: any WarmModelRouting, bodyModel: String?) throws -> WarmServingLease {
+        do {
+            return try router.servingLeaseLocal(bodyModel: bodyModel)
+        } catch {
+            throw notLoadedError
+        }
+    }
+
+    private static func key(_ modelID: String) -> String {
+        modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil)
+    }
+}

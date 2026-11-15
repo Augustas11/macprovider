@@ -168,7 +168,7 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         members[index].lastAdmissionAt = now()
         return WarmModelLease(
             table: self, token: members[index].token, modelID: members[index].modelID,
-            runtime: members[index].runtime!)
+            primary: members[index].primary, runtime: members[index].runtime!)
     }
 
     // MARK: State transitions
@@ -329,15 +329,18 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
 final class WarmModelLease<Runtime: WarmModelRuntime>: @unchecked Sendable {
     let token: UInt64
     let modelID: String
+    /// The member was the primary when the lease was taken.
+    let primary: Bool
     let runtime: Runtime
     private let table: WarmModelTable<Runtime>
     /// Guarded by the table's lock.
     fileprivate var released = false
 
-    fileprivate init(table: WarmModelTable<Runtime>, token: UInt64, modelID: String, runtime: Runtime) {
+    fileprivate init(table: WarmModelTable<Runtime>, token: UInt64, modelID: String, primary: Bool, runtime: Runtime) {
         self.table = table
         self.token = token
         self.modelID = modelID
+        self.primary = primary
         self.runtime = runtime
     }
 

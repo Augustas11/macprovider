@@ -292,6 +292,8 @@ actor ProviderAdmissionIdentityStatusRuntime {
 struct HTTPServer: Sendable {
     let config: AppConfig
     let modelRuntime: any ModelRuntimeServing
+    /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
+    let warmModels: (any WarmModelRouting)?
     let providerStatus: ProviderStatus
     let receiptBuilder: ReceiptBuilder?
     let idlePrewarmer: IdlePrewarmer?
@@ -308,6 +310,7 @@ struct HTTPServer: Sendable {
     init(
         config: AppConfig,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
@@ -341,6 +344,7 @@ struct HTTPServer: Sendable {
         } else { self.images = nil }
         self.config = config
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.providerStatus = providerStatus
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
@@ -385,6 +389,7 @@ struct HTTPServer: Sendable {
                             providerID: config.providerID,
                             coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
+                            warmModels: warmModels,
                             providerStatus: providerStatus,
                             warmSwapEnabled: config.enableWarmSwap,
                             maxBodyBytes: config.maxRequestBodyBytes,
@@ -546,6 +551,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let coordinatorURL: String?
     private let images: LocalImageGeneration?
     private let modelRuntime: any ModelRuntimeServing
+    private let warmModels: (any WarmModelRouting)?
     private let providerStatus: ProviderStatus
     private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
@@ -589,6 +595,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerID: String?,
         coordinatorURL: String?,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         warmSwapEnabled: Bool,
         maxBodyBytes: Int,
@@ -610,6 +617,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.providerID = providerID
         self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.providerStatus = providerStatus
         self.warmSwapEnabled = warmSwapEnabled
         self.maxBodyBytes = maxBodyBytes
@@ -1163,8 +1171,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 request = request.withMaxTokensLimit(maxOutputTokens)
             }
             parsedRequest = request
-            if !warmSwapEnabled {
-                try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
+            // SPEC-001-R016: the warm member this request runs on is leased
+            // before its runtime handle and released when its task ends.
+            let servingLease = try warmModels.map {
+                try Self.warmServingLease(
+                    $0,
+                    servedModelHeader: requestHead?.headers.first(name: WarmModelRoute.servedModelHeaderName),
+                    local: localLease != nil,
+                    bodyModel: request.model,
+                    primaryNames: [modelID, catalogModelIDAlias]
+                )
+            }
+            // A primary lease serves on `modelRuntime` exactly as without a
+            // warm set; a secondary member serves under its own id.
+            let member = servingLease.flatMap { $0.primary ? nil : $0 }
+            let servingRuntime = member?.runtime ?? modelRuntime
+            do {
+                if let member {
+                    try request.validateModelMatches(member.modelID, aliases: modelIDAliasList(member.modelID))
+                } else if !warmSwapEnabled {
+                    try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
+                }
+            } catch {
+                servingLease?.release()
+                throw error
             }
 
             // SPEC-038 AC-25: arm the disconnect flag before either inference
@@ -1180,7 +1210,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     request: request,
                     writer: writer,
                     disconnect: disconnect,
-                    modelRuntime: modelRuntime,
+                    modelRuntime: servingRuntime,
+                    servingLease: servingLease,
                     warmSwapEnabled: warmSwapEnabled,
                     receiptBuilder: receiptBuilder,
                     providerID: providerID,
@@ -1194,7 +1225,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
+            let task = Task.detached { @Sendable [modelRuntime = servingRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
+                defer { servingLease?.release() }
                 var startedAt = requestAcceptedAt
                 var timeline = RequestTimeline(admittedAt: requestAcceptedAt)
                 var providerRequestStarted = false
@@ -1455,6 +1487,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 disconnect.onDisconnect { task.cancel() }
                 localLease.onPreempt { task.cancel() }
             }
+        } catch let refusal as WarmRoutingRefusal {
+            // SPEC-001-R016: no `warm` member serves the named model. Nothing
+            // ran, so no receipt and no buyer error count.
+            writeAPIError(context: context, refusal.error)
         } catch let parseError as APIError {
             if localLease == nil {
                 Task { [providerStatus] in
@@ -1602,6 +1638,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         writer: ResponseWriter,
         disconnect: ClientDisconnectState,
         modelRuntime: any ModelRuntimeServing,
+        servingLease: WarmServingLease?,
         warmSwapEnabled: Bool,
         receiptBuilder: ReceiptBuilder?,
         providerID: String?,
@@ -1615,7 +1652,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let providerStatus = providerStatus
         let logRequestID = Self.logRequestID(requestID, localLease: localLease)
-        let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
+        let task = Task.detached { @Sendable [modelRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
+            defer { servingLease?.release() }
             var startedAt = Date()
             var timeline = RequestTimeline(admittedAt: startedAt)
             var providerRequestStarted = false
@@ -1954,6 +1992,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 type: "server_error",
                 code: "provider_paused"
             ))
+        }
+    }
+
+    /// R016: a coordinator dispatch names its member in
+    /// `X-MacProvider-Served-Model` (absent: the primary); a loopback local
+    /// request without it runs on the member named by the body `model`.
+    static func warmServingLease(
+        _ warmModels: any WarmModelRouting,
+        servedModelHeader: String?,
+        local: Bool,
+        bodyModel: String,
+        primaryNames: [String?]
+    ) throws -> WarmServingLease {
+        do {
+            if local, servedModelHeader == nil {
+                return try WarmModelRoute.leaseLocal(warmModels, bodyModel: bodyModel)
+            }
+            return try WarmModelRoute.lease(warmModels, servedModelID: servedModelHeader, primaryNames: primaryNames)
+        } catch let error as APIError {
+            throw WarmRoutingRefusal(error: error)
         }
     }
 
@@ -3588,6 +3646,11 @@ private extension Optional where Wrapped == String {
         guard let self else { return [] }
         return [(RouterHandler.receiptHeaderName, self)]
     }
+}
+
+/// A request refused by warm-set routing before any runtime call.
+struct WarmRoutingRefusal: Error {
+    let error: APIError
 }
 
 enum ReceiptEmissionError: Error, Equatable {

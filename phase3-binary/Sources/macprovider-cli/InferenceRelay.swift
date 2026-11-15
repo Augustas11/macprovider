@@ -28,6 +28,8 @@ actor InferenceRelay {
     private var endedRequestIDs: Set<String> = []
 
     private let modelRuntime: any ModelRuntimeServing
+    /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
+    private let warmModels: (any WarmModelRouting)?
     private let providerStatus: ProviderStatus
     private let loadedModelID: String?
     private let catalogModelIDAlias: String?
@@ -51,6 +53,7 @@ actor InferenceRelay {
 
     init(
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
         catalogModelIDAlias: String? = nil,
@@ -70,6 +73,7 @@ actor InferenceRelay {
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.providerStatus = providerStatus
         self.loadedModelID = loadedModelID
         self.catalogModelIDAlias = catalogModelIDAlias
@@ -410,8 +414,31 @@ actor InferenceRelay {
             return
         }
 
+        // SPEC-001-R016: the warm member the coordinator chose is leased
+        // before admission, so it cannot be evicted under this request; an
+        // id with no `warm` member is refused before any inference.
+        var servingLease: WarmServingLease?
+        if let warmModels {
+            do {
+                servingLease = try Self.warmServingLease(warmModels, servedModelWire: message["served_model_id"], primaryNames: [loadedModelID, catalogModelIDAlias])
+            } catch {
+                if let relayBlindOpened {
+                    try await terminateClaimedRelay(
+                        relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
+                    )
+                    return
+                }
+                try await Self.sendEndFrame(
+                    Self.errorEndFrame(requestID: requestID, error: WarmModelRoute.notLoadedError, chunksSent: 0),
+                    requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame
+                )
+                return
+            }
+        }
+
         let admission = await providerStatus.admitRequest(requestID: requestID)
         guard case .admitted(let startedAt) = admission else {
+            servingLease?.release()
             if let relayBlindOpened {
                 try await terminateClaimedRelay(
                     relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
@@ -465,16 +492,21 @@ actor InferenceRelay {
                 throw error
             }
         }
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
+        // A primary lease serves on `modelRuntime` with today's identity; a
+        // secondary member serves on its own runtime under its own id.
+        let member = servingLease.flatMap { $0.primary ? nil : $0 }
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime, servingLease, member] in
+            defer { servingLease?.release() }
             await Self.process(
                 requestID: requestID,
                 body: body,
                 stream: stream,
                 state: state,
-                modelRuntime: modelRuntime,
+                modelRuntime: member?.runtime ?? modelRuntime,
                 providerStatus: providerStatus,
-                loadedModelID: loadedModelID,
-                catalogModelIDAlias: catalogModelIDAlias,
+                loadedModelID: member?.modelID ?? loadedModelID,
+                catalogModelIDAlias: member?.modelID ?? catalogModelIDAlias,
+                servedMemberModelID: member?.modelID,
                 warmSwapEnabled: warmSwapEnabled,
                 tier2Session: tier2Session,
                 receiptBuilder: receiptBuilder,
@@ -493,6 +525,22 @@ actor InferenceRelay {
             await self?.removeActive(requestID, state: state)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
+    }
+
+    /// R016 `served_model_id`: absent or null is the primary; any other
+    /// non-string names no member.
+    static func warmServingLease(
+        _ warmModels: any WarmModelRouting,
+        servedModelWire: Any?,
+        primaryNames: [String?]
+    ) throws -> WarmServingLease {
+        let served: String?
+        switch servedModelWire {
+        case nil, is NSNull: served = nil
+        case let value as String: served = value
+        default: throw WarmModelRoute.notLoadedError
+        }
+        return try WarmModelRoute.lease(warmModels, servedModelID: served, primaryNames: primaryNames)
     }
 
     func currentAdmissionLimit() async -> Int {
@@ -767,6 +815,7 @@ actor InferenceRelay {
         providerStatus: ProviderStatus,
         loadedModelID: String?,
         catalogModelIDAlias: String?,
+        servedMemberModelID: String? = nil,
         warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
         receiptBuilder: ReceiptBuilder?,
@@ -877,9 +926,15 @@ actor InferenceRelay {
                     sendFrame: sendFrame
                 )
             } else {
-                let validationModelID = warmSwapEnabled
-                    ? await modelRuntime.currentSnapshot().modelID
-                    : loadedModelID
+                // A secondary warm member validates against its own id.
+                let validationModelID: String?
+                if let servedMemberModelID {
+                    validationModelID = servedMemberModelID
+                } else {
+                    validationModelID = warmSwapEnabled
+                        ? await modelRuntime.currentSnapshot().modelID
+                        : loadedModelID
+                }
                 let relayAliases = (validationModelID != nil && validationModelID == loadedModelID)
                     ? modelIDAliasList(catalogModelIDAlias)
                     : []
