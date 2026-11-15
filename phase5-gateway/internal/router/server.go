@@ -1261,9 +1261,10 @@ type poolzProviderRow struct {
 	// read it; older coordinators omit it.
 	InService *bool  `json:"in_service,omitempty"`
 	AuthState string `json:"auth_state,omitempty"`
-	// ServedModel is set on each row of a multi-model provider session, one
-	// row per (provider, model) entry (SPEC-002-R011). Older coordinators
-	// and single-model providers omit it.
+	// ServedModel is set on each row of a multi-model provider session (a
+	// warm set of more than one member), one row per (provider, model)
+	// entry (SPEC-002-R011). Older coordinators and single-model providers,
+	// including a warm set of exactly one member, omit it.
 	ServedModel string `json:"served_model,omitempty"`
 }
 

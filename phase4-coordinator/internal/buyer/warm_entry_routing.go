@@ -9,7 +9,6 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
-	"golang.org/x/text/unicode/norm"
 )
 
 // servedModelHeader carries served_model_id on an HTTP-forwarded dispatch
@@ -18,7 +17,7 @@ const servedModelHeader = "X-MacProvider-Served-Model"
 
 // servedModelKey is the SPEC-010 case-folded served model id.
 func servedModelKey(modelID string) string {
-	return strings.ToLower(norm.NFC.String(modelID))
+	return pool.ModelKey(modelID)
 }
 
 // furtherWarmEntry reports whether p is the per-entry view of a warm-set

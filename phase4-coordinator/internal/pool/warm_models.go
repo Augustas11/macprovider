@@ -91,9 +91,15 @@ type WarmModel struct {
 	notLoadedStrikes []time.Time
 }
 
-// warmModelKey is the SPEC-010 case-folded model id.
-func warmModelKey(modelID string) string {
+// ModelKey is the SPEC-010 case-folded model id (NFC, then lowercase): the
+// one folding the pool, buyer entry routing and the routing perf store use
+// to compare model ids.
+func ModelKey(modelID string) string {
 	return strings.ToLower(norm.NFC.String(modelID))
+}
+
+func warmModelKey(modelID string) string {
+	return ModelKey(modelID)
 }
 
 func cloneWarmModels(in []WarmModel) []WarmModel {

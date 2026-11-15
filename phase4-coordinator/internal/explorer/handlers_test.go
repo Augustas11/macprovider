@@ -1184,9 +1184,10 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-// SPEC-002-R011: every warm-set entry's model is listed as available, as the
-// /poolz summary lists it, and each provider row lists its entries; a provider without a warm set keeps
-// its single model_id and an empty warm_models list.
+// SPEC-002-R011: every warm-set entry in service is listed as available (a
+// loading member is not), and each provider row lists its entries; a
+// provider without a warm set keeps its single model_id and an empty
+// warm_models list.
 func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	registry := pool.NewRegistry(nil)
@@ -1216,7 +1217,7 @@ func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
 	}
 	poolView := decodeObject(t, overview)["pool"].(map[string]any)
 	got, _ := json.Marshal(poolView["models_available"])
-	if string(got) != `["llama","model-a","model-b","model-c"]` {
+	if string(got) != `["llama","model-a","model-b"]` {
 		t.Fatalf("models_available = %s", got)
 	}
 	if poolView["total_providers"] != float64(2) || poolView["slots_total"] != float64(3) {
@@ -1257,5 +1258,30 @@ func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
 	detail := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers/provider_warm", "operator-key")
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"model_id":"model-b"`) {
 		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}
+
+// models_available lists no entry whose hash check failed and no entry out of
+// service.
+func TestModelsAvailableSkipsFailedHashAndOutOfService(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	registry := pool.NewRegistry(nil)
+	for _, p := range []pool.Provider{
+		{ProviderID: "ok", AssignedID: "a1", ModelID: "good", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, HashStatus: pool.HashStatusVerified},
+		{ProviderID: "mismatch", AssignedID: "a2", ModelID: "swapped", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, HashStatus: pool.HashStatusMismatch},
+		{ProviderID: "invalid", AssignedID: "a3", ModelID: "garbled", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, HashStatus: pool.HashStatusInvalid},
+		{ProviderID: "draining", AssignedID: "a4", ModelID: "leaving", State: pool.StateDraining, SlotsFree: 1, SlotsTotal: 1},
+	} {
+		p := p
+		registry.Register(&p, nil)
+	}
+	h.pool = registry
+	overview := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "operator-key")
+	if overview.Code != http.StatusOK {
+		t.Fatalf("overview status=%d body=%s", overview.Code, overview.Body.String())
+	}
+	got, _ := json.Marshal(decodeObject(t, overview)["pool"].(map[string]any)["models_available"])
+	if string(got) != `["good"]` {
+		t.Fatalf("models_available = %s, want only the in-service verified model", got)
 	}
 }

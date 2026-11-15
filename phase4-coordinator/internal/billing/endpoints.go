@@ -1342,7 +1342,8 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		"provider_share_bps":     shareBps,
 		"models_served":          models,
 		// credits_by_model splits total_credits by model over the same rows,
-		// in the same provider-credit unit; it sums to total_credits.
+		// in the same provider-credit unit; it sums to total_credits minus
+		// the credits on rows with no model, which no key names.
 		"credits_by_model":  figures.byModel,
 		"rate_card_excerpt": rateCard,
 		"fault_count":       faultCount,
@@ -1850,6 +1851,8 @@ type providerPayableTotals struct {
 	total, week, today int64
 	models             []string
 	byModel            map[string]int64
+	// unattributed is the part of total on credits with no model.
+	unattributed int64
 }
 
 // providerPayableTotals reads the range-scoped payable total, the week and
@@ -1887,9 +1890,13 @@ SELECT model,
 		out.total += nullInt(total)
 		out.week += nullInt(week)
 		out.today += nullInt(today)
-		if model.Valid {
-			out.models = append(out.models, model.String)
+		// A credit with no model is in total but under no model key, so
+		// credits_by_model sums to total minus unattributed.
+		if !model.Valid {
+			out.unattributed += nullInt(total)
+			continue
 		}
+		out.models = append(out.models, model.String)
 		out.byModel[model.String] += nullInt(total)
 	}
 	if err := rows.Err(); err != nil {
