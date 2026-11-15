@@ -15,7 +15,9 @@ final class SmallMRouteTests: XCTestCase {
         shard: Bool = false,
         autotune: Bool = false,
         switchTargets: Bool = false,
-        verdict: SmallMRoute.SelfCheckVerdict = .absent
+        verdict: SmallMRoute.SelfCheckVerdict = .absent,
+        fallback: String? = nil,
+        operatorRowInvariant: Bool = false
     ) -> SmallMRoute.Inputs {
         SmallMRoute.Inputs(
             continuousBatching: mode,
@@ -26,7 +28,9 @@ final class SmallMRouteTests: XCTestCase {
             shardGroupRole: shard,
             autotuneCandidate: autotune,
             otherSwitchTargets: switchTargets,
-            selfCheckVerdict: verdict
+            selfCheckVerdict: verdict,
+            stockOrderFallback: fallback,
+            operatorForcesRowInvariant: operatorRowInvariant
         )
     }
 
@@ -34,6 +38,7 @@ final class SmallMRouteTests: XCTestCase {
     func testDecisionTableCoversEveryCombination() {
         var serialCount = 0
         var stockOrderCount = 0
+        var operatorCount = 0
         for mode in [ContinuousBatchingMode.off, .canary, .on] {
             for explicit in [false, true] {
                 for nativeMTP in [NativeMTPMode.off, .auto] {
@@ -43,27 +48,43 @@ final class SmallMRouteTests: XCTestCase {
                                 for autotune in [false, true] {
                                     for switchTargets in [false, true] {
                                         for verdict in SmallMRoute.SelfCheckVerdict.allCases {
-                                            let value = inputs(
-                                                mode: mode, explicit: explicit, nativeMTP: nativeMTP,
-                                                admission: admission, draft: draft, shard: shard,
-                                                autotune: autotune, switchTargets: switchTargets, verdict: verdict
-                                            )
-                                            let mtpInactive = nativeMTP == .off
-                                                || admission == .none || admission == .noEntryForModel
-                                            let cbCannotActivate = (explicit && mode == .off) || verdict == .grantsNoBatching
-                                            let expected = mtpInactive && cbCannotActivate
-                                                && !draft && !shard && !autotune && !switchTargets
-                                            let decision = SmallMRoute.decide(value)
-                                            XCTAssertEqual(decision.route == .serialOnly, expected, "\(value.logFields) -> \(decision.reason)")
-                                            if expected { serialCount += 1 }
-                                            // Anything that needs the row-invariant pair keeps it;
-                                            // every other batching process takes stock order.
-                                            let needsInvariant = draft || shard || autotune || switchTargets || !mtpInactive
-                                            let expectedRoute: SmallMRoute = needsInvariant
-                                                ? .rowInvariant
-                                                : (expected ? .serialOnly : .stockOrder)
-                                            XCTAssertEqual(decision.route, expectedRoute, "\(value.logFields) -> \(decision.reason)")
-                                            if expectedRoute == .stockOrder { stockOrderCount += 1 }
+                                            for fallback in [nil, SmallMRoute.stockOrderDivergence] {
+                                                for operatorRowInvariant in [false, true] {
+                                                    let value = inputs(
+                                                        mode: mode, explicit: explicit, nativeMTP: nativeMTP,
+                                                        admission: admission, draft: draft, shard: shard,
+                                                        autotune: autotune, switchTargets: switchTargets, verdict: verdict,
+                                                        fallback: fallback, operatorRowInvariant: operatorRowInvariant
+                                                    )
+                                                    let mtpInactive = nativeMTP == .off
+                                                        || admission == .none || admission == .noEntryForModel
+                                                    let cbCannotActivate = (explicit && mode == .off) || verdict == .grantsNoBatching
+                                                    let expected = mtpInactive && cbCannotActivate
+                                                        && !draft && !shard && !autotune && !switchTargets
+                                                    let decision = SmallMRoute.decide(value)
+                                                    XCTAssertEqual(decision.route == .serialOnly, expected, "\(value.logFields) -> \(decision.reason)")
+                                                    if expected { serialCount += 1 }
+                                                    // Anything that needs the row-invariant pair keeps it; a
+                                                    // stock order fallback or the operator key sends a batching
+                                                    // process there too; every other one takes stock order.
+                                                    let needsInvariant = draft || shard || autotune || switchTargets || !mtpInactive
+                                                    let expectedRoute: SmallMRoute = needsInvariant
+                                                        ? .rowInvariant
+                                                        : (expected ? .serialOnly : (fallback != nil || operatorRowInvariant ? .rowInvariant : .stockOrder))
+                                                    XCTAssertEqual(decision.route, expectedRoute, "\(value.logFields) -> \(decision.reason)")
+                                                    if expectedRoute == .stockOrder { stockOrderCount += 1 }
+                                                    // The operator key only ever replaces a stock order decision.
+                                                    var withoutOperator = value
+                                                    withoutOperator.operatorForcesRowInvariant = false
+                                                    let undecided = SmallMRoute.decide(withoutOperator)
+                                                    if operatorRowInvariant, undecided.route == .stockOrder {
+                                                        XCTAssertEqual(decision, SmallMRoute.Decision(route: .rowInvariant, reason: "operator_row_invariant"), value.logFields)
+                                                        operatorCount += 1
+                                                    } else {
+                                                        XCTAssertEqual(decision, undecided, value.logFields)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -75,6 +96,41 @@ final class SmallMRouteTests: XCTestCase {
         }
         XCTAssertGreaterThan(serialCount, 0)
         XCTAssertGreaterThan(stockOrderCount, 0)
+        XCTAssertEqual(operatorCount, stockOrderCount)
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant` turns
+    /// a stock order decision into the row-invariant route and leaves every
+    /// serial-only and row-invariant decision, reason included, as it was.
+    func testOperatorRowInvariantOnlyReplacesStockOrder() {
+        let cases: [(SmallMRoute.Inputs, SmallMRoute.Decision)] = [
+            (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(explicit: false, verdict: .staleKey), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(explicit: false, verdict: .recheckPending), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(mode: .on, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            // Serial-only stays serial-only.
+            (inputs(), .init(route: .serialOnly, reason: "continuous_batching_off_by_configuration")),
+            (inputs(explicit: false, verdict: .grantsNoBatching), .init(route: .serialOnly, reason: "self_check_no_batching")),
+            // Row-invariant decisions keep their own reason.
+            (inputs(explicit: false, verdict: .grantsBatching, fallback: SmallMRoute.stockOrderCrash), .init(route: .rowInvariant, reason: "stock_order_crash")),
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "native_mtp_entry_for_model")),
+            (inputs(explicit: false, draft: true), .init(route: .rowInvariant, reason: "draft_model")),
+            (inputs(explicit: false, shard: true), .init(route: .rowInvariant, reason: "shard_group")),
+            (inputs(explicit: false, autotune: true), .init(route: .rowInvariant, reason: "autotune_candidate")),
+            (inputs(explicit: false, switchTargets: true), .init(route: .rowInvariant, reason: "switch_targets")),
+        ]
+        for (value, unforced) in cases {
+            var forced = value
+            forced.operatorForcesRowInvariant = true
+            XCTAssertEqual(SmallMRoute.decide(value).route == .stockOrder, unforced.reason == "operator_row_invariant", value.logFields)
+            XCTAssertEqual(SmallMRoute.decide(forced), unforced, forced.logFields)
+            XCTAssertNotEqual(SmallMRoute.decide(forced).route, .stockOrder, forced.logFields)
+        }
+        // Batching stays possible: the key never makes a process serial-only.
+        let forced = inputs(explicit: false, verdict: .grantsBatching, operatorRowInvariant: true)
+        XCTAssertNil(SmallMRoute.batchingRefusal(route: SmallMRoute.decide(forced).route, entry: "serve"))
+        XCTAssertTrue(forced.logFields.hasSuffix(" operator_small_m_route=row_invariant"))
+        XCTAssertFalse(inputs(explicit: false).logFields.contains("operator_small_m_route"))
     }
 
     /// Native MTP's verify window (depth + 1 rows of one request) must equal
@@ -556,7 +612,8 @@ extension SmallMRouteTests {
             continuousBatching: .off, continuousBatchingExplicitlyConfigured: false, nativeMTPMode: .auto,
             nativeMTPAdmission: .none, draftConfigured: false, shardGroupRole: false, autotuneCandidate: false,
             otherSwitchTargets: false,
-            selfCheckVerdict: store.verdict(startupIdentity: identity, selfCheckStore: selfCheck)
+            selfCheckVerdict: store.verdict(startupIdentity: identity, selfCheckStore: selfCheck),
+            operatorForcesRowInvariant: false
         )
         value.stockOrderFallback = store.stockOrderFallback(startupIdentity: identity)
         return value

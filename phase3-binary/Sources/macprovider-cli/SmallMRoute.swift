@@ -134,6 +134,8 @@ enum SmallMRoute: String, Sendable, Equatable {
         /// stock order route (`SmallMRouteVerdictStore.stockOrderFallback`),
         /// or nil.
         var stockOrderFallback: String? = nil
+        /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant`.
+        var operatorForcesRowInvariant: Bool = false
 
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
@@ -142,6 +144,7 @@ enum SmallMRoute: String, Sendable, Equatable {
                 + "draft=\(draftConfigured) shard=\(shardGroupRole) autotune_candidate=\(autotuneCandidate) "
                 + "switch_targets=\(otherSwitchTargets) self_check=\(selfCheckVerdict.rawValue)"
                 + (stockOrderFallback.map { " stock_order_fallback=\($0)" } ?? "")
+                + (operatorForcesRowInvariant ? " operator_small_m_route=row_invariant" : "")
         }
     }
 
@@ -169,6 +172,9 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// identity; a new runtime build is a new identity and re-decides). A
     /// one-row verdict then counts only if it was measured on the
     /// row-invariant route, as it does today.
+    /// `operatorForcesRowInvariant` turns only that stock order decision into
+    /// the row-invariant route (`operator_row_invariant`); it never changes a
+    /// serial-only or another row-invariant decision, and batching stays on.
     /// A one-row verdict recorded on a batching route stays valid on the
     /// serial route: it says batching gives no net gain against that route's
     /// serial baseline (on stock order the same upstream one-row kernel the
@@ -195,6 +201,10 @@ enum SmallMRoute: String, Sendable, Equatable {
         }
         if let fallback = inputs.stockOrderFallback {
             return Decision(route: .rowInvariant, reason: fallback)
+        }
+        // Every decision left below is stock order.
+        if inputs.operatorForcesRowInvariant {
+            return Decision(route: .rowInvariant, reason: operatorRowInvariant)
         }
         switch inputs.selfCheckVerdict {
         case .grantsNoBatching:
@@ -225,6 +235,8 @@ enum SmallMRoute: String, Sendable, Equatable {
     static let stockOrderCrash = "stock_order_crash"
     static let stockOrderAttachFailed = "stock_order_attach_failed"
     static let stockOrderReferenceUnfit = "stock_order_reference_unfit"
+    /// The reason when config `small_m_route: row_invariant` replaced stock order.
+    static let operatorRowInvariant = "operator_row_invariant"
 
     /// The fallback a self-check result measured on stock order gives the
     /// next start: any width whose rows diverged (a same-order reference

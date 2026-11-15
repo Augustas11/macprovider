@@ -3252,7 +3252,8 @@ struct ServeCommand: AsyncParsableCommand {
             } ?? .absent,
             stockOrderFallback: smallMRouteStartupIdentity.flatMap {
                 smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
-            }
+            },
+            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant
         )
         #if MACPROVIDER_LAB_HARNESS
         // Lab measurement only: run the same serve on a chosen batching route
@@ -5399,6 +5400,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
     print("  continuous_batch_prefill_tokens_per_iteration: \(config.continuousBatchPrefillTokensPerIteration.map(String.init) ?? "<unset, 2048>")")
     print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
+    print("  small_m_route: \(config.smallMRouteRowInvariant ? "row_invariant" : "<unset, decided at serve>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  privacy_class_beta: \(config.privacyClassBeta)")

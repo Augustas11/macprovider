@@ -5677,6 +5677,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal",
         "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionTableCoversEveryCombination",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testOperatorRowInvariantOnlyReplacesStockOrder",
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testSmallMRouteAcceptsOnlyRowInvariant",
         "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionReasons",
         "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testNativeMTPThatMayActivateNeverRunsStockOrder",
         "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testSerialOnlyProcessRefusesNativeMTPActivation",

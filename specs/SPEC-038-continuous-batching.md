@@ -35,7 +35,10 @@ next start takes `row_invariant`, whose own grant and self-check are
 untouched; a failure measured on `row_invariant` keeps the existing rule.
 SPEC-037 v0.2.7 gives the route its own disk decode-path class. Run in the provider on an M3 Ultra: one request
 over HTTP, and a lab serve with batching granted at 1, 2, 3, 4 and 8
-concurrent requests on Llama 3.1 8B and a 27B model.
+concurrent requests on Llama 3.1 8B and a 27B model. The config key
+`small_m_route: row_invariant` puts a process that would take `stock_order`
+on `row_invariant` (reason `operator_row_invariant`) in every build, with
+batching left on; it accepts no other value.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
 again. An aged long prompt therefore leads one turn and then yields to the
@@ -1955,6 +1958,15 @@ keeps serving its current, stock-order-verified decision until it restarts,
 and logs `event=small_m_route action=stock_order_fallback_recorded
 reason=<reason> next_start=row_invariant` (or the `verdict_recorded` line
 with `fallback=<reason>`).
+
+**Operator row-invariant override (v0.3.56).** The provider config key
+`small_m_route` accepts exactly one value, `row_invariant`; any other value
+MUST fail config validation, and an absent key decides the route as above. In
+every build, a `serve` process whose decision would be `stock_order` takes
+`row_invariant` instead, with reason `operator_row_invariant`. The key MUST
+NOT change a `serial_only` decision or any other `row_invariant` decision or
+its reason, and it does not turn continuous batching off: only the small-row
+kernel route changes.
 
 The MLX core reads the variable once with C `atoi` semantics: unset, or a
 value that parses to neither 0 nor 2, keeps the invariant route; any value

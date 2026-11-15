@@ -5,8 +5,11 @@ For one context size and output length: each prompt alone, then the first k
 prompts started together for each requested width, then a join case (two rows
 start, a third joins after a delay). Prints one JSON object with aggregate
 tok/s per width and, for every row, whether its text equals that prompt's lone
-run and the first differing character if not. While a width runs it polls
-/v1/status and records the largest `scheduler.active_decode_rows` it saw.
+run and the first differing character if not. Every lone run and every row of
+every cell also carries its full response text ("text"), and each trial after
+the first says per row whether its text equals the same row in trial 0. While
+a width runs it polls /v1/status and records the largest
+`scheduler.active_decode_rows` it saw.
 
 The prompts are the parity grid's (prompts.build_messages), one per row index,
 so a row has the same prompt at every width. Needs only the standard library.
@@ -75,10 +78,11 @@ def burst(port, model, ctx, rows, max_tokens, delays=None):
 def compare(rec, lone):
     a, b = lone["text"], rec["text"]
     if a == b:
-        return {"row": rec["row"], "equal_lone": True, "tokens": rec["tokens"]}
+        return {"row": rec["row"], "equal_lone": True, "tokens": rec["tokens"], "text": b}
     i = next((j for j in range(min(len(a), len(b))) if a[j] != b[j]), min(len(a), len(b)))
     return {"row": rec["row"], "equal_lone": False, "first_diff_char": i, "tokens": rec["tokens"],
-            "lone_tokens": lone["tokens"], "lone_at": a[max(0, i - 20):i + 20], "ours_at": b[max(0, i - 20):i + 20]}
+            "lone_tokens": lone["tokens"], "lone_at": a[max(0, i - 20):i + 20], "ours_at": b[max(0, i - 20):i + 20],
+            "text": b}
 
 
 def main(argv=None):
@@ -105,11 +109,19 @@ def main(argv=None):
     result = {"model": args.model, "ctx": args.ctx, "max_tokens": args.max_tokens,
               "route": before.get("small_m_route"), "route_reason": before.get("small_m_route_reason"),
               "cb_active": before.get("active"), "self_check": before.get("self_check"),
-              "lone_tps": lone_tps, "lone_repeat_equal": again[0]["text"] == lone[0]["text"], "widths": []}
+              "lone_tps": lone_tps, "lone_repeat_equal": again[0]["text"] == lone[0]["text"],
+              "lone": [{"row": row, "tokens": lone[row]["tokens"], "finish": lone[row]["finish"],
+                        "error": lone[row]["error"], "text": lone[row]["text"]} for row in range(top)],
+              "lone_repeat_text": again[0]["text"], "widths": []}
     for k in widths:
+        first = None
         for trial in range(args.trials):
             recs, agg = burst(args.port, args.model, args.ctx, list(range(k)), args.max_tokens)
             agg.update({"width": k, "trial": trial, "rows": [compare(r, lone[r["row"]]) for r in recs]})
+            if first is None:
+                first = {r["row"]: r["text"] for r in recs}
+            else:
+                agg["rows_equal_trial0"] = [r["text"] == first[r["row"]] for r in recs]
             result["widths"].append(agg)
     recs, agg = burst(args.port, args.model, args.ctx, [0, 1, 2], args.max_tokens, delays={2: args.join_delay})
     agg.update({"case": "join", "join_delay_s": args.join_delay,
