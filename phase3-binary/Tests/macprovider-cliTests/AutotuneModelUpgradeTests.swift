@@ -1579,13 +1579,17 @@ extension AutotuneModelUpgradeTests {
 
 extension AutotuneModelUpgradeTests {
     func testTriggerAndChildStopOnlyTheServeThatStartedTheCheck() async throws {
-        XCTAssertNil(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: 42))
-        XCTAssertNil(AutotuneModelUpgrade.providerMismatch(.foreground(pid: 42, argv: ["macprovider-cli", "serve"]), expectedPID: 42))
-        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: 43), "detected_provider_is_not_the_parent")
-        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.foreground(pid: 42, argv: []), expectedPID: 43), "detected_provider_is_not_the_parent")
-        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: nil), expectedPID: 42), "detected_provider_is_not_the_parent")
-        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.none, expectedPID: 42), "no_detected_provider")
-        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: nil), "no_parent_pid")
+        XCTAssertNil(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: 42, systemLaunchDaemonInstalled: false))
+        XCTAssertNil(AutotuneModelUpgrade.providerMismatch(.foreground(pid: 42, argv: ["macprovider-cli", "serve"]), expectedPID: 42, systemLaunchDaemonInstalled: false))
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: 43, systemLaunchDaemonInstalled: false), "detected_provider_is_not_the_parent")
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.foreground(pid: 42, argv: []), expectedPID: 43, systemLaunchDaemonInstalled: false), "detected_provider_is_not_the_parent")
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: nil), expectedPID: 42, systemLaunchDaemonInstalled: false), "detected_provider_is_not_the_parent")
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.none, expectedPID: 42, systemLaunchDaemonInstalled: false), "no_detected_provider")
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: nil, systemLaunchDaemonInstalled: false), "no_parent_pid")
+        // A headless system LaunchDaemon provider looks foreground to the
+        // provider user; SIGTERM would only make launchd relaunch it.
+        XCTAssertEqual(AutotuneModelUpgrade.providerMismatch(.foreground(pid: 42, argv: ["macprovider-cli", "serve"]), expectedPID: 42, systemLaunchDaemonInstalled: true), "system_launch_daemon_provider")
+        XCTAssertNil(AutotuneModelUpgrade.providerMismatch(.launchdManaged(pid: 42), expectedPID: 42, systemLaunchDaemonInstalled: true))
 
         // A lab serve (pid 43) started the child; the launchd provider (42)
         // is what the isolation would stop: nothing is stopped.
@@ -1755,10 +1759,13 @@ extension AutotuneModelUpgradeTests {
     func testARecordedKeepHoldsUntilTheInputsChange() throws {
         // A pure re-stamp keeps the content digest; a row change does not.
         let feed = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v1","rows":{"a":{"x":1}}}"#
-        let restamped = #"{"rows":{"a":{"x":1}},"version":"v2","generated_at":"2026-11-16T00:00:00Z"}"#
+        let restamped = #"{"rows":{"a":{"x":1}},"version":"v1","generated_at":"2026-11-16T00:00:00Z"}"#
+        let newRelease = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v2","rows":{"a":{"x":1}}}"#
         let changed = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v1","rows":{"a":{"x":2}}}"#
         XCTAssertEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(restamped.utf8)))
         XCTAssertNotEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(changed.utf8)))
+        XCTAssertNotEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(newRelease.utf8)))
+        XCTAssertFalse(AutotuneModelUpgrade.recordsKeep(.keep(reason: "challenger_lacks_incumbent_acceleration"), wroteRow: false))
 
         XCTAssertTrue(AutotuneModelUpgrade.recordsKeep(.keep(reason: "no_eligible_candidate"), wroteRow: false))
         XCTAssertFalse(AutotuneModelUpgrade.recordsKeep(.keep(reason: "incumbent_selected"), wroteRow: true))

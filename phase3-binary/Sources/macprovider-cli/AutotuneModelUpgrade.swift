@@ -533,7 +533,7 @@ enum AutotuneModelUpgrade {
 
     /// Top-level feed fields a re-publish restamps without changing what the
     /// decision reads.
-    static let restampFields: Set<String> = ["generated_at", "version"]
+    static let restampFields: Set<String> = ["generated_at"]
 
     /// SHA-256 of a feed's content: its JSON with the restamp fields removed,
     /// re-serialized with sorted keys, so a pure re-stamp keeps the digest.
@@ -563,7 +563,11 @@ enum AutotuneModelUpgrade {
     /// later check may resolve.
     static func recordsKeep(_ decision: Decision, wroteRow: Bool) -> Bool {
         guard case let .keep(reason) = decision else { return false }
-        return !wroteRow && reason != "acceleration_admission_unverified"
+        // Acceleration keeps depend on CB/native-MTP admission state that
+        // is not in the inputs key, so a later release can change them.
+        return !wroteRow
+            && reason != "acceleration_admission_unverified"
+            && reason != "challenger_lacks_incumbent_acceleration"
     }
 
     /// Adds a keep for `inputsKey` to the record at `url`.
@@ -774,9 +778,18 @@ enum AutotuneModelUpgrade {
         guard fd >= 0 else {
             return .failed("open \(url.path): \(String(cString: strerror(errno)))")
         }
-        while flock(fd, blocking ? LOCK_EX : LOCK_EX | LOCK_NB) != 0 {
+        var announcedWait = false
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let code = errno
             if code == EINTR { continue }
+            if code == EWOULDBLOCK, blocking {
+                if !announcedWait {
+                    FileHandle.standardError.write(Data("model_upgrade: waiting for another model upgrade run to finish (\(url.path))\n".utf8))
+                    announcedWait = true
+                }
+                usleep(1_000_000)
+                continue
+            }
             close(fd)
             if code == EWOULDBLOCK { return .busy }
             return .failed("flock \(url.path): \(String(cString: strerror(code)))")
@@ -934,7 +947,11 @@ enum AutotuneModelUpgrade {
     /// is not the process `expectedPID`: the serve that starts the check
     /// passes its own pid, and the unattended child refuses any other
     /// provider. A provider whose pid is unknown never matches.
-    static func providerMismatch(_ conflict: ProviderConflict, expectedPID: Int32?) -> String? {
+    static func providerMismatch(
+        _ conflict: ProviderConflict,
+        expectedPID: Int32?,
+        systemLaunchDaemonInstalled: Bool
+    ) -> String? {
         guard let expectedPID else { return "no_parent_pid" }
         switch conflict {
         case .none:
@@ -942,8 +959,24 @@ enum AutotuneModelUpgrade {
         case let .launchdManaged(pid):
             return pid == expectedPID ? nil : "detected_provider_is_not_the_parent"
         case let .foreground(pid, _):
+            // A headless provider runs as a system LaunchDaemon that the
+            // provider user's `launchctl list` does not show; it looks
+            // foreground, but a SIGTERM only makes launchd relaunch it.
+            if systemLaunchDaemonInstalled { return "system_launch_daemon_provider" }
             return pid == expectedPID ? nil : "detected_provider_is_not_the_parent"
         }
+    }
+
+    static let systemLaunchDaemonPlistPaths = [
+        "/Library/LaunchDaemons/live.malibu.provider.plist",
+        "/Library/LaunchDaemons/live.streamvc.macprovider.plist",
+    ]
+
+    static func systemLaunchDaemonInstalled(
+        paths: [String] = systemLaunchDaemonPlistPaths,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        paths.contains { fileManager.fileExists(atPath: $0) }
     }
 
     /// Starts `autotune --recommend --upgrade --apply --unattended` in its own

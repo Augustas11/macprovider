@@ -31,6 +31,9 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   row the config names when it runs; a keep that wrote no row is recorded
   so its inputs are not re-run; an unreadable lifecycle state counts as
   paused; a lost lease blocks the apply; evidence is submitted after apply.
+  Audit round 3: a headless system-LaunchDaemon provider starts no check;
+  a feed `version` change is a new inputs key; acceleration keeps are not
+  recorded; an attended run says when it waits for the lock.
   Prefetch fetches the likely winners first under the free-space reserve,
   records what the run downloaded, and the run removes its unselected
   downloads. A foreground provider is restarted on every exit. Registers `SPEC-023-R029`
@@ -3362,18 +3365,24 @@ use it.
    else the first foreground serve), compared by pid. The serve passes its
    pid (`--upgrade-parent-pid`, required with `--unattended`); the child
    exits 75 with nothing downloaded or stopped when the detected provider
-   is not that pid, checked before prefetch and again at the stop. Only the
+   is not that pid, checked before prefetch and again at the stop. A
+   provider that looks foreground while a system LaunchDaemon
+   (`/Library/LaunchDaemons/live.malibu.provider.plist`) is installed is a
+   headless provider that SIGTERM cannot stop: it starts no check and the
+   child refuses it (`system_launch_daemon_provider`). Only the
    canonical installed binary is spawned. `--unattended` requires
    `--upgrade --apply` without a receipt and adds three gates after the
    freshness and pin checks:
    - **Recorded keep.** A completed run that kept I without writing a
      benchmarked row (so §9 state stays stale) records the inputs key; an
      unattended run for a recorded key exits 0 until the inputs change. A
-     keep for `acceleration_admission_unverified` is not recorded.
+     keep for `acceleration_admission_unverified` or
+     `challenger_lacks_incumbent_acceleration` is not recorded: CB and
+     native-MTP admission state is not in the inputs key.
    - **Stagger.** The inputs key is the SHA-256 over the signed candidate
      catalog, rate card and demand rank content digests (each feed's JSON
-     without its top-level `generated_at` and `version`, keys sorted, so a
-     pure re-stamp keeps the key) and the binary version,
+     without its top-level `generated_at`, keys sorted, so a pure re-stamp
+     keeps the key; a new `version` is a new release) and the binary version,
      every input whose change makes §9 stale. The run acts only from
      `anchor + offset`. `anchor` is the newest of the three feeds'
      `generated_at` and the time this binary version was first seen by the

@@ -2071,7 +2071,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         if unattended {
             // Refuse before any download when the provider this run would
             // stop is not the serve that started it.
-            if let reason = AutotuneModelUpgrade.providerMismatch(try dependencies.detectConflict(), expectedPID: upgradeParentPID) {
+            if let reason = AutotuneModelUpgrade.providerMismatch(try dependencies.detectConflict(), expectedPID: upgradeParentPID,
+                systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled()) {
                 dependencies.writeStderr("model_upgrade: unattended check refused reason=\(reason); nothing was downloaded or stopped\n")
                 throw ExitCode(75)
             }
@@ -2173,7 +2174,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         // The unattended check stops only the serve that started it.
         func refuseForeignProvider(_ conflict: ProviderConflict) throws {
             guard unattended,
-                  let reason = AutotuneModelUpgrade.providerMismatch(conflict, expectedPID: upgradeParentPID)
+                  let reason = AutotuneModelUpgrade.providerMismatch(conflict, expectedPID: upgradeParentPID,
+                systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled())
             else { return }
             dependencies.writeStderr("model_upgrade: unattended check refused reason=\(reason); the provider was not stopped and the config is unchanged\n")
             throw ExitCode(75)

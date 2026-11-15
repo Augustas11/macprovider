@@ -4282,7 +4282,8 @@ struct ServeCommand: AsyncParsableCommand {
                 // serve on this Mac never does.
                 let providerMismatch: String?
                 if let detected = try? ProviderConflictDetector().detect() {
-                    providerMismatch = AutotuneModelUpgrade.providerMismatch(detected, expectedPID: getpid())
+                    providerMismatch = AutotuneModelUpgrade.providerMismatch(detected, expectedPID: getpid(),
+                        systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled())
                 } else {
                     providerMismatch = "provider_detection_failed"
                 }
