@@ -1,6 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.41 (2026-11-16, canonical model id, slotted members and exact drain attribution)
+**Version:** 1.6.42 (2026-11-16, sanctions keyed on the resolved catalog row)
+
+**Change log v1.6.42 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+keys every per-model sanction on the resolved catalog row, not on the
+spelling. A signed catalog row is reachable as its row key and as its
+`model_id`; both names map to one sanction identity, the row's normalized
+`model_id`, and an id that names no catalog row keeps its canonical model
+id. SPEC-036 FR-25 suspension and verification keys, not-loaded strikes and
+identity pins use it, so a provider cannot leave a sanction behind by
+declaring a model under the row's other name. A warm set of two or more
+entries in which two entries (the primary included) name one row, or a
+session whose `supported_models` names one row twice while it carries such
+a warm set, takes the existing bad-`warm_models` path. A warm set of one is
+never affected. The route snapshot flag follows SPEC-022 v0.4.15. No trust
+tier or attestation label changes.
 
 **Change log v1.6.41 (2026-11-16, Related: #2338):** `SPEC-002-R011`
 gains a decode rule: a model id is accepted only in a spelling whose
@@ -6308,9 +6322,9 @@ model when they are consumed and end there.
     `supported_models`, the legacy `hello` included, supports only its
     top-level model, so it can carry only a warm set of one.
 
-  *Canonical model id.* A model id names one key everywhere (warm entries,
-  slot queue, strikes, SPEC-036 verification keys, SPEC-022 holds): the
-  trimmed, Unicode NFC, lower-case form. The coordinator accepts a model id
+  *Canonical model id.* A model id names one routing key (warm entries,
+  slot queue, sticky and perf keys): the trimmed, Unicode NFC, lower-case
+  form. The coordinator accepts a model id
   on the `hello`, the v2 `auth_request` (top-level `model_id` and every
   `supported_models` entry, on both stages), every heartbeat `model_id` and
   every `warm_models` entry only when it is non-empty, has no surrounding
@@ -6323,6 +6337,26 @@ model when they are consumed and end there.
   legal and fold to one key; catalog ids, which every legacy provider sends,
   are ASCII. The id is not rewritten: the route snapshot and the dispatch
   keep the provider's accepted spelling, whose ASCII lower case is the key.
+
+  *Sanction identity.* Every per-model sanction and its lookups (SPEC-036
+  FR-25 suspension and the passing set behind `served_model_dispatch`,
+  verification keys, due times, scorer pools and in-flight request matching,
+  not-loaded strikes, identity pins) key on the resolved catalog row, not on
+  the spelling. A signed catalog row is reachable under two names, its row
+  key and its `model_id`; both map to one identity, the row's normalized
+  `model_id`. A name that is some row's `model_id` is its own identity; a
+  name that is only a row key maps to its row's `model_id`. The active
+  catalog release decides, then each retained compatible release in a fixed
+  order. An id that names no catalog row (BYOM, uncatalogued) keeps its
+  canonical model id. A provider that declares a model under the row's
+  other name, as a further entry or as its top-level model, therefore keeps
+  that model's suspension, verification state and due time, strikes and
+  identity pin. A warm set of two or more entries in which two entries name
+  one row (a further entry naming the primary's row included), or a session
+  whose `supported_models` names one row twice while it reports such a warm
+  set, is a bad `warm_models` below. A warm set of one, and every session
+  without one, is never rejected by this rule, so a legacy provider sending
+  either name of its row is accepted as before.
 
   A bad `warm_models` on a `hello` or `auth_request` is dropped with one
   structured warning (`handshake_warm_models_dropped`); the handshake
@@ -6396,7 +6430,7 @@ model when they are consumed and end there.
   queue-full refusal, outside the buyer retry budget, and the attempt is
   logged with `error_model_not_loaded` and null usage: it is never settled
   and is not a breaker fault. A strike counts once per heartbeat generation
-  of the entry. Strikes are kept per session and case-folded model, aged
+  of the entry. Strikes are kept per session and sanction identity, aged
   only by the 120 s window: a state change, a drop and re-add of the entry
   or a promotion keeps them. When a model reaches its second strike within
   120 s (the default breaker threshold and window), the answer is a breaker fault
@@ -6428,8 +6462,9 @@ model when they are consumed and end there.
   `provider_reported_model_hash` and `expected_catalog_model_hash` (SPEC-022)
   come from the dispatched entry, the snapshot records that the attempt was
   dispatched to an entry of a multi-model session whose own SPEC-036 key is
-  `passing` (`served_model_dispatch`, SPEC-022 R-16.2a; 0 otherwise, also
-  while compute-integrity scoring is off), and the request settles against
+  `passing` and whose `model_id` spelling is its sanction identity
+  (`served_model_dispatch`, SPEC-022 R-16.2a; 0 otherwise, also while
+  compute-integrity scoring is off), and the request settles against
   that model. The provider earnings read (SPEC-005 §11.4)
   reports `credits_by_model`, the payable credit total split by each row's
   model, so a provider sees what each of its models earned; the split sums

@@ -1,9 +1,20 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.5-draft
+**Status:** v0.3.6-draft
 **Date:** 2026-11-16
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.6 (2026-11-16, Related: #2338 — keys on the resolved catalog row):**
+A verification key, its due time, its scorer pool, its tolerance key, the
+matching of an in-flight request and a FR-25 suspension key on the model's
+sanction identity (SPEC-002-R011), not on its spelling. A signed catalog row
+is reachable as its row key and as its `model_id`; both map to the row's
+normalized `model_id`. An id that names no catalog row keeps its canonical
+model id, as before. A provider suspended or under verification for a
+model keeps that state, due time and suspension when it declares the model
+under the row's other name, as a warm member or as its top-level model.
+Holds open on the key's identity (SPEC-022 v0.4.15 R-16.2a).
 
 **Change log v0.3.5 (2026-11-16, Related: #2338 — canonical model id, withdrawn members):**
 A model id has one canonical form: trimmed, Unicode NFC, then lower case
@@ -2191,6 +2202,18 @@ Every accepted spelling therefore folds to the same key here and under the
 ASCII `lower()` that the SPEC-022 R-16 hold predicate applies, so a session
 that re-spells its model keeps one key, its state and its due time, and a
 verification request in flight across the re-spelling still counts.
+
+As built, the key's `model_id` is the model's sanction identity
+(SPEC-002-R011), not the spelling: a signed catalog row is reachable under
+its row key and under its `model_id`, and both map to the row's normalized
+`model_id`; an id that names no catalog row keeps its canonical form above.
+Verification keys, due times, scorer pools, tolerance keys, the matching of
+a scorer's answer to its in-flight request, the FR-25 suspension and the
+passing set that SPEC-022 R-16.2a reads all key on it. A session that
+declares its model under the row's other name, as a further warm member or
+as its top-level model, therefore keeps one key, its state, due time,
+suspension and withdrawal count. A key state stored before this rule under
+a row key restores onto the row's identity; an adverse state still wins.
 
 A verification request to a further warm member whose entry is withdrawn
 from the session (it left the warm set or its identity changed) before the

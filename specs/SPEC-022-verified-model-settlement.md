@@ -1,11 +1,24 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.14
+Version: v0.4.15
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.15 (2026-11-16)
+
+Related: #2338. R-16.2a compares sanction identities. A signed catalog row is
+reachable as its row key and as its `model_id`, and SPEC-036 holds are opened
+on the row's identity, its normalized `model_id` (SPEC-002-R011 sanction
+identity). The route snapshot keeps the provider's spelling in `model_id`,
+unchanged for receipts, and `served_model_dispatch` is 1 only when that
+spelling's canonical form is its sanction identity, so both sides of the
+predicate's `lower()` comparison are the row's identity. An attempt to an
+entry declared under another name of its row records 0 and keeps the
+provider-wide R-16.2 match: a model held under one name cannot escape the
+hold under the other. No schema, receipt, payout or trust tier changes.
 
 ### v0.4.14 (2026-11-16)
 
@@ -2613,7 +2626,7 @@ the verified model the hold was opened for. Because a held credit is not
 payable, R-15.2 does not archive its evidence while the
 hold is `held`.
 
-R-16.2a. (v0.4.10, amended v0.4.11, v0.4.13 and v0.4.14) A credit whose attempt's
+R-16.2a. (v0.4.10, amended v0.4.11, v0.4.13, v0.4.14 and v0.4.15) A credit whose attempt's
 route snapshot records `served_model_dispatch = 1` matches a hold only when
 the served model, as recorded in the attempt's route snapshot `model_id`, equals the
 hold's `model_id`. The served model is the warm entry the coordinator
@@ -2629,8 +2642,13 @@ the hold. As built:
   (SPEC-002-R011); and (b) the SPEC-036 FR-23 key of that provider and the
   entry's canonical model id is in state `passing`, as published by the
   compute-integrity engine into the session's entry view (at restore and on
-  every transition; cleared when the key leaves `passing` or is pruned).
-  It is 0 for every other attempt: every attempt to a legacy session (one
+  every transition; cleared when the key leaves `passing` or is pruned);
+  and (c) the entry's `model_id` names its own sanction identity
+  (SPEC-002-R011): the canonical form of the spelling is the identity of
+  the catalog row it names, the row's normalized `model_id`, or, for an id
+  no catalog row carries, the canonical id itself.
+  It is 0 for every other attempt, including one to an entry declared
+  under a row key whose row's `model_id` differs: every attempt to a legacy session (one
   member, or further members loading, evicting, unverified or without a
   slot), every attempt to an entry whose key is unverified, `suspect`,
   `failed` or `recovering`, every attempt while compute-integrity scoring is
@@ -2644,7 +2662,14 @@ the hold. As built:
   `lower()` folds ASCII letters only; the coordinator accepts only model ids
   whose canonical form (trimmed, Unicode NFC, lower case) equals their ASCII
   lower case and rejects every other spelling at decode (SPEC-002-R011), so
-  `lower()` of any accepted spelling is the canonical key the hold names.
+  `lower()` of any accepted spelling is its canonical key. A hold names the
+  sanction identity of its model (SPEC-036 FR-23 keys are sanction
+  identities), and a flagged snapshot's `model_id` is its own sanction
+  identity by (c), so the comparison is between sanction identities: a
+  credit for any name of a held catalog row matches the hold, either
+  through the flag-1 comparison or through the provider-wide match of a
+  flag-0 attempt. The comparison is resolved in Go at snapshot time; no
+  column is added.
 - A credit whose route snapshot is no longer in the hot store (archived
   before the hold opened) has no flag to read and keeps the provider-wide
   R-16.2 match, as does every credit of an attempt dispatched without

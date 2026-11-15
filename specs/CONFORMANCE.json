@@ -5166,7 +5166,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartRedrawStoredOncePresent",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore",
         "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringModelSpellingKeepsOneKeyAndDueTime",
-        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings"
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringCatalogAliasKeepsKeyDueAndSuspension",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringRestoreFoldsCatalogAliases"
       ],
       "journeys": [],
       "evidence": [],
@@ -5307,7 +5309,8 @@
         "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (s *Server) handleAdminComputeIntegrityAction",
         "phase4-coordinator/internal/ws/compute_integrity_status.go:func (s *Server) computeIntegrityStatuses",
         "phase4-coordinator/internal/stats/metrics/compute_integrity.go:func (m *Metrics) IncComputeIntegrityVerification",
-        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable"
+        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SanctionKey"
       ],
       "tests": [
         "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeIntegritySuspensionIsPerModel",
@@ -5317,7 +5320,10 @@
         "phase4-coordinator/internal/stats/metrics/compute_integrity_test.go:TestComputeIntegrityMetricsUseClosedLabels",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorClearFailureRestoresState",
         "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestRelayBlindBindableExcludesComputeIntegritySuspended",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStorePruneAndRecentRequests"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStorePruneAndRecentRequests",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsSuspensionAndStrikes",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasPrimarySwitchKeepsSuspensionAndPin",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringCatalogAliasKeepsKeyDueAndSuspension"
       ],
       "journeys": [],
       "evidence": [],
@@ -13358,7 +13364,8 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldRollupTriggers",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
         "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
-        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetComputeIntegrityPassing"
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetComputeIntegrityPassing",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldWithholdsAndReleases",
@@ -13377,7 +13384,8 @@
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion",
         "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsEverySpellingOfTheServedModel",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegrityPassingIsPerEntry",
-        "phase4-coordinator/internal/ws/compute_scoring_passing_test.go:TestComputeScoringPublishesPassingVerification"
+        "phase4-coordinator/internal/ws/compute_scoring_passing_test.go:TestComputeScoringPublishesPassingVerification",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold"
       ],
       "journeys": [],
       "evidence": [],
@@ -15977,7 +15985,11 @@
         "phase5-gateway/internal/router/server.go:func countPoolzState",
         "phase4-coordinator/internal/ws/messages.go:func wellFormedModelID",
         "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ConsumeForwardedSlotBooked",
-        "phase4-coordinator/internal/pool/warm_models.go:func drainEmptyServedLocked"
+        "phase4-coordinator/internal/pool/warm_models.go:func drainEmptyServedLocked",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SanctionKey",
+        "phase4-coordinator/internal/ws/warm_models.go:func (s *Server) warmModelsSameCatalogRow",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) catalogSanctionIdentity",
+        "phase4-coordinator/internal/autotune/catalog.go:func (c *Catalog) CanonicalModelID"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/messages_test.go:TestParseHeartbeatDecodesWarmModels",
@@ -16030,7 +16042,18 @@
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmServedDispatchesNeverSeedTheDrain",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmDrainNeverEndsOnTheLiveModel",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmSessionViewDispatchCountsOnThePrimary",
-        "phase4-coordinator/internal/pool/warm_models_test.go:TestLegacySessionBooksUnnamedDispatches"
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestLegacySessionBooksUnnamedDispatches",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestSanctionKeyResolvesCatalogRowNames",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsSuspensionAndStrikes",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasPrimarySwitchKeepsSuspensionAndPin",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsIdentityPin",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestUncataloguedModelSanctionsUnchanged",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestCatalogSanctionIdentityResolvesEveryRowName",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestHeartbeatWarmModelsNamingOneCatalogRowTwiceRejected",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestWarmModelsSameCatalogRow",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestLegacySessionUnderEitherCatalogNameUnchanged",
+        "phase4-coordinator/internal/ws/warm_models_catalog_alias_test.go:TestAuthV2WarmMemberNamingPrimaryCatalogRowProceedsAsLegacy",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold"
       ],
       "journeys": [],
       "evidence": [],
