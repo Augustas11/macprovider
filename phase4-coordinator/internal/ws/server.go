@@ -7800,14 +7800,22 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	providers := s.pool.Snapshot()
-	if !tier2.ModelHashActive(s.tier2Config()) {
-		for i := range providers {
-			providers[i].ModelHash = ""
-			providers[i].HashStatus = ""
-		}
-	} else {
-		for i := range providers {
-			providers[i].HashStatus = providers[i].PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(providers[i]))).Status
+	// SPEC-002-R011: one pool row per (provider, model) entry; a provider
+	// without warm_models is one row, exactly its Snapshot value.
+	entries := make([]pool.Provider, 0, len(providers))
+	for _, p := range providers {
+		entries = append(entries, pool.EntryViews(p)...)
+	}
+	for _, list := range [][]pool.Provider{providers, entries} {
+		if !tier2.ModelHashActive(s.tier2Config()) {
+			for i := range list {
+				list[i].ModelHash = ""
+				list[i].HashStatus = ""
+			}
+		} else {
+			for i := range list {
+				list[i].HashStatus = list[i].PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(list[i]))).Status
+			}
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -7824,6 +7832,15 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		ByBinaryVersion map[string]poolzVersionSegment `json:"by_binary_version"`
 	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers, s.perf, s.now())}
 	cfg := s.tier2Config()
+	// The summary counts provider sessions; slot totals are the session's
+	// own (the primary entry's), since entry slots are not additive
+	// (SPEC-002-R011). Every entry's model is a served model.
+	for _, p := range entries {
+		if _, ok := modelSet[p.ModelID]; !ok {
+			modelSet[p.ModelID] = struct{}{}
+			summary.Models = append(summary.Models, p.ModelID)
+		}
+	}
 	for _, p := range providers {
 		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
 		// StateUpdateDoesNotPublish: FreeSlots aggregates buyer-usable
@@ -7842,10 +7859,6 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			summary.PolicyReady++
 		}
 		summary.TotalSlots += p.SlotsTotal
-		if _, ok := modelSet[p.ModelID]; !ok {
-			modelSet[p.ModelID] = struct{}{}
-			summary.Models = append(summary.Models, p.ModelID)
-		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -7864,10 +7877,15 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 		// SPEC-002 FR-O2 v1.6.31 measured-throughput fields.
 		routing.ThroughputView
+		// SPEC-002-R011 entry fields, present only on a provider that sent
+		// warm_models.
+		ServedModel string `json:"served_model,omitempty"`
+		Primary     *bool  `json:"primary,omitempty"`
+		WarmState   string `json:"warm_state,omitempty"`
 	}
 	now := s.now()
-	poolz := make([]poolzProvider, 0, len(providers))
-	for _, provider := range providers {
+	poolz := make([]poolzProvider, 0, len(entries))
+	for _, provider := range entries {
 		var receiptPubkey *string
 		if len(provider.ReceiptPubkey) > 0 {
 			encoded := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
@@ -7891,6 +7909,13 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			ReceiptPubkeyPrev: receiptPubkeyPrev,
 			ThroughputView:    routing.ProviderThroughput(provider, s.perf, now),
 		})
+		if member, ok := provider.EntryMember(); ok {
+			row := &poolz[len(poolz)-1]
+			row.ServedModel = member.ModelID
+			primary := member.Primary
+			row.Primary = &primary
+			row.WarmState = string(member.State)
+		}
 	}
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotation. The three
 	// `catalog_*` fields are present iff the catalog is effectively

@@ -4036,3 +4036,33 @@ func TestWarmEntryMarkNotLoadedUntilNextHeartbeat(t *testing.T) {
 		t.Fatal("marked a provider without a warm set")
 	}
 }
+
+// EntryViews projects a Snapshot value exactly as EntrySnapshot does, and
+// EntryMember names each view's member; a provider without a warm set is
+// one view, itself, with no member.
+func TestEntryViewsMatchEntrySnapshot(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+	session, _ := registry.Resolve("p1", "current")
+	views := EntryViews(session)
+	entries := registry.EntrySnapshot()
+	if len(views) != 3 || len(entries) != 3 {
+		t.Fatalf("views=%d entries=%d", len(views), len(entries))
+	}
+	for i, v := range views {
+		if !reflect.DeepEqual(v, entries[i]) {
+			t.Fatalf("view %d = %+v, entry = %+v", i, v, entries[i])
+		}
+		member, ok := v.EntryMember()
+		if !ok || member.ModelID != session.WarmModels[i].ModelID || member.Primary != (i == 0) {
+			t.Fatalf("view %d member = %+v %v", i, member, ok)
+		}
+	}
+	legacy := Provider{ProviderID: "p2", ModelID: "model-a"}
+	if got := EntryViews(legacy); len(got) != 1 || !reflect.DeepEqual(got[0], legacy) {
+		t.Fatalf("legacy views = %+v", got)
+	}
+	if _, ok := legacy.EntryMember(); ok {
+		t.Fatal("a provider without a warm set has no member")
+	}
+}

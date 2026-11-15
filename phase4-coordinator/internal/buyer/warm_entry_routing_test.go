@@ -290,3 +290,45 @@ func TestRouteSnapshotWithoutWarmSetIsNotServedModelDispatch(t *testing.T) {
 		t.Fatalf("served_model_dispatch=%d err=%v, want 0", flagged, err)
 	}
 }
+
+// SPEC-002-R011: /v1/models lists a model served only by a further warm
+// member, counting that entry once with its own slots; a member that is not
+// warm is not listed, and a provider without a warm set lists as before.
+func TestModelsListsWarmEntries(t *testing.T) {
+	models := func(server *buyer.Server) map[string]map[string]any {
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var got struct {
+			Data []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]map[string]any{}
+		for _, m := range got.Data {
+			out[m["id"].(string)] = m
+		}
+		return out
+	}
+	registry := pool.NewRegistry(nil)
+	registerWithEndpoint(registry, "legacy", "legacy-session", "model-a", pool.StateReady, 20000, 1, "https://legacy.example", 20)
+	registerWarmHTTPProvider(registry, "warm", "https://warm.example", warmMember("model-a", true, 1), warmMember("model-b", false, 3), buyerTestHash, nil)
+	got := models(buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0)))
+	if len(got) != 2 || got["model-a"]["provider_count"] != 2.0 || got["model-a"]["total_slots"] != 2.0 ||
+		got["model-b"]["provider_count"] != 1.0 || got["model-b"]["total_slots"] != 3.0 {
+		t.Fatalf("models = %v", got)
+	}
+
+	loading := warmMember("model-c", false, 2)
+	loading.State = pool.WarmModelLoading
+	loading.SlotsFree = 0
+	registry = pool.NewRegistry(nil)
+	registerWarmHTTPProvider(registry, "warm", "https://warm.example", warmMember("model-a", true, 1), loading, buyerTestHash, nil)
+	got = models(buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0)))
+	if len(got) != 1 || got["model-a"]["provider_count"] != 1.0 {
+		t.Fatalf("a loading member must not be listed: %v", got)
+	}
+}

@@ -2459,7 +2459,9 @@ func unavailableModelComputeIntegrityStatus() modelComputeIntegrityStatus {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := map[string]modelEntry{}
-	providers := s.pool.Snapshot()
+	// SPEC-002-R011: each (provider, model) entry lists its model, so a
+	// model served only by a further warm member is available.
+	providers := s.pool.EntrySnapshot()
 	// listed holds the providers that passed every listing gate below; the
 	// Pillar A hash state is computed over exactly these.
 	listed := make([]pool.Provider, 0, len(providers))

@@ -302,6 +302,34 @@ func (r *Registry) entryViewsLocked(p *Provider, out []Provider) []Provider {
 	return out
 }
 
+// EntryMember is the warm-set member an entry view (ServedModelID set)
+// projects; false for a provider without a warm set.
+func (p Provider) EntryMember() (WarmModel, bool) {
+	if p.ServedModelID == "" {
+		return WarmModel{}, false
+	}
+	key := warmModelKey(p.ServedModelID)
+	for _, m := range p.WarmModels {
+		if warmModelKey(m.ModelID) == key {
+			return m, true
+		}
+	}
+	return WarmModel{}, false
+}
+
+// EntryViews projects one Snapshot value onto its SPEC-002-R011 entries, in
+// WarmModels order: a provider without a warm set yields exactly itself.
+func EntryViews(session Provider) []Provider {
+	if session.WarmModels == nil {
+		return []Provider{session}
+	}
+	out := make([]Provider, 0, len(session.WarmModels))
+	for _, m := range session.WarmModels {
+		out = append(out, warmEntryView(session, m))
+	}
+	return out
+}
+
 // EntrySnapshot is Snapshot with one Provider value per SPEC-002-R011 entry:
 // a provider without a warm set yields exactly its Snapshot value, and a
 // provider with one yields a view per member (ServedModelID set).
