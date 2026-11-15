@@ -382,6 +382,42 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertFalse(merged.earningsProjectionFresh)
     }
 
+    func testCreditsByModelPassesThroughTheControlFrame() throws {
+        let decoded = try providerEarningsSummary("""
+        {
+          "unpaid_ledger_backlog_usdc": 0,
+          "usdc_lifetime": 0.000899,
+          "credits_by_model": {"model-a": 800, "model-b": 99}
+        }
+        """).markingEarningsProjectionFresh()
+        let want: [String: Int64] = ["model-a": 800, "model-b": 99]
+        XCTAssertEqual(decoded.creditsByModel, want)
+        XCTAssertEqual(decoded.markingRewardAuditSupported().creditsByModel, want)
+        XCTAssertEqual(decoded.markingWalletStatusUnavailable().creditsByModel, want)
+
+        let frameData = try ControlSocketCodec.encode(.metricsResponse(ControlMetricsSnapshot(providerEarnings: decoded)))
+        let object = try encodedProviderEarningsObject(decoded)
+        XCTAssertEqual(object["credits_by_model"] as? [String: Int], ["model-a": 800, "model-b": 99])
+        guard case .metricsResponse(let metrics) = try ControlSocketCodec.decode(frameData) else {
+            return XCTFail("expected metrics_response")
+        }
+        XCTAssertEqual(metrics.providerEarnings?.creditsByModel, want)
+    }
+
+    func testAbsentOrMalformedCreditsByModelKeepsTheFrameAsBefore() throws {
+        let legacy = try providerEarningsSummary(#"{"unpaid_ledger_backlog_usdc":0,"usdc_lifetime":1}"#)
+        XCTAssertNil(legacy.creditsByModel)
+        XCTAssertNil(try encodedProviderEarningsObject(legacy)["credits_by_model"])
+
+        let malformed = try providerEarningsSummary(#"{"unpaid_ledger_backlog_usdc":0,"usdc_lifetime":1,"credits_by_model":["x"]}"#)
+        XCTAssertNil(malformed.creditsByModel)
+        XCTAssertEqual(malformed.usdcLifetime, 1)
+        XCTAssertEqual(
+            try Self.normalizedJSONData(ControlSocketCodec.encode(.metricsResponse(ControlMetricsSnapshot(providerEarnings: malformed)))),
+            try Self.normalizedJSONData(ControlSocketCodec.encode(.metricsResponse(ControlMetricsSnapshot(providerEarnings: legacy))))
+        )
+    }
+
     private func encodedProviderEarningsObject(
         _ providerEarnings: ProviderEarningsSummary
     ) throws -> [String: Any] {

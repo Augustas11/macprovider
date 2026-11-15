@@ -1183,3 +1183,79 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
+
+// SPEC-002-R011: every warm-set entry's model is listed as available, as the
+// /poolz summary lists it, and each provider row lists its entries; a provider without a warm set keeps
+// its single model_id and an empty warm_models list.
+func TestWarmSetProviderEntriesInOverviewAndDirectory(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider_legacy", AssignedID: "assigned_legacy", ModelID: "llama",
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+	}, nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider_warm", AssignedID: "assigned_warm", ModelID: "model-a",
+		State: pool.StateReady, SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2,
+		WarmModels: []pool.WarmModel{
+			{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2},
+			{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 3, SlotsFree: 1},
+			{ModelID: "model-c", State: pool.WarmModelLoading, SlotsTotal: 2},
+		},
+	}, nil)
+	h.pool = registry
+
+	unauth := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers", "")
+	if unauth.Code != http.StatusUnauthorized || strings.Contains(unauth.Body.String(), "warm_models") {
+		t.Fatalf("unauthenticated providers status=%d body=%s", unauth.Code, unauth.Body.String())
+	}
+
+	overview := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "operator-key")
+	if overview.Code != http.StatusOK {
+		t.Fatalf("overview status=%d body=%s", overview.Code, overview.Body.String())
+	}
+	poolView := decodeObject(t, overview)["pool"].(map[string]any)
+	got, _ := json.Marshal(poolView["models_available"])
+	if string(got) != `["llama","model-a","model-b","model-c"]` {
+		t.Fatalf("models_available = %s", got)
+	}
+	if poolView["total_providers"] != float64(2) || poolView["slots_total"] != float64(3) {
+		t.Fatalf("per-session counts changed: %v", poolView)
+	}
+
+	list := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers", "operator-key")
+	if list.Code != http.StatusOK {
+		t.Fatalf("providers status=%d body=%s", list.Code, list.Body.String())
+	}
+	var body struct {
+		Providers []struct {
+			ProviderID string           `json:"provider_id"`
+			ModelID    string           `json:"model_id"`
+			WarmModels []map[string]any `json:"warm_models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode providers: %v body=%s", err, list.Body.String())
+	}
+	rows := map[string][]map[string]any{}
+	models := map[string]string{}
+	for _, item := range body.Providers {
+		rows[item.ProviderID] = item.WarmModels
+		models[item.ProviderID] = item.ModelID
+	}
+	if legacy, ok := rows["provider_legacy"]; !ok || legacy == nil || len(legacy) != 0 || models["provider_legacy"] != "llama" {
+		t.Fatalf("legacy provider row = %v model=%q body=%s", legacy, models["provider_legacy"], list.Body.String())
+	}
+	warm, _ := json.Marshal(rows["provider_warm"])
+	want := `[{"model_id":"model-a","primary":true,"slots_free":2,"slots_total":2,"state":"warm"},` +
+		`{"model_id":"model-b","primary":false,"slots_free":1,"slots_total":3,"state":"warm"},` +
+		`{"model_id":"model-c","primary":false,"slots_free":0,"slots_total":2,"state":"loading"}]`
+	if string(warm) != want || models["provider_warm"] != "model-a" {
+		t.Fatalf("warm_models = %s model=%q\nwant %s", warm, models["provider_warm"], want)
+	}
+
+	detail := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers/provider_warm", "operator-key")
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"model_id":"model-b"`) {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}

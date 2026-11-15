@@ -1112,6 +1112,9 @@ type earningsWindows struct {
 type providerEarningsFigures struct {
 	total, week, today, pending, faults int64
 	models                              []string
+	// byModel splits total by model over the same rows: its values always
+	// sum to total, and its keys are models.
+	byModel map[string]int64
 }
 
 // errEarningsRollupMaturityRace means a force credit of the provider matured
@@ -1296,7 +1299,7 @@ SELECT EXISTS (
 func foldEarningsBuckets(buckets earningsBuckets, win earningsWindows) providerEarningsFigures {
 	fromKey, toKey := earningsHourKey(win.from), earningsHourKey(win.to)
 	weekKey, todayKey := earningsHourKey(win.week), earningsHourKey(win.today)
-	out := providerEarningsFigures{models: []string{}}
+	out := providerEarningsFigures{models: []string{}, byModel: map[string]int64{}}
 	models := map[string]bool{}
 	for hour, byModel := range buckets {
 		inRange := !win.hasRange || (hour >= fromKey && hour < toKey)
@@ -1306,6 +1309,9 @@ func foldEarningsBuckets(buckets earningsBuckets, win earningsWindows) providerE
 				continue
 			}
 			out.total += agg.payableCredits
+			if agg.payableCount > 0 || agg.payableCredits != 0 {
+				out.byModel[model] += agg.payableCredits
+			}
 			if hour >= weekKey {
 				out.week += agg.payableCredits
 			}

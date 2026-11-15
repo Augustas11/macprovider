@@ -20,6 +20,8 @@ extension AgentSnapshotPresenter {
     struct EarningsCard: Equatable {
         /// Lifetime, week, and UTC-day USDC, or why they are unavailable.
         let usdcSummary: String
+        /// Lifetime USDC per model, only when more than one model has earned.
+        let modelLines: [String]
         /// The payout state, from a fresh earnings read only. It carries no
         /// amount: the pending figure is not net of past payouts.
         let payoutLine: String?
@@ -54,6 +56,7 @@ extension AgentSnapshotPresenter {
         let verdict = rewardVerdict(s)
         return EarningsCard(
             usdcSummary: usdcSummary(s, verdict: verdict),
+            modelLines: modelLines(s, verdict: verdict),
             payoutLine: payoutLine(s, verdict: verdict),
             malibuLines: malibuLines(s, verdict: verdict),
             trustLine: trustLine(s, verdict: verdict, now: now),
@@ -75,6 +78,19 @@ extension AgentSnapshotPresenter {
         guard !parts.isEmpty else { return "USDC earnings are unavailable right now." }
         let line = parts.joined(separator: " · ")
         return isShowingLastKnownUSDC(s, verdict: verdict) ? "Last known: \(line)" : line
+    }
+
+    /// Provider credits are USDC base units (6 decimals), the conversion the
+    /// coordinator uses for the USDC figures.
+    private static let creditsPerUSDC = 1_000_000.0
+
+    private static func modelLines(_ s: AgentSnapshot, verdict: RewardVerdict) -> [String] {
+        guard canShowLastKnownUSDC(s, verdict: verdict), let byModel = s.earningsCreditsByModel else { return [] }
+        let earning = byModel.filter { $0.value > 0 }
+        guard earning.count > 1 else { return [] }
+        return earning
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { "\(ShellText.display($0.key)): \(formatUSDC(Double($0.value) / creditsPerUSDC)) lifetime" }
     }
 
     private static func payoutLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
