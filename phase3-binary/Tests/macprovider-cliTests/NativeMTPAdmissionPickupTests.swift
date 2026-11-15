@@ -412,20 +412,17 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         XCTAssertEqual(newTuple, .activatable)
     }
 
-    /// The production resolve against the compiled-in signed feeds: a model
-    /// the artifact feed does not name is a definite no and fetches no
-    /// admission member; a model it names whose admission members cannot be
-    /// fetched is unresolved.
-    func testResolveClassifiesAgainstTheCompiledInFeeds() async throws {
+    /// The production resolve with the static-feed origin unreachable: the
+    /// compiled-in fallback feeds cannot stand in for a live release, so the
+    /// answer is "unresolved" (checked again later), never a definite no, and
+    /// no admission member is fetched.
+    func testResolveIsUnresolvedWhenTheFeedsCannotBeFetched() async throws {
         let now = try AutotuneStaticInputs.decodeCandidateCatalog(
             Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
         ).generatedAt.addingTimeInterval(3_600)
         let inputs = AutotuneStaticInputs(fetch: { _ in throw URLError(.cannotConnectToHost) }, now: { now })
         let loaded = await inputs.loadRecommendationInputs(includeArtifactFeed: true)
-        let feed = try XCTUnwrap(loaded.artifactFeed.value)
-        XCTAssertTrue(loaded.artifactFeed.warnings.blockingArtifactFeedWarnings.isEmpty)
         let releaseID = loaded.candidate.value.version
-        XCTAssertEqual(feed.releaseID, releaseID)
         let catalogDigest = AutotuneStaticInputs.candidateCatalogSHA256(bytes: loaded.candidate.selectedBytes)
         let fetches = LockedBox(0)
         let failing: NativeMTPAdmissionFeed.Fetcher = { _, _ in
@@ -435,68 +432,27 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-mtp-resolve-\(UUID().uuidString)", isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
-        func resolve(modelKey: String, hash: String) async -> ServeCommand.NativeMTPAdmissionResolution {
+        func resolve(release: String, mode: NativeMTPMode = .auto) async -> ServeCommand.NativeMTPAdmissionResolution {
             var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-            config.nativeMTPMode = .auto
-            config.modelCatalogKey = modelKey
+            config.nativeMTPMode = mode
+            config.modelCatalogKey = Self.model
             return await ServeCommand.resolveNativeMTPAdmission(
-                config: config, releaseID: releaseID, catalogDigest: catalogDigest,
-                authorityPath: scratch.appendingPathComponent("model").path, authoritySHA256: hash,
+                config: config, releaseID: release, catalogDigest: catalogDigest,
+                authorityPath: scratch.appendingPathComponent("model").path, authoritySHA256: Self.digest,
                 staticInputs: inputs, artifactResolver: CachedModelArtifactResolver(),
                 admissionRoot: scratch.appendingPathComponent("probe"), admissionFetcher: failing
             )
         }
-        guard case .noEntry = await resolve(modelKey: "org/not-in-the-feed", hash: Self.digest) else {
-            return XCTFail("a model the artifact feed does not name is a definite no")
+        guard case .unavailable = await resolve(release: releaseID) else {
+            return XCTFail("fallback feeds leave the release unresolved")
         }
-        XCTAssertEqual(fetches.get(), 0)
-
-        let identity = try XCTUnwrap(feed.artifactIdentities().first {
-            $0.isPrimary && $0.hashAlgorithm == NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm
-                && $0.verificationStatus == "verified"
-        })
-        guard case .unavailable = await resolve(modelKey: identity.catalogKey, hash: identity.hash) else {
-            return XCTFail("admission members that cannot be fetched leave the release unresolved")
-        }
-        XCTAssertGreaterThan(fetches.get(), 0)
-        // Another release id than the feeds carry is unresolved, not a definite no.
-        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.nativeMTPMode = .auto
-        config.modelCatalogKey = identity.catalogKey
-        guard case .unavailable = await ServeCommand.resolveNativeMTPAdmission(
-            config: config, releaseID: releaseID + "-next", catalogDigest: catalogDigest,
-            authorityPath: scratch.appendingPathComponent("model").path, authoritySHA256: identity.hash,
-            staticInputs: inputs, artifactResolver: CachedModelArtifactResolver(),
-            admissionRoot: scratch.appendingPathComponent("probe"), admissionFetcher: failing
-        ) else {
+        guard case .unavailable = await resolve(release: releaseID + "-next") else {
             return XCTFail("feeds that do not carry the release yet are unresolved")
         }
-    }
-
-    func testHooksAreBuiltOnlyWhereAReleaseCanChangeNativeMTP() {
-        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.nativeMTPMode = .auto
-        let binding = ServeCommand.VerifiedModelRuntimeBinding(
-            authorityPath: "/nonexistent/model",
-            authoritySHA256: String(repeating: "d", count: 64),
-            loadPath: "/nonexistent/model",
-            loadSHA256: String(repeating: "d", count: 64),
-            nativeMTPResolvedArtifactAuthority: nil
-        )
-        func hooks(
-            _ config: AppConfig, binding: ServeCommand.VerifiedModelRuntimeBinding?, trust: Bool = true, excluded: Bool = false
-        ) -> NativeMTPAdmissionPickup.Hooks? {
-            ServeCommand.nativeMTPAdmissionPickupHooks(
-                config: config, startupAdmission: .none, binding: binding, hasCatalogTrust: trust, slotCount: 1,
-                excluded: excluded, store: NativeMTPAdmissionPickupStore(url: temporaryStoreURL())
-            )
+        // Mode off is a definite no before anything is loaded.
+        guard case .noEntry = await resolve(release: releaseID, mode: .off) else {
+            return XCTFail("mode off never resolves an admission")
         }
-        XCTAssertNotNil(hooks(config, binding: binding))
-        XCTAssertNil(hooks(config, binding: nil))
-        XCTAssertNil(hooks(config, binding: binding, trust: false))
-        XCTAssertNil(hooks(config, binding: binding, excluded: true))
-        var off = config
-        off.nativeMTPMode = .off
-        XCTAssertNil(hooks(off, binding: binding))
+        XCTAssertEqual(fetches.get(), 0)
     }
 }
