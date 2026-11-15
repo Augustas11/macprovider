@@ -65,6 +65,9 @@ final class WarmSetBootTests: XCTestCase {
         var nextMemberID = 12_000
         var failing: Set<String> = []
         var gated: Set<String> = []
+        /// Runs in the factory before the member exists, as a runtime's
+        /// artifact verification does.
+        var verify: (@Sendable (String) throws -> Void)?
         var factoryCalls: [String] = []
         let sizes: [String: Int]
         var families: [String: String] = [:]
@@ -97,11 +100,13 @@ final class WarmSetBootTests: XCTestCase {
             factoryCalls.append(spec.modelID)
             let fail = failing.contains(spec.modelID)
             let wait = gated.contains(spec.modelID)
+            let verify = self.verify
             nextMemberID += 1
             let id = nextMemberID
             lock.unlock()
             if wait { await gate.wait() }
             if fail { throw BootFactoryFailure() }
+            try verify?(spec.modelID)
             _ = budget.recordLoaded(
                 memberID: id, label: spec.modelID, modelFamily: "fake", wires: false,
                 activeBytes: spec.estimatedResidentBytes, weightBytes: spec.estimatedResidentBytes,
@@ -436,6 +441,46 @@ final class WarmSetBootTests: XCTestCase {
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
             loader: { _ in throw BootUnexpectedContainerLoad() },
             testLoader: testLoader ?? { target in (target, String(repeating: "c", count: 64)) })
+    }
+
+    // MARK: Catalog binding of further members
+
+    func testAMemberBindsTheSignedCatalogArtifactASwitchWouldLoad() throws {
+        let authority = ModelRuntimeTargetAuthority(
+            modelArgument: "/verified/model-b", artifactSHA256: String(repeating: "b", count: 64), catalogRevision: "r7")
+        let authorities = ["Model-B": authority, "model-b": authority]
+        for verified in [true, false] {
+            XCTAssertEqual(
+                try ServeCommand.warmSetMemberBinding(modelID: "MODEL-B", authorities: authorities, primaryVerified: verified),
+                .init(loadPath: "/verified/model-b", artifactSHA256: authority.artifactSHA256, catalogRevision: "r7"))
+        }
+        // An unbound primary's members load by id, as it does.
+        XCTAssertEqual(
+            try ServeCommand.warmSetMemberBinding(modelID: "model-c", authorities: authorities, primaryVerified: false),
+            .unbound)
+        // A bound primary admits no unbound member.
+        XCTAssertThrowsError(
+            try ServeCommand.warmSetMemberBinding(modelID: "model-c", authorities: authorities, primaryVerified: true)
+        ) { error in
+            XCTAssertEqual((error as? ModelRuntimeLoadError)?.reason, "signed catalog identity unavailable")
+        }
+    }
+
+    func testAMemberThatFailsArtifactVerificationNeverBecomesWarm() async throws {
+        let h = Harness(limitBytes: 40 * gib, sizes: ["P": 4 * gib, "B": 4 * gib], supported: ["P", "B"])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("warm-verify-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
+        h.verify = { _ in try ModelRuntime.verifyLoadedArtifact(directory: directory, expectedSHA256: String(repeating: "0", count: 64)) }
+        try await h.adoptPrimary("P", bytes: 4 * gib)
+
+        let outcome = await h.boot.load("B")
+
+        guard case let .loadFailed(detail) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertTrue(detail.contains("verified model artifact changed during load"), detail)
+        XCTAssertNil(h.table.entry(modelID: "B"))
+        XCTAssertEqual(h.state, ["P:warm"])
     }
 
     private final class RuntimeHarness: @unchecked Sendable {

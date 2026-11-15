@@ -239,7 +239,26 @@ final class WarmModelRoutingTests: XCTestCase {
         try await warmEventually { harness.leases("model-b") == 0 }
     }
 
-    private func withWarmHTTPServer(_ harness: Harness, operation: (Int) async throws -> Void) async throws {
+    func testHTTPReceiptBindsTheServingMembersModelHash() async throws {
+        let harness = try Harness()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let builder = ReceiptBuilder(keyStore: WarmFixedReceiptKeyStore(key: key))
+        try await withWarmHTTPServer(harness, receiptBuilder: builder) { port in
+            for (model, hash) in [("model-b", String(repeating: "b", count: 64)), ("model-a", String(repeating: "a", count: 64))] {
+                let response = try await warmPost(port: port, model: model, headers: [WarmModelRoute.servedModelHeaderName: model])
+                XCTAssertEqual(response.status, 200, response.body)
+                let receipt = try XCTUnwrap(response.receipt, model)
+                let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(receipt.split(separator: ".")[0])))
+                let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+                XCTAssertEqual(tuple["model_hash"] as? String, hash, model)
+                XCTAssertEqual(tuple["model_id"] as? String, model, model)
+            }
+        }
+    }
+
+    private func withWarmHTTPServer(
+        _ harness: Harness, receiptBuilder: ReceiptBuilder? = nil, operation: (Int) async throws -> Void
+    ) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 16)
@@ -253,9 +272,10 @@ final class WarmModelRoutingTests: XCTestCase {
                         modelRuntime: harness.primary,
                         warmModels: harness.table,
                         providerStatus: harness.status,
-                        warmSwapEnabled: false,
+                        // Receipts carry a model hash only with warm swap on.
+                        warmSwapEnabled: receiptBuilder != nil,
                         maxBodyBytes: 1_000_000,
-                        receiptBuilder: nil
+                        receiptBuilder: receiptBuilder
                     ))
                 }
             }

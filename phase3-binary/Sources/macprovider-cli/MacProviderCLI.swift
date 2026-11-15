@@ -627,15 +627,47 @@ struct ServeCommand: AsyncParsableCommand {
 
     /// SPEC-001-R017 *Load*: what the shared budget decides a warm load on,
     /// read from the model's local files before any weights load.
-    static func warmSetLoadSpec(_ modelID: String) throws -> WarmModelLoadSpec {
-        let directory = try ModelRuntime.localModelDirectory(for: modelID)
+    /// `loadPath` is the verified catalog artifact the member loads from.
+    static func warmSetLoadSpec(_ modelID: String, loadPath: String? = nil) throws -> WarmModelLoadSpec {
+        let target = loadPath ?? modelID
+        let directory = try ModelRuntime.localModelDirectory(for: target)
         let perToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory) ?? 0
         return WarmModelLoadSpec(
             modelID: modelID,
             estimatedResidentBytes: SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: directory),
             minimumRowKVBytes: MLXMemoryBudget.kvBytes(tokens: SharedModelMemoryRules.minimumRowTokens, bytesPerToken: perToken),
-            modelFamily: ModelRuntime.localModelFamily(modelID)
+            modelFamily: ModelRuntime.localModelFamily(target)
         )
+    }
+
+    /// A further member's catalog binding: the signed catalog row and the
+    /// locally verified artifact a switch to that model would load.
+    struct WarmSetMemberBinding: Sendable, Equatable {
+        let loadPath: String?
+        let artifactSHA256: String?
+        let catalogRevision: String?
+
+        static let unbound = WarmSetMemberBinding(loadPath: nil, artifactSHA256: nil, catalogRevision: nil)
+    }
+
+    /// The binding a further member loads with. A primary bound to a
+    /// verified catalog artifact admits only members that are bound the same
+    /// way, refused with the error a switch to an unbound target gets; an
+    /// unbound primary's members load as it did, by id.
+    static func warmSetMemberBinding(
+        modelID: String,
+        authorities: [String: ModelRuntimeTargetAuthority],
+        primaryVerified: Bool
+    ) throws -> WarmSetMemberBinding {
+        if let authority = authorities[modelID] ?? authorities[modelID.lowercased(with: nil)] {
+            return WarmSetMemberBinding(
+                loadPath: authority.modelArgument, artifactSHA256: authority.artifactSHA256,
+                catalogRevision: authority.catalogRevision)
+        }
+        guard !primaryVerified else {
+            throw ModelRuntimeLoadError(target: modelID, reason: "signed catalog identity unavailable")
+        }
+        return .unbound
     }
 
     /// The primary's switch targets: a member promoted to primary (SPEC-011
@@ -649,14 +681,16 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     /// SPEC-001-R016: a further warm member, built from the configuration
-    /// the primary is built from. It carries no catalog binding of its own
-    /// (no verified artifact hash, draft model or signed native-MTP sidecar,
-    /// which name the primary), cannot be switched until it is promoted to
-    /// primary (SPEC-011 R-3.10.3), never receives the provider status, and
-    /// gets no KV disk tier.
+    /// the primary is built from and loaded from its own catalog binding:
+    /// the runtime verifies the loaded artifact against the bound hash, as
+    /// it does the primary's, and reports that hash. It gets no draft model
+    /// and no native MTP (per-member signed admission is not built), cannot
+    /// be switched until it is promoted to primary (SPEC-011 R-3.10.3),
+    /// never receives the provider status, and gets no KV disk tier.
     static func makeWarmSetMemberRuntime(
         modelID: String,
         family: String?,
+        binding: WarmSetMemberBinding,
         config: AppConfig,
         acceptedTuples: [ContinuousBatchingAcceptedTuple],
         policy: ContinuousBatchingPolicyLoadResult,
@@ -667,6 +701,7 @@ struct ServeCommand: AsyncParsableCommand {
         let context = ProviderCapacity(maxContextOverride: config.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
         return try await ModelRuntime(
             modelID: modelID,
+            modelLoadPath: binding.loadPath,
             mlxCacheLimitMB: config.mlxCacheLimitMB,
             maxContextTokensOverride: config.maxContextOverride,
             kvBitsOverride: config.kvBitsOverride,
@@ -686,9 +721,11 @@ struct ServeCommand: AsyncParsableCommand {
             continuousBatchingPolicyLoadResult: policy,
             continuousBatchingEmergencyOffOverride: emergencyOffOverride,
             continuousBatchingModeExplicitlyConfigured: config.continuousBatchingExplicitlyConfigured,
-            nativeMTPMode: config.nativeMTPMode,
+            nativeMTPMode: .off,
             warmSwapEnabled: false,
             swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds,
+            verifiedModelArtifactSHA256: binding.artifactSHA256,
+            verifiedModelCatalogRevision: binding.catalogRevision,
             targetAuthorities: switchTargets.targetAuthorities,
             authorizedSwitchModelIDs: switchTargets.authorizedSwitchModelIDs,
             switchMaxContextByTarget: switchTargets.maxContextByTarget,
@@ -3601,18 +3638,26 @@ struct ServeCommand: AsyncParsableCommand {
                 maxContextByTarget: switchMaxContextByTarget,
                 maxBatchByTarget: switchMaxBatchByTarget,
                 contextProvenanceModelIDs: switchContextProvenanceModelIDs)
+            let primaryVerified = resolved.modelArtifactSHA256 != nil
+            let memberBinding: @Sendable (String) throws -> WarmSetMemberBinding = { [targetAuthorities] modelID in
+                try Self.warmSetMemberBinding(
+                    modelID: modelID, authorities: targetAuthorities, primaryVerified: primaryVerified)
+            }
             let table = WarmModelTable<ModelRuntime>()
             let boot = WarmSetBoot(
                 table: table,
                 loader: WarmModelLoader(table: table) { spec in
                     try await Self.makeWarmSetMemberRuntime(
-                        modelID: spec.modelID, family: spec.modelFamily, config: config,
+                        modelID: spec.modelID, family: spec.modelFamily, binding: try memberBinding(spec.modelID),
+                        config: config,
                         acceptedTuples: acceptedTuples, policy: policy,
                         emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
                         switchTargets: switchTargets)
                 },
                 supportedModels: resolved.supportedModels,
-                loadSpec: { try Self.warmSetLoadSpec($0) },
+                // An unbound member is refused by the factory, with the
+                // switch's error, before any weights load.
+                loadSpec: { try Self.warmSetLoadSpec($0, loadPath: (try? memberBinding($0))?.loadPath) },
                 memberInfo: { runtime in
                     let rows = await runtime.warmSetRowReservation()
                     return WarmModelMemberInfo(
