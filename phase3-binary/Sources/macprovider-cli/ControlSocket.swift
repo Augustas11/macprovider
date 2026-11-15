@@ -1647,6 +1647,14 @@ actor ControlSocketServer {
             } catch ControlSocketConnectionError.closed {
                 await connection.close()
                 return
+            } catch ControlSocketConnectionError.timedOut {
+                // An idle client (the menu-bar app's long-lived status connection) is a
+                // normal disconnect; only a timeout mid-frame is an error.
+                if await connection.hasPartialFrame {
+                    FileHandle.standardError.write(Data("control socket error: \(ControlSocketConnectionError.timedOut); closing connection\n".utf8))
+                }
+                await connection.close()
+                return
             } catch ControlSocketConnectError.other(let underlying) where Task.isCancelled && underlying == "Bad file descriptor" {
                 await connection.close()
                 return
@@ -2149,6 +2157,8 @@ public actor ControlSocketConnection {
 
     private var fd: Int32?
     private var receiveBuffer = Data()
+
+    var hasPartialFrame: Bool { !receiveBuffer.isEmpty }
 
     init(fd: Int32) {
         self.fd = fd

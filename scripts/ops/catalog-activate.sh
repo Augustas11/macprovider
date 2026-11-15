@@ -282,6 +282,90 @@ feed_route() {
   esac
 }
 
+# billing_alias_gap: prints why the live coordinator cannot bill the committed
+# release's rows, or nothing. A served name (catalog key or model_id) that is
+# not itself a rate-card row and reaches its row only through a billing exact
+# alias (formula.go exactModelKeyAliases, mirrored by catalog-release.py) needs
+# that alias in the RUNNING coordinator: the tag /healthz reports must carry the
+# same `"from": "to"` entry in its formula.go. No alias-dependent name: no-op,
+# with no live read at all.
+billing_alias_gap() {
+  local needed tag="" commit="" formula
+  needed="$(python3 -I - "$REPO_ROOT/scripts/catalog-release.py" "$CATALOG_TARGET_DIR" <<'PY'
+import json, runpy, sys
+cr = runpy.run_path(sys.argv[1])
+d = sys.argv[2]
+cand = json.load(open(d + "/autotune-candidates.json"))
+rows = json.load(open(d + "/rate-card.json"))["rows"]
+names = set()
+for key, row in cand["rows"].items():
+    names.add(key)
+    if isinstance(row.get("model_id"), str) and row["model_id"]:
+        names.add(row["model_id"])
+g = cr["normalize_model_key"].__globals__
+aliases = g["EXACT_MODEL_KEY_ALIASES"]
+g["EXACT_MODEL_KEY_ALIASES"] = {}
+try:
+    pre = {n: cr["normalize_model_key"](n) for n in names}
+finally:
+    g["EXACT_MODEL_KEY_ALIASES"] = aliases
+for n in sorted(names):
+    row = cr["rate_row_for"](rows, n)
+    if n not in rows and pre[n] in aliases and aliases[pre[n]] == row and row != "default":
+        print(f"{pre[n]}\t{row}\t{n}")
+PY
+)" || { printf 'cannot compute the billing aliases the release needs'; return; }
+  [ -n "$needed" ] || return 0
+  if fetch_coordinator_health; then
+    tag="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("version") or ""')"
+  fi
+  if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'the release bills served names through billing aliases, and the running coordinator tag is unreadable from /healthz'
+    return
+  fi
+  commit="$(git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null)" ||
+    { git -C "$REPO_ROOT" fetch -q origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null &&
+      commit="$(git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null)"; } || commit=""
+  if ! formula="$(git -C "$REPO_ROOT" show "$commit:phase4-coordinator/internal/billing/formula.go" 2>/dev/null)" || [ -z "$commit" ]; then
+    printf 'cannot read phase4-coordinator/internal/billing/formula.go at the running coordinator tag %s' "$tag"
+    return
+  fi
+  # Fail closed: only an explicit OK or GAP verdict lets the result through.
+  local verdict=""
+  verdict="$(python3 -I -c '
+import re, sys
+formula, needed, tag = sys.argv[1:4]
+# Only the entries of the exactModelKeyAliases map literal count; a comment,
+# a commented-out entry or another map never does.
+m = re.search(r"^var exactModelKeyAliases = map\[string\]string\{\n(.*?)^\}", formula, re.S | re.M)
+if m is None:
+    raise SystemExit(2)
+entries = set()
+for raw in m.group(1).splitlines():
+    line = raw.strip()
+    if not line or line.startswith("//"):
+        continue
+    e = re.fullmatch(r"\"([^\"]+)\"\s*:\s*\"([^\"]+)\",?(\s*//.*)?", line)
+    if e is None:
+        raise SystemExit(2)
+    entries.add((e.group(1), e.group(2)))
+missing = []
+for line in needed.splitlines():
+    alias, row, name = line.split("\t")
+    if (alias, row) not in entries:
+        missing.append(f"{name} (alias {alias} -> {row})")
+if missing:
+    print("GAP:the running coordinator %s lacks the billing alias for %s, so it would bill at default" % (tag, ", ".join(missing)), end="")
+else:
+    print("OK", end="")
+' "$formula" "$needed" "$tag" 2>/dev/null)" || verdict=""
+  case "$verdict" in
+    OK) ;;
+    GAP:*) printf '%s' "${verdict#GAP:}" ;;
+    *) printf 'cannot compare billing aliases with the running coordinator %s' "$tag" ;;
+  esac
+}
+
 gather() {
   local main_sha head_sha R native_bound=false bank_rid verify_ok=false qwen_lock_purpose="" qwen_local_intent=false
   main_sha="$(origin_main_sha)"
@@ -677,6 +761,16 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
     [ "$pricing_only" != true ] ||
       content_downtime="no coordinator restart: one SIGHUP reloads the release and the rate card; the canary provider is not touched (pricing-only release); a failed activation rolls back and can strand adopters for 3-11 min"
+    # A served name that reaches its rate row only through a billing exact
+    # alias bills at that row only once the RUNNING coordinator has the alias;
+    # otherwise it bills at `default`. Refuse until the Pearl runtime carries it.
+    local alias_gap
+    alias_gap="$(billing_alias_gap)"
+    fact billing_alias_gap "$alias_gap"
+    if [ -n "$alias_gap" ]; then
+      set_next catalog_activation blocked "Activate content release $R" "" \
+        "$alias_gap; apply the Pearl runtime release that carries the alias first: scripts/ops/pearl-runtime.sh status"
+    fi
     # SPEC-048 0.1.81: the decode-path digest is provenance only, so catalog
     # activation does not compare it with any release.
     if [ "$fresh" = true ] && [ "$pricing_only" != true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
