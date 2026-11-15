@@ -470,9 +470,14 @@ type DrainStatus struct {
 }
 
 type InferenceRequest struct {
-	Type            string                     `json:"type"`
-	RequestID       string                     `json:"request_id"`
-	Stream          bool                       `json:"stream"`
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Stream    bool   `json:"stream"`
+	// ServedModelID names the warm-set entry the coordinator chose
+	// (SPEC-001-R016 Request routing). It is set only for a provider that
+	// reported warm_models, so a provider without one gets the same bytes as
+	// before.
+	ServedModelID   string                     `json:"served_model_id,omitempty"`
 	Body            string                     `json:"body"`
 	MaxOutputTokens *int                       `json:"max_output_tokens,omitempty"`
 	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
@@ -829,13 +834,36 @@ type Nak struct {
 	Error     NakError `json:"error"`
 }
 
+// PreflightRejection is a typed preflight_ack rejection reason.
+type PreflightRejection string
+
+const (
+	PreflightRejectionContextExceedsCapacity PreflightRejection = "context_exceeds_capacity"
+	PreflightRejectionQueueFull              PreflightRejection = "queue_full"
+	PreflightRejectionDraining               PreflightRejection = "draining"
+	// PreflightRejectionModelNotLoaded is also the SPEC-001-R016 answer when
+	// served_model_id names no warm entry: retryable on another entry.
+	PreflightRejectionModelNotLoaded PreflightRejection = "model_not_loaded"
+	PreflightRejectionUnhealthy      PreflightRejection = "unhealthy"
+	PreflightRejectionTierMismatch   PreflightRejection = "tier_mismatch"
+)
+
 var preflightRejectionReasons = map[string]struct{}{
-	"context_exceeds_capacity": {},
-	"queue_full":               {},
-	"draining":                 {},
-	"model_not_loaded":         {},
-	"unhealthy":                {},
-	"tier_mismatch":            {},
+	string(PreflightRejectionContextExceedsCapacity): {},
+	string(PreflightRejectionQueueFull):              {},
+	string(PreflightRejectionDraining):               {},
+	string(PreflightRejectionModelNotLoaded):         {},
+	string(PreflightRejectionUnhealthy):              {},
+	string(PreflightRejectionTierMismatch):           {},
+}
+
+// Rejection is the typed reason of a rejecting ack; empty when accepted.
+// ParsePreflightAck admits only the reasons above.
+func (a PreflightAck) Rejection() PreflightRejection {
+	if a.Accepted {
+		return ""
+	}
+	return PreflightRejection(a.Reason)
 }
 
 type MetricsSnapshot struct {

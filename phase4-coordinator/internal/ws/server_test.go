@@ -5049,3 +5049,57 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 		t.Fatalf("a rejected heartbeat changed the session: ok=%v state=%s slots_free=%d", ok, p.State, p.SlotsFree)
 	}
 }
+
+// SPEC-001-R016: a preflight to a warm-set entry names its model; one to a
+// provider without a warm set is byte-identical to before. A provider that
+// has no such warm entry answers model_not_loaded.
+func TestPreflightServedModelID(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	for _, tc := range []struct {
+		served string
+		want   string
+		reply  map[string]any
+	}{
+		{"", `{"estimated_tokens":9000,"request_id":"req-legacy","type":"preflight"}`,
+			map[string]any{"type": "preflight_ack", "request_id": "req-legacy", "accepted": true, "estimated_wait_ms": 0}},
+		{"model-b", `{"estimated_tokens":9000,"request_id":"req-entry","served_model_id":"model-b","type":"preflight"}`,
+			map[string]any{"type": "preflight_ack", "request_id": "req-entry", "accepted": false, "estimated_wait_ms": 0, "reason": "model_not_loaded"}},
+	} {
+		requestID := tc.reply["request_id"].(string)
+		resultCh := make(chan providerws.PreflightAck, 1)
+		go func() {
+			ack, ok, err := h.Provider.Preflight(pool.Provider{ProviderID: "m4-anon", AssignedID: assignedID, ServedModelID: tc.served}, requestID, 9000, 2*time.Second)
+			if !ok || err != nil {
+				t.Errorf("preflight %s ok=%v err=%v", requestID, ok, err)
+			}
+			resultCh <- ack
+		}()
+		payload, _, err := wsutil.ReadServerData(conn)
+		if err != nil {
+			t.Fatalf("read preflight: %v", err)
+		}
+		if string(payload) != tc.want {
+			t.Fatalf("preflight frame = %s, want %s", payload, tc.want)
+		}
+		if err := wsutil.WriteClientText(conn, mustJSON(tc.reply)); err != nil {
+			t.Fatalf("write preflight_ack: %v", err)
+		}
+		ack := <-resultCh
+		wantRejection := providerws.PreflightRejection("")
+		if tc.served != "" {
+			wantRejection = providerws.PreflightRejectionModelNotLoaded
+		}
+		if ack.Rejection() != wantRejection {
+			t.Fatalf("%s rejection = %q, want %q", requestID, ack.Rejection(), wantRejection)
+		}
+	}
+}

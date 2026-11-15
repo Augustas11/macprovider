@@ -472,12 +472,15 @@ type providerFrame struct {
 }
 
 type encryptedInferenceRequest struct {
-	Type       string                     `json:"type"`
-	RequestID  string                     `json:"request_id"`
-	Stream     bool                       `json:"stream"`
-	Encrypted  bool                       `json:"encrypted"`
-	Enc        tier2.AEADEnvelopeBody     `json:"enc"`
-	Settlement *SettlementReceiptMetadata `json:"settlement,omitempty"`
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Stream    bool   `json:"stream"`
+	// ServedModelID is outer-frame routing metadata, never sealed
+	// (SPEC-001-R016); see InferenceRequest.ServedModelID.
+	ServedModelID string                     `json:"served_model_id,omitempty"`
+	Encrypted     bool                       `json:"encrypted"`
+	Enc           tier2.AEADEnvelopeBody     `json:"enc"`
+	Settlement    *SettlementReceiptMetadata `json:"settlement,omitempty"`
 }
 
 type encryptedInferencePlaintext struct {
@@ -1027,6 +1030,7 @@ func (ps *providerSession) sealInferenceRequestFrame(provider pool.Provider, req
 			Type:                  "inference_request",
 			RequestID:             requestID,
 			Stream:                stream,
+			ServedModelID:         provider.ServedModelID,
 			Body:                  string(body),
 			MaxOutputTokens:       maxOutputTokens,
 			Settlement:            settlement,
@@ -1088,12 +1092,13 @@ func (ps *providerSession) sealInferenceRequestFrame(provider pool.Provider, req
 			return nil, err
 		}
 		frame, err := json.Marshal(encryptedInferenceRequest{
-			Type:       "inference_request",
-			RequestID:  requestID,
-			Stream:     stream,
-			Encrypted:  true,
-			Enc:        sized,
-			Settlement: settlement,
+			Type:          "inference_request",
+			RequestID:     requestID,
+			Stream:        stream,
+			ServedModelID: provider.ServedModelID,
+			Encrypted:     true,
+			Enc:           sized,
+			Settlement:    settlement,
 		})
 		if err != nil {
 			return nil, err
@@ -1108,12 +1113,13 @@ func (ps *providerSession) sealInferenceRequestFrame(provider pool.Provider, req
 	}
 	session.C2PCounter++
 	frame, err := json.Marshal(encryptedInferenceRequest{
-		Type:       "inference_request",
-		RequestID:  requestID,
-		Stream:     stream,
-		Encrypted:  true,
-		Enc:        envelope.Enc,
-		Settlement: settlement,
+		Type:          "inference_request",
+		RequestID:     requestID,
+		Stream:        stream,
+		ServedModelID: provider.ServedModelID,
+		Encrypted:     true,
+		Enc:           envelope.Enc,
+		Settlement:    settlement,
 	})
 	if err != nil {
 		return nil, err

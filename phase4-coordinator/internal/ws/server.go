@@ -5487,6 +5487,11 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 		"request_id":       requestID,
 		"estimated_tokens": estimatedTokens,
 	}
+	// SPEC-001-R016: only an entry of a warm-set provider names its model, so
+	// a provider without warm_models gets the same preflight as before.
+	if provider.ServedModelID != "" {
+		msg["served_model_id"] = provider.ServedModelID
+	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return PreflightAck{}, false, err
