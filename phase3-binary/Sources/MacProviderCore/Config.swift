@@ -260,6 +260,13 @@ public struct AppConfig: Equatable, Sendable {
     public var maxRequestBodyBytes: Int
     public var tier2MDAArtifactPath: String?
     public var supportedModels: [String]?
+    /// SPEC-001-R017 *Configuration*: further models loaded at boot beside
+    /// the primary `model`, in list order while they fit. yaml key
+    /// `warm_models`, env `MACPROVIDER_WARM_MODELS` (comma-separated), CLI
+    /// `--warm-models`. Entries are trimmed; a case-folded duplicate or an
+    /// entry equal to `model` fails configuration validation. Empty is a
+    /// warm set of one.
+    public var warmModels: [String] = []
     public var publishesSupportedModels: Bool
     public var enableWarmSwap: Bool
     public var enableReceipts: Bool
@@ -493,6 +500,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var configPath: String?
     public var logLevel: String?
     public var supportedModels: [String]?
+    public var warmModels: [String]?
     public var publishesSupportedModels: Bool?
     public var enableWarmSwap: Bool?
     public var enableReceipts: Bool?
@@ -546,6 +554,7 @@ public struct CLIOverrides: Equatable, Sendable {
         configPath: String? = nil,
         logLevel: String? = nil,
         supportedModels: [String]? = nil,
+        warmModels: [String]? = nil,
         publishesSupportedModels: Bool? = nil,
         enableWarmSwap: Bool? = nil,
         enableReceipts: Bool? = nil,
@@ -593,6 +602,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.configPath = configPath
         self.logLevel = logLevel
         self.supportedModels = supportedModels
+        self.warmModels = warmModels
         self.publishesSupportedModels = publishesSupportedModels
         self.enableWarmSwap = enableWarmSwap
         self.enableReceipts = enableReceipts
@@ -672,6 +682,7 @@ public enum ConfigLoader {
         config = try applyCLI(config, cli: cli, resolveCredentials: resolveCredentials)
         config.configPath = configPath
         try validateIdlePrewarm(config)
+        config.warmModels = try validatedWarmModels(config.warmModels, model: config.model)
 
         // SPEC-037 FR-KVP11: resolve the kv_disk_cache group fail-closed (never
         // throws; invalid ⇒ tier disabled + errors logged by the caller).
@@ -915,6 +926,9 @@ public enum ConfigLoader {
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: dict, key: "tier2_mda_artifact_path", expected: "string")
         try assign(&config.supportedModels, from: dict, key: "supported_models", expected: "array of strings or comma-separated string")
+        var warmModels: [String]?
+        try assign(&warmModels, from: dict, key: "warm_models", expected: "array of strings or comma-separated string")
+        if let warmModels { config.warmModels = warmModels }
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
@@ -1150,6 +1164,7 @@ public enum ConfigLoader {
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: environment, env: "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH", expected: "string")
         config.supportedModels = SupportedModels.parseCSV(environment["MACPROVIDER_SUPPORTED_MODELS"]) ?? config.supportedModels
+        config.warmModels = SupportedModels.parseCSV(environment["MACPROVIDER_WARM_MODELS"]) ?? config.warmModels
         try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
         try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
@@ -1310,6 +1325,9 @@ public enum ConfigLoader {
         }
         if let supportedModels = cli.supportedModels {
             config.supportedModels = supportedModels
+        }
+        if let warmModels = cli.warmModels {
+            config.warmModels = warmModels
         }
         if let publishesSupportedModels = cli.publishesSupportedModels {
             config.publishesSupportedModels = publishesSupportedModels
@@ -1699,6 +1717,30 @@ public enum ConfigLoader {
                 expected: "1...64 UTF-8 bytes"
             )
         }
+    }
+
+    /// SPEC-001-R017 *Configuration*: entries trimmed, empty entries dropped.
+    /// Ids compare case-folded (SPEC-010), so a duplicate or the primary
+    /// itself would name one warm-set member twice.
+    static func validatedWarmModels(_ entries: [String], model: String?) throws -> [String] {
+        let primary = model?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil)
+        var seen: Set<String> = []
+        var result: [String] = []
+        for raw in entries {
+            let entry = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !entry.isEmpty else { continue }
+            let folded = entry.lowercased(with: nil)
+            if folded == primary {
+                throw ConfigError.invalidValue(
+                    key: "warm_models", value: entry, expected: "models other than the primary model \(model ?? "")")
+            }
+            guard seen.insert(folded).inserted else {
+                throw ConfigError.invalidValue(
+                    key: "warm_models", value: entry, expected: "each model at most once (case-insensitive)")
+            }
+            result.append(entry)
+        }
+        return result
     }
 
     private static func validateRange(key: String, value: Double, range: ClosedRange<Double>) throws {

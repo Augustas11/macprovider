@@ -5,6 +5,8 @@ public enum SupportedModelsValidationError: Error, CustomStringConvertible, Equa
     case modelNotInCatalog(model: String, catalog: [String])
     case entryTooLong(entry: String, byteCount: Int)
     case catalogTooLarge(count: Int)
+    case warmModelsRequireModel
+    case warmModelNotInCatalog(model: String, catalog: [String])
 
     public var description: String {
         switch self {
@@ -16,6 +18,10 @@ public enum SupportedModelsValidationError: Error, CustomStringConvertible, Equa
             return "--supported-models entry exceeds 256 UTF-8 bytes: \(entry) (\(byteCount) bytes)"
         case let .catalogTooLarge(count):
             return "--supported-models exceeds 64 entries (got \(count))"
+        case .warmModelsRequireModel:
+            return "--warm-models requires --model to be set"
+        case let .warmModelNotInCatalog(model, _):
+            return "--warm-models \(model) not in --supported-models"
         }
     }
 }
@@ -35,19 +41,27 @@ public enum SupportedModels {
         return entries.isEmpty ? nil : entries
     }
 
+    /// SPEC-001-R017: every warm model must be in the catalog; with no
+    /// catalog the effective one is the primary followed by `warmModels`.
     public static func validate(
         model: String,
-        supportedModels: [String]?
+        supportedModels: [String]?,
+        warmModels: [String] = []
     ) throws -> [String] {
         guard !model.isEmpty else {
-            throw SupportedModelsValidationError.modelMissing
+            throw warmModels.isEmpty
+                ? SupportedModelsValidationError.modelMissing
+                : SupportedModelsValidationError.warmModelsRequireModel
         }
 
-        let catalog = supportedModels?
+        var catalog = supportedModels?
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty } ?? []
-        guard !catalog.isEmpty else {
+        guard !catalog.isEmpty || !warmModels.isEmpty else {
             return [model]
+        }
+        if catalog.isEmpty {
+            catalog = [model] + warmModels
         }
 
         for entry in catalog {
@@ -67,6 +81,10 @@ public enum SupportedModels {
         }
         guard containsModel else {
             throw SupportedModelsValidationError.modelNotInCatalog(model: model, catalog: catalog)
+        }
+        let foldedCatalog = Set(catalog.map { $0.lowercased(with: nil) })
+        if let missing = warmModels.first(where: { !foldedCatalog.contains($0.lowercased(with: nil)) }) {
+            throw SupportedModelsValidationError.warmModelNotInCatalog(model: missing, catalog: catalog)
         }
 
         return catalog

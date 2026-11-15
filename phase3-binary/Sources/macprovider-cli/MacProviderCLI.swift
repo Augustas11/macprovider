@@ -359,6 +359,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, only the configured model is advertised.")
     var supportedModels: String?
 
+    @Option(help: "Comma-separated list of further model IDs to load at boot beside --model, in order while they fit in memory (SPEC-001 §6.16). Overrides MACPROVIDER_WARM_MODELS and config key warm_models. Each must be in --supported-models when that is set.")
+    var warmModels: String?
+
     @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported model list to the network status service. Default off.")
     var publishSupportedModels: Bool?
 
@@ -607,11 +610,12 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
-        if resolved.supportedModels != nil {
+        if resolved.supportedModels != nil || !resolved.warmModels.isEmpty {
             do {
                 let catalog = try SupportedModels.validate(
                     model: resolved.model ?? "",
-                    supportedModels: resolved.supportedModels
+                    supportedModels: resolved.supportedModels,
+                    warmModels: resolved.warmModels
                 )
                 resolved.supportedModels = catalog
             } catch let error as SupportedModelsValidationError {
@@ -2336,6 +2340,7 @@ struct ServeCommand: AsyncParsableCommand {
             configPath: config,
             logLevel: logLevel,
             supportedModels: SupportedModels.parseCSV(supportedModels),
+            warmModels: SupportedModels.parseCSV(warmModels),
             publishesSupportedModels: publishSupportedModels,
             enableWarmSwap: enableWarmSwap,
             enableReceipts: enableReceipts,
