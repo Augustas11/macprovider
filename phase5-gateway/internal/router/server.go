@@ -1261,6 +1261,10 @@ type poolzProviderRow struct {
 	// read it; older coordinators omit it.
 	InService *bool  `json:"in_service,omitempty"`
 	AuthState string `json:"auth_state,omitempty"`
+	// ServedModel is set on each row of a multi-model provider session, one
+	// row per (provider, model) entry (SPEC-002-R011). Older coordinators
+	// and single-model providers omit it.
+	ServedModel string `json:"served_model,omitempty"`
 }
 
 type poolzResponse struct {
@@ -1345,10 +1349,26 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	// model or count in an exposed field; they only let FR-B1's "fewer than
 	// half in service" see the model's real provider total.
 	faulted := map[string]poolzModelStats{}
+	// entrySessions merges the rows of one multi-model provider session so
+	// pool-level and serving counts see it once (SPEC-002-R011); per-model
+	// counts stay per row. A row without served_model is its own session.
+	entrySessions := map[[2]string]*poolzEntrySession{}
 	for _, p := range poolz.Pool {
 		inService := poolzProviderInService(p)
+		var session *poolzEntrySession
+		if p.ServedModel != "" {
+			key := [2]string{p.ProviderID, p.AssignedID}
+			if session = entrySessions[key]; session == nil {
+				session = &poolzEntrySession{}
+				entrySessions[key] = session
+			}
+		}
 		if inService {
-			servingProviders++
+			if session != nil {
+				session.inService = true
+			} else {
+				servingProviders++
+			}
 		}
 		if poolzProviderServesContext(p) && p.ModelID != "" {
 			if out.ServingToolChoiceModes == nil {
@@ -1382,18 +1402,13 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 			}
 			continue
 		}
-		out.Pool.TotalProviders++
-		switch p.State {
-		case "ready":
-			out.Pool.Ready++
-		case "busy":
-			out.Pool.Busy++
-		case "degraded":
-			out.Pool.Degraded++
-		case "draining":
-			out.Pool.Draining++
-		default:
-			out.Pool.Unavailable++
+		if session != nil {
+			if !session.counted || poolzStateRank(p.State) > poolzStateRank(session.state) {
+				session.state = p.State
+			}
+			session.counted = true
+		} else {
+			countPoolzState(&out.Pool, p.State)
 		}
 		if p.ModelID == "" {
 			continue
@@ -1439,6 +1454,14 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 			st.UnavailableOrDraining++
 		}
 		stats[p.ModelID] = st
+	}
+	for _, session := range entrySessions {
+		if session.inService {
+			servingProviders++
+		}
+		if session.counted {
+			countPoolzState(&out.Pool, session.state)
+		}
 	}
 	// SPEC-002 v1.4.1 — the summary fallback only fires when the coordinator
 	// omitted the detailed `pool` array entirely (e.g. a redacted/summary-only
@@ -1499,6 +1522,46 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	}
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ID < out.Models[j].ID })
 	return out
+}
+
+// poolzEntrySession is one multi-model provider session seen through its
+// entry rows: it is in service when any row is, and counts in the pool with
+// the best state of its counted rows.
+type poolzEntrySession struct {
+	counted, inService bool
+	state              string
+}
+
+func poolzStateRank(state string) int {
+	switch state {
+	case "ready":
+		return 4
+	case "busy":
+		return 3
+	case "degraded":
+		return 2
+	case "draining":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// countPoolzState adds one provider session in state to the pool counters.
+func countPoolzState(pool *statusPool, state string) {
+	pool.TotalProviders++
+	switch state {
+	case "ready":
+		pool.Ready++
+	case "busy":
+		pool.Busy++
+	case "degraded":
+		pool.Degraded++
+	case "draining":
+		pool.Draining++
+	default:
+		pool.Unavailable++
+	}
 }
 
 // poolzProviderFaulted reports a row excluded from buyer capacity because of

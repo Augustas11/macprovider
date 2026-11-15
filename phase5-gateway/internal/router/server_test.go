@@ -9530,3 +9530,65 @@ func TestInternalHeaderStripAuditsAuthenticatedRequest(t *testing.T) {
 		t.Fatalf("audit event count = %d, want 1 for authenticated probe", got)
 	}
 }
+
+// SPEC-002-R011: the entry rows of one multi-model provider session count
+// once in the pool and serving counts and once per model; rows without
+// served_model (older coordinators, single-model providers) count as before.
+func TestAggregateStatusCountsWarmEntrySessionOnce(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"provider_id":"warm","assigned_id":"s1","served_model":"a","primary":true,"warm_state":"warm","model_id":"a","state":"ready","slots_free":1,"slots_total":2,"max_context_tokens":8192,"routing_eligible":true,"in_service":true},
+			{"provider_id":"warm","assigned_id":"s1","served_model":"b","primary":false,"warm_state":"warm","model_id":"b","state":"busy","slots_free":0,"slots_total":3,"max_context_tokens":4096,"routing_eligible":false,"in_service":true},
+			{"provider_id":"warm","assigned_id":"s1","served_model":"c","primary":false,"warm_state":"loading","model_id":"c","state":"unavailable","slots_free":0,"slots_total":1,"routing_eligible":false,"in_service":false},
+			{"provider_id":"legacy","assigned_id":"s2","model_id":"a","state":"ready","slots_free":1,"slots_total":1,"routing_eligible":true,"in_service":true}
+		],
+		"summary":{"total_providers":2,"ready":2,"total_slots":3,"free_slots":2}
+	}`), 3, fixedNow())
+
+	p := out.Pool
+	if p.TotalProviders != 2 || p.Ready != 2 || p.Busy != 0 || p.Unavailable != 0 {
+		t.Fatalf("pool=%+v, want two sessions, both ready", p)
+	}
+	// Two serving sessions are below the threshold of 3: one session with
+	// three rows must not count as three.
+	if out.Status != "degraded" {
+		t.Fatalf("status=%q, want degraded (2 serving sessions < 3)", out.Status)
+	}
+	models := map[string]statusModel{}
+	for _, m := range out.Models {
+		models[m.ID] = m
+	}
+	if a := models["a"]; a.ProviderCount != 2 || a.TotalSlots != 3 || a.SlotsFree != 2 {
+		t.Fatalf("model a=%+v, want two providers", a)
+	}
+	if b := models["b"]; b.ProviderCount != 1 || b.TotalSlots != 3 || b.Availability != "no_free_slots" {
+		t.Fatalf("model b=%+v, want one provider serving with no free slot", b)
+	}
+	if _, listed := models["c"]; listed || len(models) != 2 {
+		t.Fatalf("models=%+v, a loading entry lists nothing", out.Models)
+	}
+
+	// A session whose only counted row is a further member still counts.
+	only := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"provider_id":"warm","assigned_id":"s1","served_model":"a","model_id":"a","state":"unavailable","slots_free":0,"slots_total":2,"routing_eligible":false,"in_service":false},
+			{"provider_id":"warm","assigned_id":"s1","served_model":"b","model_id":"b","state":"ready","slots_free":2,"slots_total":2,"routing_eligible":true,"in_service":true}
+		],
+		"summary":{"total_providers":1,"ready":1,"total_slots":2,"free_slots":2}
+	}`), 1, fixedNow())
+	if only.Pool.TotalProviders != 1 || only.Pool.Ready != 1 || only.Status != "up" {
+		t.Fatalf("pool=%+v status=%q, want one ready session", only.Pool, only.Status)
+	}
+
+	// The same rows without served_model (an older coordinator) count per row.
+	legacy := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"provider_id":"warm","assigned_id":"s1","model_id":"a","state":"ready","slots_free":1,"slots_total":2,"routing_eligible":true,"in_service":true},
+			{"provider_id":"warm","assigned_id":"s1","model_id":"b","state":"ready","slots_free":1,"slots_total":2,"routing_eligible":true,"in_service":true}
+		],
+		"summary":{"total_providers":2,"ready":2,"total_slots":4,"free_slots":2}
+	}`), 1, fixedNow())
+	if legacy.Pool.TotalProviders != 2 || legacy.Pool.Ready != 2 {
+		t.Fatalf("legacy pool=%+v, want per-row counts", legacy.Pool)
+	}
+}
