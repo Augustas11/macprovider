@@ -330,17 +330,40 @@ PY
     printf 'cannot read phase4-coordinator/internal/billing/formula.go at the running coordinator tag %s' "$tag"
     return
   fi
-  python3 -I -c '
+  # Fail closed: only an explicit OK or GAP verdict lets the result through.
+  local verdict=""
+  verdict="$(python3 -I -c '
 import re, sys
 formula, needed, tag = sys.argv[1:4]
+# Only the entries of the exactModelKeyAliases map literal count; a comment,
+# a commented-out entry or another map never does.
+m = re.search(r"^var exactModelKeyAliases = map\[string\]string\{\n(.*?)^\}", formula, re.S | re.M)
+if m is None:
+    raise SystemExit(2)
+entries = set()
+for raw in m.group(1).splitlines():
+    line = raw.strip()
+    if not line or line.startswith("//"):
+        continue
+    e = re.fullmatch(r"\"([^\"]+)\"\s*:\s*\"([^\"]+)\",?(\s*//.*)?", line)
+    if e is None:
+        raise SystemExit(2)
+    entries.add((e.group(1), e.group(2)))
 missing = []
 for line in needed.splitlines():
     alias, row, name = line.split("\t")
-    if not re.search(r"\"%s\"\s*:\s*\"%s\"" % (re.escape(alias), re.escape(row)), formula):
+    if (alias, row) not in entries:
         missing.append(f"{name} (alias {alias} -> {row})")
 if missing:
-    print("the running coordinator %s lacks the billing alias for %s, so it would bill at default" % (tag, ", ".join(missing)), end="")
-' "$formula" "$needed" "$tag"
+    print("GAP:the running coordinator %s lacks the billing alias for %s, so it would bill at default" % (tag, ", ".join(missing)), end="")
+else:
+    print("OK", end="")
+' "$formula" "$needed" "$tag" 2>/dev/null)" || verdict=""
+  case "$verdict" in
+    OK) ;;
+    GAP:*) printf '%s' "${verdict#GAP:}" ;;
+    *) printf 'cannot compare billing aliases with the running coordinator %s' "$tag" ;;
+  esac
 }
 
 gather() {
