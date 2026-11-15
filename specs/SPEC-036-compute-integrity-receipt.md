@@ -1,9 +1,20 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.4-draft
+**Status:** v0.3.5-draft
 **Date:** 2026-11-16
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.5 (2026-11-16, Related: #2338 — canonical model id, withdrawn members):**
+A model id has one canonical form: trimmed, Unicode NFC, then lower case
+(`pool.ModelKey`). The coordinator rejects at decode any model id with
+surrounding whitespace or a control character, or whose canonical form is
+not its ASCII lower case, so every accepted spelling folds to one key under
+both the key rule and the ASCII `lower()` of the settlement hold predicate.
+A further warm member whose entry is withdrawn while its verification
+request is in flight stays due; three such withdrawals in a row count as one
+out-of-band outcome with the new reason `entry_withdrawn`. The primary's
+handling is unchanged.
 
 **Change log v0.3.4 (2026-11-16, Related: #2338 — served model on verification only, folded keys):**
 A verification request names the served model only for a multi-model
@@ -2170,10 +2181,29 @@ built, the scheduler sweeps one key per warm entry of every session
 rules below; a session that is not multi-model is a legacy session and one
 key. Only a session's primary entry can be a scorer candidate, so a further
 member is verified but never scores another provider. The `model_id` of a
-key, of a scorer pool and of every comparison between them is case-folded
-(Unicode NFC, then lower case): a session that re-spells its model keeps
-one key, its state and its due time, and a verification request in flight
-across the re-spelling still counts. A session's reported
+key, of a scorer pool and of every comparison between them is
+in one canonical form: trimmed, Unicode NFC, then lower case. The
+coordinator rejects at decode, through the field's existing invalid-frame
+path, any model id that is empty, has surrounding whitespace or a control
+character, or whose canonical form differs from its ASCII lower case (for
+example a Kelvin sign or an NFD sequence); ASCII case variants stay legal.
+Every accepted spelling therefore folds to the same key here and under the
+ASCII `lower()` that the SPEC-022 R-16 hold predicate applies, so a session
+that re-spells its model keeps one key, its state and its due time, and a
+verification request in flight across the re-spelling still counts.
+
+A verification request to a further warm member whose entry is withdrawn
+from the session (it left the warm set or its identity changed) before the
+answer arrives is inconclusive, but the key stays due rather than moving a
+full interval. Withdrawals count per key; the count resets on a complete answer
+and when the key's state is pruned. Every third withdrawal in a row is
+one out-of-band outcome with reason `entry_withdrawn`, scored by the
+operators of the scorers reserved for that request (reference-only when they
+were all reference scorers), so withholding answers by withdrawing the
+member walks the key through `suspect` to `failed` like any other
+out-of-band streak. The primary is unchanged: a primary model swap mid-probe
+stays an inconclusive `dispatch` and the key's due time moves a full
+interval. A session's reported
 `weights_manifest_sha256` is only what a scoring job to that session carries
 (FR-21).
 
@@ -2503,7 +2533,9 @@ Transitions:
   starts at the confirmation), or clears the key to `unverified`.
 
 Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
-`short_output`, `scorer_invalid`) change no state.
+`short_output`, `scorer_invalid`) change no state, except that a further
+warm member's third withdrawal in a row is an out-of-band outcome with
+reason `entry_withdrawn` (see the model-key rules above).
 
 A transition commits its SPEC-022 R-16 hold change and the new state in one
 database transaction (bounded at 5 s), and only then publishes the routing
@@ -2600,7 +2632,7 @@ Visibility:
   `POST /admin/compute-integrity/holds/<hold_id>/release`, each with an
   `operator_id` and a reason, and each audit-logged.
 - Reasons are a closed set: `in_band_streak`, `out_of_band_top1`,
-  `out_of_band_logprob`, `confirmed_failure`, `recovery_passed`,
+  `out_of_band_logprob`, `entry_withdrawn`, `confirmed_failure`, `recovery_passed`,
   `escalation_passed`, `escalation_inconclusive`, `operator_clear`,
   `cooldown_elapsed`, `reference_only_failure`.
 - The provider's view of a hold omits who released it and why; operators see

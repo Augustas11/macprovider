@@ -5164,7 +5164,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringEscalationRedrawsLongDueTime",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnsavedDueTimeIsNotDispatched",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartRedrawStoredOncePresent",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringModelSpellingKeepsOneKeyAndDueTime",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings"
       ],
       "journeys": [],
       "evidence": [],
@@ -5239,7 +5241,8 @@
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Apply",
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Tick",
         "phase4-coordinator/internal/computeintegrity/scoring_store.go:func upsertKeyStateExec",
-        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide"
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) memberEntryWithdrawnMidProbe"
       ],
       "tests": [
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineFailureNeedsTwoScorerOperators",
@@ -5253,7 +5256,10 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringMemberWithdrawnMidProbeStaysDueAndCounts",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringMemberWithdrawalCountResetsOnAnswer",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringPrimarySwapMidProbeUnchanged"
       ],
       "journeys": [],
       "evidence": [],
@@ -13347,7 +13353,8 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func (s *Store) ReleaseComputeIntegrityHold",
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldRollupTriggers",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
-        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement"
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetComputeIntegrityPassing"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldWithholdsAndReleases",
@@ -13363,7 +13370,10 @@
         "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchSurvivesJournalOutsideDigest",
         "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMultiModelNeedsTwoWarmVerifiedMembers",
-        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion"
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsEverySpellingOfTheServedModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegrityPassingIsPerEntry",
+        "phase4-coordinator/internal/ws/compute_scoring_passing_test.go:TestComputeScoringPublishesPassingVerification"
       ],
       "journeys": [],
       "evidence": [],
@@ -15956,7 +15966,10 @@
         "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor",
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldServedModelSQL",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handlePoolz",
-        "phase5-gateway/internal/router/server.go:func countPoolzState"
+        "phase5-gateway/internal/router/server.go:func countPoolzState",
+        "phase4-coordinator/internal/ws/messages.go:func wellFormedModelID",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ConsumeForwardedSlotBooked",
+        "phase4-coordinator/internal/pool/warm_models.go:func drainEmptyServedLocked"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/messages_test.go:TestParseHeartbeatDecodesWarmModels",
@@ -16001,7 +16014,15 @@
         "phase4-coordinator/internal/ws/server_test.go:TestHelloWarmModelsHandshake",
         "phase4-coordinator/internal/ws/server_test.go:TestAuthV2MalformedWarmModelsProceedsAsLegacy",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmKeptListDroppedAfterThreeRejections",
-        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionSurvivesRestartAsMember"
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionSurvivesRestartAsMember",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestWellFormedModelIDLowerIsTheModelKey",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestModelKeyVariantsShareSanctions",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmZeroSlotMemberIsNotMultiModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmServedDispatchesNeverSeedTheDrain",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmDrainNeverEndsOnTheLiveModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmSessionViewDispatchCountsOnThePrimary",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestLegacySessionBooksUnnamedDispatches"
       ],
       "journeys": [],
       "evidence": [],

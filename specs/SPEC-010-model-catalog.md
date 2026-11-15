@@ -1,7 +1,7 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.19
-**Status:** v1.19 identity pin per warm member (R007(c), #2338, 2026-11-16) over v1.18 multi-model warm set (L-3 lifted, #2338, 2026-11-13) over v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
+**Version:** 1.20
+**Status:** v1.20 canonical model-id spelling (R-3.1.7, #2338, 2026-11-16) over v1.19 identity pin per warm member (R007(c), #2338, 2026-11-16) over v1.18 multi-model warm set (L-3 lifted, #2338, 2026-11-13) over v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
 2026-10-01; v1.15 draft amended before landing) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
@@ -46,6 +46,15 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.20 (2026-11-16, Related: #2338 — canonical model-id spelling):**
+R-3.1.7 names the canonical form of a model id (trimmed, Unicode NFC, then
+lower case) and accepts only spellings whose canonical form is their ASCII
+lower case (SPEC-002-R011 decode rule). R-3.1.9 gains step 3a: a
+`supported_models` entry in any other spelling fails with reason
+`"supported_models must be array of strings"`, after the length checks and
+before the duplicate check, so the locked order and reasons of steps 1-5 are
+unchanged. Catalog ids are ASCII, so no legacy provider is affected.
 
 **Change log v1.19 (2026-11-16, Related: #2338 — identity pin per warm member):**
 - R007(c): for a multi-model session (SPEC-002-R011) session authority is
@@ -721,7 +730,12 @@ against retained initial-stage values, mismatch rejection).
   uniqueness checks on model IDs MUST use Unicode NFC
   normalization followed by ASCII case folding. The router uses
   this normalized form internally; the wire format preserves the
-  provider's chosen case in responses.
+  provider's chosen case in responses. (v1.20) A model id's canonical
+  form is trimmed, NFC-normalized and lower-cased; the coordinator
+  accepts a model id only when it is non-empty, has no surrounding
+  whitespace or control character, and its canonical form equals its
+  ASCII lower case (SPEC-002-R011), so NFC plus ASCII folding and the
+  canonical form agree on every accepted id.
 - **R-3.1.8** The same fields MAY appear in the legacy `hello`
   frame for deployments not yet on the `auth` handshake. Rules
   R-3.1.1 through R-3.1.7 apply identically.
@@ -738,6 +752,8 @@ against retained initial-stage values, mismatch rejection).
   3. Array length ≥ 1 and ≤ 64 (R-3.1.1, R-3.1.3) — fail reasons
      `"supported_models cannot be empty"` and
      `"supported_models exceeds 64 entries"`.
+     3a. (v1.20) Every entry in canonical spelling (R-3.1.7) — fail
+     reason `"supported_models must be array of strings"`.
   4. NFC + ASCII case-fold normalize (R-3.1.7), then duplicate
      check: after normalization, duplicate entries MUST cause
      `bad_request` with reason

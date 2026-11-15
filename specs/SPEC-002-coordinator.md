@@ -1,6 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.40 (2026-11-16, warm-set multi-model predicate and round-2 audit corrections)
+**Version:** 1.6.41 (2026-11-16, canonical model id, slotted members and exact drain attribution)
+
+**Change log v1.6.41 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+gains a decode rule: a model id is accepted only in a spelling whose
+canonical form (trimmed, Unicode NFC, lower case) is its ASCII lower case;
+every other spelling is rejected through the field's existing invalid-frame
+path, so one canonical key names a model everywhere. A further member counts
+toward a multi-model session only with `slots_total >= 1`. The route
+snapshot flag follows SPEC-022 v0.4.14 (the served entry's own passing
+verification). The legacy drain is seeded from the session's open
+dispatches made without a served model only, and relay-blind and
+privacy-class dispatches of a multi-model session are booked on the
+primary. The `model_not_loaded` rule states its trade-off: two genuine
+eviction races within 120 s count as a breaker fault. No trust tier or
+attestation label changes.
 
 **Change log v1.6.40 (2026-11-16, Related: #2338):** `SPEC-002-R011`
 defines a multi-model session: at least two entries `warm` and
@@ -6239,9 +6253,10 @@ session one pool entry per warm model. A provider that sends no `warm_models`
 is a warm set of one built from its top-level fields; every rule below then
 reduces to today's per-provider behaviour, byte for byte. A session is
 *multi-model* only while at least two of its reported entries are `warm`
-and `hash_verified` (the primary by the session's own verdict). Any other
-`warm_models` (one entry, or further entries that are `loading`,
-`evicting` or not verified) is a legacy session: the coordinator keeps no
+and `hash_verified` (the primary by the session's own verdict), each further
+one with `slots_total >= 1`. Any other `warm_models` (one entry, or further
+entries that are `loading`, `evicting`, not verified or without a slot) is a
+legacy session: the coordinator keeps no
 entry list for it, dispatches without `served_model_id`, records route
 snapshots with `served_model_dispatch` 0, holds a refused seat for the
 whole session and handles `model_not_loaded` as for a provider without
@@ -6251,14 +6266,21 @@ A session moves between legacy and multi-model on any accepted heartbeat:
 a dispatch for a model that is no longer an entry never resolves to the
 legacy session, and when a legacy session's model becomes a further entry
 under another primary, the dispatches open on it stay that entry's (its
-seats and refusal hold) until each has ended.
+seats and refusal hold) until each has ended. The coordinator counts exactly
+those dispatches: the session's open dispatches made without a served model
+(a legacy session's dispatches) seed the drain record when the model is
+demoted or another model is promoted, and only such a dispatch's ending
+draws it down. Dispatches made with a served model, and dispatches of a
+multi-model session made without one (relay-blind and privacy-class, which
+read the primary), never seed it: the latter are booked on the primary's
+model when they are consumed and end there.
 
 - *Decoding.* `warm_models` is decoded strictly on the legacy `hello`, the v2
   `auth_request` and every `heartbeat`; the whole array is accepted or
   rejected:
   - it is an array of 1 to 64 objects; each entry has a string `model_id` of
-    at most 256 bytes, unique in the array after case folding (Unicode NFC,
-    then lower case), a `state` of `loading`, `warm` or `evicting`, booleans
+    at most 256 bytes in canonical spelling (below), unique in the array
+    after case folding (trimmed, Unicode NFC, then lower case), a `state` of `loading`, `warm` or `evicting`, booleans
     `primary` and `pinned`, and an integer `slots_total` in 0..4096;
     `slots_free`, when present, appears only on a `warm` entry and is in
     0..`slots_total`;
@@ -6285,6 +6307,22 @@ seats and refusal hold) until each has ended.
     and the array is at most that long. A session that declared no
     `supported_models`, the legacy `hello` included, supports only its
     top-level model, so it can carry only a warm set of one.
+
+  *Canonical model id.* A model id names one key everywhere (warm entries,
+  slot queue, strikes, SPEC-036 verification keys, SPEC-022 holds): the
+  trimmed, Unicode NFC, lower-case form. The coordinator accepts a model id
+  on the `hello`, the v2 `auth_request` (top-level `model_id` and every
+  `supported_models` entry, on both stages), every heartbeat `model_id` and
+  every `warm_models` entry only when it is non-empty, has no surrounding
+  whitespace and no control character, and its canonical form equals its
+  ASCII lower case. Any other spelling (a trailing space, a no-break space,
+  a Kelvin sign, a dotted capital I, a non-ASCII upper-case letter, an NFD
+  sequence) is rejected through that field's existing invalid-frame path: a
+  top-level id or `supported_models` entry rejects the frame, a
+  `warm_models` entry rejects the array as below. ASCII case variants stay
+  legal and fold to one key; catalog ids, which every legacy provider sends,
+  are ASCII. The id is not rewritten: the route snapshot and the dispatch
+  keep the provider's accepted spelling, whose ASCII lower case is the key.
 
   A bad `warm_models` on a `hello` or `auth_request` is dropped with one
   structured warning (`handshake_warm_models_dropped`); the handshake
@@ -6363,7 +6401,11 @@ seats and refusal hold) until each has ended.
   or a promotion keeps them. When a model reaches its second strike within
   120 s (the default breaker threshold and window), the answer is a breaker fault
   (`repeated_warm_entry_model_not_loaded`) for the session and the request
-  takes the ordinary path, retry budget included. A provider without
+  takes the ordinary path, retry budget included. This is a stated
+  trade-off: two genuine eviction races on one model within 120 s (a member
+  evicted between the heartbeat that showed it warm and the dispatch) also
+  count as a breaker fault, because the coordinator cannot tell them from a
+  member advertised warm that is never loaded. A provider without
   `warm_models`, or with a warm set of one, keeps today's handling of the
   same answer.
 - *Pool and operator views.* `/poolz` has one row per entry for a provider
@@ -6385,8 +6427,10 @@ seats and refusal hold) until each has ended.
 - *Settlement.* The route snapshot's `model_id`, `spec008_hash_status`,
   `provider_reported_model_hash` and `expected_catalog_model_hash` (SPEC-022)
   come from the dispatched entry, the snapshot records that the attempt was
-  dispatched with `served_model_id` (SPEC-022 R-16.2a), and the request
-  settles against that model. The provider earnings read (SPEC-005 §11.4)
+  dispatched to an entry of a multi-model session whose own SPEC-036 key is
+  `passing` (`served_model_dispatch`, SPEC-022 R-16.2a; 0 otherwise, also
+  while compute-integrity scoring is off), and the request settles against
+  that model. The provider earnings read (SPEC-005 §11.4)
   reports `credits_by_model`, the payable credit total split by each row's
   model, so a provider sees what each of its models earned; the split sums
   to `total_credits` less any credit rows without a model, which are left

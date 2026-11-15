@@ -1,11 +1,27 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.13
+Version: v0.4.14
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.14 (2026-11-16)
+
+Related: #2338. R-16.2a states the exact flag rule: `served_model_dispatch`
+is 1 only for an attempt dispatched to an entry of a multi-model session
+whose own (provider, canonical model id) compute-integrity key is `passing`
+at the time the coordinator builds the route snapshot. A declared member
+counts toward a multi-model session only with `slots_total >= 1`. Every
+other attempt, including one to an entry whose key is unverified, suspect,
+failed or recovering, and every attempt while compute-integrity scoring is
+off, records 0 and keeps the provider-wide R-16.2 match. v0.4.13 set the flag
+for any entry of a session with two warm, `hash_verified` members; a public
+catalog hash and a zero-slot member were enough, so it did not hold that a
+credit could not escape a provider-wide hold. Model ids reach this predicate
+only in their canonical form (SPEC-002-R011 decode rule), so the database
+`lower()` compares canonical keys. No payout or trust tier changes.
 
 ### v0.4.13
 
@@ -15,8 +31,9 @@ to a multi-model session, one with at least two members `warm` and
 loading, evicting or unverified is a legacy session: flag 0 and the
 provider-wide R-16.2 match. v0.4.12 set the flag for any warm set of more
 than one member, so a credit of such a session could escape a
-provider-wide hold; that was a money-positive path, which this closes. No payout or trust
-tier changes.
+provider-wide hold. (v0.4.14: two warm, verified members alone still let a
+credit escape that hold; the flag now also needs the served entry's own
+passing verification.) No payout or trust tier changes.
 
 ### v0.4.12
 
@@ -2596,27 +2613,38 @@ the verified model the hold was opened for. Because a held credit is not
 payable, R-15.2 does not archive its evidence while the
 hold is `held`.
 
-R-16.2a. (v0.4.10, amended v0.4.11 and v0.4.13) A credit whose attempt was dispatched
-with a `served_model_id` (SPEC-002-R011) matches a hold only when that served
-model, as recorded in the attempt's route snapshot `model_id`, equals the
+R-16.2a. (v0.4.10, amended v0.4.11, v0.4.13 and v0.4.14) A credit whose attempt's
+route snapshot records `served_model_dispatch = 1` matches a hold only when
+the served model, as recorded in the attempt's route snapshot `model_id`, equals the
 hold's `model_id`. The served model is the warm entry the coordinator
 selected, never the buyer's requested string, so alias routing cannot escape
 the hold. As built:
 
 - The route snapshot row carries `served_model_dispatch` (0 or 1), stored
-  beside the snapshot and outside its digested preimage. It is 1 for every
-  attempt dispatched to an entry of a multi-model session, one with at least
-  two members `warm` and `hash_verified` (the primary entry included;
-  SPEC-002-R011, v0.4.13), and 0 for every other attempt: every attempt to a
-  legacy session (one member, or further members loading, evicting or not
-  verified), and every pool-model route, which reads the session and
-  dispatches without `served_model_id`.
+  beside the snapshot and outside its digested preimage. It is 1 exactly
+  when both hold at the time the coordinator builds the route snapshot:
+  (a) the attempt is dispatched to an entry (the primary included) of a
+  multi-model session, one with at least two members `warm`,
+  `hash_verified` and, for a further member, `slots_total >= 1`
+  (SPEC-002-R011); and (b) the SPEC-036 FR-23 key of that provider and the
+  entry's canonical model id is in state `passing`, as published by the
+  compute-integrity engine into the session's entry view (at restore and on
+  every transition; cleared when the key leaves `passing` or is pruned).
+  It is 0 for every other attempt: every attempt to a legacy session (one
+  member, or further members loading, evicting, unverified or without a
+  slot), every attempt to an entry whose key is unverified, `suspect`,
+  `failed` or `recovering`, every attempt while compute-integrity scoring is
+  off (no key is published as passing), and every pool-model route, which
+  reads the session and dispatches without `served_model_id`. A flag-0
+  attempt to a multi-model session is still dispatched with
+  `served_model_id`; only the hold match differs.
 - The predicate withholds a credit unless a route snapshot for the same
   request, attempt and provider has `served_model_dispatch = 1` and a
   `model_id` that differs from the hold's under the database `lower()`.
-  `lower()` folds ASCII letters only, so two ids that differ only in
-  non-ASCII case compare as different and the credit is not held by that
-  hold.
+  `lower()` folds ASCII letters only; the coordinator accepts only model ids
+  whose canonical form (trimmed, Unicode NFC, lower case) equals their ASCII
+  lower case and rejects every other spelling at decode (SPEC-002-R011), so
+  `lower()` of any accepted spelling is the canonical key the hold names.
 - A credit whose route snapshot is no longer in the hot store (archived
   before the hold opened) has no flag to read and keeps the provider-wide
   R-16.2 match, as does every credit of an attempt dispatched without
