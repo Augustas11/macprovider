@@ -3900,11 +3900,13 @@ final class ProbeSafetySampleBuffer: @unchecked Sendable {
 
 /// SPEC-023-R029: the byte budget of one model-upgrade run. A snapshot's whole
 /// advertised size is charged before its first byte is fetched; a refused
-/// snapshot charges nothing, and a charged download that later fails keeps its
-/// charge, so the budget bounds what a run can pull, not what it keeps.
+/// snapshot charges nothing. When one source fails and the next source is
+/// tried for the same snapshot, the failed source's charge is returned first,
+/// so a snapshot is charged once; the last failure keeps its charge. A run
+/// fetches its snapshots one at a time.
 final class RunDownloadBudget: @unchecked Sendable {
     let limitBytes: Int64
-    private var spentBytes: Int64 = 0
+    private var spentBytes_: Int64 = 0
     private let lock = NSLock()
 
     init(limitBytes: Int64) {
@@ -3914,7 +3916,7 @@ final class RunDownloadBudget: @unchecked Sendable {
     var remainingBytes: Int64 {
         lock.lock()
         defer { lock.unlock() }
-        return limitBytes - spentBytes
+        return limitBytes - spentBytes_
     }
 
     static func total(_ sizes: [Int64]) -> Int64 {
@@ -3924,10 +3926,23 @@ final class RunDownloadBudget: @unchecked Sendable {
         }
     }
 
+    var spentBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return spentBytes_
+    }
+
+    /// Returns every charge made after `mark` (a `spentBytes` reading).
+    func refund(toSpent mark: Int64) {
+        lock.lock()
+        spentBytes_ = min(spentBytes_, max(0, mark))
+        lock.unlock()
+    }
+
     func reserve(bytes: Int64, modelID: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        let remaining = limitBytes - spentBytes
+        let remaining = limitBytes - spentBytes_
         guard bytes <= remaining else {
             throw AutotuneRecommendError.downloadBudgetExceeded(
                 modelID: modelID,
@@ -3935,7 +3950,7 @@ final class RunDownloadBudget: @unchecked Sendable {
                 remainingBytes: remaining
             )
         }
-        spentBytes += bytes
+        spentBytes_ += bytes
     }
 }
 
@@ -4341,6 +4356,12 @@ struct HuggingFaceSnapshotDownloader {
         try Self.assertDeadlineActive(deadline)
         var failures = fallbackConfigurationDiagnostics
         let huggingFaceLast = !fallbackSources.isEmpty && reachability.preferFallbacks
+        // A source that fails before the next one is tried returns its
+        // budget charge, so the fallback does not charge the snapshot twice.
+        let budgetMark = runDownloadBudget?.spentBytes
+        func refundFailedSource() {
+            if let budgetMark { runDownloadBudget?.refund(toSpent: budgetMark) }
+        }
         if !huggingFaceLast {
             do {
                 try await downloadHuggingFaceSnapshot(
@@ -4358,10 +4379,11 @@ struct HuggingFaceSnapshotDownloader {
                 if error is URLError {
                     reachability.markHuggingFaceUnreachable()
                 }
+                refundFailedSource()
                 failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
             }
         }
-        for source in fallbackSources {
+        for (index, source) in fallbackSources.enumerated() {
             try Self.assertDeadlineActive(deadline)
             do {
                 switch source {
@@ -4391,6 +4413,9 @@ struct HuggingFaceSnapshotDownloader {
             } catch {
                 if Self.stopsSourceWalk(error) {
                     throw error
+                }
+                if huggingFaceLast || index < fallbackSources.count - 1 {
+                    refundFailedSource()
                 }
                 failures.append("\(source.label): \(Self.sourceFailureSummary(error))")
             }

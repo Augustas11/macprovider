@@ -4255,17 +4255,31 @@ struct ServeCommand: AsyncParsableCommand {
         // catalog, rate card, demand rank or binary). The detached child keeps
         // the model unless a strictly better one passes admission, honours
         // this provider's stagger offset, and restarts the provider itself.
+        // Only the canonical installed binary runs unattended; a binary the
+        // resolver rejects (for example a PATH entrypoint copy) never does.
         let modelUpgradeExecutable = serveMarkerStore.resolveCanonicalInstallBinary(
             launchedExecutableURL: Bundle.main.executableURL
-        ) ?? Bundle.main.executableURL
-        let modelUpgradeTask: Task<Void, Never>? = autotuneCandidate ? nil : Task.detached(priority: .utility) {
+        )
+        let upgradeTriggerCandidate = autotuneCandidate
+        let upgradeTriggerNoJoin = noJoin
+        // A candidate or `--no-join` serve never starts a check: its child
+        // would stop this Mac's launchd provider.
+        let upgradeTriggerStaticSuppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false,
+            poolModelID: nil,
+            autotuneCandidate: upgradeTriggerCandidate,
+            noJoin: upgradeTriggerNoJoin,
+            operatorPaused: false
+        )
+        let modelUpgradeTask: Task<Void, Never>? = upgradeTriggerStaticSuppression != nil ? nil : Task.detached(priority: .utility) {
             [providerStatus, resolved] in
             try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedFirstCheckDelaySeconds * 1_000_000_000)
             while !Task.isCancelled {
                 let suppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
                     donorMode: resolved.donorMode,
                     poolModelID: resolved.poolModelID,
-                    autotuneCandidate: false,
+                    autotuneCandidate: upgradeTriggerCandidate,
+                    noJoin: upgradeTriggerNoJoin,
                     operatorPaused: await providerStatus.operatorPauseFence
                 )
                 if let suppression {
@@ -4279,6 +4293,8 @@ struct ServeCommand: AsyncParsableCommand {
                         configPath: resolved.configPath,
                         logPath: logDirectory.appendingPathComponent("model-upgrade.log").path
                     )
+                } else {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=no_canonical_install_binary\n".utf8))
                 }
                 try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedCheckIntervalSeconds * 1_000_000_000)
             }
@@ -5125,8 +5141,16 @@ struct UpdateCommand: AsyncParsableCommand {
             // A stale or missing recommendation re-tunes; the upgrade keeps the
             // current model unless a strictly better one passes admission, so
             // its failure never fails the update.
-            if !check, let executable = Bundle.main.executableURL {
-                let status = AutotuneModelUpgrade.runAfterUpdate(executable: executable, configPath: nil)
+            // Only the canonical installed binary re-tunes, on the config
+            // this update used, as the serve trigger does.
+            if !check {
+                guard let executable = updateMarkerStore.resolveCanonicalInstallBinary(
+                    launchedExecutableURL: Bundle.main.executableURL
+                ) else {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune skipped reason=no_canonical_install_binary\n".utf8))
+                    return
+                }
+                let status = AutotuneModelUpgrade.runAfterUpdate(executable: executable, configPath: resolvedConfig?.configPath)
                 if status != 0 {
                     FileHandle.standardError.write(Data("model_upgrade: re-tune exited with status \(status)\n".utf8))
                 }

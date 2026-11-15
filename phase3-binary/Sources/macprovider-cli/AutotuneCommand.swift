@@ -1079,7 +1079,11 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
-    private func runAutotuneRecommend(upgradeReceipt: AutotuneArtifactPrefetchReceipt? = nil) async throws {
+    private func runAutotuneRecommend(
+        upgradeReceipt: AutotuneArtifactPrefetchReceipt? = nil,
+        upgradeKeep: AutotuneModelUpgrade.RunKeep? = nil,
+        upgradeAcceleration: AutotuneModelUpgrade.AccelerationAdmissions? = nil
+    ) async throws {
         // ARCH-M-1 orphan-child fix: become process-group leader BEFORE
         // spawning any CandidateProviderRunner subprocess. Combined with the
         // cascading signal handler below, this lets the caller (App) send
@@ -1157,18 +1161,23 @@ struct AutotuneCommand: AsyncParsableCommand {
             upgradeIncumbentKey = nil
         }
         // R029 step 6: on every exit after this point, remove what this run
-        // downloaded except the incumbent and a switch target.
-        var upgradeKeepModelKeys = Set(upgradeIncumbentKey.map { [$0] } ?? [])
+        // downloaded except the incumbent and an applied target. The
+        // in-process upgrade owns that cleanup itself (`upgradeKeep`), so it
+        // also covers the exits before this point.
+        let upgradeRunKeep = upgradeKeep ?? AutotuneModelUpgrade.RunKeep(Set(upgradeIncumbentKey.map { [$0] } ?? []))
         defer {
-            if upgrade, let receipt, let upgradeIncumbentKey {
+            if upgrade, upgradeKeep == nil, let receipt, upgradeIncumbentKey != nil {
                 AutotuneModelUpgrade.removeUnselectedRunDownloads(
                     receipt.artifacts,
-                    keepModelKeys: upgradeKeepModelKeys.union([upgradeIncumbentKey]),
+                    keepModelKeys: upgradeRunKeep.keys,
                     catalog: catalog.value,
                     resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
                 )
             }
         }
+        // R029 step 5/6: an upgrade's state and evidence name the row served
+        // after the decision, so they are written after it.
+        let upgradeDecides = upgradeIncumbentKey != nil && !donorMode
         let now = Date()
         var warnings = Set<AutotuneRecommendWarning>()
         warnings.formUnion(demand.warnings)
@@ -1250,7 +1259,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             result = Self.disclosingInstalledOnlyEstimate(result)
         }
         result.probeDiagnostics = outcomes.diagnostics
-        if !calibrationActive {
+        if !calibrationActive, !upgradeDecides {
             try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
         }
         if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
@@ -1288,7 +1297,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
             }
         }
-        if !calibrationActive {
+        if !calibrationActive, !upgradeDecides {
             try await submitHardwareEvidenceIfNeeded()
         }
         let paidSelected = result.recommendedModel.flatMap { recommendedModel in
@@ -1303,15 +1312,23 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         var selectedForConfig = paidSelected ?? donorSelected
         var applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
+        var upgradeSwitching = false
         if let upgradeIncumbentKey, !donorMode {
+            let acceleration: AutotuneModelUpgrade.AccelerationAdmissions
+            if let upgradeAcceleration {
+                acceleration = upgradeAcceleration
+            } else {
+                acceleration = await AutotuneModelUpgrade.loadAccelerationAdmissions(catalog: catalog, rateCard: rateCard.value)
+            }
             let decision = AutotuneModelUpgrade.decide(
                 result: result,
                 incumbentKey: upgradeIncumbentKey,
                 benchmarks: request.benchmarks,
-                catalog: catalog.value
+                catalog: catalog.value,
+                acceleration: acceleration
             )
-            if case let .switchModel(_, to, _) = decision {
-                upgradeKeepModelKeys.insert(to)
+            if case .switchModel = decision {
+                upgradeSwitching = true
             }
             selectedForConfig = AutotuneModelUpgrade.configTarget(
                 for: decision,
@@ -1327,7 +1344,16 @@ struct AutotuneCommand: AsyncParsableCommand {
                 let action = selectedForConfig == nil ? "config unchanged" : "re-applying the incumbent row"
                 FileHandle.standardError.write(Data("model_upgrade: keep \(upgradeIncumbentKey) reason=\(reason); \(action)\n".utf8))
             }
+            result = AutotuneModelUpgrade.servedResult(
+                result,
+                servedKey: selectedForConfig?.catalogKey ?? upgradeIncumbentKey,
+                benchmarks: request.benchmarks
+            )
+            try await submitHardwareEvidenceIfNeeded()
         }
+        // A switch clears `draft_model`: the incumbent's drafter does not
+        // match the new model's tokenizer, and the benchmark ran without it.
+        let configDraftModel = upgradeSwitching ? nil : draftModel
         var serveConfig: RecommendationCore?
         var configurationApplied = false
         if let selected = selectedForConfig,
@@ -1340,7 +1366,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
-                draftModel: draftModel
+                draftModel: configDraftModel
             )
         } else {
             serveConfig = nil
@@ -1574,14 +1600,21 @@ struct AutotuneCommand: AsyncParsableCommand {
                 donorMode: applyingDonorFallback,
                 benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID,
                 draftCapacity: .clamp,
-                physicalMemoryGB: hardware.memoryGB
+                physicalMemoryGB: hardware.memoryGB,
+                clearDraftModel: upgradeSwitching
             )
             configurationApplied = true
+            if upgrade {
+                upgradeRunKeep.insert(selected.catalogKey)
+            }
             if emitJSON {
                 FileHandle.standardError.write(Data("\(applied.summary)\n".utf8))
             } else {
                 print(applied.summary)
             }
+        }
+        if upgradeDecides {
+            try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
         }
         if emitJSON {
             print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
@@ -1936,6 +1969,12 @@ struct AutotuneCommand: AsyncParsableCommand {
     /// prefetch while the incumbent serves, idle wait, then the R022-isolated
     /// benchmark and guarded apply over the verified artifacts only.
     private func runModelUpgrade(dependencies: AutotuneRunDependencies) async throws {
+        // One upgrade run at a time, attended or unattended, for the whole run.
+        guard let runLock = AutotuneModelUpgrade.acquireRunLock() else {
+            dependencies.writeStderr("model_upgrade: another model upgrade run holds \(AutotuneModelUpgrade.runLockURL.path); nothing was downloaded or stopped\n")
+            throw ExitCode(75)
+        }
+        defer { runLock.release() }
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
         let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
         switch status {
@@ -1971,29 +2010,35 @@ struct AutotuneCommand: AsyncParsableCommand {
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig.providerID)
         if unattended {
-            let catalogSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes)
-            let now = Date()
             let gate = AutotuneModelUpgrade.unattendedGate(
-                now: now,
-                catalogGeneratedAt: inputs.candidate.value.generatedAt,
-                catalogSHA256: catalogSHA256,
+                now: Date(),
+                feedGeneratedAt: [
+                    inputs.candidate.value.generatedAt,
+                    inputs.rateCard.value.generatedAt,
+                    inputs.demand.value.generatedAt,
+                ],
+                inputDigests: [
+                    "candidate_catalog=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes),
+                    "rate_card=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.rateCard.selectedBytes),
+                    "demand_rank=" + AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.demand.selectedBytes),
+                ],
                 binaryVersion: CoordinatorClient.binaryVersion,
                 providerKey: identity.diversificationID,
-                lastAttempt: AutotuneModelUpgrade.readAttempt()
+                readRecord: { AutotuneModelUpgrade.readAttempt() },
+                writeRecord: { try AutotuneModelUpgrade.writeAttempt($0) }
             )
             switch gate {
             case let .staggered(until):
                 print("model_upgrade: staggered until \(ISO8601DateFormatter.autotuneInternet.string(from: until)); the current model keeps serving")
                 return
             case let .retryLater(until):
-                print("model_upgrade: already tried this catalog; next try after \(ISO8601DateFormatter.autotuneInternet.string(from: until))")
+                print("model_upgrade: already tried these inputs; next try after \(ISO8601DateFormatter.autotuneInternet.string(from: until))")
                 return
+            case let .recordUnwritable(reason):
+                dependencies.writeStderr("model_upgrade: could not record the attempt (\(reason)); nothing was downloaded or stopped\n")
+                throw ExitCode(75)
             case .proceed:
-                AutotuneModelUpgrade.writeAttempt(AutotuneModelUpgrade.AttemptRecord(
-                    catalogSHA256: catalogSHA256,
-                    binaryVersion: CoordinatorClient.binaryVersion,
-                    attemptedAt: now
-                ))
+                break
             }
         }
         let receipt = try await Self.modelUpgradePrefetchReceipt(
@@ -2003,46 +2048,83 @@ struct AutotuneCommand: AsyncParsableCommand {
             resolvedConfig: resolvedConfig,
             hardware: AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         )
-        do {
+        guard let incumbentKey = AutotuneModelUpgrade.incumbentCatalogKey(config: resolvedConfig, catalog: inputs.candidate.value) else {
+            throw ValidationError("model upgrade: the configured model has no signed catalog row")
+        }
+        try await AutotuneModelUpgrade.withRunDownloadCleanup(
+            receipt.artifacts,
+            incumbentKey: incumbentKey,
+            catalog: inputs.candidate.value,
+            resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+        ) { keep in
+            let acceleration = await AutotuneModelUpgrade.loadAccelerationAdmissions(
+                catalog: inputs.candidate,
+                rateCard: inputs.rateCard.value
+            )
             try await drainThenIsolate(
                 dependencies: dependencies,
-                waitForIdle: { await AutotuneModelUpgrade.waitForLocalProviderIdle(port: resolvedConfig.port) }
+                waitForIdle: { await AutotuneModelUpgrade.waitForLocalProviderIdle(port: resolvedConfig.port) },
+                isOperatorPaused: { AutotuneModelUpgrade.operatorPausePersisted() },
+                acquireLease: { AutotuneModelUpgrade.acquireMaintenanceLease() }
             ) {
-                try await runAutotuneRecommend(upgradeReceipt: receipt)
-            }
-        } catch let exit as ExitCode where exit.rawValue == 75 {
-            if let incumbentKey = AutotuneModelUpgrade.incumbentCatalogKey(config: resolvedConfig, catalog: inputs.candidate.value) {
-                AutotuneModelUpgrade.removeUnselectedRunDownloads(
-                    receipt.artifacts,
-                    keepModelKeys: [incumbentKey],
-                    catalog: inputs.candidate.value,
-                    resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+                try await runAutotuneRecommend(
+                    upgradeReceipt: receipt,
+                    upgradeKeep: keep,
+                    upgradeAcceleration: acceleration
                 )
             }
-            throw exit
         }
     }
 
     /// R029 step 3: the live provider is stopped only after it reports zero
-    /// in-flight and queued requests; a provider still busy at the ceiling is
-    /// left serving (exit 75). The R022 isolation then stops it and restarts
-    /// it on every exit of `operation`: success, failure or interrupt.
+    /// in-flight and queued requests, the persisted operator pause is clear,
+    /// and this run holds the maintenance lifecycle lease; otherwise nothing
+    /// is stopped and the run exits 75. The R022 isolation then stops it and
+    /// restarts it on every exit of `operation`: success, failure or
+    /// interrupt. The lease is released before the restart and on every exit.
     func drainThenIsolate(
         dependencies: AutotuneRunDependencies,
         waitForIdle: () async -> Bool,
+        isOperatorPaused: () -> Bool,
+        acquireLease: () -> AutotuneModelUpgrade.LeaseAcquisition,
         startLaunchdRestoreGuard: (ProviderConflict) throws -> ProviderLaunchdRestoreGuard? = {
             try ProviderDrainer().startLaunchdCrashRestoreGuard(for: $0)
         },
         operation: () async throws -> Void
     ) async throws {
-        guard await waitForIdle() else {
-            dependencies.writeStderr(
-                "model_upgrade: the provider stayed busy for \(AutotuneModelUpgrade.idleWaitCeilingSeconds) s; it was not stopped and the config is unchanged\n"
-            )
+        // No live provider: there is no in-flight work to wait for.
+        if try dependencies.detectConflict() != .none {
+            guard await waitForIdle() else {
+                dependencies.writeStderr(
+                    "model_upgrade: the provider was not confirmed idle within \(AutotuneModelUpgrade.idleWaitCeilingSeconds) s; it was not stopped and the config is unchanged\n"
+                )
+                throw ExitCode(75)
+            }
+        }
+        if isOperatorPaused() {
+            dependencies.writeStderr("model_upgrade: the operator paused this provider; it was not stopped and the config is unchanged\n")
             throw ExitCode(75)
         }
+        let lease: AutotuneModelUpgrade.MaintenanceLease
+        switch acquireLease() {
+        case let .acquired(held):
+            lease = held
+        case let .held(reason):
+            dependencies.writeStderr("model_upgrade: the lifecycle lease is held (\(reason)); the provider was not stopped and the config is unchanged\n")
+            throw ExitCode(75)
+        }
+        defer { lease.release() }
+        // The restarted provider takes its own startup lease, which a held
+        // maintenance lease refuses, so the lease is released right before
+        // the restart.
+        var isolated = dependencies
+        let restore = dependencies.restoreConflict
+        isolated.restoreConflict = { conflict, restartForeground in
+            lease.release()
+            return try restore(conflict, restartForeground)
+        }
         try await withRecommendLiveServeIsolation(
-            dependencies: dependencies,
+            dependencies: isolated,
             startLaunchdRestoreGuard: startLaunchdRestoreGuard,
             operation: operation
         )
@@ -2096,14 +2178,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         FileHandle.standardError.write(Data(
             "model_upgrade: prefetching \(modelIDs.count) signed candidate(s) while the current provider keeps serving\n".utf8
         ))
-        var resolver = benchmarker?.artifactResolver ?? CachedModelArtifactResolver.forConfig(resolvedConfig)
-        let capBytes = AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: hardware.memoryGB)
-        resolver.downloader.runDownloadBudget = RunDownloadBudget(limitBytes: capBytes)
-        FileHandle.standardError.write(Data(
-            "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB\n".utf8
-        ))
-        var prefetcher = benchmarker ?? AutotuneRecommendationBenchmarker()
-        prefetcher.artifactResolver = resolver
+        let prefetcher = Self.budgetedUpgradePrefetcher(benchmarker, resolvedConfig: resolvedConfig, memoryGB: hardware.memoryGB)
+        let resolver = prefetcher.artifactResolver
         let outcome = try await prefetcher.prefetchArtifacts(
             candidateCatalog: catalog.value,
             hardware: hardware,
@@ -2136,6 +2212,24 @@ struct AutotuneCommand: AsyncParsableCommand {
             candidateCatalogPolicyVersion: catalog.value.policyVersion,
             artifacts: artifacts
         )
+    }
+
+    /// R029 step 2 cap: the prefetcher an upgrade run uses, with the run's
+    /// download budget installed on its downloader.
+    static func budgetedUpgradePrefetcher(
+        _ benchmarker: AutotuneRecommendationBenchmarker?,
+        resolvedConfig: AppConfig?,
+        memoryGB: Int
+    ) -> AutotuneRecommendationBenchmarker {
+        var resolver = benchmarker?.artifactResolver ?? CachedModelArtifactResolver.forConfig(resolvedConfig)
+        let capBytes = AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: memoryGB)
+        resolver.downloader.runDownloadBudget = RunDownloadBudget(limitBytes: capBytes)
+        FileHandle.standardError.write(Data(
+            "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB\n".utf8
+        ))
+        var prefetcher = benchmarker ?? AutotuneRecommendationBenchmarker()
+        prefetcher.artifactResolver = resolver
+        return prefetcher
     }
 
     static func recommendationPrefetchTrustWarnings(

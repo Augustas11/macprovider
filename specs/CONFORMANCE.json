@@ -13463,7 +13463,12 @@
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:final class RunDownloadBudget",
         "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func unattendedGate(",
         "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func spawnDetachedUnattendedUpgrade(",
-        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func unattendedTriggerSuppression("
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func unattendedTriggerSuppression(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func acquireRunLock(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func acquireMaintenanceLease(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func loadAccelerationAdmissions(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func withRunDownloadCleanup<T>(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func drainThenIsolate("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneModelUpgradeTests.swift:final class AutotuneModelUpgradeTests",

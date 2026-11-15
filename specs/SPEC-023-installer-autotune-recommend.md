@@ -11,9 +11,19 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 - **v0.22.43 (2026-11-14, Related: #2367, #2154)** — §9.4 adds a per-run
   download cap of twice the Mac's memory (step 2) and the unattended
   trigger (step 9): a serving provider checks every 6 hours, in its own
-  session, staggered per provider over 48 hours after each catalog release
-  and retried at most daily per catalog and binary. The automatic switch treats
+  session, staggered per provider over 48 hours after each release of the
+  recommendation inputs and retried at most daily per input set. The automatic switch treats
   the catalog bench gate as hard (manual `--recommend` keeps it advisory).
+  Audit fixes in the same version: one run at a time (an upgrade lock) and
+  the SPEC-020 maintenance lease around the stop; the operator pause is
+  re-read before the stop; a status error is not idle; the stagger and
+  retry key cover every staleness input (catalog, rate card, demand rank,
+  binary) with an 8-entry attempt history, and an unwritable record stops
+  the run; state and evidence name the served row; cleanup runs on every
+  exit after prefetch; a switch clears `draft_model`; a signed CB or
+  native-MTP admission is never traded away; `--no-join` serves start no
+  check; a source fallback does not charge the budget twice; `update`
+  re-tunes with the canonical binary and its config path.
   Prefetch fetches the likely winners first under the free-space reserve,
   records what the run downloaded, and the run removes its unselected
   downloads. A foreground provider is restarted on every exit. Registers `SPEC-023-R029`
@@ -3245,14 +3255,23 @@ use it.
    content-addressed path. The incumbent's
    artifact MUST verify; otherwise the run fails before the provider is
    stopped.
-3. **Drain.** `malibu-cli update` waits until the local provider reports
-   zero `requests_in_flight` and zero `requests_queued`, for at most 600
-   seconds (the upper bound of `swap_drain_timeout_seconds`). A provider
-   that stays busy is not stopped; the run exits and retries on the next
-   update. `SPEC-023-R022` residency then stops the provider through its
-   normal SIGTERM drain and restores it on every exit: success, failure and
-   interrupt. A foreground provider is restarted too, on the config this run
-   leaves. The installer keeps its own cutover stop.
+3. **Drain.** `--upgrade --apply` without a receipt holds an exclusive
+   lock on `~/.config/macprovider/model-upgrade.lock` for the whole run,
+   attended or unattended; when another run holds it, the run exits 75
+   before any download. When a provider is running, the run waits until it
+   reports zero `requests_in_flight` and zero `requests_queued`, for at most
+   600 seconds (the upper bound of `swap_drain_timeout_seconds`). A status
+   read that fails is not idle. A provider never confirmed idle is not
+   stopped; the run exits 75 and retries later. Right before the stop the
+   run re-reads the persisted operator pause (the lifecycle state record)
+   and takes the SPEC-020 `maintenance` lifecycle lease, as an autoupdate
+   does; a paused provider or a lease held by another operation is not
+   stopped, and the run exits 75. The lease is renewed while held and
+   released right before the restart (the restarted provider takes its own
+   startup lease) and on every exit. `SPEC-023-R022` residency then stops the provider
+   through its normal SIGTERM drain and restores it on every exit: success,
+   failure and interrupt. A foreground provider is restarted too, on the
+   config this run leaves. The installer keeps its own cutover stop.
 4. **Benchmark.** Probes use only the prefetched, verified artifacts, so
    nothing is downloaded while the incumbent is stopped. Each row runs the
    same Stage-1 admission as any recommendation: swap and thermal vetoes,
@@ -3272,14 +3291,26 @@ use it.
    the TPS, demand or model-key tiebreakers, keeps I. No margin beyond
    strict greater-than applies. The client has no hysteresis constant, and
    the demand-rank `min_dwell_hours` field is not client selection policy.
+   An automatic switch never gives up a signed acceleration admission: a
+   challenger is skipped when I holds a positive, unrevoked entry in the
+   live-verified continuous-batching policy, or an entry in the release's
+   signed native-MTP admission set (matched by served model and artifact
+   hash), and S does not (keep reason
+   `challenger_lacks_incumbent_acceleration`).
    When no challenger qualifies, I is kept.
-6. **Apply.** On a switch, `ConfigApplier` writes S's row. On a keep, the
-   model does not change. When I passed admission in this run, I's own
-   benchmarked row is re-applied, as the pre-v0.22.43 re-tune did. When any
+6. **Apply.** On a switch, `ConfigApplier` writes S's row and removes
+   `draft_model`, `draft_model_artifact_sha256` and `num_draft_tokens`: the
+   benchmark ran without a drafter, and I's drafter need not match S's
+   tokenizer. On a keep, the model does not change. When I passed admission
+   in this run, I's own benchmarked row is re-applied, as the pre-v0.22.43
+   re-tune did. Recommendation state and hardware evidence are written after
+   the decision and name the row served: S on a switch, I on a keep when I
+   passed admission, and no model otherwise (the state stays stale). When any
    step fails (prefetch of I, drain, benchmark, decision or apply), the run
    writes no config and the provider is restored on its incumbent. On every
-   exit after prefetch, the run removes each artifact it downloaded
-   (`downloaded_by_run`) except I's and a switch target's. A removal is
+   exit after prefetch (including an exit 75, a failed stop, a receipt or
+   input load failure and an interrupt), the run removes each artifact it
+   downloaded (`downloaded_by_run`) except I's and an applied target's. A removal is
    limited to the row's exact durable content-addressed path under the
    current signed row and never touches a path a kept row uses; the
    incumbent's artifact and any copy that existed before the run are never
@@ -3287,8 +3318,9 @@ use it.
 7. **Pins.** The upgrade never moves a provider whose config has
    `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
    (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
-   provider keeps its model. These are the only model pins the CLI has. In
-   every other case the upgrade is on by default.
+   provider keeps its model. These are the only model pins the CLI has;
+   `draft_model` is not one (step 6). In every other case the upgrade is on
+   by default.
 8. **Entry points.** `--upgrade --apply` without a receipt runs steps 1–6 in
    one process. It returns without a change when the recommendation is
    fresh. `malibu-cli update` invokes it with the installed binary after
@@ -3308,21 +3340,28 @@ use it.
    `autotune --recommend --upgrade --apply --unattended` in its own session
    (so the step 3 stop of the provider's launchd job does not end it), with
    output appended to `~/Library/Logs/macprovider/model-upgrade.log`. No
-   check starts for an autotune candidate serve, `donor_mode`, a
-   `pool_model_id` or an operator-paused provider. `--unattended` requires
+   check starts for an autotune candidate serve, a `--no-join` serve,
+   `donor_mode`, a `pool_model_id` or an operator-paused provider. Only the
+   canonical installed binary is spawned. `--unattended` requires
    `--upgrade --apply` without a receipt and adds two gates after the
    freshness and pin checks:
-   - **Stagger.** The run acts on a catalog only from
-     `generated_at + offset`, where `offset` is the first 8 bytes of
-     `SHA-256(diversification_id "\n" candidate_catalog_sha256)` modulo 48
-     hours. Each release therefore moves the fleet evenly over 48 hours,
-     and the order changes with every release. Before its offset the run
-     exits 0 and the incumbent keeps serving.
-   - **Retry.** The run records the catalog digest, binary version and
-     time in `~/.config/macprovider/model-upgrade-attempt.json` before
-     prefetch. A later unattended run for the same catalog and binary waits
-     24 hours from that record, so a failing prefetch or a busy provider is
-     retried daily, not every check.
+   - **Stagger.** The inputs key is the SHA-256 over the signed candidate
+     catalog, rate card and demand rank digests and the binary version,
+     every input whose change makes §9 stale. The run acts only from
+     `anchor + offset`. `anchor` is the newest of the three feeds'
+     `generated_at` and the time this binary version was first seen by the
+     gate (persisted in the attempt record). `offset` is the first 8 bytes
+     of `SHA-256(diversification_id "\n" inputs_key)` modulo 48 hours. Each
+     input release therefore moves the fleet evenly over 48 hours, and the
+     order changes with every release. Before its offset the run exits 0
+     and the incumbent keeps serving.
+   - **Retry.** Before prefetch the run records the inputs key and time in
+     `~/.config/macprovider/model-upgrade-attempt.json`, which keeps the
+     last 8 attempts. A later unattended run for an inputs key attempted
+     within 24 hours waits, so a failing prefetch, a busy provider or a
+     selection that flips between input sets is retried daily, not every
+     check. When the record cannot be written, the run exits 75 before
+     anything is downloaded or stopped.
    The installer and a manual `malibu-cli update` do not pass `--unattended`
    and are not staggered.
 
@@ -3483,7 +3522,17 @@ the remaining rows and keeps the incumbent's verification. An unattended run
 exits without a change before its stagger offset, and again within 24 hours
 of an attempt on the same catalog and binary; its offsets are stable per
 provider, spread across the 48-hour window and reordered by a new catalog.
-The serve trigger is suppressed for donor, pool, operator-paused and
+The stagger anchors on the newest feed release or the first sighting of
+a binary, so a rate-card-only or binary-only change also waits for the
+offset; an unwritable attempt record stops the run, and an input set tried
+within 24 hours, even after a flip to another set, waits. A held upgrade lock
+or lifecycle lease, a persisted operator pause, or a provider never confirmed
+idle (a status error is not idle) exits 75 without a stop. This run's
+unselected downloads are removed after a failed stop too. A keep writes state
+naming the incumbent, a challenger lacking the incumbent's signed CB or
+native-MTP admission is not switched to, a switch removes `draft_model`, and
+a source fallback charges the download budget once. The serve trigger is
+suppressed for donor, pool, operator-paused, `--no-join` and
 autotune-candidate serves, and its child leads its own session.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
