@@ -15842,7 +15842,13 @@
         "phase3-binary/Tests/macprovider-cliTests/WarmModelPreflightTests.swift:testWarmMemberIsAnsweredForItsOwnContextCapacity",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testSwitchToAWarmMemberPromotesItWithoutALoad",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testAMemberThatFailsArtifactVerificationNeverBecomesWarm",
-        "phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift:testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary"
+        "phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift:testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractHandshakesAreAccepted",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractHeartbeatTransitionsAreAccepted",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractModelNotLoadedIsClassified",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractCoordinatorDispatch",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testFramesBuiltBetweenThePromotionStepsKeepEveryMemberAndOnePrimary",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testFramesBuiltAtEveryAwaitOfAPromotionKeepEveryMemberAndOnePrimary"
       ],
       "journeys": [],
       "evidence": [],
@@ -15860,6 +15866,7 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/SharedModelMemoryBudget.swift:final class SharedModelMemoryBudget",
         "phase3-binary/Sources/macprovider-cli/WarmModelLoader.swift:actor WarmModelLoader",
+        "phase3-binary/Sources/macprovider-cli/WarmModelLoader.swift:func checkLoad",
         "phase3-binary/Sources/macprovider-cli/WarmSetBoot.swift:func load(_ modelID: String, limits: WarmModelLimits? = nil) async -> WarmSetLoadOutcome",
         "phase3-binary/Sources/macprovider-cli/AutotuneWarmSetPlan.swift:struct AutotuneWarmSetPlan",
         "phase3-binary/Sources/macprovider-cli/ControlSocket.swift:nonisolated static func handleWarmSetRequest"
@@ -15874,7 +15881,8 @@
         "phase3-binary/Tests/macprovider-cliTests/WarmModelsConfigTests.swift:testUnsetSupportedModelsIsPrimaryFollowedByWarmModels",
         "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testPrimaryFirstAndOnlyWarmEntriesCarrySlotsFree",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testBootLoadsInListOrderPinnedAndPublishesEachMember",
-        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning"
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetCheckTests.swift:final class WarmSetCheckTests"
       ],
       "journeys": [],
       "evidence": [],
@@ -15904,8 +15912,12 @@
       "requirement_id": "SPEC-001-R019",
       "spec_id": "SPEC-001",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func runUnderSelfCheckHold"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/WarmMemberSelfCheckHoldTests.swift:final class WarmMemberSelfCheckHoldTests"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
