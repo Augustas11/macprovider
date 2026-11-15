@@ -25,8 +25,15 @@ also run as cohorts, and a probe, reference or pass is judged only if every
 row decoded each token beside its whole cohort (each row then keeps one
 forward and one kernel order); a run that may mix orders is a shape not met,
 never a divergence. The gain keeps its end-to-end definition but no longer
-credits prefill overlapping decode at those widths. SPEC-037 v0.2.7 gives the route its own
-disk decode-path class. Run in the provider on an M3 Ultra with one request
+credits prefill overlapping decode at those widths. A width whose
+same-order references (three copies of a probe prompt) do not fit the
+paged-KV pool is not measured on this route. A failure found on
+`stock_order` (a row divergence, a crash, a failed SPEC-039 attach probe or
+an unfit reference) never sends a start to `serial_only`: the verdict store
+records a sticky `stock_order_fallback` for the startup identity and the
+next start takes `row_invariant`, whose own grant and self-check are
+untouched; a failure measured on `row_invariant` keeps the existing rule.
+SPEC-037 v0.2.7 gives the route its own disk decode-path class. Run in the provider on an M3 Ultra with one request
 over HTTP only; no batched forward has run on this route in a provider yet.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
@@ -1824,20 +1831,24 @@ these hold:
    setting, paged-KV block size and pool, and native-MTP mode;
 3. no draft model, no shard-group role, no other warm-swap target (it would
    be served without its own self-check), and not an autotune child (a child
-   measures candidate configurations that may batch for the incumbent, which
-   serves on the invariant route).
+   measures candidate configurations that may batch on the invariant route;
+   autotune compares children only with each other, cached child results
+   and catalog gates, never with the stopped incumbent's numbers, v0.3.56).
 
 A provider with no verdict for its startup identity starts on a batching
 route (`stock_order` when items 1 and 3 hold, v0.3.56), runs its self-check
 as before, records the self-check key it applied, and logs
 `event=small_m_route action=verdict_recorded ... next_start=serial_only`
-when the verdict serves one row (`next_start=stock_order` otherwise); its
-next start takes the serial route. A verdict measured on the invariant route
+when the verdict serves one row (`next_start=stock_order` otherwise, or
+`next_start=row_invariant fallback=<reason>` after a stock order failure,
+below); its next start takes the serial route. A verdict measured on the invariant route
 stays valid on the serial route: it says batching gives no net gain against
 the invariant serial baseline, and the serial route's baseline is faster, so
-the verdict only gets more true. A verdict measured on `stock_order` stays
-valid too: its serial baseline already runs the one-row kernel the serial
-route runs, and a row divergence is a risk only a batching route takes. A
+the verdict only gets more true. A no-gain verdict measured on
+`stock_order` stays valid too: its serial baseline already runs the one-row
+kernel the serial route runs. A row divergence or crash measured on
+`stock_order` is not a one-row verdict; it is a stock order fallback
+(below). A
 serial-only process never measures, so no serial-route number is ever compared
 with a batched one. In a serial-only process:
 
@@ -1903,6 +1914,44 @@ rows both routes run the same kernel. In the provider, one request over HTTP
 on that Mac measured 0.94-0.97 of stock mlx-lm on Llama 3.1 8B and 1.00-1.02
 on a 27B model on this route; no batched forward has run on it in a provider
 yet.
+
+**Stock order fallback (v0.3.56).** A failure found on `stock_order` MUST
+NOT send a later start to `serial_only`. A `stock_order` process records a
+`stock_order_fallback` reason for its startup identity in the verdict store
+(`small-m-route.json`, the same file and entry as the one-row verdict; no
+second store) when, for the startup model:
+
+- its FR-CB10 decision is a row divergence or leak, or any measured width
+  diverged, including a same-order reference whose rows disagree
+  (`stock_order_divergence`);
+- a self-check step crashed (`stock_order_crash`);
+- the SPEC-039 attach probes ran and failed: the paged parity probe did not
+  establish parity, or the two-row shared-forward probe saw a row fail, rows
+  diverge or, with a distinguishing challenge, tokens differ from serial
+  decode (`stock_order_attach_failed`); probes that did not run, or a
+  challenge that cannot distinguish its rows, are not failures;
+- a width the ladder would probe has same-order references that do not fit
+  the pool (`stock_order_reference_unfit`, FR-CB10 item 4).
+
+A start whose identity has a fallback takes `row_invariant` with the
+fallback as its reason (after the draft, shard, autotune, native-MTP,
+switch-target and batching-off checks, and after a one-row verdict measured
+on `row_invariant`). The fallback replaces a one-row verdict measured on
+`stock_order`, so it is never read as one. It is sticky: the first reason
+recorded stays, later records for the identity keep it, and a
+`row_invariant` process never writes one, so routes never alternate. Only a
+new startup identity (a new runtime build, CLI version or any other input
+it covers) decides the route again. The row-invariant self-check key is
+separate from the stock order key (FR-CB10 item 5), so its stored grant
+stays in force, and it serves as the prior grant on the next start until
+`row_invariant` re-checks. A one-row verdict measured on `row_invariant`
+afterwards (including a divergence) sends the identity to `serial_only`
+exactly as before; a re-check scheduled on that key returns it to
+`row_invariant`, never to `stock_order`. The process that found the failure
+keeps serving its current, stock-order-verified decision until it restarts,
+and logs `event=small_m_route action=stock_order_fallback_recorded
+reason=<reason> next_start=row_invariant` (or the `verdict_recorded` line
+with `fallback=<reason>`).
 
 The MLX core reads the variable once with C `atoi` semantics: unset, or a
 value that parses to neither 0 nor 2, keeps the invariant route; any value
@@ -2336,7 +2385,18 @@ from 2 runs an exactness probe through the production scheduler:
    nor a pass), the pass is not stored, and the width is a shape not met
    (item 4). Same-order references are stored with the SHA-256 of their
    prompt and reused only for that prompt at that completion length, like
-   lone outputs. The row-invariant route is unchanged.
+   lone outputs. A same-order reference holds three copies of its prompt in
+   the pool at once, so on this route the reference bound is the widest
+   width k, at most the item 4 shape bound, for which three copies of each
+   of the first k probe prompts fit the pool together (widths 1 and 2 need
+   no reference, so the bound is at least 2 when the shape bound is). When
+   it is below the shape bound, the process measures nothing on this route
+   and holds no admission for the check: it records the
+   `stock_order_reference_unfit` fallback (FR-CB9) and keeps serving what it
+   serves, so an unfit reference never lowers a grant, never records a
+   one-row verdict and never runs a reference that cannot fit. The next
+   start measures on `row_invariant`. The grant bound (item 4) is
+   unchanged. The row-invariant route is unchanged.
 4. Fail closed. A width is probed only if all k rows fit the scheduler's
    per-request cap and, together, its paged-KV pool (each row's prompt,
    completion and decode headroom rounded up to whole blocks). The ladder

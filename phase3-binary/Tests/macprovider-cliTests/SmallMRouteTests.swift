@@ -535,3 +535,265 @@ private final class LockedLines: @unchecked Sendable {
     func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
     var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
 }
+
+/// SPEC-038 FR-CB9 (v0.3.56, Related: #2389): a failure measured on stock
+/// order sends the next start of the same startup identity to the
+/// row-invariant route, never to the serial route; a failure measured on the
+/// row-invariant route keeps the existing rule.
+extension SmallMRouteTests {
+    private static func stockKey() -> ContinuousBatchingSelfCheckKey {
+        var key = Self.key()
+        key.runtimeBuild = ContinuousBatchingSelfCheckKey.currentRuntimeBuild + "+small_m_stock_order"
+        return key
+    }
+
+    private static func decidedInputs(
+        _ store: SmallMRouteVerdictStore,
+        _ selfCheck: ContinuousBatchingSelfCheckStore,
+        _ identity: String
+    ) -> SmallMRoute.Inputs {
+        var value = SmallMRoute.Inputs(
+            continuousBatching: .off, continuousBatchingExplicitlyConfigured: false, nativeMTPMode: .auto,
+            nativeMTPAdmission: .none, draftConfigured: false, shardGroupRole: false, autotuneCandidate: false,
+            otherSwitchTargets: false,
+            selfCheckVerdict: store.verdict(startupIdentity: identity, selfCheckStore: selfCheck)
+        )
+        value.stockOrderFallback = store.stockOrderFallback(startupIdentity: identity)
+        return value
+    }
+
+    private static func temporaryStores() -> (URL, ContinuousBatchingSelfCheckStore, SmallMRouteVerdictStore) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("small-m-route-\(UUID().uuidString)")
+        let selfCheck = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent("cb-self-check.json"))
+        return (directory, selfCheck, SmallMRouteVerdictStore(selfCheckStore: selfCheck))
+    }
+
+    func testStockOrderDivergenceSendsTheNextStartToRowInvariantAndKeepsThePriorGrant() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        // The row-invariant grant this Mac served before the stock order start.
+        let prior = ContinuousBatchingSelfCheckDecision(slots: 4, reason: "granted", verifiedSlots: 4)
+        try selfCheck.store(Self.record(Self.key(), decision: prior))
+        // Stock order: two rows diverged.
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        var measured = Self.record(Self.stockKey(), decision: divergence)
+        measured.measurements = [.init(slots: 2, conformant: false, aggregateTPS: 0, throughputMeasured: false)]
+        try selfCheck.store(measured)
+        let lines = LockedLines()
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .stockOrder, log: { lines.append($0) }
+        )
+        recorder.applied(key: Self.stockKey(), decision: divergence)
+        XCTAssertEqual(lines.all, [
+            "event=small_m_route action=verdict_recorded decision=row_divergence_at_2 slots=1 next_start=row_invariant fallback=stock_order_divergence",
+        ])
+        // No one-row verdict: the next start is row-invariant, not serial-only.
+        XCTAssertEqual(store.verdict(startupIdentity: identity, selfCheckStore: selfCheck), .absent)
+        XCTAssertNil(store.oneRowDecision(startupIdentity: identity, selfCheckStore: selfCheck))
+        let next = SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity))
+        XCTAssertEqual(next, SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_divergence"))
+        XCTAssertTrue(SmallMRoute.verdictDecidesNextStart(Self.decidedInputs(store, selfCheck, identity)))
+        // The row-invariant key's grant is untouched and serves until that
+        // route re-checks.
+        XCTAssertEqual(selfCheck.decision(for: Self.key()), prior)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(
+                store: selfCheck,
+                target: ContinuousBatchingSelfCheckTarget(key: Self.key(), maxRows: 4),
+                ownerPinned: nil, provisional: nil
+            )?.servedSlots,
+            4
+        )
+
+        // A divergence above a granted width on stock order falls back too.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 2, reason: "granted", verifiedSlots: 2)
+        var wider = Self.record(Self.stockKey(), decision: granted)
+        wider.measurements = [
+            .init(slots: 2, conformant: true, aggregateTPS: 30, throughputMeasured: true),
+            .init(slots: 3, conformant: false, aggregateTPS: 0, throughputMeasured: false),
+        ]
+        try otherSelfCheck.store(wider)
+        SmallMRouteVerdictRecorder(
+            store: otherStore, selfCheckStore: otherSelfCheck, startupIdentity: identity, route: .stockOrder, log: { _ in }
+        ).applied(key: Self.stockKey(), decision: granted)
+        XCTAssertEqual(otherStore.stockOrderFallback(startupIdentity: identity), "stock_order_divergence")
+        // So does a crash; no net gain on stock order is not a stock order failure.
+        XCTAssertEqual(
+            SmallMRoute.stockOrderFallbackReason(
+                decision: .init(slots: 1, reason: "crashed_at_3", verifiedSlots: 2), anyWidthDiverged: false, crashed: true
+            ),
+            "stock_order_crash"
+        )
+        XCTAssertNil(SmallMRoute.stockOrderFallbackReason(
+            decision: .init(slots: 1, reason: "no_net_gain", verifiedSlots: 4), anyWidthDiverged: false, crashed: false
+        ))
+    }
+
+    func testAttachFailureOnStockOrderSendsTheNextStartToRowInvariant() {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m"])
+        let lines = LockedLines()
+        // A row-invariant process never records a stock order fallback.
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+        ).stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        XCTAssertNil(store.stockOrderFallback(startupIdentity: identity))
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .stockOrder, log: { lines.append($0) }
+        )
+        recorder.stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        recorder.stockOrderFailed(reason: SmallMRoute.stockOrderReferenceUnfit)
+        XCTAssertEqual(lines.all, [
+            "event=small_m_route action=stock_order_fallback_recorded reason=stock_order_attach_failed next_start=row_invariant",
+        ])
+        XCTAssertEqual(store.stockOrderFallback(startupIdentity: identity), "stock_order_attach_failed", "the first reason stays")
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_attach_failed")
+        )
+
+        // Which probe results are attach failures.
+        func parity(_ established: Bool) -> PagedKVRuntimeParityProbeResult {
+            .init(established: established, nLayers: 2, nNew: 4, gatherKernelCalls: 16, maxLogicalBlocks: 3, nonIdentityPermutation: true)
+        }
+        func isolation(
+            proven: Bool, failures: Int = 0, divergences: Int = 0, sharedParity: Bool, distinguishing: Bool
+        ) -> PagedKVRuntimeMoEProbeResult {
+            .init(
+                proven: proven, rowsDecodedInSharedForward: 2, rowFailures: failures, crossRowDivergences: divergences,
+                sharedForwardParityProven: sharedParity, parityTokensCompared: 32, challengeDistinguishing: distinguishing
+            )
+        }
+        let passing = isolation(proven: true, sharedParity: true, distinguishing: true)
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: nil, isolation: nil), "not run")
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: parity(true), isolation: nil), "not run")
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: parity(true), isolation: passing))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(parity: parity(false), isolation: passing))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, divergences: 1, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, failures: 1, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertFalse(
+            SmallMRoute.attachProbeFailed(
+                parity: parity(true), isolation: isolation(proven: false, sharedParity: false, distinguishing: false)
+            ),
+            "a challenge that cannot distinguish its rows proves nothing either way"
+        )
+    }
+
+    func testStockOrderFallbackIsStickyAcrossStartsAndNeverLoops() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        XCTAssertTrue(store.recordStockOrderFallback(startupIdentity: identity, reason: SmallMRoute.stockOrderDivergence))
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 4, reason: "granted", verifiedSlots: 4)
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 4)
+        try selfCheck.store(Self.record(Self.key(), decision: granted))
+        // Start 2 and 3 run row-invariant; their grants keep the fallback.
+        for _ in 0 ..< 2 {
+            XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)).route, .rowInvariant)
+            let lines = LockedLines()
+            SmallMRouteVerdictRecorder(
+                store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+            ).applied(key: Self.key(), decision: granted)
+            XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=granted slots=4 next_start=row_invariant"])
+            XCTAssertEqual(store.stockOrderFallback(startupIdentity: identity), "stock_order_divergence")
+        }
+        // A one-row verdict measured on the row-invariant route then decides
+        // as it always did: serial-only, which never measures again.
+        try selfCheck.store(Self.record(Self.key(), decision: noGain))
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { _ in }
+        ).applied(key: Self.key(), decision: noGain)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)).route, .serialOnly)
+        // A re-check scheduled on that key returns to row-invariant, never to stock order.
+        try selfCheck.store(Self.record(Self.key(), decision: noGain, remeasureAfter: "2026-11-16T00:00:00Z"))
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_divergence")
+        )
+        // A stock-order-measured one-row verdict recorded before the fallback
+        // is dropped with it, so a stock order failure never ends serial-only.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        try otherSelfCheck.store(Self.record(Self.stockKey(), decision: noGain))
+        XCTAssertTrue(otherStore.record(startupIdentity: identity, key: Self.stockKey(), decision: noGain, route: .stockOrder))
+        XCTAssertEqual(otherStore.verdict(startupIdentity: identity, selfCheckStore: otherSelfCheck), .grantsNoBatching)
+        otherStore.recordStockOrderFallback(startupIdentity: identity, reason: SmallMRoute.stockOrderReferenceUnfit)
+        XCTAssertEqual(otherStore.verdict(startupIdentity: identity, selfCheckStore: otherSelfCheck), .absent)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(otherStore, otherSelfCheck, identity)).route, .rowInvariant)
+    }
+
+    func testNewRuntimeBuildReDecidesTheRoute() {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        let new = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r2"])
+        XCTAssertNotEqual(old, new)
+        store.recordStockOrderFallback(startupIdentity: old, reason: SmallMRoute.stockOrderAttachFailed)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, old)).route, .rowInvariant)
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, new)),
+            SmallMRoute.Decision(route: .stockOrder, reason: "self_check_verdict_absent")
+        )
+    }
+
+    func testDivergenceOnRowInvariantKeepsTheSerialRule() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m"])
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        var measured = Self.record(Self.key(), decision: divergence)
+        measured.measurements = [.init(slots: 2, conformant: false, aggregateTPS: 0, throughputMeasured: false)]
+        try selfCheck.store(measured)
+        let lines = LockedLines()
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+        ).applied(key: Self.key(), decision: divergence)
+        XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=row_divergence_at_2 slots=1 next_start=serial_only"])
+        XCTAssertNil(store.stockOrderFallback(startupIdentity: identity))
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .serialOnly, reason: "self_check_no_batching")
+        )
+        // No net gain measured on stock order also keeps the serial rule.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 4)
+        try otherSelfCheck.store(Self.record(Self.stockKey(), decision: noGain))
+        SmallMRouteVerdictRecorder(
+            store: otherStore, selfCheckStore: otherSelfCheck, startupIdentity: identity, route: .stockOrder, log: { _ in }
+        ).applied(key: Self.stockKey(), decision: noGain)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(otherStore, otherSelfCheck, identity)).route, .serialOnly)
+    }
+
+    /// LOW-7: the core's partial-sum count is never inherited outside lab
+    /// builds, so a row-invariant or native-MTP process keeps its bits.
+    func testInheritedPartialSumCountIsRemoved() {
+        setenv(SmallMRoute.partialSumsEnvironmentKey, "8", 1)
+        defer { unsetenv(SmallMRoute.partialSumsEnvironmentKey) }
+        #if MACPROVIDER_LAB_HARNESS
+        XCTAssertFalse(SmallMRoute.removeInheritedPartialSums())
+        XCTAssertNotNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        #else
+        XCTAssertTrue(SmallMRoute.removeInheritedPartialSums())
+        XCTAssertNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        XCTAssertFalse(SmallMRoute.removeInheritedPartialSums())
+        // `apply` and `requireRowInvariant` (which calls `apply`) remove it
+        // even when this process already applied its route.
+        setenv(SmallMRoute.partialSumsEnvironmentKey, "8", 1)
+        SmallMRoute.apply(.rowInvariant, reason: "test")
+        XCTAssertNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        #endif
+        XCTAssertEqual(SmallMRoute.partialSumsEnvironmentKey, "MLX_METAL_QMV_MMA_WK")
+    }
+}

@@ -391,6 +391,30 @@ enum ContinuousBatchingSelfCheck {
         return max(1, bound)
     }
 
+    /// SPEC-038 FR-CB10 (stock order): the widest k at most
+    /// `exactnessProbeBound` whose same-order references all fit: for every
+    /// row i < k, `sameOrderReferenceRows` copies of probe prompt i together
+    /// within the pool. Widths 1 and 2 need no reference, so the result is
+    /// at least min(2, the probe bound). The ladder on stock order stops
+    /// here; the grant bound (`exactnessProbeBound`) does not change.
+    static func stockOrderReferenceBound(target: ContinuousBatchingSelfCheckTarget, maxCount: Int) -> Int {
+        let bound = exactnessProbeBound(target: target, maxCount: maxCount)
+        guard bound >= sameOrderReferenceRows else { return bound }
+        let outputTokens = exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
+        var fit = 0
+        for length in exactnessPromptLengths(
+            count: maxCount, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
+        ).prefix(bound) {
+            guard let cost = exactnessRowCost(
+                promptTokens: length, outputTokens: outputTokens, blockSizeTokens: target.blockSizeTokens
+            ) else { break }
+            let (copies, overflow) = cost.multipliedReportingOverflow(by: sameOrderReferenceRows)
+            guard !overflow, copies <= target.poolTokens else { break }
+            fit += 1
+        }
+        return fit >= sameOrderReferenceRows ? fit : min(2, bound)
+    }
+
     /// Exactness-probe texts: the task first, then background notes long
     /// enough to cut to `lengths` tokens (`fitPrompt`).
     static func exactnessTexts(lengths: [Int]) -> [String] {
@@ -1326,6 +1350,9 @@ actor ContinuousBatchingSelfCheckDriver {
     private let admissionHoldJitter: Double
     private var consecutiveDrainTimeouts = 0
     private var consecutiveCheckBounds = 0
+    /// SPEC-038 FR-CB10 (stock order): the key whose same-order references
+    /// do not fit; this process neither measures it nor holds admission for it.
+    private var stockOrderReferenceUnfitKey: ContinuousBatchingSelfCheckKey?
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
     /// When the check for this key first found no stored decision.
@@ -1438,7 +1465,7 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             // A busy Mac never finds an idle window under steady traffic: once
             // the check has been due long enough, hold admission and run it.
-            if let due = checkDueSince, Date() >= nextAttemptAt,
+            if let due = checkDueSince, Date() >= nextAttemptAt, stockOrderReferenceUnfitKey != target.key,
                ContinuousBatchingSelfCheck.admissionHoldDue(
                 dueSince: due.at, notBefore: admissionHoldNotBefore,
                 after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
@@ -1608,9 +1635,28 @@ actor ContinuousBatchingSelfCheckDriver {
             queueLimit: target.queueLimit,
             policyCeiling: target.policyCeiling
         )
-        let maxSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
+        let ladderBound = ContinuousBatchingSelfCheck.ladderUpperBound(
             target: target, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots
         )
+        // SPEC-038 FR-CB10 (stock order): a width from three rows needs each
+        // prompt's same-order reference, three copies at once. When a width
+        // the ladder would probe has references that cannot fit the pool,
+        // this process measures nothing on stock order: the next start takes
+        // the row-invariant route (`stock_order_reference_unfit`) and
+        // measures there. A shorter ladder here could lower a kept or prior
+        // grant (`reconcile` keeps only verified widths) or decide one row,
+        // so an unfit reference never does either.
+        if target.smallMRoute == .stockOrder,
+           ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: ladderBound) < ladderBound {
+            if stockOrderReferenceUnfitKey != target.key {
+                stockOrderReferenceUnfitKey = target.key
+                let referenceBound = ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: ladderBound)
+                log("event=cb_self_check action=stock_order_reference_unfit ladder_bound=\(ladderBound) reference_bound=\(referenceBound) model_sha256=\(target.key.modelSHA256)")
+                verdictRecorder?.stockOrderFailed(reason: SmallMRoute.stockOrderReferenceUnfit, modelSHA256: target.key.modelSHA256)
+            }
+            return
+        }
+        let maxSlots = ladderBound
         let rungs = Set(ContinuousBatchingSelfCheck.ladder(maxRows: maxSlots))
         var record: ContinuousBatchingSelfCheckStore.Record
         if let previous {
@@ -1634,7 +1680,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // verifies no width.
             let reason = configuredSlots >= 2 ? "probe_shape_unavailable" : "single_row"
             record.decision = .init(slots: 1, reason: reason, verifiedSlots: 1)
-            record.ladderBound = maxSlots
+            record.ladderBound = ladderBound
             // Decided: it re-runs when the bound grows, not on a timer.
             record.inProgressSlots = nil
             record.remeasureInProgress = nil
@@ -1895,7 +1941,7 @@ actor ContinuousBatchingSelfCheckDriver {
             deferrals = 0
             nextAttemptAt = .distantPast
             backpressureRefusal = nil
-            record.ladderBound = maxSlots
+            record.ladderBound = ladderBound
             await finish(record, crashedAt: nil, target: target)
         } catch {
             // Yielded to a real request, a transient failure, or a journal
@@ -1918,7 +1964,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 log("event=cb_self_check action=ladder_ended reason=probe_shape_unmet slots=\(slots) verified_k=\(record.measurements.last?.slots ?? 1) remeasure_in_s=\(Int(resume))")
                 deferrals = 0
                 nextAttemptAt = .distantPast
-                record.ladderBound = maxSlots
+                record.ladderBound = ladderBound
                 await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume, probeShapeUnmetAt: slots)
                 return
             }
@@ -1954,7 +2000,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     log("event=cb_self_check action=ladder_ended reason=backpressure refused_slots=\(refusedAt) verified_k=\(verifiedPrefix) remeasure_in_s=\(Int(resume))")
                     deferrals = 0
                     nextAttemptAt = .distantPast
-                    record.ladderBound = maxSlots
+                    record.ladderBound = ladderBound
                     await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume)
                     return
                 case .deferStep:

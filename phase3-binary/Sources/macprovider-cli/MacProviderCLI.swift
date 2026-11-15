@@ -3249,7 +3249,10 @@ struct ServeCommand: AsyncParsableCommand {
             otherSwitchTargets: authorizedSwitchModelIDs.contains { !startupModelIDs.contains($0.lowercased()) },
             selfCheckVerdict: smallMRouteStartupIdentity.map {
                 smallMRouteVerdictStore.verdict(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
-            } ?? .absent
+            } ?? .absent,
+            stockOrderFallback: smallMRouteStartupIdentity.flatMap {
+                smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
+            }
         )
         #if MACPROVIDER_LAB_HARNESS
         // Lab measurement only: run the same serve on a chosen batching route
@@ -3276,7 +3279,8 @@ struct ServeCommand: AsyncParsableCommand {
             fields: smallMRouteInputs.logFields
         ).utf8))
         // A one-row verdict this batching process applies moves the next
-        // start of the same configuration to the serial route.
+        // start of the same configuration to the serial route; a failure
+        // measured on stock order moves it to the row-invariant route.
         let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
             guard appliedSmallMRoute != .serialOnly,
                   let identity = smallMRouteStartupIdentity,
@@ -3286,6 +3290,7 @@ struct ServeCommand: AsyncParsableCommand {
                 store: smallMRouteVerdictStore,
                 selfCheckStore: cbSelfCheckStore,
                 startupIdentity: identity,
+                route: appliedSmallMRoute,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
         }()
@@ -3567,6 +3572,13 @@ struct ServeCommand: AsyncParsableCommand {
                     "event=served_slots action=applied slots=\(served) reason=small_m_route_serial_only\n".utf8
                 ))
             }
+        }
+        // SPEC-038 FR-CB9 (v0.3.56): a SPEC-039 attach probe that failed on
+        // stock order sends the next start to the row-invariant route, so a
+        // stock-order-only failure never leaves batching off on every start.
+        if appliedSmallMRoute == .stockOrder, let mlxRuntime = modelRuntime as? ModelRuntime,
+           await mlxRuntime.startupPagedKVAttachProbeFailed() {
+            smallMRouteVerdictRecorder?.stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to

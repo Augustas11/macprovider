@@ -4574,15 +4574,19 @@
       "requirement_id": "SPEC-037-R004",
       "spec_id": "SPEC-037",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:var kvDecodePath: String"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDiskCacheWrittenOnOneRouteMissesOnTheOther"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR. SPEC-037 v0.2.7: the decode-path class names the small-row route (outcome table row 12), so an entry written on one route is a disk_miss_envelope on another; unit test only."
       }
     },
     {
@@ -5600,11 +5604,15 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func usesSameOrderReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let nearTieLogitTolerance"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderTwoRowWidthComparesWithLoneRuns",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderWidthsFromThreeCompareWithTheSameOrderReference"
       ],
       "journeys": [],
       "evidence": [
@@ -5619,7 +5627,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending."
+        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending. SPEC-038 v0.3.56 stock order tolerance (FR-CB6): the self-check compares rows of three or more with a same-order reference; unit tests only."
       }
     },
     {
@@ -5656,11 +5664,32 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func decide(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func stockOrderFallbackReason(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func attachProbeFailed(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:func recordStockOrderFallback(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:func stockOrderFailed(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func removeInheritedPartialSums",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func startupPagedKVAttachProbeFailed"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionTableCoversEveryCombination",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionReasons",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testNativeMTPThatMayActivateNeverRunsStockOrder",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testSerialOnlyProcessRefusesNativeMTPActivation",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testRecordedGrantLogsTheStockOrderNextStart",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testEnvironmentValueMapsToTheCoreRoute",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testSerialOnlyProcessRefusesEveryBatchingEntry",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStartupEventAndStatusField",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStockOrderDivergenceSendsTheNextStartToRowInvariantAndKeepsThePriorGrant",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testAttachFailureOnStockOrderSendsTheNextStartToRowInvariant",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStockOrderFallbackIsStickyAcrossStartsAndNeverLoops",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testNewRuntimeBuildReDecidesTheRoute",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDivergenceOnRowInvariantKeepsTheSerialRule",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testInheritedPartialSumCountIsRemoved"
       ],
       "journeys": [],
       "evidence": [],
@@ -5668,7 +5697,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Default-off configuration and request-local fail-closed behavior are covered; complete packaged serial-parity and scheduler-failure fallback evidence remains pending."
+        "rationale": "SPEC-038 v0.3.56 stock order route and its sticky row-invariant fallback (FR-CB9): unit tests only; no batched forward has run on this route in a provider, no evidence recorded."
       }
     },
     {
@@ -5700,7 +5729,9 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func sameOrderReference(",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func rowsDifferingFromReference",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:private func sameOrderReferences(",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func cohortRowsRanInOneOrder("
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func cohortRowsRanInOneOrder(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func stockOrderReferenceBound",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:private var stockOrderReferenceUnfitKey"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
@@ -5739,7 +5770,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testSameOrderReferenceWhoseRowsDisagreeFails",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderJudgesOnlyCohortRunsWhoseRowsKeptOneOrder",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowInvariantRouteKeepsLoneReferencesAndItsKey",
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSelfCheckAdmissionTests.swift:testStockOrderRuntimeRunsTheSelfCheckUnderItsOwnKey"
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSelfCheckAdmissionTests.swift:testStockOrderRuntimeRunsTheSelfCheckUnderItsOwnKey",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderReferenceBoundCoversThreeCopiesOfEachProbePrompt"
       ],
       "journeys": [],
       "evidence": [],

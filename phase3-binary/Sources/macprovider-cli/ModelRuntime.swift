@@ -2318,6 +2318,9 @@ actor ModelRuntime: ModelRuntimeServing {
     }
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
+    /// SPEC-038 FR-CB9 (v0.3.56): the startup model's SPEC-039 attach probes
+    /// ran and failed (`SmallMRoute.attachProbeFailed`).
+    private var startupPagedKVAttachProbeFailedValue = false
     private var pagedKVRuntimeCacheClass: String
     private var pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
     private var pagedKVHardwareSizingProof: PagedKVHardwareSizingProof?
@@ -4376,6 +4379,7 @@ maxTokens: 1,
         if let recordable = parityProbe?.contiguousCacheRecordable {
             self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
+        self.startupPagedKVAttachProbeFailedValue = SmallMRoute.attachProbeFailed(parity: parityProbe, isolation: moeProbe)
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -13223,6 +13227,12 @@ maxTokens: maxTokens,
         return NativeMTPLiveProcessCodeIdentity(
             cdHash: cdHashHex
         )
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.56): whether the startup model's SPEC-039
+    /// attach probes ran and failed.
+    func startupPagedKVAttachProbeFailed() -> Bool {
+        startupPagedKVAttachProbeFailedValue
     }
 
     /// Why native MTP may not load in this process, or nil. A serial-only

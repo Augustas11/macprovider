@@ -1466,3 +1466,37 @@ final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
         )
     }
 }
+
+/// SPEC-038 FR-CB10 (v0.3.56, Related: #2389): on stock order a width from
+/// three rows needs three copies of each probe prompt in the pool at once.
+extension ContinuousBatchingSelfCheckTests {
+    func testStockOrderReferenceBoundCoversThreeCopiesOfEachProbePrompt() {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
+        )
+        var target = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 16)
+        // A pool with room for every probe row holds every reference too.
+        XCTAssertEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 16)
+        let output = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
+        let costs = ContinuousBatchingSelfCheck.exactnessPromptLengths(count: 5, keyBoundary: target.probeKeyBoundary, outputTokens: output)
+            .compactMap { ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: $0, outputTokens: output) }
+        XCTAssertEqual(costs.count, 5)
+        // Exactly the first four probe rows fit together, but not three
+        // copies of the long second prompt.
+        target.poolTokens = costs.prefix(4).reduce(0, +)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessProbeBound(target: target, maxCount: 16), 4)
+        XCTAssertGreaterThan(3 * costs[1], target.poolTokens)
+        let reference = ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16)
+        XCTAssertEqual(reference, 2, "widths 1 and 2 need no reference")
+        XCTAssertLessThan(reference, ContinuousBatchingSelfCheck.exactnessProbeBound(target: target, maxCount: 16))
+        // The grant bound does not change: an unfit reference never lowers it.
+        XCTAssertEqual(target.grantableRows, 4)
+        // A pool that holds three copies of each of the first three prompts
+        // gives at least three.
+        target.poolTokens = 3 * costs.prefix(3).max()! + costs.prefix(4).reduce(0, +)
+        XCTAssertGreaterThanOrEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 3)
+        // A bound below three needs no reference.
+        target.poolTokens = costs.prefix(2).reduce(0, +)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 2)
+    }
+}
