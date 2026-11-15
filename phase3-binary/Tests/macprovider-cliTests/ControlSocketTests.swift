@@ -1194,11 +1194,6 @@ final class ControlSocketTests: XCTestCase {
         try await connection.send(.warmSetRequest(action: "status", modelID: nil))
         let status = try await connection.receive(timeout: 2)
         await connection.close()
-        // The server closes its end before stop, so stop never closes a
-        // descriptor number a later test has reused.
-        try await waitUntil(timeoutNanoseconds: 2_000_000_000) {
-            await server.clientTasksCountForTest() == 0
-        }
         await server.stop()
 
         XCTAssertEqual(load, .warmSetResponse(WarmSetControlReply(
@@ -1223,14 +1218,45 @@ final class ControlSocketTests: XCTestCase {
         try await connection.send(.warmSetRequest(action: "load", modelID: "model-b"))
         let response = try await connection.receive(timeout: 2)
         await connection.close()
-        // The server closes its end before stop, so stop never closes a
-        // descriptor number a later test has reused.
-        try await waitUntil(timeoutNanoseconds: 2_000_000_000) {
-            await server.clientTasksCountForTest() == 0
-        }
         await server.stop()
         XCTAssertEqual(response, .warmSetResponse(WarmSetControlReply(
             action: "load", status: "unavailable", modelID: "model-b", detail: "no_warm_set", entries: [])))
+    }
+
+    /// A stopping server shuts its clients' descriptors down; only each
+    /// connection closes its own, once. A number the system hands out again
+    /// after that close is never closed by the server.
+    func testStopNeverClosesADescriptorNumberTwice() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"), idleTimeoutSeconds: 30)
+        try await server.start()
+        let client = try rawConnect(socketPath: socketPath)
+        defer { close(client) }
+        try await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            await server.clientDescriptorsForTest().count == 1
+        }
+        let descriptors = await server.clientDescriptorsForTest()
+        let accepted = try XCTUnwrap(descriptors.first)
+        let number = try XCTUnwrap(accepted.current)
+
+        await server.stop()
+        // The idle client sees end of stream: stop woke the connection.
+        XCTAssertTrue(try waitForEOF(fd: client, timeout: 2.0))
+        try await waitUntil(timeoutNanoseconds: 2_000_000_000) { accepted.isClosed }
+
+        // The number is free again; whatever takes it next stays open after
+        // the descriptor is asked to close or shut down once more.
+        var pair: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        defer { close(pair[0]); close(pair[1]) }
+        accepted.shutdown()
+        accepted.close()
+        for fd in pair {
+            XCTAssertNotEqual(fcntl(fd, F_GETFD), -1, "descriptor \(fd) (accepted was \(number)) was closed")
+        }
+        let reply = Data("x".utf8)
+        XCTAssertEqual(reply.withUnsafeBytes { write(pair[0], $0.baseAddress, 1) }, 1)
     }
 
     /// SPEC-011 R-3.10.3: a switch to a warm member is acknowledged and

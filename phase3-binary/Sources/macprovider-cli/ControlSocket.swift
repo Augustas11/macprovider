@@ -1291,7 +1291,7 @@ actor ControlSocketServer {
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
     private var clientTasks: [UUID: Task<Void, Never>] = [:]
-    private var clientFDs: [Int32] = []
+    private var clientDescriptors: [UUID: ControlSocketDescriptor] = [:]
 
     init(
         socketPath: URL,
@@ -1434,10 +1434,12 @@ actor ControlSocketServer {
             task.cancel()
         }
         clientTasks.removeAll()
-        for fd in clientFDs {
-            close(fd)
+        // Each client's connection closes its own descriptor; shutting it
+        // down here ends that connection's read.
+        for descriptor in clientDescriptors.values {
+            descriptor.shutdown()
         }
-        clientFDs.removeAll()
+        clientDescriptors.removeAll()
         if let listenerFD {
             close(listenerFD)
             self.listenerFD = nil
@@ -1458,12 +1460,16 @@ actor ControlSocketServer {
         clientTasks.removeValue(forKey: id)
     }
 
-    private func appendClientFD(_ fd: Int32) {
-        clientFDs.append(fd)
+    private func appendClientDescriptor(id: UUID, _ descriptor: ControlSocketDescriptor) {
+        clientDescriptors[id] = descriptor
     }
 
-    private func removeClientFD(_ fd: Int32) {
-        clientFDs.removeAll { $0 == fd }
+    private func removeClientDescriptor(id: UUID) {
+        clientDescriptors.removeValue(forKey: id)
+    }
+
+    func clientDescriptorsForTest() -> [ControlSocketDescriptor] {
+        Array(clientDescriptors.values)
     }
 
     private nonisolated static func acceptLoop(
@@ -1500,14 +1506,15 @@ actor ControlSocketServer {
                 close(clientFD)
                 continue
             }
-            await server.appendClientFD(clientFD)
             let taskID = UUID()
+            let descriptor = ControlSocketDescriptor(fd: clientFD)
+            await server.appendClientDescriptor(id: taskID, descriptor)
             let task = Task.detached(priority: .userInitiated) { [server] in
                 defer {
                     Task { await server.removeClientTask(taskID) }
                 }
                 await handleClient(
-                    fd: clientFD,
+                    descriptor: descriptor,
                     modelRuntime: modelRuntime,
                     tracker: tracker,
                     supportedModels: supportedModels,
@@ -1527,14 +1534,14 @@ actor ControlSocketServer {
                     warmSet: warmSet,
                     primaryRuntime: primaryRuntime
                 )
-                await server.removeClientFD(clientFD)
+                await server.removeClientDescriptor(id: taskID)
             }
             await server.appendClientTask(id: taskID, task: task)
         }
     }
 
     private nonisolated static func handleClient(
-        fd: Int32,
+        descriptor: ControlSocketDescriptor,
         modelRuntime bootRuntime: ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?,
@@ -1554,7 +1561,7 @@ actor ControlSocketServer {
         warmSet: (any WarmSetControl)? = nil,
         primaryRuntime: (@Sendable () -> ModelRuntime?)? = nil
     ) async {
-        let connection = ControlSocketConnection(fd: fd)
+        let connection = ControlSocketConnection(descriptor: descriptor)
         let currentRuntime: @Sendable () -> ModelRuntime = { primaryRuntime?() ?? bootRuntime }
 
         while !Task.isCancelled {
@@ -2255,6 +2262,45 @@ private actor ControlSocketSwitchTracker {
     }
 }
 
+/// One socket descriptor, closed exactly once. The connection that reads and
+/// writes it owns the close; anyone else (a stopping server) only shuts it
+/// down, which wakes the connection's blocked read. A descriptor number is
+/// never closed after the close, when the system may have handed it out
+/// again.
+final class ControlSocketDescriptor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32?
+
+    init(fd: Int32) {
+        self.fd = fd
+    }
+
+    var current: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return fd
+    }
+
+    var isClosed: Bool { current == nil }
+
+    func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fd {
+            Darwin.close(fd)
+            self.fd = nil
+        }
+    }
+
+    func shutdown() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fd {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+    }
+}
+
 public enum ControlSocketClient {
     public static func connect(socketPath: URL, timeout _: TimeInterval = 2.0) async throws -> ControlSocketConnection {
         let path = socketPath.path
@@ -2284,13 +2330,20 @@ public enum ControlSocketClient {
 public actor ControlSocketConnection {
     public static let maxFrameBytes = 64 * 1024
 
-    private var fd: Int32?
+    private let descriptor: ControlSocketDescriptor
+    private var fd: Int32? { descriptor.current }
     private var receiveBuffer = Data()
 
     var hasPartialFrame: Bool { !receiveBuffer.isEmpty }
 
     init(fd: Int32) {
-        self.fd = fd
+        self.descriptor = ControlSocketDescriptor(fd: fd)
+    }
+
+    /// A server's accepted client: the server may shut it down, only the
+    /// connection closes it.
+    init(descriptor: ControlSocketDescriptor) {
+        self.descriptor = descriptor
     }
 
     public func send(_ frame: ControlSocketFrame) async throws {
@@ -2342,10 +2395,7 @@ public actor ControlSocketConnection {
     }
 
     public func close() async {
-        if let fd {
-            Darwin.close(fd)
-            self.fd = nil
-        }
+        descriptor.close()
     }
 
     private func writeAll(_ data: Data) throws {
