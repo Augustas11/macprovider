@@ -1,6 +1,24 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.59 (2026-11-15, warm-set wire, contended throughput and per-member reports as built)
+**Version:** 1.9.60 (2026-11-16, warm-set limits, fit plan and operator commands as built)
+
+**Change log v1.9.60 (2026-11-16, Related: #2338):** §6.16 says what the
+code does. R017 *Configuration* adds `warm_model_limits` (per further model
+`context_tokens` of at least 1 and `slots` from 1 to 32, config file only)
+and says how a further model without its own context inherits
+`max_context_override`, which `provider context set` and `rollback` now
+check against that model's limit too. The control-socket `warm_set` `load`
+takes optional `context_tokens` and `slots` and answers `invalid_request`
+with detail `invalid_limits` outside those bounds. New *Fit plan* paragraph:
+the arithmetic `models warm check` and `autotune --recommend --warm-set` run,
+its inputs, its cross-check against the runtime load decision and its three
+decisions; it never lowers the main model, evicts, loads or downloads, and
+runs only for a model the operator names. New *Operator commands* paragraph:
+`models warm check` (text, or `models_warm_check.v1` JSON) and `--save`,
+`--context` and `--slots` on `models warm load|unload`, with the restart
+notice and the exit codes. R018 *Current limits*: a demoted main model keeps
+a measured throughput instead of reporting 0. No trust tier or attestation
+label changes.
 
 **Change log v1.9.59 (2026-11-15, Related: #2338):** §6.16 says what the
 code does. R016: the top-level fields that describe the primary are written
@@ -5627,13 +5645,37 @@ inference nor as a stall.
   order while they fit. When `supported_models` is set it MUST contain each of
   them; when it is unset the effective `supported_models` is the primary
   followed by `warm_models`. Its absence is a warm set of one.
+- *Limits.* An optional `warm_model_limits` mapping (config file only; older
+  CLIs ignore the key) gives a further model its own `context_tokens`, an
+  integer of at least 1, and `slots`, an integer from 1 through 32 (the bound
+  of `max_concurrency_override`). Each key MUST name an entry of
+  `warm_models` (case-folded, at most once) and any other field is refused,
+  so serve never starts with a misspelt limit. A further model without an
+  entry, or with a field left out, takes the primary's
+  `max_context_override` or `max_concurrency_override` for it (serve's own
+  default when that is unset). Every config write that makes a model the
+  primary (apply, restore, rollback) also takes that model out of
+  `warm_models` and `warm_model_limits`.
+- *Inherited context.* Because a further model without its own
+  `context_tokens` is served at `max_context_override`, `provider context
+  set` and `provider context rollback` check the new value against the
+  context limit read from each such model's local files as well as the
+  primary's, and refuse it, writing nothing, when it is above any of them; a
+  model with its own `context_tokens` is not checked. The config fields those
+  commands re-read under the config lock include `warm_models` and each
+  model's `context_tokens`, so a change to them between the check and the
+  write makes the command start over.
 
 *Control socket.* The operator control socket (SPEC-011 R-3.1.5) carries one
 request and one reply per warm-set action:
 
 - `{"type":"warm_set_request","action":A,"model_id":M}`, where `A` is
   `status`, `load` or `unload`, and `model_id` is required for `load` and
-  `unload` and ignored for `status`.
+  `unload` and ignored for `status`. A `load` MAY add `context_tokens` and
+  `slots`, bounded as in `warm_model_limits`; when it names either, the two
+  replace the model's configured `warm_model_limits` entry for that load (a
+  field it leaves out takes the primary's value), and when it names neither
+  the configured entry applies.
 - `{"type":"warm_set_response","action":A,"status":S,"model_id":M,"detail":D,"entries":[...]}`,
   where `model_id` echoes the request and `detail`, when present, is a short
   reason code. `entries` is the warm set after the action, primary first;
@@ -5649,9 +5691,75 @@ this Mac, or a model family that cannot run beside the loaded members) or
 `load_failed`. An `unload` answers `unloaded`, `not_loaded`, `primary` (the
 primary is never unloaded), `busy` (a request holds the member) or `failed`.
 A missing `model_id` or an unknown action answers `invalid_request` (detail
-`model_id_required` or `unknown_action`); a process without a warm set
+`model_id_required` or `unknown_action`), and a `load` whose `context_tokens`
+is below 1 or whose `slots` is outside 1 through 32 answers `invalid_request`
+(detail `invalid_limits`) without loading; a process without a warm set
 answers `unavailable` (detail `no_warm_set`) with no entries. A load runs
-through R017 exactly as a boot load does.
+through R017 exactly as a boot load does. An `unsupported_model` answer for a
+model outside the `supported_models` serve started with carries detail
+`not_in_supported_models`.
+
+*Fit plan.* Whether a named model fits beside the primary, and with what
+context and slots, is worked out by arithmetic alone: nothing is loaded,
+measured, evicted or downloaded, and the primary is never lowered. It is
+computed only when the operator names the model (`models warm check`, or
+`autotune --recommend --warm-set`). Its inputs are this Mac's physical memory
+and Metal recommended working set; for each of the two models the weight
+bytes of its local copy (the verified catalog artifact when there is one), its
+KV bytes per token and declared context limit from its local `config.json`,
+its model family and its signed catalog row; the primary's current context
+and slots; whether the primary is bound to a verified artifact; and any
+operator `MLX_MAX_MB_PER_BUFFER`. The decision is the runtime's own: the
+command-buffer check a load runs first, then the R017 load decision against
+the memory limit the primary's runtime applies, with the primary pinned at
+its current row reservation. It has three outcomes:
+
+- `fits`: the model loads beside the primary as it is. It gets the primary's
+  context, capped by its declared limit and never below the runtime's
+  4096-token minimum row, and as many of the primary's slots as the memory
+  left over allows (what the limit leaves after both models' weights, the
+  primary's rows and the per-member margins, and never more than the
+  autotune memory envelope for the two models together leaves after the
+  primary's rows); when not even one slot fits, one slot at the largest
+  context that fits, never below the minimum row.
+- `primary_must_shrink`: the load is admitted only with less memory reserved
+  for the primary. The plan names the largest primary reservation that
+  admits it (`primary_fit`: the primary's current context with fewer slots,
+  else one slot at a smaller context) and the second model at one slot of the
+  minimum row (or of its declared limit when that is smaller); it changes
+  nothing.
+- `does_not_fit`, with a reason: `insufficient_memory` (not even a primary
+  with no rows reserved admits it), `command_buffer_budget_conflict`,
+  `not_on_this_mac`, `not_in_signed_catalog` (the primary is bound to a
+  verified artifact and this model has no signed catalog row and verified
+  local artifact), `same_model` or `memory_limit_unavailable`.
+
+*Operator commands.* `models warm check <model>` prints the fit plan for that
+model beside the main model as one line, or with `--json` one object:
+`schema_version` `models_warm_check.v1`, `model_id`, then the plan's
+`decision`, `reason`, `members` (the primary first, then the model, each with
+`model_id`, `role`, `context_tokens`, `slots` and `bytes`), `primary_fit`,
+`limit_bytes` and `required_bytes`. The main model's context and slots come
+from the running provider's `warm_set` status when it answers, else from
+config.yaml's `max_context_override` and `max_concurrency_override`; with
+neither it exits 4, and with no main model in config.yaml it exits 2.
+`models warm load` takes `--context` and `--slots` (sent as the request's
+limits). `models warm load` and `unload` take `--save`, which writes the
+change to config.yaml through the config writer, so it lasts after a restart:
+a load adds the model to `warm_models` (and to `supported_models` when that
+key is present) and sets its `warm_model_limits` entry to exactly the
+`--context` and `--slots` given (none removes it); an unload takes it out of
+`warm_models` and `warm_model_limits` and leaves `supported_models` as it is.
+The result must load as a valid config, or nothing is written. The change is
+saved after serve answers `loaded`, `already_warm` or `unloaded`, and also
+after `not_loaded` for an unload. When serve answers `unsupported_model` with
+detail `not_in_supported_models`, the change is saved and the command says to
+restart the provider to use the model. When serve is not running, `--save`
+saves the change for the next start. Exit codes: 0 on success (including each
+saved case above); 2 for a refused request, `primary`, or a change that could
+not be saved; 3 for `busy`; 4 when serve is not running and `--save` is not
+given, when a stale control socket has no listener, or when serve does not
+answer or answers `unavailable`.
 
 **SPEC-001-R018 — Sharing one GPU.** Rows of different models MUST NOT be
 batched in one forward; continuous batching (SPEC-038) batches rows of one
@@ -5687,8 +5795,10 @@ sibling busy.
   - *Current limits.* After a promotion (SPEC-011 R-3.10.3) the top-level
     `throughput_tps_estimate`, and so the new primary's entry, keeps the
     start-up estimate measured for the original boot model, scaled by the new
-    primary's share; and the demoted boot model's entry reports 0, because no
-    member probe ran for it. A promotion re-measures neither.
+    primary's share. The demoted model keeps, as its solo rate, the unscaled
+    start-up estimate the top level advertised while it was the primary, and
+    its entry is that rate scaled by its own share; in autotune-candidate mode
+    that estimate is 0. A promotion runs no probe and re-measures neither.
 
 **SPEC-001-R019 — Per-member policy, self-check and settlement.** Signed
 continuous-batching admission (SPEC-038), signed native-MTP admission

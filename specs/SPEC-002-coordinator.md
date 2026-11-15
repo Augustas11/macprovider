@@ -1,6 +1,14 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.37 (2026-11-15, multi-model decoding, entry views, routing keys and `/poolz` as built)
+**Version:** 1.6.38 (2026-11-16, explorer and provider earnings per model)
+
+**Change log v1.6.38 (2026-11-16, Related: #2338):** `SPEC-002-R011` *Pool
+and operator views* adds the operator explorer (SPEC-007 v0.5.3):
+`models_available` lists every entry's model and each provider row carries
+`warm_models` (each entry's model, primary flag, state and seats), behind
+the explorer's operator bearer. The provider earnings read (SPEC-005 v0.6.26)
+adds `credits_by_model`, the payable credit total split by each row's
+model. Read-only; no routing, settlement or payout change. No trust tier or attestation label changes.
 
 **Change log v1.6.37 (2026-11-15, Related: #2338):** `SPEC-002-R011` says
 what the code does: the strict `warm_models` decoding rules and bounds (64
@@ -6304,11 +6312,19 @@ reduces to today's per-provider behaviour, byte for byte.
   model. `/v1/models` lists each entry's model. The gateway counts the rows
   of one session once for pool-level and serving counts (in service when any
   row is, with the best state of its rows) and keeps per-model counts per
-  row.
+  row. The operator explorer (SPEC-007) lists every entry's model in
+  `models_available`, keeps its provider counts and slot totals per session,
+  and adds to each provider row `warm_models`: one object per entry, primary
+  first, with `model_id`, `primary`, `state`, `slots_total` and `slots_free`
+  (the entry view's seats), and an empty list for a provider without
+  `warm_models`.
 - *Settlement.* The route snapshot's `model_id`, `spec008_hash_status`,
   `provider_reported_model_hash` and `expected_catalog_model_hash` (SPEC-022)
   come from the dispatched entry, the snapshot records that the attempt was
   dispatched with `served_model_id` (SPEC-022 R-16.2a), and the request
-  settles against that model.
+  settles against that model. The provider earnings read (SPEC-005 §11.4)
+  reports `credits_by_model`, the payable credit total split by each row's
+  model, so a provider sees what each of its models earned; the split sums
+  to `total_credits`.
 - *Trust.* No trust tier, admission tier or attestation label is minted,
   upgraded or downgraded by the number of warm models.
