@@ -231,4 +231,62 @@ func TestWarmEntryRouteSnapshotRecordsServingMember(t *testing.T) {
 	if providerID != "warm" || modelID != "model-a" || reported != buyerTestHash || expected != buyerTestHash || status != string(pool.HashStatusVerified) {
 		t.Fatalf("route snapshot provider=%s model=%s reported=%s expected=%s status=%s, want the model-a member", providerID, modelID, reported, expected, status)
 	}
+	// SPEC-022 R-16.2a: the snapshot is marked as an entry dispatch.
+	var flagged int
+	if err := db.QueryRow(`SELECT served_model_dispatch FROM settlement_route_snapshots`).Scan(&flagged); err != nil || flagged != 1 {
+		t.Fatalf("served_model_dispatch=%d err=%v, want 1", flagged, err)
+	}
+}
+
+// A provider without warm_models is never marked as an entry dispatch, so
+// its credits keep the provider-wide SPEC-022 R-16.2 hold predicate.
+func TestRouteSnapshotWithoutWarmSetIsNotServedModelDispatch(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "legacy-dispatch-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:   true,
+		CatalogPath:      writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey: pubkey,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x82}, 32))
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var flagged int
+	if err := db.QueryRow(`SELECT served_model_dispatch FROM settlement_route_snapshots`).Scan(&flagged); err != nil || flagged != 0 {
+		t.Fatalf("served_model_dispatch=%d err=%v, want 0", flagged, err)
+	}
 }

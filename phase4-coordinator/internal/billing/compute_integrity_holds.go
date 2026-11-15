@@ -54,18 +54,42 @@ CREATE INDEX IF NOT EXISTS idx_cieh_provider_model ON compute_integrity_earnings
 }
 
 // computeIntegrityHoldExclusionSQL is the SPEC-022 R-16.2 predicate over a
-// ledger_request_credits alias. The payable view and the weekly settlement
-// selection share it. A credit already settled into a payout is never
-// withheld (R-16.3), so a hold cannot invalidate or strand a payout.
+// ledger_request_credits alias, narrowed by R-16.2a. The payable view and the
+// weekly settlement selection share it. A credit already settled into a
+// payout is never withheld (R-16.3), so a hold cannot invalidate or strand a
+// payout.
 func computeIntegrityHoldExclusionSQL(alias string) string {
+	return computeIntegrityProviderHoldExclusionSQL(alias, `
+          AND `+computeIntegrityHoldServedModelSQL(alias, "cieh"))
+}
+
+// computeIntegrityProviderHoldExclusionSQL is the provider-wide R-16.2
+// predicate, with also appended to the hold match.
+func computeIntegrityProviderHoldExclusionSQL(alias, also string) string {
 	return `(` + alias + `.settled = 1 OR NOT EXISTS (
        SELECT 1
          FROM compute_integrity_earnings_holds cieh
         WHERE cieh.status = 'held'
           AND cieh.provider_id = ` + alias + `.provider_id
           AND ` + alias + `.ts_utc >= cieh.window_start_utc
-          AND (cieh.window_end_utc IS NULL OR ` + alias + `.ts_utc <= cieh.window_end_utc)
+          AND (cieh.window_end_utc IS NULL OR ` + alias + `.ts_utc <= cieh.window_end_utc)` + also + `
    ))`
+}
+
+// computeIntegrityHoldServedModelSQL is SPEC-022 R-16.2a: a credit whose
+// attempt was dispatched to a warm-set entry (SPEC-002-R011) matches only a
+// hold for the served model its route snapshot records. Any other credit,
+// including one whose snapshot is gone, keeps the provider-wide R-16.2 match.
+func computeIntegrityHoldServedModelSQL(credit, hold string) string {
+	return `NOT EXISTS (
+              SELECT 1
+                FROM settlement_route_snapshots srs_served
+               WHERE srs_served.request_id = ` + credit + `.request_id
+                 AND srs_served.attempt_n = ` + credit + `.attempt_n
+                 AND srs_served.provider_id = ` + credit + `.provider_id
+                 AND srs_served.served_model_dispatch = 1
+                 AND lower(srs_served.model_id) <> lower(` + hold + `.model_id)
+          )`
 }
 
 func computeIntegrityHoldCreditMatchSQL(row string) string {
@@ -276,12 +300,13 @@ UPDATE compute_integrity_earnings_holds
 	return hold, nil
 }
 
-const computeIntegrityHoldColumns = `
+var computeIntegrityHoldColumns = `
 SELECT h.id, h.provider_id, h.model_id, h.kind, h.window_start_utc, h.window_end_utc, h.reason, h.status,
        h.created_at_utc, h.released_at_utc, COALESCE(h.released_by, ''), COALESCE(h.release_reason, ''),
        COALESCE((SELECT SUM(c.provider_credits)
                    FROM ledger_request_credits c
-                  WHERE c.settled = 0 AND ` + "c.provider_id = h.provider_id AND c.ts_utc >= h.window_start_utc AND (h.window_end_utc IS NULL OR c.ts_utc <= h.window_end_utc)" + `), 0)
+                  WHERE c.settled = 0 AND ` + "c.provider_id = h.provider_id AND c.ts_utc >= h.window_start_utc AND (h.window_end_utc IS NULL OR c.ts_utc <= h.window_end_utc)" + `
+                    AND ` + computeIntegrityHoldServedModelSQL("c", "h") + `), 0)
   FROM compute_integrity_earnings_holds h`
 
 func scanComputeIntegrityHold(scan func(...any) error) (computeintegrity.EarningsHold, error) {
