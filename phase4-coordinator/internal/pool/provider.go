@@ -3263,7 +3263,11 @@ type HeartbeatUpdate struct {
 	// (nil: the provider reports none). Each further member carries its own
 	// ExpectedModelHash.
 	WarmModels []WarmModel
-	At         time.Time
+	// KeepWarmModels marks a heartbeat whose warm_models was rejected: the
+	// session keeps its previous member list (SPEC-002-R011), unless the
+	// top-level model no longer is that list's primary.
+	KeepWarmModels bool
+	At             time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -3354,7 +3358,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	warmInFlight := warmInFlightLocked(p)
-	promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
+	if !hb.KeepWarmModels {
+		promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
+	}
 	p.LastHeartbeatAt = hb.At
 	p.recordConversationCache(hb.ConversationCache, hb.At)
 	if hb.ConversationCache.Valid() {
@@ -3436,7 +3442,11 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
 	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
-	r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true)
+	if hb.KeepWarmModels {
+		r.keepWarmModelsLocked(p)
+	} else {
+		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true)
+	}
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
 	}

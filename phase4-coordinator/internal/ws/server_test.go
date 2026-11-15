@@ -5000,8 +5000,9 @@ func dialAndAuthV2ProviderWithInitial(t *testing.T, h providerHarness, mutate fu
 }
 
 // A v2 provider declares its warm set on the initial stage and repeats it on
-// every heartbeat. A heartbeat whose warm set leaves supported_models is
-// malformed: it is logged once and changes nothing in the pool.
+// every heartbeat. A heartbeat whose warm set leaves supported_models has a
+// malformed warm set: it is logged once, the previous warm set stays and the
+// rest of the heartbeat applies.
 func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 	logs := &lockedBuffer{}
 	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs), func(cfg *config.Config) {
@@ -5041,12 +5042,18 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 	eventually(t, func() bool {
 		return strings.Count(logs.String(), `"field":"warm_models"`) == 1
 	})
-	if !strings.Contains(logs.String(), `"message":"invalid heartbeat"`) {
+	if !strings.Contains(logs.String(), `"event":"heartbeat_warm_models_rejected"`) {
 		t.Fatalf("logs = %s", logs.String())
 	}
-	p, ok := h.Registry.Resolve("m4-anon", assignedID)
-	if !ok || p.State != pool.StateBusy || p.SlotsFree != 0 {
-		t.Fatalf("a rejected heartbeat changed the session: ok=%v state=%s slots_free=%d", ok, p.State, p.SlotsFree)
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && p.State == pool.StateReady && p.SlotsFree == 1
+	})
+	if member, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b"); !ok || member.ServedModelID != "model-b" {
+		t.Fatalf("previous warm set not kept: model-b entry = %+v ok=%v", member, ok)
+	}
+	if _, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-z"); ok {
+		t.Fatal("the rejected warm set was applied")
 	}
 }
 

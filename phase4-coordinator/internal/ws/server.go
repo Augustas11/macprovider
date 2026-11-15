@@ -6690,6 +6690,18 @@ func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string
 
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
 	hb, presence, field, err := ParseHeartbeat(payload)
+	// SPEC-002-R011: a malformed warm_models on a heartbeat drops only the
+	// warm-set update; the previous member list stays and the rest of the
+	// heartbeat applies, so the session never goes stale over it.
+	var warmModelsErr error
+	if err != nil && field == warmModelsField {
+		if rest, ok := withoutWarmModels(payload); ok {
+			if restHB, restPresence, _, restErr := ParseHeartbeat(rest); restErr == nil {
+				warmModelsErr = err
+				hb, presence, field, err = restHB, restPresence, "", nil
+			}
+		}
+	}
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
 		if field == "model_hash" || field == "model_hash_algorithm" {
@@ -6698,16 +6710,24 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		return
 	}
 	if hb.WarmModels != nil {
-		// SPEC-002-R011: a warm set outside the session's supported_models is
-		// a malformed heartbeat and changes nothing.
+		// A warm set outside the session's supported_models is malformed.
 		var supported []string
 		if current, ok := s.pool.Resolve(providerID, assignedID); ok {
 			supported = current.SupportedModels
 		}
 		if err := validateWarmModelsSupported(hb.WarmModels, supported, hb.ModelID); err != nil {
-			s.log.Warn().Err(err).Str("field", warmModelsField).Str("provider_id", providerID).Msg("invalid heartbeat")
-			return
+			warmModelsErr = err
+			hb.WarmModels = nil
 		}
+	}
+	if warmModelsErr != nil {
+		s.log.Warn().
+			Err(warmModelsErr).
+			Str("event", "heartbeat_warm_models_rejected").
+			Str("field", warmModelsField).
+			Str("provider_id", providerID).
+			Str("assigned_id", assignedID).
+			Msg("heartbeat warm_models rejected; previous warm set kept, rest of the heartbeat applied")
 	}
 	state := pool.State(hb.Status)
 	if !validState(state) {
@@ -6812,6 +6832,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			SafetyTelemetry:           hb.SafetyTelemetry,
 			ConversationCache:         hb.ConversationCache,
 			WarmModels:                warmModels,
+			KeepWarmModels:            warmModelsErr != nil,
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {

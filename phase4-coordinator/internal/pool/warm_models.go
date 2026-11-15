@@ -233,6 +233,17 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 	r.applyComputeIntegritySuspensionLocked(p)
 }
 
+// keepWarmModelsLocked keeps the previous member list for a heartbeat whose
+// warm_models was rejected. A list whose primary is no longer the session's
+// model describes another configuration and is dropped (fail closed: the
+// session serves its top-level model only until a valid warm set arrives).
+func (r *Registry) keepWarmModelsLocked(p *Provider) {
+	if p.WarmModels != nil && warmModelKey(p.WarmModels[0].ModelID) != warmModelKey(p.ModelID) {
+		p.WarmModels = nil
+	}
+	r.applyComputeIntegritySuspensionLocked(p)
+}
+
 // warmModelIdentityLocked is the SPEC-008 §5.5 / SPEC-010 verdict for one
 // further member, computed by the same verifier chain as the session's model.
 // The primary-only catalog model binding is not this member's, so it is not used.

@@ -69,7 +69,7 @@ func parseWarmModels(raw map[string]json.RawMessage, top warmModelsTopLevel) ([]
 		if entry == nil {
 			return nil, fmt.Errorf("warm_models[%d] must be an object", i)
 		}
-		model, err := parseWarmModelEntry(entry, top.ramGB)
+		model, err := parseWarmModelEntry(entry, top, i == 0)
 		if err != nil {
 			return nil, fmt.Errorf("warm_models[%d]: %w", i, err)
 		}
@@ -89,7 +89,14 @@ func parseWarmModels(raw map[string]json.RawMessage, top warmModelsTopLevel) ([]
 	return out, nil
 }
 
-func parseWarmModelEntry(entry map[string]json.RawMessage, ramGB int) (pool.WarmModel, error) {
+// parseWarmModelEntry decodes one entry. The first (primary) entry repeats
+// top-level fields: for those only equality with the top level is checked
+// (checkWarmModelsPrimary), so the top-level rules alone decide their
+// validity and a legal top-level value never fails an entry bound.
+func parseWarmModelEntry(entry map[string]json.RawMessage, top warmModelsTopLevel, first bool) (pool.WarmModel, error) {
+	ramGB := top.ramGB
+	bounded := !first
+	slotsBounded := !first || !top.slotsReported
 	var model pool.WarmModel
 	if err := requireString(entry, "model_id", &model.ModelID); err != nil {
 		return pool.WarmModel{}, err
@@ -114,7 +121,7 @@ func parseWarmModelEntry(entry map[string]json.RawMessage, ramGB int) (pool.Warm
 	if err := requireInt(entry, "slots_total", &model.SlotsTotal); err != nil {
 		return pool.WarmModel{}, err
 	}
-	if model.SlotsTotal < 0 || model.SlotsTotal > maxWarmModelSlots {
+	if slotsBounded && (model.SlotsTotal < 0 || model.SlotsTotal > maxWarmModelSlots) {
 		return pool.WarmModel{}, fmt.Errorf("slots_total must be in 0..%d", maxWarmModelSlots)
 	}
 	if v, ok := entry["slots_free"]; ok {
@@ -124,13 +131,13 @@ func parseWarmModelEntry(entry map[string]json.RawMessage, ramGB int) (pool.Warm
 		if string(v) == "null" || json.Unmarshal(v, &model.SlotsFree) != nil {
 			return pool.WarmModel{}, fmt.Errorf("slots_free must be an integer")
 		}
-		if model.SlotsFree < 0 || model.SlotsFree > model.SlotsTotal {
+		if slotsBounded && (model.SlotsFree < 0 || model.SlotsFree > model.SlotsTotal) {
 			return pool.WarmModel{}, fmt.Errorf("slots_free must be in 0..slots_total")
 		}
 	}
 	if v, ok := entry["max_context_tokens"]; ok {
 		if string(v) == "null" || json.Unmarshal(v, &model.MaxContextTokens) != nil ||
-			model.MaxContextTokens < 0 || model.MaxContextTokens > maxWarmModelContextTokens {
+			bounded && (model.MaxContextTokens < 0 || model.MaxContextTokens > maxWarmModelContextTokens) {
 			return pool.WarmModel{}, fmt.Errorf("max_context_tokens must be an integer in 0..%d", maxWarmModelContextTokens)
 		}
 	}
@@ -147,7 +154,7 @@ func parseWarmModelEntry(entry map[string]json.RawMessage, ramGB int) (pool.Warm
 			continue
 		}
 		if string(v) == "null" || json.Unmarshal(v, f.out) != nil ||
-			math.IsNaN(*f.out) || math.IsInf(*f.out, 0) || *f.out < 0 || *f.out > f.max {
+			math.IsNaN(*f.out) || math.IsInf(*f.out, 0) || bounded && (*f.out < 0 || *f.out > f.max) {
 			return pool.WarmModel{}, fmt.Errorf("%s must be a number in 0..%v", f.field, f.max)
 		}
 	}
@@ -257,6 +264,17 @@ func validateWarmModelsSupported(models []pool.WarmModel, supported []string, to
 		}
 	}
 	return nil
+}
+
+// withoutWarmModels is a heartbeat payload with its warm_models key removed.
+func withoutWarmModels(payload []byte) ([]byte, bool) {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(payload, &raw) != nil {
+		return nil, false
+	}
+	delete(raw, warmModelsField)
+	out, err := json.Marshal(raw)
+	return out, err == nil
 }
 
 // warmModelsForPool readies a validated warm set for the registry: each
