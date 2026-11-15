@@ -7,6 +7,7 @@
 #                    [--serve-env "K=V K2=V2"] [--rows 1,4] [--trials 3]
 #                    [--max-context N] [--floor 0.03] [--skip-reference]
 #                    [--text-fallback-reason TEXT] [--no-autotune-candidate]
+#                    [--margins FILE] [--tie-steps N]
 #                    [--serve-arg ARG]... [--sample-seconds N]
 #
 # --no-autotune-candidate drops the lab autotune flag from the serve command;
@@ -30,6 +31,8 @@ MAX_CONTEXT=""
 FLOOR=0.03
 SKIP_REF=0
 FALLBACK=""
+MARGINS=""
+TIE_STEPS=""
 AUTOTUNE=1
 SAMPLE_SECS=0
 SERVE_ARGS=()
@@ -54,6 +57,8 @@ while [ $# -gt 0 ]; do
     --serve-arg) SERVE_ARGS+=("$2"); shift 2 ;;
     --sample-seconds) SAMPLE_SECS="$2"; shift 2 ;;
     --text-fallback-reason) FALLBACK="$2"; shift 2 ;;
+    --margins) MARGINS="$2"; shift 2 ;;
+    --tie-steps) TIE_STEPS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -146,5 +151,7 @@ trap - EXIT
 echo "== compare $(date +%T) (client rc=$client_rc)"
 CMP=(--ref "$REF" --ours "$OURS" --floor "$FLOOR" --json "$OUT_DIR/summary.json")
 [ -n "$FALLBACK" ] && CMP+=(--text-fallback-reason "$FALLBACK")
+[ -n "$MARGINS" ] && CMP+=(--margins "$MARGINS")
+[ -n "$TIE_STEPS" ] && CMP+=(--tie-steps "$TIE_STEPS")
 /usr/bin/python3 -I "$HERE/compare.py" "${CMP[@]}" | tee "$OUT_DIR/summary.md"
 exit "${PIPESTATUS[0]}"

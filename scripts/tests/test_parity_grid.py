@@ -19,6 +19,7 @@ def module(name):
 compare = module("compare")
 prompts = module("prompts")
 client = module("provider_client")
+margin = module("margin")
 
 MODEL = "m"
 TEXT = "The keeper lit the lamp."
@@ -149,11 +150,120 @@ class CompareTests(unittest.TestCase):
         cell = by_cell(compare.evaluate(ref, ours))[(200, 128, 2)]
         self.assertTrue(any("missing single-row reference" in r for r in cell["reasons"]))
 
-    def test_missing_provider_cell_fails(self):
+    def test_missing_provider_cell_is_not_run_not_failure(self):
         ref = [ref_line(200, 128, 126.0, i) for i in range(3)] + [ref_line(200, 512, 126.0, i) for i in range(3)]
         s = compare.evaluate(ref, our_lines(200, 128, 1, [127.0] * 3))
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertEqual([(n["ctx"], n["out"]) for n in s["not_run"]], [(200, 512)])
+        self.assertNotIn((200, 512, 1), by_cell(s))
+        self.assertIn("Not run (1, excluded from pass/fail): ctx200/out512", compare.markdown(s))
+
+    def test_provider_cell_without_reference_fails(self):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        s = compare.evaluate(ref, our_lines(200, 128, 1, [127.0] * 3) + our_lines(200, 512, 1, [127.0] * 3))
         self.assertFalse(s["pass"])
-        self.assertIn("missing provider result", by_cell(s)[(200, 512, 1)]["reasons"])
+        self.assertIn("missing reference for prompt row 0", by_cell(s)[(200, 512, 1)]["reasons"])
+
+    # Tie-aware text gate.
+    BAD = "The keeper lit the lantern."  # first differing byte: len("The keeper lit the la")
+
+    def _rec(self, steps, prefix=len("The keeper lit the la"), ctx=200, span=3, index=5):
+        return {"ctx_target": ctx, "max_tokens": 128, "token_index": index, "margin": 0.0156,
+                "margin_steps": steps, "common_prefix_bytes": prefix, "diff_span_bytes": span}
+
+    def _tie_inputs(self, tokens=None, text_row0=None):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        return ref, our_lines(200, 128, 1, [127.0] * 3, texts={0: text_row0 or self.BAD}, tokens=tokens)
+
+    def test_tie_does_not_fail(self):
+        ref, ours = self._tie_inputs()
+        s = compare.evaluate(ref, ours, margins=[self._rec(1.0)])
+        self.assertTrue(s["pass"], s["failing"])
+        cell = s["cells"][0]
+        self.assertEqual(cell["text_gate"], "tie")
+        self.assertEqual(cell["tie_margin_steps"], 1.0)
+        self.assertEqual(s["ties"], [{"cell": cell["cell"], "margin_steps": 1.0}])
+        md = compare.markdown(s)
+        self.assertIn("tie (margin 1 steps)", md)
+
+    def test_tie_boundary_and_wide_margin(self):
+        ref, ours = self._tie_inputs()
+        self.assertTrue(compare.evaluate(ref, ours, margins=[self._rec(2.0)])["pass"])
+        s = compare.evaluate(ref, ours, margins=[self._rec(2.5)])
+        self.assertFalse(s["pass"])
+        self.assertEqual(s["cells"][0]["text_gate"], "fail")
+        self.assertTrue(compare.evaluate(ref, ours, margins=[self._rec(2.5)], tie_steps=3)["pass"])
+
+    def test_no_margins_or_no_record_stays_fail(self):
+        ref, ours = self._tie_inputs()
+        self.assertFalse(compare.evaluate(ref, ours)["pass"])
+        self.assertFalse(compare.evaluate(ref, ours, margins=[self._rec(0.0, ctx=4000)])["pass"])
+        # Offset outside the record's window: a different divergence.
+        self.assertFalse(compare.evaluate(ref, ours, margins=[self._rec(0.0, prefix=5)])["pass"])
+
+    def test_tie_covers_token_count_difference(self):
+        ref, ours = self._tie_inputs(tokens=100)
+        s = compare.evaluate(ref, ours, margins=[self._rec(0.0)])
+        cell = s["cells"][0]
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertTrue(cell["tokens_ok"])
+        self.assertTrue(any("not gated" in n for n in cell["notes"]))
+        # Without a covering tie the same count difference fails.
+        self.assertFalse(compare.evaluate(ref, ours)["cells"][0]["tokens_ok"])
+        # Identical text with a short count still fails the token gate.
+        ours = our_lines(200, 128, 1, [127.0] * 3, tokens=100)
+        self.assertFalse(compare.evaluate(ref, ours, margins=[self._rec(0.0)])["cells"][0]["tokens_ok"])
+
+    def test_one_record_covers_longer_cells_with_same_prefix(self):
+        ref, ours = [], []
+        for out in (128, 512):
+            ref += [ref_line(200, out, 126.0, i) for i in range(3)]
+            ours += our_lines(200, out, 1, [127.0] * 3, texts={0: self.BAD})
+        s = compare.evaluate(ref, ours, margins=[self._rec(1.0)])
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertEqual([c["text_gate"] for c in s["cells"]], ["tie", "tie"])
+
+    def test_tie_does_not_cover_other_rows(self):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        ref += [ref_line(200, 128, 125.0, 0, row=1, text="row 1 text")]
+        ours = our_lines(200, 128, 2, [250.0] * 3, texts={0: TEXT, 1: "row 1 TEXT"})
+        s = compare.evaluate(ref, ours, margins=[self._rec(0.0, prefix=len("row 1 "))])
+        self.assertFalse(s["pass"])
+
+    def test_margins_cli_flags(self):
+        import contextlib
+        import io
+        import tempfile
+        ref, ours = self._tie_inputs()
+        with tempfile.TemporaryDirectory() as d:
+            refp, oursp, mp, js = (Path(d, n) for n in ("r.jsonl", "o.jsonl", "m.json", "s.json"))
+            refp.write_text("".join(json.dumps(x) + "\n" for x in ref))
+            oursp.write_text("".join(json.dumps(x) + "\n" for x in ours))
+            mp.write_text(json.dumps({"records": [self._rec(1.5)]}))
+            base = ["--ref", str(refp), "--ours", str(oursp), "--json", str(js)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(compare.main(base), 1)
+                self.assertEqual(compare.main(base + ["--margins", str(mp)]), 0)
+                self.assertEqual(compare.main(base + ["--margins", str(mp), "--tie-steps", "1"]), 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                compare.main(base + ["--margins", str(mp)])
+            self.assertEqual(json.loads(js.read_text())["ties"][0]["margin_steps"], 1.5)
+
+    # Reasoning-only streams.
+    def test_reasoning_only_text_not_comparable(self):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        ours = our_lines(200, 128, 1, [127.0] * 3, texts={0: ""})
+        for r in ours:
+            if r["kind"] == "row":
+                r["reasoning_text"] = "thinking..."
+        s = compare.evaluate(ref, ours)
+        cell = s["cells"][0]
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertEqual(cell["text_gate"], "not_comparable")
+        self.assertIn("reasoning_content", cell["text_reason"])
+        self.assertTrue(cell["ratio_ok"])
+        # Empty text without reasoning is still a mismatch.
+        self.assertFalse(compare.evaluate(ref, our_lines(200, 128, 1, [127.0] * 3, texts={0: ""}))["pass"])
 
     def test_falling_slope(self):
         ref = []
@@ -218,6 +328,38 @@ class CompareTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = compare.main(["--ref", str(refp), "--ours", str(oursp), "--json", str(js)])
             self.assertEqual(rc, 1)
+
+
+class MarginTests(unittest.TestCase):
+    def test_spacing_by_binade(self):
+        self.assertEqual(margin.spacing(20.0, "float16"), 0.015625)
+        self.assertEqual(margin.spacing(31.99, "mlx.core.float16"), 0.015625)
+        self.assertEqual(margin.spacing(32.0, "float16"), 0.03125)
+        self.assertEqual(margin.spacing(-20.0, "float16"), 0.015625)
+        self.assertEqual(margin.spacing(20.0, "bfloat16"), 0.125)
+        self.assertEqual(margin.spacing(1.0, "bfloat16"), 2.0 ** -7)
+        self.assertEqual(margin.spacing(20.0, "float32"), 2.0 ** -19)
+        self.assertEqual(margin.spacing(0.0, "float16"), 2.0 ** -24)
+        self.assertEqual(margin.spacing(1e-9, "float16"), 2.0 ** -24)
+        with self.assertRaises(ValueError):
+            margin.spacing(1.0, "int8")
+
+    def test_first_token_diff(self):
+        self.assertEqual(margin.first_token_diff([1, 2, 3], [1, 2, 4]), 2)
+        self.assertEqual(margin.first_token_diff([1, 2, 3], [1, 2]), 2)
+
+    def test_build_record(self):
+        rec = margin.build_record(4000, 512, 7, 11, None, [11, 12, 13, 14, 15],
+                                  [20.0, 19.96875, 18.0, 17.0, 16.0], "mlx.core.float16",
+                                  common_prefix_bytes=30, diff_span_bytes=4)
+        self.assertEqual(rec["dtype"], "float16")
+        self.assertAlmostEqual(rec["margin"], 0.03125)
+        self.assertAlmostEqual(rec["margin_steps"], 2.0)
+        self.assertIsNone(rec["our_token"])
+        self.assertEqual((rec["ctx_target"], rec["max_tokens"], rec["token_index"]), (4000, 512, 7))
+        json.dumps(rec)
+        bf = margin.build_record(200, 128, 1, 1, 2, [1, 2], [20.0, 19.875], "bfloat16")
+        self.assertAlmostEqual(bf["margin_steps"], 1.0)
 
 
 class PromptTests(unittest.TestCase):
@@ -308,6 +450,35 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(res["finish"], "stop")
         self.assertEqual(res["usage"], {"completion_tokens": 2})
         self.assertEqual((res["t_first"], res["t_last"]), (0, 1))
+
+    def test_reasoning_deltas_are_timed_and_counted(self):
+        ticks = iter(range(100))
+        lines = [b'data: {"choices":[{"delta":{"reasoning_content":"a"}}]}\n',
+                 b'data: {"choices":[{"delta":{"reasoning_content":"b"}}]}\n',
+                 b'data: {"choices":[{"delta":{"content":"c"}}]}\n',
+                 b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":9,'
+                 b'"macprovider_generated_completion_tokens":3}}\n', b"data: [DONE]\n"]
+        res = client.consume_stream(lines, clock=lambda: next(ticks))
+        self.assertEqual((res["text"], res["reasoning_text"]), ("c", "ab"))
+        self.assertEqual((res["t_first"], res["t_last"], res["chunks"]), (0, 2, 3))
+        res["t0"], res["t_end"] = -1, 10
+        rec = client.row_record(res, {})
+        self.assertEqual(rec["completion_tokens"], 3)
+        self.assertEqual(rec["decode_tps"], 1.0)
+        self.assertEqual(rec["reasoning_text"], "ab")
+
+    def test_reasoning_only_stream_records_speed(self):
+        ticks = iter(range(100))
+        lines = [b'data: {"choices":[{"delta":{"reasoning_content":"x"}}]}\n',
+                 b'data: {"choices":[{"delta":{"reasoning_content":"y"}}]}\n',
+                 b'data: {"choices":[],"usage":{"completion_tokens":2}}\n']
+        res = client.consume_stream(lines, clock=lambda: next(ticks))
+        res["t0"], res["t_end"] = -1, 5
+        rec = client.row_record(res, {})
+        self.assertEqual(rec["text"], "")
+        self.assertEqual(rec["completion_tokens"], 2)
+        self.assertEqual(rec["decode_tps"], 1.0)
+        self.assertEqual(rec["ttft_s"], 1.0)
 
     def test_request_against_fake_server(self):
         msgs = prompts.build_messages(200, 0)

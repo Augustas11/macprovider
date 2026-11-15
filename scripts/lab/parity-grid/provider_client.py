@@ -12,8 +12,11 @@ prompt row r, so concurrent rows never share a prompt prefix.
 
 Per trial it writes one "row" line per request and one "aggregate" line.
 decode_tps = (completion_tokens - 1) / (t_last - t_first), where t_first and
-t_last are the arrival times of the first and last content chunks and
-completion_tokens comes from the server's usage frame.
+t_last are the arrival times of the first and last generated delta (content or
+reasoning_content: a model that streams its output as reasoning is timed the
+same way) and completion_tokens is the usage frame's
+macprovider_generated_completion_tokens when present, else completion_tokens.
+`text` is content only; reasoning deltas are kept in `reasoning_text`.
 """
 import argparse
 import hashlib
@@ -48,7 +51,7 @@ def iter_sse_data(lines):
 def consume_stream(lines, clock=time.perf_counter):
     """Fold a chat.completion.chunk SSE stream into one result dict."""
     text = []
-    reasoning_chars = 0
+    reasoning = []
     t_first = t_last = None
     chunks = 0
     finish = None
@@ -69,14 +72,16 @@ def consume_stream(lines, clock=time.perf_counter):
         for choice in obj.get("choices") or []:
             delta = choice.get("delta") or {}
             piece = delta.get("content")
-            if delta.get("reasoning_content"):
-                reasoning_chars += len(delta["reasoning_content"])
-            if piece:
+            thought = delta.get("reasoning_content")
+            if piece or thought:
                 if t_first is None:
                     t_first = now
                 t_last = now
                 chunks += 1
+            if piece:
                 text.append(piece)
+            if thought:
+                reasoning.append(thought)
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
     return {
@@ -86,7 +91,8 @@ def consume_stream(lines, clock=time.perf_counter):
         "chunks": chunks,
         "finish": finish,
         "usage": usage,
-        "reasoning_chars": reasoning_chars,
+        "reasoning_text": "".join(reasoning),
+        "reasoning_chars": sum(len(x) for x in reasoning),
         "error": error,
     }
 
@@ -94,7 +100,8 @@ def consume_stream(lines, clock=time.perf_counter):
 def completion_tokens_of(usage):
     if not usage:
         return None
-    return usage.get("completion_tokens")
+    generated = usage.get("macprovider_generated_completion_tokens")
+    return generated if generated is not None else usage.get("completion_tokens")
 
 
 def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1"):
@@ -149,6 +156,7 @@ def row_record(res, base):
         "chunks": res.get("chunks"),
         "finish": res.get("finish"),
         "reasoning_chars": res.get("reasoning_chars", 0),
+        "reasoning_text": res.get("reasoning_text", ""),
         "usage": usage or None,
         "error": error,
         "text": text,

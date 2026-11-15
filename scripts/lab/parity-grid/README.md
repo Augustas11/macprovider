@@ -17,6 +17,7 @@ always given on the command line; `grid.json` holds placeholders only.
 | `reference_mlxlm.py` | python with `mlx_lm` | `mlx_lm.load` + `stream_generate`, greedy (`temp=0`), chat template from the tokenizer |
 | `provider_client.py` | stdlib python | streaming `/v1/chat/completions` client, N concurrent rows by threads |
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
+| `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
 | `run-grid.sh` | bash | one lab window for one model: reference, provider, client, compare |
 
 ## Running a window
@@ -36,6 +37,7 @@ scripts/lab/parity-grid/run-grid.sh \
   # --serve-env "MACPROVIDER_X=1 OTHER=2"
   # --skip-reference           (reuse $OUT/reference.jsonl)
   # --text-fallback-reason "..."
+  # --margins margins.json --tie-steps 2   (tie-aware text gate, see below)
 ```
 
 Outputs in `$OUT`: `reference.jsonl`, `provider.jsonl`, `summary.md`,
@@ -70,9 +72,13 @@ Both sides write one JSON line per row per trial with `cell`, `prompt_tokens`,
 
 - `decode_tps = (completion_tokens - 1) / (t_last - t_first)`, where t_first
   and t_last are the times of the first and last token (reference) or the
-  first and last content chunk (provider).
-- Provider `completion_tokens` is the server's `usage.completion_tokens`;
-  `macprovider_generated_completion_tokens`, `cached_prompt_tokens` and
+  first and last generated delta (provider). A delta is `content` or
+  `reasoning_content`, so a model that streams everything as reasoning still
+  gets a first-token time and a tok/s. `text` is content only;
+  `reasoning_text` holds the reasoning deltas.
+- Provider `completion_tokens` is the usage frame's
+  `macprovider_generated_completion_tokens` when present, else
+  `usage.completion_tokens`; `generated_completion_tokens`, `cached_prompt_tokens` and
   `macprovider_generation_ms` are recorded alongside. The client sends
   `stream_options: {"include_usage": true}` (`--no-stream-options` drops it);
   a stream without a usage frame is recorded as an error.
@@ -108,6 +114,30 @@ A band above 0.10 is reported as a "noisy cell" note: rerun that cell.
   reason (e.g. batched kernels reorder float sums), the caller passes
   `--text-fallback-reason "..."`: the mismatch and reason are recorded as a
   note and gate 2 decides.
+- **tie (optional, `--margins FILE --tie-steps N`, default 2)**: a differing
+  row is text status `tie`, not a failure, when a margins record covers it and
+  `margin_steps <= N`. Records come from `margin.py --json`, which examines the
+  first differing token of each mismatching prompt-row-0 cell and records the
+  reference top-5 logits, the top1-top2 margin, the logits dtype and
+  `margin_steps = margin / spacing`, where spacing is the float spacing of that
+  dtype at the top logit's magnitude (float16 at 16..32 is 0.0156, bfloat16 is
+  0.125): a margin of 0 to 2 steps is rounding, not a decoding bug.
+  **Mapping rule:** a row-0 mismatch of context `ctx` whose first differing
+  UTF-8 byte offset `b` satisfies `common_prefix_bytes <= b <=
+  common_prefix_bytes + diff_span_bytes` of a record with that `ctx_target` is
+  covered by it (ties between overlapping windows: the larger
+  `common_prefix_bytes`). `common_prefix_bytes` is the byte length of the
+  agreed text before the differing token, so every output length of one context
+  that branches at the same token shares one record. Rows other than 0, a
+  different branch point, or no record stay `fail`; without `--margins`
+  nothing changes. A covered tie also exempts that row from gate 2, because
+  the texts branched and the counts can legitimately differ; prompt tokens are
+  still checked. The table shows `tie (margin M steps)` and `summary.json`
+  lists `ties` plus per-cell `ties` with `margin_steps`.
+- **reasoning-only output**: when our row has `reasoning_text` and empty
+  content, speed is compared as usual and text is `not_comparable` (reason in
+  the cell's `text_reason`; it does not fail the cell). Reasoning text is not
+  matched against the reference's raw text. Gate 2 still applies.
 - **gate 2, tokens**: every row's `completion_tokens` must equal the
   reference's. Fewer tokens (and more) fail.
 - **prompt**: `prompt_tokens` must equal the reference's; otherwise the two
@@ -117,7 +147,24 @@ A band above 0.10 is reported as a "noisy cell" note: rerun that cell.
   both cells and both sides. Ours may fall with length only as much as stock
   mlx-lm does. A past bug decoded 83 / 58 / 38 tok/s at 128 / 512 / 1024
   tokens against a flat reference; that shape fails here.
-- A cell missing on either side fails.
+- Cells in the reference but absent from the provider run (e.g. reference run
+  with outputs 128/512/2048/4096, provider with 128/512) are listed once as
+  "Not run" (`not_run` in `summary.json`) and excluded from pass/fail. A cell
+  in the provider run with no reference fails.
+
+## margin.py
+
+```bash
+python margin.py --model-path DIR --ref reference.jsonl --ours provider.jsonl --json margins.json
+scripts/lab/parity-grid/run-grid.sh ... --skip-reference --margins margins.json
+```
+
+Prints, per mismatching cell, the first differing token index and the
+reference top-5 logits (existing output) and writes `{"records": [...]}` with
+`ctx_target`, `max_tokens`, `token_index`, `ref_token`, `our_token` (null when
+ours ended), `top_ids`, `top_logits`, `margin`, `dtype`, `margin_steps`,
+`common_prefix_bytes`, `diff_span_bytes`. Cells are examined once per
+(ctx, token index).
 
 ## Tests
 
