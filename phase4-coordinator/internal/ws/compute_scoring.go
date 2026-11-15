@@ -298,9 +298,13 @@ type computeScoringEngine struct {
 	// redrawn holds keys whose due time was redrawn at start and not yet
 	// stored; the redraw is stored once the key's provider is seen, so
 	// repeated restarts cannot keep redrawing a connected key's due time.
-	redrawn       map[computeScoringKey]struct{}
-	inFlight      map[computeScoringKey]bool
-	inFlightCount int
+	redrawn  map[computeScoringKey]struct{}
+	inFlight map[computeScoringKey]bool
+	// entryWithdrawals counts, per further-member key, the verification
+	// requests in a row whose entry vanished or changed identity before the
+	// answer ended (memberEntryWithdrawnMidProbe).
+	entryWithdrawals map[computeScoringKey]int
+	inFlightCount    int
 	// recentStarts holds the start times of the verification requests of
 	// the last rolling hour (FR-20 max_per_hour).
 	recentStarts []time.Time
@@ -360,21 +364,23 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		return nil, err
 	}
 	e := &computeScoringEngine{
-		s:            s,
-		deps:         deps,
-		tolerance:    computeintegrity.NewTolerance(),
-		scorers:      computeintegrity.NewScorerTracker(excluded),
-		known:        computeintegrity.NewKnownSequences(),
-		rng:          rng,
-		states:       map[computeScoringKey]*computeintegrity.KeyState{},
-		nextDue:      map[computeScoringKey]time.Time{},
-		dirtyDue:     map[computeScoringKey]time.Time{},
-		redrawn:      map[computeScoringKey]struct{}{},
-		inFlight:     map[computeScoringKey]bool{},
-		pending:      map[string]*pendingComputeScore{},
-		operatorKeys: map[string]cachedOperatorKey{},
-		lastSeen:     map[string]time.Time{},
-		scorerBusy:   map[string]bool{},
+		s:         s,
+		deps:      deps,
+		tolerance: computeintegrity.NewTolerance(),
+		scorers:   computeintegrity.NewScorerTracker(excluded),
+		known:     computeintegrity.NewKnownSequences(),
+		rng:       rng,
+		states:    map[computeScoringKey]*computeintegrity.KeyState{},
+		nextDue:   map[computeScoringKey]time.Time{},
+		dirtyDue:  map[computeScoringKey]time.Time{},
+		redrawn:   map[computeScoringKey]struct{}{},
+		inFlight:  map[computeScoringKey]bool{},
+
+		entryWithdrawals: map[computeScoringKey]int{},
+		pending:          map[string]*pendingComputeScore{},
+		operatorKeys:     map[string]cachedOperatorKey{},
+		lastSeen:         map[string]time.Time{},
+		scorerBusy:       map[string]bool{},
 
 		pendingExclusions:  map[string]time.Time{},
 		referenceOperators: map[string]struct{}{},
@@ -798,6 +804,7 @@ func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time)
 		}
 		if seen, ok := e.lastSeen[key.providerID]; !ok || seen.Before(cutoff) {
 			delete(e.states, key)
+			delete(e.entryWithdrawals, key)
 			if e.s.pool != nil {
 				e.s.pool.SetComputeIntegrityPassing(key.providerID, key.modelID, false)
 			}
@@ -966,7 +973,7 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	// when it is dispatched (runProbe).
 	e.pendingStarts++
 	e.mu.Unlock()
-	go e.runProbe(ctx, verified, scorers)
+	go e.runProbe(ctx, verified, scorers, furtherWarmMember(p))
 }
 
 // scorerEligibleLocked applies FR-21 rule 4 and the FR-24 availability
@@ -1005,12 +1012,18 @@ func (e *computeScoringEngine) inconclusive(reason string) {
 	}
 }
 
-func (e *computeScoringEngine) finishProbe(key computeScoringKey) {
+// finishProbe releases the key's reservation and draws its next due time;
+// stayDue keeps the current (passed) due time, so the key is probed again
+// as soon as its entry is routable.
+func (e *computeScoringEngine) finishProbe(key computeScoringKey, stayDue bool) {
 	now := e.s.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.inFlight, key)
 	e.inFlightCount--
+	if stayDue {
+		return
+	}
 	state := computeintegrity.VerificationUnverified
 	if st := e.states[key]; st != nil {
 		state = st.State
@@ -1041,9 +1054,12 @@ func (e *computeScoringEngine) releaseScorers(scorers []computeintegrity.ScorerC
 	}
 }
 
-func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate) {
+// runProbe sends one verification request. member marks a further warm-set
+// member's key (SPEC-002-R011).
+func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate, member bool) {
 	key := scoringKey(verified.ProviderID, verified.ModelID)
-	defer e.finishProbe(key)
+	stayDue := false
+	defer func() { e.finishProbe(key, stayDue) }()
 	defer e.releaseScorers(scorers)
 	dispatched := false
 	defer func() {
@@ -1101,11 +1117,25 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		Body:       probe.Body,
 		MaxTokens:  probe.MaxTokens,
 	})
+	unchanged := e.sessionUnchanged(verified)
+	if member && !unchanged {
+		// The provider withdrew or changed the member while its request was
+		// in flight: the key stays due, and repeated withdrawals count.
+		stayDue = true
+		e.inconclusive(ciInconclusiveDispatch)
+		e.memberEntryWithdrawnMidProbe(ctx, key, scorers)
+		return
+	}
 	if err != nil || !resp.Complete || strings.TrimSpace(resp.OutputText+resp.ReasoningText) == "" ||
 		len(resp.OutputText)+len(resp.ReasoningText) > computeScoreMaxOutputBytes ||
-		!e.sessionUnchanged(verified) {
+		!unchanged {
 		e.inconclusive(ciInconclusiveDispatch)
 		return
+	}
+	if member {
+		e.mu.Lock()
+		delete(e.entryWithdrawals, key)
+		e.mu.Unlock()
 	}
 	if probe.Class == computeintegrity.SamplingHot {
 		// Hot requests are cover only (FR-22): honest temperature 1.0 runs
@@ -1126,6 +1156,48 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		OutputText:    resp.OutputText,
 		ReasoningText: resp.ReasoningText,
 	})
+}
+
+// maxMemberEntryWithdrawals is how many verification requests in a row a
+// further member's entry may vanish or change identity under before the
+// key takes an out-of-band outcome (SPEC-036 FR-23).
+const maxMemberEntryWithdrawals = 3
+
+// memberEntryWithdrawnMidProbe counts one withdrawal of a further member's
+// entry during its verification request. Every maxMemberEntryWithdrawals in
+// a row become one out-of-band outcome (reason entry_withdrawn) scored by
+// the operators of the scorers reserved for the request, so a provider that
+// keeps withdrawing a member ahead of its answers is escalated and, with
+// further withdrawals, fails exactly as a provider measured out of band.
+func (e *computeScoringEngine) memberEntryWithdrawnMidProbe(ctx context.Context, key computeScoringKey, scorers []computeintegrity.ScorerCandidate) {
+	now := e.s.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.entryWithdrawals[key]++
+	if e.entryWithdrawals[key] < maxMemberEntryWithdrawals {
+		return
+	}
+	delete(e.entryWithdrawals, key)
+	ops := make([]string, 0, len(scorers))
+	referenceOnly := len(scorers) > 0
+	for _, sc := range scorers {
+		ops = append(ops, sc.OperatorKey)
+		if !sc.Reference {
+			referenceOnly = false
+		}
+	}
+	st := e.stateLocked(key, now)
+	before := cloneKeyState(st)
+	committed := true
+	if tr := st.Apply(computeintegrity.Outcome{OutOfBand: true, OutReason: computeintegrity.EntryWithdrawn, ScorerOperators: ops, ReferenceOnly: referenceOnly, At: now}); tr != nil {
+		committed = e.applyTransitionLocked(ctx, st, tr, now)
+	} else if err := e.persistKeyStateLocked(ctx, st, now); err != nil {
+		committed = false
+	}
+	if !committed {
+		*st = before
+		e.entryWithdrawals[key] = maxMemberEntryWithdrawals - 1
+	}
 }
 
 // scoreAll sends one scoring job per scorer and waits for every answer up to
