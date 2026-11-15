@@ -261,7 +261,10 @@ enum ProviderConfig {
         let lockFD = try acquireConfigMutationLock(paths: paths)
         defer { releaseConfigMutationLock(lockFD) }
         let contents = (try? String(contentsOf: paths.configFile)) ?? ""
-        let rewritten = upsertingRecommendationConfigLines(into: contents, config: config)
+        // SPEC-001-R017: the new main model is never also a further model,
+        // or the provider would refuse to start; the CLI writer does the same.
+        let rewritten = try WarmSetConfigText.removingPrimary(
+            from: upsertingRecommendationConfigLines(into: contents, config: config))
         try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
     }
 

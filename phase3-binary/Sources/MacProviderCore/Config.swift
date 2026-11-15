@@ -190,7 +190,28 @@ public enum ProviderCredentialStoreKind: String, Sendable {
     case protectedFile = "protected_file"
 }
 
+/// One further warm model's own context and slots (`warm_model_limits`).
+public struct WarmModelLimits: Equatable, Sendable {
+    public var contextTokens: Int?
+    public var slots: Int?
+
+    public init(contextTokens: Int? = nil, slots: Int? = nil) {
+        self.contextTokens = contextTokens
+        self.slots = slots
+    }
+}
+
 public struct AppConfig: Equatable, Sendable {
+    /// The `warm_model_limits` slots bound: the bound the primary's
+    /// `max_concurrency_override` has.
+    public static let warmModelSlotsLimit = 32
+
+    /// `warm_model_limits` entry for `modelID`, compared case-folded.
+    public func warmModelLimits(for modelID: String) -> WarmModelLimits? {
+        let key = modelID.lowercased(with: nil)
+        return warmModelLimits.first { $0.key.lowercased(with: nil) == key }?.value
+    }
+
     /// Config key for a served depth above `legacyMaxConcurrencyOverrideLimit`
     /// (#1906). CLIs before the 32-row bound reject `max_concurrency_override`
     /// above 8 at startup, so writers keep that key at or below 8 and carry a
@@ -267,6 +288,12 @@ public struct AppConfig: Equatable, Sendable {
     /// entry equal to `model` fails configuration validation. Empty is a
     /// warm set of one.
     public var warmModels: [String] = []
+    /// SPEC-001-R017 *Configuration*: a further model's own context and
+    /// slots, yaml key `warm_model_limits` (model id → `context_tokens`,
+    /// `slots`). A model without an entry, or a field left out, takes the
+    /// primary's value. Every id must be in `warmModels`. Config file only;
+    /// older CLIs ignore the key.
+    public var warmModelLimits: [String: WarmModelLimits] = [:]
     public var publishesSupportedModels: Bool
     public var enableWarmSwap: Bool
     public var enableReceipts: Bool
@@ -683,6 +710,7 @@ public enum ConfigLoader {
         config.configPath = configPath
         try validateIdlePrewarm(config)
         config.warmModels = try validatedWarmModels(config.warmModels, model: config.model)
+        try validateWarmModelLimits(config.warmModelLimits, warmModels: config.warmModels)
 
         // SPEC-037 FR-KVP11: resolve the kv_disk_cache group fail-closed (never
         // throws; invalid ⇒ tier disabled + errors logged by the caller).
@@ -929,6 +957,9 @@ public enum ConfigLoader {
         var warmModels: [String]?
         try assign(&warmModels, from: dict, key: "warm_models", expected: "array of strings or comma-separated string")
         if let warmModels { config.warmModels = warmModels }
+        if let limits = dict["warm_model_limits"], !(limits is NSNull) {
+            config.warmModelLimits = try parseWarmModelLimits(limits)
+        }
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
@@ -1741,6 +1772,64 @@ public enum ConfigLoader {
             result.append(entry)
         }
         return result
+    }
+
+    /// `warm_model_limits`: a mapping of model id to a mapping with optional
+    /// integer `context_tokens` and `slots`. Any other field is refused, so a
+    /// misspelt limit never silently falls back to the primary's value.
+    static func parseWarmModelLimits(_ raw: Any) throws -> [String: WarmModelLimits] {
+        let expected = "mapping of model id to {context_tokens, slots}"
+        guard let entries = raw as? [AnyHashable: Any] else {
+            throw ConfigError.invalidValue(key: "warm_model_limits", value: String(describing: raw), expected: expected)
+        }
+        var result: [String: WarmModelLimits] = [:]
+        for (rawID, rawFields) in entries {
+            let id = String(describing: rawID.base).trimmingCharacters(in: .whitespacesAndNewlines)
+            var limits = WarmModelLimits()
+            if !(rawFields is NSNull) {
+                guard let fields = rawFields as? [AnyHashable: Any] else {
+                    throw ConfigError.invalidValue(key: "warm_model_limits.\(id)", value: String(describing: rawFields), expected: "{context_tokens, slots}")
+                }
+                for (rawField, value) in fields {
+                    let field = String(describing: rawField.base)
+                    let key = "warm_model_limits.\(id).\(field)"
+                    guard field == "context_tokens" || field == "slots" else {
+                        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: "context_tokens or slots")
+                    }
+                    if value is NSNull { continue }
+                    guard let number = value as? Int else {
+                        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: "integer")
+                    }
+                    if field == "context_tokens" { limits.contextTokens = number } else { limits.slots = number }
+                }
+            }
+            result[id] = limits
+        }
+        return result
+    }
+
+    /// Every `warm_model_limits` id names one entry of `warm_models`
+    /// (case-folded, at most once); the values are bounded as the primary's
+    /// `max_context_override` (at least 1) and `max_concurrency_override`
+    /// (1 through `AppConfig.warmModelSlotsLimit`) are.
+    static func validateWarmModelLimits(_ limits: [String: WarmModelLimits], warmModels: [String]) throws {
+        let warm = Set(warmModels.map { $0.lowercased(with: nil) })
+        var seen: Set<String> = []
+        for (id, entry) in limits.sorted(by: { $0.key < $1.key }) {
+            let folded = id.lowercased(with: nil)
+            guard warm.contains(folded) else {
+                throw ConfigError.invalidValue(key: "warm_model_limits", value: id, expected: "a model listed in warm_models")
+            }
+            guard seen.insert(folded).inserted else {
+                throw ConfigError.invalidValue(key: "warm_model_limits", value: id, expected: "each model at most once (case-insensitive)")
+            }
+            if let context = entry.contextTokens, context < 1 {
+                throw ConfigError.invalidValue(key: "warm_model_limits.\(id).context_tokens", value: String(context), expected: "integer >= 1")
+            }
+            if let slots = entry.slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
+                throw ConfigError.invalidValue(key: "warm_model_limits.\(id).slots", value: String(slots), expected: "1...\(AppConfig.warmModelSlotsLimit)")
+            }
+        }
     }
 
     private static func validateRange(key: String, value: Double, range: ClosedRange<Double>) throws {

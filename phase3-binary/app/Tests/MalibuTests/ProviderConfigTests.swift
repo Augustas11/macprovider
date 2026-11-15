@@ -556,6 +556,48 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertTrue(contents.contains("model_artifact_sha256: \(String(repeating: "a", count: 64))"))
     }
 
+    /// SPEC-001-R017: the new main model leaves the further models, as the
+    /// CLI writer does, so the provider still starts; a config without warm
+    /// keys is written exactly as before.
+    func testPersistAutotuneRecommendationRemovesNewMainModelFromWarmModels() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try """
+        provider_id: p_warm
+        model: stale
+        warm_models: [meta-llama/llama-3.1-8b-instruct, other/model]
+        warm_model_limits:
+          META-LLAMA/llama-3.1-8b-instruct: {slots: 2}
+          other/model: {context_tokens: 8192}
+        link_state: linked
+
+        """.write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(), paths: paths)
+
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(contents.contains(
+            "warm_models: [other/model]\nwarm_model_limits:\n  other/model: {context_tokens: 8192}\nlink_state: linked\n"), contents)
+        XCTAssertEqual(try WarmSetConfigText.read(contents).warmModels, ["other/model"])
+    }
+
+    func testPersistAutotuneRecommendationWithoutWarmKeysIsUnchangedByWarmSetCorrection() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try "provider_id: p_plain\nmodel: stale\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(), paths: paths)
+
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertEqual(try WarmSetConfigText.removingPrimary(from: contents), contents)
+        XCTAssertFalse(contents.contains("warm_"))
+        XCTAssertTrue(contents.hasPrefix("provider_id: p_plain\nmodel: meta-llama/llama-3.1-8b-instruct\n"), contents)
+    }
+
     func testValidateServeConfigShapeRejectsNestedServeFields() throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()

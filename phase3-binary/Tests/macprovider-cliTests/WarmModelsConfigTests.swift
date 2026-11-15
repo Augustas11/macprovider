@@ -150,4 +150,57 @@ final class WarmModelsConfigTests: XCTestCase {
             XCTAssertEqual(error as? SupportedModelsValidationError, .catalogTooLarge(count: SupportedModels.maxCatalogEntries + 1))
         }
     }
+
+    // MARK: warm_model_limits
+
+    func testLimitsDefaultEmptyAndParseBlockAndFlowForms() throws {
+        XCTAssertEqual(try load(yaml: "model: P\nwarm_models: [A]\n").warmModelLimits, [:])
+        let block = try load(yaml: """
+        model: P
+        warm_models: [Org/A, B]
+        warm_model_limits:
+          Org/A:
+            context_tokens: 8192
+            slots: 2
+          B: {slots: 1}
+        """)
+        XCTAssertEqual(block.warmModelLimits["Org/A"], WarmModelLimits(contextTokens: 8192, slots: 2))
+        XCTAssertEqual(block.warmModelLimits(for: "org/a"), WarmModelLimits(contextTokens: 8192, slots: 2))
+        XCTAssertEqual(block.warmModelLimits(for: "B"), WarmModelLimits(slots: 1))
+        XCTAssertNil(block.warmModelLimits(for: "P"))
+        let flow = try load(yaml: "model: P\nwarm_models: [A]\nwarm_model_limits: {A: {context_tokens: 4096}}\n")
+        XCTAssertEqual(flow.warmModelLimits(for: "A"), WarmModelLimits(contextTokens: 4096))
+        let null = try load(yaml: "model: P\nwarm_models: [A]\nwarm_model_limits: {A: null}\n")
+        XCTAssertEqual(null.warmModelLimits(for: "A"), WarmModelLimits())
+    }
+
+    func testLimitsMustNameAWarmModel() {
+        for yaml in [
+            "model: P\nwarm_model_limits: {A: {slots: 1}}\n",
+            "model: P\nwarm_models: [A]\nwarm_model_limits: {P: {slots: 1}}\n",
+            "model: P\nwarm_models: [A]\nwarm_model_limits: {A: {slots: 1}, a: {slots: 2}}\n",
+        ] {
+            XCTAssertThrowsError(try load(yaml: yaml), yaml) { error in
+                guard case let .invalidValue(key, _, _)? = error as? ConfigError else { return XCTFail("\(error)") }
+                XCTAssertEqual(key, "warm_model_limits", yaml)
+            }
+        }
+        // An environment list that drops the model leaves its limits naming nothing.
+        XCTAssertThrowsError(try load(
+            environment: ["MACPROVIDER_WARM_MODELS": "B"],
+            yaml: "model: P\nwarm_models: [A]\nwarm_model_limits: {A: {slots: 1}}\n"))
+    }
+
+    func testLimitsAreBoundedLikeThePrimaryOverrides() throws {
+        XCTAssertEqual(AppConfig.warmModelSlotsLimit, ProviderCapacity.maxConcurrencyOverrideLimit)
+        func limits(_ fields: String) throws -> AppConfig {
+            try load(yaml: "model: P\nwarm_models: [A]\nwarm_model_limits: {A: {\(fields)}}\n")
+        }
+        XCTAssertEqual(try limits("context_tokens: 1, slots: 1").warmModelLimits(for: "A"), WarmModelLimits(contextTokens: 1, slots: 1))
+        XCTAssertEqual(try limits("slots: \(AppConfig.warmModelSlotsLimit)").warmModelLimits(for: "A")?.slots, AppConfig.warmModelSlotsLimit)
+        for bad in ["context_tokens: 0", "slots: 0", "slots: \(AppConfig.warmModelSlotsLimit + 1)", "slots: two", "context: 4096"] {
+            XCTAssertThrowsError(try limits(bad), bad)
+        }
+        XCTAssertThrowsError(try load(yaml: "model: P\nwarm_models: [A]\nwarm_model_limits: [A]\n"))
+    }
 }
