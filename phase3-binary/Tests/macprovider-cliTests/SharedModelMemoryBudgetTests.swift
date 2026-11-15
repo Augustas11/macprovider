@@ -143,7 +143,12 @@ final class SharedModelMemoryBudgetTests: XCTestCase {
 
     /// The process value follows the rule; each runtime reads back its own
     /// value (never a sibling's), and an unload restores the survivors'.
-    func testCacheLimitAppliesMinimumAndRestoresOnUnload() {
+    func testCacheLimitAppliesMinimumAndRestoresOnUnload() throws {
+        let bundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(
+                bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
+        else { throw XCTSkip("MLX default metallib is unavailable in this test host") }
         let previous = Memory.cacheLimit
         defer { Memory.cacheLimit = previous }
         let budget = SharedModelMemoryBudget()

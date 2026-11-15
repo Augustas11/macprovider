@@ -359,7 +359,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, only the configured model is advertised.")
     var supportedModels: String?
 
-    @Option(help: "Comma-separated list of further model IDs to load at boot beside --model, in order while they fit in memory (SPEC-001 §6.16). Overrides MACPROVIDER_WARM_MODELS and config key warm_models. Each must be in --supported-models when that is set.")
+    @Option(help: "Comma-separated list of further model IDs to load at boot beside --model, in order while they fit in memory. Overrides MACPROVIDER_WARM_MODELS and config key warm_models. Each must be in --supported-models when that is set.")
     var warmModels: String?
 
     @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported model list to the network status service. Default off.")
