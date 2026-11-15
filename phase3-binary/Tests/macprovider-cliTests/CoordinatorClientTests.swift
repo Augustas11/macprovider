@@ -9338,9 +9338,10 @@ final class CoordinatorClientTests: XCTestCase {
     func testAdmissionPickupStopsCheckingAReleaseThatStaysUnavailable() async throws {
         let probe = NativeMTPAdmissionPickupProbe()
         probe.activatable = { _ in .unavailable }
+        let status = Self.admissionPickupStatus()
         let client = try await makeAdmissionPickupClient(
             probe: probe,
-            status: Self.admissionPickupStatus(),
+            status: status,
             recorder: CoordinatorFrameRecorder(),
             refreshIntervalSeconds: 0.02
         )
@@ -9354,6 +9355,11 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(probe.checks.count, NativeMTPAdmissionPickup.maxUnavailableChecks)
         XCTAssertEqual(probe.exits, 0)
         XCTAssertEqual(probe.claimed, [])
+        // The unresolved release is reported, not dropped silently.
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .checkExhausted)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        XCTAssertNotEqual(snapshot.status, .draining)
     }
 
     /// The wait is capped: past the cap the pickup is abandoned, nothing is

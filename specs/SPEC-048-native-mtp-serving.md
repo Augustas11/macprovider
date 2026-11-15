@@ -1964,7 +1964,8 @@ route (R003):
    that is not the served artifact, a refused tuple) is final for that
    release in that process. Inputs that cannot be fetched or do not carry the
    release yet are checked again at later refreshes, at most 6 checks per
-   release per process. A release costs at most one restart per provider
+   release per process; after the sixth the provider reports phase
+   `check_exhausted` and leaves that release alone. A release costs at most one restart per provider
    across process starts, recorded durably before the delay starts; if the
    record cannot be written the provider does not restart and reports
    `restart_required`. A process does not restart for the release it started
@@ -1994,8 +1995,8 @@ route (R003):
    `MACPROVIDER_LAUNCHD_DOMAIN`. Any other process does not exit; it reports
    the pending admission and keeps serving. Local `/v1/status` reports
    `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
-   `waiting_for_idle` or `restart_required`, and `drain_not_before` while
-   scheduled), else null.
+   `waiting_for_idle`, `restart_required` or `check_exhausted`, and
+   `drain_not_before` while scheduled), else null.
 5. A revocation never restarts a provider; the live revocation feed (R014)
    disables the tuple in place. An autotune child, a shard-group process and
    a process with an operator-placed admission set do not pick up.

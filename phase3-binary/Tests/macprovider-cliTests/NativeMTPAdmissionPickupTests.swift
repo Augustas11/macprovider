@@ -455,4 +455,40 @@ final class NativeMTPAdmissionPickupTests: XCTestCase {
         }
         XCTAssertEqual(fetches.get(), 0)
     }
+
+    /// The guards that keep an exiting pickup away from processes a catalog
+    /// release cannot change: no verified binding, no signed catalog row,
+    /// mode not `auto`, an autotune child or a shard-group process.
+    func testHooksAreBuiltOnlyWhereAReleaseCanChangeNativeMTP() {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.nativeMTPMode = .auto
+        var binding = ServeCommand.VerifiedModelRuntimeBinding(
+            authorityPath: "/nonexistent/model",
+            authoritySHA256: Self.digest,
+            loadPath: "/nonexistent/model",
+            loadSHA256: Self.digest,
+            nativeMTPResolvedArtifactAuthority: nil
+        )
+        func hooks(
+            _ config: AppConfig, binding: ServeCommand.VerifiedModelRuntimeBinding?, trust: Bool = true, excluded: Bool = false
+        ) -> NativeMTPAdmissionPickup.Hooks? {
+            ServeCommand.nativeMTPAdmissionPickupHooks(
+                config: config, startupAdmission: .none, binding: binding, hasCatalogTrust: trust, slotCount: 1,
+                excluded: excluded, store: NativeMTPAdmissionPickupStore(url: temporaryStoreURL())
+            )
+        }
+        let built = hooks(config, binding: binding)
+        XCTAssertNotNil(built)
+        XCTAssertEqual(built?.retryStartupRelease, false)
+        XCTAssertEqual(built?.maxWaitSeconds, NativeMTPAdmissionPickup.maxWaitSeconds)
+        XCTAssertNil(hooks(config, binding: nil))
+        XCTAssertNil(hooks(config, binding: binding, trust: false))
+        XCTAssertNil(hooks(config, binding: binding, excluded: true), "autotune child or shard-group process")
+        var off = config
+        off.nativeMTPMode = .off
+        XCTAssertNil(hooks(off, binding: binding))
+        // A failed startup admission resolve turns on the startup-release retry.
+        binding.nativeMTPAdmissionUnresolved = true
+        XCTAssertEqual(hooks(config, binding: binding)?.retryStartupRelease, true)
+    }
 }

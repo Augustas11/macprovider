@@ -9525,6 +9525,12 @@ actor CoordinatorClient {
                 nativeMTPAdmissionUnavailableChecks[releaseID] = attempts
                 if attempts < NativeMTPAdmissionPickup.maxUnavailableChecks {
                     nativeMTPAdmissionPickupReleases.remove(releaseID)
+                } else {
+                    // Not dropped silently: the release was never resolved.
+                    await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
+                        releaseID: releaseID, phase: .checkExhausted, drainNotBefore: nil
+                    ))
+                    log("check_exhausted")
                 }
             }
             nativeMTPAdmissionPickupTask = nil
@@ -9621,8 +9627,12 @@ actor CoordinatorClient {
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
             releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
         ))
-        await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_abandoned")
-        try? await sendStateUpdate(state: nil, reason: "native_mtp_admission_restart_abandoned")
+        // An update drain or an operator-pause drain in progress owns the
+        // state; only the fence is lowered then.
+        if !autoupdateInFlightOrPending(), !operatorPauseInProgress {
+            await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_abandoned")
+            try? await sendStateUpdate(state: nil, reason: "native_mtp_admission_restart_abandoned")
+        }
         nativeMTPAdmissionPickupTask = nil
     }
 

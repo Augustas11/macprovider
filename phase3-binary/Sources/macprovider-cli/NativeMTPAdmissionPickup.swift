@@ -180,6 +180,8 @@ struct NativeMTPAdmissionPendingStatus: Sendable, Equatable {
         case waitingForIdle = "waiting_for_idle"
         /// Not supervised: the admission needs a manual restart.
         case restartRequired = "restart_required"
+        /// The release's inputs stayed unresolved through every check.
+        case checkExhausted = "check_exhausted"
     }
 
     let releaseID: String
