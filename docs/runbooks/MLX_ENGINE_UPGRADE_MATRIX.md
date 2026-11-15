@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.63` | `8f8821668c1a2dbb23ce33e43f31ed00d45f924f` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.69` | `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
@@ -46,6 +46,15 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-16 (#2389) the LM row is `3.32.3-macprovider.69` (`5cd9eb9`),
+`.63` plus three commits that only move its mlx-swift pin. The Swift row is
+`0.32.3-macprovider.24` (`7fbcada`, `.22` plus three commits that move the
+core gitlink and regenerate the quantized jit sources) and the core row
+`v0.32.4-macprovider.15` (`4e9a71d`, seven commits on `.14`): the SPEC-038
+FR-CB9 stock-order small-row route, `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, with
+8 qmv_mma partial sums over K on that route only. The row-invariant route is
+unchanged. No C pin change.
 
 As of 2026-11-14 the LM row is `3.32.3-macprovider.63` (`8f88216`), on
 `3.32.3-macprovider.61` (#2352): DeepSeek V4 prefill can yield between

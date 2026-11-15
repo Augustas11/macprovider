@@ -585,12 +585,27 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.63` | `8f8821668c1a2dbb23ce33e43f31ed00d45f924f` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.69` | `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
+The mlx-swift-lm row `3.32.3-macprovider.69` is `3.32.3-macprovider.63`
+(`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) plus three commits that only move
+its mlx-swift pin (#2389), at `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9`. The Swift row
+moves to `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`,
+`.22` plus three commits that move the core gitlink and regenerate the
+quantized jit sources) and the core row to `v0.32.4-macprovider.15`
+(`4e9a71dc9e765f739003868f38d3aca05871e70d`, seven commits on `.14`). The core
+adds the stock-order small-row route: `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, read
+once per process, sends one row to upstream's one-row kernel, exactly two rows
+to a kernel whose rows equal the lone row bit for bit, and 3-16 rows to the
+batch kernel, which uses 8 partial sums over K instead of 4 on some GPU
+generations. The default (row-invariant) route and its output bits are
+unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is
+unchanged. The C row is unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
 (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
 `8f8821668c1a2dbb23ce33e43f31ed00d45f924f`: DeepSeek V4 prefill can yield
 between evaluated tiles so other continuous-batch rows decode while a
@@ -2699,6 +2714,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.101 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.69` (`5cd9eb9e33600c3023020882e30e7fdd2bc08fd9`),
+  mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`)
+  and MLX core `v0.32.4-macprovider.15`
+  (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038
+  FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`).
+  The row-invariant route that native MTP serves on is unchanged. The LM row
+  only moves its mlx-swift pin; the C row is unchanged.
 - **0.1.100 (2026-11-15)** — R013 adds the admission pickup: a running
   provider re-fetches the admission set when its catalog refresh sees another
   release and, if a fresh start would newly admit its loaded model, restarts

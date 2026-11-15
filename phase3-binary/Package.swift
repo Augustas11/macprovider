@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.69 (#2389) is .63 plus three commits that
+        // only move the mlx-swift pin: mlx-swift 0.32.3-macprovider.24
+        // (7fbcada9), MLX core v0.32.4-macprovider.15 (4e9a71dc9). The core
+        // adds the stock-order small-row route (MLX_METAL_SMALL_M_ROW_INVARIANT=2,
+        // SPEC-038 FR-CB9) with 8 qmv_mma partial sums on that route only;
+        // the row-invariant route is unchanged.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -150,8 +156,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.22, MLX
-        // core v0.32.4-macprovider.14 (0f26baba0) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.24, MLX
+        // core v0.32.4-macprovider.15 (4e9a71dc9) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
