@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.104
+**Version:** 0.1.105
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.104",
+  "version": "0.1.105",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -430,7 +430,7 @@ do not apply to this adapter; these do:
   target's `mtp[0]` layer, embeddings, and lm_head at each call. It never
   loads the target's weight files a second time. The allowed (adapter,
   `source_layout`) pairs are exactly `(qwen3_5_mtp_v1, separate_artifact)`,
-  `(glm5_next_mtp_v1, checkpoint_mtp)`, and (0.1.100)
+  `(glm5_next_mtp_v1, checkpoint_mtp)`, and (0.1.101)
   `(gemma4_mtp_v1, checkpoint_mtp)`. A `glm5_next_mtp_v1` capability is
   admitted only when all of these hold, else it fails closed with
   `admission_capability_unsupported` and the target serves ordinary decode:
@@ -506,7 +506,7 @@ The same ordering applies to a sidecar that carries a 5- or 6-bit override or
 more than 256 exceptions (SPEC-023 v0.22.27): a CLI that predates 0.1.36
 rejects the whole sidecar. R014 item 10 makes this a release gate.
 
-**Gemma 4 embedded assistant layout (0.1.100).** A target whose `config.json`
+**Gemma 4 embedded assistant layout (0.1.101).** A target whose `config.json`
 has top-level `model_type` `gemma4_unified`, `text_config.model_type`
 `gemma4_unified_text`, and a `text_config.mtp_assistant_config` object, served
 through the text-only `gemma4_unified` loader, uses the `gemma4_mtp_v1` adapter with `source_layout`
@@ -532,7 +532,7 @@ runtime caches in that config layout; otherwise admission fails closed with
 The signed `state_class` is `stageable_rewindable`: sliding-window layers
 hold no recurrent state. R004, R012, R014, and R015 apply unchanged.
 
-**Gemma 4 artifact observation (0.1.101).** For `gemma4_mtp_v1` the observer
+**Gemma 4 artifact observation (0.1.102).** For `gemma4_mtp_v1` the observer
 reads the target and the assistant as one embedded pair with two formats:
 
 1. *Identity.* `config.json` MUST have top-level `model_type`
@@ -2024,6 +2024,74 @@ listed file is missing or changes without a regenerated digest.
   R015, a live e2e gate or conformance promotion; the ordinary committed-evidence
   route remains available.
 
+**Admission pickup by a running provider (0.1.100).** Native MTP activates
+only at process start: the admission set is read once and the drafter loads
+with the model. A running `serve` process MUST therefore pick up an admission
+that a later catalog release adds for its loaded model, on every small-row
+route (R003):
+
+1. The provider runs its runtime catalog refresh (SPEC-023-R010) on a session
+   accept that reports another catalog document and also every 30 minutes,
+   because a catalog activation leaves a session whose row did not change
+   connected. When the refresh verifies a catalog document for the loaded
+   weights under a `release_id` other than the one the process started on,
+   the provider re-runs the startup admission resolve against that release:
+   the signed catalog and artifact feed, the signed admission set, the store
+   projection (which fetches the drafter ahead of the restart) and the
+   loader's admission checks (tuple, artifact binding, revocation state). The
+   set is written to a probe directory; the set the running process loaded
+   from stays in place.
+2. The provider restarts itself only if `native_mtp_mode` is `auto`, no draft
+   model is configured, a fresh start on that release would admit the loaded
+   model, and the set the process started on did not (it named no entry for
+   the model and artifact digest, could not be verified, or named one whose
+   tuple the loader's admission checks refuse). A definite answer (no
+   artifact identity or no admission entry for the model, a projected target
+   that is not the served artifact, a refused tuple) is final for that
+   release in that process. Inputs that cannot be fetched or do not carry the
+   release yet are checked again at later refreshes, at most 6 checks per
+   release per process; after the sixth the provider reports phase
+   `check_exhausted` and leaves that release alone. A release costs at most one restart per provider
+   across process starts, recorded durably before the delay starts; if the
+   record cannot be written the provider does not restart and reports
+   `restart_required`. A process does not restart for the release it started
+   on, with one exception: when its startup admission resolve failed on such
+   unresolved inputs, that release is checked too and may cost one restart
+   under its own durable record.
+3. The restart waits a random delay, uniform over 60 to 1800 seconds per
+   provider, while serving normally. It never drains or exits while an update
+   is in flight or not yet finalized, or while an operator pause is requested
+   or in effect; it carries on when that ends. It then reports `draining`
+   with reason `native_mtp_admission_restart`, refuses new buyer and local
+   requests, and preempts local (non-network) work as an update drain does
+   (SPEC-001-R011). It waits for the requests in flight to reach zero: no
+   buyer request is cut, and `drain_timeout_s` does not apply to this wait.
+   Until the exit no path may report `ready`, `busy` or `degraded` or reopen
+   local admission. At zero it exits nonzero through the
+   unsolicited-termination path (SPEC-001 FR-12), which the provider
+   LaunchAgent restarts; the next start decides the route and loads the
+   drafter as any start does. If more than 2 hours pass after the delay
+   without reaching that exit (a request that never ends, a long pause), the
+   provider abandons the restart without cutting anything, serves again and
+   reports `restart_required`; the next release or the next process start
+   picks the admission up.
+4. Only the provider LaunchAgent's process exits: its parent is launchd and
+   launchd names it as the provider job (`XPC_SERVICE_NAME` equals the
+   provider label) or it carries the installer plist's
+   `MACPROVIDER_LAUNCHD_DOMAIN`. Any other process does not exit; it reports
+   the pending admission and keeps serving. Local `/v1/status` reports
+   `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
+   `waiting_for_idle`, `restart_required` or `check_exhausted`, and
+   `drain_not_before` while scheduled), else null.
+5. A revocation never restarts a provider; the live revocation feed (R014)
+   disables the tuple in place. An autotune child, a shard-group process and
+   a process with an operator-placed admission set do not pick up.
+6. Not provided: providers of one model do not coordinate. The random delay
+   spreads their restarts, but two can overlap, and a model with a single
+   provider is unserved for that provider's drain and reload. The length of
+   that gap is not measured here. The restart counts in the provider's
+   restart history like any unsolicited termination.
+
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force
 `decode_path=ordinary`; `native_mtp_mode=auto` is ignored for those
@@ -2678,7 +2746,7 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
 | GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the R003-authorized tagged tuple and the GLM R015 record, which complete the R003 review record. An LFM-only tuple identity change follows MTP-13 and preserves the original measured GLM runtime/source identities. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
-| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.65` carries the Gemma 4 commits). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.101 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
+| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.65` carries the Gemma 4 commits). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.102 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2718,20 +2786,20 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.104 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
+- **0.1.105 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.65` (`8cb290572057724090123f2aadcc15b443cf4c41`) on
   `3.32.3-macprovider.63`: the three Gemma 4 commits of `3.32.3-macprovider.64`
   (packed assistant drafter, embedded assistant loader and target state
   emission; cache-owned attention for row-safe batching; K/V-read layers
   attend through the cache) on main's `.63`. Other model sources and the
   Swift, core and C rows are as in `.63`.
-- **0.1.103 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
+- **0.1.104 (2026-11-15, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.64` (`5e6c86449e26a1818efbe94804e6d37fd1c1cf57`) on
   `3.32.3-macprovider.60`: one Gemma 4 commit. The two K/V-read layers attend
   through a cache that owns attention and get its keys and values back, so
   native MTP verify columns attend exactly as the decode step at their
   position. Other model sources and the Swift, core and C rows are unchanged.
-- **0.1.102 (2026-11-14, Related: #2328)** — R003 names mlx-swift-lm
+- **0.1.103 (2026-11-14, Related: #2328)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.60` (`a4b4b536d8ef2c05b55e54db4f672e60c6c31d5b`) on
   `3.32.3-macprovider.58`: the Qwen2-VL commit of 3.32.3-macprovider.59 (#2327: post-vision
   decode uses fused non-traditional RoPE when the three M-RoPE axes share one
@@ -2741,7 +2809,7 @@ requests.
   batched rows attend only over their own keys), which the provider's
   gemma4_mtp_v1 adapter needs. Other model sources and the Swift, core and C
   rows are unchanged.
-- **0.1.101 (2026-11-14, Related: #2328)** — R002 defines the `gemma4_mtp_v1`
+- **0.1.102 (2026-11-14, Related: #2328)** — R002 defines the `gemma4_mtp_v1`
   artifact observation: the exact config identity, an MLX affine 8-bit target
   with bfloat16 scales and no exceptions, the discarded audio/vision
   namespaces, the bfloat16 assistant under `language_model.mtp.` in
@@ -2752,7 +2820,7 @@ requests.
   R015 bench and acceptance policies freeze the target's global width per
   family (`4bit`, `8bit` for `gemma4_mtp_v1`, `mlx_mxfp4_mxfp8` for DeepSeek
   DSpark). R004, R012, R014 and R015 gates are unchanged.
-- **0.1.100 (2026-11-14, Related: #2328)** — adds the `gemma4_mtp_v1` adapter
+- **0.1.101 (2026-11-14, Related: #2328)** — adds the `gemma4_mtp_v1` adapter
   with the embedded `checkpoint_mtp` layout, a drafter loaded from the
   target's `model-mtp.safetensors`, proposal depth 1...3 from one position
   whatever the assistant's decoder depth, no drafter-owned cache, and a
@@ -2763,6 +2831,12 @@ requests.
   own keys) on the R003 row; until a fork tag carries them on
   `3.32.3-macprovider.56`, the R003 tuple is unchanged and the adapter does not
   build against it. The Swift, core and C rows are unchanged.
+- **0.1.100 (2026-11-15)** — R013 adds the admission pickup: a running
+  provider re-fetches the admission set when its catalog refresh sees another
+  release and, if a fresh start would newly admit its loaded model, restarts
+  once per release after a 60 to 1800 second random delay and a drain that
+  waits for the requests in flight with no forced cut. Before this, a new
+  admission took effect only at the provider's next unrelated process start.
 - **0.1.99 (2026-11-14, Related: #2352)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.63` (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) on
   `3.32.3-macprovider.61`: DeepSeek V4 prefill can yield between evaluated

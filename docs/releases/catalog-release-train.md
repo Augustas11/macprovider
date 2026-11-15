@@ -15,19 +15,34 @@ another gate.
 
 ## Current state — 2026-11-14
 
-Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14.
+Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14; the Live
+entry is updated for the 2026-11-15 MiniMax activation.
 
-- **Live:** `published-2026-11-12-nemotron-3.5-lightning-listed-v283`
-  (`live_verified`).
-- **Committed on `main`, not activated:**
-  `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`, from
+- **Live:** `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`
+  (activated 2026-11-15 through `scripts/ops/catalog-activate.sh`, no
+  coordinator restart), from
   [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`).
   It moves `minimaxai/minimax-m3.1-flash` from `listed` to `recommendable`.
-  Pending steps: `buyer_ux_conformance`, `catalog_preflight`,
-  `catalog_activation`, `canary_bank`, `live_probe` and `gateway_proof`.
-  After activation, `buyer_ux_conformance_owed` remains for
-  `minimaxai/minimax-m3.1-flash`.
-- **`buyer_serving_e2e` owed:** the GLM-5.3-Flash uncensored artifact (since
+  Evidence (a)-(d) passed; (e) is owed for the MiniMax M3.1-Flash artifact
+  because no connected provider served it. The previous live release was
+  `published-2026-11-12-nemotron-3.5-lightning-listed-v283`.
+  `buyer_ux_conformance_owed` remains for `minimaxai/minimax-m3.1-flash`
+  (no conformance record yet), and the activation tool still lists
+  `live_probe` as pending: the canary serves the uncensored GLM-5.3-Flash
+  build, which has no native-MTP admission entry (#2382).
+- **Committed, not live:** `published-2026-11-15-nemotron-3.5-bolt-listed-v289`
+  from [PR 2385](https://github.com/Augustas11/macprovider/pull/2385)
+  (`61c3d02c3`): a `listed` row for Nemotron 3.5 Bolt 74B-A9B, serial
+  serving, `min_ram_gb` 84, rate class `class-120b-moe`. Order of live
+  steps: first a Pearl runtime release that carries the Bolt billing alias
+  (`scripts/ops/pearl-runtime.sh status`, then `next --run`), then
+  `scripts/ops/catalog-activate.sh status` and `next --run`. The activation
+  tool refuses this release until the running coordinator has the alias.
+  Live probe: one buyer request served on the Bolt row and billed at the
+  class rate, once a provider with at least 84 GB serves it.
+- **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
+  `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
+  GLM-5.3-Flash uncensored artifact (since
   `published-2026-11-09-glm53-flash-uncensored-recommendable-v281`) and the
   DeepSeek V4-Flash MXFP4 artifact (since
   `published-2026-10-23-deepseek-v4-flash-recommendable-v1`).

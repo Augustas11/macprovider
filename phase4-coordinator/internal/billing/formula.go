@@ -108,6 +108,9 @@ var exactModelKeyAliases = map[string]string{
 	// LFM3 1.7B's official MLX artifacts (the "-4bit"/"-8bit" suffix is
 	// already stripped) bill as its catalog key (#2231).
 	"liquidai/lfm3-1.7b-mlx": "liquidai/lfm3-1.7b",
+	// Nemotron 3.5 Bolt's served rapid-mlx 4-bit artifact (the "-4bit"
+	// suffix is already stripped) bills as its catalog key (#2329).
+	"rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx": "nemotron-3.5-bolt-74b-a9b",
 	// MiniMax M3.1-Flash's served oQ3e artifact (namespace already stripped)
 	// and its OpenRouter-style slug bill as its catalog key (#2189).
 	"minimax-m3.1-flash-oq3e-mtp": "minimaxai/minimax-m3.1-flash",

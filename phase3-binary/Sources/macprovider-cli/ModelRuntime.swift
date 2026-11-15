@@ -13958,7 +13958,7 @@ maxTokens: maxTokens,
                 && representation.perLayerExceptions == quantization.perLayerExceptions
                 && representation.unquantizedExceptions == quantization.unquantizedExceptions
         case ("mlx_affine_8bit", "bf16"):
-            // SPEC-048-R002 (0.1.101) `gemma4_mtp_v1`: 8-bit target, bf16 assistant.
+            // SPEC-048-R002 (0.1.102) `gemma4_mtp_v1`: 8-bit target, bf16 assistant.
             guard let representation = try? NativeMTPArtifactObserver.embeddedAssistantRepresentation(for: observation) else {
                 return false
             }
@@ -14029,7 +14029,7 @@ maxTokens: maxTokens,
     }
 
     /// Gemma 4 assistant `block_size` 4: one bonus token plus at most three
-    /// drafts from one position (SPEC-048 0.1.100, `gemma4_mtp_v1`).
+    /// drafts from one position (SPEC-048 0.1.101, `gemma4_mtp_v1`).
     static let gemma4NativeMTPMaximumProposalDepth = 3
 
     /// Whether the signed proposal depth fits the adapter. Qwen and GLM draft
