@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "755de310b0cacedd1919f50a1f774dc482cebe2fe439983fb6f76ce736d6b2a4",
-  "generated_at": "2026-11-13T13:30:00Z",
+  "autotune_candidates_sha256": "265f94d6fa65c02a922a2225d1f694045cdb31eb64f7f9aa79bc74cd86642381",
+  "generated_at": "2026-11-15T03:40:00Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -171,6 +171,13 @@
       "sha256": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262"
     },
     {
+      "catalog_key": "nvidia/nemotron-3.5-bolt-74b-a9b",
+      "min_ram_gb": 84,
+      "model_id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
+      "model_revision": "cbfda6be4e9ff9e8d3acf0c0a57c54c1a496ef81",
+      "sha256": "9dee8d5cc3e8b5fa4cd8ec6eff61a069c16f9435a6b17e7667a000a698ef042d"
+    },
+    {
       "catalog_key": "zai-org/glm-5.3-flash-uncensored",
       "min_ram_gb": 243,
       "model_id": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
@@ -186,6 +193,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-13-minimax-m3.1-flash-recommendable-v287",
+  "release_id": "published-2026-11-15-nemotron-3.5-bolt-listed-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

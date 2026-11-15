@@ -675,11 +675,14 @@ class RateCardSourceTest(unittest.TestCase):
         # admit it for recommendation.
         # #2236: Nemotron 3.5 Lightning 30B-A3B is listed on its own
         # class-30b-moe row at the Nemotron 3 Nano price.
+        # #2329: Nemotron 3.5 Bolt 74B-A9B is listed at its declared
+        # class-120b-moe class rates.
         listed_priced = {
             "ricursiveai/ripple-65b-preview",
             "liquidai/lfm3-1.7b",
             "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/nemotron-3.5-bolt-74b-a9b",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
