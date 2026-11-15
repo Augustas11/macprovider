@@ -229,6 +229,14 @@ type computeScoringKey struct {
 	modelID    string
 }
 
+// scoringKey is the per-(provider, model) key: the model id folded by
+// pool.ModelKey, as the registry, the supported-models check and the catalog
+// lookup fold it, so a provider that reports a model under another spelling
+// keeps the one key, its state, due time and in-flight probe.
+func scoringKey(providerID, modelID string) computeScoringKey {
+	return computeScoringKey{providerID, pool.ModelKey(modelID)}
+}
+
 type pendingComputeScore struct {
 	scorerID   string
 	assignedID string
@@ -402,7 +410,12 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		// provider has been away for the retention period, as if the
 		// coordinator had not restarted.
 		e.lastSeen[st.ProviderID] = startedAt
-		e.states[computeScoringKey{st.ProviderID, st.ModelID}] = st
+		key := scoringKey(st.ProviderID, st.ModelID)
+		// Rows stored under two spellings of one model fold to one key; an
+		// adverse state is never replaced by a healthier one.
+		if prev := e.states[key]; prev == nil || (prev.State.AcceptsHonestSamples() && !st.State.AcceptsHonestSamples()) {
+			e.states[key] = st
+		}
 		if st.State.RoutingSuspended() && s.pool != nil {
 			s.pool.SetComputeIntegritySuspended(st.ProviderID, st.ModelID, true)
 		}
@@ -432,7 +445,11 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 		if d.UpdatedAt.Before(stale) && d.Due.Before(stale) {
 			continue
 		}
-		key := computeScoringKey{d.ProviderID, d.ModelID}
+		key := scoringKey(d.ProviderID, d.ModelID)
+		if prev, ok := e.nextDue[key]; ok && !d.Due.Before(prev) {
+			// Two spellings of one model: the earlier due time applies.
+			continue
+		}
 		state := computeintegrity.VerificationUnverified
 		if st := e.states[key]; st != nil {
 			state = st.State
@@ -620,6 +637,7 @@ func scoringCandidate(p pool.Provider) computeintegrity.ScorerCandidate {
 		ProviderID:         p.ProviderID,
 		AssignedID:         p.AssignedID,
 		ModelID:            p.ModelID,
+		ModelKey:           pool.ModelKey(p.ModelID),
 		ManifestSHA256:     p.ModelHash,
 		WireManifestSHA256: p.WeightsManifestSHA256,
 		Capable:            p.ComputeScoreV1,
@@ -703,8 +721,8 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 		if !providerVerifiable(p) || furtherWarmMember(p) {
 			continue
 		}
-		k := scorerPoolKey{p.ModelID, p.ModelHash}
-		e.tolerance.Touch(p.ModelID, p.ModelHash, now)
+		k := scorerPoolKey{pool.ModelKey(p.ModelID), p.ModelHash}
+		e.tolerance.Touch(pool.ModelKey(p.ModelID), p.ModelHash, now)
 		index[k] = append(index[k], scoringCandidate(p))
 	}
 	// Providers are considered in random order within a time budget of one
@@ -727,7 +745,7 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 		if time.Now().After(deadline) {
 			break
 		}
-		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.ModelHash}], now, deadline)
+		e.considerProvider(ctx, p, index[scorerPoolKey{pool.ModelKey(p.ModelID), p.ModelHash}], now, deadline)
 	}
 	e.publishGauges(ctx)
 }
@@ -802,7 +820,7 @@ func (e *computeScoringEngine) hourlyBudgetLocked(now time.Time) bool {
 }
 
 func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now, deadline time.Time) {
-	key := computeScoringKey{p.ProviderID, p.ModelID}
+	key := scoringKey(p.ProviderID, p.ModelID)
 	e.mu.Lock()
 	st := e.stateLocked(key, now)
 	before := cloneKeyState(st)
@@ -963,7 +981,7 @@ func (e *computeScoringEngine) scorerEligibleIgnoringBusyLocked(c computeintegri
 	if !e.scorers.Available(c.ProviderID, now) {
 		return false
 	}
-	if st := e.states[computeScoringKey{c.ProviderID, c.ModelID}]; st != nil {
+	if st := e.states[scoringKey(c.ProviderID, c.ModelID)]; st != nil {
 		switch st.State {
 		case computeintegrity.VerificationSuspect, computeintegrity.VerificationFailed, computeintegrity.VerificationRecovering:
 			return false
@@ -1003,7 +1021,7 @@ func (e *computeScoringEngine) sessionUnchanged(verified computeintegrity.Scorer
 	// The entry serving the verified model: the session itself for a legacy
 	// or one-member session, the member's view otherwise.
 	p, ok := e.s.pool.ResolveEntry(verified.ProviderID, verified.AssignedID, verified.ModelID)
-	return ok && p.ModelID == verified.ModelID && p.ModelHash == verified.ManifestSHA256 &&
+	return ok && pool.ModelKey(p.ModelID) == pool.ModelKey(verified.ModelID) && p.ModelHash == verified.ManifestSHA256 &&
 		p.WeightsManifestSHA256 == verified.WireManifestSHA256 && p.HashStatus == pool.HashStatusVerified
 }
 
@@ -1016,7 +1034,7 @@ func (e *computeScoringEngine) releaseScorers(scorers []computeintegrity.ScorerC
 }
 
 func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate) {
-	key := computeScoringKey{verified.ProviderID, verified.ModelID}
+	key := scoringKey(verified.ProviderID, verified.ModelID)
 	defer e.finishProbe(key)
 	defer e.releaseScorers(scorers)
 	dispatched := false
@@ -1036,7 +1054,7 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 			return
 		}
 	}
-	sampledKey := computeintegrity.ToleranceKey{ModelID: verified.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: computeintegrity.SamplingSampled}
+	sampledKey := computeintegrity.ToleranceKey{ModelID: pool.ModelKey(verified.ModelID), ManifestSHA256: verified.ManifestSHA256, Class: computeintegrity.SamplingSampled}
 	e.mu.Lock()
 	greedyOnly := false
 	if st := e.states[key]; st != nil && st.State.Escalating() {
@@ -1094,7 +1112,7 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		e.inconclusive(reason)
 		return
 	}
-	tkey := computeintegrity.ToleranceKey{ModelID: verified.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: probe.Class}
+	tkey := computeintegrity.ToleranceKey{ModelID: pool.ModelKey(verified.ModelID), ManifestSHA256: verified.ManifestSHA256, Class: probe.Class}
 	e.decide(ctx, key, verified, tkey, measurements, computeintegrity.KnownSequence{
 		Body:          probe.Body,
 		OutputText:    resp.OutputText,
@@ -1215,7 +1233,7 @@ func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrit
 		checkKnown := e.scoringJobs%computeintegrity.KnownSequenceCheckEvery == 0
 		e.mu.Unlock()
 		if checkKnown {
-			go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: scorer.ManifestSHA256})
+			go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: pool.ModelKey(scorer.ModelID), ManifestSHA256: scorer.ManifestSHA256})
 		}
 	}
 	timer := time.NewTimer(deadline)
@@ -1497,7 +1515,7 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 	now := e.s.now()
 	var candidates []computeintegrity.ScorerCandidate
 	for _, p := range e.s.pool.Snapshot() {
-		if !p.ComputeScoreV1 || !providerVerifiable(p) || p.ModelID != tkey.ModelID || p.ModelHash != tkey.ManifestSHA256 {
+		if !p.ComputeScoreV1 || !providerVerifiable(p) || pool.ModelKey(p.ModelID) != tkey.ModelID || p.ModelHash != tkey.ManifestSHA256 {
 			continue
 		}
 		op := e.operatorKey(ctx, p.ProviderID, now)
@@ -1606,7 +1624,7 @@ func (s *Server) handleComputeScoreResult(providerID, assignedID string, payload
 	if pending == nil ||
 		pending.scorerID != providerID || pending.assignedID != assignedID ||
 		result.ProviderID != providerID || result.AssignedID != assignedID ||
-		result.ModelID != pending.modelID || result.WeightsManifestSHA256 != pending.manifest ||
+		pool.ModelKey(result.ModelID) != pool.ModelKey(pending.modelID) || result.WeightsManifestSHA256 != pending.manifest ||
 		now.After(pending.deadline) {
 		e.pendingMu.Unlock()
 		s.log.Warn().Str("event", "compute_integrity_score_result_rejected").Str("provider_id", providerID).Msg("compute score result rejected: no matching live request")
