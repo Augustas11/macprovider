@@ -7166,13 +7166,19 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         var roundRobin = ["long"]
         var longLedAt: [Int] = []
         var nextShort = 0
-        for turn in 0 ..< 40 {
-            // A new one-chunk prompt arrives every turn.
-            let id = "short-\(nextShort)"
-            nextShort += 1
-            remaining[id] = 1
-            bypass[id] = 0
-            roundRobin.append(id)
+        var longLedLastTurn = false
+        for turn in 0 ..< 120 {
+            // A new one-chunk prompt arrives every turn the scheduler can
+            // serve one. (A turn the long prompt leads serves no short; an
+            // arrival then would build a backlog of shorts queued ahead of the
+            // long row in round-robin order, which FR-CB2 serves first.)
+            if !longLedLastTurn {
+                let id = "short-\(nextShort)"
+                nextShort += 1
+                remaining[id] = 1
+                bypass[id] = 0
+                roundRobin.append(id)
+            }
 
             let order = ContinuousBatchPrefillOrder.order(roundRobin.map {
                 Candidate(requestID: $0, remainingPromptTokens: remaining[$0]!, bypassTurns: bypass[$0]!)
@@ -7182,6 +7188,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 bypass[id, default: 0] += 1
             }
             if head == "long" { longLedAt.append(turn) }
+            longLedLastTurn = head == "long"
+            bypass[head] = 0  // the head is served: it counts from zero again (v0.3.55)
             remaining[head]! -= 1
             roundRobin.removeAll { $0 == head }
             if remaining[head]! > 0 { roundRobin.append(head) }
@@ -7189,12 +7197,18 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
         let maxBypass = ContinuousBatchPrefillOrder.maxBypassTurns
         XCTAssertEqual(remaining["long"], 0, "the long prompt must finish")
+        // v0.3.55 (#2366): the aged long prompt leads one turn, then yields to
+        // the short stream again. The short that waited during its turn is
+        // queued ahead of it and goes first uncharged, then 8 charged short
+        // turns pass it: it leads every `maxBypassTurns + 2` turns, so it
+        // still finishes, and no short prompt waits for its whole remaining
+        // prompt.
         XCTAssertEqual(longLedAt.first, maxBypass, "\(longLedAt)")
-        XCTAssertEqual(longLedAt.count, 10)
-        // An aged row is never charged again, so no row, short or long, is
-        // passed over more than `maxBypassTurns` times.
+        XCTAssertEqual(longLedAt.count, 10, "\(longLedAt)")
+        let gaps = zip(longLedAt.dropFirst(), longLedAt).map { $0 - $1 }
+        XCTAssertTrue(gaps.allSatisfy { $0 <= maxBypass + 2 }, "\(longLedAt)")
+        XCTAssertEqual(gaps.dropLast(), Array(repeating: maxBypass + 2, count: 8)[...], "\(longLedAt)")
         XCTAssertLessThanOrEqual(bypass.values.max() ?? 0, maxBypass)
-        XCTAssertLessThanOrEqual(longLedAt.last ?? .max, 2 * maxBypass + 10)
     }
 
     /// v0.3.45: only a head admitted after a passed-over row charges it.
@@ -7252,6 +7266,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                     bypass[id, default: 0] += 1
                 }
                 heads.append(head)
+                bypass[head] = 0
                 remaining[head]! -= 1
                 roundRobin.removeAll { $0 == head }
                 if remaining[head]! > 0 { roundRobin.append(head) }
@@ -7444,9 +7459,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     /// Through the scheduler: a long prompt ahead of a stream of shorter
-    /// ones is passed over (and charged) once per short turn, leads its turn
-    /// after exactly `maxBypassTurns` of them, and then, aged, keeps leading
-    /// until it finishes (SPEC-038 FR-CB1 aging).
+    /// ones is passed over (and charged) once per short turn and leads its
+    /// turn after exactly `maxBypassTurns` of them. Leading resets its count
+    /// (v0.3.55, #2366), so the shorts still waiting go next, and the long
+    /// prompt leads again only after `maxBypassTurns` more short turns or when
+    /// no short prompt is left (SPEC-038 FR-CB2 aging).
     func testSchedulerAgedLongPromptLeadsAfterAtMostMaxBypassTurns() async throws {
         let maxBypass = ContinuousBatchPrefillOrder.maxBypassTurns
         let shortIDs = (0 ..< maxBypass + 4).map { "short-\($0)" }
@@ -7487,16 +7504,18 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(order.allSatisfy { $0.count == 1 }, "\(order)")
         let turns = order.compactMap(\.first)
         XCTAssertEqual(turns.filter { $0 == "long" }.count, 5, "\(turns)")
-        // "long" is admitted first, so every short turn before its last chunk
-        // passed it over: exactly `maxBypassTurns` of them, though the stream
-        // holds more. Once aged it leads every turn until it finishes.
-        let lastLong = try XCTUnwrap(turns.lastIndex(of: "long"))
-        let firstAgedLong = turns.indices.first { index in
-            turns[..<index].filter { $0 != "long" }.count == maxBypass && turns[index] == "long"
-        }
-        XCTAssertEqual(turns[..<lastLong].filter { $0 != "long" }.count, maxBypass, "\(turns)")
-        let agedRun = try XCTUnwrap(firstAgedLong, "\(turns)")
-        XCTAssertTrue(turns[agedRun ... lastLong].allSatisfy { $0 == "long" }, "\(turns)")
+        // 12 one-chunk shorts behind a 5-chunk long prompt admitted first.
+        // The long prompt may run chunks while it is alone (before the shorts
+        // are admitted); after that: 8 shorts, the aged long's one turn, the
+        // 4 shorts left (before v0.3.55 they waited for all of the long's
+        // remaining chunks), then the rest of the long prompt.
+        let shape = turns.map { $0 == "long" ? "L" : "S" }
+        let leadingLong = shape.prefix { $0 == "L" }.count
+        XCTAssertLessThan(leadingLong, 4, "\(turns)")
+        let expected = Array(repeating: "L", count: leadingLong) + Array(repeating: "S", count: maxBypass) + ["L"]
+            + Array(repeating: "S", count: shortIDs.count - maxBypass)
+            + Array(repeating: "L", count: 4 - leadingLong)
+        XCTAssertEqual(shape, expected, "\(turns)")
         XCTAssertEqual(turns.count, shortIDs.count + 5)
     }
 
