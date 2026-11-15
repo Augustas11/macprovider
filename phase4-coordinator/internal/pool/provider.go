@@ -486,6 +486,13 @@ type Provider struct {
 	// ResolveEntry) of a session with a warm set: the member that view
 	// describes and that a dispatch to it names as served_model_id.
 	ServedModelID string `json:"-"`
+	// legacyDispatchModel and legacyDispatchOpen attribute dispatches made
+	// with no served model while the session was a legacy session serving
+	// legacyDispatchModel, after a heartbeat made that model a further member
+	// of a warm set with another primary: until legacyDispatchOpen of them
+	// have ended, an empty served model names legacyDispatchModel.
+	legacyDispatchModel string
+	legacyDispatchOpen  int
 
 	Tier2Session *Tier2Session `json:"-"`
 
@@ -1422,7 +1429,7 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	}
 	// SPEC-002-R011: the handshake's warm set, each further member verified
 	// for its own model when the session's own model was.
-	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, p.HashStatus != "", false)
+	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, nil, p.HashStatus != "", false)
 	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
 	// session's authority from its first heartbeat on, not from the first
 	// heartbeat that happens to verify.
@@ -3358,8 +3365,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	warmInFlight := warmInFlightLocked(p)
+	var demoted *WarmModel
 	if !hb.KeepWarmModels {
-		promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
+		demoted = promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
 	}
 	p.LastHeartbeatAt = hb.At
 	p.recordConversationCache(hb.ConversationCache, hb.At)
@@ -3445,7 +3453,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if hb.KeepWarmModels {
 		r.keepWarmModelsLocked(p)
 	} else {
-		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, true, hb.Status == StateReady || hb.Status == StateBusy)
+		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, demoted, true, hb.Status == StateReady || hb.Status == StateBusy)
 	}
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)

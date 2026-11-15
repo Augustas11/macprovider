@@ -383,3 +383,84 @@ func TestWarmShrinkToLegacyIgnoresDepartedMember(t *testing.T) {
 		}
 	}
 }
+
+// A legacy session serving model-a whose heartbeat names model-b primary and
+// keeps model-a as a further member: model-a's open dispatches, made with no
+// served model, and its refusal hold move to model-a's member; the session
+// (now model-b) starts clean, and each legacy dispatch ends on model-a.
+func TestWarmLegacyModelDemotedToFurtherMember(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
+		SlotsFree: 3, SlotsTotal: 3, MaxConcurrency: 3, LastHeartbeatAt: at, LastActivityAt: at,
+	}, nil)
+	for i := 0; i < 3; i++ {
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", ""); !ok {
+			t.Fatal("legacy consume failed")
+		}
+	}
+	// The third legacy dispatch is refused: model-a's seats are held.
+	registry.MarkForwardedSlotFullFor("p1", "current", "", true)
+
+	members := []WarmModel{
+		{ModelID: "model-b", State: WarmModelWarm, Primary: true, SlotsTotal: 2, SlotsFree: 2},
+		warmTestMember("Model-A", WarmModelWarm, 3, 0),
+	}
+	update := warmHeartbeatUpdate(at.Add(time.Second), members)
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", update); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.WarmModels == nil || session.ModelID != "model-b" {
+		t.Fatalf("warm set not applied: model=%s warm=%v", session.ModelID, session.WarmModels)
+	}
+	if registry.ForwardedInFlight("p1", "current") != 0 || session.queueFullHold || session.capacitySafetyHold || session.SlotsFree != 2 {
+		t.Fatalf("new primary inherited model-a's state: in_flight=%d hold=%v/%v free=%d",
+			registry.ForwardedInFlight("p1", "current"), session.queueFullHold, session.capacitySafetyHold, session.SlotsFree)
+	}
+	if n := registry.ForwardedInFlightFor("p1", "current", "model-a"); n != 2 {
+		t.Fatalf("model-a in-flight = %d, want its 2 open legacy dispatches", n)
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-a"); free != 0 {
+		t.Fatalf("model-a refusal hold lost: routable seats %d", free)
+	}
+	// A dispatch on model-b after the flip is the session's.
+	if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok {
+		t.Fatal("model-b consume failed")
+	}
+	// The two legacy dispatches end on model-a, never on model-b.
+	if !registry.RestoreForwardedSlotFor("p1", "current", "") {
+		t.Fatal("legacy restore failed")
+	}
+	if !registry.DropForwardedInFlightFor("p1", "current", "") {
+		t.Fatal("legacy drop failed")
+	}
+	if a, b := registry.ForwardedInFlightFor("p1", "current", "model-a"), registry.ForwardedInFlight("p1", "current"); a != 0 || b != 1 {
+		t.Fatalf("after legacy ends: model-a=%d model-b=%d, want 0 and 1", a, b)
+	}
+	// Once they have ended, an empty served model is the primary again.
+	if !registry.RestoreForwardedSlotFor("p1", "current", "") || registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatalf("empty served model after the drain: model-b=%d", registry.ForwardedInFlight("p1", "current"))
+	}
+}
+
+// Growing a legacy session with its own model kept primary moves nothing.
+func TestWarmLegacyGrowthKeepsPrimary(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
+		SlotsFree: 2, SlotsTotal: 2, MaxConcurrency: 2, LastHeartbeatAt: at, LastActivityAt: at,
+	}, nil)
+	registry.ConsumeForwardedSlotFor("p1", "current", "")
+	update := warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))
+	update.SlotsFree = 1
+	registry.ApplyHeartbeat("p1", "current", update)
+	if registry.ForwardedInFlight("p1", "current") != 1 || registry.ForwardedInFlightFor("p1", "current", "model-b") != 0 {
+		t.Fatalf("growth moved counts: a=%d b=%d", registry.ForwardedInFlight("p1", "current"), registry.ForwardedInFlightFor("p1", "current", "model-b"))
+	}
+	if !registry.RestoreForwardedSlotFor("p1", "current", "") || registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatal("legacy dispatch did not end on the primary")
+	}
+}
