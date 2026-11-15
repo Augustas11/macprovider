@@ -5110,7 +5110,9 @@
       ],
       "tests": [
         "phase4-coordinator/internal/auth/provider_operator_key_test.go:TestProviderOperatorKey",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersRules"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersRules",
+        "phase4-coordinator/internal/ws/compute_scoring_warm_entries_test.go:TestComputeScoringVerifiesFurtherWarmMember",
+        "phase4-coordinator/internal/buyer/compute_integrity_probe_warm_test.go:TestComputeIntegrityProbeNamesServedModelOnlyForMultiModel"
       ],
       "journeys": [],
       "evidence": [],
@@ -5118,7 +5120,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-036 v0.3.1 (#2338): keys are per served warm model when one session serves several; served_model_id on scoring requests to a multi-model session is not implemented yet."
+        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-036 v0.3.1 (#2338): keys are per served warm model when one session serves several; SPEC-036 v0.3.3 (#2338): the sweep verifies one key per warm entry and names the member's model (served_model_id) on its verification request; further members never score."
       }
     },
     {
@@ -5303,6 +5305,7 @@
       ],
       "tests": [
         "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeIntegritySuspensionIsPerModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionIsPerEntry",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorStatusReleaseAndClear",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLogsCarryNoPromptsOrOutputs",
         "phase4-coordinator/internal/stats/metrics/compute_integrity_test.go:TestComputeIntegrityMetricsUseClosedLabels",
@@ -15928,7 +15931,8 @@
         "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) MarkEntryNotLoaded",
         "phase4-coordinator/internal/pool/warm_models.go:func EntryViews",
         "phase4-coordinator/internal/buyer/warm_entry_routing.go:func setServedModelHeader",
-        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func (s *Server) markEntryNotLoaded",
+        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func (s *Server) entryModelNotLoaded",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) RecordEntryNotLoaded",
         "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor",
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldServedModelSQL",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handlePoolz",
@@ -15950,7 +15954,18 @@
         "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchColumnMigrationIsAdditiveAndIdempotent",
         "phase4-coordinator/internal/ws/poolz_warm_entries_test.go:TestPoolzWarmEntryRows",
         "phase5-gateway/internal/router/server_test.go:TestAggregateStatusCountsWarmEntrySessionOnce",
-        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetTwoModelsOneSession"
+        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetTwoModelsOneSession",
+        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetOfOneIsLegacy",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmSetOfOneIsALegacySession",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMemberIdentityPin",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMemberRefusalHoldLiftedByReadyHeartbeat",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmEntryNotLoadedStrikes",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneHTTPDispatchIsLegacy",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneRouteSnapshotFlagIsZero",
+        "phase4-coordinator/internal/buyer/warm_entry_not_loaded_fault_test.go:TestWarmEntryRepeatedModelNotLoadedIsABreakerFault",
+        "phase4-coordinator/internal/ws/warm_models_heartbeat_test.go:TestHeartbeatMalformedWarmModelsKeepsPreviousSetAndAppliesTheRest",
+        "phase4-coordinator/internal/explorer/handlers_test.go:TestModelsAvailableSkipsFailedHashAndOutOfService",
+        "phase4-coordinator/internal/billing/credits_by_model_unattributed_test.go:TestPayableTotalsNullModelIsUnattributed"
       ],
       "journeys": [],
       "evidence": [],
@@ -15958,7 +15973,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2338",
-        "rationale": "SPEC-002 v1.6.38 (#2338) multi-model providers: strict warm_models decoding, registration, heartbeat, per-entry views, slot accounting, routing, model_not_loaded failover, pool and explorer views and route snapshots per (provider, model), provider earnings per model. Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+        "rationale": "SPEC-002 v1.6.39 (#2338) multi-model providers (a warm set of one is a legacy session; malformed heartbeat warm_models keeps the previous set; per-member identity pin and refusal hold; repeated model_not_loaded is a breaker fault): strict warm_models decoding, registration, heartbeat, per-entry views, slot accounting, routing, model_not_loaded failover, pool and explorer views and route snapshots per (provider, model), provider earnings per model. Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     }
   ]

@@ -1,7 +1,7 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.18
-**Status:** v1.18 multi-model warm set (L-3 lifted, #2338, 2026-11-13) over v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
+**Version:** 1.19
+**Status:** v1.19 identity pin per warm member (R007(c), #2338, 2026-11-16) over v1.18 multi-model warm set (L-3 lifted, #2338, 2026-11-13) over v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
 2026-10-01; v1.15 draft amended before landing) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
@@ -46,6 +46,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.19 (2026-11-16, Related: #2338 — identity pin per warm member):**
+- R007(c): for a multi-model session (SPEC-002-R011) session authority is
+  per warm entry. Each further member keeps its own pin, set by its first
+  verified identity and carried across heartbeats while it stays a further
+  member, so a later report for that member's model that resolves to a
+  different identity is a mismatch for that member only. The primary entry
+  keeps the session pin. A member that leaves the warm set, or becomes the
+  primary, starts a new binding, as a model change does. No pricing,
+  admission or settlement change.
 
 **Change log v1.18 (2026-11-13, Related: #2338 — several warm models per process):**
 - L-3 is lifted: a provider process may keep a set of warm models and serve
@@ -1279,7 +1289,12 @@ algorithm.
   fails closed rather than selecting a price. The matched member is session
   authority (b): a later report by the same session for the same `model_id`
   that resolves to a different member — the primary included — is a
-  mismatch, not a re-binding. Pricing
+  mismatch, not a re-binding. For a session that keeps several warm models
+  (SPEC-002-R011) this authority is per warm entry (v1.19): each further
+  member has its own pin, set by its first verified identity and kept across
+  heartbeats while it stays a further member; the primary entry has the
+  session pin. A member that leaves the warm set or becomes the primary
+  starts a new binding, as a model change does. Pricing
   remains model-key scoped (SPEC-023 §3.3, §3.3.1); every SPEC-023 tier gate
   (`recommendable` for paid defaults) and every SPEC-047 admission gate is
   unchanged by this requirement.

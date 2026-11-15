@@ -1,6 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.38 (2026-11-16, explorer and provider earnings per model)
+**Version:** 1.6.39 (2026-11-16, warm-set freeze audit corrections)
+
+**Change log v1.6.39 (2026-11-16, Related: #2338):** `SPEC-002-R011` says
+what the code now does after the freeze audit: a warm set of exactly one
+member is a legacy session (no entry list, no `served_model_id`, legacy
+`model_not_loaded` handling); a malformed `warm_models` on a heartbeat is
+logged once and only the warm-set update is dropped, the rest of the
+heartbeat applies; the primary entry is checked for equality with the top
+level only; each further entry carries its own identity pin and its own
+SPEC-036 suspension; a refused further entry is held until a `ready` or
+`busy` heartbeat reports free seats for it; a second `model_not_loaded`
+from one entry within 120 s is a breaker fault; `models_available` lists
+only in-service entries whose hash did not fail; `credits_by_model` leaves
+rows without a model out of the split. No trust tier or attestation label
+changes.
 
 **Change log v1.6.38 (2026-11-16, Related: #2338):** `SPEC-002-R011` *Pool
 and operator views* adds the operator explorer (SPEC-007 v0.5.3):
@@ -6210,7 +6224,11 @@ A provider that sends `warm_models` (SPEC-001-R016) keeps one session, one
 `provider_id`, one admission tier and one SPEC-008 trust tier, and under that
 session one pool entry per warm model. A provider that sends no `warm_models`
 is a warm set of one built from its top-level fields; every rule below then
-reduces to today's per-provider behaviour, byte for byte.
+reduces to today's per-provider behaviour, byte for byte. A `warm_models`
+of exactly one entry is the same warm set of one: the coordinator keeps no
+entry list for it, dispatches without `served_model_id`, records route
+snapshots with `served_model_dispatch` 0 and handles `model_not_loaded` as
+for a provider without `warm_models`.
 
 - *Decoding.* `warm_models` is decoded strictly on the legacy `hello`, the v2
   `auth_request` and every `heartbeat`; the whole array is accepted or
@@ -6230,7 +6248,9 @@ reduces to today's per-provider behaviour, byte for byte.
     whose context or memory class disagrees with the entry and session, is
     dropped and does not reject the array;
   - unknown fields inside an entry are ignored;
-  - exactly one entry is `primary`, and it is the first. It MUST equal the
+  - exactly one entry is `primary`, and it is the first. The primary entry
+    is checked only for equality with the top-level fields, which carry
+    their own bounds; it MUST equal the
     top-level fields for `model_id`, `max_context_tokens`,
     `throughput_tps_estimate`, `model_hash`, `model_hash_algorithm`,
     `weights_manifest_sha256`, `weights_manifest_algorithm`,
@@ -6244,8 +6264,11 @@ reduces to today's per-provider behaviour, byte for byte.
     top-level model, so it can carry only a warm set of one.
 
   A bad `hello` or `auth_request` closes the handshake like any other
-  malformed field (bad field `warm_models`). A bad heartbeat is logged and
-  changes nothing.
+  malformed field (bad field `warm_models`). On a heartbeat a bad
+  `warm_models` is logged once and only the warm-set update is dropped: the
+  rest of the heartbeat (state, slots, top-level fields) applies, and the
+  session keeps its previous entry set, unless the heartbeat changed the
+  top-level model, which drops the set.
 - *Registration and heartbeat.* The handshake and every accepted heartbeat
   replace the session's entry set with the reported `warm_models` (an entry
   missing from a heartbeat is gone; in-flight requests on it finish). A
@@ -6263,16 +6286,22 @@ reduces to today's per-provider behaviour, byte for byte.
   `draining` / `degraded` / `unavailable`, thermal hold) apply unchanged.
   State that belongs to the primary's tuple alone is cleared on a further
   entry: the SPEC-047 session-to-candidate model admission binding and its
-  generation, the identity pin, the SPEC-031-R033 native-MTP canary state,
+  generation, the SPEC-031-R033 native-MTP canary state,
   the pool-model candidate row identity and the shard-group fields. A
-  further entry therefore fails closed wherever one of them is required. The
-  primary entry is the session itself.
+  further entry therefore fails closed wherever one of them is required.
+  Each further entry keeps its own SPEC-010-R007 identity pin, set by its
+  first verified identity and carried across heartbeats while it stays a
+  further entry, and its own SPEC-036 FR-25 suspension and verification.
+  The primary entry is the session itself.
 - *Slots and state.* Slot accounting is per entry: a dispatch to a further
   entry takes and returns that entry's seat only and never the primary's or
   the session's; the primary's seats are the session's. Entry slots are not
   additive across entries: a dispatch the provider refuses for lack of shared
-  memory closes that entry's seats until its next heartbeat and is the
-  existing retryable over-capacity outcome, never a breaker fault. Only an
+  memory returns the seat it took and holds that entry at zero routable
+  seats until a heartbeat with status `ready` or `busy` reports free seats
+  for it (the free count is then at most the count before the refusal); a
+  heartbeat without free seats for the entry keeps the hold. The refusal is
+  the existing retryable over-capacity outcome, never a breaker fault. Only an
   entry in state `warm` is routing-eligible. Session-level state (`draining`,
   `degraded`, `unavailable`, disconnect, the breaker) applies to every entry.
 - *Routing.* A candidate is a (provider, model) entry. Selection, the
@@ -6301,8 +6330,13 @@ reduces to today's per-provider behaviour, byte for byte.
   entries are untouched. The request fails over to another candidate like a
   queue-full refusal, outside the buyer retry budget, and the attempt is
   logged with `error_model_not_loaded` and null usage: it is never settled
-  and is not a breaker fault. A provider without `warm_models` keeps today's
-  handling of the same answer.
+  and is not a breaker fault. A strike counts once per heartbeat generation
+  of the entry. When an entry reaches its second strike within 120 s (the
+  default breaker threshold and window), the answer is a breaker fault
+  (`repeated_warm_entry_model_not_loaded`) for the session and the request
+  takes the ordinary path, retry budget included. A provider without
+  `warm_models`, or with a warm set of one, keeps today's handling of the
+  same answer.
 - *Pool and operator views.* `/poolz` has one row per entry for a provider
   that sent `warm_models`; such a row adds `served_model`, `primary` and
   `warm_state` (the entry's `state`), and a provider without `warm_models`
@@ -6312,8 +6346,9 @@ reduces to today's per-provider behaviour, byte for byte.
   model. `/v1/models` lists each entry's model. The gateway counts the rows
   of one session once for pool-level and serving counts (in service when any
   row is, with the best state of its rows) and keeps per-model counts per
-  row. The operator explorer (SPEC-007) lists every entry's model in
-  `models_available`, keeps its provider counts and slot totals per session,
+  row. The operator explorer (SPEC-007) lists in `models_available` the
+  model of every entry that is in service and whose hash status is not
+  `mismatch` or `invalid`, keeps its provider counts and slot totals per session,
   and adds to each provider row `warm_models`: one object per entry, primary
   first, with `model_id`, `primary`, `state`, `slots_total` and `slots_free`
   (the entry view's seats), and an empty list for a provider without
@@ -6325,6 +6360,7 @@ reduces to today's per-provider behaviour, byte for byte.
   settles against that model. The provider earnings read (SPEC-005 §11.4)
   reports `credits_by_model`, the payable credit total split by each row's
   model, so a provider sees what each of its models earned; the split sums
-  to `total_credits`.
+  to `total_credits` less any credit rows without a model, which are left
+  out of the split.
 - *Trust.* No trust tier, admission tier or attestation label is minted,
   upgraded or downgraded by the number of warm models.

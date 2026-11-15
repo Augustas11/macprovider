@@ -1,9 +1,20 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.2-draft
-**Date:** 2026-11-15
+**Status:** v0.3.3-draft
+**Date:** 2026-11-16
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.3 (2026-11-16, Related: #2338 — per-entry suspension and probing as built):**
+FR-19 and FR-25 say how a multi-model session is verified and suspended. The
+scheduler sweeps one verification key per warm entry: a further member is
+verifiable for its own model and its verification request names that model
+(`served_model_id`), while scorer candidates are drawn from the primary
+entries only, so a further member is verified but never scores. A `failed`
+key suspends routing of that entry only; the session's other entries keep
+serving. The suspension key folds model ids like the pool (Unicode NFC, then
+lower case). A warm set of exactly one member is a legacy session, one key.
+No scorer, threshold, trust tier or attestation label changes.
 
 **Change log v0.3.2 (2026-11-15, Related: #2338 — the hold as built):**
 FR-23's earnings hold for a multi-model session follows SPEC-022 R-16.2a as
@@ -2144,7 +2155,12 @@ model hash of that warm entry. A provider cannot choose it, so a
 provider-reported value never decides which scorers a provider is compared
 with. A verification request or scoring job sent to a session that reports
 `warm_models` MUST carry `served_model_id` naming the key's model, and is
-answered by that member's runtime only. A session's reported
+answered by that member's runtime only. As built, the scheduler sweeps one
+key per warm entry of every session (SPEC-002-R011 entry views), each
+verifiable for its own model under the rules below; a warm set of exactly
+one member is a legacy session and one key. Only a session's primary entry
+can be a scorer candidate, so a further member is verified but never scores
+another provider. A session's reported
 `weights_manifest_sha256` is only what a scoring job to that session carries
 (FR-21).
 
@@ -2537,7 +2553,10 @@ Consequences of `failed`:
 - The provider is excluded from routing for that model: every buyer path
   (ordinary, pinned, slot queue, relay-blind and privacy-class binding, and
   their capability counts) skips it. Other models the provider may later serve
-  are unaffected. The provider stays connected, so it can recover; the
+  are unaffected. For a multi-model session the suspension is per warm
+  entry: only the entry serving that model is excluded, the session's other
+  entries keep serving, and the model is matched with the pool's folding
+  (Unicode NFC, then lower case). The provider stays connected, so it can recover; the
   pool-check `buyer_serving` session-liveness signal is unchanged, and the
   provider learns its state from the status surface below.
 - Its unsettled earnings inside the affected window are held under SPEC-022
