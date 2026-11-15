@@ -60,6 +60,21 @@ func sameServedEntry(a, b pool.Provider) bool {
 	return a.ProviderID == b.ProviderID && servedModelKey(a.ServedModelID) == servedModelKey(b.ServedModelID)
 }
 
+// stickyServedMatch reports whether a stored sticky entry's served model names
+// candidate's entry. A stored entry without a served model was written for a
+// legacy (or one-member warm set) session and names the provider's primary
+// entry; a stored served model names a legacy session serving that model.
+func stickyServedMatch(candidate pool.Provider, stored string) bool {
+	switch {
+	case stored == "":
+		return !furtherWarmEntry(candidate)
+	case candidate.ServedModelID == "":
+		return servedModelKey(candidate.ModelID) == servedModelKey(stored)
+	default:
+		return servedModelKey(candidate.ServedModelID) == servedModelKey(stored)
+	}
+}
+
 // pinnedEntries keeps one entry per provider for the pin paths: the entry
 // serving the requested model when the provider keeps a warm set and has it,
 // otherwise the provider's primary entry, which then fails the model check

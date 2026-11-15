@@ -9389,7 +9389,7 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	}
 	for i, candidate := range candidates {
 		// SPEC-002-R011: a sticky entry names one (provider, model) entry.
-		if candidate.ProviderID != entry.ProviderID || servedModelKey(candidate.ServedModelID) != servedModelKey(entry.ServedModelID) {
+		if candidate.ProviderID != entry.ProviderID || !stickyServedMatch(candidate, entry.ServedModelID) {
 			continue
 		}
 		if i == 0 {

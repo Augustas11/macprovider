@@ -143,19 +143,22 @@ func warmInFlightLocked(p *Provider) map[string]int {
 // promoteWarmPrimaryLocked moves the session-level in-flight count to the
 // member a heartbeat names primary (SPEC-011 R-3.10.3 promotion), so each
 // member keeps its own open dispatches. Coordinator occupancy guards that
-// described the previous primary's seats no longer apply.
+// described the previous primary's seats no longer apply. It runs only when
+// the incoming primary was a further member of the previous warm set: any
+// other primary change (a legacy or one-member session's warm swap) keeps
+// the session's own swap handling.
 func promoteWarmPrimaryLocked(p *Provider, incoming []WarmModel, inFlight map[string]int) {
-	if incoming == nil {
+	if len(incoming) == 0 {
 		return
 	}
-	priorPrimary := warmModelKey(p.ModelID)
+	nextPrimary := warmModelKey(incoming[0].ModelID)
+	wasFurther := false
 	for _, m := range p.WarmModels {
-		if m.Primary {
-			priorPrimary = warmModelKey(m.ModelID)
+		if !m.Primary && warmModelKey(m.ModelID) == nextPrimary {
+			wasFurther = true
 		}
 	}
-	nextPrimary := warmModelKey(incoming[0].ModelID)
-	if nextPrimary == priorPrimary {
+	if !wasFurther {
 		return
 	}
 	p.forwardedInFlight = inFlight[nextPrimary]
@@ -173,8 +176,12 @@ func promoteWarmPrimaryLocked(p *Provider, incoming []WarmModel, inFlight map[st
 // verdict are the session's own; a further member's hash is verified for its
 // own model. verify is false at registration while the session itself has
 // no verdict (model-hash verification inactive).
+//
+// A warm set of exactly one member (the primary) is stored as no warm set: the
+// session is a legacy session everywhere (entry views, served model, route
+// snapshot flag, sort and sticky keys, model_not_loaded and swap handling).
 func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFlight map[string]int, verify bool) {
-	if incoming == nil {
+	if len(incoming) <= 1 {
 		p.WarmModels = nil
 		return
 	}
@@ -359,7 +366,8 @@ func (p Provider) EntryMember() (WarmModel, bool) {
 }
 
 // EntryViews projects one Snapshot value onto its SPEC-002-R011 entries, in
-// WarmModels order: a provider without a warm set yields exactly itself.
+// WarmModels order: a provider without a warm set (a one-member warm set is
+// stored as none) yields exactly itself.
 func EntryViews(session Provider) []Provider {
 	if session.WarmModels == nil {
 		return []Provider{session}
@@ -373,7 +381,8 @@ func EntryViews(session Provider) []Provider {
 
 // EntrySnapshot is Snapshot with one Provider value per SPEC-002-R011 entry:
 // a provider without a warm set yields exactly its Snapshot value, and a
-// provider with one yields a view per member (ServedModelID set).
+// provider with one of more than one member yields a view per member
+// (ServedModelID set).
 func (r *Registry) EntrySnapshot() []Provider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
