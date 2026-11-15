@@ -338,6 +338,75 @@ final class MultiModelBenchCheckTests: XCTestCase {
         XCTAssertNil(none.overBytes)
     }
 
+    // MARK: Row shape (the self-check's granted rows)
+
+    private func shape(
+        requested: Int, engine: String, served: Int, selfCheck: MultiModelCheckSelfCheck?, exact: Bool = false
+    ) throws -> MultiModelCheckRowShape {
+        try MultiModelCheckRowShape.resolve(
+            slot: .b, requestedRows: requested, engine: engine, servedSlots: served, selfCheck: selfCheck, rowsExact: exact)
+    }
+
+    private func failure(_ body: () throws -> MultiModelCheckRowShape) -> String? {
+        do { _ = try body(); return nil } catch { return (error as? MultiModelCheckFailure)?.reason }
+    }
+
+    func testCheckDrivesTheRowsTheSelfCheckGranted() throws {
+        let cb = "continuous_batching"
+        // The lab's cells: 2 -> refused no_net_gain (one serial row), 4 -> 3, 8 -> 5.
+        let refused = try shape(requested: 2, engine: "serial_inference_gate", served: 1,
+                                selfCheck: .init(outcome: "refused reason=no_net_gain", reason: "no_net_gain"))
+        XCTAssertEqual(refused, .init(model: "b", requestedRows: 2, grantedRows: 1, selfCheckReason: "no_net_gain"))
+        XCTAssertEqual(try shape(requested: 4, engine: cb, served: 3,
+                                 selfCheck: .init(outcome: "granted slots=3", reason: "granted", grantedSlots: 3)).grantedRows, 3)
+        let eight = try shape(requested: 8, engine: cb, served: 5, selfCheck: .init(outcome: "granted slots=5", reason: "granted", grantedSlots: 5))
+        XCTAssertEqual(eight, .init(model: "b", requestedRows: 8, grantedRows: 5, selfCheckReason: "granted"))
+        // Never more rows than requested; one row without a self-check.
+        XCTAssertEqual(try shape(requested: 2, engine: cb, served: 4, selfCheck: nil).grantedRows, 2)
+        XCTAssertEqual(try shape(requested: 1, engine: "serial_inference_gate", served: 1, selfCheck: nil).selfCheckReason, "none")
+        XCTAssertEqual(
+            MultiModelCheckRowShape.lineFields([refused, eight]),
+            "b_rows_requested=2 b_rows_granted=1 b_self_check=no_net_gain b_rows_requested=8 b_rows_granted=5 b_self_check=granted")
+    }
+
+    func testCheckStillFailsOnARealEngineMismatchOrNoRows() {
+        // Batching rows on a serialized engine.
+        XCTAssertTrue(failure { try self.shape(requested: 4, engine: "serial_inference_gate", served: 4, selfCheck: nil) }?
+            .hasPrefix("engine_mismatch model=b rows=4 requested_rows=4 engine=serial_inference_gate") == true)
+        // A grant of several rows the engine does not serve with.
+        XCTAssertTrue(failure { try self.shape(requested: 4, engine: "serial_inference_gate", served: 1,
+                                               selfCheck: .init(outcome: "granted slots=3", reason: "granted", grantedSlots: 3)) }?
+            .hasPrefix("engine_mismatch") == true)
+        // A model that serves no row.
+        XCTAssertTrue(failure { try self.shape(requested: 2, engine: "continuous_batching", served: 0, selfCheck: nil) }?
+            .hasPrefix("no_rows model=b requested_rows=2 served_slots=0") == true)
+    }
+
+    func testRowsExactKeepsTheStrictRule() throws {
+        let granted3 = MultiModelCheckSelfCheck(outcome: "granted slots=3", reason: "granted", grantedSlots: 3)
+        XCTAssertTrue(failure { try self.shape(requested: 4, engine: "continuous_batching", served: 3, selfCheck: granted3, exact: true) }?
+            .contains("rows_exact=true") == true)
+        XCTAssertTrue(failure { try self.shape(requested: 2, engine: "serial_inference_gate", served: 1,
+                                               selfCheck: .init(outcome: "refused reason=no_net_gain", reason: "no_net_gain"), exact: true) }?
+            .hasPrefix("engine_mismatch") == true)
+        XCTAssertEqual(try shape(requested: 4, engine: "continuous_batching", served: 4, selfCheck: nil, exact: true).grantedRows, 4)
+        let parsed = try MultiModelBenchCommand.parse(["--model-a", "/a", "--model-b", "/b", "--check", "--rows-exact"])
+        XCTAssertTrue(parsed.rowsExact)
+        XCTAssertFalse(try MultiModelBenchCommand.parse(["--model-a", "/a", "--model-b", "/b", "--check"]).rowsExact)
+    }
+
+    func testGoalLineEndsWithTheRowShape() throws {
+        let solo = soloStats()
+        let goal = try XCTUnwrap(MultiModelCheckRunner.goal(
+            soloA: solo, soloB: solo, measuredPhase: "contended", a: solo, b: solo, intervalSeconds: 50).goal)
+        let shapes = [MultiModelCheckRowShape(model: "a", requestedRows: 1, grantedRows: 1, selfCheckReason: "single_row"),
+                      MultiModelCheckRowShape(model: "b", requestedRows: 4, grantedRows: 3, selfCheckReason: "granted")]
+        let line = MultiModelCheckRunner.goalLine(spec: "passthrough", goal: goal, reasons: [], rowShapes: shapes)
+        XCTAssertTrue(line.hasSuffix(" a_rows_requested=1 a_rows_granted=1 a_self_check=single_row b_rows_requested=4 b_rows_granted=3 b_self_check=granted"), line)
+        XCTAssertTrue(MultiModelCheckRunner.goalLine(spec: "passthrough", goal: nil, reasons: [], rowShapes: shapes)
+            .hasSuffix("b_rows_granted=3 b_self_check=granted"))
+    }
+
     // MARK: Build SHA
 
     func testBuildGitSHALookup() throws {

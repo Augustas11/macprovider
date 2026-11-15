@@ -22,8 +22,15 @@ import MacProviderCore
 /// bound to the catalog serving id (`--model-id-x`) and loaded from the
 /// snapshot (`--model-x`). Mixed-cache models (GLM-5.3-Flash, Qwen3.6/3.8)
 /// attach paged KV, and so batch, only under their exact serving id.
-/// A model asked for rows > 1 whose runtime reports a serialized engine, or
-/// whose scheduler never batched two rows, is a `CHECK error`, never a GOAL.
+/// Rows: serve's CB self-check decides how many rows a model serves; the
+/// check drives the rows it granted (`MultiModelCheckRowShape`), records the
+/// requested and granted rows and the self-check reason in the JSON and on
+/// the POLICY and GOAL lines, and judges its floors on that shape.
+/// `--rows-exact` instead requires the requested rows, for a cell that is
+/// about a row count. A model whose engine is not the one its granted rows
+/// imply (rows > 1 on a serialized engine), that serves no row, or whose
+/// scheduler never batched two of its granted rows, is a `CHECK error`,
+/// never a GOAL.
 /// Native MTP is not offered: the production load admits it only through a
 /// signed admission sidecar, and this harness has no lab path around that.
 ///
@@ -178,6 +185,7 @@ extension MultiModelBenchCommand {
             modelIDB: modelIDB ?? modelB,
             rowsA: rowsA,
             rowsB: rowsB,
+            rowsExact: rowsExact,
             continuousBatchingA: cbA,
             continuousBatchingB: cbB,
             maxTokensA: maxTokensA,
@@ -265,6 +273,8 @@ struct MultiModelCheckRunner: Sendable {
     let gpuTurns = MultiModelCheckGPUTurnWindow()
     /// SPEC-001-R017: shared memory budget per phase, by slot.
     let memoryBudget = MultiModelCheckMemoryBudgetWindow()
+    /// The rows each model is driven with, set at its load.
+    let rowShapes = MultiModelCheckRowShapes()
 
     func run() async throws {
         for (slot, path) in [(MultiModelBenchSlot.a, config.modelA), (.b, config.modelB)] {
@@ -417,7 +427,8 @@ struct MultiModelCheckRunner: Sendable {
             let wired = Self.footprintOverWired(phases: sharedPhases + policyPhases)
             let contendedMetrics = MultiModelCheckGoal.metrics(contendedGoal?.goal, measured: contended)
             let gatePart = String(outcome.line.dropFirst("GATE ".count))
-            let line = "POLICY \(entry.spec) \(gatePart) \(contendedMetrics) a_wait_s=\(MultiModelCheckGoal.fmt(waits["a"], "%.3f")) b_wait_s=\(MultiModelCheckGoal.fmt(waits["b"], "%.3f")) wired_limit_bytes=\(wired.wiredLimitBytes.map(String.init) ?? "n/a") footprint_over_wired_bytes=\(wired.overBytes.map(String.init) ?? "n/a")"
+            let shapes = rowShapes.all
+            let line = "POLICY \(entry.spec) \(gatePart) \(contendedMetrics) a_wait_s=\(MultiModelCheckGoal.fmt(waits["a"], "%.3f")) b_wait_s=\(MultiModelCheckGoal.fmt(waits["b"], "%.3f")) wired_limit_bytes=\(wired.wiredLimitBytes.map(String.init) ?? "n/a") footprint_over_wired_bytes=\(wired.overBytes.map(String.init) ?? "n/a") \(MultiModelCheckRowShape.lineFields(shapes))"
             var soakLine: String?
             if config.soakSeconds > 0 {
                 let soakWaits = Self.waits(soak)
@@ -461,7 +472,7 @@ struct MultiModelCheckRunner: Sendable {
             parityMismatches += outcome.mismatches
             if index == 0 {
                 baselineGoal = goal
-                goalLine = Self.goalLine(spec: entry.spec, goal: goal, reasons: outcome.reasons)
+                goalLine = Self.goalLine(spec: entry.spec, goal: goal, reasons: outcome.reasons, rowShapes: shapes)
             }
         }
         // The final GATE and the top-level JSON gate cover every policy; GOAL
@@ -495,10 +506,12 @@ struct MultiModelCheckRunner: Sendable {
         return MultiModelCheckGate(pass: false, reasons: reasons, line: line)
     }
 
-    /// Pure. The GOAL line names the policy it measured.
-    static func goalLine(spec: String, goal: MultiModelCheckGoal?, reasons: [String]) -> String {
-        if let goal { return "GOAL policy=\(spec) " + String(goal.line.dropFirst("GOAL ".count)) }
-        return "GOAL policy=\(spec) unavailable reason=\(reasons.first { $0.hasPrefix("goal_unavailable") } ?? "see_json")"
+    /// Pure. The GOAL line names the policy it measured and ends with the
+    /// rows each model was driven with.
+    static func goalLine(spec: String, goal: MultiModelCheckGoal?, reasons: [String], rowShapes: [MultiModelCheckRowShape] = []) -> String {
+        let rows = rowShapes.isEmpty ? "" : " " + MultiModelCheckRowShape.lineFields(rowShapes)
+        if let goal { return "GOAL policy=\(spec) " + String(goal.line.dropFirst("GOAL ".count)) + rows }
+        return "GOAL policy=\(spec) unavailable reason=\(reasons.first { $0.hasPrefix("goal_unavailable") } ?? "see_json")" + rows
     }
 
     /// Pure, information only (never a failing condition): the wired limit and
@@ -633,7 +646,7 @@ struct MultiModelCheckRunner: Sendable {
             physFootprintBytes: MultiModelBenchMonitor.physFootprintBytes(),
             mlxMaxMbPerBuffer: ProcessInfo.processInfo.environment["MLX_MAX_MB_PER_BUFFER"]
         )
-        let state = MultiModelCheckRuntimeState(
+        var state = MultiModelCheckRuntimeState(
             slot: slot,
             requestedMode: mode,
             rows: rows,
@@ -641,16 +654,23 @@ struct MultiModelCheckRunner: Sendable {
             servedSlots: await runtime.servedSlotLimitForTest(),
             selfCheck: selfCheck
         )
+        // The self-check's decision is the product's: drive the rows it
+        // granted (or, with --rows-exact, require the requested rows).
+        let shape = try MultiModelCheckRowShape.resolve(
+            slot: slot, requestedRows: rows, engine: state.engine, servedSlots: state.servedSlots,
+            selfCheck: selfCheck, rowsExact: config.rowsExact,
+            detail: "cb_mode=\(state.continuousBatchingMode ?? "nil") cb_unsupported=\(state.continuousBatchingUnsupportedReason ?? "nil") paged_kv=\(state.pagedKvDecision ?? "nil")")
+        state.requestedRows = shape.requestedRows
+        state.grantedRows = shape.grantedRows
+        state.selfCheckReason = shape.selfCheckReason
+        rowShapes.set(slot, shape)
         box.update { report in
             report.loads.append(load)
             report.runtimes.append(state)
             report.modelArtifactSha256[slot.rawValue] = artifactSHA256
         }
         box.write()
-        MultiModelBenchCommand.log("load done model=\(slot.rawValue) seconds=\(String(format: "%.1f", load.loadSeconds)) engine=\(state.engine) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_active=\(state.continuousBatchingActive) paged_kv=\(state.pagedKvDecision ?? "nil") served_slots=\(state.servedSlots) native_mtp=\(state.nativeMTPModeAtLoad) memory_limit=\(load.mlxMemoryLimitBytes)")
-        if rows > 1, state.engine != "continuous_batching" || state.servedSlots < rows {
-            throw MultiModelCheckFailure(reason: "engine_mismatch model=\(slot.rawValue) rows=\(rows) engine=\(state.engine) served_slots=\(state.servedSlots) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_unsupported=\(state.continuousBatchingUnsupportedReason ?? "nil") paged_kv=\(state.pagedKvDecision ?? "nil")")
-        }
+        MultiModelBenchCommand.log("load done model=\(slot.rawValue) seconds=\(String(format: "%.1f", load.loadSeconds)) engine=\(state.engine) cb_mode=\(state.continuousBatchingMode ?? "nil") cb_active=\(state.continuousBatchingActive) paged_kv=\(state.pagedKvDecision ?? "nil") served_slots=\(state.servedSlots) native_mtp=\(state.nativeMTPModeAtLoad) memory_limit=\(load.mlxMemoryLimitBytes) \(MultiModelCheckRowShape.lineFields([shape]))")
         return runtime
     }
 
@@ -713,18 +733,24 @@ struct MultiModelCheckRunner: Sendable {
             throw MultiModelCheckFailure(reason: "self_check_timeout model=\(slot.rawValue) seconds=\(Int(seconds))")
         }
         let outcome: String
+        let reason: String
+        var grantedSlots: Int?
         switch state {
-        case .granted(let slots): outcome = "granted slots=\(slots)"
-        case .refused(let reason): outcome = "refused reason=\(reason)"
-        case .pending: outcome = "pending"
+        case .granted(let slots): outcome = "granted slots=\(slots)"; reason = "granted"; grantedSlots = slots
+        case .refused(let refusal): outcome = "refused reason=\(refusal)"; reason = refusal
+        case .pending: outcome = "pending"; reason = "pending"
         }
         MultiModelBenchCommand.log("cb_self_check done model=\(slot.rawValue) \(outcome) seconds=\(Int(seconds))")
-        return MultiModelCheckSelfCheck(outcome: outcome, seconds: seconds, storePath: storeURL.path)
+        return MultiModelCheckSelfCheck(outcome: outcome, reason: reason, grantedSlots: grantedSlots, seconds: seconds, storePath: storeURL.path)
     }
 
     // MARK: Phases
 
-    private func rows(_ slot: MultiModelBenchSlot) -> Int { slot == .a ? config.rowsA : config.rowsB }
+    /// The rows a model is driven with: what its load granted, else (before
+    /// its load) the requested rows.
+    private func rows(_ slot: MultiModelBenchSlot) -> Int {
+        rowShapes.granted(slot) ?? (slot == .a ? config.rowsA : config.rowsB)
+    }
 
     /// `policy`: the policy run (contended or soak) this phase belongs to; its
     /// index tags request ids so phases of different policies never share one.
@@ -1662,8 +1688,12 @@ struct MultiModelCheckConfig: Encodable, Sendable {
     /// as serve binds the catalog id (`--model-id-x`, default the load value).
     let modelIDA: String
     let modelIDB: String
+    /// Requested rows (`--rows-x`); the rows driven are each runtime's
+    /// `granted_rows`.
     let rowsA: Int
     let rowsB: Int
+    /// `--rows-exact`: the requested rows are required, else `CHECK error`.
+    let rowsExact: Bool
     /// Explicitly configured continuous-batching mode per model (`--cb-x`).
     let continuousBatchingA: String
     let continuousBatchingB: String
@@ -1899,6 +1929,11 @@ struct MultiModelCheckRuntimeState: Encodable, Sendable {
     var schedulerSharedForwardCallsAtEnd: Int?
     /// Serve's CB self-check run at load; nil when CB is off or uncheckable.
     let selfCheck: MultiModelCheckSelfCheck?
+    /// `--rows-x`, the rows the check drove (`MultiModelCheckRowShape`), and
+    /// the self-check's reason (`granted`, a refusal reason, or `none`).
+    var requestedRows: Int?
+    var grantedRows: Int?
+    var selfCheckReason: String?
 
     init(slot: MultiModelBenchSlot, requestedMode: ContinuousBatchingMode, rows: Int, snapshot: RuntimeSnapshot, servedSlots: Int, selfCheck: MultiModelCheckSelfCheck?) {
         self.selfCheck = selfCheck
@@ -1931,10 +1966,79 @@ struct MultiModelCheckRuntimeState: Encodable, Sendable {
     }
 }
 
-struct MultiModelCheckSelfCheck: Encodable, Sendable {
+struct MultiModelCheckSelfCheck: Encodable, Sendable, Equatable {
     let outcome: String
-    let seconds: Double
-    let storePath: String
+    /// `granted`, or the refusal reason (e.g. `no_net_gain`, `single_row`).
+    var reason: String
+    /// The slots a grant gave; nil for a refusal.
+    var grantedSlots: Int?
+    var seconds: Double = 0
+    var storePath: String = ""
+}
+
+/// The rows the check drives one model with. Serve's CB self-check may grant
+/// fewer rows than requested (or refuse batching, leaving one row); that is
+/// what the product serves, so by default the check drives the granted rows.
+struct MultiModelCheckRowShape: Encodable, Sendable, Equatable {
+    let model: String
+    let requestedRows: Int
+    let grantedRows: Int
+    /// `granted`, the self-check's refusal reason, or `none` when no
+    /// self-check ran.
+    let selfCheckReason: String
+
+    /// Pure. Default: granted = min(requested, served slots). Fails when the
+    /// model serves no row, or when the granted rows (or a self-check grant)
+    /// imply batching and the engine is serialized. `rowsExact`: the
+    /// requested rows on the continuous-batching engine, as before.
+    static func resolve(
+        slot: MultiModelBenchSlot, requestedRows: Int, engine: String, servedSlots: Int,
+        selfCheck: MultiModelCheckSelfCheck?, rowsExact: Bool, detail: String = ""
+    ) throws -> MultiModelCheckRowShape {
+        let reason = selfCheck?.reason ?? "none"
+        func mismatch(_ rows: Int) -> MultiModelCheckFailure {
+            MultiModelCheckFailure(reason: "engine_mismatch model=\(slot.rawValue) rows=\(rows) requested_rows=\(requestedRows) engine=\(engine) served_slots=\(servedSlots) self_check=\(reason) rows_exact=\(rowsExact)\(detail.isEmpty ? "" : " \(detail)")")
+        }
+        if rowsExact {
+            if requestedRows > 1, engine != "continuous_batching" || servedSlots < requestedRows { throw mismatch(requestedRows) }
+            return MultiModelCheckRowShape(model: slot.rawValue, requestedRows: requestedRows, grantedRows: requestedRows, selfCheckReason: reason)
+        }
+        guard servedSlots >= 1 else {
+            throw MultiModelCheckFailure(reason: "no_rows model=\(slot.rawValue) requested_rows=\(requestedRows) served_slots=\(servedSlots) self_check=\(reason)")
+        }
+        let granted = min(requestedRows, servedSlots)
+        let grantImpliesBatching = (selfCheck?.grantedSlots ?? 0) > 1 && requestedRows > 1
+        if (granted > 1 || grantImpliesBatching), engine != "continuous_batching" { throw mismatch(granted) }
+        return MultiModelCheckRowShape(model: slot.rawValue, requestedRows: requestedRows, grantedRows: granted, selfCheckReason: reason)
+    }
+
+    /// `a_rows_requested=4 a_rows_granted=3 a_self_check=granted ...`, by model.
+    static func lineFields(_ shapes: [MultiModelCheckRowShape]) -> String {
+        shapes.map { "\($0.model)_rows_requested=\($0.requestedRows) \($0.model)_rows_granted=\($0.grantedRows) \($0.model)_self_check=\($0.selfCheckReason)" }
+            .joined(separator: " ")
+    }
+}
+
+/// The row shape of each loaded model, read by every phase.
+final class MultiModelCheckRowShapes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shapes: [MultiModelBenchSlot: MultiModelCheckRowShape] = [:]
+
+    func set(_ slot: MultiModelBenchSlot, _ shape: MultiModelCheckRowShape) {
+        lock.lock(); defer { lock.unlock() }
+        shapes[slot] = shape
+    }
+
+    func granted(_ slot: MultiModelBenchSlot) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return shapes[slot]?.grantedRows
+    }
+
+    /// In slot order (a, b).
+    var all: [MultiModelCheckRowShape] {
+        lock.lock(); defer { lock.unlock() }
+        return MultiModelBenchSlot.allCases.compactMap { shapes[$0] }
+    }
 }
 
 struct MultiModelCheckRequestRecord: Encodable, Sendable {

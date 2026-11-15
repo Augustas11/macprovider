@@ -84,6 +84,9 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("rows-b"), help: "--check: concurrent lanes on model B. Default 4.")
     var rowsB: Int = 4
 
+    @Flag(name: .customLong("rows-exact"), help: "--check: require each model to serve its requested rows (--rows-a/--rows-b) on the continuous-batching engine, else CHECK error engine_mismatch. Without it the check drives the rows serve's CB self-check granted and records requested_rows, granted_rows and the self-check reason.")
+    var rowsExact = false
+
     @Option(name: .customLong("max-tokens-a"), help: "--check: max_tokens per model A request. Default 1024.")
     var maxTokensA: Int = 1024
 
