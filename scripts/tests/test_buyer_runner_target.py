@@ -76,6 +76,63 @@ class RunnerTargetTests(unittest.TestCase):
             save.assert_not_called()
             self.assertEqual(state["phase"], "prepared")
 
+    def _reservation(self, tmp, before, current):
+        path, backup, state_path = Path(tmp, "targets.json"), Path(tmp, "backup"), Path(tmp, "state.json")
+        path.write_bytes(current)
+        backup.write_bytes(before)
+        state = {"phase": "paused", "backup": str(backup), "provider_prefix": "mp-studio", "mode": 0o644,
+                 "before_sha256": runner.digest(before), "after_sha256": runner.digest(b"paused")}
+        state_path.write_text(json.dumps(state))
+        return path, state_path, state
+
+    def _no_system(self):
+        return [patch.object(runner, "secure_path", side_effect=lambda p, **_: Path(p)),
+                patch.object(runner, "main_pid", return_value="1"),
+                patch.object(runner, "restart_runner", return_value=True),
+                patch.object(runner, "validate_if_installed")]
+
+    def test_row_restore_refuses_two_reserved_rows_in_backup(self):
+        import tempfile
+        before = b'{"targets":[{"provider_id":"mp-studio-a"},{"provider_id":"mp-studio-b"},{"provider_id":"x"}]}'
+        with tempfile.TemporaryDirectory() as tmp:
+            path, state_path, state = self._reservation(tmp, before, b'{"targets":[]}')
+            patches = self._no_system()
+            for p in patches:
+                p.start()
+            try:
+                with self.assertRaises(runner.Refusal):
+                    runner.restore_reservation(0, path, state_path, state)
+            finally:
+                for p in patches:
+                    p.stop()
+            self.assertEqual(path.read_bytes(), b'{"targets":[]}')
+            self.assertTrue(state_path.exists())
+
+    def test_crash_after_row_write_converges_on_next_restore(self):
+        import tempfile
+        before = b'{"targets":[{"provider_id":"a"},{"provider_id":"mp-studio-1","slots":8},{"provider_id":"b"}],"k":1}'
+        with tempfile.TemporaryDirectory() as tmp:
+            path, state_path, state = self._reservation(tmp, before, b'{"targets":[{"provider_id":"b"}],"k":1}')
+            patches = self._no_system()
+            for p in patches:
+                p.start()
+            try:
+                with patch.object(runner, "drop_state", side_effect=InterruptedError):
+                    with self.assertRaises(InterruptedError):
+                        runner.restore_reservation(0, path, state_path, state)
+                written = path.read_bytes()
+                state = json.loads(state_path.read_text())
+                self.assertEqual(state["phase"], "restoring")
+                with patch.object(runner, "restart_runner", return_value=True) as restart:
+                    self.assertEqual(runner.restore_reservation(0, path, state_path, state), "row")
+                    restart.assert_called_once()
+            finally:
+                for p in patches:
+                    p.stop()
+            self.assertEqual(path.read_bytes(), written)
+            self.assertEqual(json.loads(written), {"targets": [{"provider_id": "mp-studio-1", "slots": 8}, {"provider_id": "b"}], "k": 1})
+            self.assertFalse(state_path.exists())
+
     def test_systemctl_timeout_does_not_skip_recovery(self):
         with patch.object(runner.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 45)):
             self.assertFalse(runner.service("restart"))

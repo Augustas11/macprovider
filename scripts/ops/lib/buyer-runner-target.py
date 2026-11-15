@@ -292,24 +292,90 @@ def drop_state(state_path):
         os.close(directory)
 
 
-def restore_reservation(uid, path, state_path, state):
-    current = digest(path.read_bytes())
+def row_key(row):
+    return json.dumps(row)
+
+
+def row_restored_doc(raw, before, prefix):
+    """Return (doc, present): the current document with the reserved row put back.
+
+    Every other current row and top-level key stays as it is. The row goes after
+    its nearest surviving predecessor from the backup, else before its nearest
+    surviving successor, else first if it was first in the backup, else last.
+    """
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        raise Refusal("runner targets changed during the reservation and no longer parse; refusing to overwrite them")
+    if not isinstance(doc, dict) or not isinstance(doc.get("targets"), list):
+        raise Refusal("runner targets changed during the reservation and have no targets list; refusing to overwrite them")
+    old = json.loads(before)["targets"]
+    reserved = [i for i, t in enumerate(old)
+                if isinstance(t, dict) and str(t.get("provider_id", "")).startswith(prefix)]
+    if len(reserved) != 1:
+        raise Refusal("reservation backup holds %d rows with the Studio provider prefix; restore by hand" % len(reserved))
+    index = reserved[0]
+    row = old[index]
+    targets = doc["targets"]
+    present = [t for t in targets
+               if isinstance(t, dict) and str(t.get("provider_id", "")).startswith(prefix)]
+    if present:
+        if len(present) == 1 and row_key(present[0]) == row_key(row):
+            return doc, True
+        raise Refusal("runner targets changed during the reservation and hold a different Studio row; refusing to overwrite them")
+    keys = [row_key(t) for t in targets]
+    at = None
+    for neighbour in reversed(old[:index]):
+        if row_key(neighbour) in keys:
+            at = keys.index(row_key(neighbour)) + 1
+            break
+    if at is None:
+        for neighbour in old[index + 1:]:
+            if row_key(neighbour) in keys:
+                at = keys.index(row_key(neighbour))
+                break
+    if at is None:
+        at = 0 if index == 0 else len(targets)
+    targets.insert(at, row)
+    return doc, False
+
+
+def restore_reservation(uid, path, state_path, state, prefix=None):
+    raw = path.read_bytes()
+    current = digest(raw)
     backup = secure_path(state["backup"], owner=uid)
     before = backup.read_bytes()
     if digest(before) != state["before_sha256"]:
         raise Refusal("reservation backup changed; restore by hand from the backup")
-    if current not in (state["before_sha256"], state["after_sha256"]):
-        raise Refusal("runner targets changed during the reservation; refusing to overwrite them")
-    written = current == state["after_sha256"]
-    if written or state["phase"] in ("paused", "restoring"):
+    if current in (state["before_sha256"], state["after_sha256"]):
+        written = current == state["after_sha256"]
+        restored, restart = before, written or state["phase"] in ("paused", "restoring")
+        kind = "bytes" if written or state["phase"] == "restoring" else "already"
+    else:
+        # Another target changed while the Studio row was out: put back only
+        # that row, keeping every other current edit (a retired row stays gone).
+        prefix = state.get("provider_prefix") or prefix
+        if not prefix:
+            raise Refusal("runner targets changed during the reservation and no Studio provider prefix is known; refusing to overwrite them")
+        doc, present = row_restored_doc(raw, before, prefix)
+        written = not present
+        restored = render_doc(doc)
+        kind = "row" if written or state["phase"] == "restoring" else "already"
+        # A crash after a row write and before drop_state left phase restoring:
+        # the row is present now, but the runner may not have loaded it yet.
+        restart = written or state["phase"] == "restoring"
+        if written:
+            validate_if_installed(path, restored)
+    if restart:
         state["phase"] = "restoring"
         save(state_path, state, uid)
         if written:
-            atomic(path, before, state["mode"], uid)
+            atomic(path, restored, state["mode"], uid)
         if not restart_runner(main_pid()):
             service("start")
             raise RuntimeError("restored runner not stable; reservation kept for another restore")
     drop_state(state_path)
+    return kind
 
 
 def reserve_pause(args):
@@ -331,7 +397,7 @@ def reserve_pause(args):
     backup = path.with_name(path.name + ".bak-runner-reserve-" + utc_stamp())
     atomic(backup, raw, 0o600, uid)
     state = {"phase": "prepared", "owner": args.owner, "created_at": utc_stamp(), "backup": str(backup),
-             "before_sha256": digest(raw), "after_sha256": digest(after), "mode": mode}
+             "provider_prefix": args.provider_prefix, "before_sha256": digest(raw), "after_sha256": digest(after), "mode": mode}
     save(state_path, state, uid)
     try:
         if digest(path.read_bytes()) != state["before_sha256"]:
@@ -354,8 +420,8 @@ def reserve_restore(args):
         return {"phase": "absent"}
     if state.get("owner") != args.owner:
         raise Refusal("runner reservation belongs to owner %s since %s" % (state.get("owner"), state.get("created_at")))
-    restore_reservation(uid, path, state_path, state)
-    return {"phase": "restored"}
+    kind = restore_reservation(uid, path, state_path, state, args.provider_prefix)
+    return {"phase": "restored", "restore": kind}
 
 
 def reserve_status(args):
