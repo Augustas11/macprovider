@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 )
 
 // WarmModelState is a SPEC-001-R016 `warm_models[].state` value.
@@ -44,6 +46,16 @@ type WarmModel struct {
 	WeightsHashAlgorithm  string               `json:"weights_manifest_algorithm,omitempty"`
 	CBSelfCheck           *ProviderCBSelfCheck `json:"cb_self_check,omitempty"`
 	EngineProfile         *EngineProfile       `json:"-"`
+	// ToolSelectionCapabilities and VisionRuntimeCapabilities are this
+	// member's own declarations, with the schema of the session's top-level
+	// lists; buyer routing reads them for the member's model exactly as it
+	// reads the top-level lists for the primary.
+	ToolSelectionCapabilities []ToolSelectionCapability `json:"-"`
+	VisionRuntimeCapabilities []VisionRuntimeCapability `json:"-"`
+	// ArtifactIdentity is the artifact-feed binding of this member's own
+	// identity verdict (SPEC-010-R007), as Provider.ArtifactIdentity is the
+	// session's.
+	ArtifactIdentity *artifactidentity.Binding `json:"-"`
 	// ExpectedModelHash and HashStatus are the coordinator's SPEC-008 §5.5
 	// verdict for this (provider, model) pair; a failing member is excluded
 	// on its own (SPEC-001-R016 Trust).
@@ -192,19 +204,21 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		}
 		if !verify {
 			m.HashStatus = ""
+			m.ArtifactIdentity = nil
 			continue
 		}
-		m.HashStatus = r.warmModelHashStatusLocked(p, *m)
+		verdict := r.warmModelIdentityLocked(p, *m)
+		m.HashStatus, m.ArtifactIdentity = verdict.Status, verdict.Artifact
 	}
 	p.WarmModels = entries
 }
 
-// warmModelHashStatusLocked is the SPEC-008 §5.5 verdict for one further
-// member, computed by the same verifier chain as the session's model. The
-// primary-only catalog model binding is not this member's, so it is not used.
-func (r *Registry) warmModelHashStatusLocked(p *Provider, m WarmModel) HashStatus {
+// warmModelIdentityLocked is the SPEC-008 §5.5 / SPEC-010 verdict for one
+// further member, computed by the same verifier chain as the session's model.
+// The primary-only catalog model binding is not this member's, so it is not used.
+func (r *Registry) warmModelIdentityLocked(p *Provider, m WarmModel) ModelIdentityVerdict {
 	if m.ModelHash == "" {
-		return HashStatusUncatalogued
+		return ModelIdentityVerdict{Status: HashStatusUncatalogued}
 	}
 	switch {
 	case r.modelIdentityResolver != nil:
@@ -215,23 +229,50 @@ func (r *Registry) warmModelHashStatusLocked(p *Provider, m WarmModel) HashStatu
 			ReportedAlgorithm:      m.ModelHashAlgorithm,
 			CandidateCatalogSHA256: p.CandidateCatalogSHA256,
 			CatalogAdmissionMode:   p.CatalogAdmissionMode,
-		}).Status
+		})
 	case r.modelIdentityVerifier != nil:
-		return r.modelIdentityVerifier(m.ModelID, m.ExpectedModelHash, m.ModelHash, m.ModelHashAlgorithm)
+		return ModelIdentityVerdict{Status: r.modelIdentityVerifier(m.ModelID, m.ExpectedModelHash, m.ModelHash, m.ModelHashAlgorithm)}
 	case r.hashVerifier != nil:
-		return r.hashVerifier(m.ModelID, m.ModelHash)
+		return ModelIdentityVerdict{Status: r.hashVerifier(m.ModelID, m.ModelHash)}
 	default:
-		return HashStatusUncatalogued
+		return ModelIdentityVerdict{Status: HashStatusUncatalogued}
 	}
+}
+
+// refreshWarmModelIdentitiesLocked re-evaluates every further member's
+// verdict with the session's own refresh (UpdateModelIdentities), on the
+// member's entry view, so a release publication re-verifies each member
+// against its own model id and hash exactly as it does the primary.
+func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func(Provider) ModelIdentityVerdict) {
+	if p.WarmModels == nil {
+		return
+	}
+	session := *p
+	session.conn = nil
+	entries := cloneWarmModels(p.WarmModels)
+	for i := range entries {
+		m := &entries[i]
+		if m.Primary {
+			m.HashStatus = p.HashStatus
+			continue
+		}
+		if m.ModelHash == "" {
+			continue
+		}
+		next := verdictFor(warmEntryView(session, *m))
+		m.HashStatus, m.ArtifactIdentity = next.Status, next.Artifact
+	}
+	p.WarmModels = entries
 }
 
 // warmEntryView projects one member onto a copy of its session. The primary
 // is the session as it is. A further member takes its own model, slots,
-// throughput, identity and verdict; the session-level gates (connection,
-// trust, admission tier, breaker, pause, draining/degraded/unavailable,
-// thermal hold) stay. Bindings that belong to the primary's tuple alone
-// (model admission, artifact identity, native MTP, pool model, tool and vision
-// guarantees) are cleared so every consumer fails closed on them.
+// throughput, identity, verdict, artifact binding and tool and vision
+// declarations; the session-level gates (connection, trust, admission tier,
+// breaker, pause, draining/degraded/unavailable, thermal hold) stay. Bindings
+// that belong to the primary's tuple alone (the SPEC-047 session-to-candidate
+// model admission binding, the identity pin, the native-MTP canary, pool
+// model and shard group) are cleared so every consumer fails closed on them.
 func warmEntryView(session Provider, m WarmModel) Provider {
 	v := session
 	v.ServedModelID = m.ModelID
@@ -258,7 +299,7 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.HashStatus = m.HashStatus
 	v.CBSelfCheck = cloneProviderCBSelfCheck(m.CBSelfCheck)
 	v.EngineProfile = cloneEngineProfile(m.EngineProfile)
-	v.ArtifactIdentity = nil
+	v.ArtifactIdentity = m.ArtifactIdentity
 	v.IdentityPin = nil
 	clearModelAdmissionBinding(&v)
 	v.ModelAdmissionBindingGeneration = 0
@@ -267,8 +308,8 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.ShardGroupPoolModelID = ""
 	v.ShardGroupMembers = nil
 	v.CandidateRowIdentity = ""
-	v.ToolSelectionCapabilities = nil
-	v.VisionRuntimeCapabilities = nil
+	v.ToolSelectionCapabilities = m.ToolSelectionCapabilities
+	v.VisionRuntimeCapabilities = m.VisionRuntimeCapabilities
 	thermal := session.capacitySafetyHold && !session.queueFullHold
 	v.forwardedInFlight = m.forwardedInFlight
 	v.awaitingReadyOccupancy = false

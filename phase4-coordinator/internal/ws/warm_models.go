@@ -172,6 +172,18 @@ func parseWarmModelEntry(entry map[string]json.RawMessage, ramGB int) (pool.Warm
 		}
 		model.CBSelfCheck = selfCheck
 	}
+	// SPEC-001-R019: the member's own tool and vision declarations, decoded
+	// as the top-level lists are.
+	if v, ok := entry["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &model.ToolSelectionCapabilities); err != nil {
+			return pool.WarmModel{}, fmt.Errorf("tool_selection_capabilities: %w", err)
+		}
+	}
+	if v, ok := entry["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &model.VisionRuntimeCapabilities); err != nil {
+			return pool.WarmModel{}, fmt.Errorf("vision_runtime_capabilities: %w", err)
+		}
+	}
 	if v, ok := entry["engine_profile"]; ok {
 		// As on the heartbeat: an invalid or disagreeing profile is dropped,
 		// never a reason to reject the entry.

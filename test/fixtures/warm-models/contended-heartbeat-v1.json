@@ -58,7 +58,21 @@
         "slots_free" : 3,
         "slots_total" : 3,
         "state" : "warm",
-        "throughput_tps_estimate" : 25.699999999999999
+        "throughput_tps_estimate" : 25.699999999999999,
+        "tool_selection_capabilities" : [
+          {
+            "model_id" : "model-b",
+            "modes" : [
+              "auto",
+              "none"
+            ],
+            "runtime" : "mlx_cache",
+            "schema_profiles" : [
+              "ordinary-parameters-v1"
+            ],
+            "validation" : "schema-holdback-v1"
+          }
+        ]
       }
     ]
   },

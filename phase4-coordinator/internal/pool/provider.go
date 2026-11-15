@@ -1738,6 +1738,7 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 		}
 		p.HashStatus = next.Status
 		p.ArtifactIdentity = next.Artifact
+		r.refreshWarmModelIdentitiesLocked(p, verdictFor)
 		// A refresh that changes the session's identity facts is a session
 		// identity change like any other: in-flight route attempts that
 		// captured the old identity fail closed at compare-and-insert.

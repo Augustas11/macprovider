@@ -56,6 +56,11 @@ func TestWarmModelsContractFixtureIsAccepted(t *testing.T) {
 	if primary.SlotsTotal != hb.SlotsTotal || primary.SlotsFree != hb.SlotsFree || member.ModelHash == "" {
 		t.Fatalf("primary slots %d/%d vs top %d/%d, member hash %q", primary.SlotsFree, primary.SlotsTotal, hb.SlotsFree, hb.SlotsTotal, member.ModelHash)
 	}
+	// SPEC-001-R019: the member declares its own tool selection modes.
+	if len(member.ToolSelectionCapabilities) != 1 || member.ToolSelectionCapabilities[0].ModelID != member.ModelID ||
+		member.ToolSelectionCapabilities[0].Validation != "schema-holdback-v1" || primary.ToolSelectionCapabilities != nil {
+		t.Fatalf("tool declarations primary=%+v member=%+v", primary.ToolSelectionCapabilities, member.ToolSelectionCapabilities)
+	}
 }
 
 // The fixture still exercises the check it exists for: the solo estimate at

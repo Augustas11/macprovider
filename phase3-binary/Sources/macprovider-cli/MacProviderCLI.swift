@@ -3782,7 +3782,8 @@ struct ServeCommand: AsyncParsableCommand {
                         modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
                         weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256,
                         cbSelfCheck: snapshot.continuousBatching?.selfCheck,
-                        engine: WarmModelEngineState(snapshot: snapshot))
+                        engine: WarmModelEngineState(snapshot: snapshot),
+                        visionCapability: WarmModelMemberInfo.visionCapability(snapshot: snapshot))
                 },
                 // SPEC-011 R-3.10.3: what only the primary holds moves with
                 // a promotion.

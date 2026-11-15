@@ -147,7 +147,14 @@ enum WarmModelsWire {
             entry["weights_manifest_sha256"] = weights
             entry["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
-        // SPEC-001-R019: the member's own self-check and engine.
+        // SPEC-001-R019: the member's own tool selection modes, vision
+        // runtime, self-check and engine, each by the rule the top-level
+        // field follows for the primary.
+        entry["tool_selection_capabilities"] = CoordinatorClient.toolSelectionCapabilities(
+            wireModelID: view.modelID, runtimeWireModelID: view.modelID, runtimeSource: nil)
+        if let vision = info.visionCapability {
+            entry["vision_runtime_capabilities"] = [vision]
+        }
         if let report = info.cbSelfCheck {
             entry["cb_self_check"] = report.jsonObject
         }

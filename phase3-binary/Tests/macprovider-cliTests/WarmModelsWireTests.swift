@@ -170,6 +170,37 @@ final class WarmModelsWireTests: XCTestCase {
         XCTAssertEqual(primary["state"] as? String, "warm")
     }
 
+    // SPEC-001-R019 / SPEC-002-R011: a further member declares its own tool
+    // selection modes and vision runtime, by the rule the top-level fields
+    // follow for the primary; the primary entry and a member without a
+    // runtime declare none.
+    func testAMemberDeclaresItsOwnToolModesAndVisionRuntime() throws {
+        let vision = [
+            "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit", "model_hash": "hh",
+            "model_hash_algorithm": "macprovider.snapshot-manifest.v1", "weights_manifest_sha256": "ww",
+            "processor_digest": "pp", "runtime": "mlx_cache", "runtime_revision": "rr", "media_profile": "mm",
+        ]
+        let entries = WarmModelsWire.entries(
+            primaryFields: ["model_id": "model-a"], primarySlotsTotal: 2, primarySlotsFree: 2,
+            views: [
+                view("model-a", primary: true, pinned: true),
+                view("Qwen/Qwen3-8B", info: .init(maxContextTokens: 8_000, slotsTotal: 1)),
+                view("mlx-community/Qwen2-VL-2B-Instruct-4bit", info: .init(maxContextTokens: 8_000, slotsTotal: 1, visionCapability: vision)),
+                view("model-c", state: .loading),
+            ])
+        XCTAssertNil(entries[0]["tool_selection_capabilities"])
+        XCTAssertNil(entries[0]["vision_runtime_capabilities"])
+        let tools = try XCTUnwrap(entries[1]["tool_selection_capabilities"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 1)
+        XCTAssertEqual(tools[0]["model_id"] as? String, "Qwen/Qwen3-8B")
+        XCTAssertEqual(tools[0]["runtime"] as? String, "mlx_cache")
+        XCTAssertEqual(tools[0]["modes"] as? [String], ["auto", "none", "required", "named"])
+        XCTAssertNil(entries[1]["vision_runtime_capabilities"])
+        XCTAssertEqual(entries[2]["vision_runtime_capabilities"] as? [[String: String]], [vision])
+        XCTAssertNil(entries[3]["tool_selection_capabilities"])
+        XCTAssertNotNil(try? JSONSerialization.data(withJSONObject: entries))
+    }
+
     func testLocalStatusCarriesWarmModelsOnlyWithAWarmSet() async {
         let snapshot = await status().snapshot()
         let plain = RouterHandler.statusResponse(snapshot, providerID: nil, coordinatorURL: nil)

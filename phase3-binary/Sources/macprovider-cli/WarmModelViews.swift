@@ -17,6 +17,27 @@ struct WarmModelMemberInfo: Sendable, Equatable {
     /// SPEC-001-R019: this member's own serving engine state, the inputs of
     /// its `engine_profile`.
     var engine: WarmModelEngineState? = nil
+    /// This member's own native-vision runtime: the one object of its
+    /// `vision_runtime_capabilities`, with the top-level list's schema. Nil
+    /// when the member's runtime serves no qualified vision profile.
+    var visionCapability: [String: String]? = nil
+}
+
+extension WarmModelMemberInfo {
+    /// The `vision_runtime_capabilities` object a single-model provider of
+    /// this runtime's model would advertise, by the same rule
+    /// (`CoordinatorClient.appendNativeVisionCapability`).
+    static func visionCapability(snapshot: RuntimeSnapshot) -> [String: String]? {
+        guard let modelID = snapshot.modelID else { return nil }
+        var message: [String: Any] = ["model_id": modelID]
+        message["model_hash"] = snapshot.modelHash
+        message["model_hash_algorithm"] = snapshot.modelHashAlgorithm
+        message["weights_manifest_sha256"] = snapshot.weightsManifestSHA256
+        CoordinatorClient.appendNativeVisionCapability(
+            to: &message, snapshot: snapshot, wireModelID: modelID, runtimeSource: nil)
+        return (message["vision_runtime_capabilities"] as? [[String: Any]])?.first?
+            .compactMapValues { $0 as? String }
+    }
 }
 
 /// What a member's `engine_profile` says about its own runtime; the chip and
