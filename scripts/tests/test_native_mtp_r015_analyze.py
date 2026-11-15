@@ -273,6 +273,21 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 self.assertTrue(any(
                     field in item for item in result["cells"][0]["hard_failures"]
                 ), result["cells"][0]["hard_failures"])
+        # A terminal flush of cleanup-held text (s1-p4096-o128 block 2 on
+        # Gemma 4: 128 tokens, 128 gaps in both arms) is one chunk with no new
+        # token; a second one is not.
+        for gap_count, valid in ((129, True), (130, False)):
+            with self.subTest(gap_count=gap_count):
+                gaps = [0.009] * gap_count
+                result = self._run_case(native_overrides={
+                    "raw_inter_token_gaps_seconds": [gaps],
+                    "request_metrics": [{
+                        "request_id": "c-b0-r0", "completion_tokens": 129, "decode_tps": 130.0,
+                        "inter_token_gaps_seconds": gaps,
+                    }],
+                })
+                flagged = any("request_metrics" in item for item in result["cells"][0]["hard_failures"])
+                self.assertEqual(flagged, not valid, result["cells"][0]["hard_failures"])
         # The legacy gate set never read these series; its verdicts stand.
         legacy = self._run_case(native_overrides={"request_metrics": self._DELETE}, legacy_gates=True)
         self.assertEqual(legacy["overall_status"], "PASS")

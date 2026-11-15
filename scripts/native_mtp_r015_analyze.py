@@ -617,13 +617,16 @@ def _per_request_misalignment(run: dict) -> list[str]:
         # first, so a request with fewer than two completion tokens has no
         # decode interval: a positive decode rate on it is fabricated, and its
         # empty gap series could hide behind another request's gaps. Every
-        # chunk carries at least one token, so a request has at most
-        # completion_tokens - 1 gaps.
+        # chunk during decode carries at least one token; at the end of the
+        # stream the runtime may also flush text its cleanup holdback kept
+        # back from the last token (a trailing space, ModelRuntime's
+        # `finish`), one chunk with no new token. So a request has at most
+        # completion_tokens gaps.
         tokens = item.get("completion_tokens")
         if (
             not _is_count(tokens)
             or tokens < 2
-            or (isinstance(gaps, list) and len(gaps) > tokens - 1)
+            or (isinstance(gaps, list) and len(gaps) > tokens)
         ):
             invalid.append("request_metrics")
     return invalid
