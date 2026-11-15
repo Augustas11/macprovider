@@ -612,12 +612,15 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
 
     /// R017 *Load*: whether a model of `estimatedResidentBytes` (from its
     /// safetensors sizes) with `minimumRowKVBytes` for one row may load now.
+    /// `excluding` decides as if those members were already unloaded.
     func canLoad(
-        estimatedResidentBytes: Int, minimumRowKVBytes: Int = 0, limitBytes: Int? = SharedModelMemoryBudget.processLimitBytes()
+        estimatedResidentBytes: Int, minimumRowKVBytes: Int = 0, limitBytes: Int? = SharedModelMemoryBudget.processLimitBytes(),
+        excluding: Set<Int> = []
     ) -> SharedModelMemoryRules.LoadDecision {
         lock.lock(); defer { lock.unlock() }
         return SharedModelMemoryRules.loadDecision(
-            limitBytes: limitBytes, members: members, estimatedResidentBytes: estimatedResidentBytes,
+            limitBytes: limitBytes, members: excluding.isEmpty ? members : members.filter { !excluding.contains($0.key) },
+            estimatedResidentBytes: estimatedResidentBytes,
             newMinimumRowKVBytes: minimumRowKVBytes, pendingLoadBytes: pendingLoadBytesLocked())
     }
 

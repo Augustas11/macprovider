@@ -154,6 +154,12 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
               !plan.evict.contains(where: { budget.busyRows(memberID: $0) > 0 }) else {
             return WarmModelLoadCheck(outcome: .insufficientMemory, decision: decision, evict: [])
         }
+        // `load` decides again once the planned members are unloaded and
+        // refuses unless that decision fits without a further eviction.
+        let after = decide(spec, excluding: Set(plan.evict))
+        guard after.admitted, after.eviction == nil else {
+            return WarmModelLoadCheck(outcome: .insufficientMemory, decision: after, evict: [])
+        }
         return WarmModelLoadCheck(outcome: .fitsAfterEviction, decision: decision, evict: evict)
     }
 
@@ -287,10 +293,10 @@ actor WarmModelLoader<Runtime: WarmModelRuntime> {
         return table.entry(token: token)!
     }
 
-    private func decide(_ spec: WarmModelLoadSpec) -> SharedModelMemoryRules.LoadDecision {
+    private func decide(_ spec: WarmModelLoadSpec, excluding: Set<Int> = []) -> SharedModelMemoryRules.LoadDecision {
         budget.canLoad(
             estimatedResidentBytes: spec.estimatedResidentBytes, minimumRowKVBytes: spec.minimumRowKVBytes,
-            limitBytes: limitBytes())
+            limitBytes: limitBytes(), excluding: excluding)
     }
 
     private func refusal(_ spec: WarmModelLoadSpec, _ decision: SharedModelMemoryRules.LoadDecision) -> WarmModelLoaderError {

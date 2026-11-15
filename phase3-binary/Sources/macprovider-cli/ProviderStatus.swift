@@ -1003,6 +1003,10 @@ actor ProviderStatus {
     /// SPEC-001-R016: network requests in flight per secondary warm member.
     func secondaryRequestsInFlight() -> [String: Int] { secondaryInFlight }
 
+    /// SPEC-001-R016: the member key the wire names primary now
+    /// (`primaryWarmMemberKey` of the next snapshot).
+    func currentPrimaryWarmMember() -> String? { primaryMemberKey }
+
     /// SPEC-001-R016: the member key the primary's requests are admitted
     /// with, set once the warm set adopts the boot model.
     func setPrimaryWarmMember(_ key: String) async {

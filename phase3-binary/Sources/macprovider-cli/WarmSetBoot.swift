@@ -138,6 +138,9 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     /// runtime to the new one's (provider status, swap hooks, top-level
     /// fields). Runs inside the loader's turn.
     typealias PrimaryHandoff = @Sendable (_ old: WarmModelTableEntry<Runtime>, _ new: WarmModelTableEntry<Runtime>) async -> Void
+    /// The member key the wire names primary (`ProviderStatus`); nil names
+    /// none, and the table's flag decides.
+    typealias PrimaryMemberKeySource = @Sendable () async -> String?
 
     let table: WarmModelTable<Runtime>
     let loader: WarmModelLoader<Runtime>
@@ -146,6 +149,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     private let loadSpec: LoadSpec
     private let memberInfo: MemberInfo
     private let primaryHandoff: PrimaryHandoff
+    private let primaryMemberKeySource: PrimaryMemberKeySource
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var bootTask: Task<Void, Never>?
@@ -158,6 +162,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         loadSpec: @escaping LoadSpec,
         memberInfo: @escaping MemberInfo,
         primaryHandoff: @escaping PrimaryHandoff = { _, _ in },
+        primaryMemberKeySource: @escaping PrimaryMemberKeySource = { nil },
         log: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
     ) {
         self.table = table
@@ -166,6 +171,7 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
         self.loadSpec = loadSpec
         self.memberInfo = memberInfo
         self.primaryHandoff = primaryHandoff
+        self.primaryMemberKeySource = primaryMemberKeySource
         self.log = log
     }
 
@@ -306,20 +312,34 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
     }
 
     /// The primary, and a member whose runtime has not published its info
-    /// yet, is asked for it here.
+    /// yet, is asked for it here. The primary is the member the wire names
+    /// (`ProviderStatus.primaryWarmMemberKey`), listed first, so status
+    /// agrees with the heartbeat at a promotion.
     func controlEntries() async -> [WarmSetControlEntry] {
         let views = table.views.value
+        var entries = table.entries()
+        let wireKey = await primaryMemberKeySource()
+        let wirePrimary = wireKey.flatMap { key in
+            entries.first { WarmModelTable<Runtime>.memberKey(token: $0.token) == key }?.token
+        }
+        func isPrimary(_ entry: WarmModelTableEntry<Runtime>) -> Bool {
+            wirePrimary.map { $0 == entry.token } ?? entry.primary
+        }
+        if let index = entries.firstIndex(where: isPrimary), index > 0 {
+            entries.insert(entries.remove(at: index), at: 0)
+        }
         var result: [WarmSetControlEntry] = []
-        for entry in table.entries() {
+        for entry in entries {
+            let primary = isPrimary(entry)
             let view = views.first { $0.key == entry.key }
-            var info = entry.primary ? nil : view?.info
+            var info = primary ? nil : view?.info
             if info == nil, entry.state == .warm, let runtime = entry.runtime {
                 info = await memberInfo(runtime)
             }
             result.append(WarmSetControlEntry(
                 modelID: entry.modelID,
                 state: entry.state.rawValue,
-                primary: entry.primary,
+                primary: primary,
                 pinned: entry.pinned,
                 leases: entry.leases,
                 slotsTotal: info?.slotsTotal ?? 0,

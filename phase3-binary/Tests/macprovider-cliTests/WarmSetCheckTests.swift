@@ -25,11 +25,13 @@ final class WarmSetCheckRig: @unchecked Sendable {
 
     /// `memberGiB` and `memberKV` are what `serve`'s load spec says about the
     /// model asked about.
+    /// `limit`, when given, is read for every decision instead of `limitBytes`.
     init(limitBytes: Int, primaryActiveBytes: Int, primaryKV: Int = 100_000,
-         primaryContext: Int = 32_768, primarySlots: Int = 2, memberGiB: Int = 4, memberKV: Int = 50_000) throws {
+         primaryContext: Int = 32_768, primarySlots: Int = 2, memberGiB: Int = 4, memberKV: Int = 50_000,
+         limit: (@Sendable () -> Int?)? = nil) throws {
         self.primaryActiveBytes = primaryActiveBytes
         let loader = WarmModelLoader(
-            table: table, budget: budget, limitBytes: { limitBytes }, idlePollNanoseconds: 1_000_000
+            table: table, budget: budget, limitBytes: limit ?? { limitBytes }, idlePollNanoseconds: 1_000_000
         ) { [factoryCalls] spec in
             factoryCalls.add()
             return WarmFakeRuntime(memberID: 99, modelID: spec.modelID, hash: "x")
@@ -166,6 +168,65 @@ final class WarmSetCheckTests: XCTestCase {
         let refused = await pinned.check()
         XCTAssertEqual(refused.status, "insufficient_memory")
         XCTAssertEqual(refused.check?.evict, [])
+    }
+
+    /// `load` decides again after it unloads the planned members and refuses
+    /// unless that decision fits outright; the check makes the same second
+    /// decision, so a budget that refuses it gets `insufficient_memory`, not
+    /// `fits_after_eviction`.
+    func testTheCheckRefusesWhenThePostEvictionDecisionRefuses() async throws {
+        let (_, limit) = try estimate()
+        final class Reads: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            func next() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
+        }
+        let reads = Reads()
+        // Every read after the first is half the limit: what the eviction
+        // plan freed no longer covers the load.
+        let gib = self.gib
+        let rig = try WarmSetCheckRig(
+            limitBytes: limit, primaryActiveBytes: 16 * gib,
+            limit: { reads.next() == 1 ? limit : limit / 2 })
+        try rig.addThirdMember(gib: 26, pinned: false)
+        let before = rig.state()
+        let reply = await rig.check()
+        XCTAssertEqual(reply.status, "insufficient_memory")
+        XCTAssertEqual(reply.check?.evict, [])
+        XCTAssertEqual(reply.check?.limitBytes, limit / 2, "the reply reports the post-eviction decision")
+        XCTAssertTrue(reply.detail?.hasPrefix("insufficient_memory model=org/second") == true, reply.detail ?? "")
+        XCTAssertEqual(rig.state(), before, "model-c is still warm")
+        XCTAssertEqual(rig.loads, 0)
+    }
+
+    /// SPEC-001-R016: status names the member the wire names primary. At a
+    /// promotion the provider status switches first; status follows it, not
+    /// the table's flag, and lists that member first.
+    func testControlStatusNamesTheWirePrimaryAtThePromotionInstant() async throws {
+        let rig = try WarmSetCheckRig(limitBytes: 64 * gib, primaryActiveBytes: 16 * gib)
+        let token = try rig.addThirdMember(gib: 4, pinned: false)
+        let wireKey = WarmModelTable<WarmFakeRuntime>.memberKey(token: token)
+        let boot = WarmSetBoot(
+            table: rig.table, loader: rig.boot.loader, supportedModels: ["model-a", "model-c"],
+            loadSpec: { _ in throw CocoaError(.featureUnsupported) },
+            memberInfo: { _ in WarmModelMemberInfo(maxContextTokens: 4_096, slotsTotal: 1) },
+            primaryMemberKeySource: { wireKey },
+            log: { _ in })
+        XCTAssertEqual(rig.table.entries().first(where: \.primary)?.modelID, "model-a", "the table has not promoted yet")
+        let entries = await boot.controlEntries()
+        XCTAssertEqual(entries.map(\.modelID), ["model-c", "model-a"])
+        XCTAssertEqual(entries.map(\.primary), [true, false])
+
+        // No wire key, or one naming no member: the table's flag decides.
+        let unnamed = WarmSetBoot(
+            table: rig.table, loader: rig.boot.loader, supportedModels: ["model-a", "model-c"],
+            loadSpec: { _ in throw CocoaError(.featureUnsupported) },
+            memberInfo: { _ in WarmModelMemberInfo(maxContextTokens: 4_096, slotsTotal: 1) },
+            primaryMemberKeySource: { "warm-member-0" },
+            log: { _ in })
+        let tableOrder = await unnamed.controlEntries()
+        XCTAssertEqual(tableOrder.map(\.modelID), ["model-a", "model-c"])
+        XCTAssertEqual(tableOrder.map(\.primary), [true, false])
     }
 
     func testRefusalsBeforeTheMemoryDecisionMatchLoad() async throws {
