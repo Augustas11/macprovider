@@ -3343,7 +3343,7 @@ func modelsTableLines(currentModelID: String?, supportedModels: [String], member
 }
 
 private func modelIDKey(_ modelID: String) -> String {
-    modelID.lowercased(with: nil)
+    SupportedModels.foldedModelID(modelID)
 }
 
 private func writeStderr(_ line: String) {

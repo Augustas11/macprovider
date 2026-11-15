@@ -6890,10 +6890,10 @@ actor CoordinatorClient {
         guard let servedModelID else { return preflightModelNotLoaded(requestID: requestID) }
         let trimmed = servedModelID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
-        let key = trimmed.lowercased(with: nil)
+        let key = SupportedModels.foldedModelID(trimmed)
         guard let member = warmModels.first(where: { $0.key == key }) else {
             let namesPrimary = primaryNames.contains {
-                $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil) == key
+                $0.map { SupportedModels.foldedModelID($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == key
             }
             return namesPrimary
                 ? preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view)

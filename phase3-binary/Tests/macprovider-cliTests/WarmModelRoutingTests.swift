@@ -93,6 +93,43 @@ final class WarmModelRoutingTests: XCTestCase {
         try await warmEventually { harness.leases("model-b") == 0 }
     }
 
+    /// SPEC-010: one model-id fold (NFC, then lowercase) for config
+    /// validation, the table, the preflight and request routing, so a
+    /// decomposed, upper-case spelling of a non-ASCII id names the same
+    /// member everywhere and folds to the coordinator's bytes.
+    func testANonASCIIModelIDFoldsTheSameInConfigTableAndRouting() throws {
+        let composed = "Mod\u{E8}le-\u{C9}t\u{E9}"          // "Modèle-Été", precomposed
+        let decomposed = "MODE\u{300}LE-E\u{301}TE\u{301}"   // "MODÈLE-ÉTÉ", decomposed
+        let folded = SupportedModels.foldedModelID(decomposed)
+        XCTAssertEqual(Array(folded.unicodeScalars), Array("mod\u{E8}le-\u{E9}t\u{E9}".unicodeScalars))
+        XCTAssertEqual(Array(folded.utf8), Array(SupportedModels.foldedModelID(composed).utf8))
+
+        XCTAssertEqual(
+            try SupportedModels.validate(model: "model-a", supportedModels: ["model-a", composed], warmModels: [decomposed]),
+            ["model-a", composed])
+        XCTAssertEqual(WarmSetConfigText.fold(" \(decomposed) "), folded)
+
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 7_901, modelID: "model-a", hash: "a"))
+        let token = try table.beginLoading(modelID: composed, pinned: false)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 7_902, modelID: composed, hash: "e"))
+        table.updateInfo(token: token, .init(
+            maxContextTokens: 8_000, slotsTotal: 2, throughputTPSEstimate: 10, modelHash: String(repeating: "e", count: 64),
+            modelHashAlgorithm: "sha256", modelParamsB: 1))
+        XCTAssertThrowsError(try table.beginLoading(modelID: decomposed, pinned: false))
+        XCTAssertEqual(table.views.value.first { $0.modelID == composed }.map { Array($0.key.utf8) }, Array(folded.utf8))
+
+        let lease = try WarmModelRoute.lease(table, servedModelID: decomposed, primaryNames: ["model-a"])
+        XCTAssertEqual(lease.modelID, composed)
+        XCTAssertFalse(lease.primary)
+        lease.release()
+        let ack = CoordinatorClient.preflightAck(
+            requestID: "r", estimatedTokens: 1,
+            view: ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 1_000),
+            servedModelID: .some(decomposed), warmModels: table.views.value, primaryNames: ["model-a"])
+        XCTAssertEqual(ack["accepted"] as? Bool, true, "\(ack)")
+    }
+
     func testRelayWithoutServedModelServesThePrimary() async throws {
         let harness = try Harness()
         for (index, served) in [nil, NSNull(), "MODEL-A"].enumerated() {

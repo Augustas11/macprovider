@@ -30,6 +30,13 @@ public enum SupportedModels {
     public static let maxEntryByteLength = 256
     public static let maxCatalogEntries = 64
 
+    /// The SPEC-010 fold of a model id: Unicode NFC, then lowercase. The one
+    /// comparison key for model ids in config validation, the warm-set table,
+    /// the wire and request routing; the coordinator folds the same way.
+    public static func foldedModelID(_ modelID: String) -> String {
+        modelID.precomposedStringWithCanonicalMapping.lowercased(with: nil)
+    }
+
     public static func parseCSV(_ raw: String?) -> [String]? {
         guard let raw else {
             return nil
@@ -75,15 +82,15 @@ public enum SupportedModels {
             throw SupportedModelsValidationError.catalogTooLarge(count: catalog.count)
         }
 
-        let foldedModel = model.lowercased(with: nil)
+        let foldedModel = foldedModelID(model)
         let containsModel = catalog.contains { entry in
-            entry.lowercased(with: nil) == foldedModel
+            foldedModelID(entry) == foldedModel
         }
         guard containsModel else {
             throw SupportedModelsValidationError.modelNotInCatalog(model: model, catalog: catalog)
         }
-        let foldedCatalog = Set(catalog.map { $0.lowercased(with: nil) })
-        if let missing = warmModels.first(where: { !foldedCatalog.contains($0.lowercased(with: nil)) }) {
+        let foldedCatalog = Set(catalog.map(foldedModelID))
+        if let missing = warmModels.first(where: { !foldedCatalog.contains(foldedModelID($0)) }) {
             throw SupportedModelsValidationError.warmModelNotInCatalog(model: missing, catalog: catalog)
         }
 

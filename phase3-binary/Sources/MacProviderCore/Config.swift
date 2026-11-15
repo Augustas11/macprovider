@@ -1813,10 +1813,10 @@ public enum ConfigLoader {
     /// `max_context_override` (at least 1) and `max_concurrency_override`
     /// (1 through `AppConfig.warmModelSlotsLimit`) are.
     static func validateWarmModelLimits(_ limits: [String: WarmModelLimits], warmModels: [String]) throws {
-        let warm = Set(warmModels.map { $0.lowercased(with: nil) })
+        let warm = Set(warmModels.map(SupportedModels.foldedModelID))
         var seen: Set<String> = []
         for (id, entry) in limits.sorted(by: { $0.key < $1.key }) {
-            let folded = id.lowercased(with: nil)
+            let folded = SupportedModels.foldedModelID(id)
             guard warm.contains(folded) else {
                 throw ConfigError.invalidValue(key: "warm_model_limits", value: id, expected: "a model listed in warm_models")
             }

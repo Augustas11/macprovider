@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 // SPEC-001-R017 *Configuration*: the warm-set keys of the provider config
 // file (`warm_models`, `warm_model_limits`, and `supported_models` when a
@@ -70,7 +71,7 @@ enum WarmSetConfigText {
     }
 
     static func fold(_ modelID: String) -> String {
-        modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        SupportedModels.foldedModelID(modelID.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     static func read(_ text: String) throws -> Snapshot {

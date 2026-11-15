@@ -345,6 +345,29 @@ final class WarmSetBootTests: XCTestCase {
         XCTAssertEqual(SharedModelMemoryRules.soleLoadedKVBytesPerToken(members: members), 4_096)
     }
 
+    /// SPEC-001-R017: the process-wide applied KV figure is the last load's,
+    /// so a scheduler, which knows its member, reads its own model's figure
+    /// whatever order the members loaded in.
+    func testASchedulerReadsItsOwnModelsKVBytesPerTokenNotTheLastLoads() {
+        for order in [[1, 2], [2, 1]] {
+            let budget = SharedModelMemoryBudget()
+            for id in order {
+                _ = budget.recordLoaded(
+                    memberID: id, label: "m\(id)", modelFamily: "llama", wires: false, activeBytes: id * gib,
+                    weightBytes: nil, kvBytesPerToken: id == 1 ? 4_096 : 512, pinned: true)
+            }
+            XCTAssertEqual(budget.kvBytesPerTokenOverride(memberID: 1), 4_096, "order \(order)")
+            XCTAssertEqual(budget.kvBytesPerTokenOverride(memberID: 2), 512, "order \(order)")
+            XCTAssertNil(budget.processLimitView().soleKVBytesPerToken, "order \(order)")
+        }
+        let single = SharedModelMemoryBudget()
+        _ = single.recordLoaded(
+            memberID: 1, label: "m1", modelFamily: "llama", wires: false, activeBytes: gib,
+            weightBytes: nil, kvBytesPerToken: 4_096, pinned: true)
+        XCTAssertNil(single.kvBytesPerTokenOverride(memberID: 1), "one model keeps the applied figure")
+        XCTAssertEqual(single.processLimitView().soleKVBytesPerToken, 4_096)
+    }
+
     func testCommandBufferBudgetRule() {
         typealias Rules = SharedModelMemoryRules
         // A family that keeps MLX's default beside one that set 64 GiB buffers.

@@ -83,7 +83,11 @@ enum MLXMemoryLimit {
     /// SPEC-001-R017: the KV bytes per token are the only loaded model's
     /// from the shared budget, so a sibling's load (which applies its own
     /// value here) or its unload never leaves the survivor with another
-    /// model's figure. Before any model registers, the applied value.
+    /// model's figure. Before any model registers, the applied value. With
+    /// several loaded the process holds no one figure: this falls back to
+    /// the last applied (last loaded) value, so a caller that knows its
+    /// member reads `SharedModelMemoryBudget.kvBytesPerTokenOverride` first,
+    /// as the continuous-batch scheduler does (SPEC-001 §6.16 limit).
     static func admissionSample() -> MLXMemoryAdmissionSample? {
         state.lock.lock()
         let limit = state.limitBytes

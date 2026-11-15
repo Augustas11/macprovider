@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 /// SPEC-001-R016 `warm_models`: one entry per warm-set member, the primary
 /// first. Sent on the v2 `auth_request` initial stage, the legacy `hello`,
@@ -138,7 +139,7 @@ enum WarmModelsWire {
     }
 
     /// The SPEC-010 case fold of a model id, as `WarmModelMemberView.key`.
-    private static func key(_ modelID: String) -> String { modelID.lowercased(with: nil) }
+    private static func key(_ modelID: String) -> String { SupportedModels.foldedModelID(modelID) }
 
     /// `primaryEngineProfile` is the primary's `engine_profile`: a member's
     /// profile takes its chip and memory classes from it and is sent only

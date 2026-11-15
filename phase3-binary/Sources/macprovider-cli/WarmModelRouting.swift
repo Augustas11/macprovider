@@ -123,6 +123,6 @@ enum WarmModelRoute {
     }
 
     private static func key(_ modelID: String) -> String {
-        modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil)
+        SupportedModels.foldedModelID(modelID.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }

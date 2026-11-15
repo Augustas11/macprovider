@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 /// A runtime a warm-set member holds (SPEC-001-R016). `ModelRuntime`
 /// conforms; tests use fakes that load no model.
@@ -114,7 +115,7 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         self.now = now
     }
 
-    static func key(_ modelID: String) -> String { modelID.lowercased(with: nil) }
+    static func key(_ modelID: String) -> String { SupportedModels.foldedModelID(modelID) }
 
     // MARK: Lookup
 

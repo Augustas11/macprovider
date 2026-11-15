@@ -24,10 +24,12 @@ let package = Package(
         // without the lock, then retakes it to finish; recursive entry, a CPU
         // stream and a failed asynchronous schedule keep the stock locked
         // path. Swift layer only: MLX core, mlx-c and the metallib are
-        // unchanged. On an M3 Ultra with two models in one process, the main
-        // model at 1 row went from 0.20 to 0.52 of its solo decode rate and
-        // the second model at 2 rows from 0.82 to 0.57; output token ids were
-        // identical, and single-model decode was unchanged.
+        // unchanged. Measured on an earlier commit of the same change, before
+        // it was tagged .23, not on the tag itself: on an M3 Ultra with two
+        // models in one process, the main model at 1 row went from 0.20 to
+        // 0.52 of its solo decode rate and the second model at 2 rows from
+        // 0.82 to 0.57; output token ids were identical, and single-model
+        // decode was unchanged.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
