@@ -108,6 +108,10 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// SPEC-038 FR-CB11 (v0.3.22): the signed policy's `max_served_slots` for
     /// this model artifact. Nil: no policy ceiling.
     var policyCeiling: Int? = nil
+    /// SPEC-038 FR-CB9: the small-row route of the process that checks. On
+    /// stock order, widths from three rows compare with same-order
+    /// references (`ContinuousBatchingSelfCheck.usesSameOrderReference`).
+    var smallMRoute: SmallMRoute = .rowInvariant
 
     /// The most slots any grant may serve on this target: the scheduler rows,
     /// queue limit and signed policy ceiling, capped by the widest

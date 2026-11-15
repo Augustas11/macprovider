@@ -3263,10 +3263,10 @@ struct ServeCommand: AsyncParsableCommand {
             ),
             fields: smallMRouteInputs.logFields
         ).utf8))
-        // A one-row verdict this row-invariant process applies moves the next
+        // A one-row verdict this batching process applies moves the next
         // start of the same configuration to the serial route.
         let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
-            guard appliedSmallMRoute == .rowInvariant,
+            guard appliedSmallMRoute != .serialOnly,
                   let identity = smallMRouteStartupIdentity,
                   SmallMRoute.verdictDecidesNextStart(smallMRouteInputs)
             else { return nil }
@@ -3688,7 +3688,7 @@ struct ServeCommand: AsyncParsableCommand {
             guard let plan = autoServedSlots, plan.selfChecked,
                   let mlxRuntime = modelRuntime as? ModelRuntime else { return nil }
             // SPEC-038 FR-CB9: a serial-only process never runs a self-check;
-            // a re-check waits for a start on the row-invariant route.
+            // a re-check waits for a start on a batching route.
             if appliedSmallMRoute == .serialOnly {
                 FileHandle.standardError.write(Data(
                     "event=cb_self_check action=deferred reason=small_m_route_serial_only next=restart\n".utf8

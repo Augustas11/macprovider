@@ -12,13 +12,22 @@ import MacProviderCore
 /// the MLX fork's pre-window per-row `qmv` below the `qmm` limit, which is faster for one row
 /// but not row-invariant. Only a process that can never batch decode rows may
 /// run it, and such a process refuses every batching entry point.
+/// `stockOrder` sets the value to 2: one row takes upstream's one-row kernel,
+/// a forward of exactly two rows takes an exact kernel whose rows equal the
+/// lone row bit for bit, and forwards of 3-16 rows take the batch kernel,
+/// whose rows equal each other across 3-16-row forwards but may differ from
+/// the lone row in low bits. A process that may batch ordinary rows but has
+/// no native MTP, draft model, shard-group role, autotune child or other
+/// switch target runs it; native MTP keeps `rowInvariant` because its verify
+/// window of depth + 1 rows must equal the request's own one-row decode.
 enum SmallMRoute: String, Sendable, Equatable {
     case rowInvariant = "row_invariant"
     case serialOnly = "serial_only"
+    case stockOrder = "stock_order"
 
     /// Read once per process by the MLX core at its first small-row dispatch;
-    /// unset, or a value `atoi` parses to non-zero, keeps the row-invariant
-    /// window (`route(environmentValue:)`).
+    /// unset, or a value `atoi` parses to neither 0 nor 2, keeps the
+    /// row-invariant window (`route(environmentValue:)`).
     static let environmentKey = "MLX_METAL_SMALL_M_ROW_INVARIANT"
 
     struct Decision: Sendable, Equatable {
@@ -114,7 +123,9 @@ enum SmallMRoute: String, Sendable, Equatable {
 
     /// SPEC-038 FR-CB9: the route a `serve` process runs, decided once before
     /// MLX is first used, from state that cannot turn batching on later in
-    /// the same process. Serial-only needs all of:
+    /// the same process. A draft model, shard-group role, autotune child,
+    /// native MTP that may activate, or another switch target keeps the
+    /// row-invariant route. Otherwise serial-only needs all of:
     /// - native MTP inactive: mode `off`, or `auto` with no verified entry
     ///   for the loaded model and artifact digest (its rounds batch target
     ///   rows); an unreadable or unverifiable set keeps the invariant route;
@@ -126,11 +137,18 @@ enum SmallMRoute: String, Sendable, Equatable {
     ///   an autotune child (a child measures candidate configurations that
     ///   may batch, and its numbers must hold for the invariant route the
     ///   incumbent serves on).
-    /// A verdict recorded on the invariant route stays valid on the serial
-    /// route: it says batching gives no net gain against the invariant serial
-    /// baseline, and the serial route's baseline is faster, so the verdict
-    /// only gets more true. A serial-only process never measures, so no
-    /// serial-route number is ever compared with a batched one.
+    /// Every other such process may batch ordinary rows and takes the stock
+    /// order route, with the self-check verdict as its reason.
+    /// A one-row verdict recorded on a batching route stays valid on the
+    /// serial route: it says batching gives no net gain against that route's
+    /// serial baseline (on stock order the same upstream one-row kernel the
+    /// serial route runs), or that rows diverged, which the serial route
+    /// never risks. A serial-only process never measures, so no serial-route
+    /// number is ever compared with a batched one.
+    /// The SPEC-039 two-row attach probe (`PagedKVRuntimeParityProbe`)
+    /// compares a two-row forward with serial decode exactly; on stock order
+    /// it stays valid only because the core's two-row kernel is exact against
+    /// its lone row.
     static func decide(_ inputs: Inputs) -> Decision {
         if inputs.draftConfigured { return Decision(route: .rowInvariant, reason: "draft_model") }
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }
@@ -146,13 +164,13 @@ enum SmallMRoute: String, Sendable, Equatable {
         case .grantsNoBatching:
             return Decision(route: .serialOnly, reason: "self_check_no_batching")
         case .absent:
-            return Decision(route: .rowInvariant, reason: "self_check_verdict_absent")
+            return Decision(route: .stockOrder, reason: "self_check_verdict_absent")
         case .staleKey:
-            return Decision(route: .rowInvariant, reason: "self_check_key_changed")
+            return Decision(route: .stockOrder, reason: "self_check_key_changed")
         case .recheckPending:
-            return Decision(route: .rowInvariant, reason: "self_check_recheck_pending")
+            return Decision(route: .stockOrder, reason: "self_check_recheck_pending")
         case .grantsBatching:
-            return Decision(route: .rowInvariant, reason: "self_check_grants_batching")
+            return Decision(route: .stockOrder, reason: "self_check_grants_batching")
         }
     }
 
@@ -169,11 +187,16 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// The route the MLX core takes for a given environment value. The core
     /// parses a set value with C `atoi` and leaves the window off when it is
     /// 0, so "", "false", "00", "-0", " 0", "0abc" and, on Darwin, a value
-    /// that wraps to 0 such as "4294967296" are all serial-only. This calls
-    /// the same C library `atoi`, so the label always matches the core.
+    /// that wraps to 0 such as "4294967296" are all serial-only; a value that
+    /// parses to 2 ("2", "02", " 2") is stock order. This calls the same C
+    /// library `atoi`, so the label matches the core.
     static func route(environmentValue: String?) -> SmallMRoute {
         guard let environmentValue else { return .rowInvariant }
-        return environmentValue.withCString { atoi($0) } == 0 ? .serialOnly : .rowInvariant
+        switch environmentValue.withCString({ atoi($0) }) {
+        case 0: return .serialOnly
+        case 2: return .stockOrder
+        default: return .rowInvariant
+        }
     }
 
     /// SPEC-038 FR-CB9: the count a serial-only `serve` serves and reports,
@@ -211,9 +234,9 @@ enum SmallMRoute: String, Sendable, Equatable {
     }
 
     /// Sets the environment for this process before MLX's first small-row
-    /// dispatch. Row-invariant removes any inherited value, so a stray "0"
-    /// never reaches a process that can batch. The first call wins; a later
-    /// call returns the route already applied.
+    /// dispatch. Row-invariant removes any inherited value, so a stray "0" or
+    /// "2" never reaches a process that needs the invariant route. The first
+    /// call wins; a later call returns the route already applied.
     @discardableResult
     static func apply(_ route: SmallMRoute, reason: String = "applied") -> SmallMRoute {
         lock.lock()
@@ -221,6 +244,7 @@ enum SmallMRoute: String, Sendable, Equatable {
         if let applied { return applied }
         switch route {
         case .serialOnly: setenv(environmentKey, "0", 1)
+        case .stockOrder: setenv(environmentKey, "2", 1)
         case .rowInvariant: unsetenv(environmentKey)
         }
         applied = route
@@ -241,17 +265,19 @@ enum SmallMRoute: String, Sendable, Equatable {
 
     /// For every command other than `serve` and `decode-bench` that runs MLX
     /// compute: pins the row-invariant route before MLX starts, removing an
-    /// inherited value (any value `atoi` parses to 0), so the command never
-    /// runs the serial route. Exits 2 only when this process already applied
-    /// the serial route, which no command entry does.
+    /// inherited value (any value `atoi` parses to 0 or 2), so the command
+    /// never runs the serial or stock order route. Exits 2 only when this
+    /// process already applied another route, which no command entry does.
     static func requireRowInvariant(entry: String) throws {
         let inherited = ProcessInfo.processInfo.environment[environmentKey]
         let applied = apply(.rowInvariant, reason: "command")
-        if let refusal = batchingRefusal(route: applied, entry: entry) {
+        if applied != .rowInvariant {
+            let refusal = batchingRefusal(route: applied, entry: entry)
+                ?? "small_m_route_\(applied.rawValue): \(entry) needs the row-invariant small-row route, but this process already runs \(applied.rawValue)"
             FileHandle.standardError.write(Data("\(refusal)\n".utf8))
             throw ExitCode(2)
         }
-        if let inherited, route(environmentValue: inherited) == .serialOnly {
+        if let inherited, route(environmentValue: inherited) != .rowInvariant {
             FileHandle.standardError.write(Data(
                 "event=small_m_route action=inherited_value_removed entry=\(entry) mode=\(applied.rawValue)\n".utf8
             ))
@@ -259,11 +285,17 @@ enum SmallMRoute: String, Sendable, Equatable {
     }
 
     /// SPEC-037 FR-KVP4 item 10: the decode-path class in a disk-cache
-    /// envelope. KV written on one route is a clean miss on the other.
+    /// envelope. KV written on one route is a clean miss on every other.
+    /// Stock order has its own class, not serial-only's: a lone stock order
+    /// row runs the same one-row kernel as serial-only, but a stock order
+    /// process also writes KV from rows decoded in 3-16-row forwards (batch
+    /// kernel), which serial-only never produces; and its lone-row KV is not
+    /// the row-invariant route's either.
     var kvDecodePath: String {
         switch self {
         case .rowInvariant: return KVBuildIdentity.decodePathOrdinary
         case .serialOnly: return KVBuildIdentity.decodePathOrdinary + "+serial_small_m"
+        case .stockOrder: return KVBuildIdentity.decodePathOrdinary + "+stock_order_small_m"
         }
     }
 }
@@ -338,10 +370,10 @@ struct SmallMRouteVerdictStore: Sendable {
     /// `probe_shape_unavailable` (not even two exactness-probe rows fit).
     /// The last two are fixed by quantities the startup identity keys: the
     /// slot configuration, served context and paged-KV pool. Any change to
-    /// them is a new identity that starts row-invariant and re-measures. Any
-    /// other one-row reason (`serial_baseline_unavailable`,
+    /// them is a new identity that starts on a batching route and
+    /// re-measures. Any other one-row reason (`serial_baseline_unavailable`,
     /// `probe_shape_unmet_at_<k>`) re-runs on bound growth, which only a
-    /// row-invariant process can do, so it keeps that route.
+    /// process on a batching route can do, so it keeps that route.
     static func decidesOneRow(reason: String) -> Bool {
         reason == "no_net_gain" || reason == "single_row" || reason == "probe_shape_unavailable"
             || reason.hasPrefix("row_divergence_at_") || reason.hasPrefix("crashed_at_")
@@ -428,7 +460,8 @@ struct SmallMRouteVerdictStore: Sendable {
 
 /// Writes the startup model's applied self-check decision to the verdict
 /// store, once per key, and logs when it moves the next start to the serial
-/// route. Only built when every other serial-only condition holds.
+/// route. Only built when every other serial-only condition holds, so a start
+/// without a one-row verdict takes the stock order route.
 final class SmallMRouteVerdictRecorder: @unchecked Sendable {
     private let store: SmallMRouteVerdictStore
     private let selfCheckStore: ContinuousBatchingSelfCheckStore
@@ -461,6 +494,6 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         lastRecorded = (key, decision)
         store.record(startupIdentity: startupIdentity, key: key, decision: decision)
         let next = store.verdict(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore) == .grantsNoBatching
-        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next ? SmallMRoute.serialOnly.rawValue : SmallMRoute.rowInvariant.rawValue)")
+        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next ? SmallMRoute.serialOnly.rawValue : SmallMRoute.stockOrder.rawValue)")
     }
 }
