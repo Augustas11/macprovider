@@ -40,6 +40,15 @@ PR #2375 (`a8c2e6157`), epic #2355. Not live: v1.8.288 does not carry it.
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
 
+## Nemotron 3.5 Bolt billing alias and gateway model key — merged 2026-11-15, rides the next Pearl runtime
+
+PR 2385 (`61c3d02c3`), Related: #2329. Not live: v1.8.288 does not carry it.
+
+- Coordinator: the served artifact id of Nemotron 3.5 Bolt resolves to its rate-card row (`class-120b-moe`) in `internal/billing/formula.go`.
+- Gateway: the same model key in `internal/config/model_key.go`, the demand-telemetry allowlist and the store allowlist.
+
+Live step: the next Pearl runtime release, through `scripts/ops/pearl-runtime.sh status`, then `next --run`. It must be live before the Bolt catalog release is activated; `scripts/ops/catalog-activate.sh` enforces that order. The same runtime carries PR 2374 and PR 2377 below.
+
 ## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — merged 2026-11-14, rides the next Pearl runtime
 
 PR #2374 (`cdf46f633`), issue #2371. Not live: v1.8.288 does not carry it.
