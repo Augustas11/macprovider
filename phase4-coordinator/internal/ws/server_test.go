@@ -4942,10 +4942,12 @@ func warmModelsPrimaryEntry() map[string]any {
 }
 
 // SPEC-001-R016 / SPEC-002-R011: a hello may carry its warm set; one outside
-// the hello's model (a hello declares no supported_models) closes it as an
-// invalid hello.
+// the hello's model (a hello declares no supported_models) is malformed: it
+// is dropped with one structured warning and the session proceeds as legacy.
 func TestHelloWarmModelsHandshake(t *testing.T) {
-	ts := newProviderServer(t)
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs))
+	ts := h.HTTP
 	defer ts.Close()
 
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
@@ -4971,9 +4973,27 @@ func TestHelloWarmModelsHandshake(t *testing.T) {
 		warmModelsPrimaryEntry(),
 		map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0},
 	}
-	code, reason := sendHelloExpectClose(t, ts.URL, hello)
-	if code != providerws.CloseInvalidHello || reason != "invalid_hello: warm_models" {
-		t.Fatalf("close = %d %q", code, reason)
+	conn, _, _, err = gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err = wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	ack = providerws.HelloAck{}
+	if err := json.Unmarshal(payload, &ack); err != nil || ack.Type != "hello_ack" || ack.AssignedID == "" {
+		t.Fatalf("malformed warm set: ack = %s err=%v", payload, err)
+	}
+	if p, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || p.WarmModels != nil {
+		t.Fatalf("malformed warm set kept: %+v ok=%v", p.WarmModels, ok)
+	}
+	if got := strings.Count(logs.String(), `"event":"handshake_warm_models_dropped"`); got != 1 {
+		t.Fatalf("handshake_warm_models_dropped logged %d times, want 1: %s", got, logs.String())
 	}
 }
 
@@ -5060,6 +5080,55 @@ func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
 	}
 	if _, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-z"); ok {
 		t.Fatal("the rejected warm set was applied")
+	}
+
+	// Further rejections inside the log interval are not logged again; the
+	// third consecutive one drops the kept list as stale.
+	for i, free := range []int{0, 1} {
+		again := withHash(heartbeat())
+		again["slots_free"] = free
+		again["warm_models"] = bad["warm_models"]
+		if err := wsutil.WriteClientText(conn, mustJSON(again)); err != nil {
+			t.Fatalf("write heartbeat: %v", err)
+		}
+		eventually(t, func() bool {
+			p, ok := h.Registry.Resolve("m4-anon", assignedID)
+			return ok && p.SlotsFree == free
+		})
+		_, kept := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b")
+		if want := i == 0; kept != want {
+			t.Fatalf("rejection %d: model-b entry kept=%v, want %v", i+2, kept, want)
+		}
+	}
+	if got := strings.Count(logs.String(), `"event":"heartbeat_warm_models_rejected"`); got != 1 {
+		t.Fatalf("heartbeat_warm_models_rejected logged %d times in one interval, want 1", got)
+	}
+	if p, _ := h.Registry.Resolve("m4-anon", assignedID); p.WarmModels != nil || p.ServedModelID != "" {
+		t.Fatalf("stale warm set after three rejections: %+v", p.WarmModels)
+	}
+}
+
+// SPEC-002-R011: a malformed warm_models on auth_request initial is dropped
+// with one structured warning; the session authenticates as legacy.
+func TestAuthV2MalformedWarmModelsProceedsAsLegacy(t *testing.T) {
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2ProviderWithInitial(t, h, func(initial map[string]any) {
+		initial["warm_models"] = []any{warmModelsPrimaryEntry(), map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1}}
+	})
+	defer conn.Close()
+	p, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok || p.WarmModels != nil {
+		t.Fatalf("malformed warm set kept: %+v ok=%v", p.WarmModels, ok)
+	}
+	if got := strings.Count(logs.String(), `"event":"handshake_warm_models_dropped"`); got != 1 {
+		t.Fatalf("handshake_warm_models_dropped logged %d times, want 1: %s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"message_type":"auth_request"`) {
+		t.Fatalf("logs = %s", logs.String())
 	}
 }
 

@@ -2607,6 +2607,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
 		return "", ""
 	}
+	s.logHandshakeWarmModelsDropped(hello.ProviderID, "hello", hello.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
 		providerID:       hello.ProviderID,
 		authStage:        providerevents.AuthStageFirstMessage,
@@ -2806,6 +2807,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
+	s.logHandshakeWarmModelsDropped(initial.ProviderID, "auth_request", initial.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
 		providerID:       initial.ProviderID,
 		authStage:        providerevents.AuthStageFirstMessage,
@@ -6688,6 +6690,21 @@ func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string
 		Msg("provider verified-benchmark quarantine state changed")
 }
 
+// logHandshakeWarmModelsDropped logs a hello or auth_request whose malformed
+// warm_models was dropped; the session proceeds as legacy (SPEC-002-R011).
+func (s *Server) logHandshakeWarmModelsDropped(providerID, message string, err error) {
+	if err == nil {
+		return
+	}
+	s.log.Warn().
+		Err(err).
+		Str("event", "handshake_warm_models_dropped").
+		Str("field", warmModelsField).
+		Str("message_type", message).
+		Str("provider_id", providerID).
+		Msg("handshake warm_models dropped; session proceeds without a warm set")
+}
+
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
 	hb, presence, field, err := ParseHeartbeat(payload)
 	// SPEC-002-R011: a malformed warm_models on a heartbeat drops only the
@@ -6721,13 +6738,21 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		}
 	}
 	if warmModelsErr != nil {
-		s.log.Warn().
-			Err(warmModelsErr).
-			Str("event", "heartbeat_warm_models_rejected").
-			Str("field", warmModelsField).
-			Str("provider_id", providerID).
-			Str("assigned_id", assignedID).
-			Msg("heartbeat warm_models rejected; previous warm set kept, rest of the heartbeat applied")
+		var suppressed uint64
+		allow := true
+		if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+			suppressed, allow = session.allowWarmModelsRejectedLog(s.now())
+		}
+		if allow {
+			s.log.Warn().
+				Err(warmModelsErr).
+				Str("event", "heartbeat_warm_models_rejected").
+				Str("field", warmModelsField).
+				Str("provider_id", providerID).
+				Str("assigned_id", assignedID).
+				Uint64("suppressed_since_last", suppressed).
+				Msg("heartbeat warm_models rejected; previous warm set kept, rest of the heartbeat applied")
+		}
 	}
 	state := pool.State(hb.Status)
 	if !validState(state) {

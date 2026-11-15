@@ -611,3 +611,86 @@ func TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion(t *testing.T) {
 		t.Fatalf("an uncounted member dispatch reopened a seat: %d -> %d", before, after)
 	}
 }
+
+// SPEC-002-R011: a kept member list survives two consecutive rejected
+// warm_models and is dropped as stale on the third; a valid heartbeat in
+// between restarts the count.
+func TestWarmKeptListDroppedAfterThreeRejections(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	members := warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2))
+	beat := func(n int, keep bool) {
+		t.Helper()
+		update := warmHeartbeatUpdate(at.Add(time.Duration(n)*time.Second), members)
+		if keep {
+			update.WarmModels, update.KeepWarmModels = nil, true
+		}
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", update); !ok {
+			t.Fatal("heartbeat failed")
+		}
+	}
+	kept := func() bool {
+		_, ok := registry.ResolveEntry("p1", "current", "model-b")
+		return ok
+	}
+	beat(1, true)
+	beat(2, true)
+	if !kept() {
+		t.Fatal("list dropped after two rejections")
+	}
+	beat(3, false)
+	beat(4, true)
+	beat(5, true)
+	if !kept() {
+		t.Fatal("a valid heartbeat did not restart the rejection count")
+	}
+	beat(6, true)
+	if kept() {
+		t.Fatal("list kept after three consecutive rejections")
+	}
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels != nil || session.State != StateReady {
+		t.Fatalf("session after the drop: warm=%+v state=%s", session.WarmModels, session.State)
+	}
+	beat(7, false)
+	if !kept() {
+		t.Fatal("a valid warm set after the drop was not applied")
+	}
+}
+
+// SPEC-036 FR-25 per entry across a restart: after (p1, model-a) was
+// suspended, a new session with model: model-b and model-a as a further
+// member comes up with the model-a entry suspended and the rest routable.
+func TestComputeIntegritySuspensionSurvivesRestartAsMember(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	registry.SetComputeIntegritySuspended("p1", "model-a", true)
+	registry.Register(&Provider{
+		ProviderID:            "p1",
+		AssignedID:            "restart",
+		ModelID:               "model-b",
+		ModelHash:             warmTestHash("model-b"),
+		HashStatus:            HashStatusVerified,
+		State:                 StateReady,
+		SlotsFree:             2,
+		SlotsTotal:            2,
+		LastHeartbeatAt:       at,
+		LastActivityAt:        at,
+		MaxConcurrency:        2,
+		MaxContextTokens:      20000,
+		ThroughputTPSEstimate: 20,
+		WarmModels:            warmTestMembers("model-b", warmTestMember("model-a", WarmModelWarm, 2, 2)),
+	}, nil)
+	a, ok := registry.ResolveEntry("p1", "restart", "model-a")
+	if !ok || !a.ComputeIntegritySuspended || a.RoutingEligible() {
+		t.Fatalf("suspended member after restart: ok=%v suspended=%v", ok, a.ComputeIntegritySuspended)
+	}
+	b, ok := registry.ResolveEntry("p1", "restart", "model-b")
+	if !ok || b.ComputeIntegritySuspended || !b.RoutingEligible() {
+		t.Fatalf("healthy primary after restart: ok=%v suspended=%v", ok, b.ComputeIntegritySuspended)
+	}
+	if session, _ := registry.Resolve("p1", "restart"); session.ComputeIntegritySuspended {
+		t.Fatal("the member's suspension reached the session")
+	}
+}

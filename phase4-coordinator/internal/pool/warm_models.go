@@ -379,12 +379,18 @@ func warmPinsOf(members []WarmModel) map[string]*IdentityPin {
 	return pins
 }
 
+// maxRejectedWarmModels is how many consecutive heartbeats with a rejected
+// warm_models keep the previous member list before it is dropped as stale.
+const maxRejectedWarmModels = 3
+
 // keepWarmModelsLocked keeps the previous member list for a heartbeat whose
 // warm_models was rejected. A list whose primary is no longer the session's
-// model describes another configuration and is dropped (fail closed: the
-// session serves its top-level model only until a valid warm set arrives).
+// model describes another configuration and is dropped, and so is a list kept
+// over maxRejectedWarmModels consecutive rejections (fail closed: the session
+// serves its top-level model only until a valid warm set arrives).
 func (r *Registry) keepWarmModelsLocked(p *Provider) {
-	if p.WarmModels != nil && warmModelKey(p.WarmModels[0].ModelID) != warmModelKey(p.ModelID) {
+	p.warmModelsRejected++
+	if p.WarmModels != nil && (warmModelKey(p.WarmModels[0].ModelID) != warmModelKey(p.ModelID) || p.warmModelsRejected >= maxRejectedWarmModels) {
 		p.WarmModels = nil
 		p.warmPins = nil
 	}

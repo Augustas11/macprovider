@@ -1981,12 +1981,13 @@ func TestParseHelloAndAuthInitialDecodeWarmModels(t *testing.T) {
 		t.Fatalf("Hello() warm_models = %+v", hello.WarmModels)
 	}
 
+	// A malformed warm set is dropped; the session proceeds as legacy.
 	delete(auth, "supported_models")
-	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err == nil || field != "warm_models" {
-		t.Fatalf("auth initial member outside supported_models: field=%q err=%v", field, err)
+	if req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err != nil || req.WarmModels != nil || req.WarmModelsErr == nil {
+		t.Fatalf("auth initial member outside supported_models: field=%q err=%v warm_models=%+v dropped=%v", field, err, req.WarmModels, req.WarmModelsErr)
 	}
 	auth["warm_models"] = []any{primary}
-	if req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err != nil || len(req.WarmModels) != 1 {
+	if req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err != nil || len(req.WarmModels) != 1 || req.WarmModelsErr != nil {
 		t.Fatalf("auth initial warm set of one: field=%q err=%v", field, err)
 	}
 
@@ -2001,8 +2002,8 @@ func TestParseHelloAndAuthInitialDecodeWarmModels(t *testing.T) {
 		t.Fatalf("hello warm set of one: field=%q err=%v models=%+v", field, err, h.WarmModels)
 	}
 	hello["warm_models"] = []any{primary, member}
-	if _, field, err := ParseHello(mustAuthJSON(t, hello)); err == nil || field != "warm_models" {
-		t.Fatalf("hello member without supported_models: field=%q err=%v", field, err)
+	if h, field, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil || h.WarmModelsErr == nil || h.ModelID != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
+		t.Fatalf("hello member without supported_models: field=%q err=%v warm_models=%+v dropped=%v", field, err, h.WarmModels, h.WarmModelsErr)
 	}
 	contradicting := map[string]any{}
 	for k, v := range primary {
@@ -2010,8 +2011,8 @@ func TestParseHelloAndAuthInitialDecodeWarmModels(t *testing.T) {
 	}
 	contradicting["max_context_tokens"] = 1
 	hello["warm_models"] = []any{contradicting}
-	if _, field, err := ParseHello(mustAuthJSON(t, hello)); err == nil || field != "warm_models" {
-		t.Fatalf("hello contradicting primary: field=%q err=%v", field, err)
+	if h, field, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil || h.WarmModelsErr == nil {
+		t.Fatalf("hello contradicting primary: field=%q err=%v warm_models=%+v", field, err, h.WarmModels)
 	}
 	delete(hello, "warm_models")
 	if h, _, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil {

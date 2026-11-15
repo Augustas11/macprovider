@@ -58,6 +58,9 @@ type Hello struct {
 	// WarmModels is the SPEC-001-R016 warm set, primary first; nil for a
 	// provider without one (SPEC-002-R011).
 	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
+	// WarmModelsErr is why a malformed warm_models was dropped: the session
+	// proceeds as legacy (SPEC-002-R011).
+	WarmModelsErr error `json:"-"`
 }
 
 const (
@@ -162,6 +165,8 @@ type AuthRequest struct {
 	PrivacyEnrollment              *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
 	// WarmModels: see Hello.WarmModels. Initial stage only.
 	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
+	// WarmModelsErr: see Hello.WarmModelsErr.
+	WarmModelsErr error `json:"-"`
 }
 
 type Spec010Presence struct {
@@ -1016,7 +1021,8 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		err = validateWarmModelsSupported(warmModels, nil, h.ModelID)
 	}
 	if err != nil {
-		return Hello{}, warmModelsField, err
+		h.WarmModelsErr = err
+		return h, "", nil
 	}
 	h.WarmModels = warmModels
 	return h, "", nil
@@ -1299,7 +1305,8 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		err = validateWarmModelsSupported(warmModels, req.SupportedModels, req.ModelID)
 	}
 	if err != nil {
-		return AuthRequest{}, presence, warmModelsField, err
+		req.WarmModelsErr = err
+		return req, presence, "", nil
 	}
 	req.WarmModels = warmModels
 	return req, presence, "", nil

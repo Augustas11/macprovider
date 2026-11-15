@@ -499,6 +499,9 @@ type Provider struct {
 	// warmPins are the further members' identity pins by case-folded model
 	// (WarmModel.identityPin), kept while a member stays declared.
 	warmPins map[string]*IdentityPin
+	// warmModelsRejected counts consecutive heartbeats whose warm_models was
+	// rejected (keepWarmModelsLocked).
+	warmModelsRejected int
 
 	Tier2Session *Tier2Session `json:"-"`
 
@@ -1613,7 +1616,7 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	}
 
 	// 2. Pool-lifetime accumulator (SPEC-002 § 7.2).
-	canonical := strings.ToLower(modelID)
+	canonical := ModelKey(modelID)
 	if _, already := r.seenModelsLifetime[canonical]; already {
 		return
 	}
@@ -1651,7 +1654,7 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 //
 // Each entry flows through recordSeenModelLocked, so:
 //   - supported-model entries share EXACTLY the same normalization
-//     (strings.ToLower canonical key for the lifetime accumulator, raw
+//     (ModelKey canonical key for the lifetime accumulator, raw
 //     id for the per-session attribution set) as the served model_id;
 //   - they share the same lifecycle: dropped from seenModelsByProvider
 //     on disconnect / session-replacement (M2-5 / PERF-5), and retained
@@ -3459,6 +3462,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if hb.KeepWarmModels {
 		r.keepWarmModelsLocked(p)
 	} else {
+		p.warmModelsRejected = 0
 		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, demoted, true, hb.Status == StateReady || hb.Status == StateBusy)
 	}
 	if len(hb.LastAutoupdateEvent) > 0 {
@@ -3573,7 +3577,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// EqualFold("Σ","ς")==true but ToLower differs;
 	// EqualFold("İ","i")==false but ToLower agrees). Preserve the
 	// existing EqualFold contract by:
-	// 1. Fast O(1) hit on strings.ToLower canonical key (covers the
+	// 1. Fast O(1) hit on the ModelKey canonical key (covers the
 	//    ASCII/Latin common case, ~all realistic model ids).
 	// 2. On miss, EqualFold scan the lifetime accumulator before
 	//    falling through to the live/per-session paths.
@@ -3581,7 +3585,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// Issue #900: also accept rate-card / catalog keys that normalize
 	// to the same catalog identity as a seen or live HF model id
 	// (openai/gpt-oss-20b ↔ mlx-community/gpt-oss-20b-MXFP4-Q8).
-	canonical := strings.ToLower(modelID)
+	canonical := ModelKey(modelID)
 	// Hoist query normalization once; fallback scans only normalize
 	// stored ids (issue #900 audit: avoid re-allocating on the buyer
 	// string inside every EqualFold-miss iteration under RLock).

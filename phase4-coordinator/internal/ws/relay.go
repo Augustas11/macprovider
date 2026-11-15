@@ -449,6 +449,11 @@ type providerSession struct {
 	// never surfaces them as the next message. Both guarded by writeMu.
 	ackPending bool
 	preAck     []providerFrame
+
+	// warmModelsLog* rate-limit heartbeat_warm_models_rejected logs per
+	// session like inactiveLog*, under inactiveLogMu.
+	warmModelsLogAt         time.Time
+	warmModelsLogSuppressed uint64
 }
 
 // providerFrame is the unit of work consumed by runWriter. Two kinds exist:
@@ -1969,6 +1974,20 @@ func (ps *providerSession) allowInactiveFrameLog(now time.Time) (uint64, bool) {
 	}
 	suppressed := ps.inactiveLogSuppressed
 	ps.inactiveLogAt, ps.inactiveLogSuppressed = now, 0
+	return suppressed, true
+}
+
+const warmModelsRejectedLogInterval = time.Minute
+
+func (ps *providerSession) allowWarmModelsRejectedLog(now time.Time) (uint64, bool) {
+	ps.inactiveLogMu.Lock()
+	defer ps.inactiveLogMu.Unlock()
+	if !ps.warmModelsLogAt.IsZero() && now.Sub(ps.warmModelsLogAt) < warmModelsRejectedLogInterval {
+		ps.warmModelsLogSuppressed++
+		return 0, false
+	}
+	suppressed := ps.warmModelsLogSuppressed
+	ps.warmModelsLogAt, ps.warmModelsLogSuppressed = now, 0
 	return suppressed, true
 }
 
