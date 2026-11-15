@@ -1552,13 +1552,6 @@ private final class BlockingInferenceCancellation: @unchecked Sendable {
 private final class BlockingInferenceExecutor: @unchecked Sendable {
     private let label: String
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
-    /// Lab #2338: `MACPROVIDER_LAB_MLX_STREAM_PER_RUNTIME=1` runs each blocking
-    /// inference on its own MLX stream (own Metal command queue). Default off.
-    static let labStreamPerRuntime =
-        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_MLX_STREAM_PER_RUNTIME"] == "1"
-    #endif
-
     init(label: String) {
         self.label = label
     }
@@ -1577,15 +1570,6 @@ private final class BlockingInferenceExecutor: @unchecked Sendable {
                         if cancellation.isCancelled {
                             throw CancellationError()
                         }
-                        #if DEBUG || MACPROVIDER_LAB_HARNESS
-                        // Lab #2338: a detached thread inherits no task-local
-                        // MLX stream, so the caller's own stream never reaches
-                        // the serial decode loop. Give the work a stream of its own.
-                        if Self.labStreamPerRuntime {
-                            continuation.resume(returning: try MLX.Stream.withNewDefaultStream { try work.body() })
-                            return
-                        }
-                        #endif
                         continuation.resume(returning: try work.body())
                     } catch {
                         continuation.resume(throwing: error)

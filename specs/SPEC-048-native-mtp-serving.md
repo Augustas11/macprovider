@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.99
+**Version:** 0.1.100
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.99",
+  "version": "0.1.100",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,33 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.63` | `8f8821668c1a2dbb23ce33e43f31ed00d45f924f` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.67` | `2baaf9ecbc975e0d7a9fe131ba588f04fc453154` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.23` | `1cfafd1faa2ea502329d50cd851d97764ce20d1d` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
+The mlx-swift-lm row `3.32.3-macprovider.67` is on `3.32.3-macprovider.63`
+(`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2338), at
+`2baaf9ecbc975e0d7a9fe131ba588f04fc453154`: `.63` plus only the mlx-swift pin
+move. The Swift row moves to `0.32.3-macprovider.23`
+(`1cfafd1faa2ea502329d50cd851d97764ce20d1d`), `0.32.3-macprovider.22`
+(`0f93fa380369a1abd1e17757a465cf42a72d8f69`) plus two Swift-layer commits: a
+synchronous eval schedules the graph and copies its completion events under
+the process-wide evalLock, waits for the device without the lock, then
+retakes the lock to finish; recursive entry, a CPU stream and a failed
+asynchronous schedule keep the stock locked path. The new files are under
+`Source/Cmlx` only. The core and C rows are unchanged and no Metal kernel
+changed (the metallib bytes are identical). On an M3 Ultra, one process with
+a main model at 1 row beside a second model at 2 rows (1024-token prompts,
+180 s phases, two repeats, stock against patched from one source tree), the
+main model went from 0.20 to 0.52 of its solo decode rate (7.9 / 7.7 to
+20.4 / 20.4 tok/s) and the second model from 0.82 to 0.57 (26.0 / 26.1 to
+18.2 / 18.1 tok/s), about 34 to 38.5 tok/s in total. Output token ids were
+identical between the two builds on every compared request. Single-model
+serving was unchanged: 26.9 against 27.0 tok/s decode, identical token ids,
+and identical native MTP journey token ids.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
 (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
 `8f8821668c1a2dbb23ce33e43f31ed00d45f924f`: DeepSeek V4 prefill can yield
 between evaluated tiles so other continuous-batch rows decode while a
@@ -2631,6 +2652,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.100 (2026-11-15, Related: #2338)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.67` (`2baaf9ecbc975e0d7a9fe131ba588f04fc453154`) on
+  `3.32.3-macprovider.63`, `.63` plus only the mlx-swift pin move, and
+  mlx-swift `0.32.3-macprovider.23`
+  (`1cfafd1faa2ea502329d50cd851d97764ce20d1d`) on `0.32.3-macprovider.22`: a
+  synchronous eval waits for the device without holding the process-wide
+  evalLock (Swift layer only). Model sources, the core and C rows and the
+  metallib are unchanged.
 - **0.1.99 (2026-11-14, Related: #2352)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.63` (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) on
   `3.32.3-macprovider.61`: DeepSeek V4 prefill can yield between evaluated

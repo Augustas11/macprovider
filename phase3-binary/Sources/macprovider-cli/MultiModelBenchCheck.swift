@@ -65,10 +65,6 @@ enum MultiModelCheck {
     static let selfCheckBoundSeconds: Double = 1800
     static let promptsPerModel = 8
     static let schema = "macprovider.multi-model-bench.check.v2"
-    /// Lab #2338 evalLock experiment (scratchpad/evallock/): one MLX stream per
-    /// lane and per blocking inference. Default off.
-    static let labStreamPerRuntime =
-        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_MLX_STREAM_PER_RUNTIME"] == "1"
 
     static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
 
@@ -173,7 +169,7 @@ extension MultiModelBenchCommand {
         }
         GPUTurnArbiter.shared.setPolicy(gpuTurnSelection.policy)
         let labEnv = ProcessInfo.processInfo.environment
-        MultiModelBenchCommand.log("lab_mlx stream_per_runtime=\(MultiModelCheck.labStreamPerRuntime) eval_wait_unlocked=\(labEnv["MLX_SWIFT_LAB_EVAL_WAIT_UNLOCKED"] ?? "unset") max_ops_per_buffer=\(labEnv["MLX_MAX_OPS_PER_BUFFER"] ?? "unset") max_mb_per_buffer=\(labEnv["MLX_MAX_MB_PER_BUFFER"] ?? "unset")")
+        MultiModelBenchCommand.log("lab_mlx max_ops_per_buffer=\(labEnv["MLX_MAX_OPS_PER_BUFFER"] ?? "unset") max_mb_per_buffer=\(labEnv["MLX_MAX_MB_PER_BUFFER"] ?? "unset")")
         MultiModelBenchCommand.log("gpu_turn_policy name=\(gpuTurnSelection.policy.name) parameters=\(gpuTurnSelection.policy.parameters.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")) source=\(gpuTurnSelection.source)")
         let config = MultiModelCheckConfig(
             modelA: modelA,
@@ -745,14 +741,7 @@ struct MultiModelCheckRunner: Sendable {
                     for lane in 0..<count {
                         let offset = (lane * lanes.promptCount) / count
                         group.addTask {
-                            // Lab #2338: each lane, and the scheduler tasks it
-                            // starts, on its own MLX stream (own command queue).
-                            if MultiModelCheck.labStreamPerRuntime {
-                                return try await MLX.Stream.withNewDefaultStream {
-                                    try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
-                                }
-                            }
-                            return try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
+                            try await lanes.runLane(phase: phase, tag: tag, slot: slot, lane: lane, offset: offset, phaseStart: started, deadline: deadline)
                         }
                     }
                 }

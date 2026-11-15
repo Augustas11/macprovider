@@ -17,6 +17,17 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.67 (#2338) on 3.32.3-macprovider.63: only the
+        // mlx-swift pin moves, to 0.32.3-macprovider.23 (1cfafd1f), whose
+        // synchronous eval schedules the graph and copies its completion
+        // events under the process-wide evalLock, waits for the device
+        // without the lock, then retakes it to finish; recursive entry, a CPU
+        // stream and a failed asynchronous schedule keep the stock locked
+        // path. Swift layer only: MLX core, mlx-c and the metallib are
+        // unchanged. On an M3 Ultra with two models in one process, the main
+        // model at 1 row went from 0.20 to 0.52 of its solo decode rate and
+        // the second model at 2 rows from 0.82 to 0.57; output token ids were
+        // identical, and single-model decode was unchanged.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -150,7 +161,7 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.22, MLX
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.23, MLX
         // core v0.32.4-macprovider.14 (0f26baba0) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
@@ -166,7 +177,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
+            revision: "2baaf9ecbc975e0d7a9fe131ba588f04fc453154"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

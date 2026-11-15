@@ -12,7 +12,7 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 0f93fa38 the ``Source/Cmlx/mlx`` gitlink is
+mlx-swift fork revision pins it: at 1cfafd1f the ``Source/Cmlx/mlx`` gitlink is
 https://github.com/Augustas11/mlx at 0f26baba (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
@@ -42,18 +42,18 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
-# can yield between evaluated tiles so other continuous-batch rows decode
-# while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
-# hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.63"
-SPEC048_MLX_SWIFT_LM_REVISION = "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
+# 3.32.3-macprovider.67 (#2338) on 3.32.3-macprovider.63: .63 plus only the
+# mlx-swift 0.32.3-macprovider.23 pin move.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.67"
+SPEC048_MLX_SWIFT_LM_REVISION = "2baaf9ecbc975e0d7a9fe131ba588f04fc453154"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
-# Fork tag 0.32.3-macprovider.22: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below.
-SPEC048_MLX_SWIFT_REVISION = "0f93fa380369a1abd1e17757a465cf42a72d8f69"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.23"
+# Fork tag 0.32.3-macprovider.23: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below; .23 is .22 plus a synchronous eval that
+# waits for the device without holding the process-wide evalLock (Swift layer
+# only, core gitlink unchanged).
+SPEC048_MLX_SWIFT_REVISION = "1cfafd1faa2ea502329d50cd851d97764ce20d1d"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 # Fork tag v0.32.4-macprovider.14, seven commits on v0.32.4-macprovider.7
 # (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
