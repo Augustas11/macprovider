@@ -7,6 +7,25 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelsSubcommandTests: XCTestCase {
+    /// SPEC-011 R-3.10.5: every warm-set member is listed with its state and
+    /// the primary is marked; without members the table is unchanged.
+    func testModelsTableListsWarmSetMembersAndMarksThePrimary() async throws {
+        XCTAssertEqual(
+            modelsTableLines(currentModelID: "model-a", supportedModels: ["model-a", "model-b"]),
+            ["model_id\tstate", "model-a\twarm", "model-b\tidle"])
+        XCTAssertEqual(
+            modelsTableLines(
+                currentModelID: "model-a", supportedModels: ["model-a", "model-b", "model-c", "model-d"],
+                memberStates: ["model-b": "warm", "model-c": "loading"]),
+            ["model_id\tstate\tprimary", "model-a\twarm\tyes", "model-b\twarm\tno", "model-c\tloading\tno", "model-d\tidle\tno"])
+
+        let wire = try await makeModelsListWire(
+            currentModelID: "model-a", supportedModels: ["model-a", "model-b", "model-c"], source: "control_socket",
+            warmSwapAvailable: true, authorizedModelIDs: [], warmModelIDs: ["model-b"])
+        XCTAssertEqual(wire.currentModelID, "model-a")
+        XCTAssertEqual(wire.rows.map(\.state), ["warm", "warm", "idle"])
+    }
+
     func testOutputCaptureHandlesMoreThanAPipeBuffer() async throws {
         let output = String(repeating: "output", count: 32_768)
         let diagnostic = String(repeating: "diagnostic", count: 32_768)

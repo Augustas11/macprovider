@@ -655,6 +655,14 @@ final class WarmSetBootTests: XCTestCase {
         let swap = try await primary.beginSwap(targetModelID: "model-c")
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertFalse(h.log.contains("swap load"), "the swap waits for the warm load in progress")
+        // Not started: the primary still serves and is reported ready.
+        let queued = await primary.currentSnapshot()
+        XCTAssertEqual(queued.state, .ready)
+        XCTAssertEqual(queued.modelID, "model-a")
+        do {
+            _ = try await primary.beginSwap(targetModelID: "model-d")
+            XCTFail("a second swap began while the first was queued")
+        } catch {}
 
         await h.gate.release()
         try await swap.value

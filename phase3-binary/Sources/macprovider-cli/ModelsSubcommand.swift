@@ -1142,7 +1142,8 @@ struct ModelsListCommand: AsyncParsableCommand {
             }
             // SPEC-011 R-3.10.5: every warm member is listed `warm`; the
             // current model (the primary) stays the one marked current.
-            let warmModelIDs = await readWarmSecondaryModelIDs(connection: connection, primary: status.currentModelID)
+            let members = await readWarmSecondaries(connection: connection, primary: status.currentModelID)
+            let warmModelIDs = members.filter { $0.state == WarmModelState.warm.rawValue }.map(\.modelID)
             await connection.close()
             // Preserve every configured supported model for the catalog. The
             // running authority inventory only determines whether an idle row
@@ -1157,8 +1158,8 @@ struct ModelsListCommand: AsyncParsableCommand {
             if !models.contains(where: { modelIDKey($0) == modelIDKey(status.currentModelID) }) {
                 models.insert(status.currentModelID, at: 0)
             }
-            for warmModelID in warmModelIDs where !models.contains(where: { modelIDKey($0) == modelIDKey(warmModelID) }) {
-                models.append(warmModelID)
+            for member in members where !models.contains(where: { modelIDKey($0) == modelIDKey(member.modelID) }) {
+                models.append(member.modelID)
             }
             if emitJSON {
                 try await emitJSONList(
@@ -1173,7 +1174,7 @@ struct ModelsListCommand: AsyncParsableCommand {
             } else {
                 printModelsTable(
                     currentModelID: status.currentModelID, supportedModels: models,
-                    warmModelIDs: Set(warmModelIDs.map(modelIDKey)))
+                    memberStates: Dictionary(members.map { (modelIDKey($0.modelID), $0.state) }, uniquingKeysWith: { first, _ in first }))
             }
         } catch ControlSocketConnectError.socketAbsent(let path) {
             let models = idleCatalog(from: resolved)
@@ -3115,23 +3116,31 @@ private func idleCatalog(from config: AppConfig) -> [String] {
 /// The ids of the warm members beside the primary (SPEC-001-R016), read on
 /// an open control connection. Empty when serve keeps one model or does not
 /// answer the request.
-private func readWarmSecondaryModelIDs(connection: ControlSocketConnection, primary: String) async -> [String] {
+/// The warm set's other members and their states (`warm`, `loading`,
+/// `evicting`); empty without a warm set or on any failure.
+private func readWarmSecondaries(connection: ControlSocketConnection, primary: String) async -> [(modelID: String, state: String)] {
     do {
         try await connection.send(.warmSetRequest(action: "status", modelID: nil))
         guard case let .warmSetResponse(reply) = try await connection.receive(timeout: 2.0) else { return [] }
         return reply.entries
-            .filter { $0.state == WarmModelState.warm.rawValue && !$0.primary && modelIDKey($0.modelID) != modelIDKey(primary) }
-            .map(\.modelID)
+            .filter { !$0.primary && modelIDKey($0.modelID) != modelIDKey(primary) }
+            .map { ($0.modelID, $0.state) }
     } catch {
         return []
     }
 }
 
-/// `warmModelIDs` are the warm members beside the current model. With any,
-/// a `primary` column marks the current model (SPEC-011 R-3.10.5); with
-/// none the table is the single-model table.
-func printModelsTable(currentModelID: String?, supportedModels: [String], warmModelIDs: Set<String> = []) {
-    print(warmModelIDs.isEmpty ? "model_id\tstate" : "model_id\tstate\tprimary")
+/// `memberStates` (case-folded id to state) are the warm-set members beside
+/// the current model. With any, a `primary` column marks the current model
+/// (SPEC-011 R-3.10.5) and each member shows its state; with none the table
+/// is the single-model table.
+func printModelsTable(currentModelID: String?, supportedModels: [String], memberStates: [String: String] = [:]) {
+    modelsTableLines(currentModelID: currentModelID, supportedModels: supportedModels, memberStates: memberStates)
+        .forEach { print($0) }
+}
+
+func modelsTableLines(currentModelID: String?, supportedModels: [String], memberStates: [String: String] = [:]) -> [String] {
+    var lines = [memberStates.isEmpty ? "model_id\tstate" : "model_id\tstate\tprimary"]
     var rows: [String] = []
     var seen = Set<String>()
     for modelID in supportedModels where seen.insert(modelIDKey(modelID)).inserted {
@@ -3142,13 +3151,14 @@ func printModelsTable(currentModelID: String?, supportedModels: [String], warmMo
     }
     for modelID in rows {
         let current = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true
-        let state = current || warmModelIDs.contains(modelIDKey(modelID)) ? "warm" : "idle"
-        if warmModelIDs.isEmpty {
-            print("\(modelID)\t\(state)")
+        let state = current ? "warm" : memberStates[modelIDKey(modelID)] ?? "idle"
+        if memberStates.isEmpty {
+            lines.append("\(modelID)\t\(state)")
         } else {
-            print("\(modelID)\t\(state)\t\(current ? "yes" : "no")")
+            lines.append("\(modelID)\t\(state)\t\(current ? "yes" : "no")")
         }
     }
+    return lines
 }
 
 private func modelIDKey(_ modelID: String) -> String {

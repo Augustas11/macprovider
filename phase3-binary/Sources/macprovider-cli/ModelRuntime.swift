@@ -2433,6 +2433,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-011 R-3.10.3: the warm member a switch is promoting; a second
     /// switch is refused until it ends.
     private var pendingPromotionTarget: String?
+    /// A swap accepted while a warm-set load, evict or unload holds the
+    /// turn: the runtime is reserved for it, but it has not started, so the
+    /// primary is reported ready until its turn begins.
+    private var swapAwaitingWarmTurn = false
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
     private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
@@ -4947,7 +4951,7 @@ maxTokens: 1,
         case .rejected(let reason): decisionLabel = "rejected_\(reason.rawValue)"
         }
         return RuntimeSnapshot(
-            state: state,
+            state: swapAwaitingWarmTurn ? .ready : state,
             container: currentContainer,
             modelID: currentModelID,
             modelHash: currentModelHash,
@@ -6156,6 +6160,7 @@ maxTokens: 1,
         let warmSetSwapHooks = warmSetSwapHooks
         try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
         try transitionToLoading(target: targetModelID)
+        swapAwaitingWarmTurn = warmSetSwapHooks != nil
         let drainTimeoutSeconds = swapDrainTimeoutSeconds
         let providerStatus = providerStatus
         let testLoader = testLoader
@@ -6172,6 +6177,7 @@ maxTokens: 1,
             // SPEC-011 §3.10: a primary swap never overlaps a warm-set load,
             // evict or unload, so both are admitted against one budget.
             await Self.inWarmSetSwapTurn(warmSetSwapHooks) {
+                await self.beginSwapTurn()
                 do {
                     // A load of the target may have finished while this swap waited.
                     try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
@@ -6315,6 +6321,10 @@ maxTokens: 1,
     }
 
     /// Runs a swap's work inside the warm set's turn, or directly without one.
+    private func beginSwapTurn() {
+        swapAwaitingWarmTurn = false
+    }
+
     private static func inWarmSetSwapTurn(
         _ hooks: (any WarmSetSwapHooks)?, _ body: @Sendable () async -> Void
     ) async {
