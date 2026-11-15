@@ -1,11 +1,22 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.12
+Version: v0.4.13
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.13
+
+Related: #2338. R-16.2a: `served_model_dispatch` is 1 only for an attempt
+to a multi-model session, one with at least two members `warm` and
+`hash_verified` (SPEC-002-R011). A session whose second member is still
+loading, evicting or unverified is a legacy session: flag 0 and the
+provider-wide R-16.2 match. v0.4.12 set the flag for any warm set of more
+than one member, so a credit of such a session could escape a
+provider-wide hold; that was a money-positive path, which this closes. No payout or trust
+tier changes.
 
 ### v0.4.12
 
@@ -14,8 +25,10 @@ session whose warm set has more than one member (SPEC-002-R011). A warm set
 of exactly one member is a legacy session: its attempts are dispatched
 without `served_model_id`, record `served_model_dispatch` 0 and keep the
 provider-wide R-16.2 match. In a session of more than one member the flag is
-1 for every entry, the primary included. No money-positive path, payout or
-trust tier changes.
+1 for every entry, the primary included. No payout or trust tier changes.
+(v0.4.13: the flag is 1 only with at least two warm, verified members; the
+earlier "no money-positive path" did not hold for a session whose second
+member was not yet warm and verified.)
 
 ### v0.4.11
 
@@ -31,8 +44,8 @@ or trust tier changes.
 
 Related: #2338. A provider session may serve several warm models
 (SPEC-001-R016). R-16.2 gains R-16.2a: a credit whose attempt was dispatched
-with a `served_model_id` (a session whose warm set has more than one member,
-SPEC-002-R011; v0.4.12) is held only
+with a `served_model_id` (a multi-model session, at least two members warm
+and verified, SPEC-002-R011; v0.4.13) is held only
 by a hold for that served model, so a failed key for one model does not hold
 credits another model of the same provider earned. Every other credit keeps
 the v0.4.9 provider-wide predicate, so single-model providers are unchanged.
@@ -2583,7 +2596,7 @@ the verified model the hold was opened for. Because a held credit is not
 payable, R-15.2 does not archive its evidence while the
 hold is `held`.
 
-R-16.2a. (v0.4.10, amended v0.4.11) A credit whose attempt was dispatched
+R-16.2a. (v0.4.10, amended v0.4.11 and v0.4.13) A credit whose attempt was dispatched
 with a `served_model_id` (SPEC-002-R011) matches a hold only when that served
 model, as recorded in the attempt's route snapshot `model_id`, equals the
 hold's `model_id`. The served model is the warm entry the coordinator
@@ -2592,11 +2605,12 @@ the hold. As built:
 
 - The route snapshot row carries `served_model_dispatch` (0 or 1), stored
   beside the snapshot and outside its digested preimage. It is 1 for every
-  attempt dispatched to an entry of a session whose warm set has more than
-  one member (the primary entry included) and 0 for every other attempt:
-  every attempt to a session with a warm set of exactly one member, which is
-  a legacy session (SPEC-002-R011), and every pool-model route, which reads
-  the session and dispatches without `served_model_id`.
+  attempt dispatched to an entry of a multi-model session, one with at least
+  two members `warm` and `hash_verified` (the primary entry included;
+  SPEC-002-R011, v0.4.13), and 0 for every other attempt: every attempt to a
+  legacy session (one member, or further members loading, evicting or not
+  verified), and every pool-model route, which reads the session and
+  dispatches without `served_model_id`.
 - The predicate withholds a credit unless a route snapshot for the same
   request, attempt and provider has `served_model_dispatch = 1` and a
   `model_id` that differs from the hold's under the database `lower()`.

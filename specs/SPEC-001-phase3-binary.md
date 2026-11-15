@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.61 (2026-11-16, warm-set promotion wire, member self-check hold and runtime load check)
+**Version:** 1.9.62 (2026-11-16, warm-set check post-eviction decision and control-status primary)
+
+**Change log v1.9.62 (2026-11-16, Related: #2338):** §6.16 R017: a
+`warm_set` `check` that plans an eviction also makes the decision `load`
+makes once the planned members are unloaded, and answers
+`fits_after_eviction` only when that decision fits without a further
+eviction, else `insufficient_memory` with that decision's figures. The
+control socket's `entries` name as primary the member the provider status
+names (the wire's source), listed first, so status agrees with the heartbeat
+at a promotion. No trust tier or attestation label changes.
 
 **Change log v1.9.61 (2026-11-16, Related: #2338):** §6.16 says what the
 code does. R016: a promotion switches the wire in one step, the provider
@@ -5713,7 +5722,10 @@ request and one reply per warm-set action:
 - `{"type":"warm_set_response","action":A,"status":S,"model_id":M,"detail":D,"entries":[...]}`,
   where `model_id` echoes the request and `detail`, when present, is a short
   reason code. `entries` is the warm set after the action, primary first;
-  each entry has the `warm_models` fields `model_id`, `state`, `primary`,
+  the primary is the member the provider status names, the source the
+  heartbeat's `warm_models` reads (R016), so at a promotion `status` and the
+  wire name the same primary; without one the warm-set table decides. Each
+  entry has the `warm_models` fields `model_id`, `state`, `primary`,
   `pinned`, `slots_total`, `slots_free` (only while `warm`),
   `max_context_tokens`, `throughput_tps_estimate`, `model_params_b`,
   `model_hash`, `model_hash_algorithm` and `weights_manifest_sha256` (each
@@ -5740,7 +5752,12 @@ model outside the `supported_models` serve started with carries detail
 memory decision (the supported-model check, the load spec, the command-buffer
 check, then the R017 load decision against the loaded members, the pending
 loads and the process limit) without taking the load turn and without
-loading or evicting anything. It answers `fits`, `fits_after_eviction`, or
+loading or evicting anything. When the decision plans an eviction, the
+check also makes the decision a `load` makes after unloading the planned
+members (the same call with those members left out, under the live limit)
+and answers `fits_after_eviction` only when that decision fits without a
+further eviction; otherwise it answers `insufficient_memory` and its `check`
+object carries that second decision. It answers `fits`, `fits_after_eviction`, or
 what a `load` would answer instead (`already_warm`, `insufficient_memory`,
 `unsupported_model`, or `load_failed` with detail `member_loading` or
 `member_evicting` for a member in transition), with the same `detail`. A

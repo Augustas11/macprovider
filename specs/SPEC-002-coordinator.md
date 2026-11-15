@@ -1,6 +1,19 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.39 (2026-11-16, warm-set freeze audit corrections)
+**Version:** 1.6.40 (2026-11-16, warm-set multi-model predicate and round-2 audit corrections)
+
+**Change log v1.6.40 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+defines a multi-model session: at least two entries `warm` and
+`hash_verified`; any other warm set is a legacy session. A malformed
+`warm_models` on `hello` or `auth_request` is dropped with one structured
+warning and the session proceeds as legacy instead of closing. The
+heartbeat warning is rate-limited to one per session per minute; the third
+consecutive rejected `warm_models` drops the kept entry set. A served model
+that left the set never resolves to the legacy session, and requests open
+on a legacy model demoted to a further entry stay that entry's.
+`model_not_loaded` strikes are kept per session and model for 120 s across
+state changes, drops, re-adds and promotions. No trust tier or attestation
+label changes.
 
 **Change log v1.6.39 (2026-11-16, Related: #2338):** `SPEC-002-R011` says
 what the code now does after the freeze audit: a warm set of exactly one
@@ -6224,11 +6237,21 @@ A provider that sends `warm_models` (SPEC-001-R016) keeps one session, one
 `provider_id`, one admission tier and one SPEC-008 trust tier, and under that
 session one pool entry per warm model. A provider that sends no `warm_models`
 is a warm set of one built from its top-level fields; every rule below then
-reduces to today's per-provider behaviour, byte for byte. A `warm_models`
-of exactly one entry is the same warm set of one: the coordinator keeps no
+reduces to today's per-provider behaviour, byte for byte. A session is
+*multi-model* only while at least two of its reported entries are `warm`
+and `hash_verified` (the primary by the session's own verdict). Any other
+`warm_models` (one entry, or further entries that are `loading`,
+`evicting` or not verified) is a legacy session: the coordinator keeps no
 entry list for it, dispatches without `served_model_id`, records route
-snapshots with `served_model_dispatch` 0 and handles `model_not_loaded` as
-for a provider without `warm_models`.
+snapshots with `served_model_dispatch` 0, holds a refused seat for the
+whole session and handles `model_not_loaded` as for a provider without
+`warm_models`. A reported further entry's identity pin is kept while it
+stays reported, so an entry that becomes warm and verified joins with it.
+A session moves between legacy and multi-model on any accepted heartbeat:
+a dispatch for a model that is no longer an entry never resolves to the
+legacy session, and when a legacy session's model becomes a further entry
+under another primary, the dispatches open on it stay that entry's (its
+seats and refusal hold) until each has ended.
 
 - *Decoding.* `warm_models` is decoded strictly on the legacy `hello`, the v2
   `auth_request` and every `heartbeat`; the whole array is accepted or
@@ -6263,12 +6286,16 @@ for a provider without `warm_models`.
     `supported_models`, the legacy `hello` included, supports only its
     top-level model, so it can carry only a warm set of one.
 
-  A bad `hello` or `auth_request` closes the handshake like any other
-  malformed field (bad field `warm_models`). On a heartbeat a bad
-  `warm_models` is logged once and only the warm-set update is dropped: the
-  rest of the heartbeat (state, slots, top-level fields) applies, and the
-  session keeps its previous entry set, unless the heartbeat changed the
-  top-level model, which drops the set.
+  A bad `warm_models` on a `hello` or `auth_request` is dropped with one
+  structured warning (`handshake_warm_models_dropped`); the handshake
+  proceeds and the session is legacy. On a heartbeat a bad `warm_models`
+  drops only the warm-set update, with a `heartbeat_warm_models_rejected`
+  warning logged at most once per session per minute (the next one counts
+  the ones suppressed): the rest of the heartbeat (state, slots, top-level
+  fields) applies, and the session keeps its previous entry set, unless the
+  heartbeat changed the top-level model, which drops the set. The third
+  consecutive heartbeat with a bad `warm_models` drops the kept set as
+  stale; a heartbeat with a valid or no `warm_models` restarts the count.
 - *Registration and heartbeat.* The handshake and every accepted heartbeat
   replace the session's entry set with the reported `warm_models` (an entry
   missing from a heartbeat is gone; in-flight requests on it finish). A
@@ -6331,8 +6358,10 @@ for a provider without `warm_models`.
   queue-full refusal, outside the buyer retry budget, and the attempt is
   logged with `error_model_not_loaded` and null usage: it is never settled
   and is not a breaker fault. A strike counts once per heartbeat generation
-  of the entry. When an entry reaches its second strike within 120 s (the
-  default breaker threshold and window), the answer is a breaker fault
+  of the entry. Strikes are kept per session and case-folded model, aged
+  only by the 120 s window: a state change, a drop and re-add of the entry
+  or a promotion keeps them. When a model reaches its second strike within
+  120 s (the default breaker threshold and window), the answer is a breaker fault
   (`repeated_warm_entry_model_not_loaded`) for the session and the request
   takes the ordinary path, retry budget included. A provider without
   `warm_models`, or with a warm set of one, keeps today's handling of the

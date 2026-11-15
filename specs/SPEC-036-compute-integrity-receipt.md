@@ -1,9 +1,16 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.3-draft
+**Status:** v0.3.4-draft
 **Date:** 2026-11-16
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.4 (2026-11-16, Related: #2338 — served model on verification only, folded keys):**
+A verification request names the served model only for a multi-model
+session (SPEC-002-R011: at least two warm, hash_verified members); a
+scoring job goes to the primary and carries no served model. Verification
+keys compare by case-folded model id, so a re-spelling is the same key with
+the same due time and an in-flight request still counts.
 
 **Change log v0.3.3 (2026-11-16, Related: #2338 — per-entry suspension and probing as built):**
 FR-19 and FR-25 say how a multi-model session is verified and suspended. The
@@ -2153,14 +2160,20 @@ for one key never reads or changes another key of the same session. The
 **cohort hash** of a session for a key is the coordinator-verified catalog
 model hash of that warm entry. A provider cannot choose it, so a
 provider-reported value never decides which scorers a provider is compared
-with. A verification request or scoring job sent to a session that reports
-`warm_models` MUST carry `served_model_id` naming the key's model, and is
-answered by that member's runtime only. As built, the scheduler sweeps one
-key per warm entry of every session (SPEC-002-R011 entry views), each
-verifiable for its own model under the rules below; a warm set of exactly
-one member is a legacy session and one key. Only a session's primary entry
-can be a scorer candidate, so a further member is verified but never scores
-another provider. A session's reported
+with. A verification request sent to a multi-model session (SPEC-002-R011:
+at least two members `warm` and `hash_verified`) MUST carry
+`served_model_id` naming the key's model, and is answered by that member's
+runtime only; a request to any other session carries none. A scoring job
+goes to a session's primary model and carries no `served_model_id`. As
+built, the scheduler sweeps one key per warm entry of every session
+(SPEC-002-R011 entry views), each verifiable for its own model under the
+rules below; a session that is not multi-model is a legacy session and one
+key. Only a session's primary entry can be a scorer candidate, so a further
+member is verified but never scores another provider. The `model_id` of a
+key, of a scorer pool and of every comparison between them is case-folded
+(Unicode NFC, then lower case): a session that re-spells its model keeps
+one key, its state and its due time, and a verification request in flight
+across the re-spelling still counts. A session's reported
 `weights_manifest_sha256` is only what a scoring job to that session carries
 (FR-21).
 
