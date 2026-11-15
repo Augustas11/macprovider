@@ -12097,6 +12097,7 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionFeed.swift:enum NativeMTPAdmissionFeed",
         "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority",
         "phase3-binary/Sources/macprovider-cli/NativeMTPRevocationFeed.swift:struct NativeMTPRevocationFeed",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionPickup.swift:enum NativeMTPAdmissionPickup",
         "phase3-binary/Sources/macprovider-cli/DecodePathIdentity.generated.swift:enum DecodePathIdentity",
         "scripts/decode_path_digest.py:compute",
         "scripts/catalog-release.py:resolve_native_mtp_admission"
@@ -12109,6 +12110,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testCatalogReleaseAdmittingNativeMTPRestartsRunningProviderIntoAdmission",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupWaitsForRequestsInFlightPastTheDrainTimeout",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionPickupTests.swift:testJitterStaysInsideItsBoundForAnySample",
         "scripts/tests/test_catalog_native_mtp_admission.py:NativeMTPAdmissionReleaseTest"
       ],
       "journeys": [

@@ -483,6 +483,8 @@ struct ProviderSnapshot: Sendable {
     var localUsage = LocalUsageSnapshot()
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
     var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
+    /// SPEC-048-R013: a native-MTP admission waiting for this process to restart.
+    var nativeMTPAdmissionPending: NativeMTPAdmissionPendingStatus? = nil
 
     var slotsFree: Int {
         if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true { return 0 }
@@ -677,6 +679,7 @@ actor ProviderStatus {
     /// Closed by a process-exit or update drain until the provider is reset
     /// to ready; an operator pause never closes it.
     private var localAdmissionClosed = false
+    private var nativeMTPAdmissionPending: NativeMTPAdmissionPendingStatus?
     private var localCapacityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(
@@ -1216,6 +1219,7 @@ actor ProviderStatus {
             cbSelfCheckAdmissionHold: cbAdmissionHold
         )
         snapshot.localUsage = currentLocalUsage()
+        snapshot.nativeMTPAdmissionPending = nativeMTPAdmissionPending
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0
@@ -1457,6 +1461,31 @@ actor ProviderStatus {
                 return false
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
+    }
+
+    func setNativeMTPAdmissionPending(_ pending: NativeMTPAdmissionPendingStatus?) {
+        nativeMTPAdmissionPending = pending
+    }
+
+    /// SPEC-048-R013: the wait before a native-MTP admission restart. Closes
+    /// local admission and preempts local work as an update drain does, then
+    /// waits for buyer and local work with no deadline: requests in flight
+    /// are never cut. Returns false, with local admission reopened, only when
+    /// the waiting task is cancelled.
+    func waitUntilIdleForRestart(
+        pollNanoseconds: UInt64 = NativeMTPAdmissionPickup.idlePollNanoseconds
+    ) async -> Bool {
+        localAdmissionClosed = true
+        localLeases.forEach { $0.preempt() }
+        wakeLocalCapacityWaiters()
+        while requestsInFlight > 0 || !localLeases.isEmpty || localQueuedCount > 0 {
+            if Task.isCancelled {
+                localAdmissionClosed = false
+                return false
+            }
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
         return true
     }

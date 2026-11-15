@@ -1046,7 +1046,7 @@ struct ServeCommand: AsyncParsableCommand {
         return await staticInputs.loadContinuousBatchingPolicy(candidateCatalog: candidate)
     }
 
-    struct VerifiedModelRuntimeBinding {
+    struct VerifiedModelRuntimeBinding: Sendable {
         let authorityPath: String
         let authoritySHA256: String
         let loadPath: String
@@ -1240,7 +1240,8 @@ struct ServeCommand: AsyncParsableCommand {
             )
             let nativeMTPResolvedAdmission = await resolveNativeMTPArtifactAuthority(
                 config: resolved,
-                catalogTrust: catalogTrust,
+                releaseID: catalogTrust.releaseID,
+                catalogDigest: catalogTrust.digest,
                 authorityPath: canonicalAuthorityPath,
                 authoritySHA256: actual,
                 staticInputs: staticInputs,
@@ -1303,13 +1304,19 @@ struct ServeCommand: AsyncParsableCommand {
                 loadSHA256: expectedSHA256, nativeMTPResolvedArtifactAuthority: nil))
     }
 
-    private static func resolveNativeMTPArtifactAuthority(
+    /// `admissionRoot` is where a fetched set is written. Startup uses the
+    /// default root, which the serve-path loader reads; the SPEC-048-R013
+    /// pickup check passes a probe root so a running process's set stays.
+    static func resolveNativeMTPArtifactAuthority(
         config: AppConfig,
-        catalogTrust: CatalogRuntimeTrust,
+        releaseID: String,
+        catalogDigest: String,
         authorityPath: String,
         authoritySHA256: String,
         staticInputs: AutotuneStaticInputs,
-        artifactResolver: CachedModelArtifactResolver
+        artifactResolver: CachedModelArtifactResolver,
+        admissionRoot: URL = NativeMTPAdmissionFeed.defaultRoot(),
+        admissionFetcher: @escaping NativeMTPAdmissionFeed.Fetcher = NativeMTPAdmissionFeed.defaultFetch
     ) async -> NativeMTPResolvedAdmission? {
         guard config.nativeMTPMode == .auto,
               let modelKey = config.modelCatalogKey,
@@ -1319,11 +1326,11 @@ struct ServeCommand: AsyncParsableCommand {
             return nil
         }
         let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: true)
-        guard inputs.candidate.value.version == catalogTrust.releaseID,
-              AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes) == catalogTrust.digest,
+        guard inputs.candidate.value.version == releaseID,
+              AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes) == catalogDigest,
               inputs.artifactFeed.warnings.blockingArtifactFeedWarnings.isEmpty,
               let qualified = inputs.artifactFeed.value,
-              qualified.releaseID == catalogTrust.releaseID,
+              qualified.releaseID == releaseID,
               qualified.feedSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
               !qualified.signerKeyID.isEmpty
         else {
@@ -1354,9 +1361,11 @@ struct ServeCommand: AsyncParsableCommand {
             // SPEC-023 §12.5 Stage A: the release's signed admission set,
             // fetched from the static-feed origin into a private directory.
             guard let fetched = try? await NativeMTPAdmissionFeed.fetchAndMaterialize(
-                releaseID: catalogTrust.releaseID,
+                releaseID: releaseID,
                 signerKeyID: AutotuneStaticInputs.keyID,
-                trustedPublicKeys: staticInputs.trustedPublicKeys
+                trustedPublicKeys: staticInputs.trustedPublicKeys,
+                fetcher: admissionFetcher,
+                root: admissionRoot
             ) else {
                 return nil
             }
@@ -1377,7 +1386,7 @@ struct ServeCommand: AsyncParsableCommand {
             artifactRoot = storeRoot.path
         }
         guard let authority = try? qualified.nativeMTPResolvedArtifactAuthority(
-            releaseID: catalogTrust.releaseID,
+            releaseID: releaseID,
             modelKey: modelKey,
             artifactID: identity.artifactID,
             hash: identity.hash,
@@ -1843,6 +1852,123 @@ struct ServeCommand: AsyncParsableCommand {
             policyVersion: catalog.value.policyVersion,
             rowIdentity: catalog.value.rowIdentity(for: key),
             modelSHA256: row.modelSHA256
+        )
+    }
+
+    /// SPEC-048-R013 admission pickup: where the check materializes a
+    /// release's set. Never the root the serve-path loader reads, so the set
+    /// a running process restores its drafter from is left in place.
+    static func nativeMTPAdmissionProbeRoot() -> URL {
+        NativeMTPAdmissionFeed.defaultRoot().deletingLastPathComponent()
+            .appendingPathComponent("native-mtp-admission-probe", isDirectory: true)
+    }
+
+    /// SPEC-048-R013: whether a fresh start on the release in `envelope`
+    /// would admit native MTP for the loaded model where this process did
+    /// not. It re-runs the startup resolve against that release (signed
+    /// catalog and artifact feed, the fetched admission set, the store
+    /// projection, which also fetches the drafter ahead of the restart) and
+    /// then the loader's admission stage (tuple, build, artifact binding and
+    /// revocation). A process whose startup set already named the model
+    /// gains nothing from a restart, and neither does an operator-placed set.
+    static func nativeMTPAdmissionNewlyActivatable(
+        config: AppConfig,
+        startupAdmission: SmallMRoute.NativeMTPAdmission,
+        envelope: CoordinatorClient.CatalogEnvelope,
+        binding: VerifiedModelRuntimeBinding,
+        slotCount: Int,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
+        probeRoot: URL = nativeMTPAdmissionProbeRoot(),
+        admissionFetcher: @escaping NativeMTPAdmissionFeed.Fetcher = NativeMTPAdmissionFeed.defaultFetch,
+        admissionProbe: ((URL, URL?, NativeMTPAdmissionSidecar.TrustedKeyring, NativeMTPResolvedArtifactAuthority) async -> String?)? = nil
+    ) async -> Bool {
+        guard config.nativeMTPMode == .auto,
+              config.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+              startupAdmission != .entryForModel,
+              let modelID = config.model,
+              let modelRevision = config.modelArtifactSHA256, !modelRevision.isEmpty
+        else {
+            return false
+        }
+        var artifactResolver = artifactResolver
+        if let root = config.modelArtifactRoot, root.hasPrefix("/") {
+            artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
+        defer { try? FileManager.default.removeItem(at: probeRoot) }
+        guard let resolved = await resolveNativeMTPArtifactAuthority(
+            config: config,
+            releaseID: envelope.releaseID,
+            catalogDigest: envelope.candidateSHA256,
+            authorityPath: binding.authorityPath,
+            authoritySHA256: binding.authoritySHA256,
+            staticInputs: staticInputs,
+            artifactResolver: artifactResolver,
+            admissionRoot: probeRoot,
+            admissionFetcher: admissionFetcher
+        ), let sidecarPath = resolved.sidecarPath else {
+            return false
+        }
+        let sidecarURL = URL(fileURLWithPath: sidecarPath)
+        let keyring = NativeMTPAdmissionSidecar.TrustedKeyring(
+            publicKeysByKeyID: staticInputs.trustedPublicKeys,
+            requiredKeyID: AutotuneStaticInputs.keyID
+        )
+        guard SmallMRoute.nativeMTPAdmission(
+            sidecarURL: sidecarURL, modelID: modelID, modelRevision: modelRevision, trustedKeyring: keyring
+        ) == .entryForModel else {
+            return false
+        }
+        let artifactRoot = resolved.artifactRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let refusal: String?
+        if let admissionProbe {
+            refusal = await admissionProbe(sidecarURL, artifactRoot, keyring, resolved.authority)
+        } else {
+            refusal = await NativeMTPAdmissionPickup.loaderRefusal(
+                mode: config.nativeMTPMode,
+                targetModelID: modelID,
+                targetModelRevision: modelRevision,
+                slotCount: slotCount,
+                sidecarURL: sidecarURL,
+                artifactRoot: artifactRoot,
+                trustedKeyring: keyring,
+                resolvedArtifactAuthority: resolved.authority
+            )
+        }
+        if let refusal {
+            FileHandle.standardError.write(Data(
+                "event=native_mtp_admission_pickup action=probe_refused reason=\(refusal)\n".utf8
+            ))
+        }
+        return refusal == nil
+    }
+
+    /// SPEC-048-R013: the pickup hooks of a `serve` process, or nil when a
+    /// catalog release cannot change its native-MTP state: no signed catalog
+    /// row or verified binding, mode not `auto`, an autotune child, or a
+    /// shard-group role.
+    static func nativeMTPAdmissionPickupHooks(
+        config: AppConfig,
+        startupAdmission: SmallMRoute.NativeMTPAdmission,
+        binding: VerifiedModelRuntimeBinding?,
+        hasCatalogTrust: Bool,
+        slotCount: Int,
+        excluded: Bool,
+        store: NativeMTPAdmissionPickupStore = NativeMTPAdmissionPickupStore(url: NativeMTPAdmissionPickupStore.defaultURL())
+    ) -> NativeMTPAdmissionPickup.Hooks? {
+        guard let binding, hasCatalogTrust, !excluded, config.nativeMTPMode == .auto else { return nil }
+        return NativeMTPAdmissionPickup.Hooks(
+            newlyActivatable: { envelope in
+                await nativeMTPAdmissionNewlyActivatable(
+                    config: config,
+                    startupAdmission: startupAdmission,
+                    envelope: envelope,
+                    binding: binding,
+                    slotCount: slotCount
+                )
+            },
+            claim: { store.claim($0) },
+            supervised: { NativeMTPAdmissionPickup.supervisedByLaunchd() }
         )
     }
 
@@ -3838,6 +3964,14 @@ struct ServeCommand: AsyncParsableCommand {
                         )
                     }
                 },
+                nativeMTPAdmissionPickup: Self.nativeMTPAdmissionPickupHooks(
+                    config: resolved,
+                    startupAdmission: smallMRouteInputs.nativeMTPAdmission,
+                    binding: startupPreflight.runtimeBinding,
+                    hasCatalogTrust: startupPreflight.catalogTrust != nil,
+                    slotCount: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+                    excluded: autotuneCandidate || smallMRouteInputs.shardGroupRole
+                ),
                 receiptIdentitySigningKeyCandidates: admissionIdentitySigningKeyCandidates,
                 persistReceiptIdentitySigningKey: persistAdmissionIdentitySigningKey,
                 providerCredentialStore: credentialStore,
