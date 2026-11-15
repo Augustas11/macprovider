@@ -61,7 +61,7 @@ final class WarmSetContentionTests: XCTestCase {
         XCTAssertEqual(WarmSetContentionMeter.soloRate(measured: 0, busyNanoseconds: 2 * second, waitNanoseconds: 2 * second), 0)
     }
 
-    func testEveryEntryIsScaledAndTheTopLevelStaysThePrimarysOwn() {
+    func testEveryEntryIsScaledAndTheTopLevelCarriesThePrimarysContendedEstimate() {
         let info = WarmModelMemberInfo(maxContextTokens: 8_000, slotsTotal: 2, throughputTPSEstimate: 30)
         let views = [
             WarmModelMemberView(
@@ -72,22 +72,36 @@ final class WarmSetContentionTests: XCTestCase {
                 info: info, memberID: 2),
         ]
         let fields: [String: Any] = ["model_id": "model-a", "throughput_tps_estimate": 40.0]
-        let contended = WarmModelsWire.entries(
-            primaryFields: fields, primarySlotsTotal: 4, primarySlotsFree: 3, views: views,
-            contention: window(busy: [1: 3, 2: 6], wait: [1: 3, 2: 1]))
-        XCTAssertEqual(contended[0]["throughput_tps_estimate"] as? Double, 20)
-        XCTAssertEqual(contended[1]["throughput_tps_estimate"] as? Double, 25.7)
-        XCTAssertEqual(fields["throughput_tps_estimate"] as? Double, 40, "the top-level estimate is untouched")
+        func attached(_ contention: WarmSetContentionWindow?) -> [String: Any] {
+            var message = fields
+            WarmModelsWire.attach(
+                to: &message, primarySlotsTotal: 4, primarySlotsFree: 3, views: views, sessionModels: nil,
+                contention: contention)
+            return message
+        }
+        // SPEC-001-R018: the primary's estimate under contention is its
+        // contended rate, and R016's top level describes the primary, so
+        // both carry the one contended value.
+        let contended = attached(window(busy: [1: 3, 2: 6], wait: [1: 3, 2: 1]))
+        let entries = contended["warm_models"] as? [[String: Any]]
+        XCTAssertEqual(entries?[0]["throughput_tps_estimate"] as? Double, 20)
+        XCTAssertEqual(entries?[1]["throughput_tps_estimate"] as? Double, 25.7)
+        XCTAssertEqual(contended["throughput_tps_estimate"] as? Double, 20, "the top level is the primary entry's value")
 
-        let idle = WarmModelsWire.entries(
-            primaryFields: fields, primarySlotsTotal: 4, primarySlotsFree: 3, views: views,
-            contention: window(busy: [:]))
-        XCTAssertEqual(idle[0]["throughput_tps_estimate"] as? Double, 40)
-        XCTAssertEqual(idle[1]["throughput_tps_estimate"] as? Double, 30)
-        let unmeasured = WarmModelsWire.entries(
-            primaryFields: fields, primarySlotsTotal: 4, primarySlotsFree: 3, views: views, contention: nil)
-        XCTAssertEqual(unmeasured[0]["throughput_tps_estimate"] as? Double, 40)
-        XCTAssertEqual(unmeasured[1]["throughput_tps_estimate"] as? Double, 30)
+        for idle in [attached(window(busy: [:])), attached(nil)] {
+            let entries = idle["warm_models"] as? [[String: Any]]
+            XCTAssertEqual(idle["throughput_tps_estimate"] as? Double, 40)
+            XCTAssertEqual(entries?[0]["throughput_tps_estimate"] as? Double, 40)
+            XCTAssertEqual(entries?[1]["throughput_tps_estimate"] as? Double, 30)
+        }
+
+        // A warm set of one is never scaled: today's values exactly.
+        var single = fields
+        WarmModelsWire.attach(
+            to: &single, primarySlotsTotal: 4, primarySlotsFree: 3, views: [views[0]], sessionModels: nil,
+            contention: window(busy: [1: 3, 9: 6], wait: [1: 3]))
+        XCTAssertEqual(single["throughput_tps_estimate"] as? Double, 40)
+        XCTAssertEqual((single["warm_models"] as? [[String: Any]])?.first?["throughput_tps_estimate"] as? Double, 40)
     }
 
     func testTheTableNamesEachWarmMembersGPUParticipant() throws {

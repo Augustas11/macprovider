@@ -88,6 +88,88 @@ final class WarmModelsWireTests: XCTestCase {
         XCTAssertNotNil(try? JSONSerialization.data(withJSONObject: entries))
     }
 
+    // SPEC-002-R011 rejects a frame naming a model outside the session's
+    // supported_models, or listing a model twice, so neither is ever sent.
+    func testAttachNamesOnlyModelsTheSessionDeclared() {
+        let info = WarmModelMemberInfo(maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 12)
+        let views = [
+            view("model-a", primary: true, pinned: true),
+            view("Model-B", info: info),
+            view("model-c", state: .loading),
+        ]
+        func attached(_ top: String, _ session: [String]?) -> [String: Any] {
+            var message: [String: Any] = ["model_id": top, "throughput_tps_estimate": 40.0]
+            WarmModelsWire.attach(
+                to: &message, primarySlotsTotal: 2, primarySlotsFree: 2, views: views, sessionModels: session,
+                contention: nil)
+            return message
+        }
+        func ids(_ message: [String: Any]) -> [String?]? {
+            (message["warm_models"] as? [[String: Any]])?.map { $0["model_id"] as? String }
+        }
+        XCTAssertEqual(ids(attached("model-a", nil)), ["model-a", "Model-B", "model-c"])
+        XCTAssertEqual(ids(attached("model-a", ["model-a", "model-b"])), ["model-a", "Model-B"], "case-folded; model-c undeclared")
+        // A legacy hello declares none: the coordinator allows the top-level model only.
+        XCTAssertEqual(ids(attached("model-a", [])), ["model-a"])
+        // A primary the session never declared (a warm swap): no warm_models,
+        // the top level untouched, read by the coordinator as a set of one.
+        let swapped = attached("model-z", ["model-a", "model-b"])
+        XCTAssertNil(swapped["warm_models"])
+        XCTAssertEqual(swapped["throughput_tps_estimate"] as? Double, 40)
+    }
+
+    // SPEC-011 R-3.10.3: a promotion marks the new primary in the views
+    // before the top-level fields follow it. The frame built in between
+    // keeps the top-level model as the only primary and lists it once.
+    func testAPromotionInFlightNeverListsTheTopLevelModelTwice() {
+        let info = WarmModelMemberInfo(maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 12)
+        let views = [
+            view("model-b", primary: true, pinned: true),
+            view("model-a", inFlight: 1, info: info),
+            view("model-c", info: info),
+        ]
+        var message: [String: Any] = ["model_id": "model-a", "throughput_tps_estimate": 40.0]
+        WarmModelsWire.attach(
+            to: &message, primarySlotsTotal: 2, primarySlotsFree: 2, views: views, sessionModels: nil, contention: nil)
+        let entries = try? XCTUnwrap(message["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(entries?.map { $0["model_id"] as? String }, ["model-a", "model-c"])
+        XCTAssertEqual(entries?.map { $0["primary"] as? Bool }, [true, false])
+        XCTAssertEqual(entries?.first?["pinned"] as? Bool, false, "the demoted member's own pin")
+    }
+
+    // Every field the coordinator compares between the primary entry and
+    // the top level comes from one build.
+    func testAttachLeavesNoMirroredFieldDifferentFromThePrimaryEntry() throws {
+        var message: [String: Any] = [
+            "type": "heartbeat",
+            "model_id": "model-a",
+            "max_context_tokens": 32_000,
+            "throughput_tps_estimate": 40.5,
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "weights_manifest_sha256": NSNull(),
+            "model_params_b": 30.0,
+            "cb_self_check": ["decision": "passed"],
+            "engine_profile": ["chip_class": "m5"],
+            "slots_total": 4,
+            "slots_free": 3,
+            "loading": false,
+        ]
+        WarmModelsWire.attach(
+            to: &message, primarySlotsTotal: 4, primarySlotsFree: 3,
+            views: [view("model-a", primary: true, pinned: true)], sessionModels: ["model-a"], contention: nil)
+        let primary = try XCTUnwrap((message["warm_models"] as? [[String: Any]])?.first)
+        for key in WarmModelsWire.primaryFieldKeys {
+            let top = message[key].flatMap { $0 is NSNull ? nil : $0 }
+            XCTAssertEqual(
+                try top.map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) },
+                try primary[key].map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) }, key)
+        }
+        XCTAssertEqual(primary["slots_total"] as? Int, message["slots_total"] as? Int)
+        XCTAssertEqual(primary["slots_free"] as? Int, message["slots_free"] as? Int)
+        XCTAssertEqual(primary["state"] as? String, "warm")
+    }
+
     func testLocalStatusCarriesWarmModelsOnlyWithAWarmSet() async {
         let snapshot = await status().snapshot()
         let plain = RouterHandler.statusResponse(snapshot, providerID: nil, coordinatorURL: nil)

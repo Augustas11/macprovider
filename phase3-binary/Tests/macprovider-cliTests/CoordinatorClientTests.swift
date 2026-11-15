@@ -1033,11 +1033,95 @@ final class CoordinatorClientTests: XCTestCase {
 
         await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "secondary", warmMember: "model-b")
         lease.release()
+        // A legacy hello declares no supported_models, so the coordinator
+        // allows its top-level model alone (SPEC-002-R011): the primary.
         let hello = await client.helloMessage()
         let helloEntries = try XCTUnwrap(hello["warm_models"] as? [[String: Any]])
-        XCTAssertEqual(helloEntries[0]["model_id"] as? String, hello["model_id"] as? String)
+        XCTAssertEqual(helloEntries.map { $0["model_id"] as? String }, [hello["model_id"] as? String])
         XCTAssertEqual(helloEntries[0]["slots_free"] as? Int, 2)
-        XCTAssertEqual(helloEntries[1]["slots_free"] as? Int, 3)
+    }
+
+    /// The cross-language `warm_models` contract (SPEC-001-R016/R018,
+    /// SPEC-002-R011): a heartbeat rendered while both members are busy,
+    /// checked into `test/fixtures/warm-models/` and decoded by the
+    /// coordinator's own parser in `internal/ws`
+    /// (`TestWarmModelsContractFixtureIsAccepted`). Regenerate with
+    /// `WARM_MODELS_CONTRACT_WRITE=1`.
+    func testContendedHeartbeatPrimaryEntryMatchesTopLevelContract() async throws {
+        let hash = { (c: Character) in String(repeating: c, count: 64) }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2, throughputTPSEstimate: 40),
+            modelHash: hash("a"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1
+        )
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 1, modelID: "model-a", hash: "a"))
+        let token = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 2, modelID: "model-b", hash: "b"))
+        table.updateInfo(token: token, .init(
+            maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 30, modelHash: hash("b"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, modelParamsB: 4))
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status, recorder: recorder, warmModels: table, supportedModels: ["model-a", "model-b"])
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+        let second: UInt64 = 1_000_000_000
+        await client.setWarmSetContentionForTest(WarmSetContentionWindow(
+            wallNanoseconds: 10 * second,
+            busyNanoseconds: [1: 3 * second, 2: 6 * second],
+            waitNanoseconds: [1: 3 * second, 2: second]))
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        let entries = try XCTUnwrap(heartbeat["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["model_id"] as? String }, ["model-a", "model-b"])
+        // Both members busy: the primary's contended estimate on both sides.
+        XCTAssertEqual(heartbeat["throughput_tps_estimate"] as? Double, 20)
+        XCTAssertEqual(entries[1]["throughput_tps_estimate"] as? Double, 25.7)
+        for key in WarmModelsWire.primaryFieldKeys {
+            let top = heartbeat[key].flatMap { $0 is NSNull ? nil : $0 }
+            XCTAssertEqual(
+                try top.map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) },
+                try entries[0][key].map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) }, key)
+        }
+        XCTAssertEqual(entries[0]["slots_total"] as? Int, heartbeat["slots_total"] as? Int)
+        XCTAssertEqual(entries[0]["slots_free"] as? Int, heartbeat["slots_free"] as? Int)
+
+        // The fixture keeps what the coordinator's heartbeat parser reads.
+        let keys = WarmModelsWire.primaryFieldKeys + [
+            "type", "status", "ram_gb", "max_concurrency", "slots_free", "slots_total", "loading",
+            "requests_served_since_last", "avg_latency_ms_since_last", "throughput_tps_since_last", "warm_models",
+        ]
+        let rendered: [String: Any] = [
+            "supported_models": try XCTUnwrap(auth["supported_models"]),
+            "heartbeat": heartbeat.filter { keys.contains($0.key) },
+        ]
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../test/fixtures/warm-models/contended-heartbeat-v1.json").standardizedFileURL
+        if ProcessInfo.processInfo.environment["WARM_MODELS_CONTRACT_WRITE"] == "1" {
+            try FileManager.default.createDirectory(at: fixture.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: rendered, options: [.sortedKeys, .prettyPrinted]).write(to: fixture)
+        }
+        let golden = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        // The memory and chip classes are this Mac's, not the contract's.
+        func portable(_ value: Any) -> Any {
+            switch value {
+            case let object as [String: Any]:
+                return object.filter { !["ram_gb", "ram_class_gb", "chip_class"].contains($0.key) }.mapValues(portable)
+            case let array as [Any]:
+                return array.map(portable)
+            default:
+                return value
+            }
+        }
+        XCTAssertEqual(
+            String(decoding: try JSONSerialization.data(withJSONObject: portable(golden), options: .sortedKeys), as: UTF8.self),
+            String(decoding: try JSONSerialization.data(withJSONObject: portable(rendered), options: .sortedKeys), as: UTF8.self),
+            "the provider's warm_models heartbeat drifted from the coordinator contract fixture")
     }
 
     func testNoWarmSetSendsNoWarmModels() async throws {
@@ -10776,7 +10860,8 @@ final class CoordinatorClientTests: XCTestCase {
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider",
-        warmModels: (any WarmModelRouting)? = nil
+        warmModels: (any WarmModelRouting)? = nil,
+        supportedModels: [String]? = nil
     ) async throws -> CoordinatorClient {
         let resumeRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("coordinator-resume-\(UUID().uuidString)", isDirectory: true)
@@ -10797,6 +10882,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         config.losslessnessProbeEnabled = losslessnessProbeEnabled
         config.computeScoreReference = computeScoreReference
+        config.supportedModels = supportedModels
         let runtime: ModelRuntime
         if let modelRuntime {
             runtime = modelRuntime

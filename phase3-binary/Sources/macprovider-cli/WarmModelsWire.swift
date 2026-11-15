@@ -20,13 +20,61 @@ enum WarmModelsWire {
         "engine_profile",
     ]
 
+    /// Adds `warm_models` to `message`, a coordinator handshake or
+    /// heartbeat whose top-level fields describe the primary, and writes the
+    /// primary entry's value of every `primaryFieldKeys` field back to the
+    /// top level. Both come from one build, so the coordinator's
+    /// primary-versus-top-level check (SPEC-002-R011) can never fail: in
+    /// particular the top-level `throughput_tps_estimate` is the primary's
+    /// contended estimate (SPEC-001-R018), which equals its solo rate for a
+    /// warm set of one or with no busy sibling.
+    ///
+    /// `sessionModels` is the `supported_models` the session declared: an
+    /// entry outside it would make the coordinator reject the whole frame.
+    /// Empty means the session declared none (the legacy `hello`), which
+    /// the coordinator reads as the top-level model alone; nil skips the
+    /// check. A member outside it is left out; a primary outside it (a
+    /// warm swap to a model the session never declared) sends no
+    /// `warm_models` at all, which the coordinator reads as a warm set of
+    /// one built from the top-level fields, exactly as before the field
+    /// existed.
+    static func attach(
+        to message: inout [String: Any],
+        primarySlotsTotal: Int,
+        primarySlotsFree: Int,
+        views: [WarmModelMemberView],
+        sessionModels: [String]?,
+        contention: WarmSetContentionWindow?
+    ) {
+        var members = views
+        if let sessionModels {
+            let primaryKey = (message["model_id"] as? String).map(key)
+            let declared = sessionModels.isEmpty ? Set(primaryKey.map { [$0] } ?? []) : Set(sessionModels.map(key))
+            guard let primaryKey, declared.contains(primaryKey) else { return }
+            members = views.filter { $0.primary || declared.contains($0.key) }
+        }
+        let entries = entries(
+            primaryFields: message, primarySlotsTotal: primarySlotsTotal, primarySlotsFree: primarySlotsFree,
+            views: members, contention: contention)
+        for field in primaryFieldKeys {
+            if let value = entries[0][field] { message[field] = value }
+        }
+        message["warm_models"] = entries
+    }
+
     /// `primaryFields` is the message the entries ride on (its top-level
     /// fields describe the primary); `primarySlotsTotal` and
     /// `primarySlotsFree` are the primary's rows, as the top-level
     /// `slots_total` / `slots_free` report them. A `loading` or `evicting`
     /// entry carries no `slots_free`. Each entry's `throughput_tps_estimate`
     /// is its member's rate under the measured `contention` (SPEC-001-R018);
-    /// the top-level estimate stays the primary's own.
+    /// a coordinator frame takes the primary's back to the top level
+    /// (`attach`).
+    ///
+    /// The primary entry is the top-level `model_id`, whatever the views
+    /// say: a promotion marks the new primary in the views before the
+    /// top-level fields follow it, so no view with the top-level id and no
+    /// view marked primary is listed again as a further member.
     static func entries(
         primaryFields: [String: Any],
         primarySlotsTotal: Int,
@@ -35,10 +83,12 @@ enum WarmModelsWire {
         contention: WarmSetContentionWindow? = WarmSetContentionMeter.shared.window()
     ) -> [[String: Any]] {
         let primaryLoading = primaryFields["loading"] as? Bool == true
+        let primaryKey = (primaryFields["model_id"] as? String).map(key)
+        let primaryView = views.first { $0.key == primaryKey } ?? views.first(where: \.primary)
         var primary: [String: Any] = [
             "state": primaryLoading ? WarmModelState.loading.rawValue : WarmModelState.warm.rawValue,
             "primary": true,
-            "pinned": views.first(where: \.primary)?.pinned ?? true,
+            "pinned": primaryView?.pinned ?? true,
             "slots_total": primarySlotsTotal,
         ]
         if !primaryLoading {
@@ -52,10 +102,10 @@ enum WarmModelsWire {
         let members = Set(views.compactMap(\.memberID))
         if let contention, let solo = primary["throughput_tps_estimate"] as? Double {
             primary["throughput_tps_estimate"] = contention.estimate(
-                solo: solo, memberID: views.first(where: \.primary)?.memberID, members: members)
+                solo: solo, memberID: primaryView?.memberID, members: members)
         }
         let primaryEngineProfile = primaryFields["engine_profile"] as? [String: Any]
-        return [primary] + views.filter { !$0.primary }.map { view in
+        return [primary] + views.filter { !$0.primary && $0.key != primaryKey }.map { view in
             var entry = secondaryEntry(view, primaryEngineProfile: primaryEngineProfile)
             if let contention, let solo = entry["throughput_tps_estimate"] as? Double {
                 entry["throughput_tps_estimate"] = contention.estimate(solo: solo, memberID: view.memberID, members: members)
@@ -63,6 +113,9 @@ enum WarmModelsWire {
             return entry
         }
     }
+
+    /// The SPEC-010 case fold of a model id, as `WarmModelMemberView.key`.
+    private static func key(_ modelID: String) -> String { modelID.lowercased(with: nil) }
 
     /// `primaryEngineProfile` is the primary's `engine_profile`: a member's
     /// profile takes its chip and memory classes from it and is sent only

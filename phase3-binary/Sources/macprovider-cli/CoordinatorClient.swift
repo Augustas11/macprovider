@@ -598,6 +598,14 @@ actor CoordinatorClient {
     private let bootModelRuntime: any ModelRuntimeServing
     /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
     private let warmModels: (any WarmModelRouting)?
+    /// The `supported_models` the current session's handshake declared:
+    /// the v2 `auth_request` list, or empty after a legacy `hello`, which
+    /// declares none. `warm_models` never names a model outside it
+    /// (SPEC-002-R011 rejects such a frame whole).
+    private var warmModelsSessionModels: [String]?
+    /// SPEC-001-R018: the measured GPU contention the `warm_models`
+    /// estimates are scaled by.
+    private var warmSetContention: @Sendable () -> WarmSetContentionWindow? = { WarmSetContentionMeter.shared.window() }
     /// The current primary: what every top-level handshake and heartbeat
     /// field describes. A promotion (SPEC-011 R-3.10.3) moves it off the
     /// boot runtime.
@@ -4167,6 +4175,10 @@ actor CoordinatorClient {
 
     func setWebSocketForTest(_ socket: ProviderWebSocketTask?) {
         webSocket = socket
+    }
+
+    func setWarmSetContentionForTest(_ window: WarmSetContentionWindow?) {
+        warmSetContention = { window }
     }
 
     private func handleOwnershipEvent(_ payload: [String: Any]) async throws {
@@ -9097,6 +9109,7 @@ actor CoordinatorClient {
             resolvedCatalog = [wireModelID]
         }
         message["supported_models"] = resolvedCatalog
+        warmModelsSessionModels = resolvedCatalog
         appendRelayBlindKeyRecords(to: &message)
         appendPrivacyKeyRecords(to: &message)
         if publishesSupportedModels {
@@ -9190,6 +9203,9 @@ actor CoordinatorClient {
 
     func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
+        // A hello declares no supported_models: its session serves the
+        // top-level model alone.
+        warmModelsSessionModels = []
         var message: [String: Any] = [
             "type": "hello",
             "version": 1,
@@ -9270,16 +9286,19 @@ actor CoordinatorClient {
     }
 
     /// SPEC-001-R016: `warm_models` beside the top-level fields, which keep
-    /// describing the primary. Absent without a warm set, so a provider
+    /// describing the primary and take the primary entry's values
+    /// (`WarmModelsWire.attach`). Absent without a warm set, so a provider
     /// with none sends exactly today's message; a coordinator that predates
     /// the field ignores the unknown key.
     private func appendWarmModels(to message: inout [String: Any], snapshot: ProviderSnapshot) {
         guard let warmModels else { return }
-        message["warm_models"] = WarmModelsWire.entries(
-            primaryFields: message,
+        WarmModelsWire.attach(
+            to: &message,
             primarySlotsTotal: snapshot.slotsTotal,
             primarySlotsFree: snapshot.slotsFree,
-            views: warmModels.views.value
+            views: warmModels.views.value,
+            sessionModels: warmModelsSessionModels,
+            contention: warmSetContention()
         )
     }
 
