@@ -1,11 +1,13 @@
 package integration
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -141,6 +143,38 @@ func waitForWarmRouteSnapshots(t *testing.T, s *scenario, want int) []warmRouteS
 	return nil
 }
 
+// seedPassingVerification stores a passing SPEC-036 verification for each
+// (provider, model) key before the coordinator starts, as an earlier run of
+// the scoring loop would have; the coordinator publishes it at start.
+func seedPassingVerification(s *scenario, keys ...[2]string) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.coordinatorDB)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS compute_integrity_scoring_keys (
+    provider_id    TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    state          TEXT NOT NULL CHECK(state IN ('unverified','passing','suspect','failed','recovering')),
+    state_json     TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY(provider_id, model_id)
+) WITHOUT ROWID`); err != nil {
+		s.t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, k := range keys {
+		model := strings.ToLower(k[1])
+		state, _ := json.Marshal(map[string]any{"provider_id": k[0], "model_id": model, "state": "passing", "reason": "in_band_streak", "since": now,
+			"in_streak": 3, "escalation_count": 0, "in_band_total": 3, "out_of_band_total": 0})
+		if _, err := db.Exec(`INSERT INTO compute_integrity_scoring_keys (provider_id, model_id, state, state_json, updated_at_utc) VALUES (?, ?, 'passing', ?, ?)`,
+			k[0], model, string(state), now); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+}
+
 // creditFor returns the ledger credit of one route snapshot's attempt.
 func creditFor(t *testing.T, credits []ledgerCreditRow, snap warmRouteSnapshotRow) ledgerCreditRow {
 	t.Helper()
@@ -160,7 +194,10 @@ func creditFor(t *testing.T, credits []ledgerCreditRow, snap warmRouteSnapshotRo
 // credit carries the serving member's model id and hash and is priced for
 // that model. When the member is evicted before the coordinator has seen
 // it, its model_not_loaded answer fails the request over to a second
-// provider, and the next heartbeat drops the entry.
+// provider, and the next heartbeat drops the entry. SPEC-022 R-16.2a: the
+// warm provider's served models have a passing compute-integrity
+// verification, so its snapshots are flagged; the fallback's member has
+// none, so its snapshots keep the provider-wide hold match (flag 0).
 func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 	memberModel, memberHash := signedAutotuneRow(t, warmMemberAutotuneKey)
 	const warmID = "prov-warm"
@@ -171,6 +208,14 @@ func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 		providerCount:              2,
 		providerID:                 warmID,
 		settlementCatalogExtraRows: []string{warmMemberAutotuneKey},
+		coordinatorConfig: func(_ *scenario, cfg map[string]any) {
+			// Scoring runs with its default cadence (no probe within the
+			// test) over the seeded verification states.
+			cfg["compute_integrity"] = map[string]any{"scoring": map[string]any{"enabled": true, "corpus_path": ciPrivateCorpus(t)}}
+		},
+		beforeCoordinator: func(s *scenario) {
+			seedPassingVerification(s, [2]string{warmID, settlementFixtureModelID}, [2]string{warmID, memberModel})
+		},
 		providerSetup: func(fp *fakeProvider) {
 			switch fp.providerID {
 			case warmID:
@@ -305,8 +350,8 @@ func TestJourneyWarmSetTwoModelsOneSession(t *testing.T) {
 			continue
 		}
 		fallbackSnaps++
-		if snap.ModelID != memberModel || snap.ReportedHash != memberHash || snap.ServedModelDispatch != 1 {
-			t.Fatalf("fallback route snapshot = %+v", snap)
+		if snap.ModelID != memberModel || snap.ReportedHash != memberHash || snap.ServedModelDispatch != 0 {
+			t.Fatalf("fallback route snapshot = %+v, want served_model_dispatch 0 without a passing verification", snap)
 		}
 		if c := creditFor(t, credits, snap); c.PromptRatePerMtok != 50000 || c.CompletionRatePerMtok != 100000 {
 			t.Fatalf("fallback credit rates %d/%d, want the member's", c.PromptRatePerMtok, c.CompletionRatePerMtok)

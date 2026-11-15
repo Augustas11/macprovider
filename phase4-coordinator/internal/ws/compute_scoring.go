@@ -419,6 +419,11 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		if st.State.RoutingSuspended() && s.pool != nil {
 			s.pool.SetComputeIntegritySuspended(st.ProviderID, st.ModelID, true)
 		}
+		// SPEC-022 R-16.2a: a passing verification narrows holds only while
+		// scoring runs; with scoring off no key is passing.
+		if s.pool != nil {
+			s.pool.SetComputeIntegrityPassing(st.ProviderID, st.ModelID, deps.Config.Enabled && e.states[key].State == computeintegrity.VerificationPassing)
+		}
 	}
 	e.restoreSchedule(ctx, startedAt)
 	s.computeScoring.Store(e)
@@ -793,6 +798,9 @@ func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time)
 		}
 		if seen, ok := e.lastSeen[key.providerID]; !ok || seen.Before(cutoff) {
 			delete(e.states, key)
+			if e.s.pool != nil {
+				e.s.pool.SetComputeIntegrityPassing(key.providerID, key.modelID, false)
+			}
 		}
 	}
 	for id, seen := range e.lastSeen {
@@ -1382,6 +1390,7 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 	}
 	if e.s.pool != nil {
 		e.s.pool.SetComputeIntegritySuspended(st.ProviderID, st.ModelID, tr.To.RoutingSuspended())
+		e.s.pool.SetComputeIntegrityPassing(st.ProviderID, st.ModelID, e.deps.Config.Enabled && tr.To == computeintegrity.VerificationPassing)
 	}
 	if e.deps.Metrics != nil {
 		e.deps.Metrics.IncComputeIntegrityTransition(string(tr.From), string(tr.To))

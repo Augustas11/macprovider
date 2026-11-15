@@ -732,3 +732,39 @@ func TestModelKeyVariantsShareSanctions(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-002-R011: a declared warm member with no seat is never routed or
+// probed, so it never counts toward a multi-model session.
+func TestWarmZeroSlotMemberIsNotMultiModel(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerHeartbeatProvider(t, registry, "model-a", warmTestHash("model-a"), HashStatusVerified, at)
+	verifyWarmTestHashes(registry)
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 0, 0))))
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels != nil || len(registry.EntrySnapshot()) != 1 {
+		t.Fatalf("a zero-seat member made the session multi-model: %+v", session.WarmModels)
+	}
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 1, 1))))
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels == nil {
+		t.Fatal("a one-seat warm verified member is not multi-model")
+	}
+}
+
+// SPEC-022 R-16.2a: the passing verification is per (provider, model) key;
+// each entry view carries its own model's, under any spelling.
+func TestComputeIntegrityPassingIsPerEntry(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+	if a, b := warmEntry(t, registry, "model-a"), warmEntry(t, registry, "model-b"); a.ComputeIntegrityPassing || b.ComputeIntegrityPassing {
+		t.Fatal("passing without a verification")
+	}
+	registry.SetComputeIntegrityPassing("p1", "MODEL-B ", true)
+	if a, b := warmEntry(t, registry, "model-a"), warmEntry(t, registry, "model-b"); a.ComputeIntegrityPassing || !b.ComputeIntegrityPassing {
+		t.Fatalf("passing a=%v b=%v, want only model-b", a.ComputeIntegrityPassing, b.ComputeIntegrityPassing)
+	}
+	registry.SetComputeIntegrityPassing("p1", "model-a", true)
+	registry.SetComputeIntegrityPassing("p1", "model-b", false)
+	if a, b := warmEntry(t, registry, "model-a"), warmEntry(t, registry, "model-b"); !a.ComputeIntegrityPassing || b.ComputeIntegrityPassing {
+		t.Fatalf("passing a=%v b=%v, want only model-a", a.ComputeIntegrityPassing, b.ComputeIntegrityPassing)
+	}
+}

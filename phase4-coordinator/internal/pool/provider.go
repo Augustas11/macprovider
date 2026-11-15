@@ -271,6 +271,11 @@ type Provider struct {
 	// provider and its served model is failed. The registry recomputes it from
 	// the suspension set on registration, model change and every set change.
 	ComputeIntegritySuspended bool `json:"compute_integrity_suspended,omitempty"`
+	// ComputeIntegrityPassing is set while the SPEC-036 key for this
+	// provider and its served model currently has a passing verification
+	// (SPEC-022 R-16.2a); recomputed with ComputeIntegritySuspended. Never
+	// set while compute scoring is not running.
+	ComputeIntegrityPassing bool `json:"-"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -1119,6 +1124,9 @@ type Registry struct {
 	// computeIntegritySuspended is the SPEC-036 FR-25 set of failed
 	// (provider_id, model_id) keys.
 	computeIntegritySuspended map[string]map[string]struct{}
+	// computeIntegrityPassing is the set of (provider_id, model_id) keys
+	// whose verification is currently passing.
+	computeIntegrityPassing map[string]map[string]struct{}
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -2964,17 +2972,27 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 // primary model's, and each further warm member carries its own, so a
 // suspended model stays out of routing whichever member serves it and a
 // suspended primary never closes a healthy member.
+//
+// It also resolves the passing verification of the same keys
+// (ComputeIntegrityPassing), which narrows a held credit to its served model
+// (SPEC-022 R-16.2a).
 func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
 	models := r.computeIntegritySuspended[p.ProviderID]
+	passing := r.computeIntegrityPassing[p.ProviderID]
 	_, suspended := models[warmModelKey(p.ModelID)]
+	_, passed := passing[warmModelKey(p.ModelID)]
 	p.ComputeIntegritySuspended = suspended
+	p.ComputeIntegrityPassing = passed
 	if p.WarmModels == nil {
 		return
 	}
 	p.WarmModels = cloneWarmModels(p.WarmModels)
 	for i := range p.WarmModels {
-		_, memberSuspended := models[warmModelKey(p.WarmModels[i].ModelID)]
+		key := warmModelKey(p.WarmModels[i].ModelID)
+		_, memberSuspended := models[key]
+		_, memberPassing := passing[key]
 		p.WarmModels[i].computeIntegritySuspended = memberSuspended
+		p.WarmModels[i].computeIntegrityPassing = memberPassing
 	}
 }
 
@@ -2984,25 +3002,41 @@ func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
 func (r *Registry) SetComputeIntegritySuspended(providerID, modelID string, suspended bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.computeIntegritySuspended == nil {
+		r.computeIntegritySuspended = map[string]map[string]struct{}{}
+	}
+	return r.setComputeIntegrityKeyLocked(r.computeIntegritySuspended, providerID, modelID, suspended)
+}
+
+// SetComputeIntegrityPassing records whether one (provider_id, model_id)
+// key currently has a passing SPEC-036 verification and applies it to the
+// live session. It returns true when the set changed.
+func (r *Registry) SetComputeIntegrityPassing(providerID, modelID string, passing bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.computeIntegrityPassing == nil {
+		r.computeIntegrityPassing = map[string]map[string]struct{}{}
+	}
+	return r.setComputeIntegrityKeyLocked(r.computeIntegrityPassing, providerID, modelID, passing)
+}
+
+func (r *Registry) setComputeIntegrityKeyLocked(set map[string]map[string]struct{}, providerID, modelID string, on bool) bool {
 	modelID = warmModelKey(modelID)
-	models := r.computeIntegritySuspended[providerID]
+	models := set[providerID]
 	_, had := models[modelID]
-	if had == suspended {
+	if had == on {
 		return false
 	}
-	if suspended {
-		if r.computeIntegritySuspended == nil {
-			r.computeIntegritySuspended = map[string]map[string]struct{}{}
-		}
+	if on {
 		if models == nil {
 			models = map[string]struct{}{}
-			r.computeIntegritySuspended[providerID] = models
+			set[providerID] = models
 		}
 		models[modelID] = struct{}{}
 	} else {
 		delete(models, modelID)
 		if len(models) == 0 {
-			delete(r.computeIntegritySuspended, providerID)
+			delete(set, providerID)
 		}
 	}
 	if p := r.providers[providerID]; p != nil {

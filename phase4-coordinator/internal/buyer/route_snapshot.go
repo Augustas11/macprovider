@@ -340,8 +340,10 @@ func (b *billingRecorder) routeSnapshotFor(provider pool.Provider, prereq routeS
 		PoolID:             b.state.poolID,
 		ManifestVersion:    b.state.poolManifestVersion,
 		ManifestCoreDigest: b.state.poolManifestCoreDigest,
-		// SPEC-022 R-16.2a: an entry dispatch's ModelID is the served member.
-		ServedModelDispatch: provider.ServedModelID != "",
+		// SPEC-022 R-16.2a: an entry dispatch's ModelID is the served member;
+		// the hold narrows to it only while that model's own SPEC-036
+		// verification is passing.
+		ServedModelDispatch: provider.ServedModelID != "" && provider.ComputeIntegrityPassing,
 	}
 }
 

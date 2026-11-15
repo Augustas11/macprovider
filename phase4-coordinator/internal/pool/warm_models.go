@@ -73,6 +73,9 @@ type WarmModel struct {
 	// (provider, model) key; the entry view of a further member takes it in
 	// place of the session's (the primary's) flag.
 	computeIntegritySuspended bool
+	// computeIntegrityPassing is the passing SPEC-036 verification of this
+	// (provider, model) key; the entry view takes it as the suspension.
+	computeIntegrityPassing bool
 	// identityPin is this further member's SPEC-010-R007(b)(c) authority:
 	// the identity it first verified while a further member. It follows the
 	// member by model id across heartbeats (Provider.warmPins, also while the
@@ -101,7 +104,9 @@ func warmModelKey(modelID string) string {
 
 // warmMultiModel is the SPEC-002-R011 multi-model predicate: the session
 // keeps at least two members that are warm and whose identity verdict is
-// hash_verified (the primary's verdict is the session's own). Only then does
+// hash_verified (the primary's verdict is the session's own), each further
+// member with at least one seat (a zero-seat member is never routed or
+// probed). Only then does
 // the session have entry views, a served_model_id, a route snapshot flag of
 // 1 and per-model compute-integrity holds; otherwise it is a legacy session
 // exactly as with a warm set of one member.
@@ -112,7 +117,7 @@ func warmMultiModel(p *Provider, members []WarmModel) bool {
 		if m.Primary {
 			status = p.HashStatus
 		}
-		if m.State == WarmModelWarm && status == HashStatusVerified {
+		if m.State == WarmModelWarm && status == HashStatusVerified && (m.Primary || m.SlotsTotal >= 1) {
 			n++
 		}
 	}
@@ -508,6 +513,7 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.ToolSelectionCapabilities = m.ToolSelectionCapabilities
 	v.VisionRuntimeCapabilities = m.VisionRuntimeCapabilities
 	v.ComputeIntegritySuspended = m.computeIntegritySuspended
+	v.ComputeIntegrityPassing = m.computeIntegrityPassing
 	thermal := session.capacitySafetyHold && !session.queueFullHold
 	v.forwardedInFlight = m.forwardedInFlight
 	v.awaitingReadyOccupancy = false

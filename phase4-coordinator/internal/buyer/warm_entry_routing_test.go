@@ -215,6 +215,7 @@ func TestWarmEntryRouteSnapshotRecordsServingMember(t *testing.T) {
 	member.ExpectedModelHash = buyerTestHash
 	registry := pool.NewRegistry(nil)
 	registerWarmHTTPProvider(registry, "warm", upstream.URL, warmMember("model-z", true, 1), member, warmEntryOtherHash, bytes.Repeat([]byte{0x73}, 32))
+	registry.SetComputeIntegrityPassing("warm", "model-a", true)
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),
@@ -246,7 +247,8 @@ func TestWarmEntryRouteSnapshotRecordsServingMember(t *testing.T) {
 	if providerID != "warm" || modelID != "model-a" || reported != buyerTestHash || expected != buyerTestHash || status != string(pool.HashStatusVerified) {
 		t.Fatalf("route snapshot provider=%s model=%s reported=%s expected=%s status=%s, want the model-a member", providerID, modelID, reported, expected, status)
 	}
-	// SPEC-022 R-16.2a: the snapshot is marked as an entry dispatch.
+	// SPEC-022 R-16.2a: the snapshot is marked as an entry dispatch whose
+	// served model has a passing verification.
 	var flagged int
 	if err := db.QueryRow(`SELECT served_model_dispatch FROM settlement_route_snapshots`).Scan(&flagged); err != nil || flagged != 1 {
 		t.Fatalf("served_model_dispatch=%d err=%v, want 1", flagged, err)
@@ -283,6 +285,8 @@ func TestRouteSnapshotWithoutWarmSetIsNotServedModelDispatch(t *testing.T) {
 	defer upstream.Close()
 	registry := pool.NewRegistry(nil)
 	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x82}, 32))
+	// A passing verification never flags a legacy dispatch.
+	registry.SetComputeIntegrityPassing("p1", "model-a", true)
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),

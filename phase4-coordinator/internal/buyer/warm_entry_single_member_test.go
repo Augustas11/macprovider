@@ -157,16 +157,22 @@ func TestWarmSetOfOneRouteSnapshotFlagIsZero(t *testing.T) {
 // declared second member that is still loading leaves it legacy: flag 0, and
 // a hold for any model of the provider withholds the credit (provider-wide
 // R-16.2). Once the member is warm and verified the flag is 1 and a hold for
-// that other model leaves the model-a credit payable.
+// that other model leaves the model-a credit payable only while model-a's
+// own compute-integrity verification is passing (SPEC-022 R-16.2a).
 func TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		state    pool.WarmModelState
+		slots    int
+		passing  bool
+		multi    bool
 		flag     int
 		withheld bool
 	}{
-		{name: "declared-loading", state: pool.WarmModelLoading, flag: 0, withheld: true},
-		{name: "warm-verified", state: pool.WarmModelWarm, flag: 1, withheld: false},
+		{name: "declared-loading", state: pool.WarmModelLoading, slots: 1, passing: true, flag: 0, withheld: true},
+		{name: "zero-slot-member", state: pool.WarmModelWarm, slots: 0, passing: true, flag: 0, withheld: true},
+		{name: "served-model-not-verified", state: pool.WarmModelWarm, slots: 1, multi: true, flag: 0, withheld: true},
+		{name: "served-model-passing", state: pool.WarmModelWarm, slots: 1, passing: true, multi: true, flag: 1, withheld: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tier2.ResetForTest()
@@ -189,15 +195,16 @@ func TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
 			defer upstream.Close()
 			registry := pool.NewRegistry(nil)
-			second := warmMember("model-b", false, 1)
+			second := warmMember("model-b", false, tc.slots)
 			second.State = tc.state
 			if tc.state != pool.WarmModelWarm {
 				second.SlotsFree = 0
 			}
 			registerWarmHTTPProvider(registry, "p1", upstream.URL, warmMember("model-a", true, 1), second, buyerTestHash, bytes.Repeat([]byte{0x82}, 32))
-			if session, _ := registry.Resolve("p1", "p1-session"); (session.WarmModels != nil) != (tc.flag == 1) {
-				t.Fatalf("setup: multi-model=%v, want %v", session.WarmModels != nil, tc.flag == 1)
+			if session, _ := registry.Resolve("p1", "p1-session"); (session.WarmModels != nil) != tc.multi {
+				t.Fatalf("setup: multi-model=%v, want %v", session.WarmModels != nil, tc.multi)
 			}
+			registry.SetComputeIntegrityPassing("p1", "model-a", tc.passing)
 			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
 				buyer.WithRequestLog(reqLog), buyer.WithBilling(billingStore, cfg), buyer.WithBillingSnapshotID(snapshotID))
 			if rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil); rr.Code != http.StatusOK {
