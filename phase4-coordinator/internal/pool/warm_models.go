@@ -68,6 +68,10 @@ type WarmModel struct {
 	// notLoaded records a model_not_loaded answer for this member; its entry
 	// is unavailable until the next heartbeat replaces the member list.
 	notLoaded bool
+	// computeIntegritySuspended is the SPEC-036 FR-25 suspension of this
+	// (provider, model) key; the entry view of a further member takes it in
+	// place of the session's (the primary's) flag.
+	computeIntegritySuspended bool
 }
 
 // warmModelKey is the SPEC-010 case-folded model id.
@@ -218,6 +222,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		m.HashStatus, m.ArtifactIdentity = verdict.Status, verdict.Artifact
 	}
 	p.WarmModels = entries
+	r.applyComputeIntegritySuspensionLocked(p)
 }
 
 // warmModelIdentityLocked is the SPEC-008 §5.5 / SPEC-010 verdict for one
@@ -274,8 +279,8 @@ func (r *Registry) refreshWarmModelIdentitiesLocked(p *Provider, verdictFor func
 
 // warmEntryView projects one member onto a copy of its session. The primary
 // is the session as it is. A further member takes its own model, slots,
-// throughput, identity, verdict, artifact binding and tool and vision
-// declarations; the session-level gates (connection, trust, admission tier,
+// throughput, identity, verdict, artifact binding, SPEC-036 FR-25 suspension
+// and tool and vision declarations; the session-level gates (connection, trust, admission tier,
 // breaker, pause, draining/degraded/unavailable, thermal hold) stay. Bindings
 // that belong to the primary's tuple alone (the SPEC-047 session-to-candidate
 // model admission binding, the identity pin, the native-MTP canary, pool
@@ -317,6 +322,7 @@ func warmEntryView(session Provider, m WarmModel) Provider {
 	v.CandidateRowIdentity = ""
 	v.ToolSelectionCapabilities = m.ToolSelectionCapabilities
 	v.VisionRuntimeCapabilities = m.VisionRuntimeCapabilities
+	v.ComputeIntegritySuspended = m.computeIntegritySuspended
 	thermal := session.capacitySafetyHold && !session.queueFullHold
 	v.forwardedInFlight = m.forwardedInFlight
 	v.awaitingReadyOccupancy = false

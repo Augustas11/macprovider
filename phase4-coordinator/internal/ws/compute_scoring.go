@@ -605,6 +605,13 @@ func providerVerifiable(p pool.Provider) bool {
 		p.HashStatus == pool.HashStatusVerified && providerScoringReady(p)
 }
 
+// furtherWarmMember reports an entry view of a warm member other than the
+// session's primary (SPEC-002-R011).
+func furtherWarmMember(p pool.Provider) bool {
+	m, ok := p.EntryMember()
+	return ok && !m.Primary
+}
+
 // scoringCandidate is a session as scorer selection sees it: its cohort is
 // the coordinator-verified catalog model hash, and its reported manifest is
 // only what a scoring job to it carries.
@@ -669,7 +676,12 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	// can be dispatched; changes made during this sweep are not due before
 	// the next one.
 	e.flushSchedule(ctx, now, deadline)
-	providers := e.s.pool.Snapshot()
+	// SPEC-036 FR-20/FR-25 per entry: a multi-model session (SPEC-002-R011)
+	// is one key per warm member, each verified for its own model; the probe
+	// names the member's model, so the pinned dispatch carries
+	// served_model_id to that member. A legacy or one-member session is one
+	// entry, itself.
+	providers := e.s.pool.EntrySnapshot()
 	present := make(map[string]struct{}, len(providers))
 	for _, p := range providers {
 		present[p.ProviderID] = struct{}{}
@@ -686,7 +698,9 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	// Operator keys are resolved only for pools with a provider due.
 	index := map[scorerPoolKey][]computeintegrity.ScorerCandidate{}
 	for _, p := range providers {
-		if !providerVerifiable(p) {
+		// Scoring jobs carry no served model, so only a session's primary
+		// model scores; a further member is verified, never a scorer.
+		if !providerVerifiable(p) || furtherWarmMember(p) {
 			continue
 		}
 		k := scorerPoolKey{p.ModelID, p.ModelHash}
@@ -986,7 +1000,9 @@ type scoredMeasurement struct {
 // sessionUnchanged reports whether the verified session still serves the
 // same model and manifest it was selected with (FR-20 output binding).
 func (e *computeScoringEngine) sessionUnchanged(verified computeintegrity.ScorerCandidate) bool {
-	p, ok := e.s.pool.Resolve(verified.ProviderID, verified.AssignedID)
+	// The entry serving the verified model: the session itself for a legacy
+	// or one-member session, the member's view otherwise.
+	p, ok := e.s.pool.ResolveEntry(verified.ProviderID, verified.AssignedID, verified.ModelID)
 	return ok && p.ModelID == verified.ModelID && p.ModelHash == verified.ManifestSHA256 &&
 		p.WeightsManifestSHA256 == verified.WireManifestSHA256 && p.HashStatus == pool.HashStatusVerified
 }

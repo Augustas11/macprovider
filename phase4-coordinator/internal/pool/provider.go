@@ -2943,9 +2943,23 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 	return updated
 }
 
+// applyComputeIntegritySuspensionLocked resolves the SPEC-036 FR-25
+// suspension per (provider, case-folded model): the session's flag is its
+// primary model's, and each further warm member carries its own, so a
+// suspended model stays out of routing whichever member serves it and a
+// suspended primary never closes a healthy member.
 func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
-	_, suspended := r.computeIntegritySuspended[p.ProviderID][p.ModelID]
+	models := r.computeIntegritySuspended[p.ProviderID]
+	_, suspended := models[warmModelKey(p.ModelID)]
 	p.ComputeIntegritySuspended = suspended
+	if p.WarmModels == nil {
+		return
+	}
+	p.WarmModels = cloneWarmModels(p.WarmModels)
+	for i := range p.WarmModels {
+		_, memberSuspended := models[warmModelKey(p.WarmModels[i].ModelID)]
+		p.WarmModels[i].computeIntegritySuspended = memberSuspended
+	}
 }
 
 // SetComputeIntegritySuspended adds or removes a SPEC-036 FR-25 routing
@@ -2954,6 +2968,7 @@ func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
 func (r *Registry) SetComputeIntegritySuspended(providerID, modelID string, suspended bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	modelID = warmModelKey(modelID)
 	models := r.computeIntegritySuspended[providerID]
 	_, had := models[modelID]
 	if had == suspended {

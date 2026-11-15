@@ -123,3 +123,52 @@ func TestWarmPromotionOnlyFromAFurtherMember(t *testing.T) {
 		t.Fatalf("swap from outside the warm set moved the session count: %d", n)
 	}
 }
+
+// SPEC-036 FR-25 per entry: a suspended (provider, model) key closes the
+// entry serving that model only, whichever member serves it.
+func TestComputeIntegritySuspensionIsPerEntry(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+
+	// A suspended further member leaves the primary and the session routable.
+	registry.SetComputeIntegritySuspended("p1", "MODEL-B", true)
+	if b := warmEntry(t, registry, "model-b"); !b.ComputeIntegritySuspended || b.RoutingEligible() {
+		t.Fatalf("suspended member routable: suspended=%v", b.ComputeIntegritySuspended)
+	}
+	if a := warmEntry(t, registry, "model-a"); a.ComputeIntegritySuspended || !a.RoutingEligible() {
+		t.Fatal("member suspension closed the primary entry")
+	}
+
+	// Promotion: model-b becomes primary, then model-a is promoted back while
+	// model-b stays a member; model-b stays suspended throughout.
+	b := WarmModel{ModelID: "model-b", State: WarmModelWarm, Primary: true, SlotsTotal: 2, SlotsFree: 2}
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), []WarmModel{b, warmTestMember("model-a", WarmModelWarm, 2, 2)})); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if entry := warmEntry(t, registry, "model-b"); !entry.ComputeIntegritySuspended || entry.RoutingEligible() {
+		t.Fatal("suspended model routable after its promotion")
+	}
+	if entry := warmEntry(t, registry, "model-a"); entry.ComputeIntegritySuspended || !entry.RoutingEligible() {
+		t.Fatal("healthy member closed by the suspended primary")
+	}
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelWarm, 2, 2)))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if entry := warmEntry(t, registry, "model-b"); !entry.ComputeIntegritySuspended || entry.RoutingEligible() {
+		t.Fatal("suspended model routable again after demotion to a further member")
+	}
+	if session, _ := registry.Resolve("p1", "current"); session.ComputeIntegritySuspended {
+		t.Fatal("a member's suspension reached the session")
+	}
+
+	// Reverse: a suspended primary does not close a healthy member.
+	registry.SetComputeIntegritySuspended("p1", "model-b", false)
+	registry.SetComputeIntegritySuspended("p1", "model-a", true)
+	if a := warmEntry(t, registry, "model-a"); !a.ComputeIntegritySuspended || a.RoutingEligible() {
+		t.Fatal("suspended primary entry routable")
+	}
+	if b := warmEntry(t, registry, "model-b"); b.ComputeIntegritySuspended || !b.RoutingEligible() {
+		t.Fatalf("suspended primary closed a healthy member: suspended=%v state=%s", b.ComputeIntegritySuspended, b.State)
+	}
+}
