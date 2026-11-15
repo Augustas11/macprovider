@@ -3780,6 +3780,9 @@ struct ServeCommand: AsyncParsableCommand {
                                 turn: memberTurn,
                                 stepAllowed: { await memberServices.stepAllowed(memberID: memberID) },
                                 published: { await memberServices.published(memberID: memberID) },
+                                memberAdmissionHold: WarmMemberSelfCheckAdmissionHold(
+                                    memberID: memberID, hold: table, providerStatus: providerStatus,
+                                    allowed: { await memberServices.stepAllowed(memberID: memberID) }),
                                 log: { line in FileHandle.standardError.write(Data((line + " model=\(spec.modelID)\n").utf8)) }
                             )
                         },
@@ -3855,6 +3858,12 @@ struct ServeCommand: AsyncParsableCommand {
                 turn: cbSelfCheckTurn,
                 published: { [memberID = mlxRuntime.memoryBudgetMemberID] in
                     await warmSetMemberServices.published(memberID: memberID)
+                },
+                // Demoted by a promotion, it holds only its own member.
+                memberAdmissionHold: warmSet.map { [memberID = mlxRuntime.memoryBudgetMemberID] warmSet in
+                    WarmMemberSelfCheckAdmissionHold(
+                        memberID: memberID, hold: warmSet.table, providerStatus: providerStatus,
+                        allowed: { await warmSetMemberServices.stepAllowed(memberID: memberID) })
                 },
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )

@@ -81,11 +81,14 @@ struct WarmModelMemberView: Sendable, Equatable {
     /// across a re-key and a promotion: how the wire finds the member the
     /// top-level fields describe.
     var memberKey: String? = nil
+    /// SPEC-001-R019: the member's own self-check holds it closed.
+    var selfCheckHeld = false
 
     /// Rows the member may admit now; nil unless `warm` (absent on the wire
-    /// means zero).
+    /// means zero). Zero while its own self-check holds it.
     var slotsFree: Int? {
         guard state == .warm else { return nil }
+        if selfCheckHeld { return 0 }
         return max(0, (info?.slotsTotal ?? 0) - inFlight)
     }
 }

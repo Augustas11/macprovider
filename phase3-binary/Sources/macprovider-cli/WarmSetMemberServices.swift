@@ -11,6 +11,50 @@ protocol WarmSetMemberGate: AnyObject, Sendable {
 
 extension WarmSetBoot: WarmSetMemberGate {}
 
+/// The per-member self-check hold a warm set keeps (`WarmModelTable`).
+protocol WarmMemberSelfCheckHolding: AnyObject, Sendable {
+    func beginSelfCheckHold(memberID: Int) -> String?
+    func endSelfCheckHold(memberID: Int)
+    func selfCheckHoldWork(memberID: Int) -> (inFlight: Int, predatingHold: Int)
+}
+
+extension WarmModelTable: WarmMemberSelfCheckHolding {}
+
+/// SPEC-001-R019: a further warm member's self-check hold. It closes that
+/// member alone (its entry reports no free slot) and drains only that
+/// member's own requests admitted before it; it never takes the
+/// provider-wide hold, so the primary's `slots_free`, admission and
+/// in-flight work are untouched. It starts only while the provider serves
+/// and no warm-set load, eviction or swap runs (`allowed`), and the check
+/// yields the moment one starts.
+struct WarmMemberSelfCheckAdmissionHold: SelfCheckAdmissionHoldScope {
+    let memberID: Int
+    let hold: any WarmMemberSelfCheckHolding
+    let providerStatus: ProviderStatus
+    let allowed: @Sendable () async -> Bool
+
+    func beginHold(expectedEndAt: Date) async -> String? {
+        guard await providerStatus.isServingForSelfCheckAdmissionHold() else { return "provider_not_serving" }
+        guard await allowed() else { return "warm_set_busy" }
+        return hold.beginSelfCheckHold(memberID: memberID)
+    }
+
+    func endHold(outcome: String) async { hold.endSelfCheckHold(memberID: memberID) }
+    /// The skip is logged by the caller; the provider's hold status
+    /// describes the primary's hold only.
+    func noteHoldSkipped(reason: String) async {}
+
+    func isServingForHold() async -> Bool {
+        guard await providerStatus.isServingForSelfCheckAdmissionHold() else { return false }
+        return await allowed()
+    }
+
+    func heldRequestsInFlight() async -> Int { hold.selfCheckHoldWork(memberID: memberID).inFlight }
+    func hasHeldWork() async -> Bool { hold.selfCheckHoldWork(memberID: memberID).inFlight > 0 }
+    func hasBuyerWorkPredatingHold() async -> Bool { hold.selfCheckHoldWork(memberID: memberID).predatingHold > 0 }
+    func hasWorkPredatingHold() async -> Bool { hold.selfCheckHoldWork(memberID: memberID).predatingHold > 0 }
+}
+
 /// SPEC-001-R019: the background work each further warm member runs on its
 /// own runtime (its continuous-batching self-check), keyed by the member's
 /// budget id. Work is started when the member's runtime is built and stopped

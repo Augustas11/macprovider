@@ -265,7 +265,8 @@ final class WarmSetBoot<Runtime: WarmModelRuntime>: WarmSetSwapHooks, WarmSetShu
                 pinned: entry.pinned,
                 leases: entry.leases,
                 slotsTotal: info?.slotsTotal ?? 0,
-                slotsFree: entry.state == .warm ? max(0, (info?.slotsTotal ?? 0) - entry.leases) : nil,
+                slotsFree: entry.state != .warm ? nil
+                    : view?.selfCheckHeld == true ? 0 : max(0, (info?.slotsTotal ?? 0) - entry.leases),
                 maxContextTokens: info?.maxContextTokens,
                 throughputTPSEstimate: info?.throughputTPSEstimate,
                 modelParamsB: info?.modelParamsB,

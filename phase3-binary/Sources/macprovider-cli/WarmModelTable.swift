@@ -92,6 +92,12 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         var lastAdmissionAt: UInt64 = 0
         var memberID: Int?
         var info: WarmModelMemberInfo?
+        /// SPEC-001-R019: the generation of this member's own self-check
+        /// hold while one is active, nil otherwise.
+        var selfCheckHold: UInt64?
+        /// Leases taken during the active hold and not yet released: they
+        /// queue behind the check and its drain does not wait for them.
+        var holdArrivals = 0
     }
 
     private let lock = NSLock()
@@ -101,6 +107,7 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
     /// Insertion order; `entries()` lists the primary first.
     private var members: [Member] = []
     private var nextToken: UInt64 = 0
+    private var nextHoldGeneration: UInt64 = 0
     private let now: @Sendable () -> UInt64
 
     init(now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
@@ -168,14 +175,60 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         lease.released = true
         guard let index = indexLocked(token: lease.token) else { return }
         members[index].leases = max(0, members[index].leases - 1)
+        if let generation = lease.holdGeneration, members[index].selfCheckHold == generation {
+            members[index].holdArrivals = max(0, members[index].holdArrivals - 1)
+        }
     }
 
     private func leaseLocked(_ index: Int) -> WarmModelLease<Runtime> {
         members[index].leases += 1
         members[index].lastAdmissionAt = now()
-        return WarmModelLease(
+        let lease = WarmModelLease(
             table: self, token: members[index].token, modelID: members[index].modelID,
             primary: members[index].primary, runtime: members[index].runtime!)
+        if let generation = members[index].selfCheckHold {
+            members[index].holdArrivals += 1
+            lease.holdGeneration = generation
+        }
+        return lease
+    }
+
+    // MARK: Member self-check hold (SPEC-001-R019)
+
+    /// Closes the further member `memberID` for its own self-check: its
+    /// entry reports no free slot until `endSelfCheckHold`. A request that
+    /// still arrives is leased and queues behind the check, as on the
+    /// primary under the provider-wide hold. Nothing else changes: the
+    /// primary's slots and every other member are untouched. Returns why the
+    /// hold was refused, or nil.
+    func beginSelfCheckHold(memberID: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = members.firstIndex(where: { $0.memberID == memberID }) else { return "not_in_warm_set" }
+        guard members[index].state == .warm else { return "member_\(members[index].state.rawValue)" }
+        guard !members[index].primary else { return "primary" }
+        guard members[index].selfCheckHold == nil else { return "already_held" }
+        nextHoldGeneration &+= 1
+        members[index].selfCheckHold = nextHoldGeneration
+        members[index].holdArrivals = 0
+        publishLocked()
+        return nil
+    }
+
+    func endSelfCheckHold(memberID: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = members.firstIndex(where: { $0.memberID == memberID }),
+              members[index].selfCheckHold != nil else { return }
+        members[index].selfCheckHold = nil
+        members[index].holdArrivals = 0
+        publishLocked()
+    }
+
+    /// The member's leases, and those of them taken before its active hold
+    /// (all of them without one): what the hold's drain waits for.
+    func selfCheckHoldWork(memberID: Int) -> (inFlight: Int, predatingHold: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard let member = members.first(where: { $0.memberID == memberID }) else { return (0, 0) }
+        return (member.leases, max(0, member.leases - (member.selfCheckHold == nil ? 0 : member.holdArrivals)))
     }
 
     // MARK: State transitions
@@ -343,7 +396,8 @@ final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
         (members.filter(\.primary) + members.filter { !$0.primary }).map {
             WarmModelMemberView(
                 modelID: $0.modelID, key: $0.key, state: $0.state, primary: $0.primary, pinned: $0.pinned,
-                inFlight: $0.leases, info: $0.info, memberID: $0.memberID, memberKey: Self.memberKey(token: $0.token))
+                inFlight: $0.leases, info: $0.info, memberID: $0.memberID, memberKey: Self.memberKey(token: $0.token),
+                selfCheckHeld: $0.selfCheckHold != nil)
         }
     }
 
@@ -418,6 +472,9 @@ final class WarmModelLease<Runtime: WarmModelRuntime>: @unchecked Sendable {
     private let table: WarmModelTable<Runtime>
     /// Guarded by the table's lock.
     fileprivate var released = false
+    /// The member's self-check hold the lease arrived during, if any.
+    /// Guarded by the table's lock.
+    fileprivate var holdGeneration: UInt64?
 
     fileprivate init(table: WarmModelTable<Runtime>, token: UInt64, modelID: String, primary: Bool, runtime: Runtime) {
         self.table = table
