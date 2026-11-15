@@ -15915,15 +15915,49 @@
       "requirement_id": "SPEC-002-R011",
       "spec_id": "SPEC-002",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/warm_models.go:func parseWarmModels",
+        "phase4-coordinator/internal/ws/warm_models.go:func validateWarmModelsSupported",
+        "phase4-coordinator/internal/ws/warm_models.go:func (s *Server) warmModelsForPool",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) applyWarmModelsLocked",
+        "phase4-coordinator/internal/pool/warm_models.go:func warmEntryView",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) EntrySnapshot",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ResolveEntry",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ConsumeForwardedSlotFor",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) MarkEntryNotLoaded",
+        "phase4-coordinator/internal/pool/warm_models.go:func EntryViews",
+        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func setServedModelHeader",
+        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func (s *Server) markEntryNotLoaded",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor",
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldServedModelSQL",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) handlePoolz",
+        "phase5-gateway/internal/router/server.go:func countPoolzState"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/messages_test.go:TestParseHeartbeatDecodesWarmModels",
+        "phase4-coordinator/internal/ws/messages_test.go:TestParseHelloAndAuthInitialDecodeWarmModels",
+        "phase4-coordinator/internal/ws/server_test.go:TestAuthV2WarmModelsHandshakeAndHeartbeat",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryViewsProjectEachMember",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryConsumeRestoreMarkFullStayOnTheMember",
+        "phase4-coordinator/internal/pool/provider_test.go:TestEntrySnapshotEqualsSnapshotWithoutWarmSet",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryMarkNotLoadedUntilNextHeartbeat",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_internal_test.go:TestWarmEntryRoutingSecondaryModelConsumesOnlyItsSeat",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryRouteSnapshotRecordsServingMember",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestRouteSnapshotWithoutWarmSetIsNotServedModelDispatch",
+        "phase4-coordinator/internal/buyer/warm_entry_failover_test.go:TestWarmEntryModelNotLoadedFailsOver",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsOnlyTheServedModel",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchColumnMigrationIsAdditiveAndIdempotent",
+        "phase4-coordinator/internal/ws/poolz_warm_entries_test.go:TestPoolzWarmEntryRows",
+        "phase5-gateway/internal/router/server_test.go:TestAggregateStatusCountsWarmEntrySessionOnce",
+        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetTwoModelsOneSession"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2338",
-        "rationale": "SPEC-002 v1.6.36 (#2338) multi-model providers: registration, heartbeat, slot accounting, routing, pool views and route snapshots per (provider, model). Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+        "rationale": "SPEC-002 v1.6.36 (#2338) multi-model providers: registration, heartbeat, slot accounting, routing, pool views and route snapshots per (provider, model). Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     }
   ]
