@@ -2553,6 +2553,84 @@ if [ "$(next_field id)" = catalog_activation ]; then
   case "$(next_field kind):$(next_field reason)" in blocked:*"pricing_diff_sha256 is not a sha256"*) ok ;; *) bad "bad digest: $(next_field kind) $(next_field reason)" ;; esac
   case "$(next_field command)" in *pwn*) bad "bad digest reached the command" ;; *) ok ;; esac
 fi
+# Billing alias precondition: a served name that reaches its rate row only
+# through a billing exact alias needs that alias in the RUNNING coordinator tag.
+# v8.9.0 is a runtime whose formula.go predates the Bolt alias.
+set_health_version() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["version"]=sys.argv[2]; json.dump(d, open(p, "w"))' "$tmp/svc/healthz.json" "$1"; }
+BA_MAIN="$(git -C "$W" rev-parse HEAD)"
+grep -v '"rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx"' "$W/phase4-coordinator/internal/billing/formula.go" > "$tmp/formula-old.go"
+cp "$tmp/formula-old.go" "$W/phase4-coordinator/internal/billing/formula.go"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: runtime before the Bolt alias" -- phase4-coordinator/internal/billing/formula.go
+git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v8.9.0 -m "old runtime"
+git -C "$W" checkout -q "$BA_MAIN" -- phase4-coordinator/internal/billing/formula.go
+git -C "$W" reset -q --soft "$BA_MAIN"
+git -C "$W" reset -q
+verdict true "" "" ""
+set_health_version v8.9.0
+run_rc 0 "catalog status with a runtime that predates the Bolt billing alias" scripts/ops/catalog-activate.sh status
+case "$(fact_of billing_alias_gap)" in
+  *"v8.9.0 lacks the billing alias for rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"*) ok ;;
+  *) bad "alias gap fact with an old runtime: $(fact_of billing_alias_gap)" ;;
+esac
+# expect_alias_block LABEL REASON_TEXT: next is catalog_activation, blocked with REASON_TEXT in its reason.
+expect_alias_block() {
+  if [ "$(next_field id)" = catalog_activation ]; then
+    case "$(next_field kind):$(next_field reason)" in
+      blocked:*"$2"*) ok ;;
+      *) bad "$1: activation not blocked: $(next_field kind) $(next_field reason)" ;;
+    esac
+  else
+    bad "$1: next is $(next_field id) ($(next_field reason)), not catalog_activation"
+  fi
+}
+expect_alias_block "old runtime" 'scripts/ops/pearl-runtime.sh status'
+# runtime_tag TAG PY: tag a side commit whose formula.go is main's edited by PY (on s).
+runtime_tag() {
+  python3 -c 'import sys; p=sys.argv[1]; s=open(p).read(); exec(sys.argv[2]); open(p,"w").write(s)' \
+    "$W/phase4-coordinator/internal/billing/formula.go" "$2"
+  git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: runtime $1" -- phase4-coordinator/internal/billing/formula.go
+  git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a "$1" -m "runtime $1"
+  git -C "$W" checkout -q "$BA_MAIN" -- phase4-coordinator/internal/billing/formula.go
+  git -C "$W" reset -q --soft "$BA_MAIN"
+  git -C "$W" reset -q
+}
+# The alias only in a comment does not count.
+runtime_tag v8.8.0 's = s.replace(chr(9) + "\"rapid-mlx/nvidia-nemotron-3.5-bolt", chr(9) + "// \"rapid-mlx/nvidia-nemotron-3.5-bolt")'
+set_health_version v8.8.0
+run_rc 0 "catalog status with the Bolt alias only commented out" scripts/ops/catalog-activate.sh status
+case "$(fact_of billing_alias_gap)" in
+  *"v8.8.0 lacks the billing alias for rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"*) ok ;;
+  *) bad "alias gap fact with a commented alias: $(fact_of billing_alias_gap)" ;;
+esac
+expect_alias_block "commented alias" 'scripts/ops/pearl-runtime.sh status'
+# The comparison cannot run (no alias map at the tag): fail closed.
+runtime_tag v8.7.0 's = s.replace("var exactModelKeyAliases = map", "var renamedAliases = map")'
+set_health_version v8.7.0
+run_rc 0 "catalog status when the alias comparison fails" scripts/ops/catalog-activate.sh status
+expect_alias_block "comparison failure" 'cannot compare billing aliases with the running coordinator'
+set_health_version v9.0.0
+run_rc 0 "catalog status with a runtime that carries every billing alias" scripts/ops/catalog-activate.sh status
+case "$(fact_of billing_alias_gap)" in ""|None) ok ;; *) bad "alias gap with a current runtime: $(fact_of billing_alias_gap)" ;; esac
+if [ "$(next_field id)" = catalog_activation ]; then expect_next catalog_activation:mutate; fi
+# No alias-dependent name: a no-op that reads nothing live (healthz unreadable).
+mkdir -p "$tmp/noalias"
+python3 - "$W/phase3-binary/catalog/autotune" "$tmp/noalias" <<'PYNOALIAS'
+import json, sys
+src, out = sys.argv[1:3]
+cand = json.load(open(src + "/autotune-candidates.json"))
+rate = json.load(open(src + "/rate-card.json"))
+cand["rows"] = {k: dict(v, model_id=k) for k, v in cand["rows"].items() if k in rate["rows"]}
+json.dump(cand, open(out + "/autotune-candidates.json", "w"))
+json.dump(rate, open(out + "/rate-card.json", "w"))
+PYNOALIAS
+awk '/^billing_alias_gap\(\) \{$/ {on=1} on {print} on && /^\}$/ {exit}' "$W/scripts/ops/catalog-activate.sh" > "$tmp/billing_alias_gap.sh"
+ba_out="$(REPO_ROOT="$W" CATALOG_TARGET_DIR="$tmp/noalias" bash -c '
+  fetch_coordinator_health() { echo HEALTH-READ; return 1; }
+  . "$1"
+  billing_alias_gap' _ "$tmp/billing_alias_gap.sh" 2>&1)"
+[ -s "$tmp/billing_alias_gap.sh" ] || bad "billing_alias_gap not found in catalog-activate.sh"
+if [ -z "$ba_out" ]; then ok; else bad "alias precondition not a no-op without alias names: $ba_out"; fi
+
 verdict true "$DIGEST" "" "mlx-community/Test-VL-2B"
 # The activation command records the owed (e) from the deploy's own verdict line.
 cmd="$(CATALOG_PRICING_ACK="$DIGEST" bash -c 'cd "$1" && scripts/ops/catalog-activate.sh status' _ "$W" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["next"]["command"])')"

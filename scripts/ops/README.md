@@ -64,6 +64,13 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   keeps a post-activation `buyer_serving_e2e` step (a ledger entry per model
   that outlives later releases) until the operator records a buyer request
   attributed to the serving canary and its settlement row, naming the model.
+  The activation also refuses (fact `billing_alias_gap`) while a served
+  name of the release that reaches its rate row only through a billing exact
+  alias (`formula.go` `exactModelKeyAliases`) lacks that alias in the running
+  coordinator: the tag `/healthz` reports must carry the same `"from": "to"`
+  entry in its `formula.go`, or the name bills at `default`. Unblock: the Pearl
+  runtime release that carries the alias (`scripts/ops/pearl-runtime.sh
+  status`). A release with no alias-dependent name reads nothing for this.
   `PEARL_RUNTIME_TASK=updater-bundle` installs only origin's signed running
   tag that is on `origin/main`, verifies every installer-managed file, and is
   done once that install is recorded.

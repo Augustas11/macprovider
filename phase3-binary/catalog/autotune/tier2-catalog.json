@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-12-nemotron-3.5-lightning-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-15-nemotron-3.5-bolt-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-12T00:50:00Z",
+  "issued_at": "2026-11-15T03:40:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -73,6 +73,15 @@
       "min_ram_gb": 32,
       "notes": "Buyer-serving candidate nvidia/nemotron-3.5-lightning-30b-a3b (#2236 Nemotron 3.5 Lightning 30B-A3B, native nemotron_h engine, listed); identity from signed SPEC-023 row.",
       "sha256": "3d22f18d4be885e61b47be7b3c2125be4dc97016412efd3ecd635cc08e24c9ca",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
+      "min_ram_gb": 84,
+      "notes": "Buyer-serving candidate nvidia/nemotron-3.5-bolt-74b-a9b (#2329 Nemotron 3.5 Bolt 74B-A9B, native nemotron_h engine, listed, serial); identity from signed SPEC-023 row.",
+      "sha256": "9dee8d5cc3e8b5fa4cd8ec6eff61a069c16f9435a6b17e7667a000a698ef042d",
       "source": "operator-curated"
     },
     {
@@ -241,7 +250,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "cl9LEwKhvguF0h5IfEualPtr8vtycjYJZg5-dOMzvuPmUxG4RG-qKWScXLhcPKjGxxXK3TIn_APDUtM1E1D4BA"
+    "sig": "FS97vzwihyCKuOh3OZ6y7UgKZYZdUvDCPQrUWEq54OOXkA-qLDXBvKSN7MFw1WemDgmSPDCvE6rPLKVCVX4ZDA"
   },
   "version": 1
 }

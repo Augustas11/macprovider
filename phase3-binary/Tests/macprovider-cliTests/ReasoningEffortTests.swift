@@ -44,7 +44,8 @@ final class ReasoningEffortTests: XCTestCase {
             "deepseek/deepseek-v4-flash", "z-ai/glm-4.5-air", "qwen3-8b", "qwen3-32b",
             "qwen/qwen3.5-27b", "qwen/qwen3.6-35b-a3b", "qwen3-coder-30b-a3b-instruct",
             "qwen/qwen3-30b-a3b-instruct-2507", "qwen2.5-coder-32b-instruct",
-            "nvidia/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3.5-lightning-30b-a3b", "google-gemma-4-26b-a4b-it",
+            "nvidia/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/nemotron-3.5-bolt-74b-a9b", "google-gemma-4-26b-a4b-it",
             "meta-llama/llama-3.1-8b-instruct", "meta-llama/llama-3.2-3b-instruct",
             "mlx-community/qwen2-vl-2b-instruct-4bit", "unknown-model",
         ] {
