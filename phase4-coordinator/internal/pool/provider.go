@@ -493,6 +493,9 @@ type Provider struct {
 	// have ended, an empty served model names legacyDispatchModel.
 	legacyDispatchModel string
 	legacyDispatchOpen  int
+	// notLoadedStrikes are the SPEC-002-R011 model_not_loaded strikes of the
+	// session's warm-set entries per case-folded model (RecordEntryNotLoaded).
+	notLoadedStrikes map[string][]time.Time
 
 	Tier2Session *Tier2Session `json:"-"`
 

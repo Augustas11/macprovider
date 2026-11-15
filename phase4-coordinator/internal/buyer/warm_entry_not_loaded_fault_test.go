@@ -58,3 +58,39 @@ func TestWarmEntryRepeatedModelNotLoadedIsABreakerFault(t *testing.T) {
 		t.Fatalf("session after a repeated model_not_loaded = %s, want a breaker fault", session.State)
 	}
 }
+
+// A provider cycling a member warm, refuse one dispatch with
+// model_not_loaded, report it loading for one heartbeat, then warm again
+// does not clear its strikes: the second refusal is a breaker fault.
+func TestWarmEntryNotLoadedCycleThroughLoadingIsABreakerFault(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWarmWSProvider(registry, "pw", 50)
+	registerWithPath(registry, "p2", "p2-session", "model-b", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	evicted := &atomic.Bool{}
+	evicted.Store(true)
+	dispatches := &atomic.Int32{}
+	server, _ := warmBillingServer(t, registry, warmNotLoadedRelay(evicted, dispatches))
+	body := []byte(`{"model":"model-b","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rr := postChat(t, server, body, http.Header{}); rr.Code != http.StatusOK || rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("first: status=%d provider=%q", rr.Code, rr.Header().Get("X-MacProvider-Provider"))
+	}
+	assertSessionUntouched(t, registry, "pw")
+
+	loading := warmMember("model-b", false, 1)
+	loading.State, loading.SlotsFree = pool.WarmModelLoading, 0
+	if _, _, ok := registry.ApplyHeartbeat("pw", "pw-session", pool.HeartbeatUpdate{
+		Status: pool.StateReady, ModelID: "model-a", MaxContextTokens: 20000, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1,
+		ThroughputTPSEstimate: 50, WarmModels: []pool.WarmModel{warmMember("model-a", true, 1), loading}, At: time.Now().UTC(),
+	}); !ok {
+		t.Fatal("heartbeat rejected")
+	}
+	reAdvertiseWarm(t, registry)
+	rr := postChat(t, server, body, http.Header{})
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("X-MacProvider-Provider") == "p2" {
+		t.Fatalf("second: status=%d provider=%q body=%s", rr.Code, rr.Header().Get("X-MacProvider-Provider"), rr.Body.String())
+	}
+	if session, _ := registry.Resolve("pw", "pw-session"); session.RoutingEligible() {
+		t.Fatalf("session after the warm/refuse/loading cycle = %s, want a breaker fault", session.State)
+	}
+}

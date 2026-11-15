@@ -84,11 +84,6 @@ type WarmModel struct {
 	// keeps the coordinator's own count; a ready heartbeat reporting free
 	// seats lifts it, taking the lower of the two counts.
 	refusalHold bool
-	// notLoadedStrikes are the times of model_not_loaded answers from this
-	// member, at most one per heartbeat that advertised it warm. They follow
-	// the member while it stays warm and reset when it leaves the warm set
-	// or reports another state.
-	notLoadedStrikes []time.Time
 }
 
 // ModelKey is the SPEC-010 case-folded model id (NFC, then lowercase): the
@@ -287,9 +282,7 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 		return
 	}
 	prior := map[string]WarmModel{}
-	strikes := map[string][]time.Time{}
 	for _, m := range p.WarmModels {
-		strikes[warmModelKey(m.ModelID)] = m.notLoadedStrikes
 		if !m.Primary {
 			prior[warmModelKey(m.ModelID)] = m
 		}
@@ -301,9 +294,6 @@ func (r *Registry) applyWarmModelsLocked(p *Provider, incoming []WarmModel, inFl
 	for i := range entries {
 		m := &entries[i]
 		key := warmModelKey(m.ModelID)
-		if m.State == WarmModelWarm {
-			m.notLoadedStrikes = strikes[key]
-		}
 		if m.Primary {
 			m.forwardedInFlight = p.forwardedInFlight
 			m.ExpectedModelHash = p.ExpectedModelHash
@@ -727,7 +717,7 @@ func (r *Registry) ForwardedInFlightFor(providerID, assignedID, servedModelID st
 	}
 }
 
-// maxNotLoadedStrikes bounds a member's strike history.
+// maxNotLoadedStrikes bounds one model's strike history.
 const maxNotLoadedStrikes = 16
 
 // MarkEntryNotLoaded records a provider's model_not_loaded answer for the
@@ -745,6 +735,13 @@ func (r *Registry) MarkEntryNotLoaded(providerID, assignedID, servedModelID stri
 // `at`; further answers before the next heartbeat (concurrent dispatches in
 // the same race) are not. It returns the strikes within window (all kept
 // strikes when window is 0).
+//
+// Strikes are the session's, per case-folded model: only window ages them.
+// A member reporting another state, leaving and rejoining the warm set, or
+// the session becoming a legacy session and a multi-model one again keeps
+// them, so a provider cannot clear its strikes by cycling a member's state.
+// A model gets an entry only when a member of the warm set serving it
+// answers; every entry older than window is pruned at each answer.
 func (r *Registry) RecordEntryNotLoaded(providerID, assignedID, servedModelID string, at time.Time, window time.Duration) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -758,19 +755,29 @@ func (r *Registry) RecordEntryNotLoaded(providerID, assignedID, servedModelID st
 			continue
 		}
 		m := mutableWarmMemberLocked(p, i)
-		kept := make([]time.Time, 0, len(m.notLoadedStrikes)+1)
-		for _, t := range m.notLoadedStrikes {
-			if window <= 0 || t.After(at.Add(-window)) {
-				kept = append(kept, t)
+		strikes := make(map[string][]time.Time, len(p.notLoadedStrikes)+1)
+		for model, times := range p.notLoadedStrikes {
+			kept := make([]time.Time, 0, len(times)+1)
+			for _, t := range times {
+				if window <= 0 || t.After(at.Add(-window)) {
+					kept = append(kept, t)
+				}
+			}
+			if len(kept) > 0 {
+				strikes[model] = kept
 			}
 		}
+		kept := strikes[key]
 		if !m.notLoaded {
 			kept = append(kept, at)
 		}
 		if len(kept) > maxNotLoadedStrikes {
 			kept = kept[len(kept)-maxNotLoadedStrikes:]
 		}
-		m.notLoadedStrikes = kept
+		if len(kept) > 0 {
+			strikes[key] = kept
+		}
+		p.notLoadedStrikes = strikes
 		m.notLoaded = true
 		return len(kept), true
 	}

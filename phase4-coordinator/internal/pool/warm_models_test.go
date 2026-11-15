@@ -296,8 +296,9 @@ func TestWarmMemberRefusalHoldLiftedByReadyHeartbeat(t *testing.T) {
 }
 
 // A strike is one heartbeat generation in which an entry advertised warm
-// answered model_not_loaded; strikes follow the member while it stays warm
-// and reset when it reports another state or leaves the warm set.
+// answered model_not_loaded; only the window ages strikes. Another state,
+// leaving and rejoining the warm set, and the session turning legacy and
+// back all keep them.
 func TestWarmEntryNotLoadedStrikes(t *testing.T) {
 	at := time.Now()
 	registry := NewRegistry(nil)
@@ -332,11 +333,55 @@ func TestWarmEntryNotLoadedStrikes(t *testing.T) {
 	if n := record(4*time.Minute + time.Second); n != 1 {
 		t.Fatalf("strikes after the window = %d, want 1", n)
 	}
-	// A heartbeat reporting the member loading resets its strikes.
-	beat(5*time.Minute, WarmModelLoading)
-	beat(5*time.Minute+30*time.Second, WarmModelWarm)
-	if n := record(5*time.Minute + 31*time.Second); n != 1 {
-		t.Fatalf("strikes after a non-warm report = %d, want 1", n)
+	// A heartbeat reporting the member loading keeps its strikes: the
+	// warm, refuse, loading cycle is a fault on its second turn.
+	beat(4*time.Minute+10*time.Second, WarmModelLoading)
+	beat(4*time.Minute+20*time.Second, WarmModelWarm)
+	if n := record(4*time.Minute + 21*time.Second); n != 2 {
+		t.Fatalf("strikes after a loading report = %d, want 2", n)
+	}
+	// Leaving the warm set (the session becomes legacy) and rejoining keeps
+	// them; a strike in the legacy session is not recorded.
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(4*time.Minute+30*time.Second), warmTestMembers("model-a"))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if _, ok := registry.RecordEntryNotLoaded("p1", "current", "model-b", at.Add(4*time.Minute+31*time.Second), 2*time.Minute); ok {
+		t.Fatal("legacy session recorded a strike for a model it does not keep warm")
+	}
+	beat(4*time.Minute+40*time.Second, WarmModelWarm)
+	if n := record(4*time.Minute + 41*time.Second); n != 3 {
+		t.Fatalf("strikes after leaving and rejoining = %d, want 3", n)
+	}
+	// The folded model id is the key.
+	beat(4*time.Minute+50*time.Second, WarmModelWarm)
+	if n, ok := registry.RecordEntryNotLoaded("p1", "current", "MODEL-B", at.Add(4*time.Minute+51*time.Second), 2*time.Minute); !ok || n != 4 {
+		t.Fatalf("strikes under another spelling = %d, want 4", n)
+	}
+	// The window prunes them.
+	beat(8*time.Minute, WarmModelWarm)
+	if n := record(8*time.Minute + time.Second); n != 1 {
+		t.Fatalf("strikes after the window = %d, want 1", n)
+	}
+}
+
+// An honest eviction race (one model_not_loaded, then the member reported
+// gone or loading) stays at one strike; the strike map holds only models that
+// answered within the window.
+func TestWarmEntryNotLoadedSingleRaceStaysOneStrike(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	if n, ok := registry.RecordEntryNotLoaded("p1", "current", "model-b", at.Add(time.Second), 2*time.Minute); !ok || n != 1 {
+		t.Fatalf("first answer = %d %v", n, ok)
+	}
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(5*time.Second), warmTestMembers("model-a", warmTestMember("model-b", WarmModelLoading, 2, 0), warmTestMember("model-c", WarmModelWarm, 2, 2))))
+	if n, ok := registry.RecordEntryNotLoaded("p1", "current", "model-c", at.Add(6*time.Minute), 2*time.Minute); !ok || n != 1 {
+		t.Fatalf("other model's first answer = %d %v", n, ok)
+	}
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	if strikes := registry.providers["p1"].notLoadedStrikes; len(strikes) != 1 || len(strikes["model-c"]) != 1 {
+		t.Fatalf("strike map = %v, want only model-c", strikes)
 	}
 }
 
