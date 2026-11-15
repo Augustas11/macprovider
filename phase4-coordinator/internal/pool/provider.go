@@ -491,13 +491,16 @@ type Provider struct {
 	// ResolveEntry) of a session with a warm set: the member that view
 	// describes and that a dispatch to it names as served_model_id.
 	ServedModelID string `json:"-"`
-	// legacyDispatchModel and legacyDispatchOpen attribute dispatches made
-	// with no served model while the session was a legacy session serving
-	// legacyDispatchModel, after a heartbeat made that model a further member
-	// of a warm set with another primary: until legacyDispatchOpen of them
-	// have ended, an empty served model names legacyDispatchModel.
+	// legacyDispatchModel and legacyDispatchOpen are the drain record: the
+	// dispatches made with no served model while legacyDispatchModel was the
+	// session's model, after a heartbeat made another model primary. Until
+	// legacyDispatchOpen of them have ended, an empty-served ending names
+	// legacyDispatchModel.
 	legacyDispatchModel string
 	legacyDispatchOpen  int
+	// emptyServedOpen counts the session's own open dispatches consumed with
+	// no served model; it seeds the drain record (drainEmptyServedLocked).
+	emptyServedOpen int
 	// notLoadedStrikes are the SPEC-002-R011 model_not_loaded strikes of the
 	// session's warm-set entries per case-folded model (RecordEntryNotLoaded).
 	notLoadedStrikes map[string][]time.Time

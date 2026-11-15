@@ -768,3 +768,145 @@ func TestComputeIntegrityPassingIsPerEntry(t *testing.T) {
 		t.Fatalf("passing a=%v b=%v, want only model-a", a.ComputeIntegrityPassing, b.ComputeIntegrityPassing)
 	}
 }
+
+// registerLegacyWarmTestProvider registers a legacy session serving model-a
+// with three seats whose reported hashes verify.
+func registerLegacyWarmTestProvider(registry *Registry, at time.Time) {
+	verifyWarmTestHashes(registry)
+	registry.Register(&Provider{
+		ProviderID: "p1", AssignedID: "current", ModelID: "model-a", State: StateReady,
+		ModelHash: warmTestHash("model-a"), HashStatus: HashStatusVerified,
+		SlotsFree: 3, SlotsTotal: 3, MaxConcurrency: 3, LastHeartbeatAt: at, LastActivityAt: at,
+	}, nil)
+}
+
+func primaryWarmTestMember(model string, total, free int) WarmModel {
+	return WarmModel{ModelID: model, State: WarmModelWarm, Primary: true, SlotsTotal: total, SlotsFree: free, ModelHash: warmTestHash(model)}
+}
+
+// SPEC-002-R011: dispatches a multi-model session consumed with a served
+// model are never part of a later drain record. multi [A,B] with A
+// dispatches open, then legacy A, then [B,A]: the A dispatches end on A, and
+// a later legacy B session counts its own dispatches exactly, so its
+// occupancy reports apply again once they end.
+func TestWarmServedDispatchesNeverSeedTheDrain(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, at)
+	for i := 0; i < 2; i++ {
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-a"); !ok {
+			t.Fatal("consume failed")
+		}
+	}
+	beat := func(d time.Duration, members []WarmModel) {
+		t.Helper()
+		if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(d), members)); !ok {
+			t.Fatal("heartbeat failed")
+		}
+	}
+	beat(time.Second, warmTestMembers("model-a"))
+	beat(2*time.Second, []WarmModel{primaryWarmTestMember("model-b", 2, 2), warmTestMember("model-a", WarmModelWarm, 2, 0)})
+	if a, b := registry.ForwardedInFlightFor("p1", "current", "model-a"), registry.ForwardedInFlight("p1", "current"); a != 2 || b != 0 {
+		t.Fatalf("after the flip: model-a=%d model-b=%d, want 2 and 0", a, b)
+	}
+	for i := 0; i < 2; i++ {
+		registry.RestoreForwardedSlotFor("p1", "current", "model-a")
+	}
+	beat(3*time.Second, []WarmModel{primaryWarmTestMember("model-b", 2, 2)})
+	for i := 0; i < 2; i++ {
+		ok, _, booked := registry.ConsumeForwardedSlotBooked("p1", "current", "")
+		if !ok || booked != "" {
+			t.Fatalf("legacy consume ok=%v booked=%q, want an unnamed legacy dispatch", ok, booked)
+		}
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	if n := registry.ForwardedInFlight("p1", "current"); n != 0 {
+		t.Fatalf("legacy model-b in-flight = %d after its dispatches ended, want 0", n)
+	}
+	// With nothing in flight the Mac's report applies (one stale lower
+	// report is ignored by design, the second is the Mac's count).
+	beat(4*time.Second, []WarmModel{primaryWarmTestMember("model-b", 2, 1)})
+	beat(5*time.Second, []WarmModel{primaryWarmTestMember("model-b", 2, 1)})
+	if session, _ := registry.Resolve("p1", "current"); session.SlotsFree != 1 {
+		t.Fatalf("ready reports are ignored: slots_free=%d, want 1", session.SlotsFree)
+	}
+}
+
+// legacy A with d1 open, then [B, A], then A loading (legacy B): a B
+// dispatch is booked under B and ends on B in any order, and d1 ends on A
+// (now missing), never on B.
+func TestWarmDrainNeverEndsOnTheLiveModel(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerLegacyWarmTestProvider(registry, at)
+	if ok, _, booked := registry.ConsumeForwardedSlotBooked("p1", "current", ""); !ok || booked != "" {
+		t.Fatalf("d1 ok=%v booked=%q", ok, booked)
+	}
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), []WarmModel{primaryWarmTestMember("model-b", 2, 2), warmTestMember("model-a", WarmModelWarm, 3, 2)}))
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), []WarmModel{primaryWarmTestMember("model-b", 2, 2), warmTestMember("model-a", WarmModelLoading, 3, 0)}))
+	if session, _ := registry.Resolve("p1", "current"); session.WarmModels != nil || session.ModelID != "model-b" {
+		t.Fatalf("setup: want legacy model-b, got model=%s warm=%v", session.ModelID, session.WarmModels)
+	}
+	_, _, d3 := registry.ConsumeForwardedSlotBooked("p1", "current", "")
+	_, _, d4 := registry.ConsumeForwardedSlotBooked("p1", "current", "")
+	if d3 != "model-b" || d4 != "model-b" {
+		t.Fatalf("dispatches during the drain booked %q %q, want model-b", d3, d4)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", d3)
+	if n := registry.ForwardedInFlight("p1", "current"); n != 1 {
+		t.Fatalf("model-b in-flight after d3 = %d, want 1", n)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	if n := registry.ForwardedInFlight("p1", "current"); n != 1 {
+		t.Fatalf("d1 (model-a) ended on model-b: in-flight %d, want 1", n)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", d4)
+	if n := registry.ForwardedInFlight("p1", "current"); n != 0 {
+		t.Fatalf("model-b in-flight = %d, want 0", n)
+	}
+	// The drain closed: a dispatch is unnamed again.
+	if _, _, booked := registry.ConsumeForwardedSlotBooked("p1", "current", ""); booked != "" {
+		t.Fatalf("after the drain booked %q, want unnamed", booked)
+	}
+}
+
+// A session view of a multi-model session (relay-blind, privacy class) is
+// counted on the primary even while a drain record is open, and its ending
+// leaves the demoted model's dispatches alone.
+func TestWarmSessionViewDispatchCountsOnThePrimary(t *testing.T) {
+	at := time.Now()
+	registry := NewRegistry(nil)
+	registerLegacyWarmTestProvider(registry, at)
+	registry.ConsumeForwardedSlotBooked("p1", "current", "")
+	registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), []WarmModel{primaryWarmTestMember("model-b", 2, 2), warmTestMember("model-a", WarmModelWarm, 3, 2)}))
+	ok, _, booked := registry.ConsumeForwardedSlotBooked("p1", "current", "")
+	if !ok || booked != "model-b" {
+		t.Fatalf("session-view dispatch ok=%v booked=%q, want the primary", ok, booked)
+	}
+	if a, b := registry.ForwardedInFlightFor("p1", "current", "model-a"), registry.ForwardedInFlight("p1", "current"); a != 1 || b != 1 {
+		t.Fatalf("model-a=%d model-b=%d, want 1 and 1", a, b)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", booked)
+	if a, b := registry.ForwardedInFlightFor("p1", "current", "model-a"), registry.ForwardedInFlight("p1", "current"); a != 1 || b != 0 {
+		t.Fatalf("after the session-view ending: model-a=%d model-b=%d, want 1 and 0", a, b)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", "")
+	if a := registry.ForwardedInFlightFor("p1", "current", "model-a"); a != 0 {
+		t.Fatalf("model-a=%d after its legacy dispatch ended", a)
+	}
+}
+
+// A legacy session books every dispatch unnamed, exactly as before.
+func TestLegacySessionBooksUnnamedDispatches(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerLegacyWarmTestProvider(registry, time.Now())
+	ok, _, booked := registry.ConsumeForwardedSlotBooked("p1", "current", "")
+	if !ok || booked != "" || registry.ForwardedInFlight("p1", "current") != 1 {
+		t.Fatalf("legacy consume ok=%v booked=%q", ok, booked)
+	}
+	registry.RestoreForwardedSlotFor("p1", "current", booked)
+	if registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatal("legacy restore did not end on the session")
+	}
+}

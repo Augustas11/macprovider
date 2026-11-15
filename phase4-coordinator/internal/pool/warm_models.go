@@ -222,6 +222,7 @@ func promoteWarmPrimaryLocked(p *Provider, incoming []WarmModel, inFlight map[st
 	if !wasFurther {
 		return nil
 	}
+	drainEmptyServedLocked(p)
 	p.forwardedInFlight = inFlight[nextPrimary]
 	p.awaitingReadyOccupancy = false
 	p.ignoredLowerReadyReport = false
@@ -237,8 +238,8 @@ func promoteWarmPrimaryLocked(p *Provider, incoming []WarmModel, inFlight map[st
 // member: the session's open dispatches, seat count and refusal hold belong
 // to that member, so they leave the session (now the new primary) and the
 // returned prior entry carries them to the member. The legacy dispatches
-// name no served model; legacyDispatchModel attributes them to the member
-// until as many of them as were open have ended.
+// that name no served model are drained to the member
+// (drainEmptyServedLocked).
 func demoteLegacyModelLocked(p *Provider, incoming []WarmModel) *WarmModel {
 	old := warmModelKey(p.ModelID)
 	if warmModelKey(incoming[0].ModelID) == old {
@@ -249,8 +250,7 @@ func demoteLegacyModelLocked(p *Provider, incoming []WarmModel) *WarmModel {
 			continue
 		}
 		prior := &WarmModel{ModelID: m.ModelID, SlotsFree: p.SlotsFree, refusalHold: p.queueFullHold}
-		p.legacyDispatchModel = p.ModelID
-		p.legacyDispatchOpen = p.forwardedInFlight
+		drainEmptyServedLocked(p)
 		p.forwardedInFlight = 0
 		p.awaitingReadyOccupancy = false
 		p.ignoredLowerReadyReport = false
@@ -263,24 +263,37 @@ func demoteLegacyModelLocked(p *Provider, incoming []WarmModel) *WarmModel {
 	return nil
 }
 
-// dispatchModelLocked is the served model a dispatch with servedModelID is
-// for: an empty served model names the demoted legacy model while dispatches
-// made before the demotion are open and the session keeps a warm set.
-func dispatchModelLocked(p *Provider, servedModelID string) string {
-	if servedModelID == "" && p.legacyDispatchOpen > 0 && p.WarmModels != nil {
-		return p.legacyDispatchModel
+// drainEmptyServedLocked runs when the session's model stops being its
+// primary (a legacy model demoted under another primary, or a primary
+// promoted away): the open dispatches that name no served model
+// (emptyServedOpen) are that model's, so they become the drain record and
+// every later empty-served ending is attributed to that model until as many
+// as were open have ended. While the record is open, a dispatch that names
+// no served model is booked under the session's model
+// (ConsumeForwardedSlotBooked), so the two never mix.
+func drainEmptyServedLocked(p *Provider) {
+	if p.emptyServedOpen == 0 {
+		return
 	}
-	return servedModelID
+	p.legacyDispatchModel = p.ModelID
+	p.legacyDispatchOpen = p.emptyServedOpen
+	p.emptyServedOpen = 0
 }
 
-// endedDispatchModelLocked is dispatchModelLocked for a dispatch that ends
-// (restore, drop, refusal of a consumed seat): an empty served model names
-// the demoted legacy model while any dispatch made before the demotion is
-// open, whatever the session's warm set is now, and counts one of them as
-// ended.
+// endedDispatchModelLocked is the served model a dispatch that ends
+// (restore, drop, refusal of a consumed seat) was booked for: an empty
+// served model names the drained model while its record is open, whatever
+// the session's warm set is now (a model that left the warm set resolves as
+// missing, never as a live model), and otherwise the session.
 func endedDispatchModelLocked(p *Provider, servedModelID string) string {
-	if servedModelID != "" || p.legacyDispatchOpen == 0 {
+	if servedModelID != "" {
 		return servedModelID
+	}
+	if p.legacyDispatchOpen == 0 {
+		if p.emptyServedOpen > 0 {
+			p.emptyServedOpen--
+		}
+		return ""
 	}
 	model := p.legacyDispatchModel
 	p.legacyDispatchOpen--
@@ -625,20 +638,42 @@ func (r *Registry) ConsumeForwardedSlotFor(providerID, assignedID, servedModelID
 	if p == nil || p.AssignedID != assignedID {
 		return false, false
 	}
-	model := dispatchModelLocked(p, servedModelID)
-	switch idx := warmMemberIndexLocked(p, model); idx {
+	return r.consumeForwardedSlotForLocked(p, servedModelID)
+}
+
+// ConsumeForwardedSlotBooked is ConsumeForwardedSlotFor that also returns the
+// served model every ending of the dispatch (RestoreForwardedSlotFor,
+// DropForwardedInFlightFor, MarkForwardedSlotFullFor) must name. A dispatch
+// without a served model is booked under the session's model when the
+// session has a warm set (a session view, e.g. relay-blind or privacy class,
+// reaches the primary and is counted there) or a drain record is open;
+// otherwise, as on every legacy session, it stays empty.
+func (r *Registry) ConsumeForwardedSlotBooked(providerID, assignedID, servedModelID string) (ok, unconfirmed bool, booked string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false, false, ""
+	}
+	booked = servedModelID
+	if booked == "" && (p.WarmModels != nil || p.legacyDispatchOpen > 0) {
+		booked = p.ModelID
+	}
+	ok, unconfirmed = r.consumeForwardedSlotForLocked(p, booked)
+	return ok, unconfirmed, booked
+}
+
+func (r *Registry) consumeForwardedSlotForLocked(p *Provider, servedModelID string) (ok, unconfirmed bool) {
+	switch idx := warmMemberIndexLocked(p, servedModelID); idx {
 	case warmMemberSession:
 		ok, unconfirmed = r.consumeForwardedSlotLocked(p)
-		if ok && model != servedModelID {
-			p.legacyDispatchOpen++
+		if ok && servedModelID == "" {
+			p.emptyServedOpen++
 		}
 		return ok, unconfirmed
 	case warmMemberMissing:
 		return false, false
 	default:
-		if model != servedModelID {
-			p.legacyDispatchOpen++
-		}
 		m := mutableWarmMemberLocked(p, idx)
 		unconfirmed = m.forwardedInFlight > 0
 		m.forwardedInFlight++
@@ -717,7 +752,7 @@ func (r *Registry) MarkForwardedSlotFullFor(providerID, assignedID, servedModelI
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
-	model := dispatchModelLocked(p, servedModelID)
+	model := servedModelID
 	if refusedSeatConsumed {
 		model = endedDispatchModelLocked(p, servedModelID)
 	}
@@ -750,7 +785,7 @@ func (r *Registry) RoutableSlotsFreeFor(providerID, assignedID, servedModelID st
 	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
 		return 0, false
 	}
-	switch idx := warmMemberIndexLocked(p, dispatchModelLocked(p, servedModelID)); idx {
+	switch idx := warmMemberIndexLocked(p, servedModelID); idx {
 	case warmMemberSession:
 		if p.capacitySafetyHold || p.SlotsFree < 0 {
 			return 0, true
@@ -777,7 +812,7 @@ func (r *Registry) ForwardedInFlightFor(providerID, assignedID, servedModelID st
 	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
 		return 0
 	}
-	switch idx := warmMemberIndexLocked(p, dispatchModelLocked(p, servedModelID)); idx {
+	switch idx := warmMemberIndexLocked(p, servedModelID); idx {
 	case warmMemberSession:
 		return p.forwardedInFlight
 	case warmMemberMissing:

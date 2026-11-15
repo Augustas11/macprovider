@@ -10354,12 +10354,12 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 			// this provider: chats the Mac may already be running that the
 			// coordinator has not yet counted in flight.
 			consume := func(otherReserved int) {
-				if ok, unconfirmed := s.pool.ConsumeForwardedSlotFor(provider.ProviderID, provider.AssignedID, provider.ServedModelID); ok {
+				if ok, unconfirmed, booked := s.pool.ConsumeForwardedSlotBooked(provider.ProviderID, provider.AssignedID, provider.ServedModelID); ok {
 					state.acceptedOnUnconfirmedOccupancy = unconfirmed || otherReserved > 0
 					state.slotConsumedOnAccept = true
 					state.consumedProviderID = provider.ProviderID
 					state.consumedAssignedID = provider.AssignedID
-					state.consumedServedModelID = provider.ServedModelID
+					state.consumedServedModelID = booked
 				}
 			}
 			if s.slotQueue != nil && state.queuedSlotProviderID != "" {

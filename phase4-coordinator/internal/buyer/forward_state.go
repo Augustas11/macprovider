@@ -162,8 +162,9 @@ type forwardState struct {
 	slotConsumedOnAccept bool
 	consumedProviderID   string
 	consumedAssignedID   string
-	// consumedServedModelID names the warm-set entry whose seat was consumed
-	// (SPEC-002-R011); empty for a provider without a warm set.
+	// consumedServedModelID is the served model the consumed seat was booked
+	// for (pool.ConsumeForwardedSlotBooked, SPEC-002-R011); empty for a
+	// provider without a warm set.
 	consumedServedModelID string
 	// acceptedOnUnconfirmedOccupancy records that the latest accepted
 	// attempt took its seat while the coordinator, not a Mac report, owned
