@@ -5695,7 +5695,11 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func runUnderAdmissionHold",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func admissionHoldDue",
         "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func beginSelfCheckAdmissionHold",
-        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func admitRequest"
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func admitRequest",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func usesSameOrderReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func sameOrderReference(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func rowsDifferingFromReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:private func sameOrderReferences("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
@@ -5728,14 +5732,20 @@
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldAdmitsTheRelayRequest",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringAShortCheckWaitsAndTheCheckCompletes",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerWaitingPastTheBoundYieldsTheHoldAndIsServed",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderTwoRowWidthComparesWithLoneRuns",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderWidthsFromThreeCompareWithTheSameOrderReference",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testSameOrderReferenceWhoseRowsDisagreeFails",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowInvariantRouteKeepsLoneReferencesAndItsKey",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSelfCheckAdmissionTests.swift:testStockOrderRuntimeRunsTheSelfCheckUnderItsOwnKey"
       ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-038 v0.3.55 stock order same-order reference rule (FR-CB10 exactness probe item 3): unit tests only; not yet run on hardware, no evidence recorded."
       }
     },
     {

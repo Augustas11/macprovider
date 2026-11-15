@@ -1,11 +1,27 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.55
+Version: v0.3.56
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.56 (2026-11-15, stock order small-row route, Related: (issue to be filed)):**
+FR-CB9 adds a third MLX small-row route, `stock_order`
+(`MLX_METAL_SMALL_M_ROW_INVARIANT=2`): one row takes upstream's one-row
+kernel, a forward of exactly two rows an exact kernel whose rows equal the
+lone row bit for bit, and forwards of 3-16 rows the batch kernel. A `serve`
+process that can batch ordinary rows and has no native MTP that may
+activate, no draft model, no shard-group role, no other warm-swap target and
+is not an autotune child now takes it instead of `row_invariant`; every
+process that needs the row-invariant pair keeps it, and the serial-only rule
+is unchanged. A native-MTP drafter load is refused on `stock_order`. FR-CB6
+states how the accepted numerical tolerance covers the 3+-row difference.
+FR-CB10: on `stock_order` a width of three or more rows is compared with
+each prompt's same-order reference (the prompt run as three identical rows,
+row 0) instead of its lone run; the reference's rows must be identical, and
+the stored key carries the route. SPEC-037 v0.2.7 gives the route its own
+disk decode-path class. Not yet run on hardware in the provider.
 **Change log v0.3.55 (2026-11-15, FR-CB2 bypass count resets when a row leads, Related: #2366):**
 FR-CB2: a row that leads a prefill turn counts its bypass turns from zero
 again. An aged long prompt therefore leads one turn and then yields to the
@@ -1700,6 +1716,21 @@ batched-versus-serial argmax comparison; it does NOT relax the SPEC-039 single-
 row paged-gather parity gate, which shares the serial computation's accumulation
 order and so remains exact.
 
+**(v0.3.56) Stock order.** On the FR-CB9 `stock_order` small-row route the
+serial path of a lone request runs upstream's one-row kernel, and a row of a
+decode forward of three or more rows runs the batch kernel, whose arithmetic
+may differ from it in low bits. That is an accumulation-order difference of
+the kind the accepted numerical tolerance already recognizes: a
+temperature-0 batched request MAY take a different greedy token than its
+serial path only where the two tokens are a near tie of the request's own
+distribution, and a token from another row is still a leak. A row decoded in
+a forward of one or two rows matches the serial path bit for bit. Because the
+row count of a forward follows the requests in the batch, a near-tied token
+MAY differ when a third request joins or leaves. The FR-CB10 self-check
+enforces this rule with its exact-tie tolerance against a same-order
+reference. The tolerance does not relax the SPEC-039 single-row parity gate
+or its two-row attach probe, which stay exact on every route.
+
 ### FR-CB7 - single-owner actor isolation (SPEC-038-R007)
 
 All mutable batch state (queue, prompt set, decode batch, per-row lifecycle,
@@ -1747,7 +1778,9 @@ for correct serving.
 **Small-row route (v0.3.50, resolved state v0.3.51, #2335).** Every process
 that can batch decode rows (a CB row, the FR-CB10 self-check, a SPEC-048
 native-MTP round, a shard-group head) MUST run the MLX core's row-invariant
-small-row route, so a row computes the same bits alone and inside a batch. A
+small-row route, so a row computes the same bits alone and inside a batch,
+except a `serve` process that takes the stock order route below (v0.3.56),
+which batches ordinary CB rows and runs the FR-CB10 self-check only. A
 `serve` process that cannot batch for its whole lifetime MAY take the MLX
 fork's pre-window small-row route (`qmv` per row below the `qmm` limit), which
 is faster for one row. The provider decides once, from resolved state before
@@ -1776,8 +1809,9 @@ these hold:
    identity) on the self-check key this startup identity resolved to, with no
    unfinished step and no re-measurement scheduled. A one-row decision that
    re-runs when the ladder bound grows (`serial_baseline_unavailable`,
-   `probe_shape_unmet_at_<k>`) keeps the invariant route, the only one on
-   which the self-check can run. The startup identity covers the inputs the
+   `probe_shape_unmet_at_<k>`) keeps a batching route (the invariant route,
+   or `stock_order` where it applies, v0.3.56), the only routes on which the
+   self-check can run. The startup identity covers the inputs the
    key and the ladder bound derive from: model bytes, CLI version, decode-path
    digest, MLX pins, OS build, chip and memory, signed CB policy, rows, owner
    pin, queue limit, context, `kv_bits`, prefill chunk, cached turns, paged-KV
@@ -1787,13 +1821,17 @@ these hold:
    measures candidate configurations that may batch for the incumbent, which
    serves on the invariant route).
 
-A provider with no verdict for its startup identity starts on the invariant
-route, runs its self-check as before, records the self-check key it applied,
-and logs `event=small_m_route action=verdict_recorded ... next_start=serial_only`
-when the verdict serves one row; its next start takes the serial route. A
-verdict measured on the invariant route stays valid on the serial route: it
-says batching gives no net gain against the invariant serial baseline, and the
-serial route's baseline is faster, so the verdict only gets more true. A
+A provider with no verdict for its startup identity starts on a batching
+route (`stock_order` when items 1 and 3 hold, v0.3.56), runs its self-check
+as before, records the self-check key it applied, and logs
+`event=small_m_route action=verdict_recorded ... next_start=serial_only`
+when the verdict serves one row (`next_start=stock_order` otherwise); its
+next start takes the serial route. A verdict measured on the invariant route
+stays valid on the serial route: it says batching gives no net gain against
+the invariant serial baseline, and the serial route's baseline is faster, so
+the verdict only gets more true. A verdict measured on `stock_order` stays
+valid too: its serial baseline already runs the one-row kernel the serial
+route runs, and a row divergence is a risk only a batching route takes. A
 serial-only process never measures, so no serial-route number is ever compared
 with a batched one. In a serial-only process:
 
@@ -1820,10 +1858,49 @@ with a batched one. In a serial-only process:
   every condition above, and local `/v1/status` reports
   `continuous_batching.small_m_route` and `small_m_route_reason`.
 
+**Stock order route (v0.3.56).** The MLX core runs affine quantized matmuls
+of 1-16 rows on one of three routes:
+
+| Route (`small_m_route`) | Variable | Kernels | Guarantee |
+|---|---|---|---|
+| `row_invariant` | unset, or parses to neither 0 nor 2 | one row: a single-row kernel with the batch kernel's reduction order; 2-16 rows: the batch kernel | a row computes the same bits alone and in any forward of 1-16 rows |
+| `serial_only` | parses to 0 | the fork's pre-window per-row `qmv` below the `qmm` limit | none across row counts; only for a process that can never batch |
+| `stock_order` | parses to 2 | one row: upstream's one-row kernel; exactly two rows: an exact two-row kernel; 3-16 rows: the batch kernel | a lone row equals the same row of a two-row forward bit for bit; rows of 3-16-row forwards equal each other bit for bit; a row MAY differ in low bits between a lone or two-row forward and a forward of three or more rows, so a near-tied greedy token MAY differ when a third request joins or leaves |
+
+A `serve` process MUST take `stock_order` when items 1 and 3 above hold and
+item 2 does not: native MTP cannot activate, there is no draft model, no
+shard-group role and no other warm-swap target, it is not an autotune child,
+and continuous batching can activate (the self-check verdict is absent, on a
+changed key, pending a re-check, or grants batching). Its reason is the
+self-check verdict (`self_check_verdict_absent`, `self_check_key_changed`,
+`self_check_recheck_pending`, `self_check_grants_batching`). Every other
+process that can batch keeps `row_invariant` with its existing reason. In
+particular a process whose native MTP may activate keeps `row_invariant`: a
+native-MTP verify window is depth + 1 rows of one request and MUST equal that
+request's own ordinary one-row decode (SPEC-048 R015/R016), which from three
+rows only the row-invariant pair gives. A `stock_order` process refuses the
+native-MTP drafter load (`small_m_route_stock_order`) if an admission set
+appears after startup, as a serial-only process does. In a `stock_order`
+process the scheduler is built, the FR-CB10 self-check runs (item 3 of its
+exactness probe names the reference it uses) under a key that carries the
+route, served output follows FR-CB6 (v0.3.56), SPEC-037 disk KV and prompt
+snapshots carry the class `ordinary+stock_order_small_m` (SPEC-037 v0.2.7),
+and local `/v1/status` reports `continuous_batching.small_m_route:
+stock_order`. The SPEC-039 two-row attach probe compares a two-row shared
+forward with serial decode exactly; it stays valid on `stock_order` because
+the two-row kernel is exact against the lone row. Basis: the lab layer
+benchmark (`scripts/lab/parity-grid/qmm_layers_bench.py`, every quantized
+linear of a 4-bit model chained once per pass) on an M3 Ultra measured one
+row at 8.76 ms per pass on `stock_order` against 9.96 ms on `row_invariant`
+for Llama 3.1 8B, and 26.45 ms against 30.38 ms for a 27B model; from three
+rows both routes run the same kernel. The provider has not yet been run on
+this route on hardware.
+
 The MLX core reads the variable once with C `atoi` semantics: unset, or a
-value that parses to non-zero, keeps the invariant route; any value that
-parses to 0 (`0`, `""`, `false`, `00`, `-0`, ` 0`, `0x1`) takes the serial
-route, and the provider labels its route by the same parse. Every other
+value that parses to neither 0 nor 2, keeps the invariant route; any value
+that parses to 0 (`0`, `""`, `false`, `00`, `-0`, ` 0`, `0x1`) takes the
+serial route; any value that parses to 2 (`2`, `02`, ` 2`) takes the stock
+order route, and the provider labels its route by the same parse. Every other
 command that runs MLX compute (`self-test`, `msb-throughput`,
 `msb-compute-score`, `hardware-check` and `performance-check` (and their
 legacy `spec028-canary` and `spec028-benchmark` names), `shard-bench`,
@@ -1831,7 +1908,8 @@ legacy `spec028-canary` and `spec028-benchmark` names), `shard-bench`,
 `native-mtp-journey-e2e`, `native-mtp-request-shape-replay`, the
 `native-mtp-qualify bench` and `replay`, `relay-blind-fixture`) MUST
 pin the invariant route before MLX starts, removing an inherited value;
-`decode-bench` applies its own `--small-m-route` option.
+`decode-bench` applies its own `--small-m-route` option (`row-invariant`,
+`serial-only` or `stock-order`).
 
 A missed case costs single-row speed, never exactness.
 
@@ -1961,7 +2039,9 @@ buyer traffic. No extra runtime enable flag is introduced.
    crash, never lowers a prior grant, and does not grow the deferral backoff;
    with no width verified yet it is an ordinary deferral. Every row MUST equal
    that prompt run
-   alone on the same paged engine, or first differ only at an exact tie
+   alone on the same paged engine (on the FR-CB9 `stock_order` route, from
+   three rows, its same-order reference, exactness probe item 3), or first
+   differ only at an exact tie
    (v0.3.19): at the first differing position both tokens are the stock
    serial top two for the shared prefix, within `nearTieLogitTolerance`
    (1/1024 logit), and the batched token is not another row's token at that
@@ -2211,6 +2291,25 @@ from 2 runs an exactness probe through the production scheduler:
    flips the old 1.0-logit rule accepted sat at 0.125, one bfloat16 step at
    logits of 16-32. 1/1024 is below one bfloat16 step at any logit of
    magnitude 0.25 or more. Excused ties are counted (`near_tie_rows`).
+   (v0.3.56) On the FR-CB9 `stock_order` route a width of two rows is
+   compared with the lone runs exactly as above, because the two-row kernel
+   is exact against the lone row. A width of three or more rows compares
+   each row, in the exactness probe and in the throughput passes, with its
+   prompt's same-order reference instead: the prompt submitted three times
+   as one cohort (item 2) through the same scheduler entry point and at the
+   same completion length, row 0's tokens taken. The three rows decode in the
+   same batch-kernel forwards and MUST be identical; if they differ the width
+   fails as a row divergence on its own. A row that equals its lone run
+   exactly also passes, because the FR-CB2 decode row bound can leave it in a
+   forward of one or two rows. Every other row is judged against the
+   same-order reference under the same tie rule, tolerance and leak rule.
+   The throughput passes are not cohorts, so a row admitted early can decode
+   some steps in a forward of one or two rows and the rest in a wider one; a
+   flip that causes is judged under the same rule and fails the width unless
+   it is an exact tie. The gain is still measured against the stock serial
+   baseline. Same-order references are stored with the SHA-256 of their
+   prompt and reused only for that prompt at that completion length, like
+   lone outputs. The row-invariant route is unchanged.
 4. Fail closed. A width is probed only if all k rows fit the scheduler's
    per-request cap and, together, its paged-KV pool (each row's prompt,
    completion and decode headroom rounded up to whole blocks). The ladder
@@ -2238,7 +2337,10 @@ from 2 runs an exactness probe through the production scheduler:
    that prompt at that completion length; the store file is read only when
    no other user can read or write it. A result measured by an older probe
    re-runs, and its grant carries the Mac through the re-run under the
-   item 2 continuation rule, within item 4's shape bound.
+   item 2 continuation rule, within item 4's shape bound. (v0.3.56) On the
+   FR-CB9 `stock_order` route the key also ends in `+small_m_stock_order`, so
+   no result measured on the row-invariant route qualifies a stock order
+   process; every row-invariant key is unchanged.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 

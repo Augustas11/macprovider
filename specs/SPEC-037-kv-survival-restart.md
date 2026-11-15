@@ -1,10 +1,25 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.2.6
+Version: v0.2.7
 Status: draft (v0.2 fleet/recurrent implementation and acceptance in progress)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
 Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle. v0.2.1 (#2015): a batched hybrid first turn's serial cache carries the terminal checkpoint state in its recurrent layers, so codec-v2 capture sees complete canonical state instead of an empty placeholder; both staging ceilings default to 1 GiB on hosts with at least 64 GiB of memory (256 MiB below), because a Qwen3.6-35B-A3B entry needs ~61 MiB per recurrent checkpoint plus 20 KiB/token and its promotion staging is twice its decoded size. v0.2.2 (#2015): the tier is on by default (AGENTS.md rule 11). Basis: KVS-01a and KVS-01b restart-survival evidence (`docs/runbooks/kv-survival-kvs01a-enable-gate-evidence-2026-09-20.md`, `docs/runbooks/kv-survival-kvs01b-8k-gate-evidence-2026-09-21.md`) and the R016 Studio acceptance on the #2032 build (14/14; median repeat-prefix TTFT 750 ms with the tier on against 3,523 ms off). KVS-02 (same-family model switch misses) and KVS-03 (same model id, different artifact SHA misses) passed as Studio smoke runs (`docs/research/RESEARCH_ROADMAP.md`, RESEARCH_233 row), and the AC-2 per-envelope-field mutation and wrong-epoch fixtures cover the remaining variants. Caps, staging defaults, the fleet-grant gate and fail-closed activation are unchanged. Privacy-class requests bypass the tier per request (SPEC-049 v0.6.0, SPEC-049-R010), so an enabled tier no longer removes a provider from the privacy class.
+
+## Amendment v0.2.7 — stock order small-row route in the decode-path class
+
+Related: (issue to be filed).
+
+SPEC-038 FR-CB9 v0.3.55 adds a third small-row route, `stock_order`. A
+`serve` process on it writes and expects `decode_path =
+ordinary+stock_order_small_m`. It does not share `ordinary+serial_small_m`:
+a lone stock order row runs the same one-row kernel as the serial-only
+route, but a stock order process also writes KV from rows decoded in
+forwards of three or more rows (the batch kernel), which a serial-only
+process never produces; its lone-row KV is not the row-invariant route's
+either. KV and prompt snapshots written on any one route are a clean
+`disk_miss_envelope` on each other route, so a provider whose route changes
+between starts misses its earlier entries once.
 
 ## Amendment v0.2.6 — small-row route decided from resolved state
 
@@ -875,7 +890,7 @@ independently hits), with exactly one reason code:
 | 9 | Manifest schema ID or payload codec ID unknown | `disk_miss_envelope` |
 | 10 | Namespace or key-epoch mismatch (incl. file copied across namespaces/epochs) | `disk_miss_envelope` |
 | 11 | HMAC index does not recompute from the presented canonical key bytes | `disk_miss_envelope` |
-| 12 | Decode path class is not ordinary decode, or names the other small-row route (v0.2.5) | `disk_miss_envelope` |
+| 12 | Decode path class is not ordinary decode, or names another small-row route (v0.2.5, v0.2.7) | `disk_miss_envelope` |
 | 13 | Artifact internally inconsistent: token count / generation / commit sequence / chunk table / `decoded_length` / any declared length fails recomputation or coherence, or a required field is missing / an unknown field present | `disk_miss_corrupt` |
 | 14 | `creation_time` in the future | `disk_miss_envelope` |
 | 15 | Eligibility deadline passed | `disk_miss_expired` |
