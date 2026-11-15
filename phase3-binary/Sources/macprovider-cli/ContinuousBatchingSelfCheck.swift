@@ -781,7 +781,7 @@ enum ContinuousBatchingSelfCheck {
         log: @escaping @Sendable (String) -> Void,
         check: @escaping @Sendable () async -> Bool
     ) async -> AdmissionHoldOutcome {
-        await runUnderAdmissionHold(
+        await runUnderSelfCheckHold(
             scope: ProcessSelfCheckAdmissionHold(providerStatus: providerStatus),
             drainSeconds: drainSeconds, checkSeconds: checkSeconds, lifecycleLease: lifecycleLease,
             stillValid: stillValid, buyerWaitSeconds: buyerWaitSeconds, buyerWaitYieldSeconds: buyerWaitYieldSeconds,
@@ -791,7 +791,7 @@ enum ContinuousBatchingSelfCheck {
     /// The same hold over `scope`: the whole provider (the primary's check,
     /// `ProcessSelfCheckAdmissionHold`) or one further warm member
     /// (SPEC-001-R019, `WarmMemberSelfCheckAdmissionHold`).
-    static func runUnderAdmissionHold(
+    static func runUnderSelfCheckHold(
         scope hold: any SelfCheckAdmissionHoldScope,
         drainSeconds: Int,
         checkSeconds: Double = admissionHoldCheckSeconds,
@@ -1412,12 +1412,12 @@ actor ContinuousBatchingSelfCheckDriver {
     }
 
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the check under an admission hold
-    /// (`ContinuousBatchingSelfCheck.runUnderAdmissionHold`). A prior grant
+    /// (`ContinuousBatchingSelfCheck.runUnderSelfCheckHold`). A prior grant
     /// keeps serving until the check decides; holds are at least
     /// `admissionHoldAfterSeconds` apart.
     private func measureUnderAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget, dueSeconds: Double) async {
         let runtime = runtime
-        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+        let outcome = await ContinuousBatchingSelfCheck.runUnderSelfCheckHold(
             scope: await admissionHoldScope(),
             drainSeconds: ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(
                 base: admissionHoldDrainSeconds, consecutiveDrainTimeouts: consecutiveDrainTimeouts

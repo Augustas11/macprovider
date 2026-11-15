@@ -49,7 +49,7 @@ final class WarmMemberSelfCheckHoldTests: XCTestCase {
         let table = rig.table
         let status = rig.status
         let task = Task {
-            await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            await ContinuousBatchingSelfCheck.runUnderSelfCheckHold(
                 scope: hold, drainSeconds: 5, checkSeconds: 5, lifecycleLease: { nil },
                 context: "test", log: { _ in }
             ) {
@@ -105,7 +105,7 @@ final class WarmMemberSelfCheckHoldTests: XCTestCase {
     /// and the check yields the moment one starts.
     func testAMemberHoldIsRefusedDuringAWarmSetChangeAndYieldsToOne() async throws {
         let rig = try Rig()
-        let refused = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+        let refused = await ContinuousBatchingSelfCheck.runUnderSelfCheckHold(
             scope: rig.memberHold(allowed: { false }), drainSeconds: 1, checkSeconds: 1, lifecycleLease: { nil },
             context: "test", log: { _ in }
         ) { XCTFail("the check ran during a warm-set change"); return true }
@@ -113,7 +113,7 @@ final class WarmMemberSelfCheckHoldTests: XCTestCase {
         XCTAssertEqual(rig.memberView?.selfCheckHeld, false)
 
         let busy = LockedFlag()
-        let yielded = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+        let yielded = await ContinuousBatchingSelfCheck.runUnderSelfCheckHold(
             scope: rig.memberHold(allowed: { !busy.value }), drainSeconds: 1, checkSeconds: 5, lifecycleLease: { nil },
             context: "test", log: { _ in }
         ) {
