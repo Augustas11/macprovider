@@ -24,6 +24,7 @@
     {"model": "LiquidAI/LFM3-1.7B-MLX-4bit", "family": ""},
     {"model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp", "family": "minimax"},
     {"model": "minimaxai/minimax-m3.1-flash", "family": "minimax"},
+    {"model": "minimaxai/minimax-m3.1-flash-abliterated", "family": "minimax"},
     {"model": "MINIMAXAI/MINIMAX-M3-PREVIEW", "family": "minimax"},
     {"model": "local/minimax_m3_vl-text", "family": "minimax"},
     {"model": "MiniMaxAI/MiniMax-M2.5", "family": ""},

@@ -281,6 +281,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
         let refused = [
             "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
             "minimaxai/minimax-m3.1-flash",
+            "minimaxai/minimax-m3.1-flash-abliterated",
             "minimax/minimax-m3.1-flash",
             "MINIMAXAI/MINIMAX-M3-PREVIEW",
             "local/minimax_m3_vl-text",

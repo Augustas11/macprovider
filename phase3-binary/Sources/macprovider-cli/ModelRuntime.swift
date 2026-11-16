@@ -3721,6 +3721,7 @@ maxTokens: 1,
             "zai-org/glm-5.3-flash-uncensored": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
+            "minimaxai/minimax-m3.1-flash-abliterated": "MiniMaxM3SparseForConditionalGeneration",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.101
+**Version:** 0.1.103
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.101",
+  "version": "0.1.103",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,14 +585,14 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.70` | `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.72` | `fd4153e86a9adc6e8fef3924fc130a224fab693e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.70` is `3.32.3-macprovider.63`
-(`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) plus three commits that only move
-its mlx-swift pin (#2389), at `5cd9eb9e33600c3023020882e30e7fdd2bc08fd9`. The Swift row
+The mlx-swift-lm row `3.32.3-macprovider.72` is `3.32.3-macprovider.71`
+(`29b5778b36ffba045786c4cd73427f5287c79a54`) plus three commits that only move
+its mlx-swift pin (#2389), at `fd4153e86a9adc6e8fef3924fc130a224fab693e`. The Swift row
 moves to `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`,
 `.22` plus three commits that move the core gitlink and regenerate the
 quantized jit sources) and the core row to `v0.32.4-macprovider.15`
@@ -604,6 +604,22 @@ batch kernel, which uses 8 partial sums over K instead of 4 on some GPU
 generations. The default (row-invariant) route and its output bits are
 unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is
 unchanged. The C row is unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
+(`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
+`29b5778b36ffba045786c4cd73427f5287c79a54`: MiniMax M3 projects
+`alpha * r r^T` out of the attention and MLP/MoE outputs of the decoder
+layers the optional `refusal_ablation` config key names, before each
+residual add, in float32. Commit `29b5778` (`04a1d29` plus its audit fixes)
+touches `MiniMaxM3.swift` and its tests only; a model without the key runs the
+unchanged fused path. The loader refuses `alpha` outside finite
+`0 < alpha <= 4` and assigns the direction only when it is a finite
+`[hidden_size]` vector with `|norm - 1| <= 1e-3` under a `direction_key` that
+names no base weight; otherwise the load fails. An indexed checkpoint may
+store it as `language_model.refusal_direction`. The text sanitize drops
+stored `model.layers.N.refusal_direction` keys, so only the validated
+direction sets the per-layer directions. It
+changed no Swift, core or C row.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
 (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
@@ -2714,14 +2730,31 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.101 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.70` (`5cd9eb9e33600c3023020882e30e7fdd2bc08fd9`),
+- **0.1.103 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.72` (`fd4153e86a9adc6e8fef3924fc130a224fab693e`),
   mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`)
   and MLX core `v0.32.4-macprovider.15`
   (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038
   FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`).
   The row-invariant route that native MTP serves on is unchanged. The LM row
-  only moves its mlx-swift pin; the C row is unchanged.
+  is `3.32.3-macprovider.71` plus three commits that only move its mlx-swift
+  pin; the C row is unchanged.
+- **0.1.102 (2026-11-16, Related: #2376)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.71` (`29b5778b36ffba045786c4cd73427f5287c79a54`), which is
+  `3.32.3-macprovider.69` plus one commit: the MiniMax M3 text sanitize drops
+  stored `model.layers.N.refusal_direction` keys, so a checkpoint cannot skip
+  direction validation when the ablated range is a single layer. `29b5778`
+  touches `MiniMaxM3.swift` and its tests only. Other model sources and the
+  Swift, core and C rows are unchanged.
+- **0.1.101 (2026-11-15, Related: #2376)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.69` (`a089112e8535bf6e25206963f681826d38befad2`) on
+  `3.32.3-macprovider.63`: MiniMax M3 projects `alpha * r r^T` out of the
+  attention and MLP/MoE outputs of the decoder layers the optional
+  `refusal_ablation` config key names; the loader refuses an out-of-range
+  `alpha` (finite, `0 < alpha <= 4`) or a direction that is not a finite unit
+  `[hidden_size]` vector, and reads `language_model.refusal_direction` from an
+  indexed checkpoint. `a089112` touches `MiniMaxM3.swift` and its tests only. Other model sources and the Swift, core and C rows are
+  unchanged.
 - **0.1.100 (2026-11-15)** — R013 adds the admission pickup: a running
   provider re-fetches the admission set when its catalog refresh sees another
   release and, if a fresh start would newly admit its loaded model, restarts

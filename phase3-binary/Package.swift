@@ -17,12 +17,23 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.70 (#2389) is .63 plus three commits that
+        // Tag 3.32.3-macprovider.72 (#2389) is .71 plus three commits that
         // only move the mlx-swift pin: mlx-swift 0.32.3-macprovider.24
         // (7fbcada9), MLX core v0.32.4-macprovider.15 (4e9a71dc9). The core
         // adds the stock-order small-row route (MLX_METAL_SMALL_M_ROW_INVARIANT=2,
         // SPEC-038 FR-CB9) with 8 qmv_mma partial sums on that route only;
         // the row-invariant route is unchanged.
+        // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
+        // MiniMax M3 projects a refusal direction out of the attention and
+        // MLP/MoE outputs of the configured decoder layers when the
+        // refusal_ablation config key is present (the abliterated M3.1-Flash
+        // variant), refusing an alpha outside 0 < alpha <= 4 or a direction
+        // that is not a finite unit vector; an indexed checkpoint may store it
+        // as language_model.refusal_direction. The text sanitize drops stored
+        // model.layers.N.refusal_direction keys, so only the validated
+        // direction sets them. 29b5778 (04a1d29 plus the audit fixes) touches
+        // MiniMaxM3.swift and its tests only; a model without the key runs the
+        // unchanged fused path.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -172,7 +183,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "5cd9eb9e33600c3023020882e30e7fdd2bc08fd9"
+            revision: "fd4153e86a9adc6e8fef3924fc130a224fab693e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

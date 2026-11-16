@@ -27,22 +27,25 @@ final class PagedMiniMaxM3CacheTests: XCTestCase {
         frequency: [Int]? = nil,
         useSparse: Bool = true,
         blockSize: Int = 128,
-        topkBlocks: Int = 16
+        topkBlocks: Int = 16,
+        refusalAblation: [String: Any]? = nil
     ) -> Data {
+        var textConfig: [String: Any] = [
+            "num_hidden_layers": layers,
+            "num_local_experts": 128,
+            "num_experts_per_tok": 4,
+            "sparse_attention_config": [
+                "use_sparse_attention": useSparse,
+                "sparse_attention_freq": frequency ?? Array(repeating: 1, count: layers),
+                "sparse_block_size": blockSize,
+                "sparse_topk_blocks": topkBlocks,
+            ] as [String: Any],
+        ]
+        textConfig["refusal_ablation"] = refusalAblation
         let object: [String: Any] = [
             "model_type": modelType,
             "architectures": architectures,
-            "text_config": [
-                "num_hidden_layers": layers,
-                "num_local_experts": 128,
-                "num_experts_per_tok": 4,
-                "sparse_attention_config": [
-                    "use_sparse_attention": useSparse,
-                    "sparse_attention_freq": frequency ?? Array(repeating: 1, count: layers),
-                    "sparse_block_size": blockSize,
-                    "sparse_topk_blocks": topkBlocks,
-                ] as [String: Any],
-            ] as [String: Any],
+            "text_config": textConfig,
         ]
         return try! JSONSerialization.data(withJSONObject: object)
     }
@@ -106,6 +109,32 @@ final class PagedMiniMaxM3CacheTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(
             Array(repeating: .pagedAttention, count: 60), modelCapabilities: capabilities
         ))
+    }
+
+    /// The abliterated variant (#2376) is the same artifact plus a refusal
+    /// direction and a `text_config.refusal_ablation` key: its catalog id is
+    /// admitted on the same exact checks, and a MiniMax id nobody listed is not.
+    func testAbliteratedCatalogIdentityCarriesTheSameBlockSparseLayout() throws {
+        let ablation: [String: Any] = [
+            "layers": [20, 40], "alpha": 1.0,
+            "direction_file": "refusal_direction.safetensors", "direction_key": "refusal_direction",
+        ]
+        let config = Self.config(refusalAblation: ablation)
+        let capabilities = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "minimaxai/minimax-m3.1-flash-abliterated", configJSONData: config
+        )
+        XCTAssertEqual(capabilities.modelFamily, "minimax_m3")
+        XCTAssertTrue(capabilities.requiresMoEDispatch)
+        XCTAssertTrue(capabilities.hybridDecoderArchitectureVerified)
+        XCTAssertEqual(try XCTUnwrap(capabilities.blockSparseAttention).expectedCacheKinds.count, 60)
+        func verified(_ modelID: String, _ data: Data) -> Bool {
+            ModelRuntime.pagedKVModelCapabilities(modelID: modelID, configJSONData: data).hybridDecoderArchitectureVerified
+        }
+        XCTAssertFalse(verified("minimaxai/minimax-m3.1-flash-abliterated", Self.config(modelType: "minimax_m3")))
+        XCTAssertFalse(verified("minimaxai/minimax-m3.1-flash-abliterated", Self.config(useSparse: false)))
+        for unlisted in ["minimaxai/minimax-m3.1-flash-uncensored", "minimaxai/minimax-m3.1", "huihui-ai/minimax-m3.1-flash-abliterated"] {
+            XCTAssertFalse(verified(unlisted, config), unlisted)
+        }
     }
 
     func testOtherMiniMaxConfigsFailClosed() {
