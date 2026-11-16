@@ -120,8 +120,9 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     /// #2100: a glm5_next (pagedMLA) backend takes the 2048-token CB prompt
-    /// chunk ceiling, and so does a Qwen MoE backend (#2402, SPEC-038 FR-CB2);
-    /// every other backend, dense Qwen included, keeps the 512-token default.
+    /// chunk ceiling, and so does a hybrid Qwen MoE backend (#2402, SPEC-038
+    /// FR-CB2), whose idle prefill cohort keeps the 512-sized shape; every
+    /// other backend, dense Qwen included, keeps the 512-token default.
     func testSchedulerPromptChunkCeilingIsPerFamily() {
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
@@ -145,22 +146,45 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
             layerCount: 2,
             cacheKinds: [.recurrentMamba, .pagedAttention]
         )
-        let qwenMoE = PagedKVSharedForwardBackend(
+        let hybridQwenMoE = PagedKVSharedForwardBackend(
             container: container,
             blockSizeTokens: 32,
             maxPhysicalBlocks: 16,
             poolEpoch: 1,
             layerCount: 2,
             cacheKinds: [.recurrentMamba, .pagedAttention],
-            isQwenMoE: true
+            isHybridQwenMoE: true
         )
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: glm), 2_048)
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: qwen), 512)
-        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: qwenMoE), 2_048)
+        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: hybridQwenMoE), 2_048)
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: nil), 512)
-        XCTAssertTrue(ModelRuntime.isQwenMoE(.init(modelFamily: "qwen", requiresMoEDispatch: true)))
-        XCTAssertFalse(ModelRuntime.isQwenMoE(.init(modelFamily: "qwen", requiresMoEDispatch: false)))
-        XCTAssertFalse(ModelRuntime.isQwenMoE(.init(modelFamily: "glm5_next", requiresMoEDispatch: true)))
+        XCTAssertNil(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: glm))
+        XCTAssertNil(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: qwen))
+        XCTAssertEqual(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: hybridQwenMoE), 512)
+        XCTAssertNil(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: nil))
+    }
+
+    /// #2402 serve and native-MTP hardware wiring: only the hybrid Qwen MoE
+    /// shape (family qwen, MoE dispatch, recurrent layers) that the lab
+    /// measured takes the 2048-token chunk; dense Qwen, non-hybrid Qwen MoE
+    /// (Qwen3-30B-A3B) and glm5_next do not set the flag.
+    func testPromptChunkFamilyIsHybridQwenMoEOnlyForTheMeasuredShape() {
+        let hybrid: [PagedKVSharedForwardBackend.CacheKind] = [.recurrentMamba, .pagedAttention]
+        let attentionOnly: [PagedKVSharedForwardBackend.CacheKind] = [.pagedAttention, .pagedAttention]
+        XCTAssertTrue(ModelRuntime.promptChunkFamilyIsHybridQwenMoE(
+            modelCapabilities: .init(modelFamily: "qwen", requiresMoEDispatch: true), cacheKinds: hybrid
+        ))
+        XCTAssertFalse(ModelRuntime.promptChunkFamilyIsHybridQwenMoE(
+            modelCapabilities: .init(modelFamily: "qwen", requiresMoEDispatch: false), cacheKinds: hybrid
+        ))
+        XCTAssertFalse(ModelRuntime.promptChunkFamilyIsHybridQwenMoE(
+            modelCapabilities: .init(modelFamily: "qwen", requiresMoEDispatch: true), cacheKinds: attentionOnly
+        ))
+        XCTAssertFalse(ModelRuntime.promptChunkFamilyIsHybridQwenMoE(
+            modelCapabilities: .init(modelFamily: "glm5_next", requiresMoEDispatch: true),
+            cacheKinds: [.recurrentMamba, .pagedMLA(kpool: 4)]
+        ))
     }
 
     func testSchedulerNativeRaggedPrefillBindingKeepsQwenAndExistingGLMCapabilitiesClosed() {

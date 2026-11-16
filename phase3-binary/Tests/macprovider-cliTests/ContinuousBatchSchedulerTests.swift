@@ -6501,14 +6501,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     /// #2100 / SPEC-038 FR-CB2: the serve path's prompt chunk is the backend
-    /// family's ceiling (`glm5_next` 2048, every other family 512), which the
+    /// family's ceiling (`glm5_next` and hybrid Qwen MoE 2048, every other
+    /// family 512), which the
     /// default per-iteration budget does not clamp. An operator
     /// `prefill_step_size` only lowers it, and decode steps while prefilling
     /// scale with the chunk, never below the default.
     func testProductionPromptChunkFollowsTheFamilyCeilingAndTheOperatorOnlyLowersIt() {
         let glm = ModelRuntime.pagedMLAPromptChunkTokens
         XCTAssertEqual(glm, 2_048)
-        let qwenMoE = ModelRuntime.qwenMoEPromptChunkTokens
+        let qwenMoE = ModelRuntime.hybridQwenMoEPromptChunkTokens
         XCTAssertEqual(qwenMoE, 2_048)
         // (prefill_step_size, family ceiling, chunk, decode steps while prefilling)
         let cases: [(Int?, Int, Int, Int)] = [
@@ -6615,6 +6616,71 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
         XCTAssertGreaterThanOrEqual(whilePrefilling.filter { $0.ids == ["active"] && $0.steps == 16 }.count, 2)
         XCTAssertFalse(whilePrefilling.contains { $0.steps > 16 })
+    }
+
+    /// #2402 / SPEC-038 FR-CB2: four equal 4,096-token prompts arriving
+    /// together on an idle hybrid Qwen MoE scheduler (2048-token chunk, idle
+    /// cohort sized by 512) prefill one row per forward: no forward carries
+    /// more than 2,048 prompt tokens, the shape measured before the chunk
+    /// rose, and every row keeps the chunks it prefills alone. Without the
+    /// cohort bound the four rows would share 8,192-token forwards.
+    func testHybridQwenMoEIdleCohortKeepsEveryPrefillForwardWithinTheMeasuredShape() async throws {
+        func run(_ ids: [String], idleCohortChunk: Int?) async throws -> ScriptedBackend {
+            let backend = ScriptedBackend(scripts: Dictionary(uniqueKeysWithValues: ids.map { ($0, [7]) }))
+            let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                tuple: Self.tuple(),
+                maxBatch: 4,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: 8_192,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3,
+                prefillStepSize: nil,
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .unconstrained,
+                promptChunkCeiling: ModelRuntime.hybridQwenMoEPromptChunkTokens,
+                idlePrefillCohortChunkTokens: idleCohortChunk,
+                allowsRaggedPrefillOffsets: true
+            )
+            let scheduler = ContinuousBatchScheduler(
+                configuration: configuration,
+                allocator: try PagedKVBlockAllocator(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                backend: backend,
+                replayAuthority: TestReplayAuthority()
+            )
+            let installed = await scheduler.installLabBatchComposition(ids)
+            XCTAssertTrue(installed)
+            let tasks = ids.map { id in
+                Task {
+                    try await scheduler.submit(.init(
+                        id: id, conversationKey: "", promptTokens: Array(1 ... 4_096), maxOutputTokens: 1
+                    ))
+                }
+            }
+            for task in tasks { _ = try await task.value }
+            return backend
+        }
+        let ids = ["r0", "r1", "r2", "r3"]
+        let measuredCohortChunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        let together = try await run(ids, idleCohortChunk: measuredCohortChunk)
+        let alone = try await run(["r0"], idleCohortChunk: measuredCohortChunk)
+        let unbounded = try await run(ids, idleCohortChunk: nil)
+
+        let aloneChunks = await alone.prefillInputs().map(\.promptTokens.count)
+        XCTAssertEqual(aloneChunks, [2_048, 2_048])
+        let forwards = await together.prefillTokenCountsByCall()
+        XCTAssertEqual(forwards, Array(repeating: 2_048, count: 8))
+        let inputs = await together.prefillInputs()
+        for id in ids {
+            XCTAssertEqual(inputs.filter { $0.requestID == id }.map(\.promptTokens.count), aloneChunks, id)
+        }
+        let unboundedForwards = await unbounded.prefillTokenCountsByCall()
+        XCTAssertEqual(unboundedForwards, [8_192, 8_192])
     }
 
     private func decodeWindowsWhileAPromptPrefills(

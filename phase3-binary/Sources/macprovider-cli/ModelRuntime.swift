@@ -6759,7 +6759,8 @@ maxTokens: 1,
                 runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
                     forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
                     forwardTokenCap: scheduler.forwardTokenCap,
-                    smallMRoute: smallMRoute
+                    smallMRoute: smallMRoute,
+                    promptChunkTokens: scheduler.selfCheckPromptChunkTokens
                 ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),

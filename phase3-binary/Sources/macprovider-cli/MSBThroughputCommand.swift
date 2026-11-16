@@ -370,7 +370,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     cacheKinds: cacheKinds,
                     recurrentStateLayout: recurrentStateLayout,
                     // Match serve/parity prefill boundaries so throughput does
-                    // not allocate a whole long prompt in one forward.
+                    // not allocate a whole long prompt in one forward. Every
+                    // family prefills in 512-token chunks here, not the served
+                    // 2048 of glm5_next and hybrid Qwen MoE.
                     maxPromptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
                 )
                 lastSchedulerRun = detail
