@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.103
+**Version:** 0.1.104
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.103",
+  "version": "0.1.104",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1929,8 +1929,13 @@ listed file is missing or changes without a regenerated digest.
   (`mtp_state_class`, `cache_state_classes`, `mtp_head_count`,
   `proposal_depth`). Its signed entry is the donor's entry with the variant's
   identity (`model_key`, `artifact_id`, `artifact_hash`, `tokenizer_sha256`,
-  `mtp_manifest_sha256`) and the donor's bounds, thresholds and evidence
-  digests; the signed entry schema is unchanged.
+  `mtp_manifest_sha256`), the variant's own `quantization` block, and the
+  donor's bounds, thresholds and evidence digests; the signed entry schema is
+  unchanged. The variant declares its block in `native-mtp-variants.json`
+  (the observer's block for the variant artifact: group size, per-layer and
+  unquantized exceptions, representation manifest). Its `kind` MUST equal the
+  donor's. A variant without its own block is refused, since the provider
+  recomputes every signed quantization field from the loaded artifact.
   1. The variant needs only its MTP-16 on-device pass. It runs at every load
      like any admitted tuple; a failure serves ordinary decode on that Mac.
      It needs no R015 cells of its own.
@@ -1943,9 +1948,15 @@ listed file is missing or changes without a regenerated digest.
      `event=native_mtp_self_check_record` when the check passes); until it
      is recorded the donor's expected output stands, which the provider's
      on-device check does not compare and the R033 canary does.
-  3. R012 memory fit is computed: the variant's verified artifact
-     `size_bytes` MUST NOT exceed the donor's, so the donor's fit evidence
-     covers it. A larger variant needs its own fit evidence.
+  3. R012 memory fit is computed on served weight bytes: the sum of the
+     `.safetensors` file sizes in the variant's snapshot manifest MUST NOT
+     exceed the donor's, so the donor's fit evidence covers it. Snapshot
+     files that are not loaded (GGUF, mmproj, docs) do not count. Each
+     manifest is the exact snapshot-manifest.v1 bytes, committed as
+     `phase3-binary/catalog/autotune/snapshot-manifests/<artifact hash>.manifest`.
+     Its SHA-256 MUST equal the artifact feed's hash, so the file list is the
+     one the provider verifies. A variant with larger served weights needs its
+     own fit evidence.
 - Publishing (0.1.81): R014 item 10 governs only what a released CLI can
   parse. The decode-path binding is not tied to the release CLI: an entry is
   published without comparing its `decode_path_digest` to any release, and
@@ -2730,7 +2741,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.103 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
+- **0.1.104 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.72` (`fd4153e86a9adc6e8fef3924fc130a224fab693e`),
   mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`)
   and MLX core `v0.32.4-macprovider.15`
@@ -2739,6 +2750,13 @@ requests.
   The row-invariant route that native MTP serves on is unchanged. The LM row
   is `3.32.3-macprovider.71` plus three commits that only move its mlx-swift
   pin; the C row is unchanged.
+- **0.1.103 (2026-11-16, Related: #2382)** — MTP-13 variant: the signed
+  entry carries the variant's own `quantization` block from
+  `native-mtp-variants.json` (same `kind` as the donor), not the donor's, which
+  failed the provider's load-time quantization check. R012 computed fit
+  compares served `.safetensors` bytes from hash-bound snapshot manifests
+  instead of catalog `size_bytes`, which counts non-weight snapshot files. A
+  variant with larger served weights is still refused.
 - **0.1.102 (2026-11-16, Related: #2376)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.71` (`29b5778b36ffba045786c4cd73427f5287c79a54`), which is
   `3.32.3-macprovider.69` plus one commit: the MiniMax M3 text sanitize drops

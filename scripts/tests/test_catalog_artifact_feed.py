@@ -2526,7 +2526,10 @@ class HermeticRelease:
         (self.catalog / "autotune-artifacts.json").unlink()
         # A native-MTP admission requires the artifact-bound feed set, so the
         # pre-activation state has no admission inputs either.
-        for name in ("native-mtp-admission.json", "native-mtp-admission-tuple.json", "native-mtp-admission-release.json"):
+        for name in (
+            "native-mtp-admission.json", "native-mtp-admission-tuple.json", "native-mtp-admission-release.json",
+            "native-mtp-variants.json",
+        ):
             (self.catalog / name).unlink(missing_ok=True)
         # The historical pre-activation release had no CB admission entries.
         # Rewind both the feed and its authoring source before regenerating it.
@@ -2709,6 +2712,7 @@ class HermeticRelease:
         "CB_POLICY_SOURCE_PATH": "catalog/continuous-batching-policy-source.json",
         "NATIVE_MTP_TUPLE_INPUT_PATH": "catalog/native-mtp-admission-tuple.json",
         "NATIVE_MTP_RELEASE_INPUT_PATH": "catalog/native-mtp-admission-release.json",
+        "NATIVE_MTP_VARIANTS_PATH": "catalog/native-mtp-variants.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
         "MARKET_PEG_BIND_PATH": "catalog/market-peg-bind.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",

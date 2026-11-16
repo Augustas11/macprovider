@@ -73,6 +73,7 @@ struct ConfigApplier {
         draftCapacity: DraftCapacityPolicy = .refuse,
         physicalMemoryGB: Int = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB,
         recordsProvenance: Bool = true,
+        clearDraftModel: Bool = false,
         beforeMutation: ((_ originalOwnedValues: [String: String], _ targetOwnedValues: [String: String], _ backupPath: URL, _ preApplySHA256: String, _ postApplySHA256: String) throws -> Void)? = nil
     ) throws -> AppliedConfig {
         let fileManager = FileManager.default
@@ -86,7 +87,9 @@ struct ConfigApplier {
             // #1689: re-read the draft model serve will use from the file
             // under the lock, so one added after the caller's snapshot still
             // caps what is written; a file serve cannot load fails closed.
-            let written = try Self.cappedForServedDraftModel(
+            // SPEC-023-R029: a model switch removes the draft keys, so the
+            // draft term no longer caps what is written.
+            let written = clearDraftModel ? recommendation : try Self.cappedForServedDraftModel(
                 recommendation,
                 configText: originalText,
                 configPath: configPath.path,
@@ -115,7 +118,8 @@ struct ConfigApplier {
                 originalText,
                 recommendation: written,
                 donorMode: donorMode,
-                provenance: provenance
+                provenance: provenance,
+                clearedKeys: clearDraftModel ? Self.draftModelKeys : []
             )
             try validateYAML(updatedText)
             guard let updatedData = updatedText.data(using: .utf8) else {
@@ -571,7 +575,8 @@ struct ConfigApplier {
         _ original: String,
         recommendation: RecommendationCore,
         donorMode: Bool,
-        provenance: MaxContextProvenance?
+        provenance: MaxContextProvenance?,
+        clearedKeys: [String] = []
     ) throws -> String {
         let values: [String: String?] = [
             "model": Self.yamlScalar(recommendation.model),
@@ -597,7 +602,9 @@ struct ConfigApplier {
             // serve recomputes the slots (SPEC-023-R009).
             AppConfig.maxConcurrencySourceKey: nil,
         ]
-        let ownedKeys = Self.recommendationOwnedKeys
+        // Cleared keys have no value, so their lines (and block values) are
+        // dropped and never re-added.
+        let ownedKeys = Self.recommendationOwnedKeys + clearedKeys
 
         if original.isEmpty {
             return renderOwnedConfig(values: values)
@@ -682,6 +689,9 @@ struct ConfigApplier {
         }
         return output
     }
+
+    /// The draft-model keys a model switch removes (SPEC-023-R029 step 6).
+    static let draftModelKeys = ["draft_model", "draft_model_artifact_sha256", "num_draft_tokens"]
 
     static let recommendationOwnedKeys = [
         "model",

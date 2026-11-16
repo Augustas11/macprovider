@@ -423,8 +423,11 @@ NON_HOST_TOKENS = frozenset({
 })
 # Fixed public tensor identifiers from reviewed native-MTP sidecars are not
 # hostnames. No free-form module name, URL, local path or suffix is exempt.
+# Checkpoints name the text tower language_model.model.* or, in the
+# model.language_model.* layout, with the same layer terminals.
 PUBLIC_MTP_TENSOR_TOKEN_RE = re.compile(
-    r"^language_model\.(?:model(?:\.layers(?:\.[0-9]{1,4}\.(?:mlp(?:\.gate)?|self_attn\.indexer(?:\.wk)?))?)?"
+    r"^model\.language_model(?:\.layers(?:\.[0-9]{1,4}\.(?:mlp(?:\.gate)?|self_attn\.indexer(?:\.wk)?))?)?$"
+    r"|^language_model\.(?:model(?:\.layers(?:\.[0-9]{1,4}\.(?:mlp(?:\.gate)?|self_attn\.indexer(?:\.wk)?))?)?"
     r"|mtp\.[0-9]{1,4}\.block(?:\.(?:mlp|self_attn\.indexer(?:\.wk)?))?)$"
 )
 IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
