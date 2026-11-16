@@ -37,6 +37,18 @@ entry is updated for the 2026-11-15 MiniMax activation.
   activation tool still lists `live_probe` and `gateway_proof` as pending:
   the canary serves the uncensored GLM-5.3-Flash build, which has no
   native-MTP admission entry (#2382).
+- **Pending, `published-2026-11-16-glm53-flash-uncensored-native-mtp-v289`
+  (#2382, signed with `streamvc-autotune-static-v4`, stacked on the Bolt
+  release):** the native-MTP admission set gains
+  `zai-org/glm-5.3-flash-uncensored` (`mlx-oq4e-uncensored-dflash2`, snapshot
+  `242f8fcf…`) as an MTP-13 variant of `zai-org/glm-5.3-flash`, with its own
+  quantization block and MTP-16 self-check record
+  (`docs/evidence/glm53-uncensored-native-mtp-variant-2026-11-16/`). Nothing
+  else changes; the Tier-2 catalog is unchanged. **Live steps:** (1) merge,
+  then `scripts/ops/catalog-activate.sh status` and `next --run`; (2) the
+  canary serving the uncensored build reports native MTP enabled
+  (`live_probe`); (3) one buyer request through the gateway is served with
+  native MTP (`gateway_proof`); (4) the next CLI cut bakes the release.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since
