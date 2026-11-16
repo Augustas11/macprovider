@@ -860,7 +860,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// one token and its own copied `[1, 1, hidden]` row, never a view of the
     /// batch output. A row holds at most `nativeMTPDrafterColumnCap` columns:
     /// a held row about to pass it catches its drafter up early, before its
-    /// next ordinary window.
+    /// next ordinary window. A prompt-free drafter buffers none: its held
+    /// rows go straight to the state a flush would give them
+    /// (`storePromptFreeHeldDrafterState`).
     private var nativeMTPPendingDrafterColumns: [String: [(token: Int, hidden: MLXArray)]] = [:]
     /// Far above the R015 cells' 512-token completions, so the cap never
     /// fires in a measured gated cell; it bounds the buffer's memory, which
@@ -927,6 +929,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// adapters retain the equal-offset veto unless their grouped rows run
     /// alone under the existing flattened-token rule.
     let nativeMTPPromptRowsJoinRaggedPrefill: Bool
+
+    /// Whether native verification attends each column as its decode step
+    /// (`PagedKVBatchLayerCache.columnExactVerification`): Gemma 4 only.
+    let nativeMTPColumnExactVerification: Bool
+
+    static func verifiesColumnsAsDecode(familyAdapter: String?) -> Bool {
+        familyAdapter == NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+    }
 
     static func supportsNativeMTPPromptRowsInRaggedPrefill(familyAdapter: String?) -> Bool {
         familyAdapter == "qwen3_5_mtp_v1"
@@ -1039,6 +1049,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
             familyAdapter: nativeMTPFamilyAdapter
         )
+        self.nativeMTPColumnExactVerification = Self.verifiesColumnsAsDecode(familyAdapter: nativeMTPFamilyAdapter)
         self.nativeMTPDrafterPromptWindow = Self.drafterPromptWindow(
             familyAdapter: nativeMTPFamilyAdapter
         )
@@ -1301,6 +1312,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 self.labCaptureTargetLogits(
                                     requestID: input.requestID, position: input.samplerStep,
                                     tokenIDs: [sampledToken], logits: output.logits[0..., -1, 0...])
+                                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                                if NativeMTPLabTokenTrace.enabled, input.samplerStep < NativeMTPLabTokenTrace.limit {
+                                    let top = NativeMTPLabTokenTrace.topTwo(output.logits[0..., -1, 0...])[0]
+                                    NativeMTPLabTokenTrace.write(requestID: input.requestID, path: "prefill", [.init(
+                                        index: input.samplerStep, column: 0, width: input.promptTokens.count,
+                                        source: "target", token: sampledToken, top1: top.top1, top2: top.top2,
+                                        margin: top.margin, kvBefore: input.committedKVTokenCount,
+                                        kvAfter: input.targetKVTokenCount
+                                    )])
+                                }
+                                #endif
                             }
                         } else {
                             sampledToken = nil
@@ -1316,7 +1338,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 input: input,
                                 targetHidden: targetHidden,
                                 positionDeltas: output.state?[mtpPositionDeltasKey],
-                                sampledToken: sampledToken
+                                sampledToken: sampledToken,
+                                sharedKV: output.state?[mtpSharedKVStatesKey]
                             )
                         }
                         // Earlier chunks evaluate only cache state. The final
@@ -1390,7 +1413,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         input: ContinuousBatchPrefillInput,
         targetHidden: MLXArray,
         positionDeltas: MLXArray?,
-        sampledToken: Int?
+        sampledToken: Int?,
+        sharedKV: [String: (MLXArray, MLXArray)]? = nil
     ) async throws {
         try requireTargetLockHeld("seed_drafter_from_prefill")
         let tailToken: Int
@@ -1423,6 +1447,81 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 tailToken: tailToken
             )
         }
+        if input.isFinalChunk, let sharedKV {
+            try await seedPromptFreeDrafterFromPrefill(
+                targetModel: targetModel,
+                input: input,
+                targetHidden: targetHidden,
+                sharedKV: sharedKV,
+                firstBonusToken: tailToken
+            )
+        }
+    }
+
+    /// #2328: a prompt-free drafter (the Gemma 4 assistant attends over the
+    /// target's K/V) proposes its first token from the prompt's last hidden
+    /// column and the prefill's target K/V, the input
+    /// `MTPSpeculativeTokenIterator` gives its first round. Without this seed
+    /// the first native round verified one column with no proposal, so a
+    /// one-token answer ending at EOS never exercised a proposal (R005
+    /// `admission_passed` false on acceptance-short-19). Leaves the row
+    /// unseeded, as before, when the K/V does not end exactly at the
+    /// committed prefix (shared or padded prefill forwards).
+    private func seedPromptFreeDrafterFromPrefill(
+        targetModel: any LanguageModel,
+        input: ContinuousBatchPrefillInput,
+        targetHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        firstBonusToken: Int
+    ) async throws {
+        guard let drafterContainer,
+              Self.prefillSharedKVSeedsDrafter(sharedKV, committedTokens: input.targetKVTokenCount),
+              targetHidden.ndim == 3, targetHidden.dim(0) == 1,
+              !input.promptTokens.isEmpty, targetHidden.dim(1) >= input.promptTokens.count,
+              let state = nativeMTPDrafterState(for: input.requestID),
+              state.cache.isEmpty, nativeMTPDrafterSeedToken(for: input.requestID) == nil
+        else { return }
+        let column = input.promptTokens.count - 1
+        let row = MTPPackedDrafterAdvanceRow(
+            targetHidden: targetHidden[0..., column ..< (column + 1), 0...],
+            acceptedTokens: [],
+            finalToken: firstBonusToken,
+            positionDeltas: nil,
+            state: state,
+            sharedKV: sharedKV,
+            sharedKVOffset: input.targetKVTokenCount
+        )
+        let seeded = try await drafterContainer.perform(
+            nonSendable: (targetModel, row)
+        ) { drafterContext, values -> (state: MTPDrafterState, seed: Int)? in
+            let (targetModel, row) = values
+            guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel,
+                  !drafter.requiresPromptPrefill, drafter.requiresSharedTargetKV
+            else { return nil }
+            let advance = try drafter.advanceAndProposePacked(
+                target: targetModel,
+                rows: [row],
+                sampler: GenerateParameters(temperature: 0).sampler()
+            )
+            let seeds = advance.proposals.asType(.int32)
+            eval(advance.states.flatMap { $0.cache.flatMap(\.state) } + [seeds])
+            guard let state = advance.states.first, let seed = seeds.asArray(Int32.self).first else { return nil }
+            return (state, Int(seed))
+        }
+        guard let seeded else { return }
+        storeNativeMTPDrafterAdvance(requestIDs: [input.requestID], states: [seeded.state], seedTokens: [seeded.seed])
+    }
+
+    /// The prefill K/V seeds a drafter only when its full-attention entry is
+    /// one row spanning exactly the committed prefix.
+    static func prefillSharedKVSeedsDrafter(
+        _ sharedKV: [String: (MLXArray, MLXArray)],
+        committedTokens: Int
+    ) -> Bool {
+        guard committedTokens > 0, let full = sharedKV["full_attention"], sharedKV["sliding_attention"] != nil
+        else { return false }
+        return full.0.ndim == 4 && full.0.dim(0) == 1 && full.0.dim(2) == committedTokens
+            && full.0.shape == full.1.shape
     }
 
     private func makeBatchedCachesIfCompatible(
@@ -1542,11 +1641,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 steps: 1
             )
             guard !decodable.isEmpty else { return capFailures }
-            return try self.performDecode(
+            let promptFreeState = await self.promptFreeDrafterStateForHeldRows(decodable)
+            let outcomes = try self.performDecode(
                 model: context.model,
                 supportedInputs: decodable,
-                steps: 1
-            ) + capFailures
+                steps: 1,
+                capturesDrafterColumns: promptFreeState == nil
+            )
+            if let promptFreeState {
+                self.storePromptFreeHeldDrafterState(promptFreeState, inputs: decodable, outcomes: outcomes)
+            }
+            return outcomes + capFailures
         }
         for outcome in decoded {
             if case .rowFailure(let requestID) = outcome {
@@ -1593,12 +1698,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 steps: steps
             )
             guard !decodable.isEmpty else { return capFailures }
-            return try self.performDecode(
+            let promptFreeState = await self.promptFreeDrafterStateForHeldRows(decodable)
+            let outcomes = try self.performDecode(
                 model: context.model,
                 supportedInputs: decodable,
                 steps: steps,
-                onStep: onStep
-            ) + capFailures
+                onStep: onStep,
+                capturesDrafterColumns: promptFreeState == nil
+            )
+            if let promptFreeState {
+                self.storePromptFreeHeldDrafterState(promptFreeState, inputs: decodable, outcomes: outcomes)
+            }
+            return outcomes + capFailures
         }
         for outcome in decoded {
             if case .rowFailure(let requestID) = outcome {
@@ -1830,6 +1941,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         requestID: input.requestID, position: input.samplerStep, tokenIDs: tokens,
                         logits: concatenated([row.proposalLogits, row.bonusLogits], axis: 0), speculative: true)
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                if NativeMTPLabTokenTrace.enabled, input.samplerStep < NativeMTPLabTokenTrace.limit {
+                    let columns = row.proposalLogits.ndim == 2 && row.proposalLogits.dim(0) > 0
+                        ? concatenated([row.proposalLogits, row.bonusLogits], axis: 0)
+                        : row.bonusLogits
+                    NativeMTPLabTokenTrace.write(
+                        requestID: input.requestID, path: "verify",
+                        NativeMTPLabTokenTrace.verifyEntries(
+                            samplerStep: input.samplerStep,
+                            proposals: input.proposalTokens,
+                            targets: tokens,
+                            tops: NativeMTPLabTokenTrace.topTwo(columns),
+                            kvBefore: input.committedKVTokenCount
+                        )
+                    )
+                }
+                #endif
             }
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
@@ -2626,7 +2754,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         model: any LanguageModel,
         supportedInputs: [ContinuousBatchDecodeInput],
         steps: Int,
-        onStep: ContinuousBatchDecodeWindowStepObserver? = nil
+        onStep: ContinuousBatchDecodeWindowStepObserver? = nil,
+        capturesDrafterColumns: Bool = true
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
         // A capped backend (`pagedMLA`) never forms a wider forward; the
@@ -2655,7 +2784,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // Native rows riding this forward need the target hidden state of
         // every step for their drafter. Capture asks the target to emit it;
         // that output state is diagnostic only and never becomes row state.
-        let captureIndices = drafterContainer == nil
+        // A prompt-free drafter consumes no columns (the caller passes
+        // `capturesDrafterColumns` false), so its held rows ride the forward
+        // exactly as ordinary rows do: no emission, pipelined steps.
+        let captureIndices = drafterContainer == nil || !capturesDrafterColumns
             ? []
             : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
         if !captureIndices.isEmpty && (hasBatchedState || rowStates.contains(where: { $0.state != nil })) {
@@ -2849,6 +2981,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         position: supportedInputs[index].samplerStep + stepIndex,
                         tokenIDs: [stepSampled[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                if NativeMTPLabTokenTrace.enabled {
+                    for (index, input) in supportedInputs.enumerated()
+                    where input.samplerStep + stepIndex < NativeMTPLabTokenTrace.limit {
+                        let top = NativeMTPLabTokenTrace.topTwo(logits[index, -1, 0...].reshaped(1, -1))[0]
+                        let kvBefore = input.committedKVTokenCount + stepIndex
+                        NativeMTPLabTokenTrace.write(requestID: input.requestID, path: "decode", [.init(
+                            index: input.samplerStep + stepIndex, column: 0, width: 1, source: "target",
+                            token: stepSampled[index], top1: top.top1, top2: top.top2, margin: top.margin,
+                            kvBefore: kvBefore, kvAfter: kvBefore + 1
+                        )])
+                    }
+                }
+                #endif
                 if !captureIndices.isEmpty {
                     guard let hidden = state?[mtpLastHiddenStatesKey],
                           hidden.ndim == 3,
@@ -3456,6 +3602,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws {
         try requireTargetLockHeld("advance_drafter_prompt_chunk")
         guard let drafterContainer else { return }
+        // A drafter that keeps nothing from the prompt (the Gemma 4
+        // assistant attends over the target's K/V) is left by single-pass
+        // seeding with its fresh state and no seed; every chunk leaves the
+        // same. Its packed advance needs the target K/V of a verified round,
+        // which a prompt chunk has not got (#2328).
+        if let promptFreeState = try await Self.promptFreeDrafterState(drafterContainer) {
+            storeNativeMTPDrafterAdvance(
+                requestIDs: [input.requestID],
+                states: [promptFreeState],
+                seedTokens: [nil]
+            )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            try labRecordNativeMTPCommittedPrefix(
+                requestID: input.requestID,
+                tokens: input.promptTokens,
+                hidden: try Self.labHiddenColumns(targetHidden, count: input.promptTokens.count),
+                positionDeltas: positionDeltas,
+                targetBonusToken: tailToken,
+                startsFresh: input.promptTokenOffset == 0
+            )
+            #endif
+            return
+        }
         let chunkCount = input.promptTokens.count
         guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
@@ -3541,6 +3710,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         max(0, windowStart - promptTokenOffset)
     }
 
+    /// The fresh state of a drafter that keeps nothing from committed
+    /// columns (`requiresPromptPrefill` false: it attends over the target's
+    /// K/V, like the Gemma 4 assistant), or nil for a drafter that must
+    /// consume them.
+    private static func promptFreeDrafterState(_ drafterContainer: MTPDrafterContainer) async throws -> MTPDrafterState? {
+        try await drafterContainer.perform(nonSendable: ()) { drafterContext, _ in
+            guard let drafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            return drafter.requiresPromptPrefill ? nil : drafter.makeState(parameters: nil)
+        }
+    }
+
     /// Row `row`'s last-position hidden state as a `[1, 1, hidden]` array
     /// with its own buffer. A slice would share the whole `[B, T, hidden]`
     /// batch output, so a buffered column would pin every row's state; a
@@ -3585,6 +3767,42 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// #2328 R015 gated cells: the fresh state a prompt-free drafter (the
+    /// Gemma 4 assistant) is left with by a held window, or nil when no row
+    /// of the window is held or the drafter consumes columns. Buffering
+    /// columns for such a drafter made the shared forward emit drafter state
+    /// and read every step on the host before queuing the next, costing every
+    /// row of the window about 2.3 ms per token (s2/s4 cells 0.949/0.958),
+    /// for columns the flush then discarded.
+    private func promptFreeDrafterStateForHeldRows(_ inputs: [ContinuousBatchDecodeInput]) async -> MTPDrafterState? {
+        guard let drafterContainer, inputs.contains(where: \.captureNativeMTPDrafterColumns) else { return nil }
+        return (try? await Self.promptFreeDrafterState(drafterContainer)) ?? nil
+    }
+
+    /// Leaves each held row that decoded with the state the column flush
+    /// gives a prompt-free drafter (`flushNativeMTPDrafterColumns`): its
+    /// fresh state and no seed, as an unseeded prefill also leaves it. Its
+    /// next native round proposes nothing and verifies one column, whose
+    /// finalize proposes from that round's target hidden state and K/V.
+    private func storePromptFreeHeldDrafterState(
+        _ state: MTPDrafterState,
+        inputs: [ContinuousBatchDecodeInput],
+        outcomes: [ContinuousBatchDecodeOutcome]
+    ) {
+        let decoded = Set(outcomes.compactMap { outcome -> String? in
+            if case .output(let output) = outcome { return output.requestID }
+            return nil
+        })
+        lock.lock()
+        for input in inputs where input.captureNativeMTPDrafterColumns && decoded.contains(input.requestID)
+            && nativeMTPDrafterStates[input.requestID] != nil {
+            nativeMTPDrafterStates[input.requestID] = state
+            nativeMTPDrafterSeedTokens.removeValue(forKey: input.requestID)
+            nativeMTPPendingDrafterColumns.removeValue(forKey: input.requestID)
+        }
+        lock.unlock()
+    }
+
     private func pendingNativeMTPDrafterColumnCount(for requestID: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -3611,6 +3829,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws {
         try requireTargetLockHeld("flush_drafter_columns")
         guard let drafterContainer, !requestIDs.isEmpty else { return }
+        // A prompt-free drafter consumes no columns: its state after them is
+        // its fresh state, and the next native round proposes nothing and
+        // verifies one column, whose finalize carries the target K/V.
+        if let promptFreeState = try await Self.promptFreeDrafterState(drafterContainer) {
+            let (flushIDs, _) = try pendingNativeMTPDrafterAdvanceRows(
+                requestIDs: requestIDs,
+                minimumColumns: minimumColumns
+            )
+            lock.lock()
+            for requestID in flushIDs {
+                nativeMTPDrafterStates[requestID] = promptFreeState
+                nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
+                nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
+            }
+            lock.unlock()
+            return
+        }
         let (flushIDs, advanceRows) = try pendingNativeMTPDrafterAdvanceRows(
             requestIDs: requestIDs,
             minimumColumns: minimumColumns
@@ -3728,7 +3963,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 acceptedTokens: Array(transaction.proposalTokens.prefix(input.committedProposalTokenCount)),
                 finalToken: finalTokenID,
                 positionDeltas: transaction.targetState.positionDeltas,
-                state: state
+                state: state,
+                sharedKV: transaction.targetState.sharedKV,
+                sharedKVOffset: transaction.targetState.queryOffset
             )
         }
         return try await drafterContainer.perform(
@@ -4952,6 +5189,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let cache = raggedPrefill
                     ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rows)
                     : PagedKVBatchLayerCache(rowCaches: rows, attachRows: attachRows)
+                cache.columnExactVerification = nativeMTP && nativeMTPColumnExactVerification
                 return PagedKVSharedLayerBatch(
                     cache: cache,
                     validateBatchStateClosure: {},
@@ -5296,6 +5534,43 @@ enum PagedKVVectorAttentionRoute {
         return ((value + 31) / 32) * 32
     }()
 
+    /// Core's `MLX_SDPA_D512_MIN_KL` (default 1024; 0 lifts the head dim
+    /// 512 defaults).
+    static let d512MinimumKeyTokens: Int = {
+        guard let raw = ProcessInfo.processInfo.environment["MLX_SDPA_D512_MIN_KL"],
+              let value = Int(raw)
+        else { return 1024 }
+        return value
+    }()
+
+    /// Whether core attends a call of at most 8 query tokens with a vector
+    /// kernel (fork core `has_fused_kernel` and `use_fallback`,
+    /// scaled_dot_product_attention.cpp). Any other call takes the
+    /// composite fallback, whose matmuls depend on the batch: no shared
+    /// call is exact for it.
+    static func takesVectorKernel(
+        keyTokens n: Int,
+        queryTokens: Int,
+        gqaFactor: Int,
+        headDim: Int,
+        valueDim: Int,
+        hasArrayMask: Bool,
+        d512MinimumKeyTokens: Int = d512MinimumKeyTokens
+    ) -> Bool {
+        guard queryTokens <= n, queryTokens * gqaFactor <= 32 else { return false }
+        // 192/192 has a vector kernel, but `use_fallback` prefers the
+        // composite for it.
+        let supported = (headDim == valueDim && [64, 96, 128, 256, 512].contains(headDim))
+            || (headDim == 192 && valueDim == 128)
+            || (headDim == 96 && valueDim == 64)
+        guard supported else { return false }
+        guard headDim == 512 else { return true }
+        if d512MinimumKeyTokens != 0, queryTokens != 1 || gqaFactor != 8 || hasArrayMask {
+            return false
+        }
+        return n >= d512MinimumKeyTokens
+    }
+
     static func route(
         keyTokens n: Int,
         queryTokens: Int,
@@ -5308,6 +5583,10 @@ enum PagedKVVectorAttentionRoute {
         partitionOverride: Int?
     ) -> Route? {
         guard queryTokens >= 1, queryTokens <= 8, kvHeads > 0, queryHeads % kvHeads == 0,
+              takesVectorKernel(
+                  keyTokens: n, queryTokens: queryTokens, gqaFactor: queryHeads / kvHeads,
+                  headDim: headDim, valueDim: valueDim, hasArrayMask: hasArrayMask
+              ),
               let device = architecture.last
         else { return nil }
         let large = device == "d" || device == "s"
@@ -5390,7 +5669,150 @@ enum PagedKVVectorAttentionRoute {
     }
 }
 
+/// Diagnostic only (off unless a probe turns it on): exact bit
+/// fingerprints of one row's inputs and output at every paged attention
+/// call, in call order, so a lone run and a shared run of the same row can
+/// be compared call by call (#2328).
+enum PagedKVAttentionTrace {
+    struct Entry: Equatable {
+        /// Forward index in the run: prompt chunks first, then decode steps.
+        let forward: Int
+        /// Order of the row's layer cache among the caches the run attended.
+        let layer: Int
+        let queryTokens: Int
+        let keyTokens: Int
+        let kvHeads: Int
+        let windowed: Bool
+        let queries: [Int64]
+        let keys: [Int64]
+        let values: [Int64]
+        let output: [Int64]
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var enabled = false
+    nonisolated(unsafe) private static var layers: [ObjectIdentifier: Int] = [:]
+    nonisolated(unsafe) private static var layerCounts: [Int: Int] = [:]
+    nonisolated(unsafe) private static var forwards: [Int: Int] = [:]
+    nonisolated(unsafe) private static var entries: [Int: [Entry]] = [:]
+
+    /// Starts recording every row of every paged attention call.
+    static func begin() {
+        lock.lock()
+        defer { lock.unlock() }
+        enabled = true
+        layers = [:]
+        layerCounts = [:]
+        forwards = [:]
+        entries = [:]
+    }
+
+    /// Stops recording; the entries of each batch row index, in call order.
+    static func end() -> [Int: [Entry]] {
+        lock.lock()
+        defer { lock.unlock() }
+        enabled = false
+        let recorded = entries
+        entries = [:]
+        layers = [:]
+        return recorded
+    }
+
+    static func record(rowCaches: [PagedKVCache], queries: MLXArray, keys: MLXArray, values: MLXArray, output: MLXArray) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled else { return }
+        let rows = min(rowCaches.count, queries.dim(0), keys.dim(0), values.dim(0), output.dim(0))
+        for row in 0 ..< rows {
+            let id = ObjectIdentifier(rowCaches[row])
+            let layer: Int
+            if let known = layers[id] {
+                layer = known
+            } else {
+                layer = layerCounts[row, default: 0]
+                layerCounts[row] = layer + 1
+                layers[id] = layer
+            }
+            if layer == 0 { forwards[row, default: -1] += 1 }
+            func own(_ array: MLXArray) -> [Int64] {
+                fingerprint(array[row ..< row + 1, 0..., 0..., 0...])
+            }
+            entries[row, default: []].append(Entry(
+                forward: forwards[row, default: 0],
+                layer: layer,
+                queryTokens: queries.dim(2),
+                keyTokens: rowCaches[row].offset,
+                kvHeads: keys.dim(1),
+                windowed: rowCaches[row].attentionWindowTokens != nil,
+                queries: own(queries),
+                keys: own(keys),
+                values: own(values),
+                output: own(output)
+            ))
+        }
+    }
+
+    /// Two exact integer sums over the array's raw bits (plain and
+    /// position-weighted): equal arrays give equal sums, and any changed
+    /// element changes them.
+    static func fingerprint(_ array: MLXArray) -> [Int64] {
+        let raw: MLXArray
+        switch array.itemSize {
+        case 2: raw = array.view(dtype: .uint16)
+        case 4: raw = array.view(dtype: .uint32)
+        default: raw = array.asType(.float32).view(dtype: .uint32)
+        }
+        let flat = raw.asType(.int64).reshaped([-1])
+        let weights = (MLXArray.arange(flat.dim(0), dtype: .int64) % 65_521) + 1
+        let sums = stacked([flat.sum(), (flat * weights).sum()])
+        eval(sums)
+        return sums.asArray(Int64.self)
+    }
+}
+
 enum PagedKVRowAttention {
+    /// Whether MLX core reduces a row attended alone in another order than
+    /// the same row inside one batched call of equal-length rows, so each row
+    /// needs its own call. That holds for a call over a single KV head that
+    /// core attends with its composite fallback: every prompt call (more than
+    /// 8 query tokens) and every short call no vector kernel takes
+    /// (`PagedKVVectorAttentionRoute.route` is nil), such as head dim 512 at
+    /// a GQA factor other than 8. Alone, the fallback's two matmuls have one
+    /// batch after `collapse_batches`: the query heads fold into the GEMM
+    /// rows (fork core `matmul.cpp` batch collapse), and with few rows and a
+    /// long history `scores @ V` takes split-K (`steel_gemm_splitk_axpby`,
+    /// batch size 1 only), which sums keys in partitions. In a batch of two
+    /// each row keeps its own batches: the plain GEMM for a prompt chunk,
+    /// GEMV for one decode token. Gemma 4 12B's full-attention layers (16
+    /// query heads, 1 KV head, head dim 512) hit this on the 64-token chunk
+    /// after 1024 keys (M = 16 x 64, N = 512, K = 1088) and at every decode
+    /// step (M = 16, N = 512, K = keys) (#2328). Vector kernels attend each
+    /// (row, head) alone and keep one call.
+    static func loneCallReducesDifferently(
+        rows: Int,
+        queryTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        keyTokens: Int,
+        loneCallHasArrayMask: Bool,
+        architecture: String = PagedKVVectorAttentionRoute.deviceArchitecture
+    ) -> Bool {
+        guard rows > 1, kvHeads == 1 else { return false }
+        return queryTokens > 8 || PagedKVVectorAttentionRoute.route(
+            keyTokens: keyTokens,
+            queryTokens: queryTokens,
+            queryHeads: queryHeads,
+            kvHeads: kvHeads,
+            headDim: headDim,
+            valueDim: valueDim,
+            hasArrayMask: loneCallHasArrayMask,
+            architecture: architecture,
+            partitionOverride: nil
+        ) == nil
+    }
+
     /// Per-row extents when one batched SDPA call would not give every row
     /// its lone bits, else nil (one call is exact). Rows whose keys or query
     /// columns are padded to a longer neighbour need their own call:
@@ -5459,13 +5881,17 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, KVCacheAttentionReturningStateProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int
         let proposalTokenCount: Int
         let inputKeys: MLXArray
         let inputValues: MLXArray
+        /// Column-exact verification: the row keeps the sliding ring its
+        /// one-token decode steps would have kept, as if the accepted columns
+        /// had been appended one at a time.
+        var keepsRingAnchor = false
 
         func commit(inputCount: Int) throws {
             eval(try stageCommit(inputCount: inputCount))
@@ -5480,7 +5906,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             guard inputCount > 0 else { return [] }
             let keySlice = inputKeys[0..., 0..., 0 ..< inputCount, 0...]
             let valueSlice = inputValues[0..., 0..., 0 ..< inputCount, 0...]
+            let anchor = rowCache.slidingRingAnchor
             let updated = rowCache.update(keys: keySlice, values: valueSlice)
+            if keepsRingAnchor { rowCache.slidingRingAnchor = anchor }
             return [updated.0, updated.1]
         }
     }
@@ -5529,6 +5957,13 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// `attachRows` (decode sessions) attaches rows that hold full, unwindowed
     /// history; sliding-window rows take the per-row update path, where an
     /// attached row would copy its history out every step.
+    /// Native MTP verification attends every verify column as the one-token
+    /// decode step at its position would (`attendVerificationColumnsAsDecode`).
+    /// Set for families whose verify must equal ordinary decode bit for bit
+    /// and whose decode attention a multi-column call cannot reproduce
+    /// (Gemma 4: sliding-window ring order, head-dim-512 fallback, #2328).
+    var columnExactVerification = false
+
     init(rowCaches: [PagedKVCache], attachRows: Bool = false) {
         self.rowCaches = rowCaches
         self.attachesRows = attachRows
@@ -5842,7 +6277,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil).output
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
+        )
+        return output
     }
 
     /// GPT-OSS attention with per-head sinks takes the same per-row route:
@@ -5855,7 +6294,28 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         sinks: MLXArray
     ) -> MLXArray {
-        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+        let output = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks).output
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: output
+        )
+        return output
+    }
+
+    /// Gemma 4's layers whose K/V the drafter reads attend here too, so
+    /// they take the same route as every other layer, and get the K/V a
+    /// plain `update` returns.
+    func updateAndAttendReturningState(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> (output: MLXArray, keys: MLXArray, values: MLXArray) {
+        let attended = attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+        PagedKVAttentionTrace.record(
+            rowCaches: rowCaches, queries: queries, keys: incomingKeys, values: incomingValues, output: attended.output
+        )
+        return attended
     }
 
     private func attendRows(
@@ -5865,6 +6325,23 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         sinks: MLXArray?
+    ) -> (output: MLXArray, keys: MLXArray, values: MLXArray) {
+        var updatedKeys = incomingKeys
+        var updatedValues = incomingValues
+        let output = attendRowsBody(
+            queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks
+        ) { updatedKeys = $0; updatedValues = $1 }
+        return (output, updatedKeys, updatedValues)
+    }
+
+    private func attendRowsBody(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?,
+        updated: (MLXArray, MLXArray) -> Void
     ) -> MLXArray {
         let queryTokens = queries.dim(2)
         let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
@@ -5874,6 +6351,14 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         insideUpdateAndAttend = true
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
         insideUpdateAndAttend = false
+        updated(keys, values)
+        if columnExactVerification, sinks == nil,
+           let rowMaps = preparedMTPPackedRowMaps,
+           let exact = attendVerificationColumnsAsDecode(
+               queries: queries, keys: keys, values: values, scale: scale, rowMaps: rowMaps
+           ) {
+            return exact
+        }
         func batched() -> MLXArray {
             MLXFast.scaledDotProductAttention(
                 queries: queries, keys: keys, values: values, scale: scale, mask: mask, sinks: sinks
@@ -5889,8 +6374,57 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             offsetsBefore: extentOffsets,
             packedRows: packedRows
         ) else {
-            // No row is padded: the one call is each row's lone call.
-            return batched()
+            // No row is padded: the one call is each row's lone call, except
+            // where MLX core reduces a lone row in another order
+            // (`PagedKVRowAttention.loneCallReducesDifferently`).
+            let unpaddedPlainMask = PagedKVBatchLayerCache.maskIsPlainCacheMask(mask)
+            var loneCallHasArrayMask = false
+            // Packed verification rows take their slice of the packed mask,
+            // as the split path gives them.
+            if case .array = mask, !unpaddedPlainMask || packedRows != nil { loneCallHasArrayMask = true }
+            guard PagedKVRowAttention.loneCallReducesDifferently(
+                rows: queries.dim(0),
+                queryTokens: queryTokens,
+                queryHeads: queries.dim(1),
+                kvHeads: keys.dim(1),
+                headDim: queries.dim(3),
+                valueDim: values.dim(3),
+                keyTokens: keys.dim(2),
+                loneCallHasArrayMask: loneCallHasArrayMask
+            ), !windowed,
+                queries.dim(0) == rowCaches.count, keys.dim(0) == rowCaches.count
+            else {
+                return batched()
+            }
+            if packedRows != nil, !loneCallHasArrayMask {
+                attendedOutsideCachePath = true
+                return batched()
+            }
+            var loneMask = mask
+            if case .array(let array) = mask {
+                if unpaddedPlainMask, packedRows == nil {
+                    // Padding and causality only, and no row is padded: the
+                    // mask the lone call takes (none for one decode token).
+                    loneMask = queryTokens > 1 ? .causal : .none
+                } else if array.ndim != 4 || (array.dim(0) != 1 && array.dim(0) != rowCaches.count) {
+                    attendedOutsideCachePath = true
+                    return batched()
+                }
+            }
+            return concatenated((0 ..< rowCaches.count).map { row in
+                var rowMask = loneMask
+                if case .array(let array) = loneMask, array.dim(0) != 1 {
+                    rowMask = .array(array[row ..< row + 1, 0..., 0..., 0...])
+                }
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries[row ..< row + 1, 0..., 0..., 0...],
+                    keys: keys[row ..< row + 1, 0..., 0..., 0...],
+                    values: values[row ..< row + 1, 0..., 0..., 0...],
+                    scale: scale,
+                    mask: rowMask,
+                    sinks: sinks
+                )
+            }, axis: 0)
         }
         func notIsolatable() -> MLXArray {
             attendedOutsideCachePath = true
@@ -5986,6 +6520,64 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         }, axis: 0)
     }
 
+    /// Column-exact native MTP verification (#2328): column `c` of a row at
+    /// query offset `n` attends as the one-token decode step at position
+    /// `n + c` does. One query, no mask, and the keys that step's `update`
+    /// presents: the whole history `[..<n+c+1]`, or for a sliding window the
+    /// last `window` keys in the row's ring order
+    /// (`PagedKVCache.presentation`). Every other operator of the forward
+    /// treats its rows independently, so the column's logits are the decode
+    /// step's. Padded columns attend nothing. Nil when the update did not
+    /// stage this verification (the caller keeps its own route).
+    private func attendVerificationColumnsAsDecode(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        rowMaps: [MTPPackedVerificationRowMap]
+    ) -> MLXArray? {
+        guard mtpPackedForwardDidUpdate,
+              rowMaps.count == rowCaches.count,
+              queries.dim(0) == rowCaches.count,
+              keys.dim(0) == rowCaches.count,
+              zip(rowCaches, rowMaps).allSatisfy({ $0.offset == $1.queryOffset }),
+              rowMaps.allSatisfy({ $0.queryOffset + $0.inputCount <= keys.dim(2) && $0.inputCount <= queries.dim(2) })
+        else {
+            return nil
+        }
+        let window = presentationWindowTokens
+        let rows = rowMaps.enumerated().map { row, map -> MLXArray in
+            let columns = (0 ..< queries.dim(2)).map { column -> MLXArray in
+                guard column < map.inputCount else {
+                    return MLXArray.zeros([1, queries.dim(1), 1, values.dim(3)], dtype: queries.dtype)
+                }
+                let end = map.queryOffset + column + 1
+                var rowKeys = keys[row ..< row + 1, 0..., ..<end, 0...]
+                var rowValues = values[row ..< row + 1, 0..., ..<end, 0...]
+                if let window, window > 0 {
+                    let keepPrior = PagedKVCache.slidingWindowPresentationPrefix(priorTokens: end - 1, windowSize: window)
+                    let start = max(0, end - keepPrior - 1)
+                    if start > 0 {
+                        let shift = PagedKVCache.slidingRingShift(
+                            postUpdateOffset: end, anchor: rowCaches[row].slidingRingAnchor, windowSize: window
+                        )
+                        rowKeys = PagedKVCache.ringOrdered(rowKeys[.ellipsis, start..., 0...], shift: shift)
+                        rowValues = PagedKVCache.ringOrdered(rowValues[.ellipsis, start..., 0...], shift: shift)
+                    }
+                }
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries[row ..< row + 1, 0..., column ..< column + 1, 0...],
+                    keys: rowKeys,
+                    values: rowValues,
+                    scale: scale,
+                    mask: .none
+                )
+            }
+            return columns.count == 1 ? columns[0] : concatenated(columns, axis: 2)
+        }
+        return rows.count == 1 ? rows[0] : concatenated(rows, axis: 0)
+    }
+
     private func updatePackedMTPVerification(
         keys incomingKeys: MLXArray,
         values incomingValues: MLXArray,
@@ -6035,7 +6627,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
                 inputTokenCount: map.inputCount,
                 proposalTokenCount: map.proposalCount,
                 inputKeys: inputKeys,
-                inputValues: inputValues
+                inputValues: inputValues,
+                keepsRingAnchor: columnExactVerification
             ))
         }
 

@@ -25,6 +25,11 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     let blockSizeTokens: Int
     /// The paged kind the target's attention layers must use.
     let pagedKind: PagedKVSharedForwardBackend.CacheKind
+    /// The target keeps recurrent (`MambaCache`) layers beside its paged ones.
+    var hasRecurrentLayers = true
+    /// The policies' `quantization` field: the global MLX affine width of the
+    /// target artifact, which the R002 observer checks on the bytes.
+    var quantization = "4bit"
 
     /// The Qwen3.5 fixture's paged block (unchanged from the Qwen-only harness).
     static let qwenBlockSizeTokens = 32
@@ -55,10 +60,27 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         pagedKind: .deepseekV4Pool(ratio: 4, windowTokens: 128)
     )
 
+    /// Gemma 4 12B (`gemma4_mtp_v1`): an MLX affine 8-bit target with the
+    /// embedded bfloat16 assistant, sliding-window and full-attention layers
+    /// paged on one block table (SPEC-039 v0.1.35) and no recurrent layers.
+    /// The block is the Qwen3.5 harness's, which the pool sizing assumes.
+    static let gemma4 = NativeMTPHardwareE2EFamily(
+        modelFamily: "gemma4",
+        familyAdapter: "gemma4_mtp_v1",
+        embeddedMTP: true,
+        blockSizeTokens: qwenBlockSizeTokens,
+        pagedKind: .pagedAttention,
+        hasRecurrentLayers: false,
+        quantization: "8bit"
+    )
+
     var maximumProposalDepth: Int { self == .deepseekV4 ? 5 : (self == .glm5Next ? 2 : 1) }
-    var predictionLayerCount: Int { self == .deepseekV4 ? 3 : 1 }
-    var stateClass: String { self == .deepseekV4 ? "stageable_rewindable" : "hybrid_stageable_rewindable" }
-    var quantizationLabel: String { self == .deepseekV4 ? "mlx_mxfp4_mxfp8" : "4bit" }
+    /// The cache/state class the lab tuple signs: `hybrid_` marks recurrent
+    /// state (`ModelRuntime.nativeMTPExpectedStateClass`).
+    var stateClass: String {
+        self == .deepseekV4 || !hasRecurrentLayers ? "stageable_rewindable" : "hybrid_stageable_rewindable"
+    }
+    var quantizationLabel: String { self == .deepseekV4 ? "mlx_mxfp4_mxfp8" : quantization }
 
     /// The lab tuple's `request_feature_profile`: sampled where the family
     /// may sign it (Qwen3.5 and GLM-5-Next, SPEC-048 MTP-2).
@@ -103,7 +125,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// The native active-row bound the family's tuple signs (SPEC-048 R007),
     /// nil when the harness's slot count is used. glm5_next signs 1: at four
     /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
-    var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+    var signedMaxNativeActiveRows: Int? { self == .glm5Next || self == .gemma4 ? 1 : nil }
     var implementationMaxNativeActiveRows: Int? {
         NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: familyAdapter)
     }
@@ -136,6 +158,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         case "qwen": .qwen35
         case "glm5_next": .glm5Next
         case "deepseek_v4": .deepseekV4
+        case "gemma4": .gemma4
         default: nil
         }
     }
@@ -410,6 +433,32 @@ final class NativeMTPHardwareE2ERunner {
 
     private var mtpDirectory: URL {
         root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+    }
+
+    /// The observed-versus-admitted fields the artifact matcher compares,
+    /// listing only those that differ (diagnostic text, never a decision).
+    static func artifactAdmissionMismatch(
+        _ observation: NativeMTPArtifactPairObservation,
+        _ admission: NativeMTPAdmissionCapability
+    ) -> String {
+        let quantization = admission.quantization
+        let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation)
+        let fields: [(String, String, String)] = [
+            ("quantization.target", observation.target.format.sidecarQuantizationLabel, quantization.target),
+            ("quantization.mtp", observation.mtp.format.sidecarQuantizationLabel, quantization.mtp),
+            ("target.prediction_layer_count", "\(observation.target.mtpPredictionLayerCount)", "\(admission.predictionLayerCount)"),
+            ("mtp.prediction_layer_count", "\(observation.mtp.mtpPredictionLayerCount)", "\(admission.predictionLayerCount)"),
+            ("block_size_elements", representation.map { "\($0.groupSize)" } ?? "unavailable",
+             quantization.blockSizeElements.map(String.init) ?? "null"),
+            ("representation_manifest_sha256", representation?.manifestSHA256 ?? "unavailable",
+             quantization.representationManifestSHA256 ?? "null"),
+            ("per_layer_exceptions", representation.map { "\($0.perLayerExceptions)" } ?? "unavailable",
+             "\(quantization.perLayerExceptions)"),
+            ("unquantized_exceptions", representation.map { "\($0.unquantizedExceptions)" } ?? "unavailable",
+             "\(quantization.unquantizedExceptions)"),
+        ]
+        let differing = fields.filter { $0.1 != $0.2 }.map { "\($0.0) observed=\($0.1) admitted=\($0.2)" }
+        return differing.isEmpty ? "no listed field differs" : differing.joined(separator: "; ")
     }
 
     private func observeArtifacts(targetDirectory: URL) throws -> NativeMTPArtifactPairObservation {
@@ -775,7 +824,8 @@ final class NativeMTPHardwareE2ERunner {
                 artifactObservation,
                 admissionCapability: nativeAdmissionCapability
             ),
-            "artifact observation does not match admission"
+            "artifact observation does not match admission: "
+                + Self.artifactAdmissionMismatch(artifactObservation, nativeAdmissionCapability)
         )
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
@@ -877,7 +927,13 @@ final class NativeMTPHardwareE2ERunner {
             }
         }
         try require(cacheKinds.contains(where: family.matchesPagedKind), "\(family.pagedKind) cache not observed")
-        if family != .deepseekV4 {
+        if family == .gemma4 {
+            // A sliding-window/full-attention class: exactly its config layout.
+            try require(
+                cacheKinds == modelCapabilities.slidingWindowAttention?.expectedCacheKinds,
+                "\(family.modelFamily) cache layout does not match its config"
+            )
+        } else if family != .deepseekV4 {
             try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
         }
 
@@ -1274,7 +1330,11 @@ final class NativeMTPHardwareE2ERunner {
             artifactManifestSHA: sha256Hex(projectionData),
             challengeBankSHA: sha256Hex(selfTestBankData),
             signerKeyID: keyID,
-            affineRepresentation: affineRepresentation
+            affineRepresentation: affineRepresentation,
+            // The observer's count, as production compares it: Gemma 4's
+            // assistant depth (`mtp_num_hidden_layers`, SPEC-048-R002 0.1.111)
+            // is not its proposal depth.
+            predictionLayerCount: artifactObservation.target.mtpPredictionLayerCount
         )
         // The lab envelope beside the projection: its quantization block is
         // what the production artifact observer computed for this pair, the
@@ -1391,7 +1451,8 @@ final class NativeMTPHardwareE2ERunner {
         artifactManifestSHA: String,
         challengeBankSHA: String,
         signerKeyID: String,
-        affineRepresentation: NativeMTPAffineRepresentation
+        affineRepresentation: NativeMTPAffineRepresentation,
+        predictionLayerCount: Int
     ) throws -> Data {
         let entry: [String: Any] = [
             "model_key": modelID,
@@ -1404,7 +1465,7 @@ final class NativeMTPHardwareE2ERunner {
             "mtp_manifest_sha256": manifestSHA,
             "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": family.stateClass,
-            "mtp_head_count": family.predictionLayerCount,
+            "mtp_head_count": predictionLayerCount,
             "proposal_depth": proposalDepth,
             "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
             "runtime_revision": Self.upstreamRevision,

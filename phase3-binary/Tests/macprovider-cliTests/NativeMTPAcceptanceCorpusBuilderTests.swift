@@ -84,18 +84,23 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
         }
     }
 
-    /// Qwen signs sampled text. Tool history and reasoning_effort select
-    /// ordinary, which is what failed acceptance-short-0 in the 2026-11-04 window.
-    func testQwenRequestsStayInsideTheSampledTextSelector() throws {
-        let capability = NativeMTPCapability(
-            admitted: true, revoked: false, revocationStateAvailable: true,
-            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
-            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
-            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
-            maximumPromptTokens: 4096, maximumCompletionTokens: 4096,
-            family: "qwen3_5_mtp_v1", supportsSampling: true
-        )
-        for modelID in ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"] {
+    /// Qwen and Gemma 4 sign sampled text. Tool history and reasoning_effort
+    /// select ordinary, which is what failed acceptance-short-0 in the
+    /// 2026-11-04 window.
+    func testQwenAndGemmaRequestsStayInsideTheSampledTextSelector() throws {
+        for (modelID, family) in [
+            ("qwen/qwen3.6-27b", "qwen3_5_mtp_v1"), ("qwen/qwen3.8-27b", "qwen3_5_mtp_v1"),
+            ("google/gemma-4-12b-it", NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter),
+        ] {
+            XCTAssertTrue(NativeMTPAcceptanceCorpusBuilder.modelIDs.contains(modelID), modelID)
+            let capability = NativeMTPCapability(
+                admitted: true, revoked: false, revocationStateAvailable: true,
+                supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+                supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+                hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+                maximumPromptTokens: 4096, maximumCompletionTokens: 4096,
+                family: family, supportsSampling: true
+            )
             var sawStop = false
             var sawGreedy = false
             var sawSampled = false

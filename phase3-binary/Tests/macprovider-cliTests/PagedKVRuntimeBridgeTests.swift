@@ -1324,6 +1324,373 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    /// #2328: a drafter that keeps nothing from the prompt
+    /// (`requiresPromptPrefill` false; the Gemma 4 assistant) has no packed
+    /// advance without a verified round's target K/V. A chunked prompt
+    /// leaves it as single-pass seeding does, fresh state and no seed, and
+    /// never calls the packed advance, which threw
+    /// `MTPPackedDrafterError.incompatibleState(row: 0)` on the first chunk.
+    func testChunkedPromptPrefillLeavesAPromptFreeDrafterLikeSinglePass() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13], emitsMTPState: true)
+        let drafter = RuntimeBridgePromptFreePackedMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        let prompt = [10, 11, 12]
+
+        func prefill(_ id: String, chunks: [Int]) async throws -> [ContinuousBatchPrefillOutput] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            var outputs: [ContinuousBatchPrefillOutput] = []
+            var offset = 0
+            for size in chunks {
+                let end = offset + size
+                _ = try await allocator.extend(handle, by: size)
+                outputs += try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: Array(prompt[offset ..< end]),
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: offset,
+                    committedKVTokenCount: offset,
+                    targetKVTokenCount: end,
+                    isFinalChunk: end == prompt.count,
+                    nativeMTPPromptPrefill: true,
+                    nativeMTPNextPromptToken: end < prompt.count ? prompt[end] : nil
+                )])
+                offset = end
+            }
+            return outputs
+        }
+
+        let single = try await prefill("single", chunks: [3])
+        let chunked = try await prefill("chunked", chunks: [2, 1])
+        XCTAssertEqual(single, [ContinuousBatchPrefillOutput(requestID: "single", sampledToken: 13)])
+        XCTAssertEqual(chunked, [
+            ContinuousBatchPrefillOutput(requestID: "chunked", sampledToken: nil),
+            ContinuousBatchPrefillOutput(requestID: "chunked", sampledToken: 13),
+        ])
+        XCTAssertEqual(drafter.packedAdvanceCount(), 0)
+        let reference = backend.nativeMTPDrafterSnapshotForTest(requestID: "single")
+        let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: "chunked")
+        let referenceState = try XCTUnwrap(reference.state)
+        let candidateState = try XCTUnwrap(candidate.state)
+        XCTAssertTrue(candidateState.cache.isEmpty)
+        XCTAssertEqual(candidateState.nextPosition, referenceState.nextPosition)
+        XCTAssertEqual(candidateState.proposalAppended, referenceState.proposalAppended)
+        XCTAssertNil(candidate.seedToken)
+        XCTAssertEqual(candidate.seedToken, reference.seedToken)
+        XCTAssertEqual(candidate.pendingColumns, 0)
+    }
+
+    /// #2328 lab token trace: a verify commits its accepted proposals as
+    /// `draft` and the target's pick at the first mismatch as `target`; the
+    /// top-2 margin is per column; steps past the limit are not traced.
+    func testNativeMTPLabTokenTraceEntriesAndTopTwo() throws {
+        try requireMetal()
+        let tops = NativeMTPLabTokenTrace.topTwo(MLXArray(
+            [Float(0), 3, 1, 3, 0.5, 2, 0.25, 0], [2, 4]
+        ))
+        XCTAssertEqual(tops.map(\.top1), [1, 1])
+        XCTAssertEqual(tops.map(\.top2), [3, 0])
+        XCTAssertEqual(tops.map(\.margin), [0, 1.5])
+        let accepted = NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 5, proposals: [1], targets: [1, 2], tops: tops, kvBefore: 1540)
+        XCTAssertEqual(accepted.map(\.source), ["draft", "target"])
+        XCTAssertEqual(accepted.map(\.index), [5, 6])
+        XCTAssertEqual(accepted.map(\.kvAfter), [1542, 1542])
+        let rejected = NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 5, proposals: [7], targets: [1, 2], tops: tops, kvBefore: 1540)
+        XCTAssertEqual(rejected, [NativeMTPLabTokenTrace.Entry(
+            index: 5, column: 0, width: 2, source: "target", token: 1, top1: 1, top2: 3, margin: 0,
+            kvBefore: 1540, kvAfter: 1541)])
+        XCTAssertEqual(
+            NativeMTPLabTokenTrace.line(requestID: "r", path: "verify", rejected[0]),
+            "[mtp-token] req=r path=verify idx=5 col=0 width=2 src=target token=1 top1=1 top2=3 margin=0.0 kv=1540->1541\n"
+        )
+        XCTAssertEqual(NativeMTPLabTokenTrace.verifyEntries(
+            samplerStep: 63, proposals: [1], targets: [1, 2], tops: tops, kvBefore: 0).map(\.index), [63])
+    }
+
+    /// Gemma-shaped tiny target (sliding, sliding, full, sliding; 8-token
+    /// window; one KV head; full head dim twice the sliding one), 8-bit so
+    /// every projection takes the row-independent quantized vector kernel,
+    /// as the served 12B does. Dims are multiples of the group size.
+    private static let tinyGemma4ColumnExactConfiguration = """
+        {
+          "model_type": "gemma4_unified",
+          "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+          "vocab_size": 64,
+          "text_config": {
+            "model_type": "gemma4_unified_text",
+            "hidden_size": 64,
+            "num_hidden_layers": 4,
+            "intermediate_size": 128,
+            "num_attention_heads": 2,
+            "head_dim": 32,
+            "global_head_dim": 64,
+            "num_key_value_heads": 1,
+            "num_global_key_value_heads": 1,
+            "attention_k_eq_v": true,
+            "num_kv_shared_layers": 0,
+            "hidden_size_per_layer_input": 0,
+            "vocab_size": 64,
+            "vocab_size_per_layer_input": 64,
+            "sliding_window": 8,
+            "layer_types": ["sliding_attention", "sliding_attention", "full_attention", "sliding_attention"],
+            "max_position_embeddings": 4096,
+            "final_logit_softcapping": 30.0,
+            "use_double_wide_mlp": false,
+            "enable_moe_block": false,
+            "tie_word_embeddings": false,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+              "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
+              "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+            }
+          }
+        }
+        """
+
+    private static func tinyGemma4ColumnExactBackend(
+        drafter: (any MTPPackedStatefulDrafterModel & Module)?,
+        familyAdapter: String?
+    ) throws -> RuntimeBridgeRecordingNativeMTPBackend {
+        let configuration = try JSONDecoder().decode(
+            Gemma4Configuration.self, from: Data(Self.tinyGemma4ColumnExactConfiguration.utf8)
+        )
+        MLXRandom.seed(2328)
+        let target = Gemma4Model(configuration)
+        quantize(model: target, groupSize: 32, bits: 8, mode: .affine)
+        eval(target)
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 256)
+        return RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: target,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 4,
+            cacheKinds: [.slidingWindow(windowTokens: 8), .slidingWindow(windowTokens: 8), .pagedAttention, .slidingWindow(windowTokens: 8)],
+            drafterContainer: drafter.map {
+                MTPDrafterContainer(context: MTPDrafterContext(configuration: ModelConfiguration(id: "mtp"), model: $0))
+            },
+            nativeMTPFamilyAdapter: familyAdapter
+        ))
+    }
+
+    /// One request's traced committed tokens by sampler step.
+    private static func tracedRun(
+        backend: RuntimeBridgeRecordingNativeMTPBackend,
+        request: ContinuousBatchSchedulerRequest
+    ) async throws -> (tokens: [Int], trace: [Int: (path: String, entry: NativeMTPLabTokenTrace.Entry)]) {
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend, maxPhysicalBlocks: 256)
+        let lock = NSLock()
+        nonisolated(unsafe) var trace: [Int: (path: String, entry: NativeMTPLabTokenTrace.Entry)] = [:]
+        NativeMTPLabTokenTrace.setSink { requestID, path, entry in
+            guard requestID == request.id else { return }
+            lock.lock()
+            trace[entry.index] = (path, entry)
+            lock.unlock()
+        }
+        defer { NativeMTPLabTokenTrace.setSink(nil) }
+        let result = try await scheduler.submit(request)
+        lock.lock()
+        defer { lock.unlock() }
+        return (result.generatedTokens, trace)
+    }
+
+    /// #2328: Gemma 4 native MTP verifies each column as the one-token decode
+    /// step at its position (ring-ordered sliding window, one-query
+    /// full-attention call), so a single native row emits ordinary greedy
+    /// decode's tokens, and every verify column's top-2 margin equals the
+    /// decode step's bit for bit, over accepted and rejected drafts and past
+    /// several ring wraps. Without column-exact verification the margins
+    /// differ.
+    func testGemma4NativeMTPVerifyColumnsEqualOrdinaryDecodeBitForBit() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 2328, vocabulary: 64)
+        let budget = 72
+        let ordinary = try await Self.tracedRun(
+            backend: try Self.tinyGemma4ColumnExactBackend(drafter: nil, familyAdapter: nil),
+            request: Self.tinyNativeRequest("ordinary", prompt, budget, decodePath: .ordinary)
+        )
+        XCTAssertEqual(ordinary.tokens.count, budget)
+        XCTAssertGreaterThan(Set(ordinary.tokens).count, 3, "random weights degenerated")
+
+        func native(_ familyAdapter: String?) async throws
+            -> (tokens: [Int], trace: [Int: (path: String, entry: NativeMTPLabTokenTrace.Entry)], drafter: RuntimeBridgeOracleGemmaDrafter) {
+            let drafter = RuntimeBridgeOracleGemmaDrafter(
+                reference: ordinary.tokens, promptLength: prompt.count, vocabulary: 64, wrongEvery: 3
+            )
+            let run = try await Self.tracedRun(
+                backend: try Self.tinyGemma4ColumnExactBackend(drafter: drafter, familyAdapter: familyAdapter),
+                request: Self.tinyNativeRequest("native", prompt, budget)
+            )
+            return (run.tokens, run.trace, drafter)
+        }
+
+        let exact = try await native(NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter)
+        XCTAssertEqual(exact.tokens, ordinary.tokens, "native diverged from ordinary greedy decode")
+        // The prefill seeds the first proposal, so the first decode step is
+        // already a two-column verify (R005 acceptance-short-19: a one-token
+        // answer ending at EOS ran its only round without a proposal).
+        XCTAssertEqual(exact.trace[1]?.path, "verify")
+        XCTAssertEqual(exact.trace[1]?.entry.width, 2, "the first native round proposed nothing")
+        let verified = exact.trace.values.filter { $0.path == "verify" }
+        XCTAssertTrue(verified.contains { $0.entry.source == "draft" }, "no draft was accepted")
+        XCTAssertTrue(verified.contains { $0.entry.column == 1 }, "no second verify column was committed")
+        XCTAssertTrue(verified.contains { $0.entry.width == 2 && $0.entry.source == "target" && $0.entry.column == 0 },
+                      "no draft was rejected")
+        for index in 0 ..< NativeMTPLabTokenTrace.limit {
+            let reference = try XCTUnwrap(ordinary.trace[index], "ordinary step \(index) untraced").entry
+            let candidate = try XCTUnwrap(exact.trace[index], "native step \(index) untraced").entry
+            XCTAssertEqual(candidate.token, reference.token, "step \(index)")
+            XCTAssertEqual(candidate.top2, reference.top2, "step \(index)")
+            XCTAssertEqual(candidate.margin.bitPattern, reference.margin.bitPattern,
+                           "step \(index): verify margin \(candidate.margin) vs decode \(reference.margin)")
+        }
+
+        // Control: the multi-column verify this replaces does not give the
+        // decode step's bits.
+        let approximate = try await native(nil)
+        let differing = (1 ..< NativeMTPLabTokenTrace.limit).filter { index in
+            guard let lhs = approximate.trace[index], lhs.path == "verify", let rhs = ordinary.trace[index] else { return false }
+            return lhs.entry.margin.bitPattern != rhs.entry.margin.bitPattern
+        }
+        XCTAssertFalse(differing.isEmpty, "the control verify already matched decode bit for bit")
+    }
+
+    /// #2328 R015 gated cells: a Gemma 4 native row the load gate holds
+    /// (depth 1 -> 0 for many rounds -> 1) rides the ordinary forward with no
+    /// drafter columns buffered, so that forward is the ordinary one (no
+    /// drafter emission, pipelined steps). While held, its drafter is in the
+    /// state an unseeded prefill leaves (fresh, no seed); the first round
+    /// after the hold verifies one column, as before; every later proposal
+    /// equals the never-held run's at the same step, and every token equals
+    /// ordinary greedy decode.
+    func testGemma4HeldNativeRowBuffersNoColumnsAndRestoresTheUninterruptedProposals() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 2328, vocabulary: 64)
+        let budget = 48
+        let ordinary = try await Self.tracedRun(
+            backend: try Self.tinyGemma4ColumnExactBackend(drafter: nil, familyAdapter: nil),
+            request: Self.tinyNativeRequest("a", prompt, budget, decodePath: .ordinary)
+        )
+        XCTAssertGreaterThan(Set(ordinary.tokens).count, 3, "random weights degenerated")
+        func drafter() -> RuntimeBridgeOracleGemmaDrafter {
+            RuntimeBridgeOracleGemmaDrafter(
+                reference: ordinary.tokens, promptLength: prompt.count, vocabulary: 64, wrongEvery: 3
+            )
+        }
+
+        let uninterrupted = try Self.tinyGemma4ColumnExactBackend(
+            drafter: drafter(), familyAdapter: NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+        )
+        let uninterruptedResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: uninterrupted, maxPhysicalBlocks: 256
+        ).submit(Self.tinyNativeRequest("a", prompt, budget))
+        XCTAssertTrue(uninterrupted.capturedDecodeStepsByRow().isEmpty)
+        XCTAssertEqual(uninterruptedResult.generatedTokens, ordinary.tokens)
+
+        let held = try Self.tinyGemma4ColumnExactBackend(
+            drafter: drafter(), familyAdapter: NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: held, maxPhysicalBlocks: 256)
+        let peer = RuntimeBridgeTaskBox()
+        let maxPending = RuntimeBridgePendingColumnsBox()
+        let heldResult = try await scheduler.submit(
+            Self.tinyNativeRequest("a", prompt, budget, maximumActiveRows: 1)
+        ) { event in
+            if event.tokenIndex == 3 {
+                peer.start {
+                    try await scheduler.submit(Self.tinyNativeRequest(
+                        "peer", Self.tinyPrompt(length: 6, salt: 9, vocabulary: 64), 20, decodePath: .ordinary
+                    ))
+                }
+            }
+            let pending = held.base.nativeMTPDrafterSnapshotForTest(requestID: "a").pendingColumns
+            maxPending.record(max(maxPending.value() ?? 0, pending))
+        }
+        let peerResult = try await peer.value()
+        XCTAssertEqual(heldResult.terminalStatus, .length, heldResult.errorCode ?? "")
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+        XCTAssertEqual(heldResult.generatedTokens, ordinary.tokens, "held native row diverged from ordinary")
+
+        let heldSteps = held.capturedDecodeStepsByRow()["a"] ?? []
+        XCTAssertGreaterThanOrEqual(
+            heldSteps.count, ContinuousBatchScheduler.nativeMTPLoadGateReleaseRounds + 1,
+            "gate never held the native row on the ordinary forward"
+        )
+        XCTAssertEqual(maxPending.value() ?? 0, 0, "a prompt-free drafter buffered held columns")
+
+        let lastHeldStep = try XCTUnwrap(heldSteps.max())
+        let reference = uninterrupted.proposalsByStep()["a"] ?? [:]
+        let heldProposals = held.proposalsByStep()["a"] ?? [:]
+        let restored = heldProposals.filter { $0.key > lastHeldStep }
+        XCTAssertGreaterThanOrEqual(restored.count, 5, "native proposals did not resume: \(heldProposals)")
+        // Rounds of the two runs start at different steps once one of them
+        // accepts a draft the other did not get to propose; compare every
+        // step at which both proposed.
+        let shared = restored.keys.filter { reference[$0] != nil }
+        XCTAssertGreaterThanOrEqual(shared.count, 3, "too few common proposal steps after restore")
+        for (step, proposal) in heldProposals.sorted(by: { $0.key < $1.key }) {
+            guard let expected = reference[step] else { continue }
+            XCTAssertEqual(proposal, expected, "held-run proposal at step \(step) differs from never-held")
+        }
+        XCTAssertEqual(held.base.retainedRowCountForTest(), 0)
+    }
+
+    /// #2328: only a one-row full-attention K/V ending exactly at the
+    /// committed prefix seeds a prompt-free drafter from the prefill.
+    func testPrefillSharedKVSeedsDrafterOnlyAtTheCommittedPrefix() throws {
+        try requireMetal()
+        func kv(_ batch: Int, _ length: Int) -> (MLXArray, MLXArray) {
+            (MLXArray.zeros([batch, 1, length, 2]), MLXArray.zeros([batch, 1, length, 2]))
+        }
+        XCTAssertTrue(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 13), "sliding_attention": kv(1, 13)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 4), "sliding_attention": kv(1, 4)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(2, 13), "sliding_attention": kv(2, 13)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 13)], committedTokens: 13))
+    }
+
+    func testPackedDrafterFailureReasonNamesTheCaseAndItsValues() {
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureTelemetryLine(MTPPackedDrafterError.incompatibleState(row: 0)),
+            "event=batching_prefill_failed action=fail_closed reason=mtp_packed_drafter_incompatiblestate_row_0\n"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(
+                MTPPackedDrafterError.invalidTargetHidden(row: 1, shape: [1, 512, 3840])
+            ),
+            "mtp_packed_drafter_invalidtargethidden_row_1_shape_1_512_3840"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(
+                MTPPackedDrafterError.positionMismatch(row: 0, nextPosition: -2, cacheOffset: 1)
+            ),
+            "mtp_packed_drafter_positionmismatch_row_0_nextposition_-2_cacheoffset_1"
+        )
+    }
+
     /// SPEC-048-R007 / SPEC-038 FR-CB2: a native row in an equal-length
     /// prefill group shares the group's one `[B, L]` target forward; its
     /// drafter is seeded from its own `[1, L]` slice of that forward's hidden
@@ -2006,6 +2373,48 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    /// Rows at Gemma 4 12B's full-attention shape (16 query heads, 1 KV
+    /// head, head dim 512). Core attends these with its composite fallback
+    /// (no vector kernel: head dim 512 needs GQA factor 8), and a lone row
+    /// folds its query heads into the matmul rows and may take split-K,
+    /// while one call for several rows keeps a batch per row (plain GEMM for
+    /// the 64-token chunk after 1024 keys, GEMV for a decode token). A single
+    /// call gave each row other bits than its lone call (#2328). Every row,
+    /// equal-length or padded, must match its lone call bit for bit.
+    func testSingleKVHeadFallbackAttentionMatchesLoneBits() throws {
+        try requireMetal()
+        MLXRandom.seed(2328)
+        func splits(
+            rows: Int = 2, queries: Int, heads: Int = 16, kvHeads: Int = 1, dim: Int = 512,
+            keys: Int, mask: Bool = false
+        ) -> Bool {
+            PagedKVRowAttention.loneCallReducesDifferently(
+                rows: rows, queryTokens: queries, queryHeads: heads, kvHeads: kvHeads,
+                headDim: dim, valueDim: dim, keyTokens: keys, loneCallHasArrayMask: mask,
+                architecture: "applegpu_g15d"
+            )
+        }
+        XCTAssertTrue(splits(queries: 64, keys: 1088), "Gemma prompt chunk")
+        XCTAssertTrue(splits(queries: 1, keys: 1089), "Gemma decode: GQA 16 at head dim 512 has no vector kernel")
+        XCTAssertTrue(splits(queries: 3, keys: 1091, mask: true), "Gemma packed verification")
+        XCTAssertFalse(splits(rows: 1, queries: 64, keys: 1088))
+        XCTAssertFalse(splits(queries: 1, heads: 8, keys: 1089), "vector kernel: batch-invariant")
+        XCTAssertFalse(splits(queries: 1, dim: 128, keys: 1089), "vector kernel: batch-invariant")
+        XCTAssertFalse(splits(queries: 64, kvHeads: 2, keys: 1088), "more than one KV head keeps a batch per head")
+        XCTAssertNil(PagedKVVectorAttentionRoute.route(
+            keyTokens: 1089, queryTokens: 1, queryHeads: 16, kvHeads: 1, headDim: 512, valueDim: 512,
+            hasArrayMask: false, architecture: "applegpu_g15d", partitionOverride: nil
+        ), "a fallback call has no vector route, so padded rows never share it")
+        try assertBatchCacheAttentionMatchesLoneBits([
+            BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024]),
+            BatchAttentionCase(label: "prefill", queryTokens: 64, histories: [1024, 1024], ragged: true),
+            BatchAttentionCase(label: "prefill", queryTokens: 32, histories: [700, 700, 700]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1088, 1088]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1100, 1100, 1100]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1088, 1130]),
+        ], heads: [(16, 1, 512)])
+    }
+
     /// SPEC-038 FR-CB2 decode and packed MTP verification isolation, through
     /// the shared decode batch cache, at the served attention shapes. Decode
     /// histories straddle the one-pass / two-pass switch (1024 keys) and the
@@ -2086,9 +2495,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// must hold exactly its history plus its own new tokens (verification
     /// stages and commits nothing). Prints, without asserting, the rows that
     /// a single padded call would have given other bits (device dependent).
-    private func assertBatchCacheAttentionMatchesLoneBits(_ cases: [BatchAttentionCase]) throws {
+    private func assertBatchCacheAttentionMatchesLoneBits(
+        _ cases: [BatchAttentionCase],
+        heads: [(queryHeads: Int, kvHeads: Int, headDim: Int)] = [(16, 2, 256), (24, 4, 256), (16, 2, 128)]
+    ) throws {
         var paddedRouteDifferences: [String] = []
-        for (queryHeads, kvHeads, headDim) in [(16, 2, 256), (24, 4, 256), (16, 2, 128)] {
+        for (queryHeads, kvHeads, headDim) in heads {
             let scale = 1 / Float(headDim).squareRoot()
             for testCase in cases {
                 let rows = testCase.histories.count
@@ -7344,6 +7756,131 @@ private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafter
         lock.lock()
         defer { lock.unlock() }
         return hiddenWidths
+    }
+}
+
+/// A drafter like the Gemma 4 assistant: no prompt prefill, no own cache,
+/// and a packed advance that needs the target K/V of a verified round
+/// (`Gemma4AssistantDraftModel.packedRowInput`).
+private final class RuntimeBridgePromptFreePackedMTPDrafter: Module, MTPPackedStatefulDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresGreedySampling = true
+    private let lock = NSLock()
+    private var packedAdvances = 0
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func advanceAndProposePacked(
+        target: any LanguageModel,
+        rows: [MTPPackedDrafterAdvanceRow],
+        sampler: any LogitSampler
+    ) throws -> MTPPackedDrafterAdvanceResult {
+        lock.lock()
+        packedAdvances += 1
+        lock.unlock()
+        for (index, row) in rows.enumerated() where row.sharedKV == nil || row.sharedKVOffset == nil {
+            throw MTPPackedDrafterError.incompatibleState(row: index)
+        }
+        return MTPPackedDrafterAdvanceResult(
+            states: rows.map { _ in makeState(parameters: nil) },
+            proposals: MLXArray.zeros([rows.count, 1], dtype: .int32)
+        )
+    }
+
+    func packedAdvanceCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return packedAdvances
+    }
+}
+
+/// A prompt-free packed drafter (Gemma-4-assistant shape) that proposes the
+/// reference greedy token for the row's next position, except every
+/// `wrongEvery`-th position, where it proposes a wrong one.
+private final class RuntimeBridgeOracleGemmaDrafter: Module, MTPPackedStatefulDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresGreedySampling = true
+    private let reference: [Int]
+    private let promptLength: Int
+    private let vocabulary: Int
+    private let wrongEvery: Int
+
+    init(reference: [Int], promptLength: Int, vocabulary: Int, wrongEvery: Int) {
+        self.reference = reference
+        self.promptLength = promptLength
+        self.vocabulary = vocabulary
+        self.wrongEvery = wrongEvery
+        super.init()
+    }
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func draftBlock(
+        target: any LanguageModel, lastToken: MLXArray, lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
+        blockSize: Int, state: inout MTPDrafterState, sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel, lastToken: MLXArray, lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
+        blockSize: Int, sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func advanceAndProposePacked(
+        target: any LanguageModel,
+        rows: [MTPPackedDrafterAdvanceRow],
+        sampler: any LogitSampler
+    ) throws -> MTPPackedDrafterAdvanceResult {
+        let proposals = try rows.enumerated().map { index, row -> Int32 in
+            guard row.sharedKV != nil, let offset = row.sharedKVOffset else {
+                throw MTPPackedDrafterError.incompatibleState(row: index)
+            }
+            // KV holds the prompt and every committed token but the final one.
+            let rejected = row.targetHidden.dim(1) - 1 - row.acceptedTokens.count
+            let next = offset - rejected - promptLength + 1
+            let token = next < reference.count ? reference[next] : 0
+            return Int32(next % wrongEvery == 0 ? (token + 1) % vocabulary : token)
+        }
+        return MTPPackedDrafterAdvanceResult(
+            states: rows.map { _ in makeState(parameters: nil) },
+            proposals: MLXArray(proposals, [rows.count, 1])
+        )
     }
 }
 

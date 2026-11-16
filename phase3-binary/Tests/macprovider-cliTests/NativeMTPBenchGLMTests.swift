@@ -45,6 +45,25 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertNoThrow(try policy.validateFamily(.qwen35))
     }
 
+    /// The Gemma 4 12B step-1 template the lab window stamps: it loads,
+    /// freezes the 8-bit target width and the one-row bound, and fits only
+    /// the gemma4 family.
+    func testGemma4StepOneTemplateLoadsAndFitsOnlyTheGemma4Family() throws {
+        let url = Self.glmPolicyURL
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/lab/cb-studio/gemma4-12b-mtp/gemma4-step1-d1.json")
+        let policy = try NativeMTPBenchPolicy.load(from: url)
+        XCTAssertEqual(policy.quantization, "8bit")
+        XCTAssertEqual(policy.maxNativeActiveRows, 1)
+        XCTAssertEqual(policy.temperature, 0)
+        XCTAssertNoThrow(try policy.validateFamily(.gemma4))
+        XCTAssertThrowsError(try policy.validateFamily(.qwen35))
+        XCTAssertThrowsError(try policy.validateFamily(.glm5Next))
+        // A 4-bit policy does not fit the 8-bit gemma4 target.
+        XCTAssertThrowsError(try NativeMTPBenchPolicy.load(from: Self.glmPolicyURL).validateFamily(.gemma4))
+    }
+
     func testResumeCountsARecordOnlyForItsPolicyCellShapeAndPhase() throws {
         let policy = try NativeMTPBenchPolicy.load(from: Self.glmPolicyURL)
         func check(

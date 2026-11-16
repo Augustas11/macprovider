@@ -24,6 +24,31 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertTrue(NativeMTPHardwareE2EFamily.qwen35.admitsSampledRows)
     }
 
+    /// The Gemma 4 12B fixture: embedded bfloat16 assistant, 8-bit target,
+    /// paged attention with no recurrent layers, one native row.
+    func testGemma4TargetSelectsTheEmbeddedGemma4Family() throws {
+        let config = try JSONSerialization.data(withJSONObject: [
+            "model_type": "gemma4_unified",
+            "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+            "text_config": ["model_type": "gemma4_unified_text"],
+        ])
+        let family = try XCTUnwrap(NativeMTPHardwareE2EFamily.detect(configJSONData: config))
+        XCTAssertEqual(family, .gemma4)
+        XCTAssertEqual(family.familyAdapter, "gemma4_mtp_v1")
+        XCTAssertTrue(family.embeddedMTP)
+        XCTAssertEqual(family.mtpDirectoryName, "target")
+        XCTAssertEqual(family.quantization, "8bit")
+        XCTAssertFalse(family.hasRecurrentLayers)
+        XCTAssertEqual(family.stateClass, "stageable_rewindable")
+        XCTAssertEqual(family.signedMaxNativeActiveRows, 1)
+        XCTAssertTrue(family.matchesPagedKind(.pagedAttention))
+        // Existing families keep their 4-bit width and hybrid state class.
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.quantization, "4bit")
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.quantization, "4bit")
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.stateClass, "hybrid_stageable_rewindable")
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.stateClass, "hybrid_stageable_rewindable")
+    }
+
     /// JOURNEY step-05 places forced rejections at the fixture's real block
     /// boundaries; Qwen3.5 keeps exactly its 32-token, 256-row, crossing-only
     /// behaviour.

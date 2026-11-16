@@ -30,7 +30,9 @@ struct NativeMTPSignedAcceptanceCommand: AsyncParsableCommand {
             let identity = try cache.identity(directory: target)
             let tokenizerSHA = SHA256.hash(data: try Data(contentsOf: target.appendingPathComponent("tokenizer.json"))).map { String(format: "%02x", $0) }.joined()
             let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
-            try policy.validate(corpus: corpus, environment: environment, targetSHA256: identity.digest, mtpSHA256: identity.digest, tokenizerSHA256: tokenizerSHA)
+            let family = NativeMTPBenchFixtureLayout.resolve(root: URL(fileURLWithPath: ConfigLoader.expandTilde(root))).family
+            try policy.validate(corpus: corpus, environment: environment, targetSHA256: identity.digest, mtpSHA256: identity.digest,
+                                tokenizerSHA256: tokenizerSHA, quantization: family.quantization)
             if validateAcceptanceOnly {
                 let data = try JSONSerialization.data(withJSONObject: NativeMTPQualificationScope.bind(["validate_only": "pass", "corpus_sha256": corpus.digestSHA256, "policy_sha256": policy.digestSHA256]), options: [.sortedKeys])
                 FileHandle.standardOutput.write(data + Data("\n".utf8))

@@ -143,12 +143,13 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
                 .map { String(format: "%02x", $0) }.joined()
             let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
             try policy.validate(corpus: corpus, environment: environment,
-                                targetSHA256: target.digest, mtpSHA256: mtpDigest, tokenizerSHA256: tokenizerSHA)
+                                targetSHA256: target.digest, mtpSHA256: mtpDigest, tokenizerSHA256: tokenizerSHA,
+                                quantization: layout.family.quantization)
             checkedTarget = target
             acceptancePolicy = policy
             preflightDocument = [
                 "target_sha256": target.digest, "mtp_sha256": mtpDigest, "tokenizer_sha256": tokenizerSHA,
-                "quantization": "4bit", "cache_mode": "paged_kv_mixed",
+                "quantization": layout.family.quantization, "cache_mode": "paged_kv_mixed",
                 "policy_sha256": policy.digestSHA256,
                 "observed_environment": [
                     "hw_model": environment.hwModel, "chip": environment.chip, "ram_gb": environment.ramGB,

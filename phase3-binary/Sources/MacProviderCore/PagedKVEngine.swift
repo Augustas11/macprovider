@@ -347,11 +347,12 @@ public enum PagedKVAttachDecision: Equatable, Sendable {
 public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
     public static let deepseekV4RowPoolBridgeIdentifier = "deepseek-v4-row-pool-decode-v1"
-    public static let recognizedModelFamilies = ["deepseek_v4", "glm5_next", "gpt_oss", "lfm2", "llama", "minimax_m3", "qwen"]
+    public static let recognizedModelFamilies = ["deepseek_v4", "gemma4", "glm5_next", "gpt_oss", "lfm2", "llama", "minimax_m3", "qwen"]
 
     /// Some mixed cache layouts are measured per identity: Qwen hybrid decoders
     /// retain row-local recurrent state while paging only attention KV, and the
-    /// gpt-oss 120b tuple mixes sliding-window and full-attention paged KV.
+    /// gpt-oss and gemma-4-12b tuples mix sliding-window and full-attention
+    /// paged KV.
     public static func supportsCacheClass(
         _ runtimeCacheClass: String,
         hybridDecoderArchitectureVerified: Bool = false

@@ -2027,6 +2027,9 @@ struct NativeMTPBenchPolicy {
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
+    /// The target's global quantization label (`4bit`, `8bit` for
+    /// `gemma4_mtp_v1`, `mlx_mxfp4_mxfp8` for DSpark); `validateFamily` binds
+    /// it to the fixture family.
     var quantization: String = "4bit"
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
@@ -2104,7 +2107,7 @@ struct NativeMTPBenchPolicy {
         )
         try policy.validateMatrix()
         guard (1...5).contains(policy.proposalDepth),
-              ["4bit", "mlx_mxfp4_mxfp8"].contains(policy.quantization) else {
+              ["4bit", "8bit", "mlx_mxfp4_mxfp8"].contains(policy.quantization) else {
             throw NativeMTPBenchError.invalidPolicy("unsupported quantization or proposal_depth")
         }
         if policy.quantization == "4bit" {

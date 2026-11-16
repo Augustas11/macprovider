@@ -15,7 +15,6 @@ final class NativeMTPHardwareE2EDeepseekTests: XCTestCase {
         XCTAssertEqual(family, .deepseekV4)
         XCTAssertEqual(family.familyAdapter, "deepseek_v4_dspark_v1")
         XCTAssertEqual(family.mtpDirectoryName, "target")
-        XCTAssertEqual(family.predictionLayerCount, 3)
         XCTAssertEqual(family.maximumProposalDepth, 5)
         XCTAssertEqual(family.stateClass, "stageable_rewindable")
         XCTAssertEqual(family.quantizationLabel, "mlx_mxfp4_mxfp8")

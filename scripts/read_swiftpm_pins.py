@@ -42,16 +42,15 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.80 (#2393) on 3.32.3-macprovider.79: On
-# 3.32.3-macprovider.79, the last native-MTP layer (GLM-5-Next nextn head,
-# Qwen 3.5/3.6 MTP predictor) runs its post-attention norm and MoE/MLP, and
-# Qwen's final norm, on each row's read column only, while attention and the
-# drafter cache write still run on every column (MLX_LM_MTP_LAST_COLUMN=0 runs
-# every column again); carries the #2373 candidate: TokenIterator settles
-# simple and rotating caches by their stored buffers, and Llama and Qwen3 run
-# SwiGLU as one compiled kernel.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.80"
-SPEC048_MLX_SWIFT_LM_REVISION = "9317a903a9efb08a471c57be26744f7fa2a90ab9"
+# 3.32.3-macprovider.81 (#2328) on 3.32.3-macprovider.80: The three Gemma 4
+# commits of the campaign (packed assistant drafter, embedded assistant loader
+# and target state emission; cache-owned attention for row-safe batching; the
+# two K/V-read layers attend through the cache too), first carried by
+# 3.32.3-macprovider.65 on .63, cherry-picked onto 3.32.3-macprovider.80
+# without conflicts; other model families, the native-MTP read-column pruning
+# and the Swift, core and C rows are as in .80.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.81"
+SPEC048_MLX_SWIFT_LM_REVISION = "2639874f835134c94c069d1825afe44604110a58"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
