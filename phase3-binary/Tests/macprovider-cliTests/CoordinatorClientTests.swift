@@ -9389,12 +9389,15 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         refreshed: @escaping @Sendable () async -> CoordinatorClient.CatalogEnvelope? = { CoordinatorClientTests.refreshedCatalogEnvelope() },
         hooks: NativeMTPAdmissionPickup.Hooks? = nil,
-        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds
+        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds,
+        warmSet: AdmissionPickupWarmSet? = nil
     ) async throws -> CoordinatorClient {
         try await makeClient(
             status: status,
             recorder: recorder,
             drainTimeoutSeconds: 1,
+            enableWarmSwap: warmSet != nil,
+            modelRuntime: warmSet?.boot,
             catalogReleaseID: "release-a",
             catalogPolicyVersion: "policy-a",
             catalogCandidateSHA256: String(repeating: "a", count: 64),
@@ -9404,8 +9407,42 @@ final class CoordinatorClientTests: XCTestCase {
             catalogEnvelopeRefresher: refreshed,
             catalogEnvelopeRefreshMinimumInterval: 0,
             nativeMTPAdmissionPickup: hooks ?? probe.hooks,
-            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds
+            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds,
+            warmModels: warmSet?.table,
+            supportedModels: warmSet == nil ? nil : ["model-a", "model-b"]
         )
+    }
+
+    /// A warm set whose primary is the client's boot runtime (`model-a`) and
+    /// a warm `model-b`. `promote` performs SPEC-011 R-3.10.3 as
+    /// `WarmSetBoot.promoteInSwapTurn` does: the table, the primary role
+    /// with its swap-signal subscribers, then `completed`.
+    private struct AdmissionPickupWarmSet {
+        let table: WarmModelTable<ModelRuntime>
+        let boot: ModelRuntime
+        let member: ModelRuntime
+
+        func promote(signal: Bool = true) async throws {
+            _ = try table.promote(modelID: "model-b")
+            _ = await boot.handOffPrimaryRole(to: member)
+            if signal { await member.announceSwitchCompleted(target: "model-b") }
+        }
+    }
+
+    private func admissionPickupWarmSet() throws -> AdmissionPickupWarmSet {
+        let boot = makeRuntime(modelID: "model-a", warmSwapEnabled: true)
+        let member = makeRuntime(modelID: "model-b", warmSwapEnabled: false)
+        let table = WarmModelTable<ModelRuntime>()
+        _ = try table.insertPrimary(modelID: "model-a", runtime: boot)
+        let token = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: token, runtime: member)
+        return AdmissionPickupWarmSet(table: table, boot: boot, member: member)
+    }
+
+    /// The client hears its primary's swap signals, as `start()` arranges.
+    private static func listenForSwapSignals(_ client: CoordinatorClient) async throws {
+        await client.startSwapSignalConsumerForTest()
+        try await Task.sleep(nanoseconds: 200_000_000)
     }
 
     private static func admissionPickupStatus() -> ProviderStatus {
@@ -9681,6 +9718,126 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(Self.isDraining(frames))
         snapshot = await status.snapshot()
         XCTAssertEqual(snapshot.status, .draining)
+    }
+
+    /// SPEC-048-R013 with SPEC-001-R016: the pickup was computed for the
+    /// boot model, and a restart brings the boot model back as the primary.
+    /// A promotion during the delay abandons the pickup: no drain, no exit,
+    /// the admission reported pending.
+    func testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDelay() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.holdSleep = true
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.sleeps.count == 1 }
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .scheduled)
+
+        try await warmSet.promote()
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        probe.releaseSleep()
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertFalse(Self.isDraining(frames))
+        snapshot = await status.snapshot()
+        XCTAssertNotEqual(snapshot.status, .draining)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .restartRequired)
+        let admitted = await status.admitRequest(requestID: "after-promotion")
+        guard case .admitted(let startedAt) = admitted else { return XCTFail("the provider serves after the promotion") }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+    }
+
+    /// A promotion while the pickup waits for requests in flight abandons
+    /// it through the same path as an expired wait: nothing is cut, the
+    /// provider serves again, and the admission is reported pending.
+    func testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDrain() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .waitingForIdle
+        }
+        let draining = await status.snapshot().status
+        XCTAssertEqual(draining, .draining)
+
+        try await warmSet.promote()
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .ready)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        let admitted = await status.admitRequest(requestID: "after-promotion")
+        guard case .admitted(let next) = admitted else { return XCTFail("the provider serves again") }
+        await status.finishRequest(startedAt: next, completion: nil, failed: false)
+    }
+
+    /// The check before the exit holds without a swap signal: a promotion
+    /// that lands while the drain waits is seen when the wait ends.
+    func testAdmissionPickupChecksThePrimaryAgainBeforeItsExit() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe, status: status, recorder: CoordinatorFrameRecorder(), warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .waitingForIdle
+        }
+        try await warmSet.promote(signal: false)
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let state = await status.snapshot().status
+        XCTAssertEqual(state, .ready)
+    }
+
+    /// A warm set whose boot model stays the primary restarts exactly as a
+    /// single-model provider does.
+    func testAdmissionPickupWithAnUnpromotedWarmSetRestartsAsBefore() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.exits == 1 }
+        let frames = await recorder.frames
+        XCTAssertTrue(Self.isDraining(frames))
+        let phase = await status.snapshot().nativeMTPAdmissionPending?.phase
+        XCTAssertEqual(phase, .waitingForIdle)
     }
 
     /// Requests in flight are never cut: the wait outlasts `drain_timeout_s`,

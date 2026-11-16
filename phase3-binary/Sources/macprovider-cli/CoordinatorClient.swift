@@ -1606,6 +1606,11 @@ actor CoordinatorClient {
             case .loadFinished:
                 continue
             case .completed:
+                if primaryPromotedOffBootRuntime() {
+                    // SPEC-048-R013: a pickup was computed for the boot model;
+                    // a promotion abandons it, sleeping or draining.
+                    nativeMTPAdmissionPickupTask?.cancel()
+                }
                 if catalogReleaseID != nil {
                     let runtimeSnapshot = await modelRuntime.currentSnapshot()
                     if await catalogRuntimeMatches(runtimeSnapshot) == false {
@@ -9618,6 +9623,13 @@ actor CoordinatorClient {
         startNativeMTPAdmissionRefresh()
     }
 
+    func startSwapSignalConsumerForTest() {
+        guard swapHeartbeatTask == nil else { return }
+        swapHeartbeatTask = Task { [weak self] in
+            await self?.consumeSwapSignals()
+        }
+    }
+
     /// SPEC-048-R013: a verified catalog document for the loaded weights
     /// under a release other than the one this process started on may carry
     /// a new native-MTP admission. Each release is checked once, one at a
@@ -9652,6 +9664,16 @@ actor CoordinatorClient {
                 releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
             ))
         }
+        // SPEC-048-R013: the check is computed for the boot model, and a
+        // restart brings the boot model back as the primary. Once a warm
+        // member has been promoted the pickup is abandoned instead: the
+        // admission is reported pending and nothing drains or exits.
+        func abandonIfPrimaryPromoted() async -> Bool {
+            guard !stopped, !signalShutdownStarted, primaryPromotedOffBootRuntime() else { return false }
+            await abandonNativeMTPAdmissionRestart(releaseID: releaseID, reopen: nativeMTPAdmissionRestartDraining)
+            log("abandoned_primary_promoted")
+            return true
+        }
         let check = await hooks.newlyActivatable(envelope)
         guard check == .activatable else {
             log(check.rawValue)
@@ -9673,6 +9695,7 @@ actor CoordinatorClient {
             nativeMTPAdmissionPickupTask = nil
             return
         }
+        if await abandonIfPrimaryPromoted() { return }
         guard hooks.supervised() else {
             // Nothing restarts this process after an exit: report and keep serving.
             await reportRestartRequired()
@@ -9696,12 +9719,14 @@ actor CoordinatorClient {
         ))
         log("scheduled", " delay_s=\(Int(delay))")
         await hooks.sleep(delay)
+        if await abandonIfPrimaryPromoted() { return }
         let deadline = Date().addingTimeInterval(hooks.maxWaitSeconds)
         while true {
             // An update in flight replaces the process itself, and a pause
             // (requested or confirmed) is the operator's: never drain or exit
             // under either; carry on once it is over.
             while autoupdateInFlightOrPending() || operatorPaused || operatorPauseInProgress {
+                if await abandonIfPrimaryPromoted() { return }
                 guard !Task.isCancelled, !signalShutdownStarted else { return }
                 if Date() >= deadline {
                     await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
@@ -9710,6 +9735,7 @@ actor CoordinatorClient {
                 }
                 try? await Task.sleep(nanoseconds: NativeMTPAdmissionPickup.idlePollNanoseconds)
             }
+            if await abandonIfPrimaryPromoted() { return }
             guard !Task.isCancelled, !signalShutdownStarted else { return }
             nativeMTPAdmissionRestartDraining = true
             await providerStatus.raiseRestartDrainFence()
@@ -9724,6 +9750,7 @@ actor CoordinatorClient {
             case .idle:
                 break
             case .cancelled:
+                if await abandonIfPrimaryPromoted() { return }
                 if !signalShutdownStarted, !stopped {
                     await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
                 }
@@ -9738,8 +9765,17 @@ actor CoordinatorClient {
             if operatorPaused || operatorPauseInProgress || autoupdateInFlightOrPending() { continue }
             break
         }
+        if await abandonIfPrimaryPromoted() { return }
         log("restarting")
         hooks.requestExit()
+    }
+
+    /// SPEC-001-R016: a warm member other than the runtime this process
+    /// started with is the primary (SPEC-011 R-3.10.3). A swap of the
+    /// primary reloads the boot runtime in place and never counts.
+    private func primaryPromotedOffBootRuntime() -> Bool {
+        guard let primary = warmModels?.primaryServingRuntime() else { return false }
+        return primary !== bootModelRuntime
     }
 
     /// An update being evaluated, applied, or not yet finalized after its
@@ -9758,7 +9794,9 @@ actor CoordinatorClient {
     /// Gives up a restart without cutting anything: the provider serves
     /// again and reports that the admission still needs a restart. The
     /// release stays checked, so the next release or the next start retries.
-    private func abandonNativeMTPAdmissionRestart(releaseID: String) async {
+    /// `reopen` false: the pickup never drained (a promotion during its
+    /// delay), so the serving state is not touched.
+    private func abandonNativeMTPAdmissionRestart(releaseID: String, reopen: Bool = true) async {
         nativeMTPAdmissionRestartDraining = false
         await providerStatus.lowerRestartDrainFence()
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
@@ -9766,7 +9804,7 @@ actor CoordinatorClient {
         ))
         // An update drain or an operator-pause drain in progress owns the
         // state; only the fence is lowered then.
-        if !autoupdateInFlightOrPending(), !operatorPauseInProgress {
+        if reopen, !autoupdateInFlightOrPending(), !operatorPauseInProgress {
             await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_abandoned")
             try? await sendStateUpdate(state: nil, reason: "native_mtp_admission_restart_abandoned")
         }
