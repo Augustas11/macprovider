@@ -515,6 +515,10 @@ final class PagedKVDecodeSessionFinishTests: XCTestCase {
         try await shared.decode(["a", "b"], steps: 2)
         XCTAssertEqual(shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
 
+        // The retained record keeps the finished row's caches.
+        let finishedLayers = shared.backend.rowPagedCachesForTest(requestID: "a")
+        XCTAssertEqual(finishedLayers.count, 2)
+        let finishedTokens = shared.committed("a")
         shared.backend.finish(requestID: "a")
         XCTAssertEqual(
             shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false,
@@ -522,6 +526,10 @@ final class PagedKVDecodeSessionFinishTests: XCTestCase {
         )
 
         try await shared.decode(["b"], steps: 3)
+        // The next window releases the session finish dropped: the finished
+        // row's caches hold their own copy, so they pin no batch buffer.
+        XCTAssertTrue(finishedLayers.allSatisfy(\.holdsOwnKVBuffers), "a still rides the dropped batch")
+        XCTAssertEqual(finishedLayers.map(\.offset), [finishedTokens, finishedTokens])
         try await shared.decode(["b"], steps: 2)
         let count = shared.generated["b"]!.count
         let lone = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: ["b": prompts["b"]!])

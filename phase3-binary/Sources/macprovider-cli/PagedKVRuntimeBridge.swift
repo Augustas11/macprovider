@@ -756,6 +756,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private struct DecodeSession {
+        let id = UUID()
         var requestIDs: [String]
         var batchedCaches: [PagedKVSharedLayerBatch]
         var compiledCaches: [KVCache]
@@ -829,6 +830,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
+    /// Sessions dropped off the model container (`finish`, the native-MTP
+    /// verify entry) whose rows may still ride their buffers. The next
+    /// container caller releases them (`releaseRetiredDecodeSessions`).
+    private var retiredDecodeSessions: [DecodeSession] = []
     private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
     /// Row-owned drafter state. Only prompt prefill and a committed finalize
     /// change it, so an aborted or cancelled round leaves the pre-round
@@ -1090,6 +1095,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
         let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(
                 inputs,
@@ -1657,7 +1663,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_duplicate_packed_row")
         }
 
-        clearDecodeSession()
+        // Outside the model container: a window may be repacking the rows.
+        retireDecodeSession()
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
         let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
@@ -1713,6 +1720,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
+            self.releaseRetiredDecodeSessions()
             let rowStates = inputs.map {
                 self.rowState(
                     for: $0.requestID,
@@ -2032,7 +2040,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         labTraceLiveRows("finish_before", finishing: requestID)
         defer { labTraceLiveRows("finish_after", finishing: requestID) }
         #endif
-        dropDecodeSession(containing: requestID)
+        retireDecodeSession(containing: requestID)
         removeNativeMTPPendingTransaction(for: requestID)
         removeNativeMTPRowState(for: requestID)
         removeRowState(for: requestID, discardRecordedCache: false)
@@ -2102,6 +2110,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         try await container.perform(nonSendable: input) { context, input in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             var state = self.rowState(
                 for: input.requestID,
                 binding: input.binding,
@@ -2334,6 +2343,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform { _ in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             self.invalidateDecodeSession(containing: requestID)
             let row = self.existingRowState(for: requestID)
             guard let row, row.caches.count == self.cacheKinds.count else { return nil }
@@ -2663,6 +2673,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
             #endif
         }
+        // After packing, so riding rows already left the retired buffers.
+        releaseRetiredDecodeSessions(inUse: session?.id)
         let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
             && !hasBatchedState
@@ -4316,32 +4328,43 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.unlock()
     }
 
-    private func clearDecodeSession() {
-        lock.lock()
-        let session = decodeSession
-        decodeSession = nil
-        lock.unlock()
-        session?.batchedCaches.forEach { $0.releaseRows() }
-    }
-
     private func invalidateDecodeSession(containing requestID: String) {
         invalidateDecodeSession(containingAnyOf: [requestID])
     }
 
-    /// `finish` only (#2396): forgets the session a finished row rides and
-    /// touches no row cache. The scheduler calls `finish` while the next
-    /// window runs, and that window may be repacking these same caches into
-    /// its new batch: releasing the session here detached them mid-pack, and
-    /// a layer packed from a half-detached row started an empty one-token
-    /// lockstep buffer. The remaining rows stay attached to the dropped
-    /// session's buffers (synced at its window end); the next window repacks
-    /// them on the model container.
-    private func dropDecodeSession(containing requestID: String) {
+    /// For callers outside the model container (`finish`, the native-MTP
+    /// verify entry; #2396): forgets the decode session (the one holding
+    /// `requestID`, or any) without touching a row cache. The scheduler calls
+    /// `finish` while the next window runs, and that window may be repacking
+    /// these same caches into its new batch: releasing the session here
+    /// detached them mid-pack, and a layer packed from a half-detached row
+    /// started an empty one-token lockstep buffer. The session's rows stay
+    /// attached to its buffers (synced at its window end) until a container
+    /// caller repacks them or releases it (`releaseRetiredDecodeSessions`).
+    private func retireDecodeSession(containing requestID: String? = nil) {
         lock.lock()
-        if decodeSession?.requestIDs.contains(requestID) == true {
+        if let current = decodeSession, requestID.map(current.requestIDs.contains) ?? true {
             decodeSession = nil
+            retiredDecodeSessions.append(current)
         }
         lock.unlock()
+    }
+
+    /// Inside the model container only: releases retired sessions, so rows
+    /// that left them (a finished row's retained caches) take a copy of
+    /// their own history and the batch buffers free. Rows a window already
+    /// repacked ride its new batch and are untouched. Skips the stored
+    /// session and `inUse` (a window that reused a session `finish` retired
+    /// meanwhile stores it back; it is released when replaced).
+    private func releaseRetiredDecodeSessions(inUse: UUID? = nil) {
+        lock.lock()
+        let storedID = decodeSession?.id
+        let retired = retiredDecodeSessions
+        retiredDecodeSessions.removeAll()
+        lock.unlock()
+        for session in retired where session.id != storedID && session.id != inUse {
+            session.batchedCaches.forEach { $0.releaseRows() }
+        }
     }
 
     /// Ends the decode session only when one of `requestIDs` rides it. A
