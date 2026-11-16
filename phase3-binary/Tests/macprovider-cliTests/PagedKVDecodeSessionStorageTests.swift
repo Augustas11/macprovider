@@ -310,7 +310,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
     }
 
     /// Two-layer KV-only Qwen3 with random weights.
-    private static func tinyQwen3() throws -> Qwen3Model {
+    fileprivate static func tinyQwen3() throws -> Qwen3Model {
         let configuration = try JSONDecoder().decode(Qwen3Configuration.self, from: Data("""
             {
               "hidden_size": 16,
@@ -332,7 +332,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         return target
     }
 
-    private static func tinyPrompt(length: Int, salt: Int) -> [Int] {
+    fileprivate static func tinyPrompt(length: Int, salt: Int) -> [Int] {
         var state = UInt64(truncatingIfNeeded: 0x9E37_79B9 &+ salt)
         return (0 ..< length).map { _ in
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
@@ -342,7 +342,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 
     /// Serial reference: one `KVCacheSimple` per layer, the same 512-token
     /// prompt chunks, greedy decode.
-    private static func serialGreedy(target: Qwen3Model, prompt: [Int], tokens: Int) throws -> [Int] {
+    fileprivate static func serialGreedy(target: Qwen3Model, prompt: [Int], tokens: Int) throws -> [Int] {
         let cache = try target.newCache(parameters: nil)
         var logits: MLXArray?
         var offset = 0
@@ -360,7 +360,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         return generated
     }
 
-    private final class Rows {
+    fileprivate final class Rows {
         let backend: PagedKVSharedForwardBackend
         let allocator: PagedKVBlockAllocator
         let prompts: [String: [Int]]
@@ -471,6 +471,70 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
+    }
+}
+
+/// #2396: the scheduler calls `finish` from a finished row's terminal
+/// delivery while the next decode window already runs on the model
+/// container (every one of the Studio overlaps logged an active operation).
+/// `finish` must therefore touch no row cache. It released the dropped
+/// session, which detached the remaining rows' layer caches while that window
+/// was repacking the same caches into its new batch. A layer packed from a
+/// half-detached row got no K/V, started a fresh lockstep buffer at the
+/// window's first token, and the row recorded that layer with 8 tokens
+/// against a 467-token block table (`paged_kv_block_table_mismatch`).
+///
+/// CPU only, random two-layer weights: runs without a metallib (CI).
+final class PagedKVDecodeSessionFinishTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
+    override func invokeTest() {
+        guard MLXTestDevice.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.cpu)) {
+            super.invokeTest()
+        }
+    }
+
+    /// Two equal-length rows ride one lockstep session (the Studio failure:
+    /// `r2` and `r0` at 458 tokens), one row finishes, and the other decodes
+    /// on alone. `finish` leaves the remaining row attached to the dropped
+    /// session's buffers; the next window repacks it on the container, and
+    /// its greedy tokens equal the row decoded alone and a serial run.
+    func testFinishLeavesRemainingRowCachesToTheNextWindow() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 21),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 22),
+        ]
+        let shared = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        try await shared.prefillAll("a")
+        try await shared.prefillAll("b")
+        try await shared.decode(["a", "b"], steps: 2)
+        XCTAssertEqual(shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+
+        shared.backend.finish(requestID: "a")
+        XCTAssertEqual(
+            shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false,
+            "finish must not touch another row's caches: a window running beside it repacks them"
+        )
+
+        try await shared.decode(["b"], steps: 3)
+        try await shared.decode(["b"], steps: 2)
+        let count = shared.generated["b"]!.count
+        let lone = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: ["b": prompts["b"]!])
+        try await lone.prefillAll("b")
+        while lone.generated["b"]!.count < count {
+            try await lone.decode(["b"], steps: 1)
+        }
+        XCTAssertEqual(shared.generated["b"], lone.generated["b"], "b diverged from the row decoded alone")
+        XCTAssertEqual(
+            shared.generated["b"],
+            try PagedKVDecodeSessionStorageTests.serialGreedy(target: target, prompt: prompts["b"]!, tokens: count),
+            "b diverged from serial KVCacheSimple"
+        )
     }
 }
 
