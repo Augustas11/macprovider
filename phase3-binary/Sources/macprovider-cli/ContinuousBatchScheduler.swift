@@ -295,6 +295,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let prefillGrouping: ContinuousBatchPrefillGroupingRule
     let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
+    /// Chunk the idle prefill cohort (`prefillTurnTokenBudget`) is sized by
+    /// when below the prompt chunk; nil sizes it by the prompt chunk. Never
+    /// changes a row's chunks (SPEC-038 FR-CB2, hybrid Qwen MoE: 512).
+    let idlePrefillCohortChunkTokens: Int?
     /// Fixed per-row reference partition, independent of generic token budgets.
     let referencePrefillStepSize: Int?
     /// Prefill each row in chunks of exactly the chunk limit from its cursor
@@ -377,6 +381,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
+        idlePrefillCohortChunkTokens: Int? = nil,
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
         allowsRaggedPrefillOffsets: Bool = false,
@@ -422,6 +427,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
+        self.idlePrefillCohortChunkTokens = idlePrefillCohortChunkTokens.map { max(1, $0) }
         // Ragged grouping may shorten chunks to fit its generic token budget.
         // Reference pooling partitions must instead prefill each row alone.
         self.allowsRaggedPrefillOffsets = referencePrefillStepSize == nil && allowsRaggedPrefillOffsets
@@ -2599,6 +2605,16 @@ actor ContinuousBatchScheduler {
     }
     nonisolated var poolTokens: Int {
         configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
+    }
+    /// The prompt chunk a hybrid Qwen MoE backend prefills in when it is
+    /// above the 512-token default, which keys its FR-CB10 grant; nil for
+    /// every other backend and chunk, whose keys are unchanged (#2402).
+    nonisolated var selfCheckPromptChunkTokens: Int? {
+        let chunk = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
+        guard (backend as? PagedKVSharedForwardBackend)?.isHybridQwenMoE == true,
+              chunk > ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        else { return nil }
+        return chunk
     }
     private let allocator: PagedKVBlockAllocator
     private let backend: any ContinuousBatchSchedulerBackend
@@ -6889,11 +6905,13 @@ actor ContinuousBatchScheduler {
     /// prefill splitting the earlier rows' windows. Only rows with as many
     /// prompt tokens left as the head use the tokens past the configured
     /// budget: a row that cannot finish with the head would only delay the
-    /// head's first token (FR-CB2 v0.3.36, #2253 msb03).
+    /// head's first token (FR-CB2 v0.3.36, #2253 msb03). A configured
+    /// `idlePrefillCohortChunkTokens` sizes the cohort by that smaller chunk
+    /// (hybrid Qwen MoE, v0.3.59).
     private func prefillTurnTokenBudget() -> Int {
         let budget = configuration.maxPrefillTokensPerIteration
         guard activeDecode.isEmpty, configuration.referencePrefillStepSize == nil else { return budget }
-        let chunk = min(configuration.maxPromptChunkTokens, budget)
+        let chunk = min(configuration.maxPromptChunkTokens, configuration.idlePrefillCohortChunkTokens ?? Int.max, budget)
         let (cohort, overflow) = chunk.multipliedReportingOverflow(by: configuration.maxPrefillRowsPerIteration)
         guard !overflow else { return budget }
         return max(budget, min(cohort, ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration))

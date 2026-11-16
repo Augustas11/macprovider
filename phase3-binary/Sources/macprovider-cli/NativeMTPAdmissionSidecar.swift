@@ -1753,7 +1753,7 @@ enum NativeMTPAdmissionSidecar {
                   paddingRule == "none" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
-            // SPEC-048-R002 (0.1.110): a `gemma4_mtp_v1` affine tuple is an
+            // SPEC-048-R002 (0.1.111): a `gemma4_mtp_v1` affine tuple is an
             // 8-bit target with the unquantized bfloat16 assistant; the
             // representation digest binds both.
             let gemma4 = familyAdapter == gemma4MTPFamilyAdapter

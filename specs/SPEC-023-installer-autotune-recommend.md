@@ -14,7 +14,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   to the runtime as `mlx_affine_8bit` (target) and `bf16` (MTP), with empty
   exception arrays and a representation manifest whose `mtp` object is the
   base form. Every other adapter keeps global width 4 for both artifacts.
-  Lockstep with SPEC-048 0.1.110.
+  Lockstep with SPEC-048 0.1.111.
 - **v0.22.44 (2026-11-16, Related: #2338)** — §6: `autotune --recommend
   --warm-set <model>` adds a `warm_set` member, last, to the recommendation
   JSON: the SPEC-001 §6.16 fit plan for that model beside the recommended

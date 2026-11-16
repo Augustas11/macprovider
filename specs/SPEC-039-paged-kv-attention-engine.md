@@ -1,11 +1,14 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.34
-Status: draft (normative design). v0.1.34 defines the `gemma4` mixed cache
+Version: v0.1.35
+Status: draft (normative design). v0.1.35 defines the `gemma4` mixed cache
 class (keep=0 sliding-window layers and full-attention layers from
 `text_config`, both paged on one block table, decode keys in ring order) and
 adds the provisional FR-PKV12 `google/gemma-4-12b-it` identity so its attach
-probes and FR-CB10 self-check can run. v0.1.33 removes the `gpt_oss` family from
+probes and FR-CB10 self-check can run. v0.1.34 states that the hybrid attach-time
+proof keeps its at-most-512-token partition for the hybrid Qwen MoE family,
+which now serves chunks of up to 2048 tokens like `glm5_next` (SPEC-038
+v0.3.59 FR-CB2, Related: #2402); the proof is unchanged. v0.1.33 removes the `gpt_oss` family from
 the model-family KV-quant default and makes an explicit `kv_bits` for a
 gpt-oss model fail closed: gpt-oss attention sinks have no quantized-KV
 attention path. v0.1.32 records the attach, isolation,
@@ -102,7 +105,7 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
-Change log v0.1.34 (2026-11-14): defines the `gemma4` mixed cache class
+Change log v0.1.35 (2026-11-14): defines the `gemma4` mixed cache class
 (#2154). FR-PKV12 adds a provisional, SPEC-first `google/gemma-4-12b-it`
 entry with `architectures == ["Gemma4UnifiedForConditionalGeneration"]` and
 top-level `model_type` `gemma4_unified`. Its topology is read from
@@ -668,7 +671,7 @@ attach-time admission allowlist. For v0.1.2, the first additional admitted
 family was `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; that 20b
 fixture did not prove `gpt-oss-120b`. For v0.1.14,
 `openai/gpt-oss-120b` adds its own exact-identity packaged-runtime evidence.
-(v0.1.34) `google/gemma-4-12b-it` enters provisionally under the same rule:
+(v0.1.35) `google/gemma-4-12b-it` enters provisionally under the same rule:
 its attach probes and FR-CB10 self-check are the evidence path. Other `gemma4`
 artifacts, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
 the allowlist until they have equivalent FR-PKV4 evidence.
@@ -698,7 +701,7 @@ keep=0 `RotatingKVCache` on `sliding_attention` layers and `KVCacheSimple` on
    decode attention outputs bit for bit against the serial caches, with the
    gather on a non-identity block order.
 
-**`gemma4` sliding-window/full-attention class (v0.1.34).** The `gemma4`
+**`gemma4` sliding-window/full-attention class (v0.1.35).** The `gemma4`
 mixed class follows the three `gpt_oss` rules above with the same oracle.
 Its 1024-token window is longer than the 513-token proof, so the attach
 proof's prompt is `max(513, sliding_window + 2 × block_size_tokens)` tokens
@@ -1058,7 +1061,7 @@ be individually measured before it is added. The v1 allowlist is:
   parity and isolation probes and the automatic FR-CB10 self-check; it is
   not parity evidence, a signed grant or production qualification, and
   attach fails closed until those gates pass.
-- (v0.1.34, provisional, SPEC-first) `google/gemma-4-12b-it`, the catalog
+- (v0.1.35, provisional, SPEC-first) `google/gemma-4-12b-it`, the catalog
   model whose verified artifact is `Jundot/gemma-4-12B-it-oQ8e-mtp`, with
   `architectures == ["Gemma4UnifiedForConditionalGeneration"]` and top-level
   `model_type` `gemma4_unified` in the artifact's `config.json` (dense
@@ -1087,7 +1090,7 @@ serial ring order (FR-PKV4). The parity label is `sdpa-parity-v1`. A
 different count, order, window, a keep>0 sink-token layer, a recurrent layer
 or any other cache kind fails closed with `paged_fallback_cache_class`.
 
-**`gemma4` mixed class (v0.1.34).** The runtime cache identity is `mixed`.
+**`gemma4` mixed class (v0.1.35).** The runtime cache identity is `mixed`.
 The layout comes from `text_config`, which MUST have `model_type`
 `gemma4_unified_text`, an explicit `layer_types` array, and
 `num_kv_shared_layers` present and equal to 0, so every decoder layer owns
@@ -1198,10 +1201,12 @@ Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
 parity and isolation gates on the packaged runtime. For an allowlisted hybrid,
 the attach-time proof MUST compare at least 48 exact greedy tokens after a
-513-token prompt partitioned in the same at-most-512-token chunks used by
-production serving; a shorter, differently partitioned, or non-exact proof
-fails closed. For a sparse-attention family (`glm5_next`) the attach-time
-proof prompt MUST instead be at least
+513-token prompt partitioned in at-most-512-token chunks. The proof keeps
+this 512 partition; the production chunk is 2048 for `glm5_next` and the
+hybrid Qwen MoE family (SPEC-038 FR-CB2). A shorter, differently
+partitioned, or non-exact proof fails closed. For a
+sparse-attention family (`glm5_next`) the attach-time proof prompt MUST
+instead be at least
 `max(513, index_topk + 2 × block_size_tokens)` tokens, read from the resident
 model's `config.json` and the pool's configured block size (2560 for the
 admitted identity at block 256), in the same production chunks: a 513-token
@@ -1217,7 +1222,7 @@ for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
 `KVCacheSimple` on full-attention layers, while `openai/gpt-oss-120b` uses
 keep=0 `RotatingKVCache` on sliding-window layers and `KVCacheSimple` on
 full-attention layers in the exact `gpt_oss` class layout above (v0.1.29;
-`openai/gpt-oss-20b` the same, and (v0.1.34) `google/gemma-4-12b-it` in the
+`openai/gpt-oss-20b` the same, and (v0.1.35) `google/gemma-4-12b-it` in the
 `gemma4` class layout). The `glm5_next` identity uses exactly one cache per
 decoder layer in layer order: `MambaCache` at every `linear_attention` index of
 `text_config.layer_types` (34 KDA layers for the admitted artifact) and
@@ -1287,7 +1292,7 @@ leftovers proof. Recognizing `gpt_oss` as a model family (v0.1.2) is
 identity-family only; gpt-oss alternating sliding/full layers remain an
 unallowlisted `mixed` class except for the exact `openai/gpt-oss-120b` and
 (v0.1.29) `openai/gpt-oss-20b` identity/config pairs named above, each in the
-exact `gpt_oss` class layout. Recognizing `gemma4` (v0.1.34) is likewise
+exact `gpt_oss` class layout. Recognizing `gemma4` (v0.1.35) is likewise
 identity-family only: only `google/gemma-4-12b-it` in the exact `gemma4`
 class layout is allowlisted.
 

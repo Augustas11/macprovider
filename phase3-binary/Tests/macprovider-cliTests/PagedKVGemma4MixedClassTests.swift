@@ -6,7 +6,7 @@ import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
 
-/// SPEC-039 v0.1.34 `gemma4` mixed cache class: the exact
+/// SPEC-039 v0.1.35 `gemma4` mixed cache class: the exact
 /// `google/gemma-4-12b-it` identity, its `text_config` sliding-window /
 /// full-attention layout, and batched-vs-alone token exactness on a tiny
 /// random-weight Gemma 4 model whose rows cross the sliding window.

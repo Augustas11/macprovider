@@ -22,6 +22,18 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## A self-degraded provider returns while a chat is forwarded to it — live in v1.8.292 (merged 2026-11-16)
+
+Issue #2399. Coordinator: a `degraded` provider with no coordinator hold (for example the first-token stall hold of PR 2378) that sends a `ready` or `busy` `state_update` leaves `degraded` on it even while a chat the coordinator forwarded is still running on it. The coordinator keeps owning the seat count while chats are forwarded: the provider returns as `busy` or `ready` from that count, never from its own `slots_free`, and free seats never exceed `slots_total` minus the forwarded chats. A heartbeat's `ready` does not lift `degraded` while chats are forwarded, so wake warm-up (SPEC-002 FR-P8) still waits for its own exit. Recovery and breaker holds, coordinator drains and thermal reports are unchanged. No schema change, no wire change, no provider CLI change.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: a provider that trips its first-token stall watchdog and recovers is reported in service again (`/poolz` `ready` or `busy`, `in_service: true`) on its next state update while its held request is still running.
+
+## Native-MTP canary steps logged on the coordinator (SPEC-031-R033, SPEC-048-R016) — live in v1.8.292 (merged 2026-11-16)
+
+[PR 2405](https://github.com/Augustas11/macprovider/pull/2405) (Related: #2404). The coordinator logs one structured line each for canary challenge sent (challenge id, request id, deadline, bank release id), challenge send failure, result received (outcome, reason, decode path, diagnostic), canary timeout, and native-MTP tuple disable sent (reason). Canary behaviour is unchanged: one timeout still disables the tuple, as SPEC-048-R016 requires.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: a provider with native-MTP admission starts; the coordinator log shows `native_mtp_canary_challenge_sent` followed by `native_mtp_canary_result_received` with outcome `pass`, and native MTP stays enabled past the first canary. A `native_mtp_canary_timeout` instead shows which challenge went unanswered.
+
 ## Several models per provider session (SPEC-001 R016 to R019, SPEC-002 R011) — merged 2026-11-16, not live
 
 [PR 2386](https://github.com/Augustas11/macprovider/pull/2386) merged as `354f13dd2` (Related: #2338). Coordinator: strict decode of a provider's `warm_models`; a session with at least two loaded, hash-verified members gets one pool entry per model with its own slots, routing, pins and queue; `served_model_id` on dispatch; `model_not_loaded` before the first byte fails over without settlement; compute-integrity sanctions per model, keyed on the catalog row. A provider with one loaded model is handled as today. Gateway: counts a multi-model session once; `/v1/models` and earnings per model. Schema: one defaulted column, `served_model_dispatch`, on the two route-snapshot tables (additive).
@@ -45,6 +57,10 @@ PR #2375 (`a8c2e6157`), epic #2355. Live in v1.8.290 (2026-11-15 14:17 WITA).
 - Gateway: the OpenRouter model feed advertises `tools` for `lfm2.5-24b-a2b`, matching the coordinator's tool-grammar family.
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
+
+## Pearl runtime v1.8.292 (2026-11-16)
+
+**Live 2026-11-16 22:51 WITA** (tag `v1.8.292` at `c17feb3ec`, release run 43888372416, applied through `scripts/ops/pearl-runtime.sh`). It carries PR 2403 (a self-degraded provider returns to service while a chat is forwarded to it; `ade936f03`, issue 2399) and the coordinator half of PR 2405 (native-MTP canary challenge, result, timeout and disable are logged; `c17feb3ec`, Related: #2404). The apply held buyers with 503 for about two to three minutes; coordinator and gateway `/healthz` report `v1.8.292` with no buyer hold.
 
 ## Pearl runtime v1.8.291 (2026-11-16)
 

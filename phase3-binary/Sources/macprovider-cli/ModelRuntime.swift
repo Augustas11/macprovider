@@ -3741,7 +3741,7 @@ maxTokens: 1,
         // #1780; the 20b entry (SPEC-039 v0.1.29) is that same class on its own
         // exact identity. Both also need the config's exact per-layer layout;
         // neither admits the gpt_oss family or a path alias. The gemma-4-12b
-        // entry (SPEC-039 v0.1.34) is the same class read from its
+        // entry (SPEC-039 v0.1.35) is the same class read from its
         // `text_config`; it does not admit the gemma4 family. Non-
         // hybrid Qwen models are admitted by the base `KVCacheSimple` allowlist.
         // Adding a future measured mixed identity is one entry here plus the
@@ -3796,7 +3796,7 @@ maxTokens: 1,
         }()
         // `gpt_oss` and `gemma4` key on the exact `architectures` array and
         // model type and carry their verified sliding-window/full-attention
-        // layer layout (`gemma4` from `text_config`, SPEC-039 v0.1.34).
+        // layer layout (`gemma4` from `text_config`, SPEC-039 v0.1.35).
         let slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
@@ -6789,7 +6789,8 @@ maxTokens: 1,
                 runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
                     forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
                     forwardTokenCap: scheduler.forwardTokenCap,
-                    smallMRoute: smallMRoute
+                    smallMRoute: smallMRoute,
+                    promptChunkTokens: scheduler.selfCheckPromptChunkTokens
                 ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
@@ -14338,7 +14339,7 @@ maxTokens: maxTokens,
                 && representation.perLayerExceptions == quantization.perLayerExceptions
                 && representation.unquantizedExceptions == quantization.unquantizedExceptions
         case ("mlx_affine_8bit", "bf16"):
-            // SPEC-048-R002 (0.1.110) `gemma4_mtp_v1`: 8-bit target, bf16 assistant.
+            // SPEC-048-R002 (0.1.111) `gemma4_mtp_v1`: 8-bit target, bf16 assistant.
             guard let representation = try? NativeMTPArtifactObserver.embeddedAssistantRepresentation(for: observation) else {
                 return false
             }
@@ -14409,7 +14410,7 @@ maxTokens: maxTokens,
     }
 
     /// Gemma 4 assistant `block_size` 4: one bonus token plus at most three
-    /// drafts from one position (SPEC-048 0.1.109, `gemma4_mtp_v1`).
+    /// drafts from one position (SPEC-048 0.1.110, `gemma4_mtp_v1`).
     static let gemma4NativeMTPMaximumProposalDepth = 3
 
     /// Whether the signed proposal depth fits the adapter. Qwen and GLM draft
@@ -14486,7 +14487,7 @@ maxTokens: maxTokens,
     /// `gemma4_mtp_v1`: the assistant attends over the target's last
     /// full-attention and sliding-attention K/V, which packed verification
     /// hands back per row only from paged K/V. The target must be the exact
-    /// SPEC-039 v0.1.34 `gemma4` mixed class, with the runtime caches in its
+    /// SPEC-039 v0.1.35 `gemma4` mixed class, with the runtime caches in its
     /// config layout.
     private static func gemma4NativeMTPTopologySupported(
         modelCapabilities: PagedKVRuntimeModelCapabilities,

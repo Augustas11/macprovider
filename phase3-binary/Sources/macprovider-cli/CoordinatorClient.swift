@@ -1318,7 +1318,8 @@ actor CoordinatorClient {
                 await runtime.disableNativeMTPTuple(
                     admissionTupleSHA256: payload.nativeMTPAdmissionTupleSHA256,
                     servedSnapshotID: payload.servedSnapshotID,
-                    targetGeneration: payload.targetGeneration
+                    targetGeneration: payload.targetGeneration,
+                    reason: CoordinatorClient.nativeMTPStatusReason(forCoordinatorDisable: payload.reason)
                 )
             }
         }
@@ -3191,6 +3192,14 @@ actor CoordinatorClient {
                   !nativeMTPTupleDisableReplaySet.contains(requestDigest) else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable request digest")
             }
+            Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
+                event: "native_mtp_tuple_disable_received",
+                fields: [
+                    ("reason", reason),
+                    ("target_generation", String(targetGeneration)),
+                    ("issued_at", issuedAt),
+                ]
+            ))
             nativeMTPTupleDisableReplaySet.insert(requestDigest)
             nativeMTPTupleDisableReplayDigests.append(requestDigest)
             if nativeMTPTupleDisableReplayDigests.count > 256 {
@@ -3248,6 +3257,13 @@ actor CoordinatorClient {
                 lastNativeMTPTupleOfferDigest = nil
             }
         } catch {
+            Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
+                event: "native_mtp_tuple_disable_nak",
+                fields: [
+                    ("reason", (message["reason"] as? String) ?? "none"),
+                    ("code", "invalid_message"),
+                ]
+            ))
             try await sendNAK(
                 inReplyTo: "native_mtp_tuple_disable_v1",
                 code: "invalid_message",
@@ -3443,6 +3459,13 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("native MTP canary session binding mismatch")
             }
         } catch {
+            Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
+                event: "native_mtp_canary_request_nak",
+                fields: [
+                    ("challenge_id", (message["challenge_id"] as? String) ?? "none"),
+                    ("code", "invalid_message"),
+                ]
+            ))
             try await sendNAK(
                 inReplyTo: "native_mtp_canary_request_v1",
                 code: "invalid_message",
@@ -3450,17 +3473,69 @@ actor CoordinatorClient {
             )
             return
         }
+        Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
+            event: "native_mtp_canary_request_received",
+            fields: [
+                ("challenge_id", request.challengeID),
+                ("request_id", request.requestID),
+                ("target_generation", String(request.targetGeneration)),
+                ("expires_at", request.expiresAt),
+            ]
+        ))
 
+        let started = DispatchTime.now().uptimeNanoseconds
         let result = await nativeMTPCanaryExecutor(request)
+        var sent = result
         do {
             try Self.validateNativeMTPCanaryResult(result, request: request)
             try await send(result.wireObject)
         } catch {
-            let failed = Self.inconclusiveNativeMTPCanaryResult(
+            sent = Self.inconclusiveNativeMTPCanaryResult(
                 request: request,
                 diagnostic: "native MTP canary executor returned invalid result"
             )
-            try await send(failed.wireObject)
+            try await send(sent.wireObject)
+        }
+        let elapsedMS = (DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000
+        Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
+            event: "native_mtp_canary_result_sent",
+            fields: [
+                ("challenge_id", sent.challengeID),
+                ("request_id", sent.requestID),
+                ("terminal_reason", sent.terminalReason),
+                ("decode_path", sent.actualDecodePath),
+                ("diagnostic", sent.diagnostic ?? "none"),
+                ("elapsed_ms", String(elapsedMS)),
+            ]
+        ))
+    }
+
+    /// Issue #2404: one line per native-MTP canary and disable step, so a
+    /// timeout shows which side lost the frame. Values are identifiers and
+    /// closed-set words only; challenge content and prompts are never logged.
+    private static func logNativeMTPCanary(_ line: String) {
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    static func nativeMTPCanaryLogLine(event: String, fields: [(String, String)]) -> String {
+        let detail = fields
+            .map { "\($0.0)=\(sanitizedDiagnosticText($0.1, maxLength: 128).replacingOccurrences(of: " ", with: "_"))" }
+            .joined(separator: " ")
+        return "event=\(event) \(detail)\n"
+    }
+
+    /// The status `last_reason` for a coordinator disable: the coordinator's
+    /// own reason, so a canary timeout no longer reads as a revocation.
+    /// `tuple_revoked` stays for a reason this provider does not know.
+    static func nativeMTPStatusReason(forCoordinatorDisable reason: String) -> NativeMTPStatusReason {
+        switch reason {
+        case "mismatch": return .canaryMismatch
+        case "timeout": return .canaryTimeout
+        case "expired": return .canaryExpired
+        case "fallback": return .canaryFallback
+        case "ordinary_or_classic": return .canaryOrdinaryOrClassic
+        case "operator": return .coordinatorOperator
+        default: return .tupleRevoked
         }
     }
 
