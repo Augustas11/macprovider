@@ -11,6 +11,25 @@ import XCTest
 /// full-attention layout, and batched-vs-alone token exactness on a tiny
 /// random-weight Gemma 4 model whose rows cross the sliding window.
 final class PagedKVGemma4MixedClassTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
+    override func invokeTest() {
+        guard MLXTestDevice.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.cpu)) {
+            super.invokeTest()
+        }
+    }
+
     private static let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
     private static let modelSHA = String(repeating: "a", count: 64)
     private static let modelID = "google/gemma-4-12b-it"
