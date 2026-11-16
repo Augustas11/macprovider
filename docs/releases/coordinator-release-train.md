@@ -28,6 +28,12 @@ Issue #2399. Coordinator: a `degraded` provider with no coordinator hold (for ex
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: a provider that trips its first-token stall watchdog and recovers is reported in service again (`/poolz` `ready` or `busy`, `in_service: true`) on its next state update while its held request is still running.
 
+## Native-MTP canary steps logged on the coordinator (SPEC-031-R033, SPEC-048-R016) — open, not live
+
+[PR 2405](https://github.com/Augustas11/macprovider/pull/2405) (Related: #2404). The coordinator logs one structured line each for canary challenge sent (challenge id, request id, deadline, bank release id), challenge send failure, result received (outcome, reason, decode path, diagnostic), canary timeout, and native-MTP tuple disable sent (reason). Canary behaviour is unchanged: one timeout still disables the tuple, as SPEC-048-R016 requires.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: a provider with native-MTP admission starts; the coordinator log shows `native_mtp_canary_challenge_sent` followed by `native_mtp_canary_result_received` with outcome `pass`, and native MTP stays enabled past the first canary. A `native_mtp_canary_timeout` instead shows which challenge went unanswered.
+
 ## Several models per provider session (SPEC-001 R016 to R019, SPEC-002 R011) — merged 2026-11-16, not live
 
 [PR 2386](https://github.com/Augustas11/macprovider/pull/2386) merged as `354f13dd2` (Related: #2338). Coordinator: strict decode of a provider's `warm_models`; a session with at least two loaded, hash-verified members gets one pool entry per model with its own slots, routing, pins and queue; `served_model_id` on dispatch; `model_not_loaded` before the first byte fails over without settlement; compute-integrity sanctions per model, keyed on the catalog row. A provider with one loaded model is handled as today. Gateway: counts a multi-model session once; `/v1/models` and earnings per model. Schema: one defaulted column, `served_model_dispatch`, on the two route-snapshot tables (additive).
