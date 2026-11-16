@@ -303,6 +303,19 @@ final class MultiModelBenchCheckTests: XCTestCase {
         XCTAssertEqual(pass.line, "GATE pass")
     }
 
+    /// A model granted other rows than requested is named on the final GATE
+    /// line; equal rows leave the line as it was.
+    func testAggregateGateCarriesTheRowFieldsWhenGrantedDiffersFromRequested() {
+        let one = MultiModelCheckRowShape(model: "a", requestedRows: 4, grantedRows: 1, selfCheckReason: "no_net_gain")
+        let full = MultiModelCheckRowShape(model: "b", requestedRows: 2, grantedRows: 2, selfCheckReason: "granted")
+        let pass = MultiModelCheckRunner.aggregateGate([("a", gate([]))], rowShapes: [one, full])
+        XCTAssertEqual(pass.line, "GATE pass a_rows_requested=4 a_rows_granted=1 a_self_check=no_net_gain b_rows_requested=2 b_rows_granted=2 b_self_check=granted")
+        let fail = MultiModelCheckRunner.aggregateGate([("a", gate(["hang"]))], rowShapes: [one, full])
+        XCTAssertEqual(fail.line, "GATE fail policies=a reason=hang a_rows_requested=4 a_rows_granted=1 a_self_check=no_net_gain b_rows_requested=2 b_rows_granted=2 b_self_check=granted")
+        XCTAssertEqual(fail.reasons, ["policy=a hang"])
+        XCTAssertEqual(MultiModelCheckRunner.aggregateGate([("a", gate([]))], rowShapes: [full]).line, "GATE pass")
+    }
+
     func testGoalLineNamesThePolicy() throws {
         let solo = soloStats()
         let goal = try XCTUnwrap(MultiModelCheckRunner.goal(

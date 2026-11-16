@@ -15,7 +15,7 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
         primaryGiB: Int = 16, primaryKV: Int = 100_000, primaryContext: Int = 32_768, primarySlots: Int = 2,
         memberGiB: Int? = 4, memberKV: Int = 50_000, memberDeclaredMax: Int? = 131_072,
         primaryFamily: String? = "qwen3", memberFamily: String? = "llama", operatorMB: Int? = nil,
-        primaryVerified: Bool = true, memberBound: Bool = true
+        operatorValue: String? = nil, primaryVerified: Bool = true, memberBound: Bool = true
     ) -> AutotuneWarmSetPlan.Inputs {
         AutotuneWarmSetPlan.Inputs(
             physicalMemoryBytes: UInt64(ramGiB) * UInt64(gib),
@@ -26,7 +26,7 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
             member: .init(modelID: "second/model", artifactBytes: memberGiB.map { $0 * gib }, kvBytesPerToken: memberKV,
                           declaredMaxContextTokens: memberDeclaredMax, family: memberFamily, catalogMinRAMGB: 8,
                           catalogBound: memberBound),
-            operatorCommandBufferMB: operatorMB)
+            operatorCommandBuffer: operatorValue ?? operatorMB.map(String.init))
     }
 
     func testFitsGivesTheSecondModelThePrimarysShapeWhenThereIsRoom() throws {
@@ -117,10 +117,31 @@ final class AutotuneWarmSetPlanTests: XCTestCase {
             if let mb = ModelRuntime.commandBufferBudgetMBByFamily[primary] {
                 budget.recordCommandBufferBudget(modelFamily: primary, megabytes: mb)
             }
-            let planned = AutotuneWarmSetPlan.commandBufferBudgetConflicts(family: member, primaryFamily: primary, operatorMB: nil)
+            let planned = AutotuneWarmSetPlan.commandBufferBudgetConflicts(family: member, primaryFamily: primary, operatorValue: nil)
             XCTAssertEqual(planned, conflicts, "\(primary) + \(member)")
             XCTAssertEqual(planned, budget.commandBufferBudgetConflict(modelFamily: member) != nil, "\(primary) + \(member)")
         }
+    }
+
+    /// Any non-empty `MLX_MAX_MB_PER_BUFFER` is the operator's, integer or
+    /// not, in the plan as in the loader: never a conflict.
+    func testANonIntegerOperatorCommandBufferValueIsTheOperatorsInThePlanAndTheLoader() {
+        for value in ["64mb", " 1024 ", "abc"] {
+            let plan = AutotuneWarmSetPlan.compute(
+                inputs(ramGiB: 512, workingSetGiB: 400, memberFamily: "deepseek_v4", operatorValue: value))
+            XCTAssertEqual(plan.decision, .fits, value)
+            XCTAssertFalse(AutotuneWarmSetPlan.commandBufferBudgetConflicts(
+                family: "deepseek_v4", primaryFamily: "qwen3", operatorValue: value), value)
+            XCTAssertEqual(SharedModelMemoryRules.operatorCommandBufferBudget(value)?.family, "environment", value)
+        }
+        XCTAssertEqual(SharedModelMemoryRules.operatorCommandBufferBudget(" 1024 ")?.megabytes, 1_024)
+        XCTAssertNil(SharedModelMemoryRules.operatorCommandBufferBudget("abc")?.megabytes)
+        XCTAssertNil(SharedModelMemoryRules.operatorCommandBufferBudget(""))
+        XCTAssertNil(SharedModelMemoryRules.operatorCommandBufferBudget(nil))
+        // An empty value is unset, as for the loader: the conflict stands.
+        XCTAssertEqual(AutotuneWarmSetPlan.compute(
+            inputs(ramGiB: 512, workingSetGiB: 400, memberFamily: "deepseek_v4", operatorValue: "")).reason,
+            "command_buffer_budget_conflict")
     }
 
     func testRefusalsThatNeedNoArithmetic() {

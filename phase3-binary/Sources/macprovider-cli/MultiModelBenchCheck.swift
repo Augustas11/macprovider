@@ -477,7 +477,7 @@ struct MultiModelCheckRunner: Sendable {
         }
         // The final GATE and the top-level JSON gate cover every policy; GOAL
         // is the baseline's. Exit 2 when any policy failed.
-        let aggregate = Self.aggregateGate(gateResults)
+        let aggregate = Self.aggregateGate(gateResults, rowShapes: rowShapes.all)
         await recordRuntimeEnds(lanes.runtimes)
         box.update { report in
             report.parityChecked = parityChecked
@@ -493,15 +493,23 @@ struct MultiModelCheckRunner: Sendable {
     }
 
     /// Pure. `GATE pass`, or a fail naming every failed policy and its first
-    /// reason; the first failed policy's reason leads the line.
-    static func aggregateGate(_ results: [(spec: String, gate: MultiModelCheckGate)]) -> MultiModelCheckGate {
+    /// reason; the first failed policy's reason leads the line. When a model
+    /// was granted other rows than requested, the line ends with each
+    /// model's row fields, so a cell meant to batch that ran fewer rows shows
+    /// on the line a reader greps.
+    static func aggregateGate(
+        _ results: [(spec: String, gate: MultiModelCheckGate)], rowShapes: [MultiModelCheckRowShape] = []
+    ) -> MultiModelCheckGate {
+        let rows = rowShapes.contains { $0.grantedRows != $0.requestedRows }
+            ? " " + MultiModelCheckRowShape.lineFields(rowShapes) : ""
         let failed = results.filter { !$0.gate.pass }
         guard let lead = failed.first else {
-            return MultiModelCheckGate(pass: true, reasons: [], line: "GATE pass")
+            return MultiModelCheckGate(pass: true, reasons: [], line: "GATE pass" + rows)
         }
         func first(_ gate: MultiModelCheckGate) -> String { gate.reasons.first ?? "unspecified" }
         var line = "GATE fail policies=\(failed.map(\.spec).joined(separator: "|")) reason=\(first(lead.gate))"
         for other in failed.dropFirst() { line += " other_policy=\(other.spec) other_reason=\(first(other.gate))" }
+        line += rows
         let reasons = failed.flatMap { entry in entry.gate.reasons.map { "policy=\(entry.spec) \($0)" } }
         return MultiModelCheckGate(pass: false, reasons: reasons, line: line)
     }

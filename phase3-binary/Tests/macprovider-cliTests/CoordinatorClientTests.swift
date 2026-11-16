@@ -9753,6 +9753,9 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNotEqual(snapshot.status, .draining)
         XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
         XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .restartRequired)
+        // The top level now describes model-b; the pending object names the
+        // model the admission is for.
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.statusObject()["model_id"] as? String, "model-a")
         let admitted = await status.admitRequest(requestID: "after-promotion")
         guard case .admitted(let startedAt) = admitted else { return XCTFail("the provider serves after the promotion") }
         await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)

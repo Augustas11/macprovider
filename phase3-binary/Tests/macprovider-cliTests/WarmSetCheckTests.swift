@@ -93,7 +93,7 @@ final class WarmSetCheckTests: XCTestCase {
             primaryContextTokens: 32_768, primarySlots: 2, primaryVerified: true,
             member: .init(modelID: "org/second", artifactBytes: 4 * gib, kvBytesPerToken: 50_000,
                           declaredMaxContextTokens: 131_072, family: "llama", catalogMinRAMGB: 8),
-            operatorCommandBufferMB: nil))
+            operatorCommandBuffer: nil))
         return (plan, try XCTUnwrap(plan.limitBytes))
     }
 

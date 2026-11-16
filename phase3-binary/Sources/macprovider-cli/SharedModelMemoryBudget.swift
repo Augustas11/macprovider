@@ -335,6 +335,15 @@ enum SharedModelMemoryRules {
     /// is the recorded budget and its owner (nil before any member
     /// registered); an operator-set value (`operatorMB`) is the operator's
     /// choice and never conflicts.
+    /// The operator's `MLX_MAX_MB_PER_BUFFER` as a recorded budget: nil when
+    /// unset or empty. Any other value is the operator's and owns the budget
+    /// whether or not it is an integer (`ModelRuntime.commandBufferBudgetMB`
+    /// then sets none); `megabytes` is nil when it is not one.
+    static func operatorCommandBufferBudget(_ configured: String?) -> (family: String?, megabytes: Int?)? {
+        guard let configured, !configured.isEmpty else { return nil }
+        return ("environment", Int(configured.trimmingCharacters(in: .whitespaces)))
+    }
+
     static func commandBufferBudgetConflicts(
         family: String, wantedMB: Int?, effective: (family: String?, megabytes: Int?)?, operatorMB: Int?
     ) -> Bool {
@@ -692,10 +701,12 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
     /// command-buffer budget than the device was created with; nil when it
     /// may load (`SharedModelMemoryRules.commandBufferBudgetConflicts`).
     func commandBufferBudgetConflict(modelFamily: String) -> String? {
-        let operatorMB = ProcessInfo.processInfo.environment["MLX_MAX_MB_PER_BUFFER"].flatMap(Int.init)
+        let operatorBudget = SharedModelMemoryRules.operatorCommandBufferBudget(
+            ProcessInfo.processInfo.environment["MLX_MAX_MB_PER_BUFFER"])
+        let operatorMB = operatorBudget?.megabytes
         let wanted = ModelRuntime.commandBufferBudgetMBByFamily[modelFamily]
         lock.lock()
-        let effective = commandBufferBudget
+        let effective = commandBufferBudget ?? operatorBudget
         lock.unlock()
         guard SharedModelMemoryRules.commandBufferBudgetConflicts(
             family: modelFamily, wantedMB: wanted, effective: effective, operatorMB: operatorMB
@@ -710,7 +721,9 @@ final class SharedModelMemoryBudget: @unchecked Sendable {
         let configured = ProcessInfo.processInfo.environment["MLX_MAX_MB_PER_BUFFER"]
         let wanted = ModelRuntime.commandBufferBudgetMBByFamily[modelFamily]
         lock.lock()
-        if commandBufferBudget == nil { commandBufferBudget = (configured == nil ? nil : "environment", configured.flatMap(Int.init)) }
+        if commandBufferBudget == nil {
+            commandBufferBudget = SharedModelMemoryRules.operatorCommandBufferBudget(configured) ?? (nil, nil)
+        }
         let (owner, current) = commandBufferBudget!
         let conflict = SharedModelMemoryRules.commandBufferBudgetConflicts(
             family: modelFamily, wantedMB: wanted, effective: (owner, current), operatorMB: nil)

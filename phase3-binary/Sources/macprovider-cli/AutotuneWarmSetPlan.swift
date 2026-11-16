@@ -80,8 +80,9 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
         /// model must be too.
         var primaryVerified: Bool
         var member: ModelFacts
-        /// `MLX_MAX_MB_PER_BUFFER` set by the operator.
-        var operatorCommandBufferMB: Int?
+        /// `MLX_MAX_MB_PER_BUFFER` as the operator set it, read by the
+        /// loader's rule (`SharedModelMemoryRules.operatorCommandBufferBudget`).
+        var operatorCommandBuffer: String?
     }
 
     let decision: Decision
@@ -134,7 +135,7 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
             return refused("memory_limit_unavailable")
         }
         if let family = s.family, commandBufferBudgetConflicts(
-            family: family, primaryFamily: p.family, operatorMB: inputs.operatorCommandBufferMB) {
+            family: family, primaryFamily: p.family, operatorValue: inputs.operatorCommandBuffer) {
             return refused("command_buffer_budget_conflict", limit: limit)
         }
 
@@ -239,10 +240,11 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
     /// `MLX_MAX_MB_PER_BUFFER`, else the value the primary's family set
     /// (`ModelRuntime.applyMLXCommandBufferBudget`), else MLX's default with
     /// no owning family.
-    static func commandBufferBudgetConflicts(family: String, primaryFamily: String?, operatorMB: Int?) -> Bool {
+    static func commandBufferBudgetConflicts(family: String, primaryFamily: String?, operatorValue: String?) -> Bool {
+        let operatorBudget = SharedModelMemoryRules.operatorCommandBufferBudget(operatorValue)
         let effective: (family: String?, megabytes: Int?)
-        if let operatorMB {
-            effective = ("environment", operatorMB)
+        if let operatorBudget {
+            effective = operatorBudget
         } else if let primaryFamily, let primaryMB = ModelRuntime.commandBufferBudgetMBByFamily[primaryFamily] {
             effective = (primaryFamily, primaryMB)
         } else {
@@ -250,7 +252,7 @@ struct AutotuneWarmSetPlan: Equatable, Encodable {
         }
         return SharedModelMemoryRules.commandBufferBudgetConflicts(
             family: family, wantedMB: ModelRuntime.commandBufferBudgetMBByFamily[family],
-            effective: effective, operatorMB: operatorMB)
+            effective: effective, operatorMB: operatorBudget?.megabytes)
     }
 }
 
@@ -296,7 +298,7 @@ extension AutotuneWarmSetPlan {
             primarySlots: primarySlots,
             primaryVerified: primaryVerified,
             member: facts(memberModelID, loadPath: authority(memberModelID)?.modelArgument ?? memberModelID),
-            operatorCommandBufferMB: environment["MLX_MAX_MB_PER_BUFFER"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+            operatorCommandBuffer: environment["MLX_MAX_MB_PER_BUFFER"])
     }
 
     /// One JSON object, keys sorted.

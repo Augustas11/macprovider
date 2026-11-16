@@ -9661,7 +9661,7 @@ actor CoordinatorClient {
         }
         func reportRestartRequired() async {
             await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+                releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil, modelID: loadedModelID
             ))
         }
         // SPEC-048-R013: the check is computed for the boot model, and a
@@ -9687,7 +9687,7 @@ actor CoordinatorClient {
                 } else {
                     // Not dropped silently: the release was never resolved.
                     await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                        releaseID: releaseID, phase: .checkExhausted, drainNotBefore: nil
+                        releaseID: releaseID, phase: .checkExhausted, drainNotBefore: nil, modelID: loadedModelID
                     ))
                     log("check_exhausted")
                 }
@@ -9715,7 +9715,7 @@ actor CoordinatorClient {
         }
         let delay = NativeMTPAdmissionPickup.jitterSeconds(unit: hooks.randomUnit())
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay)
+            releaseID: releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay), modelID: loadedModelID
         ))
         log("scheduled", " delay_s=\(Int(delay))")
         await hooks.sleep(delay)
@@ -9740,7 +9740,7 @@ actor CoordinatorClient {
             nativeMTPAdmissionRestartDraining = true
             await providerStatus.raiseRestartDrainFence()
             await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                releaseID: releaseID, phase: .waitingForIdle, drainNotBefore: nil
+                releaseID: releaseID, phase: .waitingForIdle, drainNotBefore: nil, modelID: loadedModelID
             ))
             log("waiting_for_idle")
             // New requests are refused from here, by the coordinator (draining
@@ -9800,7 +9800,7 @@ actor CoordinatorClient {
         nativeMTPAdmissionRestartDraining = false
         await providerStatus.lowerRestartDrainFence()
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+            releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil, modelID: loadedModelID
         ))
         // An update drain or an operator-pause drain in progress owns the
         // state; only the fence is lowered then.
