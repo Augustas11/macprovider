@@ -1,6 +1,16 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.63 (2026-11-16, warm-set command-buffer rule and its reply code)
+**Version:** 1.9.64 (2026-11-16, member native-MTP admission after load and the pickup after a promotion)
+
+**Change log v1.9.64 (2026-11-16, Related: #2338):** §6.16 R019: a further
+member's native-MTP admission is resolved, when it loads, against the catalog
+release the process started on; a later release that newly admits a member is
+not picked up for that member until the process restarts (current limit). The SPEC-048-R013
+admission pickup follows the boot model and is abandoned, with nothing cut,
+once another member has been promoted to primary. R017: any non-empty
+operator `MLX_MAX_MB_PER_BUFFER`, an integer or not, is the operator's and
+never conflicts, in the loader and in the autotune plan alike. No trust tier
+or attestation label changes.
 
 **Change log v1.9.63 (2026-11-16, Related: #2338):** §6.16 R017: a model
 family with no explicit command-buffer requirement runs under whatever
@@ -5669,7 +5679,8 @@ creation: a member whose model family has no explicit requirement runs under
 whatever value the process has; a member whose family explicitly requires a
 value MUST NOT load when the process's effective value differs (the device
 kept MLX's default, or another family set another value), unless the
-operator set the value, which never conflicts. The model
+operator set the value (any non-empty value, an integer or not), which never
+conflicts. The model
 liveness tracker (SPEC-025 §5.2) is fed by buyer inference on any member; it
 does not track a warm-set load, so a member's load neither counts as
 inference nor as a stall.
@@ -5934,6 +5945,16 @@ that served the request, read from that member's own hash-tracking state
   the session and describe the primary only. The coordinator clears both on
   a further member's entry (SPEC-002-R011), so a further member fails closed
   wherever either is required.
+- *Admission after load.* A further member's signed native-MTP admission is
+  resolved when that member loads, against the catalog release the process
+  started on (its start-up catalog trust), also for a member loaded later. A
+  later release that newly admits a further member is not picked up for that
+  member while the process runs; it takes effect at the next process start
+  (current limit). The running-provider admission pickup (SPEC-048-R013)
+  follows the boot model: it restarts the process only while the boot
+  model's runtime is the primary, and once another member has been promoted
+  (SPEC-011 R-3.10.3) it is abandoned with nothing cut and reports
+  `restart_required`, so a restart never undoes a promotion.
 
 ---
 

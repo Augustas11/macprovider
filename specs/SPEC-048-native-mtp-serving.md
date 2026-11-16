@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.101
+**Version:** 0.1.102
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.101",
+  "version": "0.1.102",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -2009,15 +2009,26 @@ route (R003):
    without reaching that exit (a request that never ends, a long pause), the
    provider abandons the restart without cutting anything, serves again and
    reports `restart_required`; the next release or the next process start
-   picks the admission up.
+   picks the admission up. The pickup is computed for the boot model (the
+   configured `model`), which a restart brings back as the primary. On a
+   provider with a warm set (SPEC-001 §6.16), once a warm member other than
+   the boot model's runtime has been promoted to primary (SPEC-011
+   R-3.10.3), the pickup is abandoned the same way, with nothing cut: a
+   promotion during the delay or the drain cancels it at once, and the
+   primary is checked again before the drain and before the exit. The
+   provider serves on and reports `restart_required`. A swap of the primary
+   that reloads the boot runtime is not a promotion. A provider that never
+   promotes a warm member restarts exactly as above.
 4. Only the provider LaunchAgent's process exits: its parent is launchd and
    launchd names it as the provider job (`XPC_SERVICE_NAME` equals the
    provider label) or it carries the installer plist's
    `MACPROVIDER_LAUNCHD_DOMAIN`. Any other process does not exit; it reports
    the pending admission and keeps serving. Local `/v1/status` reports
-   `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
-   `waiting_for_idle`, `restart_required` or `check_exhausted`, and
-   `drain_not_before` while scheduled), else null.
+   `native_mtp_admission_pending` (`release_id`, `model_id` of the boot
+   model the admission is for, `phase` of `scheduled`, `waiting_for_idle`,
+   `restart_required` or `check_exhausted`, and `drain_not_before` while
+   scheduled), else null. After a promotion the top-level status fields
+   describe the new primary and `model_id` still names the boot model.
 5. A revocation never restarts a provider; the live revocation feed (R014)
    disables the tuple in place. An autotune child, a shard-group process and
    a process with an operator-placed admission set do not pick up.
@@ -2720,6 +2731,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.102 (2026-11-16, Related: #2338)** — R013: the admission pickup
+  follows the boot model. When a warm member has been promoted to primary,
+  a pending pickup is abandoned without cutting anything (cancelled at the
+  promotion during its delay or drain, and checked again before the drain
+  and before the exit) and reports `restart_required`, so a restart never
+  undoes the promotion. `native_mtp_admission_pending` names the boot model
+  in a new `model_id` field. A provider that never promotes a warm member is
+  unchanged.
 - **0.1.101 (2026-11-16, Related: #2338)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.67` (`2baaf9ecbc975e0d7a9fe131ba588f04fc453154`) on
   `3.32.3-macprovider.63`, `.63` plus only the mlx-swift pin move, and
