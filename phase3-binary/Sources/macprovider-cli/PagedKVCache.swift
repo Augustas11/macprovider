@@ -199,6 +199,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// True once at least one gather ran over a genuinely non-identity physical order.
     nonisolated(unsafe) private(set) static var observedNonIdentityPermutation = false
 
+    #if DEBUG
+    /// Tests (#2396): called inside `detachFromBatch` after the row left its
+    /// batch slot and before it holds its own copy, the point a concurrent
+    /// reader must never observe.
+    nonisolated(unsafe) static var detachObserverForTest: ((PagedKVCache) -> Void)?
+    #endif
+
     static func resetGatherDiagnostics() {
         gatherKernelCalls = 0
         maxLogicalBlocksObserved = 0
@@ -288,6 +295,9 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let keys = keyStore
         let values = valueStore
         batchSlot = nil
+        #if DEBUG
+        Self.detachObserverForTest?(self)
+        #endif
         guard storedTokens > 0, let keys, let values else { return }
         let capacity = PagedKVBlockLayout.alignedCapacity(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
         keyBuffer = Self.resized(keys, stored: storedTokens, capacity: capacity)

@@ -2624,6 +2624,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             labTraceWindowRows("session_rebuild_prev_synced", window: labWindow, inputs: supportedInputs,
                                rowStates: rowStates, batches: previous?.batchedCaches ?? [], fresh: labFreshRows)
             #endif
+            #if DEBUG
+            rebuildObserverForTest?("prev_synced")
+            #endif
             // While rows ride the session, its batch buffers are their only
             // K/V. Hybrid (recurrent) sessions are rebuilt every window, so
             // their rows keep their own K/V.
@@ -2631,6 +2634,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 from: rowStates.map(\.caches),
                 attachRows: !cacheKinds.contains(.recurrentMamba)
             )
+            #if DEBUG
+            rebuildObserverForTest?("packed")
+            #endif
             // Packing re-attached the rows that ride on; rows that left with
             // the old session get their own K/V back. Build the new batch one
             // layer at a time and drop each replaced layer as soon as its
@@ -4435,6 +4441,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         enterTargetLock()
         defer { exitTargetLock() }
         return try rowTargetCacheDigest(requestID: requestID)
+    }
+    #endif
+
+    #if DEBUG
+    /// Tests (#2396): called by a window rebuilding its session, after the
+    /// previous session synced (`prev_synced`) and after the new batch packed
+    /// its rows (`packed`), on the model container.
+    var rebuildObserverForTest: ((String) -> Void)?
+
+    /// Whether some caller holds this backend's target `container.perform`.
+    func targetLockHeldForTest() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return targetLockHolders > 0
+    }
+
+    /// A retained row's paged attention layer caches, in layer order.
+    func rowPagedCachesForTest(requestID: String) -> [PagedKVCache] {
+        existingRowState(for: requestID).map { Self.pagedAttentionCaches(in: $0.caches) } ?? []
     }
     #endif
 
