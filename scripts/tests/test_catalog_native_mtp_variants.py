@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 import json
+import pathlib
+import tempfile
 import unittest
 
 from scripts.tests import test_catalog_artifact_feed as artifact_tests
@@ -27,7 +29,18 @@ def committed() -> tuple[list, dict, dict]:
     return inputs, bank, manifest
 
 
-def variants(record: dict | None = None, donor: str = DONOR) -> dict:
+def own_quantization() -> dict:
+    """The variant's own block: the donor's kind with another group of
+    per-layer exceptions and representation manifest."""
+    inputs, _, _ = committed()
+    donor = next(i["entry"] for i in inputs if i["entry"]["model_key"] == DONOR)
+    quantization = copy.deepcopy(donor["quantization"])
+    quantization["per_layer_exceptions"] = quantization["per_layer_exceptions"][:-11]
+    quantization["representation_manifest_sha256"] = "e" * 64
+    return quantization
+
+
+def variants(record: dict | None = None, donor: str = DONOR, quantization: object = "own") -> dict:
     variant = {
         "model_key": VARIANT,
         "donor_model_key": donor,
@@ -42,6 +55,10 @@ def variants(record: dict | None = None, donor: str = DONOR) -> dict:
             "manifest": {"path": "variant/config.json", "sha256": "c" * 64},
         },
     }
+    if quantization == "own":
+        variant["quantization"] = own_quantization()
+    elif quantization is not None:
+        variant["quantization"] = quantization
     if record is not None:
         variant["self_check_record"] = record
     return {"schema_version": catalog_release.NATIVE_MTP_VARIANTS_SCHEMA, "variants": [variant]}
@@ -136,17 +153,92 @@ class NativeMTPVariantExpansionTests(unittest.TestCase):
         with self.assertRaisesRegex(catalog_release.CatalogError, "no quantization kind"):
             catalog_release.expand_native_mtp_variants(inputs, bank, manifest, variants(), None)
 
-    def test_variant_gets_its_own_quantization_provenance(self):
+    def test_variant_signs_its_own_quantization_block(self):
         inputs, bank, manifest = committed()
         donor = next(i["entry"] for i in inputs if i["entry"]["model_key"] == DONOR)
         out_inputs, _, _ = expand(inputs, bank, manifest, variants())
         entry = next(i["entry"] for i in out_inputs if i["entry"]["model_key"] == VARIANT)
-        self.assertEqual(entry["quantization"]["representation_manifest_sha256"], "a" * 64)
-        self.assertNotEqual(
-            entry["quantization"]["representation_manifest_sha256"],
-            donor["quantization"]["representation_manifest_sha256"],
-        )
+        self.assertEqual(entry["quantization"], own_quantization())
+        self.assertNotEqual(entry["quantization"], donor["quantization"])
         self.assertEqual(entry["quantization"]["kind"], donor["quantization"]["kind"])
+        # The donor's own entry keeps its block.
+        out_donor = next(i["entry"] for i in out_inputs if i["entry"]["model_key"] == DONOR)
+        self.assertEqual(out_donor["quantization"], donor["quantization"])
+
+    def test_variant_without_its_own_quantization_block_is_refused(self):
+        inputs, bank, manifest = committed()
+        with self.assertRaisesRegex(catalog_release.CatalogError, "declares no quantization block"):
+            expand(inputs, bank, manifest, variants(quantization=None))
+
+    def test_variant_with_an_invalid_quantization_block_is_refused(self):
+        inputs, bank, manifest = committed()
+        quantization = own_quantization()
+        del quantization["representation_manifest_sha256"]
+        with self.assertRaisesRegex(ValueError, "variants\\[0\\].quantization"):
+            expand(inputs, bank, manifest, variants(quantization=quantization))
+
+    def test_variant_declaring_another_quantization_kind_is_refused(self):
+        inputs, bank, manifest = committed()
+        quantization = own_quantization()
+        quantization["kind"] = "base"
+        for key in ("packed_data_dtype", "packed_layout", "scale_dtype", "scale_layout", "padding_rule"):
+            quantization[key] = "none"
+        quantization.update(block_size_elements=None, per_layer_exceptions=[], unquantized_exceptions=[])
+        with self.assertRaisesRegex(catalog_release.CatalogError, "quantization.kind 'base' differs"):
+            expand(inputs, bank, manifest, variants(quantization=quantization))
+
+
+def snapshot_manifest(files: dict[str, int]) -> bytes:
+    return "".join(f"{path}\n{size}\n{'f' * 64}\n" for path, size in sorted(files.items())).encode("utf-8")
+
+
+class NativeMTPVariantWeightFitTests(unittest.TestCase):
+    """R012: served safetensors bytes, read from the hash-bound snapshot manifest."""
+
+    def fit(self, variant_files: dict[str, int], donor_files: dict[str, int], write=None):
+        donor_bytes, variant_bytes = snapshot_manifest(donor_files), snapshot_manifest(variant_files)
+        donor_hash, variant_hash = catalog_release.sha256(donor_bytes), catalog_release.sha256(variant_bytes)
+        artifact_obj = {"models": {
+            DONOR: {"artifacts": {"mlx-oq4e-mtp": {"hash": donor_hash}}},
+            VARIANT: {"artifacts": {"mlx-oq4e-variant": {"hash": variant_hash}}},
+        }}
+        variant = {"model_key": VARIANT, "donor_model_key": DONOR, "artifact_id": "mlx-oq4e-variant"}
+        donors = {DONOR: {"model_key": DONOR, "artifact_id": "mlx-oq4e-mtp"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
+            (directory / f"{donor_hash}.manifest").write_bytes(donor_bytes)
+            (directory / f"{variant_hash}.manifest").write_bytes(variant_bytes)
+            if write is not None:
+                write(directory, variant_hash)
+            catalog_release.require_native_mtp_variant_weight_fit([variant], donors, artifact_obj, directory)
+
+    def test_larger_snapshot_with_no_larger_weights_passes(self):
+        # The #2382 shape: GGUF and mmproj files make the snapshot larger,
+        # the served safetensors are smaller than the donor's.
+        self.fit(
+            {"model-00001.safetensors": 90, "model-00002.safetensors": 9, "dflash2.gguf": 500, "mmproj.gguf": 50},
+            {"model-00001.safetensors": 90, "model-00002.safetensors": 10, "README.md": 5},
+        )
+
+    def test_genuinely_larger_weights_are_refused(self):
+        with self.assertRaisesRegex(catalog_release.CatalogError, "served weight bytes 101 exceed its donor's 100"):
+            self.fit(
+                {"model-00001.safetensors": 91, "model-00002.safetensors": 10},
+                {"model-00001.safetensors": 90, "model-00002.safetensors": 10, "dflash2.gguf": 500},
+            )
+
+    def test_missing_manifest_is_refused(self):
+        def remove(directory, variant_hash):
+            (directory / f"{variant_hash}.manifest").unlink()
+        with self.assertRaisesRegex(catalog_release.CatalogError, "R012 needs its snapshot manifest"):
+            self.fit({"a.safetensors": 1}, {"a.safetensors": 2}, remove)
+
+    def test_manifest_not_matching_the_feed_hash_is_refused(self):
+        def tamper(directory, variant_hash):
+            # Understating the weights breaks the hash binding.
+            (directory / f"{variant_hash}.manifest").write_bytes(snapshot_manifest({"a.safetensors": 1}))
+        with self.assertRaisesRegex(catalog_release.CatalogError, "does not hash to the feed's artifact hash"):
+            self.fit({"a.safetensors": 3}, {"a.safetensors": 2}, tamper)
 
 
 if __name__ == "__main__":

@@ -149,6 +149,9 @@ NATIVE_MTP_SIDECAR_GENERATOR_PATH = ROOT / "scripts" / "native_mtp_admission_sid
 NATIVE_MTP_SIDECAR_VALIDITY_DAYS = 89
 # SPEC-048 0.1.81 same-architecture variant declarations (optional source).
 NATIVE_MTP_VARIANTS_PATH = CATALOG_DIR / "native-mtp-variants.json"
+# Exact snapshot-manifest.v1 bytes ("<path>\n<size>\n<sha256>\n" per file,
+# as scripts/publish-model-mirror.py writes them), named `<artifact hash>.manifest`.
+SNAPSHOT_MANIFESTS_DIR = CATALOG_DIR / "snapshot-manifests"
 NATIVE_MTP_VARIANTS_SCHEMA = "macprovider.native-mtp-variants.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -2934,10 +2937,12 @@ def resolve_native_mtp_admission(
 
 
 # SPEC-048 0.1.81: the fields a variant declares. Every other tuple field,
-# every evidence digest and every bound comes from the donor's entry.
+# every evidence digest and every bound comes from the donor's entry. The
+# quantization block (0.1.101) is the variant's own: the provider recomputes
+# every signed quantization field from the loaded artifact.
 NATIVE_MTP_VARIANT_KEYS = {
     "model_key", "donor_model_key", "artifact_id", "artifact_hash", "tokenizer_sha256",
-    "mtp_manifest_sha256", "projection_artifacts",
+    "mtp_manifest_sha256", "projection_artifacts", "quantization",
 }
 NATIVE_MTP_VARIANT_OPTIONAL_KEYS = {"mtp_artifact_sha256", "self_check_record"}
 NATIVE_MTP_SELF_CHECK_RECORD_KEYS = {
@@ -2997,6 +3002,9 @@ def expand_native_mtp_variants(
         vlabel = f"{label} variants[{index}]"
         if not isinstance(variant, dict):
             fail(f"{vlabel}: must be an object")
+        if "quantization" not in variant:
+            fail(f"{vlabel}: declares no quantization block of its own; the donor's would fail the "
+                 "provider's load-time quantization check")
         exact_keys(
             variant, NATIVE_MTP_VARIANT_KEYS | NATIVE_MTP_VARIANT_OPTIONAL_KEYS, NATIVE_MTP_VARIANT_KEYS, vlabel
         )
@@ -3008,12 +3016,17 @@ def expand_native_mtp_variants(
             if key in variant:
                 generator._str(variant[key], f"{vlabel}.{key}", generator.SHA256)
         generator._projection_artifacts(variant["projection_artifacts"], f"{vlabel}.projection_artifacts")
+        generator.validate_quantization(variant["quantization"], f"{vlabel}.quantization")
+        if variant["quantization"]["kind"] != donor["quantization"]["kind"]:
+            fail(f"{vlabel}: quantization.kind {variant['quantization']['kind']!r} differs from the donor's "
+                 f"{donor['quantization']['kind']!r}; it needs its own admission")
         entry = copy.deepcopy(donor)
         for key in ("model_key", "artifact_id", "artifact_hash", "tokenizer_sha256", "mtp_manifest_sha256"):
             entry[key] = variant[key]
         # SPEC-048 MTP-13: the variant inherits only on the donor's quantization
-        # kind, read from the artifact feed (the tuple's `quantization.kind` is
-        # the donor's own). Its quantization provenance is its own artifact's.
+        # kind, read from the artifact feed and from its declared block. The
+        # signed block is the declared one: group size, per-layer exceptions and
+        # representation manifest are the variant artifact's, not the donor's.
         own = native_mtp_variant_artifact(artifact_obj, variant["model_key"], variant["artifact_id"])
         donor_artifact = native_mtp_variant_artifact(artifact_obj, donor["model_key"], donor["artifact_id"])
         own_kind = own.get("quantization") if own else None
@@ -3026,7 +3039,7 @@ def expand_native_mtp_variants(
                  "it needs its own admission")
         if own.get("hash") != variant["artifact_hash"] or not HEX64.fullmatch(str(own.get("hash"))):
             fail(f"{vlabel}: artifact_hash does not match the variant artifact's feed record")
-        entry["quantization"]["representation_manifest_sha256"] = own["hash"]
+        entry["quantization"] = copy.deepcopy(variant["quantization"])
         entry["ordinary_baseline"] = {**entry["ordinary_baseline"], "artifact_hash": variant["artifact_hash"]}
         for key in NATIVE_MTP_VARIANT_CLASS_KEYS:
             if entry.get(key) != donor.get(key):
@@ -3113,10 +3126,57 @@ def cmd_native_mtp_variants() -> None:
     print(f"catalog-release: native-MTP variants expanded into {', '.join(sorted(p.name for p in files))}")
 
 
+def native_mtp_weight_bytes(artifact_obj: dict, model_key: str, artifact_id: str,
+                            manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR) -> int:
+    """The served weight bytes of a feed artifact: the `.safetensors` sizes in
+    its committed snapshot manifest. The manifest's SHA-256 must be the feed's
+    artifact hash, so the file list is the one the provider verifies."""
+    label = f"native-MTP weight bytes {model_key!r}/{artifact_id!r}"
+    artifact = native_mtp_variant_artifact(artifact_obj, model_key, artifact_id)
+    if artifact is None or not HEX64.fullmatch(str(artifact.get("hash"))):
+        fail(f"{label}: the artifact feed has no hash for it")
+    path = manifests_dir / f"{artifact['hash']}.manifest"
+    if not path.is_file():
+        fail(f"{label}: R012 needs its snapshot manifest {path.name} in {manifests_dir.name}/")
+    data = path.read_bytes()
+    if sha256(data) != artifact["hash"]:
+        fail(f"{label}: {path.name} does not hash to the feed's artifact hash")
+    lines = data.decode("utf-8").split("\n")
+    if len(lines) < 4 or lines[-1] != "" or (len(lines) - 1) % 3:
+        fail(f"{label}: {path.name} is not snapshot-manifest.v1 bytes")
+    total, paths = 0, []
+    for i in range(0, len(lines) - 1, 3):
+        rel, size, digest = lines[i:i + 3]
+        if not rel or not size.isdigit() or not HEX64.fullmatch(digest):
+            fail(f"{label}: {path.name} has a malformed record at line {i + 1}")
+        paths.append(rel)
+        if rel.endswith(".safetensors"):
+            total += int(size)
+    if paths != sorted(set(paths)):
+        fail(f"{label}: {path.name} paths are not sorted and unique")
+    if total == 0:
+        fail(f"{label}: {path.name} lists no .safetensors weights")
+    return total
+
+
+def require_native_mtp_variant_weight_fit(variants: list, donors: dict, artifact_obj: dict,
+                                          manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR) -> None:
+    """R012 (SPEC-048 0.1.101): a variant's served weights are no larger than
+    its donor's, so the donor's fit evidence covers it. Non-weight snapshot
+    files (GGUF, mmproj, docs) are not loaded and do not count."""
+    for variant in variants:
+        donor = donors[variant["donor_model_key"]]
+        own = native_mtp_weight_bytes(artifact_obj, variant["model_key"], variant["artifact_id"], manifests_dir)
+        donor_bytes = native_mtp_weight_bytes(artifact_obj, donor["model_key"], donor["artifact_id"], manifests_dir)
+        if own > donor_bytes:
+            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 served weight bytes {own} exceed "
+                 f"its donor's {donor_bytes}; it needs its own fit evidence")
+
+
 def require_native_mtp_variants_current(artifact_obj: dict | None) -> None:
     """generate: the committed inputs equal the variant expansion, and each
-    variant passes the computed R012 weight-size check: its verified artifact
-    is no larger than its donor's, so the donor's fit evidence covers it."""
+    variant passes the computed R012 weight-size check: its served weights
+    are no larger than its donor's, so the donor's fit evidence covers it."""
     files = native_mtp_variant_files(artifact_obj)
     if files is None:
         return
@@ -3126,23 +3186,9 @@ def require_native_mtp_variants_current(artifact_obj: dict | None) -> None:
                  "`catalog-release.py native-mtp-variants`")
     if artifact_obj is None:
         fail("generate: a native-MTP variant requires the artifact-bound feed set")
-    sizes = {
-        (model_key, artifact_id): artifact.get("size_bytes")
-        for model_key, model in artifact_obj["models"].items()
-        for artifact_id, artifact in model["artifacts"].items()
-    }
     variants = strict_json(NATIVE_MTP_VARIANTS_PATH.read_bytes(), NATIVE_MTP_VARIANTS_PATH.name)["variants"]
     donors = {i["entry"]["model_key"]: i["entry"] for i in json.loads(files[NATIVE_MTP_TUPLE_INPUT_PATH])}
-    for variant in variants:
-        donor = donors[variant["donor_model_key"]]
-        own = sizes.get((variant["model_key"], variant["artifact_id"]))
-        donor_size = sizes.get((donor["model_key"], donor["artifact_id"]))
-        if not isinstance(own, int) or not isinstance(donor_size, int):
-            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 needs measured size_bytes for "
-                 "it and its donor in the artifact feed")
-        if own > donor_size:
-            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 weight size {own} exceeds its "
-                 f"donor's {donor_size}; it needs its own fit evidence")
+    require_native_mtp_variant_weight_fit(variants, donors, artifact_obj)
 
 
 def verify_native_mtp_bank_signature(directory: pathlib.Path, bank: bytes, body: dict, keys: dict[str, bytes]) -> None:
