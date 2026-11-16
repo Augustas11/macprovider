@@ -1,11 +1,22 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.15
+Version: v0.4.16
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.16 (2026-11-16)
+
+Related: #2338. R-16.2a states the rule for holds named before holds were
+opened on the sanction identity. A key restored from a state stored under a
+catalog row key opens every new hold on the row's identity, never on the
+stored spelling. A hold opened earlier under the row key keeps matching: its
+credits are flag-0 attempts on the provider-wide match, and a recovery close
+or release applies to every held, open recovery hold of the provider whose
+`model_id` resolves to the key's identity, so none is left open. No schema,
+receipt, payout or trust tier changes.
 
 ### v0.4.15 (2026-11-16)
 
@@ -2662,13 +2673,22 @@ the hold. As built:
   `lower()` folds ASCII letters only; the coordinator accepts only model ids
   whose canonical form (trimmed, Unicode NFC, lower case) equals their ASCII
   lower case and rejects every other spelling at decode (SPEC-002-R011), so
-  `lower()` of any accepted spelling is its canonical key. A hold names the
-  sanction identity of its model (SPEC-036 FR-23 keys are sanction
-  identities), and a flagged snapshot's `model_id` is its own sanction
-  identity by (c), so the comparison is between sanction identities: a
-  credit for any name of a held catalog row matches the hold, either
-  through the flag-1 comparison or through the provider-wide match of a
-  flag-0 attempt. The comparison is resolved in Go at snapshot time; no
+  `lower()` of any accepted spelling is its canonical key. A hold is opened
+  on the sanction identity of its key (SPEC-036 FR-23 keys are sanction
+  identities), whatever spelling the key's stored state carries, and a
+  flagged snapshot's `model_id` is its own sanction identity by (c), so the
+  comparison is between sanction identities: a credit for any name of a
+  held catalog row matches the hold, either through the flag-1 comparison
+  or through the provider-wide match of a flag-0 attempt. A hold opened
+  before v0.4.16 may name a row key, the spelling its key's state was
+  stored under. Such a hold was opened before any snapshot could record
+  `served_model_dispatch = 1`, and while its recovery window stays open its
+  key is `recovering`, not `passing`, so every credit in its window is a
+  flag-0 attempt and keeps the provider-wide match. Its key closes or
+  releases it like any other: a recovery close or release applies to every
+  held, open recovery hold of the provider whose `model_id` resolves to the
+  key's sanction identity, under either name, so no earlier hold is left
+  open. The comparison is resolved in Go at snapshot time; no
   column is added.
 - A credit whose route snapshot is no longer in the hot store (archived
   before the hold opened) has no flag to read and keeps the provider-wide

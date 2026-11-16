@@ -13385,7 +13385,9 @@
         "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsEverySpellingOfTheServedModel",
         "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegrityPassingIsPerEntry",
         "phase4-coordinator/internal/ws/compute_scoring_passing_test.go:TestComputeScoringPublishesPassingVerification",
-        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold"
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold",
+        "phase4-coordinator/internal/ws/compute_scoring_sanction_hold_test.go:TestComputeScoringRestoredRowKeyStateHoldsSanctionIdentity",
+        "phase4-coordinator/internal/ws/compute_scoring_sanction_hold_test.go:TestComputeScoringEarlierRowKeyRecoveryHoldStillReleased"
       ],
       "journeys": [],
       "evidence": [],

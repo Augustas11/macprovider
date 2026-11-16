@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -434,7 +435,10 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		e.lastSeen[st.ProviderID] = startedAt
 		key := e.scoringKey(st.ProviderID, st.ModelID)
 		// Rows stored under two spellings of one model fold to one key; an
-		// adverse state is never replaced by a healthier one.
+		// adverse state is never replaced by a healthier one. The state keeps
+		// its stored spelling: it names the row its writes update (a second
+		// row under the identity could later fold over newer state) and any
+		// recovery hold opened before holds named the identity.
 		if prev := e.states[key]; prev == nil || (prev.State.AcceptsHonestSamples() && !st.State.AcceptsHonestSamples()) {
 			e.states[key] = st
 		}
@@ -1462,13 +1466,47 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 	}
 	ctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
 	defer cancel()
+	// A hold is opened on the key's sanction identity, whatever spelling a
+	// restored state was stored under (SPEC-022 R-16.2a). A recovery hold
+	// opened before that rule names a stored spelling of the same row, so a
+	// close or release also applies to the state's stored spelling and to
+	// every held open recovery hold of the provider whose name resolves to
+	// the identity; it fails only when none of them has a recovery hold.
+	identity := e.modelKey(st.ModelID)
+	names := []string{identity}
+	if k := tr.Hold.Kind; k == computeintegrity.HoldActionReleaseRecovery || k == computeintegrity.HoldActionCloseRecovery {
+		if st.ModelID != identity {
+			names = append(names, st.ModelID)
+		}
+		holds, err := e.deps.Holds.ComputeIntegrityHolds(ctx, st.ProviderID)
+		if err != nil {
+			return fail(err)
+		}
+		for _, h := range holds {
+			if h.Kind == computeintegrity.HoldKindRecovery && h.Status == computeintegrity.HoldHeld && h.WindowEnd == nil &&
+				e.modelKey(h.ModelID) == identity && !slices.Contains(names, h.ModelID) {
+				names = append(names, h.ModelID)
+			}
+		}
+	}
 	tx, err := e.deps.Store.BeginTx(ctx)
 	if err != nil {
 		return fail(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := e.deps.Holds.ApplyComputeIntegrityHoldAction(ctx, tx, st.ProviderID, st.ModelID, tr.Hold, string(tr.Reason), now); err != nil {
-		return fail(err)
+	applied := false
+	for _, name := range names {
+		err := e.deps.Holds.ApplyComputeIntegrityHoldAction(ctx, tx, st.ProviderID, name, tr.Hold, string(tr.Reason), now)
+		if errors.Is(err, computeintegrity.ErrHoldNotFound) {
+			continue
+		}
+		if err != nil {
+			return fail(err)
+		}
+		applied = true
+	}
+	if !applied {
+		return fail(computeintegrity.ErrHoldNotFound)
 	}
 	if err := e.deps.Store.UpsertKeyStateTx(ctx, tx, st, now); err != nil {
 		return fail(err)

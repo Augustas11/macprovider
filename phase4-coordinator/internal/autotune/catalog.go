@@ -109,6 +109,15 @@ func ParseCatalog(rawJSON []byte) (*Catalog, error) {
 		normalizedModelID := normalizeModelID(row.ModelID)
 		keysByModel[normalizedModelID] = append(keysByModel[normalizedModelID], key)
 	}
+	// A name resolves row key first (HighestClaimedTier) and model_id first
+	// (CanonicalModelID); a row key that is another row's model_id would give
+	// one name two rows and its row two sanction identities.
+	for key, row := range envelope.Rows {
+		name := normalizeModelID(key)
+		if _, ok := keysByModel[name]; ok && normalizeModelID(row.ModelID) != name {
+			return nil, fmt.Errorf("autotune candidate catalog row key %q is the model_id of another row", strings.TrimSpace(key))
+		}
+	}
 	return &Catalog{
 		Version:       envelope.Version,
 		PolicyVersion: envelope.PolicyVersion,
