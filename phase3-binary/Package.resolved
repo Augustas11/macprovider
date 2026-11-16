@@ -14,7 +14,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Augustas11/mlx-swift",
       "state" : {
-        "revision" : "0f93fa380369a1abd1e17757a465cf42a72d8f69"
+        "revision" : "7fbcada97b58ddafab567121da63b959b8d092e3"
       }
     },
     {
@@ -22,7 +22,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Augustas11/mlx-swift-lm.git",
       "state" : {
-        "revision" : "9489ddeb74090d1a91ad1c8a01c0d0e117052450"
+        "revision" : "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
       }
     },
     {

@@ -263,6 +263,31 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         XCTAssertEqual(prefilled, 0)
     }
 
+    /// SPEC-038 FR-CB9: a stock order process batches ordinary rows, so it
+    /// exposes a self-check target like the row-invariant route. Its key
+    /// carries the route, so no row-invariant result qualifies it, and the
+    /// row-invariant key is unchanged. It never takes the serial-only state.
+    func testStockOrderRuntimeRunsTheSelfCheckUnderItsOwnKey() async throws {
+        let invariant = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .rowInvariant)
+        let invariantResolved = await invariant.continuousBatchingSelfCheckTarget(includeDecided: true)
+        let invariantTarget = try XCTUnwrap(invariantResolved)
+        XCTAssertEqual(invariantTarget.smallMRoute, .rowInvariant)
+        XCTAssertFalse(invariantTarget.key.runtimeBuild.contains("small_m_stock_order"))
+
+        let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), smallMRoute: .stockOrder)
+        let resolved = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true)
+        let target = try XCTUnwrap(resolved)
+        XCTAssertEqual(target.smallMRoute, .stockOrder)
+        XCTAssertEqual(target.key.runtimeBuild, invariantTarget.key.runtimeBuild + "+small_m_stock_order")
+        XCTAssertNotEqual(target.key, invariantTarget.key)
+
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 2)
+        let ignored = await runtime.applySerialOnlySelfCheck(stored: noGain, key: nil, servedSlots: 1)
+        XCTAssertNil(ignored)
+        let state = await runtime.continuousBatchingSelfCheckState()
+        XCTAssertEqual(state, .pending)
+    }
+
     /// SPEC-038 FR-CB9: a signed positive entry and a stored one-row verdict
     /// never turn batching on in a serial-only process. It serves serially,
     /// as a refused self-check does on the invariant route: effective mode

@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.78 (#2389) is 3.32.3-macprovider.76
+        // plus three commits that only move its
+        // mlx-swift pin to 0.32.3-macprovider.24
+        // (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX core
+        // v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d)
+        // adds the SPEC-038 FR-CB9 stock-order small-row route
+        // (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that
+        // native MTP serves on is unchanged.
         // Tag 3.32.3-macprovider.76 (#2381) on 3.32.3-macprovider.71: Two
         // upstream fixes as picks: the serial prefill chunk loop clears the
         // MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710),
@@ -170,8 +178,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.22, MLX
-        // core v0.32.4-macprovider.14 (0f26baba0) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.24, MLX
+        // core v0.32.4-macprovider.15 (4e9a71dc9) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -186,7 +194,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "9489ddeb74090d1a91ad1c8a01c0d0e117052450"
+            revision: "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

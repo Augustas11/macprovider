@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 0f93fa38 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 0f26baba (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 7fbcada9 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 4e9a71dc (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,32 +42,34 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.76 (#2381) on 3.32.3-macprovider.71: Two upstream fixes
-# as picks: the serial prefill chunk loop clears the MLX buffer cache after
-# each chunk (ml-explore/mlx-swift-lm #710), behind
-# PrefillParameters.clearsBufferCache (default true) for hosts without a Metal
-# library, and an MLX error raised on the loader's worker threads is thrown
-# instead of ending the process (port of ml-explore/mlx-swift-lm #698). No
-# model source, decode step or kernel route changes; continuous-batch prefill
-# does not use the chunk loop.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.76"
-SPEC048_MLX_SWIFT_LM_REVISION = "9489ddeb74090d1a91ad1c8a01c0d0e117052450"
+# 3.32.3-macprovider.78 (#2389) on 3.32.3-macprovider.76: It is
+# 3.32.3-macprovider.76 plus three commits that only move its mlx-swift pin to
+# 0.32.3-macprovider.24 (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX
+# core v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d) adds
+# the SPEC-038 FR-CB9 stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that native MTP
+# serves on is unchanged.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.78"
+SPEC048_MLX_SWIFT_LM_REVISION = "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
-# Fork tag 0.32.3-macprovider.22: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below.
-SPEC048_MLX_SWIFT_REVISION = "0f93fa380369a1abd1e17757a465cf42a72d8f69"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.24"
+# Fork tag 0.32.3-macprovider.24: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below (.22 plus three commits that move the core
+# gitlink to the stock-order route and regenerate the quantized jit sources).
+SPEC048_MLX_SWIFT_REVISION = "7fbcada97b58ddafab567121da63b959b8d092e3"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.14, seven commits on v0.32.4-macprovider.7
-# (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# Fork tag v0.32.4-macprovider.15, seven commits on v0.32.4-macprovider.14
+# (upstream MLX v0.32.4) that add the stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2) and its qmv_mma partial-sum count: the
+# reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.14"
-SPEC048_MLX_CORE_REVISION = "0f26baba0d1c1a10d74e7133614e0dc7f409ff80"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.15"
+SPEC048_MLX_CORE_REVISION = "4e9a71dc9e765f739003868f38d3aca05871e70d"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"

@@ -15,7 +15,9 @@ final class SmallMRouteTests: XCTestCase {
         shard: Bool = false,
         autotune: Bool = false,
         switchTargets: Bool = false,
-        verdict: SmallMRoute.SelfCheckVerdict = .absent
+        verdict: SmallMRoute.SelfCheckVerdict = .absent,
+        fallback: String? = nil,
+        operatorRowInvariant: Bool = false
     ) -> SmallMRoute.Inputs {
         SmallMRoute.Inputs(
             continuousBatching: mode,
@@ -26,13 +28,17 @@ final class SmallMRouteTests: XCTestCase {
             shardGroupRole: shard,
             autotuneCandidate: autotune,
             otherSwitchTargets: switchTargets,
-            selfCheckVerdict: verdict
+            selfCheckVerdict: verdict,
+            stockOrderFallback: fallback,
+            operatorForcesRowInvariant: operatorRowInvariant
         )
     }
 
     /// Every combination of every input against the rule written out once.
     func testDecisionTableCoversEveryCombination() {
         var serialCount = 0
+        var stockOrderCount = 0
+        var operatorCount = 0
         for mode in [ContinuousBatchingMode.off, .canary, .on] {
             for explicit in [false, true] {
                 for nativeMTP in [NativeMTPMode.off, .auto] {
@@ -42,19 +48,43 @@ final class SmallMRouteTests: XCTestCase {
                                 for autotune in [false, true] {
                                     for switchTargets in [false, true] {
                                         for verdict in SmallMRoute.SelfCheckVerdict.allCases {
-                                            let value = inputs(
-                                                mode: mode, explicit: explicit, nativeMTP: nativeMTP,
-                                                admission: admission, draft: draft, shard: shard,
-                                                autotune: autotune, switchTargets: switchTargets, verdict: verdict
-                                            )
-                                            let mtpInactive = nativeMTP == .off
-                                                || admission == .none || admission == .noEntryForModel
-                                            let cbCannotActivate = (explicit && mode == .off) || verdict == .grantsNoBatching
-                                            let expected = mtpInactive && cbCannotActivate
-                                                && !draft && !shard && !autotune && !switchTargets
-                                            let decision = SmallMRoute.decide(value)
-                                            XCTAssertEqual(decision.route == .serialOnly, expected, "\(value.logFields) -> \(decision.reason)")
-                                            if expected { serialCount += 1 }
+                                            for fallback in [nil, SmallMRoute.stockOrderDivergence] {
+                                                for operatorRowInvariant in [false, true] {
+                                                    let value = inputs(
+                                                        mode: mode, explicit: explicit, nativeMTP: nativeMTP,
+                                                        admission: admission, draft: draft, shard: shard,
+                                                        autotune: autotune, switchTargets: switchTargets, verdict: verdict,
+                                                        fallback: fallback, operatorRowInvariant: operatorRowInvariant
+                                                    )
+                                                    let mtpInactive = nativeMTP == .off
+                                                        || admission == .none || admission == .noEntryForModel
+                                                    let cbCannotActivate = (explicit && mode == .off) || verdict == .grantsNoBatching
+                                                    let expected = mtpInactive && cbCannotActivate
+                                                        && !draft && !shard && !autotune && !switchTargets
+                                                    let decision = SmallMRoute.decide(value)
+                                                    XCTAssertEqual(decision.route == .serialOnly, expected, "\(value.logFields) -> \(decision.reason)")
+                                                    if expected { serialCount += 1 }
+                                                    // Anything that needs the row-invariant pair keeps it; a
+                                                    // stock order fallback or the operator key sends a batching
+                                                    // process there too; every other one takes stock order.
+                                                    let needsInvariant = draft || shard || autotune || switchTargets || !mtpInactive
+                                                    let expectedRoute: SmallMRoute = needsInvariant
+                                                        ? .rowInvariant
+                                                        : (expected ? .serialOnly : (fallback != nil || operatorRowInvariant ? .rowInvariant : .stockOrder))
+                                                    XCTAssertEqual(decision.route, expectedRoute, "\(value.logFields) -> \(decision.reason)")
+                                                    if expectedRoute == .stockOrder { stockOrderCount += 1 }
+                                                    // The operator key only ever replaces a stock order decision.
+                                                    var withoutOperator = value
+                                                    withoutOperator.operatorForcesRowInvariant = false
+                                                    let undecided = SmallMRoute.decide(withoutOperator)
+                                                    if operatorRowInvariant, undecided.route == .stockOrder {
+                                                        XCTAssertEqual(decision, SmallMRoute.Decision(route: .rowInvariant, reason: "operator_row_invariant"), value.logFields)
+                                                        operatorCount += 1
+                                                    } else {
+                                                        XCTAssertEqual(decision, undecided, value.logFields)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -65,6 +95,61 @@ final class SmallMRouteTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(serialCount, 0)
+        XCTAssertGreaterThan(stockOrderCount, 0)
+        XCTAssertEqual(operatorCount, stockOrderCount)
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant` turns
+    /// a stock order decision into the row-invariant route and leaves every
+    /// serial-only and row-invariant decision, reason included, as it was.
+    func testOperatorRowInvariantOnlyReplacesStockOrder() {
+        let cases: [(SmallMRoute.Inputs, SmallMRoute.Decision)] = [
+            (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(explicit: false, verdict: .staleKey), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(explicit: false, verdict: .recheckPending), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            (inputs(mode: .on, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            // Serial-only stays serial-only.
+            (inputs(), .init(route: .serialOnly, reason: "continuous_batching_off_by_configuration")),
+            (inputs(explicit: false, verdict: .grantsNoBatching), .init(route: .serialOnly, reason: "self_check_no_batching")),
+            // Row-invariant decisions keep their own reason.
+            (inputs(explicit: false, verdict: .grantsBatching, fallback: SmallMRoute.stockOrderCrash), .init(route: .rowInvariant, reason: "stock_order_crash")),
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "native_mtp_entry_for_model")),
+            (inputs(explicit: false, draft: true), .init(route: .rowInvariant, reason: "draft_model")),
+            (inputs(explicit: false, shard: true), .init(route: .rowInvariant, reason: "shard_group")),
+            (inputs(explicit: false, autotune: true), .init(route: .rowInvariant, reason: "autotune_candidate")),
+            (inputs(explicit: false, switchTargets: true), .init(route: .rowInvariant, reason: "switch_targets")),
+        ]
+        for (value, unforced) in cases {
+            var forced = value
+            forced.operatorForcesRowInvariant = true
+            XCTAssertEqual(SmallMRoute.decide(value).route == .stockOrder, unforced.reason == "operator_row_invariant", value.logFields)
+            XCTAssertEqual(SmallMRoute.decide(forced), unforced, forced.logFields)
+            XCTAssertNotEqual(SmallMRoute.decide(forced).route, .stockOrder, forced.logFields)
+        }
+        // Batching stays possible: the key never makes a process serial-only.
+        let forced = inputs(explicit: false, verdict: .grantsBatching, operatorRowInvariant: true)
+        XCTAssertNil(SmallMRoute.batchingRefusal(route: SmallMRoute.decide(forced).route, entry: "serve"))
+        XCTAssertTrue(forced.logFields.hasSuffix(" operator_small_m_route=row_invariant"))
+        XCTAssertFalse(inputs(explicit: false).logFields.contains("operator_small_m_route"))
+    }
+
+    /// Native MTP's verify window (depth + 1 rows of one request) must equal
+    /// that request's one-row decode (SPEC-048 R015/R016), which only the
+    /// row-invariant pair gives from three rows: a process whose native MTP
+    /// may activate never takes stock order, and one that does refuses the
+    /// drafter.
+    func testNativeMTPThatMayActivateNeverRunsStockOrder() {
+        for admission in SmallMRoute.NativeMTPAdmission.allCases where admission.mayActivate {
+            for mode in [ContinuousBatchingMode.off, .canary, .on] {
+                for explicit in [false, true] {
+                    for verdict in SmallMRoute.SelfCheckVerdict.allCases {
+                        let value = inputs(mode: mode, explicit: explicit, nativeMTP: .auto, admission: admission, verdict: verdict)
+                        XCTAssertEqual(SmallMRoute.decide(value).route, .rowInvariant, value.logFields)
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder), "small_m_route_stock_order")
     }
 
     func testDecisionReasons() {
@@ -77,11 +162,11 @@ final class SmallMRouteTests: XCTestCase {
             (inputs(nativeMTP: .auto, admission: .unverifiable), .rowInvariant, "native_mtp_unverifiable"),
             (inputs(nativeMTP: .off, admission: .entryForModel), .serialOnly, "continuous_batching_off_by_configuration"),
             // The ordinary install: implicit CB default, native MTP auto.
-            (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .rowInvariant, "self_check_verdict_absent"),
+            (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .stockOrder, "self_check_verdict_absent"),
             (inputs(explicit: false, nativeMTP: .auto, verdict: .grantsNoBatching), .serialOnly, "self_check_no_batching"),
-            (inputs(explicit: false, verdict: .staleKey), .rowInvariant, "self_check_key_changed"),
-            (inputs(explicit: false, verdict: .recheckPending), .rowInvariant, "self_check_recheck_pending"),
-            (inputs(explicit: false, verdict: .grantsBatching), .rowInvariant, "self_check_grants_batching"),
+            (inputs(explicit: false, verdict: .staleKey), .stockOrder, "self_check_key_changed"),
+            (inputs(explicit: false, verdict: .recheckPending), .stockOrder, "self_check_recheck_pending"),
+            (inputs(explicit: false, verdict: .grantsBatching), .stockOrder, "self_check_grants_batching"),
             (inputs(mode: .on, verdict: .grantsNoBatching), .serialOnly, "self_check_no_batching"),
             // An 8 GB Mac whose probe shape does not fit (#2325): default
             // config, stored `probe_shape_unavailable`.
@@ -91,11 +176,15 @@ final class SmallMRouteTests: XCTestCase {
                 ))),
                 .serialOnly, "self_check_no_batching"
             ),
-            (inputs(mode: .canary, verdict: .absent), .rowInvariant, "self_check_verdict_absent"),
+            (inputs(mode: .canary, verdict: .absent), .stockOrder, "self_check_verdict_absent"),
             (inputs(draft: true), .rowInvariant, "draft_model"),
             (inputs(shard: true), .rowInvariant, "shard_group"),
             (inputs(autotune: true), .rowInvariant, "autotune_candidate"),
             (inputs(switchTargets: true), .rowInvariant, "switch_targets"),
+            // Batching is possible, but native MTP or another need keeps the pair.
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .rowInvariant, "native_mtp_entry_for_model"),
+            (inputs(explicit: false, draft: true, verdict: .grantsBatching), .rowInvariant, "draft_model"),
+            (inputs(explicit: false, switchTargets: true, verdict: .grantsBatching), .rowInvariant, "switch_targets"),
         ]
         for (value, route, reason) in cases {
             XCTAssertEqual(SmallMRoute.decide(value), SmallMRoute.Decision(route: route, reason: reason), value.logFields)
@@ -196,6 +285,8 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .serialOnly), "small_m_route_serial_only")
         XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .rowInvariant))
         XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .off, route: .rowInvariant), "mode_not_auto")
+        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder), "small_m_route_stock_order")
+        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .off, route: .stockOrder), "mode_not_auto")
     }
 
     private static func key(_ model: String = String(repeating: "a", count: 64)) -> ContinuousBatchingSelfCheckKey {
@@ -315,7 +406,26 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertEqual(store.verdict(startupIdentity: identity, selfCheckStore: selfCheck), .absent)
     }
 
-    /// The MLX core parses a set value with C `atoi`; 0 is the serial route.
+    /// The recorder runs only where every other serial condition holds, so a
+    /// start without a one-row verdict takes the stock order route.
+    func testRecordedGrantLogsTheStockOrderNextStart() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("small-m-route-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let selfCheck = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent("cb-self-check.json"))
+        let store = SmallMRouteVerdictStore(selfCheckStore: selfCheck)
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 2, reason: "granted", verifiedSlots: 2)
+        try selfCheck.store(Self.record(Self.key(), decision: granted))
+        let lines = LockedLines()
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: SmallMRouteVerdictStore.startupIdentity(["model": "m"]),
+            log: { lines.append($0) }
+        )
+        recorder.applied(key: Self.key(), decision: granted)
+        XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=granted slots=2 next_start=stock_order"])
+    }
+
+    /// The MLX core parses a set value with C `atoi`; 0 is the serial route,
+    /// 2 stock order.
     func testEnvironmentValueMapsToTheCoreRoute() {
         let table: [(String?, SmallMRoute)] = [
             (nil, .rowInvariant),
@@ -323,15 +433,20 @@ final class SmallMRouteTests: XCTestCase {
             ("00", .serialOnly), ("-0", .serialOnly), ("+0", .serialOnly), (" 0", .serialOnly),
             ("\t\n0", .serialOnly), ("0x1", .serialOnly), ("0abc", .serialOnly), (" ", .serialOnly),
             ("-", .serialOnly), ("true", .serialOnly), ("x1", .serialOnly),
-            ("1", .rowInvariant), ("2", .rowInvariant), ("-1", .rowInvariant), (" 1", .rowInvariant),
+            ("1", .rowInvariant), ("2", .stockOrder), ("-1", .rowInvariant), (" 1", .rowInvariant),
             ("+1", .rowInvariant), ("01", .rowInvariant), ("1abc", .rowInvariant), ("10", .rowInvariant),
+            ("02", .stockOrder), (" 2", .stockOrder), ("+2", .stockOrder), ("2abc", .stockOrder),
+            ("-2", .rowInvariant), ("3", .rowInvariant), ("12", .rowInvariant), ("20", .rowInvariant),
             // Darwin's atoi wraps these to 0, so the core takes the serial route.
             ("4294967296", .serialOnly), ("8589934592", .serialOnly),
+            // ... and this one to 2.
+            ("4294967298", .stockOrder),
         ]
         for (value, expected) in table {
             XCTAssertEqual(SmallMRoute.route(environmentValue: value), expected, String(describing: value))
             if let value {
-                let core: SmallMRoute = value.withCString { atoi($0) } == 0 ? .serialOnly : .rowInvariant
+                let parsed = value.withCString { atoi($0) }
+                let core: SmallMRoute = parsed == 0 ? .serialOnly : (parsed == 2 ? .stockOrder : .rowInvariant)
                 XCTAssertEqual(SmallMRoute.route(environmentValue: value), core, value)
             }
         }
@@ -385,6 +500,7 @@ final class SmallMRouteTests: XCTestCase {
         for entry in ["continuous_batch_scheduler", "ContinuousBatchScheduler", "msb-throughput",
                       "native-mtp-bench", "native-mtp-hardware-e2e", "relay-blind-fixture"] {
             XCTAssertNil(SmallMRoute.batchingRefusal(route: .rowInvariant, entry: entry))
+            XCTAssertNil(SmallMRoute.batchingRefusal(route: .stockOrder, entry: entry))
             let refusal = SmallMRoute.batchingRefusal(route: .serialOnly, entry: entry)
             XCTAssertEqual(
                 refusal,
@@ -409,22 +525,38 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertEqual(fields["small_m_route"] as? String, "serial_only")
         XCTAssertEqual(fields["small_m_route_reason"] as? String, "self_check_no_batching")
         XCTAssertEqual(RouterHandler.continuousBatchingStatusFields(nil)["small_m_route"] as? String, "row_invariant")
+        XCTAssertEqual(
+            SmallMRoute.event(.init(route: .stockOrder, reason: "self_check_grants_batching")),
+            "event=small_m_route mode=stock_order reason=self_check_grants_batching\n"
+        )
+        let stock = RouterHandler.continuousBatchingStatusFields(
+            nil, smallMRoute: .stockOrder, smallMRouteReason: "self_check_verdict_absent"
+        )
+        XCTAssertEqual(stock["small_m_route"] as? String, "stock_order")
+        XCTAssertEqual(stock["small_m_route_reason"] as? String, "self_check_verdict_absent")
     }
 
     func testDecodeBenchRouteOption() {
         XCTAssertEqual(decodeBenchSmallMRoute("row-invariant"), .rowInvariant)
         XCTAssertEqual(decodeBenchSmallMRoute("serial-only"), .serialOnly)
+        XCTAssertEqual(decodeBenchSmallMRoute("stock-order"), .stockOrder)
         XCTAssertNil(decodeBenchSmallMRoute("serial_only"))
+        XCTAssertNil(decodeBenchSmallMRoute("stock_order"))
         XCTAssertNil(decodeBenchSmallMRoute(""))
     }
 
     func testDiskCacheWrittenOnOneRouteMissesOnTheOther() {
         XCTAssertEqual(SmallMRoute.rowInvariant.kvDecodePath, "ordinary")
         XCTAssertNotEqual(SmallMRoute.serialOnly.kvDecodePath, SmallMRoute.rowInvariant.kvDecodePath)
+        // Stock order writes batch-kernel KV from 3+-row forwards, which
+        // neither other route produces: its own class.
+        XCTAssertEqual(SmallMRoute.stockOrder.kvDecodePath, "ordinary+stock_order_small_m")
+        XCTAssertNotEqual(SmallMRoute.stockOrder.kvDecodePath, SmallMRoute.serialOnly.kvDecodePath)
+        XCTAssertNotEqual(SmallMRoute.stockOrder.kvDecodePath, SmallMRoute.rowInvariant.kvDecodePath)
         let (reference, runtime) = KVDiskCacheFormatTests.validPair()
-        for written in [SmallMRoute.rowInvariant, .serialOnly] {
+        for written in [SmallMRoute.rowInvariant, .serialOnly, .stockOrder] {
             let manifest = KVDiskCacheFormatTests.mutate(reference) { $0.decodePath = written.kvDecodePath }
-            for reading in [SmallMRoute.rowInvariant, .serialOnly] {
+            for reading in [SmallMRoute.rowInvariant, .serialOnly, .stockOrder] {
                 let result = KVEnvelopeValidator.validate(
                     manifest, runtime: Self.runtime(runtime, decodePath: reading.kvDecodePath), nowMillis: 1_000_500
                 )
@@ -458,4 +590,267 @@ private final class LockedLines: @unchecked Sendable {
     private var lines: [String] = []
     func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
     var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+/// SPEC-038 FR-CB9 (v0.3.56, Related: #2389): a failure measured on stock
+/// order sends the next start of the same startup identity to the
+/// row-invariant route, never to the serial route; a failure measured on the
+/// row-invariant route keeps the existing rule.
+extension SmallMRouteTests {
+    private static func stockKey() -> ContinuousBatchingSelfCheckKey {
+        var key = Self.key()
+        key.runtimeBuild = ContinuousBatchingSelfCheckKey.currentRuntimeBuild + "+small_m_stock_order"
+        return key
+    }
+
+    private static func decidedInputs(
+        _ store: SmallMRouteVerdictStore,
+        _ selfCheck: ContinuousBatchingSelfCheckStore,
+        _ identity: String
+    ) -> SmallMRoute.Inputs {
+        var value = SmallMRoute.Inputs(
+            continuousBatching: .off, continuousBatchingExplicitlyConfigured: false, nativeMTPMode: .auto,
+            nativeMTPAdmission: .none, draftConfigured: false, shardGroupRole: false, autotuneCandidate: false,
+            otherSwitchTargets: false,
+            selfCheckVerdict: store.verdict(startupIdentity: identity, selfCheckStore: selfCheck),
+            operatorForcesRowInvariant: false
+        )
+        value.stockOrderFallback = store.stockOrderFallback(startupIdentity: identity)
+        return value
+    }
+
+    private static func temporaryStores() -> (URL, ContinuousBatchingSelfCheckStore, SmallMRouteVerdictStore) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("small-m-route-\(UUID().uuidString)")
+        let selfCheck = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent("cb-self-check.json"))
+        return (directory, selfCheck, SmallMRouteVerdictStore(selfCheckStore: selfCheck))
+    }
+
+    func testStockOrderDivergenceSendsTheNextStartToRowInvariantAndKeepsThePriorGrant() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        // The row-invariant grant this Mac served before the stock order start.
+        let prior = ContinuousBatchingSelfCheckDecision(slots: 4, reason: "granted", verifiedSlots: 4)
+        try selfCheck.store(Self.record(Self.key(), decision: prior))
+        // Stock order: two rows diverged.
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        var measured = Self.record(Self.stockKey(), decision: divergence)
+        measured.measurements = [.init(slots: 2, conformant: false, aggregateTPS: 0, throughputMeasured: false)]
+        try selfCheck.store(measured)
+        let lines = LockedLines()
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .stockOrder, log: { lines.append($0) }
+        )
+        recorder.applied(key: Self.stockKey(), decision: divergence)
+        XCTAssertEqual(lines.all, [
+            "event=small_m_route action=verdict_recorded decision=row_divergence_at_2 slots=1 next_start=row_invariant fallback=stock_order_divergence",
+        ])
+        // No one-row verdict: the next start is row-invariant, not serial-only.
+        XCTAssertEqual(store.verdict(startupIdentity: identity, selfCheckStore: selfCheck), .absent)
+        XCTAssertNil(store.oneRowDecision(startupIdentity: identity, selfCheckStore: selfCheck))
+        let next = SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity))
+        XCTAssertEqual(next, SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_divergence"))
+        XCTAssertTrue(SmallMRoute.verdictDecidesNextStart(Self.decidedInputs(store, selfCheck, identity)))
+        // The row-invariant key's grant is untouched and serves until that
+        // route re-checks.
+        XCTAssertEqual(selfCheck.decision(for: Self.key()), prior)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(
+                store: selfCheck,
+                target: ContinuousBatchingSelfCheckTarget(key: Self.key(), maxRows: 4),
+                ownerPinned: nil, provisional: nil
+            )?.servedSlots,
+            4
+        )
+
+        // A divergence above a granted width on stock order falls back too.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 2, reason: "granted", verifiedSlots: 2)
+        var wider = Self.record(Self.stockKey(), decision: granted)
+        wider.measurements = [
+            .init(slots: 2, conformant: true, aggregateTPS: 30, throughputMeasured: true),
+            .init(slots: 3, conformant: false, aggregateTPS: 0, throughputMeasured: false),
+        ]
+        try otherSelfCheck.store(wider)
+        SmallMRouteVerdictRecorder(
+            store: otherStore, selfCheckStore: otherSelfCheck, startupIdentity: identity, route: .stockOrder, log: { _ in }
+        ).applied(key: Self.stockKey(), decision: granted)
+        XCTAssertEqual(otherStore.stockOrderFallback(startupIdentity: identity), "stock_order_divergence")
+        // So does a crash; no net gain on stock order is not a stock order failure.
+        XCTAssertEqual(
+            SmallMRoute.stockOrderFallbackReason(
+                decision: .init(slots: 1, reason: "crashed_at_3", verifiedSlots: 2), anyWidthDiverged: false, crashed: true
+            ),
+            "stock_order_crash"
+        )
+        XCTAssertNil(SmallMRoute.stockOrderFallbackReason(
+            decision: .init(slots: 1, reason: "no_net_gain", verifiedSlots: 4), anyWidthDiverged: false, crashed: false
+        ))
+    }
+
+    func testAttachFailureOnStockOrderSendsTheNextStartToRowInvariant() {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m"])
+        let lines = LockedLines()
+        // A row-invariant process never records a stock order fallback.
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+        ).stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        XCTAssertNil(store.stockOrderFallback(startupIdentity: identity))
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .stockOrder, log: { lines.append($0) }
+        )
+        recorder.stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        recorder.stockOrderFailed(reason: SmallMRoute.stockOrderReferenceUnfit)
+        XCTAssertEqual(lines.all, [
+            "event=small_m_route action=stock_order_fallback_recorded reason=stock_order_attach_failed next_start=row_invariant",
+        ])
+        XCTAssertEqual(store.stockOrderFallback(startupIdentity: identity), "stock_order_attach_failed", "the first reason stays")
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_attach_failed")
+        )
+
+        // Which probe results are attach failures.
+        func parity(_ established: Bool) -> PagedKVRuntimeParityProbeResult {
+            .init(established: established, nLayers: 2, nNew: 4, gatherKernelCalls: 16, maxLogicalBlocks: 3, nonIdentityPermutation: true)
+        }
+        func isolation(
+            proven: Bool, failures: Int = 0, divergences: Int = 0, sharedParity: Bool, distinguishing: Bool
+        ) -> PagedKVRuntimeMoEProbeResult {
+            .init(
+                proven: proven, rowsDecodedInSharedForward: 2, rowFailures: failures, crossRowDivergences: divergences,
+                sharedForwardParityProven: sharedParity, parityTokensCompared: 32, challengeDistinguishing: distinguishing
+            )
+        }
+        let passing = isolation(proven: true, sharedParity: true, distinguishing: true)
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: nil, isolation: nil), "not run")
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: parity(true), isolation: nil), "not run")
+        XCTAssertFalse(SmallMRoute.attachProbeFailed(parity: parity(true), isolation: passing))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(parity: parity(false), isolation: passing))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, divergences: 1, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, failures: 1, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertTrue(SmallMRoute.attachProbeFailed(
+            parity: parity(true), isolation: isolation(proven: false, sharedParity: false, distinguishing: true)
+        ))
+        XCTAssertFalse(
+            SmallMRoute.attachProbeFailed(
+                parity: parity(true), isolation: isolation(proven: false, sharedParity: false, distinguishing: false)
+            ),
+            "a challenge that cannot distinguish its rows proves nothing either way"
+        )
+    }
+
+    func testStockOrderFallbackIsStickyAcrossStartsAndNeverLoops() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        XCTAssertTrue(store.recordStockOrderFallback(startupIdentity: identity, reason: SmallMRoute.stockOrderDivergence))
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 4, reason: "granted", verifiedSlots: 4)
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 4)
+        try selfCheck.store(Self.record(Self.key(), decision: granted))
+        // Start 2 and 3 run row-invariant; their grants keep the fallback.
+        for _ in 0 ..< 2 {
+            XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)).route, .rowInvariant)
+            let lines = LockedLines()
+            SmallMRouteVerdictRecorder(
+                store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+            ).applied(key: Self.key(), decision: granted)
+            XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=granted slots=4 next_start=row_invariant"])
+            XCTAssertEqual(store.stockOrderFallback(startupIdentity: identity), "stock_order_divergence")
+        }
+        // A one-row verdict measured on the row-invariant route then decides
+        // as it always did: serial-only, which never measures again.
+        try selfCheck.store(Self.record(Self.key(), decision: noGain))
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { _ in }
+        ).applied(key: Self.key(), decision: noGain)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)).route, .serialOnly)
+        // A re-check scheduled on that key returns to row-invariant, never to stock order.
+        try selfCheck.store(Self.record(Self.key(), decision: noGain, remeasureAfter: "2026-11-16T00:00:00Z"))
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .rowInvariant, reason: "stock_order_divergence")
+        )
+        // A stock-order-measured one-row verdict recorded before the fallback
+        // is dropped with it, so a stock order failure never ends serial-only.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        try otherSelfCheck.store(Self.record(Self.stockKey(), decision: noGain))
+        XCTAssertTrue(otherStore.record(startupIdentity: identity, key: Self.stockKey(), decision: noGain, route: .stockOrder))
+        XCTAssertEqual(otherStore.verdict(startupIdentity: identity, selfCheckStore: otherSelfCheck), .grantsNoBatching)
+        otherStore.recordStockOrderFallback(startupIdentity: identity, reason: SmallMRoute.stockOrderReferenceUnfit)
+        XCTAssertEqual(otherStore.verdict(startupIdentity: identity, selfCheckStore: otherSelfCheck), .absent)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(otherStore, otherSelfCheck, identity)).route, .rowInvariant)
+    }
+
+    func testNewRuntimeBuildReDecidesTheRoute() {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r1"])
+        let new = SmallMRouteVerdictStore.startupIdentity(["model": "m", "runtime_build": "r2"])
+        XCTAssertNotEqual(old, new)
+        store.recordStockOrderFallback(startupIdentity: old, reason: SmallMRoute.stockOrderAttachFailed)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(store, selfCheck, old)).route, .rowInvariant)
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, new)),
+            SmallMRoute.Decision(route: .stockOrder, reason: "self_check_verdict_absent")
+        )
+    }
+
+    func testDivergenceOnRowInvariantKeepsTheSerialRule() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m"])
+        let divergence = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1)
+        var measured = Self.record(Self.key(), decision: divergence)
+        measured.measurements = [.init(slots: 2, conformant: false, aggregateTPS: 0, throughputMeasured: false)]
+        try selfCheck.store(measured)
+        let lines = LockedLines()
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .rowInvariant, log: { lines.append($0) }
+        ).applied(key: Self.key(), decision: divergence)
+        XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=row_divergence_at_2 slots=1 next_start=serial_only"])
+        XCTAssertNil(store.stockOrderFallback(startupIdentity: identity))
+        XCTAssertEqual(
+            SmallMRoute.decide(Self.decidedInputs(store, selfCheck, identity)),
+            SmallMRoute.Decision(route: .serialOnly, reason: "self_check_no_batching")
+        )
+        // No net gain measured on stock order also keeps the serial rule.
+        let (other, otherSelfCheck, otherStore) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: other) }
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 4)
+        try otherSelfCheck.store(Self.record(Self.stockKey(), decision: noGain))
+        SmallMRouteVerdictRecorder(
+            store: otherStore, selfCheckStore: otherSelfCheck, startupIdentity: identity, route: .stockOrder, log: { _ in }
+        ).applied(key: Self.stockKey(), decision: noGain)
+        XCTAssertEqual(SmallMRoute.decide(Self.decidedInputs(otherStore, otherSelfCheck, identity)).route, .serialOnly)
+    }
+
+    /// LOW-7: the core's partial-sum count is never inherited outside lab
+    /// builds, so a row-invariant or native-MTP process keeps its bits.
+    func testInheritedPartialSumCountIsRemoved() {
+        setenv(SmallMRoute.partialSumsEnvironmentKey, "8", 1)
+        defer { unsetenv(SmallMRoute.partialSumsEnvironmentKey) }
+        #if MACPROVIDER_LAB_HARNESS
+        XCTAssertFalse(SmallMRoute.removeInheritedPartialSums())
+        XCTAssertNotNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        #else
+        XCTAssertTrue(SmallMRoute.removeInheritedPartialSums())
+        XCTAssertNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        XCTAssertFalse(SmallMRoute.removeInheritedPartialSums())
+        // `apply` and `requireRowInvariant` (which calls `apply`) remove it
+        // even when this process already applied its route.
+        setenv(SmallMRoute.partialSumsEnvironmentKey, "8", 1)
+        SmallMRoute.apply(.rowInvariant, reason: "test")
+        XCTAssertNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
+        #endif
+        XCTAssertEqual(SmallMRoute.partialSumsEnvironmentKey, "MLX_METAL_QMV_MMA_WK")
+    }
 }
