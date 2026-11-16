@@ -271,6 +271,11 @@ type Provider struct {
 	// provider and its served model is failed. The registry recomputes it from
 	// the suspension set on registration, model change and every set change.
 	ComputeIntegritySuspended bool `json:"compute_integrity_suspended,omitempty"`
+	// ComputeIntegrityPassing is set while the SPEC-036 key for this
+	// provider and its served model currently has a passing verification
+	// (SPEC-022 R-16.2a); recomputed with ComputeIntegritySuspended. Never
+	// set while compute scoring is not running.
+	ComputeIntegrityPassing bool `json:"-"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -477,6 +482,34 @@ type Provider struct {
 	LoadingStartedAt time.Time `json:"-"`
 
 	NativeMTPCanary *NativeMTPCanaryDiagnostics `json:"native_mtp_canary,omitempty"`
+
+	// WarmModels is the session's SPEC-001-R016 warm set, primary first, as
+	// the latest handshake or heartbeat reported it (SPEC-002-R011); nil for a
+	// provider without one. The top-level model fields describe the primary.
+	WarmModels []WarmModel `json:"-"`
+	// ServedModelID is set only on a per-entry view (EntrySnapshot,
+	// ResolveEntry) of a session with a warm set: the member that view
+	// describes and that a dispatch to it names as served_model_id.
+	ServedModelID string `json:"-"`
+	// legacyDispatchModel and legacyDispatchOpen are the drain record: the
+	// dispatches made with no served model while legacyDispatchModel was the
+	// session's model, after a heartbeat made another model primary. Until
+	// legacyDispatchOpen of them have ended, an empty-served ending names
+	// legacyDispatchModel.
+	legacyDispatchModel string
+	legacyDispatchOpen  int
+	// emptyServedOpen counts the session's own open dispatches consumed with
+	// no served model; it seeds the drain record (drainEmptyServedLocked).
+	emptyServedOpen int
+	// notLoadedStrikes are the SPEC-002-R011 model_not_loaded strikes of the
+	// session's warm-set entries per SanctionKey (RecordEntryNotLoaded).
+	notLoadedStrikes map[string][]time.Time
+	// warmPins are the further members' identity pins by SanctionKey
+	// (WarmModel.identityPin), kept while a member stays declared.
+	warmPins map[string]*IdentityPin
+	// warmModelsRejected counts consecutive heartbeats whose warm_models was
+	// rejected (keepWarmModelsLocked).
+	warmModelsRejected int
 
 	Tier2Session *Tier2Session `json:"-"`
 
@@ -1007,8 +1040,17 @@ func (p Provider) IsWSTunneled() bool {
 // #274). AssignedID is a coordinator-issued UUID and similarly may
 // not contain "/"; if the AssignedID format ever changes, this
 // docstring AND the key encoding must be revisited.
+//
+// A per-entry view of a warm-set session (SPEC-002-R011) appends
+// `#<case-folded ServedModelID>`, so each (provider, model) entry is its own
+// routing candidate. The provider-ID grammar and the UUID AssignedID both
+// exclude "#", so the first "#" always starts the model.
 func (p Provider) SortKey() string {
-	return p.ProviderID + "/" + p.AssignedID
+	key := p.ProviderID + "/" + p.AssignedID
+	if p.ServedModelID != "" {
+		key += "#" + warmModelKey(p.ServedModelID)
+	}
+	return key
 }
 
 type Registry struct {
@@ -1079,12 +1121,16 @@ type Registry struct {
 	hashVerifier            HeartbeatHashVerifier
 	modelIdentityVerifier   ModelIdentityVerifier
 	modelIdentityResolver   ModelIdentityResolver
+	sanctionResolver        SanctionResolver
 	swapEmitter             SwapEventEmitter
 	receiptRotationEmitter  ReceiptRotationEventEmitter
 
 	// computeIntegritySuspended is the SPEC-036 FR-25 set of failed
-	// (provider_id, model_id) keys.
+	// (provider_id, SanctionKey) keys.
 	computeIntegritySuspended map[string]map[string]struct{}
+	// computeIntegrityPassing is the set of (provider_id, SanctionKey) keys
+	// whose verification is currently passing.
+	computeIntegrityPassing map[string]map[string]struct{}
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -1402,6 +1448,9 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 			p.InferencePath = InferencePathWSTunneled
 		}
 	}
+	// SPEC-002-R011: the handshake's warm set, each further member verified
+	// for its own model when the session's own model was.
+	r.applyWarmModelsLocked(p, p.WarmModels, map[string]int{}, nil, p.HashStatus != "", false)
 	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
 	// session's authority from its first heartbeat on, not from the first
 	// heartbeat that happens to verify.
@@ -1579,7 +1628,7 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	}
 
 	// 2. Pool-lifetime accumulator (SPEC-002 § 7.2).
-	canonical := strings.ToLower(modelID)
+	canonical := ModelKey(modelID)
 	if _, already := r.seenModelsLifetime[canonical]; already {
 		return
 	}
@@ -1617,7 +1666,7 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 //
 // Each entry flows through recordSeenModelLocked, so:
 //   - supported-model entries share EXACTLY the same normalization
-//     (strings.ToLower canonical key for the lifetime accumulator, raw
+//     (ModelKey canonical key for the lifetime accumulator, raw
 //     id for the per-session attribution set) as the served model_id;
 //   - they share the same lifecycle: dropped from seenModelsByProvider
 //     on disconnect / session-replacement (M2-5 / PERF-5), and retained
@@ -1717,6 +1766,7 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 		}
 		p.HashStatus = next.Status
 		p.ArtifactIdentity = next.Artifact
+		r.refreshWarmModelIdentitiesLocked(p, verdictFor)
 		// A refresh that changes the session's identity facts is a session
 		// identity change like any other: in-flight route attempts that
 		// captured the old identity fail closed at compare-and-insert.
@@ -1995,6 +2045,10 @@ func (r *Registry) ConsumeForwardedSlotDetailed(providerID, assignedID string) (
 	if p == nil || p.AssignedID != assignedID {
 		return false, false
 	}
+	return r.consumeForwardedSlotLocked(p)
+}
+
+func (r *Registry) consumeForwardedSlotLocked(p *Provider) (ok, unconfirmed bool) {
 	unconfirmed = p.forwardedInFlight > 0 || p.awaitingReadyOccupancy
 	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
@@ -2046,7 +2100,14 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
-	if p == nil || p.AssignedID != assignedID || p.SlotsTotal <= 0 {
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	return r.restoreForwardedSlotLocked(p)
+}
+
+func (r *Registry) restoreForwardedSlotLocked(p *Provider) bool {
+	if p.SlotsTotal <= 0 {
 		return false
 	}
 	if p.forwardedInFlight > 0 {
@@ -2099,6 +2160,10 @@ func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string, refusedS
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	return r.markForwardedSlotFullLocked(p, refusedSeatConsumed)
+}
+
+func (r *Registry) markForwardedSlotFullLocked(p *Provider, refusedSeatConsumed bool) bool {
 	thermalHold := p.capacitySafetyHold && !p.queueFullHold
 	if refusedSeatConsumed {
 		if p.forwardedInFlight > 0 {
@@ -2906,9 +2971,33 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 	return updated
 }
 
+// applyComputeIntegritySuspensionLocked resolves the SPEC-036 FR-25
+// suspension per (provider, SanctionKey): the session's flag is its
+// primary model's, and each further warm member carries its own, so a
+// suspended model stays out of routing whichever member serves it and a
+// suspended primary never closes a healthy member.
+//
+// It also resolves the passing verification of the same keys
+// (ComputeIntegrityPassing), which narrows a held credit to its served model
+// (SPEC-022 R-16.2a).
 func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
-	_, suspended := r.computeIntegritySuspended[p.ProviderID][p.ModelID]
+	models := r.computeIntegritySuspended[p.ProviderID]
+	passing := r.computeIntegrityPassing[p.ProviderID]
+	_, suspended := models[r.SanctionKey(p.ModelID)]
+	_, passed := passing[r.SanctionKey(p.ModelID)]
 	p.ComputeIntegritySuspended = suspended
+	p.ComputeIntegrityPassing = passed
+	if p.WarmModels == nil {
+		return
+	}
+	p.WarmModels = cloneWarmModels(p.WarmModels)
+	for i := range p.WarmModels {
+		key := r.SanctionKey(p.WarmModels[i].ModelID)
+		_, memberSuspended := models[key]
+		_, memberPassing := passing[key]
+		p.WarmModels[i].computeIntegritySuspended = memberSuspended
+		p.WarmModels[i].computeIntegrityPassing = memberPassing
+	}
 }
 
 // SetComputeIntegritySuspended adds or removes a SPEC-036 FR-25 routing
@@ -2917,24 +3006,41 @@ func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
 func (r *Registry) SetComputeIntegritySuspended(providerID, modelID string, suspended bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	models := r.computeIntegritySuspended[providerID]
+	if r.computeIntegritySuspended == nil {
+		r.computeIntegritySuspended = map[string]map[string]struct{}{}
+	}
+	return r.setComputeIntegrityKeyLocked(r.computeIntegritySuspended, providerID, modelID, suspended)
+}
+
+// SetComputeIntegrityPassing records whether one (provider_id, model_id)
+// key currently has a passing SPEC-036 verification and applies it to the
+// live session. It returns true when the set changed.
+func (r *Registry) SetComputeIntegrityPassing(providerID, modelID string, passing bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.computeIntegrityPassing == nil {
+		r.computeIntegrityPassing = map[string]map[string]struct{}{}
+	}
+	return r.setComputeIntegrityKeyLocked(r.computeIntegrityPassing, providerID, modelID, passing)
+}
+
+func (r *Registry) setComputeIntegrityKeyLocked(set map[string]map[string]struct{}, providerID, modelID string, on bool) bool {
+	modelID = r.SanctionKey(modelID)
+	models := set[providerID]
 	_, had := models[modelID]
-	if had == suspended {
+	if had == on {
 		return false
 	}
-	if suspended {
-		if r.computeIntegritySuspended == nil {
-			r.computeIntegritySuspended = map[string]map[string]struct{}{}
-		}
+	if on {
 		if models == nil {
 			models = map[string]struct{}{}
-			r.computeIntegritySuspended[providerID] = models
+			set[providerID] = models
 		}
 		models[modelID] = struct{}{}
 	} else {
 		delete(models, modelID)
 		if len(models) == 0 {
-			delete(r.computeIntegritySuspended, providerID)
+			delete(set, providerID)
 		}
 	}
 	if p := r.providers[providerID]; p != nil {
@@ -3207,7 +3313,15 @@ type HeartbeatUpdate struct {
 	HardwareCapacity    *ProviderHardwareCapacity
 	SafetyTelemetry     *ProviderSafetyTelemetry
 	ConversationCache   *ConversationCacheTelemetry
-	At                  time.Time
+	// WarmModels is the heartbeat's SPEC-001-R016 warm set, already validated
+	// (nil: the provider reports none). Each further member carries its own
+	// ExpectedModelHash.
+	WarmModels []WarmModel
+	// KeepWarmModels marks a heartbeat whose warm_models was rejected: the
+	// session keeps its previous member list (SPEC-002-R011), unless the
+	// top-level model no longer is that list's primary.
+	KeepWarmModels bool
+	At             time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -3297,6 +3411,11 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorIdentity := sessionIdentityFingerprint(p)
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
+	warmInFlight := warmInFlightLocked(p)
+	var demoted *WarmModel
+	if !hb.KeepWarmModels {
+		demoted = promoteWarmPrimaryLocked(p, hb.WarmModels, warmInFlight)
+	}
 	p.LastHeartbeatAt = hb.At
 	p.recordConversationCache(hb.ConversationCache, hb.At)
 	if hb.ConversationCache.Valid() {
@@ -3307,10 +3426,13 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.VisionRuntimeCapabilities = hb.VisionRuntimeCapabilities
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
-	if modelIDChanged {
+	if r.SanctionKey(priorModelID) != r.SanctionKey(hb.ModelID) {
 		// A model change (warm swap, R006) ends the previous session
-		// authority whether or not this report carries a hash.
+		// authority whether or not this report carries a hash. Another
+		// name of the same catalog row is no model change for the pin.
 		p.IdentityPin = nil
+	}
+	if modelIDChanged {
 		// SPEC-047-R003 v0.1.5: the session-to-candidate binding is cleared
 		// on model change; the ws drift path revokes the bound candidate
 		// before re-deriving.
@@ -3378,6 +3500,12 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
 	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
+	if hb.KeepWarmModels {
+		r.keepWarmModelsLocked(p)
+	} else {
+		p.warmModelsRejected = 0
+		r.applyWarmModelsLocked(p, hb.WarmModels, warmInFlight, demoted, true, hb.Status == StateReady || hb.Status == StateBusy)
+	}
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
 	}
@@ -3490,7 +3618,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// EqualFold("Σ","ς")==true but ToLower differs;
 	// EqualFold("İ","i")==false but ToLower agrees). Preserve the
 	// existing EqualFold contract by:
-	// 1. Fast O(1) hit on strings.ToLower canonical key (covers the
+	// 1. Fast O(1) hit on the ModelKey canonical key (covers the
 	//    ASCII/Latin common case, ~all realistic model ids).
 	// 2. On miss, EqualFold scan the lifetime accumulator before
 	//    falling through to the live/per-session paths.
@@ -3498,7 +3626,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// Issue #900: also accept rate-card / catalog keys that normalize
 	// to the same catalog identity as a seen or live HF model id
 	// (openai/gpt-oss-20b ↔ mlx-community/gpt-oss-20b-MXFP4-Q8).
-	canonical := strings.ToLower(modelID)
+	canonical := ModelKey(modelID)
 	// Hoist query normalization once; fallback scans only normalize
 	// stored ids (issue #900 audit: avoid re-allocating on the buyer
 	// string inside every EqualFold-miss iteration under RLock).
@@ -3808,16 +3936,21 @@ func (r *Registry) Snapshot() []Provider {
 	defer r.mu.RUnlock()
 	out := make([]Provider, 0, len(r.providers))
 	for _, p := range r.providers {
-		cp := *p
-		cp.conn = nil
-		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
-		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
-		cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
-		cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
-		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
-		out = append(out, cp)
+		out = append(out, snapshotProviderLocked(p))
 	}
 	return out
+}
+
+func snapshotProviderLocked(p *Provider) Provider {
+	cp := *p
+	cp.conn = nil
+	cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
+	cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
+	cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
+	cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
+	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
+	cp.WarmModels = cloneWarmModels(p.WarmModels)
+	return cp
 }
 
 type RegistryOption func(*Registry)
@@ -3839,6 +3972,34 @@ func WithModelIdentityVerifier(fn ModelIdentityVerifier) RegistryOption {
 // callback; it takes precedence over WithModelIdentityVerifier.
 func WithModelIdentityResolver(fn ModelIdentityResolver) RegistryOption {
 	return func(r *Registry) { r.modelIdentityResolver = fn }
+}
+
+// SanctionResolver maps a canonical model id (ModelKey) to the identity of
+// the signed catalog row it names; ok is false for an id no row carries.
+type SanctionResolver func(modelKey string) (string, bool)
+
+// WithSanctionResolver installs the catalog lookup SanctionKey uses. Unset,
+// every id is its own sanction key (ModelKey).
+func WithSanctionResolver(fn SanctionResolver) RegistryOption {
+	return func(r *Registry) { r.sanctionResolver = fn }
+}
+
+// SanctionKey is the one identity every per-model sanction and its lookups
+// key on (SPEC-036 FR-25, SPEC-002-R011): a signed catalog row is reachable
+// under more than one name (its row key and its model_id), and every name of
+// one row maps to that row's identity, so a provider cannot leave a
+// suspension, scoring schedule, strike or identity pin behind by declaring
+// the model under its other name. An id that names no catalog row keeps its
+// ModelKey.
+func (r *Registry) SanctionKey(modelID string) string {
+	key := ModelKey(modelID)
+	if r == nil || r.sanctionResolver == nil {
+		return key
+	}
+	if row, ok := r.sanctionResolver(key); ok && row != "" {
+		return ModelKey(row)
+	}
+	return key
 }
 
 // WithSwapEmitter injects the operator_model_swap callback per SPEC-002

@@ -1,6 +1,17 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.46.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.47.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.47.0 (2026-11-16, Related: #2338):**
+R004 adds the models this Mac keeps loaded beside the current one
+(SPEC-001 §6.16): an "Also loaded" section on On this Mac, read from the
+`warm_models` list in the local status, with each model's slots and context
+and Keep loaded / Unload actions that run `models warm load|unload --save`.
+The models list accepts several loaded rows only when the current model is
+one of them. §3.2 Earnings card lists lifetime USDC per model when more than
+one model has earned (`credits_by_model`, SPEC-005 §11.4). With one model
+loaded and earning, both screens are unchanged. Existing requirement IDs
+remain stable.
 
 **Change log v0.46.0 (2026-10-26, Related: #2164):**
 Adds SPEC-025-R021 Create for provider-local SDXL-Turbo images, capability
@@ -750,6 +761,10 @@ time (60–240 s for the first model) in the background.
     requests and USDC; "Payouts are not enabled yet in beta." while a fresh
     earnings read reports `payouts_enabled` false (SPEC-005 §11.4). No amount
     is labelled unpaid, since the pending figure is not net of past payouts.
+    When a fresh or last-known earnings read reports `credits_by_model` with
+    more than one model above zero, one line per such model follows the
+    USDC line, largest first, as "<model id>: <USDC> lifetime"; otherwise
+    no line is added.
     The header shows the model and "last credited job <relative time>".
   - MALIBU: "paused network-wide" while `emission.active` is false; the balance
     split into held and not held; held MALIBU is "not released and not
@@ -860,6 +875,24 @@ projections (SPEC-044-R004), colour never the only signal.
   reads **Not downloaded**. Quantization, architecture, parameter count and
   capability columns or badges MUST NOT be shown until the signed catalog row
   and the SPEC-044 projection carry them.
+  *Also loaded (v0.47.0).* When the local status lists more than one loaded
+  model (`warm_models`, SPEC-001 §6.16), On this Mac MUST show an **Also
+  loaded** section with each model loaded beside the current one: its
+  readable title and exact identifier, and its slots and context ("Loading…"
+  or "Unloading…" while it loads or unloads). Each such model offers
+  **Keep loaded** (`models warm load <model> --save`, offered only while
+  config.yaml does not already load it at start) and **Unload**
+  (`models warm unload <model> --save`); both are enabled only while the
+  model is loaded and no other such action runs, and their result is one
+  plain line ("stays loaded, also after a restart", "is unloaded", "is
+  saved. Restart the provider to use it.", "is serving a request. Try again
+  when it is idle.", or that it could not be kept loaded or unloaded). A
+  status list is used only whole: every entry readable and exactly one main
+  model, listed first. The models list accepts several loaded rows only when
+  the current model is among them (a loaded set without it is still
+  rejected), and a model loaded beside the current one is listed like any
+  other row, not as the current model. With one model loaded there is no
+  such section.
 - **SPEC-025-R005 Switch confirmation and progress.** Before a switch or
   revert, Malibu MUST state: the from and to models; that customers get a
   "provider loading" response (HTTP 503) while the new model loads and

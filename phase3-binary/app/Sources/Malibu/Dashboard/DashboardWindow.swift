@@ -110,6 +110,7 @@ enum DashboardCopy {
         }
         strings.append(earningsTitle)
         strings.append(card.usdcSummary)
+        strings.append(contentsOf: card.modelLines)
         if let payout = card.payoutLine { strings.append(payout) }
         if let address = snapshot.payoutRegisteredAddress {
             strings.append("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
@@ -308,6 +309,12 @@ struct DashboardView: View {
             Text(card.usdcSummary)
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(card.modelLines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let payout = card.payoutLine {
                 Text(payout)
                     .font(.callout)

@@ -22,6 +22,12 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Several models per provider session (SPEC-001 R016 to R019, SPEC-002 R011) — merged 2026-11-16, not live
+
+[PR 2386](https://github.com/Augustas11/macprovider/pull/2386) merged as `354f13dd2` (Related: #2338). Coordinator: strict decode of a provider's `warm_models`; a session with at least two loaded, hash-verified members gets one pool entry per model with its own slots, routing, pins and queue; `served_model_id` on dispatch; `model_not_loaded` before the first byte fails over without settlement; compute-integrity sanctions per model, keyed on the catalog row. A provider with one loaded model is handled as today. Gateway: counts a multi-model session once; `/v1/models` and earnings per model. Schema: one defaulted column, `served_model_dispatch`, on the two route-snapshot tables (additive).
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator and gateway source change, additive schema change; state the about 1-2 min coordinator downtime first). No provider advertises a second model until a CLI cut carries the provider half (see the CLI release train), so this runtime changes nothing for the current fleet. Live probe after both: one provider serves buyer requests for two catalog models through the gateway in the same minute, with a receipt and billing row per model.
+
 ## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, live in v1.8.290
 
 PR #2377 (`589fd8d24`), issue #2365. Live in v1.8.290 (2026-11-15 14:17 WITA); its own live probe (a follow-up Messages turn reporting `cache_read_input_tokens`) is not recorded here yet.
@@ -39,6 +45,10 @@ PR #2375 (`a8c2e6157`), epic #2355. Live in v1.8.290 (2026-11-15 14:17 WITA).
 - Gateway: the OpenRouter model feed advertises `tools` for `lfm2.5-24b-a2b`, matching the coordinator's tool-grammar family.
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
+
+## Pearl runtime v1.8.291 (2026-11-16)
+
+**Live 2026-11-16 15:29 WITA** (tag `v1.8.291` at `e7dde22b2`, release run 43821206016, applied through `scripts/ops/pearl-runtime.sh`). It carries the coordinator and gateway half of PR 2386 (several models per provider process; additive schema change) and the billing and gateway aliases for the abliterated MiniMax M3.1-Flash row from PR 2392. The apply held buyers with 503 for about two minutes; coordinator and gateway `/healthz` report `v1.8.291` with no buyer hold. Remaining live steps that depended on it: catalog activation of the PR 2392 release and then of the PR 2394 release through `scripts/ops/catalog-activate.sh` (see `docs/releases/catalog-release-train.md`), and the provider half of PR 2386 with the next CLI cut.
 
 ## Pearl runtime v1.8.290 (2026-11-15)
 

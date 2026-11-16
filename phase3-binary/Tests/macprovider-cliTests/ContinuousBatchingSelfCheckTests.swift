@@ -823,7 +823,8 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     /// The throughput passes time decode only on both sides for a
     /// `decodeOnlyGain` (glm5_next) target (v0.3.21): the batch runs as a
     /// cohort and its rate comes from the cohort span, the serial side from
-    /// the stock decode rate. Every other target keeps the end-to-end rates.
+    /// the stock decode rate. Every other target keeps the end-to-end rates;
+    /// on stock order from three rows its batch also runs as a cohort.
     func testThroughputPassesCompareDecodeRatesOnly() throws {
         let source = try String(
             contentsOf: URL(fileURLWithPath: #filePath)
@@ -833,7 +834,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         )
         // Check the cohort argument independently of nesting/indentation.
         let normalizedSource = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        XCTAssertTrue(normalizedSource.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\", cohort: decodeOnly"))
+        XCTAssertTrue(normalizedSource.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\", cohort: decodeOnly || sameOrder"))
         XCTAssertTrue(source.contains("let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS"))
         XCTAssertTrue(source.contains("let aggregate = decodeOnly\n                        ? ContinuousBatchingSelfCheck.cohortDecodeTPS("))
         let runtime = try String(
@@ -938,6 +939,218 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(
             ContinuousBatchingSelfCheck.reusableLoneOutputs([[10, -1]], digests: digests, prompts: prompts, outputTokens: 2), []
         )
+    }
+
+    /// SPEC-038 FR-CB10 (stock order): a lone row and a two-row forward share
+    /// one reduction order, so a two-row width is still compared with each
+    /// prompt's lone run.
+    func testStockOrderTwoRowWidthComparesWithLoneRuns() {
+        XCTAssertFalse(ContinuousBatchingSelfCheck.usesSameOrderReference(route: .stockOrder, slots: 2))
+        let lone = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        let sameOrder = [[1, 2, 0], [4, 5, 0], [7, 8, 0]]
+        let references = ContinuousBatchingSelfCheck.rowReferences(
+            route: .stockOrder, slots: 2, lone: lone, sameOrder: sameOrder
+        )
+        XCTAssertEqual(references, [[1, 2, 3], [4, 5, 6]])
+        let exact = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 5, 6]]], references: references
+        )
+        XCTAssertTrue(exact.rows.isEmpty)
+        XCTAssertFalse(exact.countMismatch)
+        // A row that matches only the same-order run is a divergence at two rows.
+        let off = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 5, 0]]], references: references
+        )
+        XCTAssertEqual(off.rows.map { $0.row }, [1])
+        XCTAssertEqual(off.rows.first?.pair.1, [4, 5, 6])
+    }
+
+    /// From three rows each row is compared with its prompt's same-order
+    /// reference (the prompt run three times together, row 0). A row equal
+    /// to its lone run also passes: the decode row bound can leave it in a
+    /// forward of one or two rows. A row equal to neither is judged.
+    func testStockOrderWidthsFromThreeCompareWithTheSameOrderReference() {
+        for slots in [3, 4, 8, 16] {
+            XCTAssertTrue(ContinuousBatchingSelfCheck.usesSameOrderReference(route: .stockOrder, slots: slots), "\(slots)")
+        }
+        let lone = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+        let sameOrder = [[1, 2, 3], [4, 5, 0], [7, 0, 0], [10, 11, 12]]
+        let references = ContinuousBatchingSelfCheck.rowReferences(
+            route: .stockOrder, slots: 3, lone: lone, sameOrder: sameOrder
+        )
+        XCTAssertEqual(references, [[1, 2, 3], [4, 5, 0], [7, 0, 0]])
+        let alternates = Array(lone.prefix(3))
+        let sameOrderRows = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 5, 0], [7, 0, 0]]], references: references, exactAlternates: alternates
+        )
+        XCTAssertTrue(sameOrderRows.rows.isEmpty)
+        let splitRow = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 5, 0], [7, 8, 9]]], references: references, exactAlternates: alternates
+        )
+        XCTAssertTrue(splitRow.rows.isEmpty, "a row equal to its lone run passes")
+        let neither = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 9, 9], [7, 0, 0]], [[1, 2, 3], [4, 9, 9], [7, 0, 0]]],
+            references: references, exactAlternates: alternates
+        )
+        XCTAssertEqual(neither.rows.map { $0.row }, [1], "each distinct row output is judged once")
+        XCTAssertEqual(neither.rows.first?.pair.1, [4, 5, 0], "judged against the same-order reference")
+        let short = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2, 3], [4, 5, 0]]], references: references, exactAlternates: alternates
+        )
+        XCTAssertTrue(short.countMismatch)
+    }
+
+    /// Stock order from three rows: a cohort run is judged only when every
+    /// row decoded each token beside the whole cohort, so its forward (and
+    /// kernel order) was fixed for its whole run. A row-bound split (bound 5,
+    /// width 7: forwards of 5 and 2) keeps each row in one forward when every
+    /// step is full width, so each row equals its same-order reference or
+    /// its lone run. A row that also decoded in a narrower step may mix the
+    /// two orders mid-run and is never judged: the width is a shape not met.
+    func testStockOrderJudgesOnlyCohortRunsWhoseRowsKeptOneOrder() throws {
+        // 8 tokens per row: 1 from prefill, 7 decoded.
+        let rows = (0..<7).map { row in (0..<8).map { row * 100 + $0 } }
+        XCTAssertTrue(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+            outputs: rows, cohortDecodeTokens: Array(repeating: 7, count: 7)
+        ))
+        // One row's first decode ran before the cohort was whole.
+        var mixed = Array(repeating: 7, count: 7)
+        mixed[5] = 6
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(outputs: rows, cohortDecodeTokens: mixed))
+        // Early rows decoded narrow, then the cohort decoded full width.
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+            outputs: rows, cohortDecodeTokens: [3, 3, 7, 7, 7, 7, 7]
+        ))
+        // No cohort step at all, a missing count, or an empty row.
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+            outputs: rows, cohortDecodeTokens: Array(repeating: 0, count: 7)
+        ))
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+            outputs: rows, cohortDecodeTokens: Array(repeating: 7, count: 6)
+        ))
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(outputs: [], cohortDecodeTokens: []))
+        XCTAssertFalse(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(outputs: [[]], cohortDecodeTokens: [-1]))
+        // Each row is counted against its own length (self-check rows carry
+        // no stop tokens, so in practice every row has the full length).
+        XCTAssertTrue(ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+            outputs: [[1, 2, 3], [4, 5]], cohortDecodeTokens: [2, 1]
+        ))
+
+        // The split case with every step full width: rows 0-4 in the
+        // five-row forward equal their same-order reference, rows 5-6 in the
+        // two-row forward equal their lone runs; both pass. The comparison
+        // is not loosened: a row equal to neither is judged.
+        let lone = (0..<7).map { row in (0..<8).map { row * 100 + $0 } }
+        let sameOrder = lone.map { Array($0.dropLast()) + [-1] }
+        let references = ContinuousBatchingSelfCheck.rowReferences(
+            route: .stockOrder, slots: 7, lone: lone, sameOrder: sameOrder
+        )
+        let split = Array(sameOrder.prefix(5)) + Array(lone.suffix(2))
+        XCTAssertTrue(ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [split], references: references, exactAlternates: lone
+        ).rows.isEmpty)
+        var wrong = split
+        wrong[6][7] = 999
+        XCTAssertEqual(ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [wrong], references: references, exactAlternates: lone
+        ).rows.map { $0.row }, [6])
+
+        // The measure loop checks the shape before any row is judged and
+        // runs every stock order pass from three rows as a cohort.
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift"),
+            encoding: .utf8
+        )
+        let normalized = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let shape = try XCTUnwrap(normalized.range(of: "reason=probe_mixed_order"))
+        let probeJudged = try XCTUnwrap(normalized.range(of: "let probeCheck = try await checkRows("))
+        XCTAssertLessThan(shape.lowerBound, probeJudged.lowerBound)
+        let referenceShape = try XCTUnwrap(normalized.range(of: "reason=same_order_reference_mixed_order"))
+        let referenceJudged = try XCTUnwrap(normalized.range(of: "guard let reference = ContinuousBatchingSelfCheck.sameOrderReference(run.outputs)"))
+        XCTAssertLessThan(referenceShape.lowerBound, referenceJudged.lowerBound)
+        let passShape = try XCTUnwrap(normalized.range(of: "reason=pass_mixed_order"))
+        let passesJudged = try XCTUnwrap(normalized.range(of: "let passCheck = try await checkRows("))
+        XCTAssertLessThan(passShape.lowerBound, passesJudged.lowerBound)
+        XCTAssertTrue(normalized.contains("cohort: decodeOnly || sameOrder"))
+    }
+
+    /// The three rows of a same-order reference run decode in the same
+    /// batch-kernel forwards, so they must be identical; if they differ the
+    /// reference is refused and the width fails.
+    func testSameOrderReferenceWhoseRowsDisagreeFails() {
+        XCTAssertEqual(ContinuousBatchingSelfCheck.sameOrderReferenceRows, 3)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.sameOrderReference([[5, 6], [5, 6], [5, 6]]), [5, 6])
+        XCTAssertNil(ContinuousBatchingSelfCheck.sameOrderReference([[5, 6], [5, 6], [5, 7]]))
+        XCTAssertNil(ContinuousBatchingSelfCheck.sameOrderReference([[5, 6], [5, 7], [5, 6]]))
+        XCTAssertNil(ContinuousBatchingSelfCheck.sameOrderReference([[5, 6], [5, 6]]))
+        XCTAssertNil(ContinuousBatchingSelfCheck.sameOrderReference([[5, 6], [5, 6], [5, 6], [5, 6]]))
+        XCTAssertNil(ContinuousBatchingSelfCheck.sameOrderReference([]))
+        // A width failed on its reference is a row divergence at that width:
+        // the grant stays at or below the widths verified under it.
+        let decision = ContinuousBatchingSelfCheck.decide(serialTPS: 10, measurements: [
+            .init(slots: 2, conformant: true, aggregateTPS: 30),
+            .init(slots: 3, conformant: false, aggregateTPS: 0, throughputMeasured: false),
+        ])
+        XCTAssertEqual(decision.verifiedSlots, 2)
+        XCTAssertLessThanOrEqual(decision.slots, 2)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.decide(serialTPS: 10, measurements: [
+                .init(slots: 2, conformant: false, aggregateTPS: 0, throughputMeasured: false),
+            ]).reason,
+            "row_divergence_at_2"
+        )
+    }
+
+    /// The row-invariant route keeps one reduction order for 1-16 rows: every
+    /// width still compares with lone runs, with no alternate, and its
+    /// self-check key is unchanged. Stock order keys apart from it.
+    func testRowInvariantRouteKeepsLoneReferencesAndItsKey() {
+        let lone = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        let sameOrder = [[1, 0], [3, 0], [5, 0], [7, 0]]
+        for slots in 2...16 {
+            XCTAssertFalse(ContinuousBatchingSelfCheck.usesSameOrderReference(route: .rowInvariant, slots: slots))
+            XCTAssertFalse(ContinuousBatchingSelfCheck.usesSameOrderReference(route: .serialOnly, slots: slots))
+        }
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.rowReferences(route: .rowInvariant, slots: 4, lone: lone, sameOrder: sameOrder),
+            lone
+        )
+        let flipped = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: [[[1, 2], [3, 0], [5, 6], [7, 8]]], references: lone
+        )
+        XCTAssertEqual(flipped.rows.map { $0.row }, [1])
+        XCTAssertEqual(ContinuousBatchingSelfCheckTarget(key: ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"), maxRows: 4).smallMRoute, .rowInvariant)
+        let invariant = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
+        XCTAssertEqual(
+            invariant,
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024, smallMRoute: .rowInvariant)
+        )
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024, smallMRoute: .stockOrder),
+            invariant + "+small_m_stock_order"
+        )
+    }
+
+    /// Stored same-order references load from a record written before the
+    /// fields existed, and round-trip.
+    func testSameOrderReferencesRoundTripInTheStore() throws {
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"), decision: nil, serialTPS: 0, measurements: [], aloneOutputs: [],
+            inProgressSlots: nil, decidedAt: nil
+        )
+        let old = try JSONEncoder().encode(record)
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("same_order"))
+        XCTAssertNil(try JSONDecoder().decode(ContinuousBatchingSelfCheckStore.Record.self, from: old).sameOrderOutputs)
+        record.sameOrderOutputs = [[1, 2]]
+        record.sameOrderPromptSHA256s = [ContinuousBatchingSelfCheck.promptSHA256([9])]
+        record.probeSameOrderOutputs = [[3, 4]]
+        record.probeSameOrderPromptSHA256s = [ContinuousBatchingSelfCheck.promptSHA256([8])]
+        let decoded = try JSONDecoder().decode(
+            ContinuousBatchingSelfCheckStore.Record.self, from: try JSONEncoder().encode(record)
+        )
+        XCTAssertEqual(decoded, record)
     }
 
     /// A Mac that could not hold two probe rows re-runs once its bound grows.
@@ -1251,5 +1464,39 @@ final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
             NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(challengeID: "c", runNonce: "aaaaaaaa", attempt: 0),
             NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(challengeID: "c", runNonce: "aaaaaaaa", attempt: 1)
         )
+    }
+}
+
+/// SPEC-038 FR-CB10 (v0.3.56, Related: #2389): on stock order a width from
+/// three rows needs three copies of each probe prompt in the pool at once.
+extension ContinuousBatchingSelfCheckTests {
+    func testStockOrderReferenceBoundCoversThreeCopiesOfEachProbePrompt() {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
+        )
+        var target = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 16)
+        // A pool with room for every probe row holds every reference too.
+        XCTAssertEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 16)
+        let output = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
+        let costs = ContinuousBatchingSelfCheck.exactnessPromptLengths(count: 5, keyBoundary: target.probeKeyBoundary, outputTokens: output)
+            .compactMap { ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: $0, outputTokens: output) }
+        XCTAssertEqual(costs.count, 5)
+        // Exactly the first four probe rows fit together, but not three
+        // copies of the long second prompt.
+        target.poolTokens = costs.prefix(4).reduce(0, +)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessProbeBound(target: target, maxCount: 16), 4)
+        XCTAssertGreaterThan(3 * costs[1], target.poolTokens)
+        let reference = ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16)
+        XCTAssertEqual(reference, 2, "widths 1 and 2 need no reference")
+        XCTAssertLessThan(reference, ContinuousBatchingSelfCheck.exactnessProbeBound(target: target, maxCount: 16))
+        // The grant bound does not change: an unfit reference never lowers it.
+        XCTAssertEqual(target.grantableRows, 4)
+        // A pool that holds three copies of each of the first three prompts
+        // gives at least three.
+        target.poolTokens = 3 * costs.prefix(3).max()! + costs.prefix(4).reduce(0, +)
+        XCTAssertGreaterThanOrEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 3)
+        // A bound below three needs no reference.
+        target.poolTokens = costs.prefix(2).reduce(0, +)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: 16), 2)
     }
 }

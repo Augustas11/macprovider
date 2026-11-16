@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2986,4 +2987,88 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// SPEC-001-R016 / SPEC-002-R011: an entry view of a warm-set provider names
+// its model on the outer inference_request frame; a provider without a warm
+// set gets the frame it got before, byte for byte.
+func TestInferenceRequestServedModelIDOnlyOnEntryViews(t *testing.T) {
+	legacy := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	entry := legacy
+	entry.ServedModelID = "model-b"
+	body := []byte(`{"model":"model-b"}`)
+
+	plain := &providerSession{}
+	golden := `{"type":"inference_request","request_id":"req-1","stream":true,"body":"{\"model\":\"model-b\"}"}`
+	raw, err := plain.sealInferenceRequest(legacy, "req-1", body, true, nil, "")
+	if err != nil || string(raw) != golden {
+		t.Fatalf("legacy plaintext frame changed:\n%s\nwant\n%s (err=%v)", raw, golden, err)
+	}
+	relayBlind := &RelayBlindDispatchContext{KID: "kid-1", RequestID: "req-1", AssignedSession: "session-a"}
+	type frameCase struct {
+		name string
+		seal func(pool.Provider) ([]byte, error)
+	}
+	for _, tc := range []frameCase{
+		{"plaintext", func(p pool.Provider) ([]byte, error) {
+			return (&providerSession{}).sealInferenceRequest(p, "req-1", body, true, nil, "conv-1")
+		}},
+		{"relay-blind", func(p pool.Provider) ([]byte, error) {
+			return (&providerSession{}).sealInferenceRequestWithRelayBlind(p, "req-1", body, true, nil, "", nil, relayBlind)
+		}},
+		{"spec-008 sealed", func(p pool.Provider) ([]byte, error) {
+			ps, _, _ := sealedSizeTestSession()
+			return ps.sealInferenceRequest(p, "req-1", body, true, nil, "")
+		}},
+		{"spec-008 sealed under a frame limit", func(p pool.Provider) ([]byte, error) {
+			ps, _, _ := sealedSizeTestSession()
+			ps.maxTextFrameBytes = 1 << 20
+			return ps.sealInferenceRequest(p, "req-1", body, true, nil, "")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyRaw, err := tc.seal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(legacyRaw, []byte("served_model_id")) {
+				t.Fatalf("legacy frame carries served_model_id: %s", legacyRaw)
+			}
+			entryRaw, err := tc.seal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var legacyFrame, entryFrame map[string]json.RawMessage
+			if err := json.Unmarshal(legacyRaw, &legacyFrame); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(entryRaw, &entryFrame); err != nil {
+				t.Fatal(err)
+			}
+			if string(entryFrame["served_model_id"]) != `"model-b"` {
+				t.Fatalf("entry frame served_model_id = %s", entryFrame["served_model_id"])
+			}
+			delete(entryFrame, "served_model_id")
+			if !reflect.DeepEqual(entryFrame, legacyFrame) {
+				t.Fatalf("served_model_id changed more than itself:\n%s\n%s", entryRaw, legacyRaw)
+			}
+		})
+	}
+}
+
+func TestParsePreflightAckModelNotLoaded(t *testing.T) {
+	ack, field, err := ParsePreflightAck([]byte(`{"type":"preflight_ack","request_id":"req-1","accepted":false,"estimated_wait_ms":0,"reason":"model_not_loaded"}`))
+	if err != nil {
+		t.Fatalf("field=%q err=%v", field, err)
+	}
+	if ack.Rejection() != PreflightRejectionModelNotLoaded {
+		t.Fatalf("rejection = %q", ack.Rejection())
+	}
+	accepted, _, err := ParsePreflightAck([]byte(`{"type":"preflight_ack","request_id":"req-1","accepted":true,"estimated_wait_ms":0}`))
+	if err != nil || accepted.Rejection() != "" {
+		t.Fatalf("accepted ack rejection = %q err=%v", accepted.Rejection(), err)
+	}
+	if _, _, err := ParsePreflightAck([]byte(`{"type":"preflight_ack","request_id":"req-1","accepted":false,"reason":"model_cold"}`)); err == nil {
+		t.Fatal("accepted an unknown rejection reason")
+	}
 }

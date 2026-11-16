@@ -487,6 +487,40 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(profiledResult.warnings, baselineResult.warnings)
     }
 
+    /// `--warm-set` is additive: without it the printed recommendation is
+    /// the recommendation JSON byte for byte; with it a `warm_set` member
+    /// is added last.
+    func testRecommendationJSONWithoutWarmSetIsUnchangedAndWarmSetIsAddedLast() throws {
+        let request = try makeRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let core = RecommendationCore(
+            model: selected.model, targetContext: 4000, knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 4000),
+            tpsMedian: selected.tokensPerSecond, ttftP95MS: 0, replicates: 0)
+        let json = result.jsonString(serveConfig: core)
+
+        let plain = try AutotuneCommand.parse(["--recommend", "--json"])
+        XCTAssertNil(plain.warmSetPlan(beside: core))
+        XCTAssertEqual(AutotuneCommand.addingWarmSet(nil, to: json), json)
+        XCTAssertEqual(Array(AutotuneCommand.addingWarmSet(nil, to: json).utf8), Array(json.utf8))
+
+        let withBlock = AutotuneCommand.addingWarmSet("{\"decision\":\"fits\"}", to: json)
+        XCTAssertTrue(withBlock.hasPrefix(String(json.dropLast())))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(withBlock.utf8)) as? [String: Any])
+        XCTAssertEqual((root["warm_set"] as? [String: Any])?["decision"] as? String, "fits")
+        XCTAssertEqual(Set(root.keys).subtracting(["warm_set"]),
+                       Set(try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]).keys))
+        let noPlan = AutotuneCommand.addingWarmSet("null", to: json)
+        XCTAssertTrue(noPlan.hasSuffix(",\"warm_set\":null}"))
+        // The plan's own block says it is an estimate.
+        let plan = AutotuneWarmSetPlan(
+            decision: .fits, reason: "fits", members: [], primaryFit: nil, limitBytes: 1, requiredBytes: 1)
+        let estimated = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(AutotuneCommand.addingWarmSet(plan.jsonString, to: json).utf8)) as? [String: Any])
+        XCTAssertEqual((estimated["warm_set"] as? [String: Any])?["estimate"] as? Bool, true)
+        XCTAssertTrue(AutotuneWarmSetPlan.estimateLabel.hasPrefix("Estimate"))
+    }
+
     func testRecommendationJSONIncludesApplyReadyServeConfigWhenProvided() throws {
         let request = try makeRequest()
         let result = AutotuneRecommendEngine().recommend(request)

@@ -699,7 +699,10 @@ func collectRequestEvidence(ctx context.Context, q evidenceQueryer, requestID st
 		return b, nil
 	}
 	payable := map[int64]bool{}
-	rows, err := q.QueryContext(ctx, `SELECT id FROM spec022_payable_request_credits WHERE request_id = ?`, requestID)
+	// SPEC-022 R-16.2: evidence stays hot while any held hold of the provider
+	// covers the credit, also one R-16.2a lets it be paid: archiving the
+	// route snapshot would drop the served model that keeps it payable.
+	rows, err := q.QueryContext(ctx, `SELECT lrc.id FROM spec022_payable_request_credits lrc WHERE lrc.request_id = ? AND `+computeIntegrityProviderHoldExclusionSQL("lrc", ""), requestID)
 	if err != nil {
 		return b, err
 	}

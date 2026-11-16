@@ -55,6 +55,12 @@ type Hello struct {
 	RelayBlindKeyRecords   []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords      []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment      *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels is the SPEC-001-R016 warm set, primary first; nil for a
+	// provider without one (SPEC-002-R011).
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
+	// WarmModelsErr is why a malformed warm_models was dropped: the session
+	// proceeds as legacy (SPEC-002-R011).
+	WarmModelsErr error `json:"-"`
 }
 
 const (
@@ -157,6 +163,10 @@ type AuthRequest struct {
 	RelayBlindKeyRecords           []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords              []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment              *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels: see Hello.WarmModels. Initial stage only.
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
+	// WarmModelsErr: see Hello.WarmModelsErr.
+	WarmModelsErr error `json:"-"`
 }
 
 type Spec010Presence struct {
@@ -386,6 +396,8 @@ type Heartbeat struct {
 	RelayBlindKeyRecords    []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment       *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
+	// WarmModels: see Hello.WarmModels.
+	WarmModels []pool.WarmModel `json:"warm_models,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -463,9 +475,14 @@ type DrainStatus struct {
 }
 
 type InferenceRequest struct {
-	Type            string                     `json:"type"`
-	RequestID       string                     `json:"request_id"`
-	Stream          bool                       `json:"stream"`
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Stream    bool   `json:"stream"`
+	// ServedModelID names the warm-set entry the coordinator chose
+	// (SPEC-001-R016 Request routing). It is set only for a provider that
+	// reported warm_models, so a provider without one gets the same bytes as
+	// before.
+	ServedModelID   string                     `json:"served_model_id,omitempty"`
 	Body            string                     `json:"body"`
 	MaxOutputTokens *int                       `json:"max_output_tokens,omitempty"`
 	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
@@ -822,13 +839,36 @@ type Nak struct {
 	Error     NakError `json:"error"`
 }
 
+// PreflightRejection is a typed preflight_ack rejection reason.
+type PreflightRejection string
+
+const (
+	PreflightRejectionContextExceedsCapacity PreflightRejection = "context_exceeds_capacity"
+	PreflightRejectionQueueFull              PreflightRejection = "queue_full"
+	PreflightRejectionDraining               PreflightRejection = "draining"
+	// PreflightRejectionModelNotLoaded is also the SPEC-001-R016 answer when
+	// served_model_id names no warm entry: retryable on another entry.
+	PreflightRejectionModelNotLoaded PreflightRejection = "model_not_loaded"
+	PreflightRejectionUnhealthy      PreflightRejection = "unhealthy"
+	PreflightRejectionTierMismatch   PreflightRejection = "tier_mismatch"
+)
+
 var preflightRejectionReasons = map[string]struct{}{
-	"context_exceeds_capacity": {},
-	"queue_full":               {},
-	"draining":                 {},
-	"model_not_loaded":         {},
-	"unhealthy":                {},
-	"tier_mismatch":            {},
+	string(PreflightRejectionContextExceedsCapacity): {},
+	string(PreflightRejectionQueueFull):              {},
+	string(PreflightRejectionDraining):               {},
+	string(PreflightRejectionModelNotLoaded):         {},
+	string(PreflightRejectionUnhealthy):              {},
+	string(PreflightRejectionTierMismatch):           {},
+}
+
+// Rejection is the typed reason of a rejecting ack; empty when accepted.
+// ParsePreflightAck admits only the reasons above.
+func (a PreflightAck) Rejection() PreflightRejection {
+	if a.Accepted {
+		return ""
+	}
+	return PreflightRejection(a.Reason)
 }
 
 type MetricsSnapshot struct {
@@ -880,7 +920,7 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if len([]byte(h.Hostname)) > maxHandshakeHostnameBytes {
 		return Hello{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
 	}
-	if err := requireString(raw, "model_id", &h.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &h.ModelID); err != nil {
 		return Hello{}, err.Field, err
 	}
 	if len([]byte(h.ModelID)) > maxHandshakeModelIDBytes {
@@ -975,6 +1015,16 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if field, err := parsePrivacyEnrollment(raw, &h.PrivacyEnrollment); err != nil {
 		return Hello{}, field, err
 	}
+	warmModels, err := parseWarmModels(raw, warmModelsTopLevel{ramGB: h.RAMGB})
+	if err == nil {
+		// A hello carries no supported_models: its warm set is its model.
+		err = validateWarmModelsSupported(warmModels, nil, h.ModelID)
+	}
+	if err != nil {
+		h.WarmModelsErr = err
+		return h, "", nil
+	}
+	h.WarmModels = warmModels
 	return h, "", nil
 }
 
@@ -1054,7 +1104,7 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if len([]byte(req.Hostname)) > maxHandshakeHostnameBytes {
 		return AuthRequest{}, Spec010Presence{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
 	}
-	if err := requireString(raw, "model_id", &req.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &req.ModelID); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if len([]byte(req.ModelID)) > maxHandshakeModelIDBytes {
@@ -1220,6 +1270,14 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		if len(req.SupportedModels) > 64 {
 			return AuthRequest{}, presence, "supported_models exceeds 64 entries", fieldError{Field: "supported_models exceeds 64 entries"}
 		}
+		// SPEC-002-R011: an entry that is not a well-formed model id
+		// (surrounding whitespace, control or non-canonical characters) is
+		// no model id string.
+		for _, model := range req.SupportedModels {
+			if !wellFormedModelID(model) {
+				return AuthRequest{}, presence, "supported_models must be array of strings", fieldError{Field: "supported_models must be array of strings"}
+			}
+		}
 		seen := make(map[string]struct{}, len(req.SupportedModels))
 		for _, model := range req.SupportedModels {
 			normalized := normalizeSupportedModelEntry(model)
@@ -1250,6 +1308,15 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if field, err := parsePrivacyEnrollment(raw, &req.PrivacyEnrollment); err != nil {
 		return AuthRequest{}, presence, field, err
 	}
+	warmModels, err := parseWarmModels(raw, warmModelsTopLevel{ramGB: req.RAMGB})
+	if err == nil {
+		err = validateWarmModelsSupported(warmModels, req.SupportedModels, req.ModelID)
+	}
+	if err != nil {
+		req.WarmModelsErr = err
+		return req, presence, "", nil
+	}
+	req.WarmModels = warmModels
 	return req, presence, "", nil
 }
 
@@ -1307,6 +1374,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 		}
 		if err := json.Unmarshal(v, &req.SupportedModels); err != nil {
 			return AuthRequest{}, presence, "supported_models", err
+		}
+		for _, model := range req.SupportedModels {
+			if !wellFormedModelID(model) {
+				return AuthRequest{}, presence, "supported_models", fmt.Errorf("supported_models entries must be well-formed model ids")
+			}
 		}
 	}
 	if v, ok := raw["publishes_supported_models"]; ok {
@@ -1367,6 +1439,7 @@ func (r AuthRequest) Hello() Hello {
 		RelayBlindKeyRecords:   append([]relayblind.KeyRecord(nil), r.RelayBlindKeyRecords...),
 		PrivacyKeyRecords:      append([]relayblind.PrivacyKeyRecord(nil), r.PrivacyKeyRecords...),
 		PrivacyEnrollment:      r.PrivacyEnrollment,
+		WarmModels:             append([]pool.WarmModel(nil), r.WarmModels...),
 	}
 }
 
@@ -1527,6 +1600,41 @@ func requireString(raw map[string]json.RawMessage, field string, out *string) *f
 		return &fieldError{Field: field}
 	}
 	return nil
+}
+
+// requireModelID is requireString for a model id, which must also be
+// wellFormedModelID (SPEC-002-R011).
+func requireModelID(raw map[string]json.RawMessage, field string, out *string) *fieldError {
+	if err := requireString(raw, field, out); err != nil {
+		return err
+	}
+	if !wellFormedModelID(*out) {
+		return &fieldError{Field: field}
+	}
+	return nil
+}
+
+// wellFormedModelID is the SPEC-002-R011 decode rule for every model id a
+// provider sends (top-level model_id, supported_models entries, warm_models
+// entry ids): not empty, no surrounding whitespace, no control character,
+// and no case or Unicode-form variance beyond ASCII letter case. Every
+// accepted id then has one canonical form, pool.ModelKey, and the ASCII
+// lower() settlement SQL applies to a recorded model id yields exactly that
+// form, so no spelling of a model escapes a sanction keyed on it.
+func wellFormedModelID(s string) bool {
+	if s == "" || s != strings.TrimSpace(s) || containsControlChar(s) {
+		return false
+	}
+	return pool.ModelKey(s) == asciiLower(s)
+}
+
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }
 
 // containsControlChar reports whether s contains any C0 control
@@ -1806,7 +1914,7 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	if err := requireString(raw, "status", &hb.Status); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
-	if err := requireString(raw, "model_id", &hb.ModelID); err != nil {
+	if err := requireModelID(raw, "model_id", &hb.ModelID); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if len([]byte(hb.ModelID)) > maxHandshakeModelIDBytes {
@@ -2080,6 +2188,19 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	}
 	if field, err := parsePrivacyEnrollment(raw, &hb.PrivacyEnrollment); err != nil {
 		return Heartbeat{}, presence, field, err
+	}
+	// supported_models lives on the session, so handleHeartbeat checks the
+	// entries against it (validateWarmModelsSupported).
+	hb.WarmModels, err = parseWarmModels(raw, warmModelsTopLevel{
+		ramGB:          hb.RAMGB,
+		slotsReported:  true,
+		slotsTotal:     hb.SlotsTotal,
+		slotsFree:      hb.SlotsFree,
+		loadingPresent: presence.Loading,
+		loading:        hb.Loading,
+	})
+	if err != nil {
+		return Heartbeat{}, presence, warmModelsField, err
 	}
 	return hb, presence, "", nil
 }

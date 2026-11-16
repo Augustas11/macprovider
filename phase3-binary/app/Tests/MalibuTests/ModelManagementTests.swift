@@ -1705,6 +1705,73 @@ final class ModelManagementTests: XCTestCase {
         }
     }
 
+    /// Several loaded models are accepted only when the current model is
+    /// one of them; one loaded model is classified exactly as before.
+    func testModelsListAcceptsSeveralLoadedModelsOnlyWithTheCurrentOneAmongThem() throws {
+        func document(current: String?, rows: [MalibuModelsListDocument.Row]) -> MalibuModelsListDocument {
+            MalibuModelsListDocument(
+                schemaVersion: "models_list.v1", generatedAt: "2026-08-08T00:00:00Z", source: "control_socket",
+                warmSwapAvailable: true, currentModelID: current, rows: rows)
+        }
+        let current = row(id: "org/current", state: "warm", weightsPresentLocally: true, fit: "fits")
+        let second = row(id: "org/second", state: "warm", weightsPresentLocally: true, fit: "fits")
+        let idle = row(id: "org/idle", state: "idle", weightsPresentLocally: true, fit: "fits")
+
+        let several = try document(current: "org/current", rows: [current, second, idle]).validated()
+        XCTAssertThrowsError(try document(current: "org/idle", rows: [current, second, idle]).validated(),
+                             "a loaded set without the current model is rejected")
+        XCTAssertThrowsError(try document(current: nil, rows: [current, second]).validated(),
+                             "several loaded models need the current model named")
+        XCTAssertThrowsError(try document(current: "org/idle", rows: [current, idle]).validated(),
+                             "one loaded model that is not the current one is still rejected")
+
+        XCTAssertFalse(several.isLoadedBesideCurrent(current))
+        XCTAssertTrue(several.isLoadedBesideCurrent(second))
+        XCTAssertFalse(several.isLoadedBesideCurrent(idle))
+        let rows = several.rows.map {
+            MalibuModelRow(row: $0, currentModelID: "org/current", warmSwapAvailable: true,
+                           loadedBesideCurrent: several.isLoadedBesideCurrent($0))
+        }
+        XCTAssertEqual(rows.map(\.category), [.current, .ready, .ready])
+        XCTAssertEqual(rows[1].action, .switchModel, "a model loaded beside the current one can be switched to")
+
+        // One loaded model: unchanged, its row is the current one.
+        let single = try document(current: nil, rows: [current, idle]).validated()
+        XCTAssertFalse(single.isLoadedBesideCurrent(current))
+        XCTAssertEqual(
+            MalibuModelRow(row: current, currentModelID: "org/other", warmSwapAvailable: true,
+                           loadedBesideCurrent: single.isLoadedBesideCurrent(current)).category,
+            .current)
+    }
+
+    @MainActor
+    func testKeepLoadedAndUnloadRunTheSavingWarmCommands() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: "{}", stderr: "saved to config.yaml\nRestart the provider to use it.\n"),
+            ModelCLIResult(exitCode: 3, stdout: "{}", stderr: "busy"),
+            ModelCLIResult(exitCode: 0, stdout: "{}", stderr: "saved to config.yaml\n"),
+        ])
+        let paths = testProviderPaths()
+        let store = ModelManagementStore(
+            cli: cli, paths: paths,
+            defaults: UserDefaults(suiteName: "ModelManagementTests.alsoLoaded.\(UUID().uuidString)")!)
+
+        await store.runLoadedModelAction(.keep, modelID: "org/second")
+        XCTAssertEqual(cli.invocations[0], [
+            "models", "warm", "load", "org/second", "--save",
+            "--config", paths.configFile.path, "--ctl-socket-path", paths.controlSocket.path,
+        ])
+        XCTAssertEqual(store.loadedModelActionLine, "org/second is saved. Restart the provider to use it.")
+
+        await store.runLoadedModelAction(.unload, modelID: "org/second")
+        XCTAssertEqual(cli.invocations[1][0...4], ["models", "warm", "unload", "org/second", "--save"])
+        XCTAssertEqual(store.loadedModelActionLine, "org/second is serving a request. Try again when it is idle.")
+
+        await store.runLoadedModelAction(.unload, modelID: "org/second")
+        XCTAssertEqual(store.loadedModelActionLine, "org/second is unloaded.")
+        XCTAssertNil(store.loadedModelActionTarget)
+    }
+
     func testCatalogValidationRejectsCaseVariantDuplicateActionIDs() throws {
         let document = MalibuModelsListDocument(
             schemaVersion: "models_list.v1",

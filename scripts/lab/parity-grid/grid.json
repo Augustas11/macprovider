@@ -1,0 +1,16 @@
+{
+  "schema": "parity-grid.v1",
+  "models": [
+    {"name": "<model-name: pass --model-name>", "path": "<model-dir: pass --model-path>"}
+  ],
+  "outputs": [128, 512, 2048, 4096],
+  "contexts": [
+    {"name": "short", "tokens": 200},
+    {"name": "4k", "tokens": 4000},
+    {"name": "16k", "tokens": 16000}
+  ],
+  "rows": [1, 4],
+  "trials": 3,
+  "warmup_tokens": 32,
+  "noise_floor": 0.03
+}

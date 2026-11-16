@@ -4574,15 +4574,19 @@
       "requirement_id": "SPEC-037-R004",
       "spec_id": "SPEC-037",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:var kvDecodePath: String"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDiskCacheWrittenOnOneRouteMissesOnTheOther"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR. SPEC-037 v0.2.7: the decode-path class names the small-row route (outcome table row 12), so an entry written on one route is a disk_miss_envelope on another; unit test only."
       }
     },
     {
@@ -5110,7 +5114,9 @@
       ],
       "tests": [
         "phase4-coordinator/internal/auth/provider_operator_key_test.go:TestProviderOperatorKey",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersRules"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersRules",
+        "phase4-coordinator/internal/ws/compute_scoring_warm_entries_test.go:TestComputeScoringVerifiesFurtherWarmMember",
+        "phase4-coordinator/internal/buyer/compute_integrity_probe_warm_test.go:TestComputeIntegrityProbeNamesServedModelOnlyForMultiModel"
       ],
       "journeys": [],
       "evidence": [],
@@ -5118,7 +5124,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-036 v0.3.1 (#2338): keys are per served warm model when one session serves several; SPEC-036 v0.3.3 (#2338): the sweep verifies one key per warm entry and names the member's model (served_model_id) on its verification request; further members never score."
       }
     },
     {
@@ -5162,7 +5168,11 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringEscalationRedrawsLongDueTime",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnsavedDueTimeIsNotDispatched",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartRedrawStoredOncePresent",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringModelSpellingKeepsOneKeyAndDueTime",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringCatalogAliasKeepsKeyDueAndSuspension",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringRestoreFoldsCatalogAliases"
       ],
       "journeys": [],
       "evidence": [],
@@ -5237,7 +5247,8 @@
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Apply",
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Tick",
         "phase4-coordinator/internal/computeintegrity/scoring_store.go:func upsertKeyStateExec",
-        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide"
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) memberEntryWithdrawnMidProbe"
       ],
       "tests": [
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineFailureNeedsTwoScorerOperators",
@@ -5251,7 +5262,10 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringMemberWithdrawnMidProbeStaysDueAndCounts",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringMemberWithdrawalCountResetsOnAnswer",
+        "phase4-coordinator/internal/ws/compute_scoring_withdrawal_test.go:TestComputeScoringPrimarySwapMidProbeUnchanged"
       ],
       "journeys": [],
       "evidence": [],
@@ -5299,16 +5313,21 @@
         "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (s *Server) handleAdminComputeIntegrityAction",
         "phase4-coordinator/internal/ws/compute_integrity_status.go:func (s *Server) computeIntegrityStatuses",
         "phase4-coordinator/internal/stats/metrics/compute_integrity.go:func (m *Metrics) IncComputeIntegrityVerification",
-        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable"
+        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SanctionKey"
       ],
       "tests": [
         "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeIntegritySuspensionIsPerModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionIsPerEntry",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorStatusReleaseAndClear",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLogsCarryNoPromptsOrOutputs",
         "phase4-coordinator/internal/stats/metrics/compute_integrity_test.go:TestComputeIntegrityMetricsUseClosedLabels",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorClearFailureRestoresState",
         "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestRelayBlindBindableExcludesComputeIntegritySuspended",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStorePruneAndRecentRequests"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStorePruneAndRecentRequests",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsSuspensionAndStrikes",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasPrimarySwitchKeepsSuspensionAndPin",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestComputeScoringCatalogAliasKeepsKeyDueAndSuspension"
       ],
       "journeys": [],
       "evidence": [],
@@ -5600,11 +5619,15 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func usesSameOrderReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let nearTieLogitTolerance"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderTwoRowWidthComparesWithLoneRuns",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderWidthsFromThreeCompareWithTheSameOrderReference"
       ],
       "journeys": [],
       "evidence": [
@@ -5619,7 +5642,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending."
+        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending. SPEC-038 v0.3.56 stock order tolerance (FR-CB6): the self-check compares rows of three or more with a same-order reference; unit tests only."
       }
     },
     {
@@ -5656,11 +5679,34 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func decide(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func stockOrderFallbackReason(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func attachProbeFailed(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:func recordStockOrderFallback(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:func stockOrderFailed(",
+        "phase3-binary/Sources/macprovider-cli/SmallMRoute.swift:static func removeInheritedPartialSums",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func startupPagedKVAttachProbeFailed"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionTableCoversEveryCombination",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testOperatorRowInvariantOnlyReplacesStockOrder",
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testSmallMRouteAcceptsOnlyRowInvariant",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDecisionReasons",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testNativeMTPThatMayActivateNeverRunsStockOrder",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testSerialOnlyProcessRefusesNativeMTPActivation",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testRecordedGrantLogsTheStockOrderNextStart",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testEnvironmentValueMapsToTheCoreRoute",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testSerialOnlyProcessRefusesEveryBatchingEntry",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStartupEventAndStatusField",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStockOrderDivergenceSendsTheNextStartToRowInvariantAndKeepsThePriorGrant",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testAttachFailureOnStockOrderSendsTheNextStartToRowInvariant",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testStockOrderFallbackIsStickyAcrossStartsAndNeverLoops",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testNewRuntimeBuildReDecidesTheRoute",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testDivergenceOnRowInvariantKeepsTheSerialRule",
+        "phase3-binary/Tests/macprovider-cliTests/SmallMRouteTests.swift:testInheritedPartialSumCountIsRemoved"
       ],
       "journeys": [],
       "evidence": [],
@@ -5668,7 +5714,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Default-off configuration and request-local fail-closed behavior are covered; complete packaged serial-parity and scheduler-failure fallback evidence remains pending."
+        "rationale": "SPEC-038 v0.3.56 stock order route and its sticky row-invariant fallback (FR-CB9): unit tests, plus one lab serve with batching granted on an M3 Ultra (Llama 3.1 8B and a 27B model, 1 to 8 concurrent requests); the fallback has unit tests only; no evidence file recorded."
       }
     },
     {
@@ -5695,7 +5741,14 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func runUnderAdmissionHold",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func admissionHoldDue",
         "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func beginSelfCheckAdmissionHold",
-        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func admitRequest"
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func admitRequest",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func usesSameOrderReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func sameOrderReference(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func rowsDifferingFromReference",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:private func sameOrderReferences(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func cohortRowsRanInOneOrder(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func stockOrderReferenceBound",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:private var stockOrderReferenceUnfitKey"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
@@ -5728,14 +5781,22 @@
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldAdmitsTheRelayRequest",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringAShortCheckWaitsAndTheCheckCompletes",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerWaitingPastTheBoundYieldsTheHoldAndIsServed",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderTwoRowWidthComparesWithLoneRuns",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderWidthsFromThreeCompareWithTheSameOrderReference",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testSameOrderReferenceWhoseRowsDisagreeFails",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderJudgesOnlyCohortRunsWhoseRowsKeptOneOrder",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowInvariantRouteKeepsLoneReferencesAndItsKey",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSelfCheckAdmissionTests.swift:testStockOrderRuntimeRunsTheSelfCheckUnderItsOwnKey",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStockOrderReferenceBoundCoversThreeCopiesOfEachProbePrompt"
       ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-038 v0.3.56 stock order same-order reference rule, cohort throughput passes and one-order run requirement (FR-CB10 exactness probe item 3): unit tests only; not yet run on hardware, no evidence recorded."
       }
     },
     {
@@ -11876,7 +11937,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.104 names LM 3.32.3-macprovider.74 (a8394de83549c6d0e6301f17ef6b4a71a0931321) (#2393, #2373) on 3.32.3-macprovider.71: the last native-MTP layer (the GLM-5-Next nextn head and the Qwen 3.5/3.6 MTP predictor) runs its post-attention norm and MoE/MLP, and Qwen's final norm, on each row's read column only; attention and the drafter cache write still run on every column, and MLX_LM_MTP_LAST_COLUMN=0 runs every column again. TokenIterator settles KVCacheSimple and RotatingKVCache by their stored buffers, and the Llama and Qwen3 MLP run SwiGLU as one compiled kernel (values unchanged). Prior tuple context: SPEC-048 v0.1.102 names LM 3.32.3-macprovider.71 (29b5778b36ffba045786c4cd73427f5287c79a54) (#2376) on 3.32.3-macprovider.63: MiniMax M3 projects alpha * r r^T out of the attention and MLP/MoE outputs of the decoder layers the optional refusal_ablation config key names, before each residual add, in float32. Commit 29b5778b36ffba045786c4cd73427f5287c79a54 (04a1d29fbe88257cc055f72fdb131494598422d4 plus its audit fixes) touches MiniMaxM3.swift and its tests only; a model without the key runs the unchanged fused path. The loader refuses refusal_ablation.alpha outside finite 0 < alpha <= 4 and assigns the direction only when it is a finite [hidden_size] vector with |norm - 1| <= 1e-3 under a direction_key that names no base weight; otherwise the load fails. An indexed checkpoint may store it as language_model.refusal_direction. The text sanitize drops stored model.layers.N.refusal_direction keys, so a checkpoint cannot skip direction validation when the ablated range is a single layer. Prior tuple context: SPEC-048 v0.1.99 names LM 3.32.3-macprovider.63 (8f8821668c1a2dbb23ce33e43f31ed00d45f924f) (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill can yield between evaluated tiles so other continuous-batch rows decode while a reference prefill is in flight. Commit 8f8821668c1a2dbb23ce33e43f31ed00d45f924f cherry-picks the 3.32.3-macprovider.62 pause hook (505f3683212b96d4ab915a6cc0d8b9591133fa74, DeepseekV4.swift only) onto ef656c59adc2424ddf1f1bcfca0338536befcc25, so the Qwen VL dtype fix stays. Prior tuple context: SPEC-048 v0.1.98 names LM 3.32.3-macprovider.61 (ef656c59adc2424ddf1f1bcfca0338536befcc25) (#2327) on 3.32.3-macprovider.59: Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype, so an image prefill no longer leaves the language model and its KV cache in float32 (upstream ml-explore/mlx-swift-lm #766); FastVLM image pixels take the patch-embed weight dtype and Mistral3 drops its bfloat16 image-feature cast. Prior tuple context: SPEC-048 v0.1.97 names LM 3.32.3-macprovider.59 (7ee1b3f73d719726c86b39da11a715be5d1c197e) (#2327) on 3.32.3-macprovider.58: Qwen2-VL post-vision decode uses fused non-traditional RoPE when the three M-RoPE axes share one rope delta; per-row deltas and traditional RoPE stay on the position-id path. Prior tuple context: SPEC-048 v0.1.95 names LM 3.32.3-macprovider.58 (a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e) (#2335) on 3.32.3-macprovider.56: MLX core v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row of a qualifying affine weight takes affine_qmv_mma1, a single-row kernel with qmv_mma's exact reduction order, and rows 2-16 take qmv_mma; a row is bit-identical alone and in a batch because the two kernels are bit-identical (checked on M5 and M3 Ultra GPUs; not on M1, M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT, read once per process, keeps that window by default; 0 skips it for the fork's pre-window small-row routing (per-row qmv below the qmm limit), which the provider sets only for a serial-only serve process (SPEC-038 FR-CB9). Decode tok/s for the core change is not yet measured on the merged build. The Swift row moves to 0.32.3-macprovider.22 and the core row to v0.32.4-macprovider.14; the C row is unchanged. Prior tuple context: SPEC-048 v0.1.92 names LM 3.32.3-macprovider.56 (e7a256000dda3278260667e8c3c9c7b48c4dbd38) (#2305) on 3.32.3-macprovider.49: DeepSeek V4 prefill keeps the GPU fed between tiles and expert groups: attention and indexer prefill tiles are evaluated one ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; DeepSeek V4 only. Prior tuple context: SPEC-048 v0.1.91 names LM 3.32.3-macprovider.49 (3ac5b028e6c8f54e09836e6a4486bc354794089c): 3.32.3-macprovider.48 plus one tests-only commit, GLM-5-Next row invariance up to the provider per-forward decode bound and TF32-derived test tolerances (#2307); .48 (e246b8fd6ed35c6b1ab969c927222c06f759ec82) is 3.32.3-macprovider.47 plus the campaign #2111 DeepSeek V4 reference-arithmetic, DSpark drafter, shared MXFP8 multi-row and row-invariant decode kernel commits, with DeepSeek-only hyper-connection options off by default for other families; .47 (bfc88b9c8f745a13f3cce145101f13dc3dc95e8c) is 3.32.3-macprovider.44 (MiniMax M3, ce950bf2840453b7e320fbb0a3b6eee7c7283658) plus the mlx-swift 0.32.3-macprovider.18 pin, whose core v0.32.4-macprovider.10 sends every small-M affine product whose K is not a multiple of 128 to qmv_wide for every row count on gen 15 and 16 GPUs (#2256); .43 is 3.32.3-macprovider.42 plus the Mamba2 segsum batch-mask fix and upstream #728, #703, #712, #747 and #754, without #740 (#2230); .42 is 3.32.3-macprovider.40 (the LiquidAI LFM3 text model, #2231) plus the GPT-OSS SwiGLU bf16 clip and a lab-only gpt-oss per-layer dump (#2254, #2255); .40 is 3.32.3-macprovider.38 plus the LiquidAI LFM3 text model (#2231); .38 is 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_wide core on the qmv_mma core; the C row is unchanged."
+        "rationale": "SPEC-048 v0.1.106 names LM 3.32.3-macprovider.79 (92459644d702bf42959c66dd8be0c0416f1dd882) (#2338) on 3.32.3-macprovider.78: It is 3.32.3-macprovider.78 plus one commit that only moves its mlx-swift pin to 0.32.3-macprovider.25 (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two Swift-layer commits: a synchronous eval schedules the graph and copies its completion events under the process-wide evalLock, waits for the device without the lock, then retakes the lock to finish; recursive entry, a CPU stream and a failed asynchronous schedule keep the stock locked path. The core and C rows are unchanged and no Metal kernel changed. Prior tuple context: SPEC-048 v0.1.105 names LM 3.32.3-macprovider.78 (6889f3b41b84041f1693ca1637b1e92e30d5a2d4) (#2389) is 3.32.3-macprovider.76 plus three commits that only move its mlx-swift pin to 0.32.3-macprovider.24 (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX core v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d) adds the SPEC-038 FR-CB9 stock-order small-row route (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that native MTP serves on is unchanged. Prior tuple context: SPEC-048 v0.1.104 names LM 3.32.3-macprovider.76 (9489ddeb74090d1a91ad1c8a01c0d0e117052450) (#2381) on 3.32.3-macprovider.71: Two upstream fixes as picks: the serial prefill chunk loop clears the MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710), behind PrefillParameters.clearsBufferCache (default true) for hosts without a Metal library, and an MLX error raised on the loader's worker threads is thrown instead of ending the process (port of ml-explore/mlx-swift-lm #698). No model source, decode step or kernel route changes; continuous-batch prefill does not use the chunk loop. Prior tuple context: SPEC-048 v0.1.102 names LM 3.32.3-macprovider.71 (29b5778b36ffba045786c4cd73427f5287c79a54) (#2376) on 3.32.3-macprovider.63: MiniMax M3 projects alpha * r r^T out of the attention and MLP/MoE outputs of the decoder layers the optional refusal_ablation config key names, before each residual add, in float32. Commit 29b5778b36ffba045786c4cd73427f5287c79a54 (04a1d29fbe88257cc055f72fdb131494598422d4 plus its audit fixes) touches MiniMaxM3.swift and its tests only; a model without the key runs the unchanged fused path. The loader refuses refusal_ablation.alpha outside finite 0 < alpha <= 4 and assigns the direction only when it is a finite [hidden_size] vector with |norm - 1| <= 1e-3 under a direction_key that names no base weight; otherwise the load fails. An indexed checkpoint may store it as language_model.refusal_direction. The text sanitize drops stored model.layers.N.refusal_direction keys, so a checkpoint cannot skip direction validation when the ablated range is a single layer. Prior tuple context: SPEC-048 v0.1.99 names LM 3.32.3-macprovider.63 (8f8821668c1a2dbb23ce33e43f31ed00d45f924f) (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill can yield between evaluated tiles so other continuous-batch rows decode while a reference prefill is in flight. Commit 8f8821668c1a2dbb23ce33e43f31ed00d45f924f cherry-picks the 3.32.3-macprovider.62 pause hook (505f3683212b96d4ab915a6cc0d8b9591133fa74, DeepseekV4.swift only) onto ef656c59adc2424ddf1f1bcfca0338536befcc25, so the Qwen VL dtype fix stays. Prior tuple context: SPEC-048 v0.1.98 names LM 3.32.3-macprovider.61 (ef656c59adc2424ddf1f1bcfca0338536befcc25) (#2327) on 3.32.3-macprovider.59: Qwen2-VL and Qwen2.5-VL M-RoPE cos/sin take the hidden-state dtype, so an image prefill no longer leaves the language model and its KV cache in float32 (upstream ml-explore/mlx-swift-lm #766); FastVLM image pixels take the patch-embed weight dtype and Mistral3 drops its bfloat16 image-feature cast. Prior tuple context: SPEC-048 v0.1.97 names LM 3.32.3-macprovider.59 (7ee1b3f73d719726c86b39da11a715be5d1c197e) (#2327) on 3.32.3-macprovider.58: Qwen2-VL post-vision decode uses fused non-traditional RoPE when the three M-RoPE axes share one rope delta; per-row deltas and traditional RoPE stay on the position-id path. Prior tuple context: SPEC-048 v0.1.95 names LM 3.32.3-macprovider.58 (a3c93ea9d6b42ce3d49b2bc93844c1f198a9082e) (#2335) on 3.32.3-macprovider.56: MLX core v0.32.4-macprovider.14 (via mlx-swift 0.32.3-macprovider.22): one row of a qualifying affine weight takes affine_qmv_mma1, a single-row kernel with qmv_mma's exact reduction order, and rows 2-16 take qmv_mma; a row is bit-identical alone and in a batch because the two kernels are bit-identical (checked on M5 and M3 Ultra GPUs; not on M1, M2 or M4). MLX_METAL_SMALL_M_ROW_INVARIANT, read once per process, keeps that window by default; 0 skips it for the fork's pre-window small-row routing (per-row qmv below the qmm limit), which the provider sets only for a serial-only serve process (SPEC-038 FR-CB9). Decode tok/s for the core change is not yet measured on the merged build. The Swift row moves to 0.32.3-macprovider.22 and the core row to v0.32.4-macprovider.14; the C row is unchanged. Prior tuple context: SPEC-048 v0.1.92 names LM 3.32.3-macprovider.56 (e7a256000dda3278260667e8c3c9c7b48c4dbd38) (#2305) on 3.32.3-macprovider.49: DeepSeek V4 prefill keeps the GPU fed between tiles and expert groups: attention and indexer prefill tiles are evaluated one ahead (asyncEval, at most two in flight) and on the M3 Ultra the MoE prefill groups wide-route experts into one launch per row-count group and serves gathered plain and split-K runs with sorted gather_qmm (single-row experts and declined gathers stay per expert), in ascending-id expert batches of at most 49,152 routed rows, with the per-token sum over the selected experts in ascending expert order in float32. Outputs are bit-identical to the per-expert loop; DeepSeek V4 only. Prior tuple context: SPEC-048 v0.1.91 names LM 3.32.3-macprovider.49 (3ac5b028e6c8f54e09836e6a4486bc354794089c): 3.32.3-macprovider.48 plus one tests-only commit, GLM-5-Next row invariance up to the provider per-forward decode bound and TF32-derived test tolerances (#2307); .48 (e246b8fd6ed35c6b1ab969c927222c06f759ec82) is 3.32.3-macprovider.47 plus the campaign #2111 DeepSeek V4 reference-arithmetic, DSpark drafter, shared MXFP8 multi-row and row-invariant decode kernel commits, with DeepSeek-only hyper-connection options off by default for other families; .47 (bfc88b9c8f745a13f3cce145101f13dc3dc95e8c) is 3.32.3-macprovider.44 (MiniMax M3, ce950bf2840453b7e320fbb0a3b6eee7c7283658) plus the mlx-swift 0.32.3-macprovider.18 pin, whose core v0.32.4-macprovider.10 sends every small-M affine product whose K is not a multiple of 128 to qmv_wide for every row count on gen 15 and 16 GPUs (#2256); .43 is 3.32.3-macprovider.42 plus the Mamba2 segsum batch-mask fix and upstream #728, #703, #712, #747 and #754, without #740 (#2230); .42 is 3.32.3-macprovider.40 (the LiquidAI LFM3 text model, #2231) plus the GPT-OSS SwiGLU bf16 clip and a lab-only gpt-oss per-layer dump (#2254, #2255); .40 is 3.32.3-macprovider.38 plus the LiquidAI LFM3 text model (#2231); .38 is 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_wide core on the qmv_mma core; the C row is unchanged."
       }
     },
     {
@@ -12113,6 +12174,9 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testCatalogReleaseAdmittingNativeMTPRestartsRunningProviderIntoAdmission",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupWaitsForRequestsInFlightPastTheDrainTimeout",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionPickupTests.swift:testJitterStaysInsideItsBoundForAnySample",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDelay",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupChecksThePrimaryAgainBeforeItsExit",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupWithAnUnpromotedWarmSetRestartsAsBefore",
         "scripts/tests/test_catalog_native_mtp_admission.py:NativeMTPAdmissionReleaseTest"
       ],
       "journeys": [
@@ -13348,7 +13412,9 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func (s *Store) ReleaseComputeIntegrityHold",
         "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldRollupTriggers",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
-        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement"
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetComputeIntegrityPassing",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldWithholdsAndReleases",
@@ -13356,7 +13422,21 @@
         "phase4-coordinator/internal/billing/earnings_rollup_test.go:TestProviderEarningsRollupMatchesViewOnSeededData",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHoldWriteFailureDefersFailure",
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor",
-        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldsListEveryHeldHold"
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldsListEveryHeldHold",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneRouteSnapshotFlagIsZero",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsOnlyTheServedModel",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldOtherModelSymmetric",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchColumnMigrationIsAdditiveAndIdempotent",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchSurvivesJournalOutsideDigest",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMultiModelNeedsTwoWarmVerifiedMembers",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsEverySpellingOfTheServedModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegrityPassingIsPerEntry",
+        "phase4-coordinator/internal/ws/compute_scoring_passing_test.go:TestComputeScoringPublishesPassingVerification",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold",
+        "phase4-coordinator/internal/ws/compute_scoring_sanction_hold_test.go:TestComputeScoringRestoredRowKeyStateHoldsSanctionIdentity",
+        "phase4-coordinator/internal/ws/compute_scoring_sanction_hold_test.go:TestComputeScoringEarlierRowKeyRecoveryHoldStillReleased"
       ],
       "journeys": [],
       "evidence": [],
@@ -13364,7 +13444,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-022 v0.4.9 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog. SPEC-022 v0.4.11 (#2338): R-16.2a served-model scoping of holds for credits whose route snapshot carries served_model_dispatch is implemented and unit-tested. SPEC-022 v0.4.13 (#2338): served_model_dispatch is 1 only for a multi-model session (at least two warm, hash_verified members); a session whose second member is loading or unverified records 0 and keeps the provider-wide match."
       }
     },
     {
@@ -15856,6 +15936,222 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2157",
         "rationale": "Original-family local privacy consumer and provider-side Responses/Messages conversion are under implementation. Targeted protocol and local client checks do not establish signed production deployment or actual multi-turn tool-using Codex and Claude sessions. Code-bound hardware acceptance remains pending. No conformance promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R016",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/WarmModelTable.swift:final class WarmModelTable",
+        "phase3-binary/Sources/macprovider-cli/WarmModelRouting.swift:enum WarmModelRoute",
+        "phase3-binary/Sources/macprovider-cli/WarmModelsWire.swift:static func entries",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:static func warmServingLease",
+        "phase3-binary/Sources/macprovider-cli/WarmSetBoot.swift:func promoteInSwapTurn",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:static func warmSetMemberBinding"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelTableTests.swift:testResolveRules",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testRelayServesTheNamedMemberOnItsOwnRuntime",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testHTTPForwardedHeaderRoutesToTheMemberAndRefusesAnUnknownOne",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testRelayReceiptBindsTheServingMembersModelHash",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelRoutingTests.swift:testHTTPReceiptBindsTheServingMembersModelHash",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testAWarmSetOfOneRepeatsTheTopLevelPrimaryFields",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testWireEntriesArePrimaryFirstAfterPromotion",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelPreflightTests.swift:testWarmMemberIsAnsweredForItsOwnContextCapacity",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testSwitchToAWarmMemberPromotesItWithoutALoad",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testAMemberThatFailsArtifactVerificationNeverBecomesWarm",
+        "phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift:testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractHandshakesAreAccepted",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractHeartbeatTransitionsAreAccepted",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractModelNotLoadedIsClassified",
+        "phase4-coordinator/internal/ws/warm_models_contract_test.go:TestWarmModelsContractCoordinatorDispatch",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testFramesBuiltBetweenThePromotionStepsKeepEveryMemberAndOnePrimary",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testFramesBuiltAtEveryAwaitOfAPromotionKeepEveryMemberAndOnePrimary"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.60 (#2338) warm set state and wire: primary model and promotion, the primary entry and top-level fields built together, warm_models on handshake and heartbeat, served_model_id routing, member catalog binding, single-model compatibility. Implemented and unit-tested; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R017",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SharedModelMemoryBudget.swift:final class SharedModelMemoryBudget",
+        "phase3-binary/Sources/macprovider-cli/WarmModelLoader.swift:actor WarmModelLoader",
+        "phase3-binary/Sources/macprovider-cli/WarmModelLoader.swift:func checkLoad",
+        "phase3-binary/Sources/macprovider-cli/WarmSetBoot.swift:func load(_ modelID: String, limits: WarmModelLimits? = nil) async -> WarmSetLoadOutcome",
+        "phase3-binary/Sources/macprovider-cli/AutotuneWarmSetPlan.swift:struct AutotuneWarmSetPlan",
+        "phase3-binary/Sources/macprovider-cli/ControlSocket.swift:nonisolated static func handleWarmSetRequest"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SharedModelMemoryBudgetTests.swift:testTwoRuntimeAdmissionRefusedPastSharedBudget",
+        "phase3-binary/Tests/macprovider-cliTests/SharedModelMemoryBudgetTests.swift:testLoadDecisionKeepsPinnedReservedRows",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testFitsAfterEvictionEvictsTheIdleUnpinnedMember",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testEvictionIsLeastRecentlyUsedFirst",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testMemberWithInFlightRowsIsNeverEvicted",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelLoaderTests.swift:testPinnedMemberRowsAreReserved",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsConfigTests.swift:testUnsetSupportedModelsIsPrimaryFollowedByWarmModels",
+        "phase3-binary/Tests/macprovider-cliTests/WarmModelsWireTests.swift:testPrimaryFirstAndOnlyWarmEntriesCarrySlotsFree",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testBootLoadsInListOrderPinnedAndPublishesEachMember",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testControlLoadReportsEveryOutcomeAndStatusListsLeasesAndPinning",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetCheckTests.swift:final class WarmSetCheckTests",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testCommandBufferBudgetRule",
+        "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testDefaultRequirementMemberLoadsUnderAnExplicitPrimaryBudget",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneWarmSetPlanTests.swift:testCommandBufferBudgetConflictDoesNotFit",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneWarmSetPlanTests.swift:testANonIntegerOperatorCommandBufferValueIsTheOperatorsInThePlanAndTheLoader",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testModelsWarmLoadReportsACommandBufferBudgetConflictUnderItsOwnCode"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.60 (#2338) one memory budget for every warm model: row admission against the shared budget, load, LRU eviction of idle unpinned models, pinning, warm_models configuration, warm_model_limits, warm_set control frames with per-load limits, the arithmetic fit plan behind models warm check and autotune --warm-set, --save on models warm load and unload. Implemented and unit-tested; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R018",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.60 (#2338) sharing one GPU: no cross-model batching, one submission order, token parity with solo, prefill/decode fairness, contended per-model capacity (solo rate times the measured GPU share over a window of at least 5 s, with the stated limits after a promotion). Implemented and unit-tested; it stays pending until proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R019",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func runUnderSelfCheckHold"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/WarmMemberSelfCheckHoldTests.swift:final class WarmMemberSelfCheckHoldTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-001 v1.9.60 (#2338) signed CB / native-MTP admission and the batched-isolation self-check per warm model, one self-check at a time per process; per-member tool, vision and engine reports; receipts bind the serving member. Implemented and unit-tested; it stays pending until proven by a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R011",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/warm_models.go:func parseWarmModels",
+        "phase4-coordinator/internal/ws/warm_models.go:func validateWarmModelsSupported",
+        "phase4-coordinator/internal/ws/warm_models.go:func (s *Server) warmModelsForPool",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) applyWarmModelsLocked",
+        "phase4-coordinator/internal/pool/warm_models.go:func warmEntryView",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) EntrySnapshot",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ResolveEntry",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ConsumeForwardedSlotFor",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) MarkEntryNotLoaded",
+        "phase4-coordinator/internal/pool/warm_models.go:func EntryViews",
+        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func setServedModelHeader",
+        "phase4-coordinator/internal/buyer/warm_entry_routing.go:func (s *Server) entryModelNotLoaded",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) RecordEntryNotLoaded",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) routeSnapshotFor",
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldServedModelSQL",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) handlePoolz",
+        "phase5-gateway/internal/router/server.go:func countPoolzState",
+        "phase4-coordinator/internal/ws/messages.go:func wellFormedModelID",
+        "phase4-coordinator/internal/pool/warm_models.go:func (r *Registry) ConsumeForwardedSlotBooked",
+        "phase4-coordinator/internal/pool/warm_models.go:func drainEmptyServedLocked",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SanctionKey",
+        "phase4-coordinator/internal/ws/warm_models.go:func (s *Server) warmModelsSameCatalogRow",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) catalogSanctionIdentity",
+        "phase4-coordinator/internal/autotune/catalog.go:func (c *Catalog) CanonicalModelID"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/messages_test.go:TestParseHeartbeatDecodesWarmModels",
+        "phase4-coordinator/internal/ws/messages_test.go:TestParseHelloAndAuthInitialDecodeWarmModels",
+        "phase4-coordinator/internal/ws/server_test.go:TestAuthV2WarmModelsHandshakeAndHeartbeat",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryViewsProjectEachMember",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryConsumeRestoreMarkFullStayOnTheMember",
+        "phase4-coordinator/internal/pool/provider_test.go:TestEntrySnapshotEqualsSnapshotWithoutWarmSet",
+        "phase4-coordinator/internal/pool/provider_test.go:TestWarmEntryMarkNotLoadedUntilNextHeartbeat",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_internal_test.go:TestWarmEntryRoutingSecondaryModelConsumesOnlyItsSeat",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryRouteSnapshotRecordsServingMember",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestRouteSnapshotWithoutWarmSetIsNotServedModelDispatch",
+        "phase4-coordinator/internal/buyer/warm_entry_failover_test.go:TestWarmEntryModelNotLoadedFailsOver",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestComputeIntegrityHoldWithholdsOnlyTheServedModel",
+        "phase4-coordinator/internal/billing/compute_integrity_served_model_test.go:TestServedModelDispatchColumnMigrationIsAdditiveAndIdempotent",
+        "phase4-coordinator/internal/ws/poolz_warm_entries_test.go:TestPoolzWarmEntryRows",
+        "phase5-gateway/internal/router/server_test.go:TestAggregateStatusCountsWarmEntrySessionOnce",
+        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetTwoModelsOneSession",
+        "test/integration/warm_models_journey_test.go:TestJourneyWarmSetOfOneIsLegacy",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmSetOfOneIsALegacySession",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMemberIdentityPin",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMemberRefusalHoldLiftedByReadyHeartbeat",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmEntryNotLoadedStrikes",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneHTTPDispatchIsLegacy",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSetOfOneRouteSnapshotFlagIsZero",
+        "phase4-coordinator/internal/buyer/warm_entry_not_loaded_fault_test.go:TestWarmEntryRepeatedModelNotLoadedIsABreakerFault",
+        "phase4-coordinator/internal/ws/warm_models_heartbeat_test.go:TestHeartbeatMalformedWarmModelsKeepsPreviousSetAndAppliesTheRest",
+        "phase4-coordinator/internal/explorer/handlers_test.go:TestModelsAvailableSkipsFailedHashAndOutOfService",
+        "phase4-coordinator/internal/billing/credits_by_model_unattributed_test.go:TestPayableTotalsNullModelIsUnattributed",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmShrinkToLegacyIgnoresDepartedMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmPromotionOnlyFromAFurtherMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLegacyModelDemotedToFurtherMember",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLegacyGrowthKeepsPrimary",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringModelSpellingKeepsOneKeyAndDueTime",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringProbeInFlightSurvivesSpellingChange",
+        "phase4-coordinator/internal/ws/compute_scoring_model_fold_test.go:TestComputeScoringRestoreFoldsStoredSpellings",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmEntryNotLoadedSingleRaceStaysOneStrike",
+        "phase4-coordinator/internal/buyer/warm_entry_not_loaded_fault_test.go:TestWarmEntryNotLoadedCycleThroughLoadingIsABreakerFault",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmMultiModelNeedsTwoWarmVerifiedMembers",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmLoadingMemberPromotedOnLoadFlipsThroughDemotion",
+        "phase4-coordinator/internal/buyer/warm_entry_single_member_test.go:TestWarmSecondMemberRouteSnapshotFlagFollowsMultiModel",
+        "phase4-coordinator/internal/ws/server_test.go:TestHelloWarmModelsHandshake",
+        "phase4-coordinator/internal/ws/server_test.go:TestAuthV2MalformedWarmModelsProceedsAsLegacy",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmKeptListDroppedAfterThreeRejections",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestComputeIntegritySuspensionSurvivesRestartAsMember",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestModelIDDecodeRejectsNonCanonicalSpellings",
+        "phase4-coordinator/internal/ws/model_id_decode_test.go:TestWellFormedModelIDLowerIsTheModelKey",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestModelKeyVariantsShareSanctions",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmZeroSlotMemberIsNotMultiModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmServedDispatchesNeverSeedTheDrain",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmDrainNeverEndsOnTheLiveModel",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestWarmSessionViewDispatchCountsOnThePrimary",
+        "phase4-coordinator/internal/pool/warm_models_test.go:TestLegacySessionBooksUnnamedDispatches",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestSanctionKeyResolvesCatalogRowNames",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsSuspensionAndStrikes",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasPrimarySwitchKeepsSuspensionAndPin",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestCatalogAliasMemberKeepsIdentityPin",
+        "phase4-coordinator/internal/pool/sanction_key_test.go:TestUncataloguedModelSanctionsUnchanged",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestCatalogSanctionIdentityResolvesEveryRowName",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestHeartbeatWarmModelsNamingOneCatalogRowTwiceRejected",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestWarmModelsSameCatalogRow",
+        "phase4-coordinator/internal/ws/sanction_catalog_alias_test.go:TestLegacySessionUnderEitherCatalogNameUnchanged",
+        "phase4-coordinator/internal/ws/warm_models_catalog_alias_test.go:TestAuthV2WarmMemberNamingPrimaryCatalogRowProceedsAsLegacy",
+        "phase4-coordinator/internal/buyer/warm_entry_routing_test.go:TestWarmEntryUnderCatalogAliasCreditStaysUnderHold"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2338",
+        "rationale": "SPEC-002 v1.6.40 (#2338) multi-model providers (a session is multi-model only with at least two warm, hash_verified members, otherwise legacy; a departed member never resolves to the legacy session and a demoted legacy model keeps its open dispatches; a malformed handshake warm_models is dropped and the session proceeds as legacy; the heartbeat warning is rate-limited and a kept set is dropped after three rejections; model_not_loaded strikes survive state changes; scoring keys fold the model id; malformed heartbeat warm_models keeps the previous set; per-member identity pin and refusal hold; repeated model_not_loaded is a breaker fault): strict warm_models decoding, registration, heartbeat, per-entry views, slot accounting, routing, model_not_loaded failover, pool and explorer views and route snapshots per (provider, model), provider earnings per model. Implemented and tested, including a hermetic two-model coordinator and gateway journey with model_not_loaded failover; it stays pending until a live probe in which one provider serves buyer requests for two catalog models through the gateway in the same minute, with no swap between them and with receipts and billing correct for each model."
       }
     }
   ]

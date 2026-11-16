@@ -1,0 +1,30 @@
+{
+  "http" : {
+    "body" : {
+      "error" : {
+        "code" : "model_not_loaded",
+        "inference_ran" : false,
+        "message" : "Model not loaded",
+        "param" : null,
+        "request_id" : null,
+        "retryable" : true,
+        "settlement_ran" : false,
+        "type" : "server_error"
+      }
+    },
+    "status" : 503
+  },
+  "inference_response_end" : {
+    "chunks_sent" : 0,
+    "error" : "Model not loaded",
+    "request_id" : "req-not-loaded",
+    "status" : "error_model_not_loaded",
+    "type" : "inference_response_end"
+  },
+  "preflight_ack" : {
+    "accepted" : false,
+    "reason" : "model_not_loaded",
+    "request_id" : "req-not-loaded",
+    "type" : "preflight_ack"
+  }
+}

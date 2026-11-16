@@ -98,7 +98,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("small-m-route"),
-        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route) or serial-only (the fork's pre-window per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0)."
+        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route), serial-only (the fork's pre-window per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0) or stock-order (upstream's one-row kernel, an exact two-row kernel and the batch kernel from three rows, MLX_METAL_SMALL_M_ROW_INVARIANT=2)."
     )
     var smallMRoute: String = "row-invariant"
     @Option(
@@ -124,7 +124,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
         guard let route = decodeBenchSmallMRoute(smallMRoute) else {
             FileHandle.standardError.write(Data(
-                "decode-bench: --small-m-route must be row-invariant or serial-only\n".utf8
+                "decode-bench: --small-m-route must be row-invariant, serial-only or stock-order\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -484,6 +484,7 @@ func decodeBenchSmallMRoute(_ value: String) -> SmallMRoute? {
     switch value {
     case "row-invariant": return .rowInvariant
     case "serial-only": return .serialOnly
+    case "stock-order": return .stockOrder
     default: return nil
     }
 }

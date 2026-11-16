@@ -50,6 +50,7 @@ type routeSnapshotJournalPruneRow struct {
 	samplingCovered int64
 	hardwareDigest  sql.NullString
 	bindingDigest   sql.NullString
+	servedModel     int64
 }
 
 // RouteSnapshotCanonicalJSON returns the digest preimage of a stored route
@@ -176,7 +177,8 @@ func loadRouteSnapshotJournalPruneBatch(ctx context.Context, db *sql.DB, afterID
 SELECT id, account_scope, request_id, attempt_n, provider_id,
        route_snapshot_digest, route_snapshot_json, created_at_utc, mirrored_at_utc,
        compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
-       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest
+       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest,
+       served_model_dispatch
   FROM settlement_route_snapshot_journal
  WHERE id > ?
  ORDER BY id
@@ -190,7 +192,7 @@ SELECT id, account_scope, request_id, attempt_n, provider_id,
 		var row routeSnapshotJournalPruneRow
 		if err := rows.Scan(&row.id, &row.identity.AccountScope, &row.identity.RequestID, &row.identity.AttemptN,
 			&row.identity.ProviderID, &row.digest, &row.rendered, &row.createdAt, &row.mirroredAt,
-			&row.captureRequired, &row.samplingCovered, &row.hardwareDigest, &row.bindingDigest); err != nil {
+			&row.captureRequired, &row.samplingCovered, &row.hardwareDigest, &row.bindingDigest, &row.servedModel); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -203,16 +205,17 @@ SELECT id, account_scope, request_id, attempt_n, provider_id,
 // the JSON, and its canonical preimage hashes to that digest.
 func (s *Store) routeSnapshotJournalRowMatchesPrimary(ctx context.Context, row routeSnapshotJournalPruneRow) (bool, error) {
 	var digest, rendered, canonical string
-	var captureRequired, samplingCovered int64
+	var captureRequired, samplingCovered, servedModel int64
 	var hardwareDigest, bindingDigest sql.NullString
 	err := s.reader().QueryRowContext(ctx, `
 SELECT route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json,
        compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
-       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest
+       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest,
+       served_model_dispatch
   FROM settlement_route_snapshots
  WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
 		row.identity.AccountScope, row.identity.RequestID, row.identity.AttemptN, row.identity.ProviderID,
-	).Scan(&digest, &rendered, &canonical, &captureRequired, &samplingCovered, &hardwareDigest, &bindingDigest)
+	).Scan(&digest, &rendered, &canonical, &captureRequired, &samplingCovered, &hardwareDigest, &bindingDigest, &servedModel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -221,7 +224,8 @@ SELECT route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json
 	}
 	if digest != row.digest || rendered != row.rendered ||
 		captureRequired != row.captureRequired || samplingCovered != row.samplingCovered ||
-		hardwareDigest != row.hardwareDigest || bindingDigest != row.bindingDigest {
+		hardwareDigest != row.hardwareDigest || bindingDigest != row.bindingDigest ||
+		servedModel != row.servedModel {
 		return false, nil
 	}
 	preimage, err := RouteSnapshotCanonicalJSON(canonical, rendered)

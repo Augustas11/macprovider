@@ -1,6 +1,93 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.35 (2026-11-14, busy providers are not degraded)
+**Version:** 1.6.42 (2026-11-16, sanctions keyed on the resolved catalog row)
+
+**Change log v1.6.42 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+keys every per-model sanction on the resolved catalog row, not on the
+spelling. A signed catalog row is reachable as its row key and as its
+`model_id`; both names map to one sanction identity, the row's normalized
+`model_id`, and an id that names no catalog row keeps its canonical model
+id. SPEC-036 FR-25 suspension and verification keys, not-loaded strikes and
+identity pins use it, so a provider cannot leave a sanction behind by
+declaring a model under the row's other name. A warm set of two or more
+entries in which two entries (the primary included) name one row, or a
+session whose `supported_models` names one row twice while it carries such
+a warm set, takes the existing bad-`warm_models` path. A warm set of one is
+never affected. The route snapshot flag follows SPEC-022 v0.4.15. No trust
+tier or attestation label changes.
+
+**Change log v1.6.41 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+gains a decode rule: a model id is accepted only in a spelling whose
+canonical form (trimmed, Unicode NFC, lower case) is its ASCII lower case;
+every other spelling is rejected through the field's existing invalid-frame
+path, so one canonical key names a model everywhere. A further member counts
+toward a multi-model session only with `slots_total >= 1`. The route
+snapshot flag follows SPEC-022 v0.4.14 (the served entry's own passing
+verification). The legacy drain is seeded from the session's open
+dispatches made without a served model only, and relay-blind and
+privacy-class dispatches of a multi-model session are booked on the
+primary. The `model_not_loaded` rule states its trade-off: two genuine
+eviction races within 120 s count as a breaker fault. No trust tier or
+attestation label changes.
+
+**Change log v1.6.40 (2026-11-16, Related: #2338):** `SPEC-002-R011`
+defines a multi-model session: at least two entries `warm` and
+`hash_verified`; any other warm set is a legacy session. A malformed
+`warm_models` on `hello` or `auth_request` is dropped with one structured
+warning and the session proceeds as legacy instead of closing. The
+heartbeat warning is rate-limited to one per session per minute; the third
+consecutive rejected `warm_models` drops the kept entry set. A served model
+that left the set never resolves to the legacy session, and requests open
+on a legacy model demoted to a further entry stay that entry's.
+`model_not_loaded` strikes are kept per session and model for 120 s across
+state changes, drops, re-adds and promotions. No trust tier or attestation
+label changes.
+
+**Change log v1.6.39 (2026-11-16, Related: #2338):** `SPEC-002-R011` says
+what the code now does after the freeze audit: a warm set of exactly one
+member is a legacy session (no entry list, no `served_model_id`, legacy
+`model_not_loaded` handling); a malformed `warm_models` on a heartbeat is
+logged once and only the warm-set update is dropped, the rest of the
+heartbeat applies; the primary entry is checked for equality with the top
+level only; each further entry carries its own identity pin and its own
+SPEC-036 suspension; a refused further entry is held until a `ready` or
+`busy` heartbeat reports free seats for it; a second `model_not_loaded`
+from one entry within 120 s is a breaker fault; `models_available` lists
+only in-service entries whose hash did not fail; `credits_by_model` leaves
+rows without a model out of the split. No trust tier or attestation label
+changes.
+
+**Change log v1.6.38 (2026-11-16, Related: #2338):** `SPEC-002-R011` *Pool
+and operator views* adds the operator explorer (SPEC-007 v0.5.3):
+`models_available` lists every entry's model and each provider row carries
+`warm_models` (each entry's model, primary flag, state and seats), behind
+the explorer's operator bearer. The provider earnings read (SPEC-005 v0.6.26)
+adds `credits_by_model`, the payable credit total split by each row's
+model. Read-only; no routing, settlement or payout change. No trust tier or attestation label changes.
+
+**Change log v1.6.37 (2026-11-15, Related: #2338):** `SPEC-002-R011` says
+what the code does: the strict `warm_models` decoding rules and bounds (64
+entries, 4096 seats, 10 000 000 context tokens, 1 000 000 tokens/s, 100 000 B
+parameters, unknown entry fields ignored, the primary checked field by field
+against the top level, a session without `supported_models` limited to a warm
+set of one); what a further entry keeps and what is cleared on it (the
+SPEC-047 admission binding, identity pin and native-MTP canary stay with the
+session's primary); per-entry seats, the slot-queue key, sticky and pins per
+model, and primary-only relay-blind, privacy-class, pool-model and BYOM
+routing; `model_not_loaded` failover; `/poolz` entry rows and session-level
+summary slots; and the gateway counting a session once. No trust tier or
+attestation label changes.
+
+**Change log v1.6.36 (2026-11-15, Related: #2338):** Adds `SPEC-002-R011`. A
+provider process may keep a set of warm models (SPEC-001-R016). The
+coordinator keeps one session per provider and, under it, one pool entry per
+warm model: hash state, catalog and CB / native-MTP admission, slots, state,
+throughput and measured performance are per (provider, model), and routing
+selects an entry and dispatches with `served_model_id`. A provider that sends
+no `warm_models` is a warm set of one and is handled exactly as before. Route
+snapshots, receipts and settlement use the dispatched entry's model. The
+breaker counter stays per provider session. Trust tier and attestation labels
+are per provider session and unchanged.
 
 **Change log v1.6.35 (2026-11-14, PR #2374, Related: #2371):** A provider
 that is busy serving is not degraded. FR-B1 defines **in service**
@@ -1090,7 +1177,7 @@ insertion points for each. See Section 3 for hook-point locations.
   HTTP API is wire-compatible with what SPEC-003 will need)
 - Buyer-side privacy stack (Tier 2)
 - TLS termination (deployment concern; Caddy or nginx in front)
-- Multi-model-per-provider support (SPEC-001 is single model per binary)
+- Batching rows of different models in one provider forward (a provider may keep several warm models since v1.6.36, `SPEC-002-R011`; each forward runs one model)
 - Automatic scaling or auto-restart of provider binaries
 
 ---
@@ -1652,8 +1739,9 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
   `degraded` (routing-ineligible per FR-P5), logs
   `state_update.reason = "breaker_tripped"` with fault type and count, and
-  runs the FR-P11 recovery cycle. The counter is per provider (a provider
-  serves a single model). Simultaneous faults across a multi-slot provider
+  runs the FR-P11 recovery cycle. The counter is per provider session, for a
+  multi-model provider too (`SPEC-002-R011`): its models share one process
+  and one GPU, so a wedge in one can stall all of them. Simultaneous faults across a multi-slot provider
   from one wedge event each count, intentionally tripping immediately. The
   breaker applies to all tiers (pinned, trusted, and provisional). Transition to
   `draining`/`unavailable` (any cause) clears the counter; a successful
@@ -6170,3 +6258,217 @@ longest a provider can legitimately keep working on a request after it was
 retired. The retired set MUST be bounded per provider session (8192 entries; the oldest
 entry without an armed cancel terminal is evicted first); an evicted request's late frames take the unknown-request
 path above and are still discarded without closing the session.
+
+## SPEC-002-R011 — Multi-model providers
+
+A provider that sends `warm_models` (SPEC-001-R016) keeps one session, one
+`provider_id`, one admission tier and one SPEC-008 trust tier, and under that
+session one pool entry per warm model. A provider that sends no `warm_models`
+is a warm set of one built from its top-level fields; every rule below then
+reduces to today's per-provider behaviour, byte for byte. A session is
+*multi-model* only while at least two of its reported entries are `warm`
+and `hash_verified` (the primary by the session's own verdict), each further
+one with `slots_total >= 1`. Any other `warm_models` (one entry, or further
+entries that are `loading`, `evicting`, not verified or without a slot) is a
+legacy session: the coordinator keeps no
+entry list for it, dispatches without `served_model_id`, records route
+snapshots with `served_model_dispatch` 0, holds a refused seat for the
+whole session and handles `model_not_loaded` as for a provider without
+`warm_models`. A reported further entry's identity pin is kept while it
+stays reported, so an entry that becomes warm and verified joins with it.
+A session moves between legacy and multi-model on any accepted heartbeat:
+a dispatch for a model that is no longer an entry never resolves to the
+legacy session, and when a legacy session's model becomes a further entry
+under another primary, the dispatches open on it stay that entry's (its
+seats and refusal hold) until each has ended. The coordinator counts exactly
+those dispatches: the session's open dispatches made without a served model
+(a legacy session's dispatches) seed the drain record when the model is
+demoted or another model is promoted, and only such a dispatch's ending
+draws it down. Dispatches made with a served model, and dispatches of a
+multi-model session made without one (relay-blind and privacy-class, which
+read the primary), never seed it: the latter are booked on the primary's
+model when they are consumed and end there.
+
+- *Decoding.* `warm_models` is decoded strictly on the legacy `hello`, the v2
+  `auth_request` and every `heartbeat`; the whole array is accepted or
+  rejected:
+  - it is an array of 1 to 64 objects; each entry has a string `model_id` of
+    at most 256 bytes in canonical spelling (below), unique in the array
+    after case folding (trimmed, Unicode NFC, then lower case), a `state` of `loading`, `warm` or `evicting`, booleans
+    `primary` and `pinned`, and an integer `slots_total` in 0..4096;
+    `slots_free`, when present, appears only on a `warm` entry and is in
+    0..`slots_total`;
+  - `max_context_tokens` is an integer in 0..10 000 000,
+    `throughput_tps_estimate` a finite number in 0..1 000 000 and
+    `model_params_b` a finite number in 0..100 000; the hash fields follow
+    the top-level identity rules; `cb_self_check`,
+    `tool_selection_capabilities` and `vision_runtime_capabilities` decode
+    as their top-level counterparts; an invalid `engine_profile`, or one
+    whose context or memory class disagrees with the entry and session, is
+    dropped and does not reject the array;
+  - unknown fields inside an entry are ignored;
+  - exactly one entry is `primary`, and it is the first. The primary entry
+    is checked only for equality with the top-level fields, which carry
+    their own bounds; it MUST equal the
+    top-level fields for `model_id`, `max_context_tokens`,
+    `throughput_tps_estimate`, `model_hash`, `model_hash_algorithm`,
+    `weights_manifest_sha256`, `weights_manifest_algorithm`,
+    `model_params_b`, `cb_self_check` and `engine_profile` (absent and null
+    are equal), MUST NOT be `evicting`, MUST be `loading` exactly when a
+    reported top-level `loading` is true, and on a heartbeat MUST equal the
+    top-level `slots_total` and, when `warm`, `slots_free`;
+  - every `model_id` is in the session's `supported_models` (case-folded)
+    and the array is at most that long. A session that declared no
+    `supported_models`, the legacy `hello` included, supports only its
+    top-level model, so it can carry only a warm set of one.
+
+  *Canonical model id.* A model id names one routing key (warm entries,
+  slot queue, sticky and perf keys): the trimmed, Unicode NFC, lower-case
+  form. The coordinator accepts a model id
+  on the `hello`, the v2 `auth_request` (top-level `model_id` and every
+  `supported_models` entry, on both stages), every heartbeat `model_id` and
+  every `warm_models` entry only when it is non-empty, has no surrounding
+  whitespace and no control character, and its canonical form equals its
+  ASCII lower case. Any other spelling (a trailing space, a no-break space,
+  a Kelvin sign, a dotted capital I, a non-ASCII upper-case letter, an NFD
+  sequence) is rejected through that field's existing invalid-frame path: a
+  top-level id or `supported_models` entry rejects the frame, a
+  `warm_models` entry rejects the array as below. ASCII case variants stay
+  legal and fold to one key; catalog ids, which every legacy provider sends,
+  are ASCII. The id is not rewritten: the route snapshot and the dispatch
+  keep the provider's accepted spelling, whose ASCII lower case is the key.
+
+  *Sanction identity.* Every per-model sanction and its lookups (SPEC-036
+  FR-25 suspension and the passing set behind `served_model_dispatch`,
+  verification keys, due times, scorer pools and in-flight request matching,
+  not-loaded strikes, identity pins) key on the resolved catalog row, not on
+  the spelling. A signed catalog row is reachable under two names, its row
+  key and its `model_id`; both map to one identity, the row's normalized
+  `model_id`. A name that is some row's `model_id` is its own identity; a
+  name that is only a row key maps to its row's `model_id`. The active
+  catalog release decides, then each retained compatible release in a fixed
+  order. An id that names no catalog row (BYOM, uncatalogued) keeps its
+  canonical model id. A provider that declares a model under the row's
+  other name, as a further entry or as its top-level model, therefore keeps
+  that model's suspension, verification state and due time, strikes and
+  identity pin. A warm set of two or more entries in which two entries name
+  one row (a further entry naming the primary's row included), or a session
+  whose `supported_models` names one row twice while it reports such a warm
+  set, is a bad `warm_models` below. A warm set of one, and every session
+  without one, is never rejected by this rule, so a legacy provider sending
+  either name of its row is accepted as before.
+
+  A bad `warm_models` on a `hello` or `auth_request` is dropped with one
+  structured warning (`handshake_warm_models_dropped`); the handshake
+  proceeds and the session is legacy. On a heartbeat a bad `warm_models`
+  drops only the warm-set update, with a `heartbeat_warm_models_rejected`
+  warning logged at most once per session per minute (the next one counts
+  the ones suppressed): the rest of the heartbeat (state, slots, top-level
+  fields) applies, and the session keeps its previous entry set, unless the
+  heartbeat changed the top-level model, which drops the set. The third
+  consecutive heartbeat with a bad `warm_models` drops the kept set as
+  stale; a heartbeat with a valid or no `warm_models` restarts the count.
+- *Registration and heartbeat.* The handshake and every accepted heartbeat
+  replace the session's entry set with the reported `warm_models` (an entry
+  missing from a heartbeat is gone; in-flight requests on it finish). A
+  further entry's seats are clamped by the operator concurrency ceiling like
+  the top-level ones. Each further entry's hash is verified for its own model
+  against the catalog hash expected for that model (SPEC-008 §5.3-§5.6,
+  SPEC-010 §3.7) and gets its own artifact-identity verdict; the primary
+  entry takes the session's own verdict. A failing entry is excluded on its
+  own; the other entries keep serving.
+- *Per-entry view.* Routing reads each entry as a copy of the session that
+  takes the entry's own model, slots, context, throughput, parameter count,
+  identity and verdict, artifact binding, `cb_self_check`, `engine_profile`,
+  `tool_selection_capabilities` and `vision_runtime_capabilities`; the
+  session-level gates (connection, trust and admission tier, breaker, pause,
+  `draining` / `degraded` / `unavailable`, thermal hold) apply unchanged.
+  State that belongs to the primary's tuple alone is cleared on a further
+  entry: the SPEC-047 session-to-candidate model admission binding and its
+  generation, the SPEC-031-R033 native-MTP canary state,
+  the pool-model candidate row identity and the shard-group fields. A
+  further entry therefore fails closed wherever one of them is required.
+  Each further entry keeps its own SPEC-010-R007 identity pin, set by its
+  first verified identity and carried across heartbeats while it stays a
+  further entry, and its own SPEC-036 FR-25 suspension and verification.
+  The primary entry is the session itself.
+- *Slots and state.* Slot accounting is per entry: a dispatch to a further
+  entry takes and returns that entry's seat only and never the primary's or
+  the session's; the primary's seats are the session's. Entry slots are not
+  additive across entries: a dispatch the provider refuses for lack of shared
+  memory returns the seat it took and holds that entry at zero routable
+  seats until a heartbeat with status `ready` or `busy` reports free seats
+  for it (the free count is then at most the count before the refusal); a
+  heartbeat without free seats for the entry keeps the hold. The refusal is
+  the existing retryable over-capacity outcome, never a breaker fault. Only an
+  entry in state `warm` is routing-eligible. Session-level state (`draining`,
+  `degraded`, `unavailable`, disconnect, the breaker) applies to every entry.
+- *Routing.* A candidate is a (provider, model) entry. Selection, the
+  SPEC-002-R005 measured-performance store (already keyed by provider and
+  served model), the throughput floor and the SPEC-004 objective all read the
+  entry. The coordinator MUST NOT assume an entry's solo throughput while its
+  sibling entries are busy: it uses the entry's reported contended
+  `throughput_tps_estimate` and its measured decode. Every dispatch to an
+  entry carries `served_model_id` naming it, on `preflight` and
+  `inference_request` or as `X-MacProvider-Served-Model`. Sticky routing
+  records and matches the (provider, served model) entry, so a sticky entry
+  for one model is not a hit for another model of the same provider. A
+  provider pin keeps one entry per provider: the one serving the requested
+  model, else the primary, which then fails the model check. The slot queue
+  keys a further entry as `<provider_id>#<case-folded model>` and the primary
+  entry by the bare provider id, so plaintext, relay-blind and privacy-class
+  reservations on the primary's seats share one queue and a waiter for one
+  member is never granted another member's seat. Relay-blind,
+  privacy-class, pool-model and external-runtime (BYOM) routing read the
+  session as before, that is the primary only.
+- *`model_not_loaded`.* When a dispatch to an entry is answered
+  `model_not_loaded` before any byte reached the buyer (a `preflight_ack`
+  reason, an `inference_response_end` status `error_model_not_loaded`, or an
+  HTTP 503 with that error code), that entry is unavailable until the
+  session's next heartbeat replaces the entry set; the session and its other
+  entries are untouched. The request fails over to another candidate like a
+  queue-full refusal, outside the buyer retry budget, and the attempt is
+  logged with `error_model_not_loaded` and null usage: it is never settled
+  and is not a breaker fault. A strike counts once per heartbeat generation
+  of the entry. Strikes are kept per session and sanction identity, aged
+  only by the 120 s window: a state change, a drop and re-add of the entry
+  or a promotion keeps them. When a model reaches its second strike within
+  120 s (the default breaker threshold and window), the answer is a breaker fault
+  (`repeated_warm_entry_model_not_loaded`) for the session and the request
+  takes the ordinary path, retry budget included. This is a stated
+  trade-off: two genuine eviction races on one model within 120 s (a member
+  evicted between the heartbeat that showed it warm and the dispatch) also
+  count as a breaker fault, because the coordinator cannot tell them from a
+  member advertised warm that is never loaded. A provider without
+  `warm_models`, or with a warm set of one, keeps today's handling of the
+  same answer.
+- *Pool and operator views.* `/poolz` has one row per entry for a provider
+  that sent `warm_models`; such a row adds `served_model`, `primary` and
+  `warm_state` (the entry's `state`), and a provider without `warm_models`
+  is one row without them. The `/poolz` summary counts provider sessions:
+  `total_slots` and `free_slots` are the session's own (primary) slots,
+  because entry slots are not additive, and `models` lists every entry's
+  model. `/v1/models` lists each entry's model. The gateway counts the rows
+  of one session once for pool-level and serving counts (in service when any
+  row is, with the best state of its rows) and keeps per-model counts per
+  row. The operator explorer (SPEC-007) lists in `models_available` the
+  model of every entry that is in service and whose hash status is not
+  `mismatch` or `invalid`, keeps its provider counts and slot totals per session,
+  and adds to each provider row `warm_models`: one object per entry, primary
+  first, with `model_id`, `primary`, `state`, `slots_total` and `slots_free`
+  (the entry view's seats), and an empty list for a provider without
+  `warm_models`.
+- *Settlement.* The route snapshot's `model_id`, `spec008_hash_status`,
+  `provider_reported_model_hash` and `expected_catalog_model_hash` (SPEC-022)
+  come from the dispatched entry, the snapshot records that the attempt was
+  dispatched to an entry of a multi-model session whose own SPEC-036 key is
+  `passing` and whose `model_id` spelling is its sanction identity
+  (`served_model_dispatch`, SPEC-022 R-16.2a; 0 otherwise, also while
+  compute-integrity scoring is off), and the request settles against
+  that model. The provider earnings read (SPEC-005 §11.4)
+  reports `credits_by_model`, the payable credit total split by each row's
+  model, so a provider sees what each of its models earned; the split sums
+  to `total_credits` less any credit rows without a model, which are left
+  out of the split.
+- *Trust.* No trust tier, admission tier or attestation label is minted,
+  upgraded or downgraded by the number of warm models.

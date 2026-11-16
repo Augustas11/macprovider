@@ -687,8 +687,14 @@ func poolOverview(providers []pool.Provider) map[string]any {
 		case pool.StateUnavailable:
 			out["unavailable_providers"] = out["unavailable_providers"].(int) + 1
 		}
-		if p.ModelID != "" {
-			models[p.ModelID] = true
+		// A SPEC-002-R011 entry's model is available while the entry is in
+		// service (routable, or serving on every seat) and its hash check
+		// has not failed; the counts above stay per provider session.
+		for _, entry := range pool.EntryViews(p) {
+			if entry.ModelID != "" && entry.InService() &&
+				entry.HashStatus != pool.HashStatusMismatch && entry.HashStatus != pool.HashStatusInvalid {
+				models[entry.ModelID] = true
+			}
 		}
 		out["slots_free"] = out["slots_free"].(int) + p.SlotsFree
 		out["slots_total"] = out["slots_total"].(int) + p.SlotsTotal
