@@ -170,6 +170,31 @@
       "primary_artifact_id": "mlx-oq3e",
       "rate_class": "class-120b-moe"
     },
+    "minimaxai/minimax-m3.1-flash-abliterated": {
+      "artifacts": {
+        "mlx-oq3e": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "795d9cf46799deb2cf61822acfbf8586aa946fcaa880686e86be3ca77280368a",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 230,
+          "notes": "MiniMax M3.1-Flash abliterated (#2376): the oQ3e build of mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp at b1084ba6 with every base weight shard byte-identical (routed experts affine 3-bit g64; MXFP8 shared experts, indexer and part of attention), plus refusal_direction.safetensors (one float32 unit vector under the key language_model.refusal_direction, hidden size 6144), that key added to the weight_map of model.safetensors.index.json, and config.json text_config.refusal_ablation (layers 16-42, alpha 1.5): in those decoder layers the native Swift minimax_m3 engine projects the direction out of the attention and MLP/MoE outputs before each residual add (mlx-swift-lm 3.32.3-macprovider.71). Because the index lists the direction tensor, a runtime without refusal-ablation support refuses the model instead of serving the unablated base. Text only; the vision encoder and the bundled dspark/ draft are not loaded, and configuration_minimax_m3_vl.py, image_processor.py, processing_minimax.py and video_processor.py are never executed. min_ram_gb = 230, the base row's figure (199.5 GB measured native peak at 32K + 26 GB SPEC-048-R012 floor + 4 GB margin). Snapshot-manifest hash recomputed from the HF tree API at the pinned revision (scripts/catalog-hash-sweep.py algorithm, 66 files); it equals the manifest of the staged upload. License: MiniMax Community License: commercial use requires the attribution 'Built with MiniMax M3.1-Flash' on a related website, UI or documentation, and a one-time notice to MiniMax (prior written authorization above USD 20M yearly revenue); its appendix lists prohibited uses.",
+          "quantization": "oq3e-affine3-g64-mxfp8-mixed",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 196186926717,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+            "revision": "e45ff82cab94d9ecb46a86b12b891eeba3d1e198"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-15"
+        }
+      },
+      "primary_artifact_id": "mlx-oq3e",
+      "rate_class": "class-120b-moe"
+    },
     "mlx-community/qwen2-vl-2b-instruct-4bit": {
       "artifacts": {
         "mlx-4bit": {

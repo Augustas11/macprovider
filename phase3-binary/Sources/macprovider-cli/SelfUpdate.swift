@@ -3747,12 +3747,34 @@ struct LocalStatusFormatter {
         \(title)
         Provider: \(providerID)
         Owner: \(owner)
-        Model: \(model)
+        Model: \(model)\(warmModelsLines(status, advanced: false))
         Provider software: \(update)
         Requests: \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors\(recommendation)\(action)
 
         Advanced diagnostics: malibu-cli status --advanced
         """
+    }
+
+    /// The models this Mac keeps loaded side by side, primary first, one
+    /// line each. Empty when it serves one model, so that output is unchanged.
+    static func warmModelsLines(_ status: [String: Any], advanced: Bool) -> String {
+        guard let entries = status["warm_models"] as? [[String: Any]], entries.count > 1 else { return "" }
+        let indent = advanced ? "  " : ""
+        let lines = entries.map { entry -> String in
+            let state = string(entry["state"])
+            var details: [String] = []
+            if entry["primary"] as? Bool == true { details.append(advanced ? "primary" : "main") }
+            if advanced {
+                details.append(state)
+                if let total = entry["slots_total"] as? Int, let free = entry["slots_free"] as? Int {
+                    details.append("\(free) of \(total) slots free")
+                }
+            } else {
+                details.append(["warm": "ready", "loading": "loading", "evicting": "unloading"][state] ?? state)
+            }
+            return "\n\(indent)  \(string(entry["model_id"])) (\(details.joined(separator: ", ")))"
+        }
+        return "\n\(indent)Loaded models:" + lines.joined()
     }
 
     private static func advancedFormat(
@@ -3809,7 +3831,7 @@ struct LocalStatusFormatter {
         Local:
           Provider ID:  \(string(status["provider_id"]))
           Owner: \(ownerLine)
-          Model:       \(string(status["model"]))\(donorBadge)
+          Model:       \(string(status["model"]))\(donorBadge)\(warmModelsLines(status, advanced: true))
           Status:      \(string(status["status"]))
           Uptime:      \(uptime)
           Requests:    \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors

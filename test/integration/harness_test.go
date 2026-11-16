@@ -289,6 +289,10 @@ type scenario struct {
 	// maps before they are written (scenario-specific feature config).
 	coordinatorConfig func(*scenario, map[string]any)
 	gatewayConfig     func(*scenario, map[string]any)
+	// settlementCatalogExtraRows / settlementCatalogExtra: further signed
+	// autotune rows listed in the settlement catalog, and what was listed.
+	settlementCatalogExtraRows []string
+	settlementCatalogExtra     []settlementCatalogModel
 }
 
 type scenarioOpts struct {
@@ -381,6 +385,9 @@ type scenarioOpts struct {
 	// gatewayPrivacyClass turns on features.privacy_class. Relay-blind must
 	// already be enabled or the gateway rejects the config.
 	gatewayPrivacyClass bool
+	// settlementCatalogExtraRows lists further signed autotune row keys in
+	// the settlement catalog (models a warm-set member serves).
+	settlementCatalogExtraRows []string
 }
 
 // coordinatorPrivacyClassOpts is the SPEC-049 pin block for one fixture.
@@ -422,6 +429,8 @@ type settlementCatalogFixture struct {
 	autotunePolicyVersion   string
 	catalogID               string
 	catalogKeyID            string
+	// extraModels are the rows added for settlementCatalogExtraRows.
+	extraModels []settlementCatalogModel
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -451,6 +460,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	}
 	s.coordinatorConfig = opts.coordinatorConfig
 	s.gatewayConfig = opts.gatewayConfig
+	s.settlementCatalogExtraRows = opts.settlementCatalogExtraRows
 	t.Cleanup(s.shutdown)
 
 	if opts.providerCount == 0 {
@@ -520,6 +530,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.autotuneCatalogSHA256 = settlementCatalog.autotuneCatalogSHA256
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
+		s.settlementCatalogExtra = settlementCatalog.extraModels
 	}
 	relayBlindIdentityPublicKeys := opts.relayBlindIdentityPublicKeys
 	autoEnroll := opts.coordinatorPrivacyClass != nil && opts.coordinatorPrivacyClass.AutoEnroll
@@ -1006,6 +1017,7 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		Version       string `json:"version"`
 		PolicyVersion string `json:"policy_version"`
 		Rows          map[string]struct {
+			ModelID     string `json:"model_id"`
 			ModelSHA256 string `json:"model_sha256"`
 		} `json:"rows"`
 	}
@@ -1032,6 +1044,18 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		SHA256:       modelHash,
 		Source:       "integration-test",
 	}}
+	// Further signed autotune rows the scenario serves (warm-set members),
+	// listed under their HF model id and signed hash like the fixture row.
+	var extraModels []settlementCatalogModel
+	for _, key := range s.settlementCatalogExtraRows {
+		row, ok := autotuneCatalog.Rows[key]
+		if !ok || len(row.ModelSHA256) != sha256.Size*2 || row.ModelID == "" {
+			s.t.Fatalf("signed autotune fixture has no usable row %q", key)
+		}
+		extra := settlementCatalogModel{ArtifactKind: "mlx_weight_file", HashScope: "primary_weight_file", ModelID: row.ModelID, MinRAMGB: &minRAM, SHA256: row.ModelSHA256, Source: "integration-test"}
+		models = append(models, extra)
+		extraModels = append(extraModels, extra)
+	}
 	issuedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	expiresAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	body := settlementCatalogBody{
@@ -1086,6 +1110,7 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		autotunePolicyVersion:   autotuneCatalog.PolicyVersion,
 		catalogID:               body.CatalogID,
 		catalogKeyID:            file.Signature.KeyID,
+		extraModels:             extraModels,
 	}
 }
 
@@ -1736,6 +1761,127 @@ type fakeProvider struct {
 	streamDecodeDelay time.Duration
 	// maxContextTokens is the advertised max_context_tokens (0 = 8192).
 	maxContextTokens int
+	// warmMembers, when set, makes the provider report a SPEC-001-R016 warm
+	// set: the session model as primary plus these further members, on auth
+	// initial and every heartbeat. warmMu guards the members once started.
+	warmMu      sync.Mutex
+	warmMembers []*fakeWarmMember
+	// warmSetOfOne makes the provider report warm_models with only its
+	// primary entry, as every new CLI does for a single model.
+	warmSetOfOne bool
+	// primaryThroughput, when set, replaces the primary's advertised
+	// throughput on a warm-set session so routing between primaries is
+	// deterministic.
+	primaryThroughput float64
+	// servedModels records each chat request's X-MacProvider-Served-Model.
+	servedModels []string
+}
+
+// fakeWarmMember is one further member of a fake provider's warm set.
+type fakeWarmMember struct {
+	modelID    string
+	modelHash  string
+	slots      int
+	throughput float64
+	state      string // "warm" or "loading"
+	// notLoaded makes the runtime answer a dispatch to this member with
+	// model_not_loaded, as after an eviction the coordinator has not yet
+	// seen; after the first such answer the member leaves the heartbeat.
+	notLoaded bool
+	evicted   bool
+}
+
+// setWarmMember edits one warm member under warmMu.
+func (p *fakeProvider) setWarmMember(modelID string, edit func(*fakeWarmMember)) {
+	p.warmMu.Lock()
+	defer p.warmMu.Unlock()
+	for _, m := range p.warmMembers {
+		if m.modelID == modelID {
+			edit(m)
+			return
+		}
+	}
+	p.t.Fatalf("no warm member %s", modelID)
+}
+
+// supportedModelIDs is the session model plus every warm member.
+func (p *fakeProvider) supportedModelIDs() []string {
+	p.warmMu.Lock()
+	defer p.warmMu.Unlock()
+	out := []string{p.modelID}
+	for _, m := range p.warmMembers {
+		out = append(out, m.modelID)
+	}
+	return out
+}
+
+// addWarmModels adds warm_models to an auth initial or heartbeat frame. The
+// primary entry repeats the frame's top-level model fields.
+func (p *fakeProvider) addWarmModels(msg map[string]any, slotsTotal, slotsFree int) {
+	p.warmMu.Lock()
+	defer p.warmMu.Unlock()
+	if len(p.warmMembers) == 0 && !p.warmSetOfOne {
+		return
+	}
+	if p.primaryThroughput > 0 {
+		msg["throughput_tps_estimate"] = p.primaryThroughput
+	}
+	primary := map[string]any{"state": "warm", "primary": true, "pinned": true, "slots_total": slotsTotal, "slots_free": slotsFree}
+	for _, key := range []string{"model_id", "max_context_tokens", "throughput_tps_estimate", "model_hash", "model_hash_algorithm", "weights_manifest_sha256", "weights_manifest_algorithm", "model_params_b"} {
+		if v, ok := msg[key]; ok {
+			primary[key] = v
+		}
+	}
+	entries := []map[string]any{primary}
+	for _, m := range p.warmMembers {
+		if m.evicted {
+			continue
+		}
+		entry := map[string]any{
+			"model_id": m.modelID, "state": m.state, "primary": false, "pinned": false,
+			"slots_total": m.slots, "max_context_tokens": 8192, "throughput_tps_estimate": m.throughput, "model_params_b": 3.0,
+		}
+		if m.state == "warm" {
+			entry["slots_free"] = m.slots
+		}
+		addCanonicalModelIdentity(entry, m.modelHash)
+		entries = append(entries, entry)
+	}
+	msg["warm_models"] = entries
+}
+
+// answerNotLoaded reports whether a dispatch to servedModel is answered
+// model_not_loaded, and evicts the member when it is.
+func (p *fakeProvider) answerNotLoaded(servedModel string) bool {
+	p.warmMu.Lock()
+	defer p.warmMu.Unlock()
+	for _, m := range p.warmMembers {
+		if m.modelID == servedModel && m.notLoaded {
+			m.evicted = true
+			return true
+		}
+	}
+	return false
+}
+
+// receiptModelHash is the hash of the warm member that served modelID
+// (SPEC-015 §M.2.4), the session's own otherwise.
+func (p *fakeProvider) receiptModelHash(modelID string) string {
+	p.warmMu.Lock()
+	defer p.warmMu.Unlock()
+	for _, m := range p.warmMembers {
+		if m.modelID == modelID {
+			return m.modelHash
+		}
+	}
+	return p.modelHash
+}
+
+// ServedModels returns each request's X-MacProvider-Served-Model in order.
+func (p *fakeProvider) ServedModels() []string {
+	p.hitMu.Lock()
+	defer p.hitMu.Unlock()
+	return append([]string(nil), p.servedModels...)
 }
 
 func (p *fakeProvider) completionText() string {
@@ -1981,7 +2127,7 @@ func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata,
 		"catalog_id":                    metadata.CatalogID,
 		"expected_catalog_model_hash":   metadata.ExpectedCatalogModelHash,
 		"issued_at_unix_ms":             terminalTSUnixMS,
-		"model_hash":                    p.modelHash,
+		"model_hash":                    p.receiptModelHash(metadata.ModelID),
 		"model_id":                      metadata.ModelID,
 		"output_hash":                   outputHash,
 		"output_prefix_end_byte":        outputPrefixEnd,
@@ -2432,8 +2578,16 @@ func (p *fakeProvider) start(ctx context.Context) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		servedModel := r.Header.Get("X-MacProvider-Served-Model")
+		if servedModel != "" && p.answerNotLoaded(servedModel) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"model not loaded","type":"server_error","code":"model_not_loaded"}}`))
+			return
+		}
 		p.hitMu.Lock()
 		p.hits++
+		p.servedModels = append(p.servedModels, servedModel)
 		p.lastRequestBody = append([]byte(nil), requestBody...)
 		p.lastResponseBody = []byte(p.completionBody())
 		omitReceipt := p.omitSettlementReceipt
@@ -2612,7 +2766,7 @@ func (p *fakeProvider) handshake(conn net.Conn, endpointURL string) error {
 			"endpoint_url":                endpointURL,
 			"provider_ecdh_public_key":    base64.RawURLEncoding.EncodeToString(providerECDH),
 			"provider_receipt_public_key": base64.StdEncoding.EncodeToString(p.receiptPubkey),
-			"supported_models":            []string{p.modelID},
+			"supported_models":            p.supportedModelIDs(),
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
 		}
@@ -2630,6 +2784,7 @@ func (p *fakeProvider) handshake(conn net.Conn, endpointURL string) error {
 			initial["tier2_capabilities"].(map[string]any)["compute_score_v1"] = true
 		}
 		p.addWeightsManifest(initial)
+		p.addWarmModels(initial, 2, 2)
 		if p.admissionPriv != nil {
 			initial["provider_admission_public_key"] = base64.StdEncoding.EncodeToString(p.admissionPriv.Public().(ed25519.PublicKey))
 		}
@@ -2664,7 +2819,7 @@ func (p *fakeProvider) handshake(conn net.Conn, endpointURL string) error {
 			"auth_attempt_id":            challenge.AuthAttemptID,
 			"provider_id":                p.providerID,
 			"attestation_token":          nil,
-			"supported_models":           []string{p.modelID},
+			"supported_models":           p.supportedModelIDs(),
 			"publishes_supported_models": true,
 		}
 		if p.admissionPriv != nil {
@@ -2859,6 +3014,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			}
 			p.canonicalIdentity(hb)
 			p.addWeightsManifest(hb)
+			p.addWarmModels(hb, 2, 2)
 			if err := p.writeFrame(conn, hb); err != nil {
 				return
 			}

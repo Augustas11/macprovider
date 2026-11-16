@@ -1,0 +1,83 @@
+{
+  "heartbeat" : {
+    "avg_latency_ms_since_last" : null,
+    "engine_profile" : {
+      "cb_granted_slots" : 0,
+      "chip_class" : "m5",
+      "engine_family" : "general_mlx",
+      "max_stable_context_tokens" : 20000,
+      "native_mtp_active" : false,
+      "ram_class_gb" : 32,
+      "version" : "engine-profile-v1"
+    },
+    "max_concurrency" : 2,
+    "max_context_tokens" : 20000,
+    "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+    "model_id" : "model-a",
+    "model_params_b" : 0,
+    "ram_gb" : 32,
+    "requests_served_since_last" : 0,
+    "slots_free" : 2,
+    "slots_total" : 2,
+    "status" : "ready",
+    "throughput_tps_estimate" : 20,
+    "throughput_tps_since_last" : null,
+    "type" : "heartbeat",
+    "warm_models" : [
+      {
+        "engine_profile" : {
+          "cb_granted_slots" : 0,
+          "chip_class" : "m5",
+          "engine_family" : "general_mlx",
+          "max_stable_context_tokens" : 20000,
+          "native_mtp_active" : false,
+          "ram_class_gb" : 32,
+          "version" : "engine-profile-v1"
+        },
+        "max_context_tokens" : 20000,
+        "model_hash" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "model-a",
+        "model_params_b" : 0,
+        "pinned" : true,
+        "primary" : true,
+        "slots_free" : 2,
+        "slots_total" : 2,
+        "state" : "warm",
+        "throughput_tps_estimate" : 20
+      },
+      {
+        "max_context_tokens" : 8000,
+        "model_hash" : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "model_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "model-b",
+        "model_params_b" : 4,
+        "pinned" : true,
+        "primary" : false,
+        "slots_free" : 3,
+        "slots_total" : 3,
+        "state" : "warm",
+        "throughput_tps_estimate" : 25.699999999999999,
+        "tool_selection_capabilities" : [
+          {
+            "model_id" : "model-b",
+            "modes" : [
+              "auto",
+              "none"
+            ],
+            "runtime" : "mlx_cache",
+            "schema_profiles" : [
+              "ordinary-parameters-v1"
+            ],
+            "validation" : "schema-holdback-v1"
+          }
+        ]
+      }
+    ]
+  },
+  "supported_models" : [
+    "model-a",
+    "model-b"
+  ]
+}

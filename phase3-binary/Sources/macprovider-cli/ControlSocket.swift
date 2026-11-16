@@ -33,6 +33,92 @@ struct ProviderControlCommandResult: Equatable, Sendable {
     }
 }
 
+/// One warm-set member in a `warm_set_response`: the `warm_models` wire
+/// entry fields plus the requests holding it (`leases`).
+public struct WarmSetControlEntry: Codable, Equatable, Sendable {
+    public var modelID: String
+    public var state: String
+    public var primary: Bool
+    public var pinned: Bool
+    public var leases: Int
+    public var slotsTotal: Int
+    /// Absent unless `warm`.
+    public var slotsFree: Int?
+    public var maxContextTokens: Int?
+    public var throughputTPSEstimate: Double?
+    public var modelParamsB: Double?
+    public var modelHash: String?
+    public var modelHashAlgorithm: String?
+    public var weightsManifestSHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case modelID = "model_id"
+        case state
+        case primary
+        case pinned
+        case leases
+        case slotsTotal = "slots_total"
+        case slotsFree = "slots_free"
+        case maxContextTokens = "max_context_tokens"
+        case throughputTPSEstimate = "throughput_tps_estimate"
+        case modelParamsB = "model_params_b"
+        case modelHash = "model_hash"
+        case modelHashAlgorithm = "model_hash_algorithm"
+        case weightsManifestSHA256 = "weights_manifest_sha256"
+    }
+}
+
+/// The running process's own load decision for a `warm_set check`
+/// (`SharedModelMemoryRules.LoadDecision`): the measured resident bytes of
+/// the loaded members, the new model's estimate, what the load needs in
+/// all and the limit it is held to, and the members it would unload first.
+public struct WarmSetCheckReport: Codable, Equatable, Sendable {
+    /// `fits`, `fits_after_eviction`, `insufficient_memory` or
+    /// `limit_unavailable`.
+    public var decision: String
+    public var limitBytes: Int?
+    public var requiredBytes: Int
+    public var loadedResidentBytes: Int
+    public var estimatedResidentBytes: Int
+    public var evict: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case decision
+        case limitBytes = "limit_bytes"
+        case requiredBytes = "required_bytes"
+        case loadedResidentBytes = "loaded_resident_bytes"
+        case estimatedResidentBytes = "estimated_resident_bytes"
+        case evict
+    }
+}
+
+/// The reply to every `warm_set_request`. `status` is `ok` for `status`, the
+/// load outcome (`loaded`, `already_warm`, `insufficient_memory`,
+/// `unsupported_model`, `command_buffer_budget_conflict`, `load_failed`),
+/// the check outcome (`fits`,
+/// `fits_after_eviction`, or the load outcome a load would get), the
+/// unload outcome (`unloaded`, `not_loaded`, `primary`, `busy`, `failed`),
+/// `invalid_request`, or `unavailable` when the process has no warm set.
+/// `entries` is the warm set after the action; `check` rides on a check
+/// that reached the memory decision.
+public struct WarmSetControlReply: Codable, Equatable, Sendable {
+    public var action: String
+    public var status: String
+    public var modelID: String?
+    public var detail: String?
+    public var entries: [WarmSetControlEntry]
+    public var check: WarmSetCheckReport? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case status
+        case modelID = "model_id"
+        case detail
+        case entries
+        case check
+    }
+}
+
 public enum ControlSocketFrame: Equatable, Sendable {
     case switchRequest(targetModelID: String, requestedAtMs: Int64)
     case statusRequest
@@ -109,6 +195,12 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case kvCachePurgeResponse(status: String, entriesRemoved: Int, bytesFreed: Int, detail: String?)
     case kvCacheStatusRequest
     case kvCacheStatusResponse(payloadJSON: String)
+
+    /// Warm-set control: `action` is `status`, `load` or `unload`; `load`
+    /// and `unload` name `modelID`.
+    /// `contextTokens` / `slots`: a `load`'s own limits (optional).
+    case warmSetRequest(action: String, modelID: String?, contextTokens: Int? = nil, slots: Int? = nil)
+    case warmSetResponse(WarmSetControlReply)
 }
 
 public enum RewardAuditControlErrorCode: String, Sendable, Equatable {
@@ -380,6 +472,14 @@ public enum ControlSocketCodec {
             object = ["type": "kv_cache_status_request"]
         case let .kvCacheStatusResponse(payloadJSON):
             object = ["type": "kv_cache_status_response", "payload_json": payloadJSON]
+        case let .warmSetRequest(action, modelID, contextTokens, slots):
+            var frame: [String: Any] = ["type": "warm_set_request", "action": action]
+            if let modelID { frame["model_id"] = modelID }
+            if let contextTokens { frame["context_tokens"] = contextTokens }
+            if let slots { frame["slots"] = slots }
+            object = frame
+        case let .warmSetResponse(reply):
+            object = try Self.object(encoding: reply, adding: ["type": "warm_set_response"])
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -693,6 +793,13 @@ public enum ControlSocketCodec {
             return .kvCacheStatusRequest
         case "kv_cache_status_response":
             return .kvCacheStatusResponse(payloadJSON: try stringField("payload_json", in: object))
+        case "warm_set_request":
+            return .warmSetRequest(
+                action: try stringField("action", in: object), modelID: object["model_id"] as? String,
+                contextTokens: optionalIntField("context_tokens", in: object),
+                slots: optionalIntField("slots", in: object))
+        case "warm_set_response":
+            return .warmSetResponse(try decode(WarmSetControlReply.self, from: object, removing: "type"))
         default:
             throw ControlSocketError.unknownType(type)
         }
@@ -1208,11 +1315,18 @@ actor ControlSocketServer {
     /// re-acquisition); nil ⇒ the tier is disabled and the standalone CLI path
     /// acquires the free lock instead.
     private let kvDiskTier: KVDiskTier?
+    /// The serve process's warm set; nil when `--model` is served by an
+    /// external runtime, and `warm_set` requests then reply `unavailable`.
+    private let warmSet: (any WarmSetControl)?
+    /// SPEC-011 R-3.10.3: the warm set's current primary. Switch, status and
+    /// adoption frames go to it; nil (no warm set) means `modelRuntime`. The
+    /// KV disk tier frames stay on `modelRuntime`, which holds the tier.
+    private let primaryRuntime: (@Sendable () -> ModelRuntime?)?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
     private var clientTasks: [UUID: Task<Void, Never>] = [:]
-    private var clientFDs: [Int32] = []
+    private var clientDescriptors: [UUID: ControlSocketDescriptor] = [:]
 
     init(
         socketPath: URL,
@@ -1231,8 +1345,11 @@ actor ControlSocketServer {
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         watchdogCleanup: ControlSocketWatchdogCleanup? = nil,
-        kvDiskTier: KVDiskTier? = nil
+        kvDiskTier: KVDiskTier? = nil,
+        warmSet: (any WarmSetControl)? = nil,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)? = nil
     ) {
+        self.primaryRuntime = primaryRuntime
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
         self.supportedModels = supportedModels
@@ -1250,6 +1367,7 @@ actor ControlSocketServer {
         self.resumeProvider = resumeProvider
         self.watchdogCleanup = watchdogCleanup
         self.kvDiskTier = kvDiskTier
+        self.warmSet = warmSet
     }
 
     func start() async throws {
@@ -1336,6 +1454,8 @@ actor ControlSocketServer {
                 pauseProvider: pauseProvider,
                 resumeProvider: resumeProvider,
                 kvDiskTier: self.kvDiskTier,
+                warmSet: self.warmSet,
+                primaryRuntime: self.primaryRuntime,
                 server: self
             )
         }
@@ -1349,10 +1469,12 @@ actor ControlSocketServer {
             task.cancel()
         }
         clientTasks.removeAll()
-        for fd in clientFDs {
-            close(fd)
+        // Each client's connection closes its own descriptor; shutting it
+        // down here ends that connection's read.
+        for descriptor in clientDescriptors.values {
+            descriptor.shutdown()
         }
-        clientFDs.removeAll()
+        clientDescriptors.removeAll()
         if let listenerFD {
             close(listenerFD)
             self.listenerFD = nil
@@ -1373,12 +1495,16 @@ actor ControlSocketServer {
         clientTasks.removeValue(forKey: id)
     }
 
-    private func appendClientFD(_ fd: Int32) {
-        clientFDs.append(fd)
+    private func appendClientDescriptor(id: UUID, _ descriptor: ControlSocketDescriptor) {
+        clientDescriptors[id] = descriptor
     }
 
-    private func removeClientFD(_ fd: Int32) {
-        clientFDs.removeAll { $0 == fd }
+    private func removeClientDescriptor(id: UUID) {
+        clientDescriptors.removeValue(forKey: id)
+    }
+
+    func clientDescriptorsForTest() -> [ControlSocketDescriptor] {
+        Array(clientDescriptors.values)
     }
 
     private nonisolated static func acceptLoop(
@@ -1399,6 +1525,8 @@ actor ControlSocketServer {
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         kvDiskTier: KVDiskTier?,
+        warmSet: (any WarmSetControl)?,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -1413,14 +1541,15 @@ actor ControlSocketServer {
                 close(clientFD)
                 continue
             }
-            await server.appendClientFD(clientFD)
             let taskID = UUID()
+            let descriptor = ControlSocketDescriptor(fd: clientFD)
+            await server.appendClientDescriptor(id: taskID, descriptor)
             let task = Task.detached(priority: .userInitiated) { [server] in
                 defer {
                     Task { await server.removeClientTask(taskID) }
                 }
                 await handleClient(
-                    fd: clientFD,
+                    descriptor: descriptor,
                     modelRuntime: modelRuntime,
                     tracker: tracker,
                     supportedModels: supportedModels,
@@ -1436,17 +1565,19 @@ actor ControlSocketServer {
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
                     resumeProvider: resumeProvider,
-                    kvDiskTier: kvDiskTier
+                    kvDiskTier: kvDiskTier,
+                    warmSet: warmSet,
+                    primaryRuntime: primaryRuntime
                 )
-                await server.removeClientFD(clientFD)
+                await server.removeClientDescriptor(id: taskID)
             }
             await server.appendClientTask(id: taskID, task: task)
         }
     }
 
     private nonisolated static func handleClient(
-        fd: Int32,
-        modelRuntime: ModelRuntime,
+        descriptor: ControlSocketDescriptor,
+        modelRuntime bootRuntime: ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?,
         receiptRotator: (@Sendable () async throws -> Void)?,
@@ -1461,13 +1592,17 @@ actor ControlSocketServer {
 		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
-        kvDiskTier: KVDiskTier? = nil
+        kvDiskTier: KVDiskTier? = nil,
+        warmSet: (any WarmSetControl)? = nil,
+        primaryRuntime: (@Sendable () -> ModelRuntime?)? = nil
     ) async {
-        let connection = ControlSocketConnection(fd: fd)
+        let connection = ControlSocketConnection(descriptor: descriptor)
+        let currentRuntime: @Sendable () -> ModelRuntime = { primaryRuntime?() ?? bootRuntime }
 
         while !Task.isCancelled {
             do {
                 let frame = try await connection.receive(timeout: idleTimeoutSeconds)
+                let modelRuntime = currentRuntime()
                 switch frame {
                 case .statusRequest:
                     let snapshot = await modelRuntime.currentSnapshot()
@@ -1493,6 +1628,7 @@ actor ControlSocketServer {
                         requestedAtMs: requestedAtMs,
                         connection: connection,
                         modelRuntime: modelRuntime,
+                        currentRuntime: currentRuntime,
                         tracker: tracker,
                         supportedModels: supportedModels
                     )
@@ -1628,13 +1764,18 @@ actor ControlSocketServer {
                         .referralChallengeCancelAck(status: try await service.cancel())
                     }
                 case let .kvCachePurgeRequest(mode, key):
-                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: bootRuntime, connection: connection)
                     await connection.close()
                     return
                 case .kvCacheStatusRequest:
-                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: bootRuntime, connection: connection)
                     await connection.close()
                     return
+                case let .warmSetRequest(action, modelID, contextTokens, slots):
+                    try await connection.send(.warmSetResponse(
+                        await handleWarmSetRequest(
+                            action: action, modelID: modelID, warmSet: warmSet,
+                            contextTokens: contextTokens, slots: slots)))
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()
@@ -1755,6 +1896,50 @@ actor ControlSocketServer {
     /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
     /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
     /// the CLI, and hide surviving disk residue.
+    /// `warm_set status | load <model> | check <model> | unload <model>`. A
+    /// load goes through the warm-set loader and the shared memory budget; a
+    /// check asks the loader for the decision that load would get now and
+    /// changes nothing; an unload refuses the primary and a member holding a
+    /// request.
+    nonisolated static func handleWarmSetRequest(
+        action: String, modelID: String?, warmSet: (any WarmSetControl)?,
+        contextTokens: Int? = nil, slots: Int? = nil
+    ) async -> WarmSetControlReply {
+        func reply(_ status: String, detail: String? = nil, check: WarmSetCheckReport? = nil) async -> WarmSetControlReply {
+            WarmSetControlReply(
+                action: action, status: status, modelID: modelID, detail: detail,
+                entries: await warmSet?.controlEntries() ?? [], check: check)
+        }
+        guard let warmSet else { return await reply("unavailable", detail: "no_warm_set") }
+        let target = modelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch action {
+        case "status":
+            return await reply("ok")
+        case "load", "check":
+            guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
+            // The same bounds `warm_model_limits` has in config.yaml.
+            if let contextTokens, contextTokens < 1 { return await reply("invalid_request", detail: "invalid_limits") }
+            if let slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
+                return await reply("invalid_request", detail: "invalid_limits")
+            }
+            let limits = contextTokens == nil && slots == nil
+                ? nil : WarmModelLimits(contextTokens: contextTokens, slots: slots)
+            if action == "check" {
+                let outcome = await warmSet.check(target, limits: limits)
+                return await reply(outcome.status, detail: outcome.detail, check: outcome.report)
+            }
+            let outcome = await warmSet.load(target, limits: limits)
+            return await reply(outcome.code, detail: outcome.detail)
+        case "unload":
+            guard let target, !target.isEmpty else { return await reply("invalid_request", detail: "model_id_required") }
+            let outcome = await warmSet.unload(target)
+            if case let .failed(detail) = outcome { return await reply(outcome.code, detail: detail) }
+            return await reply(outcome.code)
+        default:
+            return await reply("invalid_request", detail: "unknown_action")
+        }
+    }
+
     private nonisolated static func handleKVCacheStatus(
         tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {
@@ -1866,6 +2051,7 @@ actor ControlSocketServer {
         requestedAtMs: Int64,
         connection: ControlSocketConnection,
         modelRuntime: ModelRuntime,
+        currentRuntime: @Sendable () -> ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?
     ) async {
@@ -1906,7 +2092,8 @@ actor ControlSocketServer {
                     try await connection.send(.switchProgress(state: .draining, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
                     continue
                 case .completed:
-                    let served = await modelRuntime.servedContext()
+                    // A promotion completes on the new primary.
+                    let served = await currentRuntime().servedContext()
                     try await connection.send(.switchProgress(
                         state: .loaded,
                         elapsedMs: elapsedMs(since: requestedAtMs),
@@ -2126,6 +2313,45 @@ private actor ControlSocketSwitchTracker {
     }
 }
 
+/// One socket descriptor, closed exactly once. The connection that reads and
+/// writes it owns the close; anyone else (a stopping server) only shuts it
+/// down, which wakes the connection's blocked read. A descriptor number is
+/// never closed after the close, when the system may have handed it out
+/// again.
+final class ControlSocketDescriptor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32?
+
+    init(fd: Int32) {
+        self.fd = fd
+    }
+
+    var current: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return fd
+    }
+
+    var isClosed: Bool { current == nil }
+
+    func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fd {
+            Darwin.close(fd)
+            self.fd = nil
+        }
+    }
+
+    func shutdown() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fd {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+    }
+}
+
 public enum ControlSocketClient {
     public static func connect(socketPath: URL, timeout _: TimeInterval = 2.0) async throws -> ControlSocketConnection {
         let path = socketPath.path
@@ -2155,13 +2381,20 @@ public enum ControlSocketClient {
 public actor ControlSocketConnection {
     public static let maxFrameBytes = 64 * 1024
 
-    private var fd: Int32?
+    private let descriptor: ControlSocketDescriptor
+    private var fd: Int32? { descriptor.current }
     private var receiveBuffer = Data()
 
     var hasPartialFrame: Bool { !receiveBuffer.isEmpty }
 
     init(fd: Int32) {
-        self.fd = fd
+        self.descriptor = ControlSocketDescriptor(fd: fd)
+    }
+
+    /// A server's accepted client: the server may shut it down, only the
+    /// connection closes it.
+    init(descriptor: ControlSocketDescriptor) {
+        self.descriptor = descriptor
     }
 
     public func send(_ frame: ControlSocketFrame) async throws {
@@ -2213,10 +2446,7 @@ public actor ControlSocketConnection {
     }
 
     public func close() async {
-        if let fd {
-            Darwin.close(fd)
-            self.fd = nil
-        }
+        descriptor.close()
     }
 
     private func writeAll(_ data: Data) throws {

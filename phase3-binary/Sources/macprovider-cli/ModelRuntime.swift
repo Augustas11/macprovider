@@ -2125,6 +2125,11 @@ actor ModelRuntime: ModelRuntimeServing {
     // warm-swaps). Used to gate the catalog-id alias so the alias only applies
     // while the configured model is the one currently loaded.
     private let modelID: String?
+    /// SPEC-001-R018: this runtime's turn on the process GPU. Registered while
+    /// a model is loaded; every decode step and prefill chunk is bracketed by it.
+    nonisolated let gpuTurnParticipant: GPUTurnParticipant
+    /// SPEC-001-R017: this runtime's key in `SharedModelMemoryBudget`.
+    nonisolated var memoryBudgetMemberID: Int { gpuTurnParticipant.id }
     private let configuredModelLoadPath: String?
     // Coordinator-advertised catalog id (e.g. mlx-community/…) accepted as an
     // alias for the configured served model. nil when unset. See BUILD_SPEC
@@ -2147,9 +2152,6 @@ actor ModelRuntime: ModelRuntimeServing {
         let modelCapabilities: PagedKVRuntimeModelCapabilities
     }
     private var creativeServingState: CreativeServingState?
-    /// Keeps the loaded model's weights in MLX's residency sets; see
-    /// `startResidentWeightsTicket(modelFamily:)`.
-    private var residentWeightsTicket: WiredMemoryTicket?
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
@@ -2253,7 +2255,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private let switchContextProvenanceModelIDs: Set<String>
     /// SPEC-038 FR-CB9: the MLX small-row route this runtime's process runs.
     /// On `serialOnly` no self-check target, self-check batch or native-MTP
-    /// drafter exists here, so no row can be batched.
+    /// drafter exists here, so no row can be batched. On `stockOrder`
+    /// ordinary rows batch but no native-MTP drafter loads.
     let smallMRoute: SmallMRoute
     /// The configured `max_context_override` serve started with; a switch that
     /// serves exactly it serves the config value, not a recomputed one.
@@ -2317,6 +2320,9 @@ actor ModelRuntime: ModelRuntimeServing {
     }
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
+    /// SPEC-038 FR-CB9 (v0.3.56): the startup model's SPEC-039 attach probes
+    /// ran and failed (`SmallMRoute.attachProbeFailed`).
+    private var startupPagedKVAttachProbeFailedValue = false
     private var pagedKVRuntimeCacheClass: String
     private var pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
     private var pagedKVHardwareSizingProof: PagedKVHardwareSizingProof?
@@ -2411,7 +2417,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
     private var mlxCacheLimitBeforeLFM25: Int?
     private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
-    private let warmSwapEnabled: Bool
+    /// Moves with the primary role on a promotion (SPEC-011 R-3.10.3).
+    private var warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     struct DrainTiming: Sendable {
         let nowMilliseconds: @Sendable () -> Int64
@@ -2424,6 +2431,16 @@ actor ModelRuntime: ModelRuntimeServing {
         try? await Task.sleep(nanoseconds: 50_000_000)
     }
     private var providerStatus: ProviderStatus?
+    /// SPEC-011 §3.10: the warm set this runtime is the primary of; nil for
+    /// a single-model process and for every non-primary member.
+    private var warmSetSwapHooks: (any WarmSetSwapHooks)?
+    /// SPEC-011 R-3.10.3: the warm member a switch is promoting; a second
+    /// switch is refused until it ends.
+    private var pendingPromotionTarget: String?
+    /// A swap accepted while a warm-set load, evict or unload holds the
+    /// turn: the runtime is reserved for it, but it has not started, so the
+    /// primary is reported ready until its turn begins.
+    private var swapAwaitingWarmTurn = false
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
     private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
@@ -3339,12 +3356,18 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Bounds MLX's buffer cache. Must run before the model loads; see
     /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
     /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
-    /// Returns the applied byte limit.
+    /// Returns the applied byte limit. With `memberID` the value goes through
+    /// the process's shared budget (SPEC-001-R017), which applies the
+    /// smallest limit any loaded runtime asks for.
     @discardableResult
-    nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
+    nonisolated static func applyMLXCacheLimit(megabytes: Int?, memberID: Int? = nil) -> Int? {
         guard let megabytes, isValidMLXCacheLimitMB(megabytes) else { return nil }
         let bytes = megabytes * 1024 * 1024
-        Memory.cacheLimit = bytes
+        if let memberID {
+            SharedModelMemoryBudget.shared.applyCacheLimit(memberID: memberID, label: nil, bytes: bytes)
+        } else {
+            Memory.cacheLimit = bytes
+        }
         return bytes
     }
 
@@ -3397,19 +3420,22 @@ actor ModelRuntime: ModelRuntimeServing {
             .contains(where: Self.lfm25MLXCacheModelIDs.contains)
         let configuredBytes = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 }
         let applied: Int?
+        // SPEC-001-R017: this runtime's cache limit, read and set through the
+        // shared budget so a sibling's value is never saved or restored here.
+        let budget = SharedModelMemoryBudget.shared
         if requiresLFMCap {
-            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = Memory.cacheLimit }
-            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? Memory.cacheLimit
+            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = budget.cacheLimit(for: memoryBudgetMemberID) }
+            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? budget.cacheLimit(for: memoryBudgetMemberID)
             let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: lfmID, baselineBytes: baseline)
-            Memory.cacheLimit = bytes
+            budget.applyCacheLimit(memberID: memoryBudgetMemberID, label: target, bytes: bytes)
             applied = bytes
         } else if let previous = mlxCacheLimitBeforeLFM25 {
             let bytes = configuredBytes ?? previous
-            Memory.cacheLimit = bytes
+            budget.applyCacheLimit(memberID: memoryBudgetMemberID, label: target, bytes: bytes)
             mlxCacheLimitBeforeLFM25 = nil
             applied = bytes
         } else {
-            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading, memberID: memoryBudgetMemberID)
         }
         if let applied {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
@@ -3513,6 +3539,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: modelFamily, configured: ProcessInfo.processInfo.environment[key])
         else { return nil }
         setenv(key, String(mb), 0)
+        SharedModelMemoryBudget.shared.recordCommandBufferBudget(modelFamily: modelFamily, megabytes: mb)
         return mb
     }
 
@@ -3526,7 +3553,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated static func clearMLXBufferCacheAfterPrefill(
         isFinalChunk: Bool = true,
-        using clear: () -> Void = { Memory.clearCache() }
+        using clear: () -> Void = { SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: nil) }
     ) {
         guard isFinalChunk else { return }
         clear()
@@ -3717,6 +3744,7 @@ maxTokens: 1,
             "zai-org/glm-5.3-flash-uncensored": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
+            "minimaxai/minimax-m3.1-flash-abliterated": "MiniMaxM3SparseForConditionalGeneration",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -4014,6 +4042,11 @@ maxTokens: 1,
             && generatedTokenIDs.last.map(isHarmonyTerminalToken) == true
     }
 
+    deinit {
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
+        SharedModelMemoryBudget.shared.forget(memberID: gpuTurnParticipant.id)
+    }
+
     init(
         modelID: String?,
         modelLoadPath: String? = nil,
@@ -4057,6 +4090,9 @@ maxTokens: 1,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
+        // SPEC-001-R019: a further warm member names its model on its
+        // native-MTP serve-path admission events; nil keeps them as today.
+        nativeMTPAdmissionEventModelID: String? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -4083,6 +4119,17 @@ maxTokens: 1,
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
+        // SPEC-001-R018: registered at the end of this initializer, once it can
+        // no longer throw: a throw before every property is set runs no deinit,
+        // and a registered handle would leak and end the single-participant
+        // fast path for the process.
+        let participant = GPUTurnArbiter.shared.makeParticipant()
+        self.gpuTurnParticipant = participant
+        // SPEC-001-R017: a throw after the cache limit below is recorded would
+        // otherwise leave this id's limit in the shared budget (no deinit runs
+        // on a partial init). `forget` is a no-op for an absent id.
+        var initialized = false
+        defer { if !initialized { SharedModelMemoryBudget.shared.forget(memberID: participant.id) } }
         self.configuredModelLoadPath = Self.nonEmpty(modelLoadPath)
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -4231,6 +4278,8 @@ maxTokens: 1,
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
+            // No model loaded: the GPU turn participant registers on the first load.
+            initialized = true
             return
         }
         try Self.refuseQuantizedKV(explicit: kvBitsOverride, modelIDs: [modelID, modelLoadPath, catalogModelIDAlias])
@@ -4241,15 +4290,16 @@ maxTokens: 1,
             target: modelID, configuredModelID: modelID,
             verifiedCatalogModelID: verifiedCatalogModelID)
         let initialCacheLimit: Int?
+        // SPEC-001-R017: through the shared budget (one cache limit per process).
         if let cacheModelID, Self.lfm25MLXCacheModelIDs.contains(cacheModelID.lowercased()) {
-            let previous = Memory.cacheLimit
+            let previous = SharedModelMemoryBudget.shared.cacheLimit(for: self.gpuTurnParticipant.id)
             self.mlxCacheLimitBeforeLFM25 = previous
             let baseline = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 } ?? previous
             let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: cacheModelID, baselineBytes: baseline)
-            Memory.cacheLimit = bytes
+            SharedModelMemoryBudget.shared.applyCacheLimit(memberID: self.gpuTurnParticipant.id, label: modelID, bytes: bytes)
             initialCacheLimit = bytes
         } else {
-            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading, memberID: self.gpuTurnParticipant.id)
         }
         if let initialCacheLimit {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
@@ -4285,13 +4335,15 @@ maxTokens: 1,
                     targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
                     selfTestRunner: self.nativeMTPSelfTestRunner,
                     route: self.smallMRoute,
+                    eventModelID: nativeMTPAdmissionEventModelID,
                     rejectionObserver: rejectionRecorder.record
                 )
                 candidateNativeMTPDisabledReason = rejectionRecorder.statusReason ?? .tupleNotAdmitted
             } else {
                 candidateNativeMTPLoad = Self.rejectNativeMTPServePath(
                     reasonCode: "target_directory_unavailable",
-                    artifactRole: "target"
+                    artifactRole: "target",
+                    modelID: nativeMTPAdmissionEventModelID
                 )
                 candidateNativeMTPDisabledReason = .tupleNotAdmitted
             }
@@ -4333,10 +4385,14 @@ maxTokens: 1,
             try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
         self.currentContainer = container
-        self.residentWeightsTicket = await Self.startResidentWeightsTicket(
-            modelFamily: modelCapabilities.modelFamily)
-        MLXMemoryLimit.apply(
-            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory))
+        // SPEC-001-R017: the shared budget records the weights and owns the
+        // one wired limit (the sum over wiring runtimes, not the last load's).
+        let loadedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory)
+        await SharedModelMemoryBudget.shared.registerLoaded(
+            memberID: self.gpuTurnParticipant.id, label: modelID, modelFamily: modelCapabilities.modelFamily,
+            kvBytesPerToken: loadedKVBytesPerToken,
+            weightBytes: await SharedModelMemoryRules.weightBytes(of: container))
+        MLXMemoryLimit.apply(stage: "model_loaded", kvBytesPerToken: loadedKVBytesPerToken)
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -4375,6 +4431,7 @@ maxTokens: 1,
         if let recordable = parityProbe?.contiguousCacheRecordable {
             self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
+        self.startupPagedKVAttachProbeFailedValue = SmallMRoute.attachProbeFailed(parity: parityProbe, isolation: moeProbe)
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -4446,7 +4503,8 @@ maxTokens: 1,
             prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
-            cachedTurns: self.effectiveContinuousBatchingCachedTurns
+            cachedTurns: self.effectiveContinuousBatchingCachedTurns,
+            gpuTurnParticipant: self.gpuTurnParticipant
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -4507,6 +4565,8 @@ maxTokens: 1,
             self.currentDraftTargetModelID = modelID
             self.currentDraftContainer = draftContainer
         }
+        initialized = true
+        GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
     }
 
     init(
@@ -4596,6 +4656,7 @@ maxTokens: 1,
             durableAvailable: continuousBatchingDurableReplayAuthorityAvailable
         )
         self.modelID = modelID
+        self.gpuTurnParticipant = GPUTurnArbiter.shared.register(modelID: modelID ?? "unloaded")
         self.configuredModelLoadPath = nil
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
@@ -4799,6 +4860,91 @@ maxTokens: 1,
         self.providerStatus = providerStatus
     }
 
+    /// The primary's warm set (SPEC-011 §3.10): a swap is refused for a
+    /// target that is another member, runs while no warm-set load, evict or
+    /// unload runs, and re-keys the primary once it completes.
+    func setWarmSetSwapHooks(_ hooks: any WarmSetSwapHooks) {
+        warmSetSwapHooks = hooks
+    }
+
+    /// Whether this runtime writes the process-wide provider status (only the
+    /// primary does, SPEC-001-R016).
+    func hasProviderStatus() -> Bool { providerStatus != nil }
+
+    /// What only the primary of a warm set holds (SPEC-001-R016, SPEC-011
+    /// §3.10): the provider status it writes, the warm set's swap hooks, the
+    /// switch permission and the subscribers to its swap signals.
+    struct PrimaryRole: Sendable {
+        let providerStatus: ProviderStatus?
+        let swapHooks: (any WarmSetSwapHooks)?
+        let warmSwapEnabled: Bool
+        let signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation]
+    }
+
+    /// SPEC-011 R-3.10.3: this runtime stops being the primary. It stops
+    /// writing the provider status, can no longer be switched, and its swap
+    /// signal subscribers (the control socket's pending switch, the
+    /// coordinator session) now hear `successor`. Its requests keep running.
+    /// Returns the switch target to announce once the caller has moved the
+    /// rest of the primary's state (`announceSwitchCompleted`).
+    @discardableResult
+    func handOffPrimaryRole(to successor: ModelRuntime) async -> String? {
+        let role = PrimaryRole(
+            providerStatus: providerStatus,
+            swapHooks: warmSetSwapHooks,
+            warmSwapEnabled: warmSwapEnabled,
+            signalContinuations: signalContinuations
+        )
+        providerStatus = nil
+        warmSetSwapHooks = nil
+        warmSwapEnabled = false
+        signalContinuations = [:]
+        await successor.acceptPrimaryRole(role)
+        return pendingPromotionTarget
+    }
+
+    private func acceptPrimaryRole(_ role: PrimaryRole) {
+        providerStatus = role.providerStatus
+        warmSetSwapHooks = role.swapHooks
+        warmSwapEnabled = role.warmSwapEnabled
+        signalContinuations.merge(role.signalContinuations) { current, _ in current }
+    }
+
+    /// The switch to this runtime, promoted to primary, is complete.
+    func announceSwitchCompleted(target: String) {
+        signal(SwapSignal(
+            targetModelID: target,
+            outcome: .completed(newModelID: currentModelID ?? target, newModelHash: currentModelHash)))
+    }
+
+    /// A switch to a warm secondary: no load, no drain. The promotion runs
+    /// in the warm set's turn, so it never overlaps a load, an eviction or
+    /// another swap.
+    private func beginPromotion(target: String, hooks: any WarmSetSwapHooks) throws -> Task<Void, Error> {
+        guard state == .ready, pendingPromotionTarget == nil else {
+            throw RuntimeStateMachineError.notReady(current: state)
+        }
+        pendingPromotionTarget = target
+        return Task.detached { [weak self] in
+            await hooks.runSwapTurn {
+                do {
+                    try await hooks.promoteInSwapTurn(target)
+                    await self?.finishPromotion(failure: nil)
+                } catch {
+                    await self?.finishPromotion(failure: String(describing: error))
+                }
+            }
+        }
+    }
+
+    private func finishPromotion(failure: String?) {
+        let target = pendingPromotionTarget ?? ""
+        pendingPromotionTarget = nil
+        if let failure {
+            signal(SwapSignal(targetModelID: target, outcome: .failed(reason: failure)))
+        }
+    }
+
     func authorizedSwitchModelIDList() -> [String] {
         authorizedSwitchModelIDs
     }
@@ -4816,7 +4962,7 @@ maxTokens: 1,
         case .rejected(let reason): decisionLabel = "rejected_\(reason.rawValue)"
         }
         return RuntimeSnapshot(
-            state: state,
+            state: swapAwaitingWarmTurn ? .ready : state,
             container: currentContainer,
             modelID: currentModelID,
             modelHash: currentModelHash,
@@ -5730,12 +5876,13 @@ maxTokens: 1,
         currentDraftContainer = nil
         currentContainer = nil
         self.currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
         // Creative inference inherits the process budget, not the unloaded LFM cap.
         finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: hadMLXModel)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
-        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         // Fixture runtimes own no MLX allocations and must not initialize a GPU.
         if hadMLXModel { Memory.clearCache() }
     }
@@ -5864,6 +6011,42 @@ maxTokens: 1,
         }
     }
 
+    /// SPEC-001-R017 *Pinning*: every served slot at the full context.
+    func warmSetRowReservation() -> WarmModelRowReservation {
+        WarmModelRowReservation(rows: servedSlotLimit, tokensPerRow: maxContextTokens)
+    }
+
+    /// SPEC-001-R017 eviction or unload of an idle warm-set member. The
+    /// release steps of `discardCreativePartialReload`, without its writes
+    /// to process-wide state: the provider status describes the primary
+    /// (R016), and the cache limit follows the members that stay once this
+    /// one leaves the shared budget.
+    func unloadForWarmSet() async {
+        let hadMLXModel = currentContainer != nil || currentDraftContainer != nil || currentNativeMTPDrafterContainer != nil
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
+        continuousBatchScheduler = nil
+        currentContinuousBatchTextPreparationLane = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
+        publishNativeMTPStatusSink(capability: nil, admissionCapability: nil)
+        currentDraftContainer = nil
+        currentContainer = nil
+        currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
+        currentDraftModelID = nil
+        currentDraftTargetModelID = nil
+        await conversationCache.purgeAllHot()
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
+        state = .ready
+        targetModelID = nil
+        // Fixture runtimes own no MLX allocations and must not initialize a GPU.
+        if hadMLXModel { SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: memoryBudgetMemberID) }
+    }
+
     private func discardCreativePartialReload() async {
         stopNativeMTPRevocationRefresh()
         currentNativeMTPTupleOffer = nil
@@ -5878,11 +6061,12 @@ maxTokens: 1,
         currentDraftContainer = nil
         currentContainer = nil
         currentModelID = nil
+        GPUTurnArbiter.shared.unregister(gpuTurnParticipant)
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
         finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: testLoader == nil)
         await conversationCache.purgeAllHot()
-        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
         state = .ready
         targetModelID = nil
@@ -5968,6 +6152,13 @@ maxTokens: 1,
         } else if adoptionTransactionID != nil {
             throw ModelRuntimeAdoptionError.transactionNotPrepared
         }
+        // SPEC-011 R-3.10.3: a target already warm beside the primary is
+        // promoted, never loaded twice. An adoption carries knobs for a load
+        // and stays on the load path, which refuses a member target.
+        if let hooks = warmSetSwapHooks, adoptionTransactionID == nil, !creativeRestore,
+           hooks.isWarmSecondary(targetModelID) {
+            return try beginPromotion(target: targetModelID, hooks: hooks)
+        }
         try Self.refuseQuantizedKV(explicit: adoptionKnobs?.kvBits ?? kvBitsOverride, modelIDs: [targetModelID])
         let targetAuthority = targetAuthority(for: targetModelID)
         if testLoader == nil {
@@ -5975,7 +6166,12 @@ maxTokens: 1,
                 throw ModelRuntimeLoadError(target: targetModelID, reason: "signed catalog identity unavailable")
             }
         }
+        // SPEC-011 §3.10: a swap replaces the primary only; a member that is
+        // loading or evicting is refused.
+        let warmSetSwapHooks = warmSetSwapHooks
+        try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
         try transitionToLoading(target: targetModelID)
+        swapAwaitingWarmTurn = warmSetSwapHooks != nil
         let drainTimeoutSeconds = swapDrainTimeoutSeconds
         let providerStatus = providerStatus
         let testLoader = testLoader
@@ -5987,144 +6183,163 @@ maxTokens: 1,
         let serialKVBits = Self.serialKVBits(
             explicit: kvBitsOverride, familyKVQuantDefault: familyKVQuantDefault, modelID: targetModelID)
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, serialKVBits, prefillStepSize, targetAuthority, adoptionKnobs] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, serialKVBits, prefillStepSize, targetAuthority, adoptionKnobs, warmSetSwapHooks] in
             guard let self else { return }
-            do {
-                let container: ModelContainer?
-                let modelID: String
-                let modelHash: String?
-                let modelHashAlgorithm: String?
-                let weightsManifestSHA256: String?
-                let tokenizerConfigSHA256: String?
-                let chatTemplateSHA256: String?
-                let nativeVisionProfile: NativeVisionProfile?
-                let modelCapabilities: PagedKVRuntimeModelCapabilities
-                let draftModelID: String?
-                let draftContainer: ModelContainer?
-                let draftFailureReason: String?
-                if let testLoader {
-                    let loaded = try await testLoader(targetModelID)
-                    container = nil
-                    modelID = loaded.0
-                    modelHash = loaded.1
-                    modelHashAlgorithm = await self.currentModelHashAlgorithm
-                    weightsManifestSHA256 = nil
-                    tokenizerConfigSHA256 = nil
-                    chatTemplateSHA256 = nil
-                    nativeVisionProfile = nil
-                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
-                    if let configuredDraftModelID {
-                        do {
-                            let loadedDraft = try await testLoader(configuredDraftModelID)
-                            draftModelID = loadedDraft.0
-                            draftContainer = nil
-                            draftFailureReason = nil
-                        } catch {
+            // SPEC-011 §3.10: a primary swap never overlaps a warm-set load,
+            // evict or unload, so both are admitted against one budget.
+            await Self.inWarmSetSwapTurn(warmSetSwapHooks) {
+                await self.beginSwapTurn()
+                do {
+                    // A load of the target may have finished while this swap waited.
+                    try warmSetSwapHooks?.refuseSwapTarget(targetModelID)
+                    let container: ModelContainer?
+                    let modelID: String
+                    let modelHash: String?
+                    let modelHashAlgorithm: String?
+                    let weightsManifestSHA256: String?
+                    let tokenizerConfigSHA256: String?
+                    let chatTemplateSHA256: String?
+                    let nativeVisionProfile: NativeVisionProfile?
+                    let modelCapabilities: PagedKVRuntimeModelCapabilities
+                    let draftModelID: String?
+                    let draftContainer: ModelContainer?
+                    let draftFailureReason: String?
+                    if let testLoader {
+                        let loaded = try await testLoader(targetModelID)
+                        container = nil
+                        modelID = loaded.0
+                        modelHash = loaded.1
+                        modelHashAlgorithm = await self.currentModelHashAlgorithm
+                        weightsManifestSHA256 = nil
+                        tokenizerConfigSHA256 = nil
+                        chatTemplateSHA256 = nil
+                        nativeVisionProfile = nil
+                        modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+                        if let configuredDraftModelID {
+                            do {
+                                let loadedDraft = try await testLoader(configuredDraftModelID)
+                                draftModelID = loadedDraft.0
+                                draftContainer = nil
+                                draftFailureReason = nil
+                            } catch {
+                                draftModelID = nil
+                                draftContainer = nil
+                                draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            }
+                        } else {
                             draftModelID = nil
                             draftContainer = nil
-                            draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            draftFailureReason = nil
                         }
                     } else {
-                        draftModelID = nil
-                        draftContainer = nil
-                        draftFailureReason = nil
+                        guard let targetAuthority else {
+                            throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                        }
+                        // Nil-model startup defers Metal setup until its first signed load.
+                        await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
+                        let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
+                        let loaded = try await Self.loadLocalContainer(
+                            from: targetAuthority.modelArgument,
+                            nativeVision: visionModelID != nil
+                        )
+                        container = loaded.0
+                        modelID = targetModelID
+                        guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
+                        else {
+                            throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                        }
+                        modelHash = targetAuthority.artifactSHA256
+                        modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
+                        weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                        let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
+                        tokenizerConfigSHA256 = swapTokenizerHashes.config
+                        chatTemplateSHA256 = swapTokenizerHashes.template
+                        nativeVisionProfile = try NativeVisionProfile.load(
+                            modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
+                        modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
+                        if let configuredDraftModelID {
+                            do {
+                                let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
+                                try await Self.validateTokenizerCompatibility(
+                                    target: loaded.0,
+                                    targetDirectory: loaded.1,
+                                    draft: draftLoaded.0,
+                                    draftDirectory: draftLoaded.1
+                                )
+                                try await Self.runSpeculativeStartupProbe(
+                                    target: loaded.0,
+                                    draft: draftLoaded.0,
+                                    numDraftTokens: 1,
+                                    maxContextTokens: maxContextTokens,
+                                    kvBitsOverride: serialKVBits,
+                                    prefillStepSize: prefillStepSize,
+                                    blockingInferenceExecutor: self.blockingInferenceExecutor
+                                )
+                                try await Self.runSpeculativeEquivalenceCanary(
+                                    target: loaded.0,
+                                    draft: draftLoaded.0,
+                                    targetModelID: modelID,
+                                    numDraftTokens: numDraftTokens,
+                                    maxContextTokens: maxContextTokens,
+                                    kvBitsOverride: serialKVBits,
+                                    prefillStepSize: prefillStepSize,
+                                    blockingInferenceExecutor: self.blockingInferenceExecutor
+                                )
+                                draftModelID = configuredDraftModelID
+                                draftContainer = draftLoaded.0
+                                draftFailureReason = nil
+                            } catch {
+                                draftModelID = nil
+                                draftContainer = nil
+                                draftFailureReason = Self.draftSwapFailureReason(for: error)
+                            }
+                        } else {
+                            draftModelID = nil
+                            draftContainer = nil
+                            draftFailureReason = nil
+                        }
                     }
-                } else {
-                    guard let targetAuthority else {
-                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    try await self.enterDrainPhase()
+                    let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                    if didTimeout {
+                        await self.cancelAllInFlightForDrainTimeout()
+                        // Cancellation is only a request to stop old-generation
+                        // work, not proof that the old container is quiescent.
+                        // Keep the old snapshot installed and fail this swap.
+                        throw DrainCancelledError()
                     }
-                    // Nil-model startup defers Metal setup until its first signed load.
-                    await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
-                    let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
-                    let loaded = try await Self.loadLocalContainer(
-                        from: targetAuthority.modelArgument,
-                        nativeVision: visionModelID != nil
+                    await self.completeSwapAtomically(
+                        container: container,
+                        modelID: modelID,
+                        modelHash: modelHash,
+                        modelHashAlgorithm: modelHashAlgorithm,
+                        weightsManifestSHA256: weightsManifestSHA256,
+                        tokenizerConfigSHA256: tokenizerConfigSHA256,
+                        chatTemplateSHA256: chatTemplateSHA256,
+                        nativeVisionProfile: nativeVisionProfile,
+                        draftModelID: draftModelID,
+                        draftContainer: draftContainer,
+                        draftFailureReason: draftFailureReason,
+                        modelCapabilities: modelCapabilities,
+                        adoptionKnobs: adoptionKnobs
                     )
-                    container = loaded.0
-                    modelID = targetModelID
-                    guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
-                    else {
-                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
-                    }
-                    modelHash = targetAuthority.artifactSHA256
-                    modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
-                    weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
-                    let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
-                    tokenizerConfigSHA256 = swapTokenizerHashes.config
-                    chatTemplateSHA256 = swapTokenizerHashes.template
-                    nativeVisionProfile = try NativeVisionProfile.load(
-                        modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
-                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
-                    if let configuredDraftModelID {
-                        do {
-                            let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
-                            try await Self.validateTokenizerCompatibility(
-                                target: loaded.0,
-                                targetDirectory: loaded.1,
-                                draft: draftLoaded.0,
-                                draftDirectory: draftLoaded.1
-                            )
-                            try await Self.runSpeculativeStartupProbe(
-                                target: loaded.0,
-                                draft: draftLoaded.0,
-                                numDraftTokens: 1,
-                                maxContextTokens: maxContextTokens,
-                                kvBitsOverride: serialKVBits,
-                                prefillStepSize: prefillStepSize,
-                                blockingInferenceExecutor: blockingInferenceExecutor
-                            )
-                            try await Self.runSpeculativeEquivalenceCanary(
-                                target: loaded.0,
-                                draft: draftLoaded.0,
-                                targetModelID: modelID,
-                                numDraftTokens: numDraftTokens,
-                                maxContextTokens: maxContextTokens,
-                                kvBitsOverride: serialKVBits,
-                                prefillStepSize: prefillStepSize,
-                                blockingInferenceExecutor: blockingInferenceExecutor
-                            )
-                            draftModelID = configuredDraftModelID
-                            draftContainer = draftLoaded.0
-                            draftFailureReason = nil
-                        } catch {
-                            draftModelID = nil
-                            draftContainer = nil
-                            draftFailureReason = Self.draftSwapFailureReason(for: error)
-                        }
-                    } else {
-                        draftModelID = nil
-                        draftContainer = nil
-                        draftFailureReason = nil
-                    }
+                    warmSetSwapHooks?.primarySwapped(to: modelID)
+                } catch {
+                    await self.failSwap(reason: String(describing: error))
                 }
-                try await self.enterDrainPhase()
-                let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
-                if didTimeout {
-                    await self.cancelAllInFlightForDrainTimeout()
-                    // Cancellation is only a request to stop old-generation
-                    // work, not proof that the old container is quiescent.
-                    // Keep the old snapshot installed and fail this swap.
-                    throw DrainCancelledError()
-                }
-                await self.completeSwapAtomically(
-                    container: container,
-                    modelID: modelID,
-                    modelHash: modelHash,
-                    modelHashAlgorithm: modelHashAlgorithm,
-                    weightsManifestSHA256: weightsManifestSHA256,
-                    tokenizerConfigSHA256: tokenizerConfigSHA256,
-                    chatTemplateSHA256: chatTemplateSHA256,
-                    nativeVisionProfile: nativeVisionProfile,
-                    draftModelID: draftModelID,
-                    draftContainer: draftContainer,
-                    draftFailureReason: draftFailureReason,
-                    modelCapabilities: modelCapabilities,
-                    adoptionKnobs: adoptionKnobs
-                )
-            } catch {
-                await self.failSwap(reason: String(describing: error))
             }
         }
+    }
+
+    /// Runs a swap's work inside the warm set's turn, or directly without one.
+    private func beginSwapTurn() {
+        swapAwaitingWarmTurn = false
+    }
+
+    private static func inWarmSetSwapTurn(
+        _ hooks: (any WarmSetSwapHooks)?, _ body: @Sendable () async -> Void
+    ) async {
+        if let hooks { await hooks.runSwapTurn(body) } else { await body() }
     }
 
     func prepareModelAdoption(
@@ -6512,11 +6727,12 @@ maxTokens: 1,
 
     /// The self-check subject for the loaded model, or nil when there is
     /// nothing to check: a decision already exists, batching cannot run here
-    /// (emergency off, draft model, no attached scheduler), or a signed
-    /// revocation names this model on this runtime revision.
+    /// (serial-only route, emergency off, draft model, no attached
+    /// scheduler), or a signed revocation names this model on this runtime
+    /// revision.
     func continuousBatchingSelfCheckTarget(includeDecided: Bool = false) -> ContinuousBatchingSelfCheckTarget? {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
-              smallMRoute == .rowInvariant,
+              smallMRoute != .serialOnly,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
               let scheduler = continuousBatchScheduler,
@@ -6535,7 +6751,8 @@ maxTokens: 1,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
                 runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
                     forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
-                    forwardTokenCap: scheduler.forwardTokenCap
+                    forwardTokenCap: scheduler.forwardTokenCap,
+                    smallMRoute: smallMRoute
                 ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
@@ -6548,7 +6765,8 @@ maxTokens: 1,
             blockSizeTokens: scheduler.blockSizeTokens,
             // Paged MLA and DeepSeek row pools both use the eight-token decode cap.
             decodeOnlyGain: scheduler.forwardTokenCap != nil,
-            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
+            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256),
+            smallMRoute: smallMRoute
         )
     }
 
@@ -6688,7 +6906,7 @@ maxTokens: 1,
     /// is off by configuration), as a refused check reads on the invariant
     /// route. Kept across swaps. Serves `servedSlots`
     /// (`SmallMRoute.serialOnlyServedSlots`) and reports the count it serves.
-    /// Returns that count; nil (and no change) on the row-invariant route.
+    /// Returns that count; nil (and no change) on a batching route.
     @discardableResult
     func applySerialOnlySelfCheck(
         stored decision: ContinuousBatchingSelfCheckDecision?,
@@ -7345,7 +7563,8 @@ maxTokens: 1,
             prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
-            cachedTurns: effectiveContinuousBatchingCachedTurns
+            cachedTurns: effectiveContinuousBatchingCachedTurns,
+            gpuTurnParticipant: gpuTurnParticipant
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -7519,7 +7738,7 @@ maxTokens: 1,
     }
 
     private func transitionToLoading(target: String) throws {
-        guard state == .ready else {
+        guard state == .ready, pendingPromotionTarget == nil else {
             throw RuntimeStateMachineError.notReady(current: state)
         }
         state = .loading
@@ -7544,7 +7763,9 @@ maxTokens: 1,
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
-            let providerInFlight = snapshot.requestsInFlight > 0
+            // SPEC-011 R-3.10.2: requests on other warm members keep serving
+            // through the swap; only the primary's are drained.
+            let providerInFlight = snapshot.primaryRequestsInFlight > 0
             let runtimeInFlight = !inFlightCancellations.isEmpty
             if !providerInFlight && !runtimeInFlight {
                 return false
@@ -7626,17 +7847,21 @@ maxTokens: 1,
         await conversationCache.purgeAllHot()
         conversationCache.memoryBudget.resetGeometryForModelChange()
         currentContainer = container
-        if let previous = residentWeightsTicket {
-            residentWeightsTicket = nil
-            _ = await previous.end()
-        }
-        residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
-        if container != nil {
-            MLXMemoryLimit.apply(
-                stage: "model_swapped",
-                kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: try? Self.localModelDirectory(for: modelID)))
+        // SPEC-001-R017: the shared budget re-derives the wired limit for the
+        // swapped-in weights; a fixture swap (no container) holds none.
+        if let container {
+            let swappedKVBytesPerToken = MLXMemoryLimit.kvBytesPerToken(
+                modelDirectory: try? Self.localModelDirectory(for: modelID))
+            await SharedModelMemoryBudget.shared.registerLoaded(
+                memberID: memoryBudgetMemberID, label: modelID, modelFamily: modelCapabilities.modelFamily,
+                kvBytesPerToken: swappedKVBytesPerToken,
+                weightBytes: await SharedModelMemoryRules.weightBytes(of: container))
+            MLXMemoryLimit.apply(stage: "model_swapped", kvBytesPerToken: swappedKVBytesPerToken)
+        } else {
+            await SharedModelMemoryBudget.shared.unregister(memberID: memoryBudgetMemberID)
         }
         currentModelID = modelID
+        GPUTurnArbiter.shared.register(gpuTurnParticipant, modelID: modelID)
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(
             artifactSHA256: modelHash,
@@ -7903,18 +8128,21 @@ maxTokens: 1,
         nextInFlightID += 1
         let id = nextInFlightID
         inFlightCancellations[id] = cancel
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, inFlightCancellations.count)
         return id
     }
 
     func unregisterInFlight(_ id: Int) {
         inFlightCancellations.removeValue(forKey: id)
         localRegistrationIDs.remove(id)
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, inFlightCancellations.count)
     }
 
     private func cancelAllInFlightForDrainTimeout() {
         let cancels = Array(inFlightCancellations.values)
         inFlightCancellations.removeAll()
         localRegistrationIDs.removeAll()
+        SharedModelMemoryBudget.shared.setInFlightRows(memberID: memoryBudgetMemberID, 0)
         for cancel in cancels {
             cancel()
         }
@@ -10658,6 +10886,7 @@ maxTokens: boundedMaxTokens,
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
         configureConversationCacheMemoryBudget()
+        let memoryBudgetMemberID = memoryBudgetMemberID
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
             configured: serialKVBits,
@@ -10666,6 +10895,7 @@ maxTokens: boundedMaxTokens,
             serialQuantizedConversation: coldContext?.eligible != true
         )
         let inferenceGate = inferenceGate
+        let gpuTurnParticipant = gpuTurnParticipant
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
@@ -10731,6 +10961,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-001-R017: the serial row's worst-case KV is charged to the
+                    // shared budget for the row's lifetime and released on every exit.
+                    let serialKVCharge = SharedModelMemoryBudget.shared.chargeSerialRow(
+                        memberID: memoryBudgetMemberID,
+                        tokens: SharedModelMemoryRules.serialRowTokens(
+                            promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
+                            maxContextTokens: maxContextTokens))
+                    defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
                     if Self.speculativeRoute(
                         for: request,
                         draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
@@ -10763,7 +11001,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 shouldCancel: shouldCancel,
                                 drainCancelled: drainCancelled,
                                 prefillScope: prefillScope,
-                                blockingInferenceExecutor: blockingInferenceExecutor
+                                blockingInferenceExecutor: blockingInferenceExecutor,
+                                gpuTurnParticipant: gpuTurnParticipant
                             )
                         } catch let error as DrainCancelledError {
                             throw error
@@ -10815,6 +11054,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         ))
                     }
                         do {
+                            // SPEC-001-R018: this request's GPU turns, one per prefill chunk
+                            // and one per decode token step.
+                            let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                            gpuTurn.open()
+                            defer { gpuTurn.close() }
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             var kvCache: [KVCache]
                             var iteratorInput: LMInput
@@ -10843,7 +11087,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 context: generationContext, prefillStepSize: prefillStepSize,
                                 modelID: snapshot.modelID, state: iteratorState,
-                                isCancelled: { Task.isCancelled || shouldCancel() })
+                                isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                             iteratorState = recurrent.state
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10854,7 +11098,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
                                 context: generationContext, prefillStepSize: prefillStepSize,
                                 modelID: snapshot.modelID, state: iteratorState,
-                                isCancelled: { Task.isCancelled || shouldCancel() })
+                                isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                             iteratorState = promptSnapshot.state
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10871,13 +11115,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 // both request origins so a cache hit preserves forward shapes.
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
-                                    tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                    // SPEC-001-R018: beside an active sibling a keyless prompt takes the
+                                    // arbiter's short chunk; a reference plan below ignores it.
+                                    tokenCount: promptTokenIds.count, from: start,
+                                    stepSize: lease == nil ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize,
                                     referenceStepSize: lfmReferenceStep
                                         ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                         ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                     leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
+                                    gpuTurn.yield(.prefillChunk(tokens: range.count))
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
                                     iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                     eval(kvCache)
@@ -10890,16 +11138,29 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             kvCache = try Self.providerOwnedConversationCache(
                                 kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
                                 groupSize: parameters.kvGroupSize)
-                            let generation = Self.serveGenerationConfiguration(
+                            var generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                     cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            // SPEC-001-R018: beside an active sibling a keyless text prompt on a
+                            // model with no fixed prefill plan takes the arbiter's short chunk;
+                            // alone or under passthrough the hint is the full step (unchanged).
+                            let iteratorPrefillStep = lease == nil && lfmReferenceStep == nil
+                                && !(generationContext.model is DeepseekV4Model) && !request.containsNonTextMessageContentPart
+                                ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize
+                            if iteratorPrefillStep != prefillStepSize { generation.parameters.prefill.stepSize = iteratorPrefillStep }
+                            // SPEC-001-R018: the iterator's own prefill yields the turn after
+                            // every chunk it queues; its final forward and the first decode
+                            // step run in the turn taken here.
+                            generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
+                            gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
+                            gpuTurn.end()
                             Self.clearMLXBufferCacheAfterPrefill()
                             try prefillScope.markPrefillDone()
                             var serialToolObserver = NativeToolCallStreamEmitter(
@@ -10942,8 +11203,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             )
                             var serialToolStopText = IncrementalToolStopText(observer: serialToolObserver)
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
-                                BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                    let disposition: GenerateDisposition = {
+                                // One turn per token step: `next()` builds and queues step N+1 and
+                                // reads step N; the callback (detokenize, stream) runs outside it.
+                                // Under a sharing policy the turn's end realises step N+1, so the
+                                // step is charged here, not to the sibling's next turn. A cancelled
+                                // request leaves a turn wait at once (this thread has no task).
+                                gpuTurn.isCancelled = { inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired }
+                                gpuTurn.begin(.decodeStep(rows: 1))
+                                defer { gpuTurn.end() }
+                                return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                    gpuTurn.end()
+                                    var disposition: GenerateDisposition = {
                                         if !tokens.isEmpty {
                                             timeline.markFirstToken()
                                             ModelLivenessTracker.shared.recordProgress()
@@ -11005,11 +11275,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         }
                                         return GenerateDisposition.more
                                     }()
+                                    // A turn wait left on cancellation holds no turn: stop like a cancel.
+                                    if disposition == .more, !gpuTurn.begin(.decodeStep(rows: 1)) { disposition = .stop }
                                     stoppedByDecodeCallback = disposition == .stop
                                     return disposition
                                 })
                             }
                             timeline.markEnded()
+                            gpuTurn.close()
                             Self.logIncrementalOutputFallbacks(
                                 path: "serial",
                                 decodeFallbacks: requestStopObserver.incrementalFallbacks.decode
@@ -11212,7 +11485,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
         prefillScope: PrefillCancelScope,
-        blockingInferenceExecutor: BlockingInferenceExecutor
+        blockingInferenceExecutor: BlockingInferenceExecutor,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async throws -> CompletionResult {
         let generated = try await collectSpeculativeText(
             input: input,
@@ -11225,7 +11499,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled,
             prefillScope: prefillScope,
-            blockingInferenceExecutor: blockingInferenceExecutor
+            blockingInferenceExecutor: blockingInferenceExecutor,
+            gpuTurnParticipant: gpuTurnParticipant
         )
         try drainCancelled.check()
         try Task.checkCancellation()
@@ -11302,11 +11577,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
         prefillScope: PrefillCancelScope,
-        blockingInferenceExecutor: BlockingInferenceExecutor
+        blockingInferenceExecutor: BlockingInferenceExecutor,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async throws -> SpeculativeTextResult {
         do {
             return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
                 let (input, targetContext, cache) = values
+                // SPEC-001-R018: the whole prompt prefill (target and draft) is
+                // one turn; each `next()` (one draft-and-verify round, or a
+                // buffered token) is one turn after it.
+                let gpuTurn = gpuTurnParticipant.map(GPUTurnScope.init)
+                gpuTurn?.open()
+                defer { gpuTurn?.close() }
+                gpuTurn?.begin(.prefillChunk(tokens: input.text.tokens.size))
                 // SPEC-001 FR-26: build the iterator (its prompt prefill) in the
                 // request task, where the model's chunked prefill sees a buyer
                 // cancel through task cancellation; the executor thread cannot.
@@ -11320,9 +11603,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     parameters: parameters,
                     numDraftTokens: numDraftTokens
                 )
+                gpuTurn?.end()
                 Self.clearMLXBufferCacheAfterPrefill()
                 try prefillScope.markPrefillDone()
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
+                    defer { gpuTurn?.end() }
                     let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
                     var tokenIDs: [Int] = []
                     var output = ""
@@ -11330,7 +11615,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     var stopStringFilter = GenerationConfigStopStringFilter(
                         stopStrings: targetContext.configuration.effectiveStopStrings
                     )
+                    gpuTurn?.begin(.decodeStep(rows: 1))
                     while let token = iterator.next() {
+                        gpuTurn?.end()
                         try drainCancelled.check()
                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
                             throw CancellationError()
@@ -11352,8 +11639,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 break
                             }
                         }
+                        gpuTurn?.begin(.decodeStep(rows: 1))
                     }
                     timeline.markEnded()
+                    gpuTurn?.end()
                     if let text = stopStringFilter.finish() {
                         output += text
                     }
@@ -11635,6 +11924,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         configureConversationCacheMemoryBudget()
+        let memoryBudgetMemberID = memoryBudgetMemberID
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
             configured: serialKVBits,
@@ -11643,6 +11933,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             serialQuantizedConversation: coldContext?.eligible != true
         )
         let inferenceGate = inferenceGate
+        let gpuTurnParticipant = gpuTurnParticipant
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
@@ -11716,6 +12007,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-001-R017: the serial row's worst-case KV is charged to the
+                    // shared budget for the row's lifetime and released on every exit.
+                    let serialKVCharge = SharedModelMemoryBudget.shared.chargeSerialRow(
+                        memberID: memoryBudgetMemberID,
+                        tokens: SharedModelMemoryRules.serialRowTokens(
+                            promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
+                            maxContextTokens: maxContextTokens))
+                    defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
                     // Autotune throughput probe: measure warm-decode
                     // wall-time on the provider so the client can derive an
                     // honest decode rate even for reasoning models whose
@@ -11869,6 +12168,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
                     do {
+                        // SPEC-001-R018: this request's GPU turns, one per prefill chunk
+                        // and one per decode token step.
+                        let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                        gpuTurn.open()
+                        defer { gpuTurn.close() }
                         var kvCache: [KVCache]
                         var iteratorInput: LMInput
                         let forceSimpleKV = Self.forceSimpleKVCache(
@@ -11893,7 +12197,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             context: generationContext, prefillStepSize: prefillStepSize,
                             modelID: snapshot.modelID, state: iteratorState,
-                            isCancelled: { Task.isCancelled || shouldCancel() })
+                            isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                         iteratorState = recurrent.state
                         if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -11904,7 +12208,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             start: promptTokenIds.count - iteratorInput.text.tokens.size,
                             context: generationContext, prefillStepSize: prefillStepSize,
                             modelID: snapshot.modelID, state: iteratorState,
-                            isCancelled: { Task.isCancelled || shouldCancel() })
+                            isCancelled: { Task.isCancelled || shouldCancel() }, gpuTurn: gpuTurn)
                         iteratorState = promptSnapshot.state
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -11921,13 +12225,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // both request origins so a cache hit preserves forward shapes.
                             let start = promptTokenIds.count - iteratorInput.text.tokens.size
                             let resumeAt = try Self.cancellableLocalPrefill(
-                                tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                // SPEC-001-R018: beside an active sibling a keyless prompt takes the
+                                // arbiter's short chunk; a reference plan below ignores it.
+                                tokenCount: promptTokenIds.count, from: start,
+                                stepSize: lease == nil ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize,
                                 referenceStepSize: lfmReferenceStep
                                     ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                     ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                 leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
+                                gpuTurn.yield(.prefillChunk(tokens: range.count))
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
                                 iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                 eval(kvCache)
@@ -11971,16 +12279,29 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvCache = try Self.providerOwnedConversationCache(
                             kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
                             groupSize: parameters.kvGroupSize)
-                        let generation = Self.serveGenerationConfiguration(
+                        var generation = Self.serveGenerationConfiguration(
                             parameters: Self.serveIteratorParameters(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                 cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                        // SPEC-001-R018: beside an active sibling a keyless text prompt on a
+                        // model with no fixed prefill plan takes the arbiter's short chunk;
+                        // alone or under passthrough the hint is the full step (unchanged).
+                        let iteratorPrefillStep = lease == nil && lfmReferenceStep == nil
+                            && !(generationContext.model is DeepseekV4Model) && !request.containsNonTextMessageContentPart
+                            ? gpuTurn.prefillChunkTokens(fullSize: prefillStepSize) : prefillStepSize
+                        if iteratorPrefillStep != prefillStepSize { generation.parameters.prefill.stepSize = iteratorPrefillStep }
+                        // SPEC-001-R018: the iterator's own prefill yields the turn after
+                        // every chunk it queues; its final forward and the first decode
+                        // step run in the turn taken here.
+                        generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
+                        gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
+                        gpuTurn.end()
                         Self.clearMLXBufferCacheAfterPrefill()
                         try prefillScope.markPrefillDone()
                         // #2317: the decode and output filter of every token so
@@ -11996,8 +12317,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let labFilter = IncrementalStreamFilter(
                             stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
-                            BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                let disposition: GenerateDisposition = {
+                            // One turn per token step: `next()` builds and queues step N+1 and
+                            // reads step N; the callback (detokenize, stream) runs outside it.
+                            // Under a sharing policy the turn's end realises step N+1, so the
+                            // step is charged here, not to the sibling's next turn. A cancelled
+                            // request leaves a turn wait at once (this thread has no task).
+                            gpuTurn.isCancelled = {
+                                inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired
+                            }
+                            gpuTurn.begin(.decodeStep(rows: 1))
+                            defer { gpuTurn.end() }
+                            return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                gpuTurn.end()
+                                var disposition: GenerateDisposition = {
                                     EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
                                     // Round-2 code LOW: only start the decode timer
                                     // on a callback that actually carries a token.
@@ -12089,10 +12421,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         return .stop
                                     }
                                 }()
+                                // A turn wait left on cancellation holds no turn: stop like a cancel.
+                                if disposition == .more, !gpuTurn.begin(.decodeStep(rows: 1)) { disposition = .stop }
                                 stoppedByDecodeCallback = disposition == .stop
                                 return disposition
                             })
                         }
+                        gpuTurn.close()
                         // Warm-decode wall-time: from the first decoded token
                         // (any channel) to the generate result. Reported to the
                         // client as `macprovider_generation_ms` so the autotune
@@ -12624,6 +12959,7 @@ maxTokens: 1,
             let kvBitsOverride = runtime.serialKVBits
             let prefillStepSize = runtime.prefillStepSize
             let blockingInferenceExecutor = runtime.blockingInferenceExecutor
+            let gpuTurnParticipant = runtime.gpuTurnParticipant
             var tokens = 0
             var seconds = 0.0
             var decodeTokens = 0
@@ -12633,7 +12969,7 @@ maxTokens: 1,
                 let start = Date()
                 let result: BlockingGenerateResult = try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
-                    let parameters = try Self.makeServeGenerateParameters(
+                    var parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
                         maxTokens: maxTokens,
                         promptTokens: prompt.count,
@@ -12643,11 +12979,23 @@ maxTokens: 1,
                         temperature: 0.0,
                         topP: 1.0
                     )
-                    return try await blockingInferenceExecutor.run { cancellation in
+                    // SPEC-001-R018: the probe may run while another model serves,
+                    // so it takes turns like a request: one per prefill chunk and
+                    // one per decode step.
+                    let gpuTurn = GPUTurnScope(gpuTurnParticipant)
+                    gpuTurn.open()
+                    defer { gpuTurn.close() }
+                    parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: prefillStepSize)
+                    return try await blockingInferenceExecutor.run { [parameters] cancellation in
+                        gpuTurn.begin(.prefillChunk(tokens: min(prefillStepSize, prompt.count)))
+                        defer { gpuTurn.end() }
                         // Yield to a buyer at once: the driver cancels this
                         // task when a request arrives.
-                        BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                            cancellation.isCancelled ? GenerateDisposition.stop : GenerateDisposition.more
+                        return BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                            gpuTurn.end()
+                            let disposition = cancellation.isCancelled ? GenerateDisposition.stop : GenerateDisposition.more
+                            if disposition == .more { gpuTurn.begin(.decodeStep(rows: 1)) }
+                            return disposition
                         })
                     }
                 }
@@ -13227,13 +13575,27 @@ maxTokens: maxTokens,
         )
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.56): whether the startup model's SPEC-039
+    /// attach probes ran and failed.
+    func startupPagedKVAttachProbeFailed() -> Bool {
+        startupPagedKVAttachProbeFailedValue
+    }
+
     /// Why native MTP may not load in this process, or nil. A serial-only
     /// process (SPEC-038 FR-CB9) refuses it even if an admission set appears
-    /// after startup, because its rounds batch target rows.
+    /// after startup, because its rounds batch target rows. A stock order
+    /// process refuses it too: a verify window of three or more rows takes
+    /// the batch kernel, which may differ from the request's own one-row
+    /// decode (SPEC-048 R015/R016). `SmallMRoute.decide` keeps any process
+    /// whose native MTP may activate on the row-invariant route, so this is
+    /// reached only if an admission set appears after startup.
     nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
-        guard route == .rowInvariant else { return "small_m_route_serial_only" }
-        return nil
+        switch route {
+        case .rowInvariant: return nil
+        case .serialOnly: return "small_m_route_serial_only"
+        case .stockOrder: return "small_m_route_stock_order"
+        }
     }
 
     private static func loadNativeMTPDrafterIfAdmitted(
@@ -13255,11 +13617,12 @@ maxTokens: maxTokens,
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner,
         route: SmallMRoute = SmallMRoute.processRoute,
+        eventModelID: String? = nil,
         rejectionObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> NativeMTPRuntimeLoadResult? {
         func reject(reasonCode: String, artifactRole: String) -> NativeMTPRuntimeLoadResult? {
             rejectionObserver(reasonCode)
-            return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole)
+            return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole, modelID: eventModelID)
         }
         if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
             return reject(reasonCode: reasonCode, artifactRole: "runtime")
@@ -13569,9 +13932,10 @@ maxTokens: maxTokens,
 
     private static func rejectNativeMTPServePath(
         reasonCode: String,
-        artifactRole: String
+        artifactRole: String,
+        modelID: String? = nil
     ) -> NativeMTPRuntimeLoadResult? {
-        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole)
+        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole, modelID: modelID)
         return nil
     }
 
@@ -13580,25 +13944,28 @@ maxTokens: maxTokens,
         return nil
     }
 
-    private static func logNativeMTPServePathRejection(reasonCode: String, artifactRole: String) {
+    private static func logNativeMTPServePathRejection(reasonCode: String, artifactRole: String, modelID: String? = nil) {
         FileHandle.standardError.write(Data(nativeMTPServePathRejectionLogLine(
             reasonCode: reasonCode,
-            artifactRole: artifactRole
+            artifactRole: artifactRole,
+            modelID: modelID
         ).utf8))
     }
 
     /// One sorted-key JSON object per rejection, terminated by a single newline.
-    static func nativeMTPServePathRejectionLogLine(reasonCode: String, artifactRole: String) -> String {
-        let payload: [String: String] = [
+    /// `modelID` is set only for a further warm-set member (SPEC-001-R019).
+    static func nativeMTPServePathRejectionLogLine(reasonCode: String, artifactRole: String, modelID: String? = nil) -> String {
+        var payload: [String: String] = [
             "artifact_role": artifactRole,
             "event": "native_mtp_serve_path_admission",
             "reason_code": reasonCode,
             "status": "rejected",
         ]
+        if let modelID { payload["model_id"] = modelID }
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
             return String(decoding: data, as: UTF8.self) + "\n"
         }
-        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
+        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\(modelID.map { " model_id=\($0)" } ?? "")\n"
     }
 
     struct NativeMTPHardwareE2EServePathLoad: @unchecked Sendable {
@@ -15119,7 +15486,8 @@ maxTokens: maxTokens,
         prefillStepSize: Int,
         modelID: String? = nil,
         state: LMOutput.State? = nil,
-        isCancelled: () -> Bool = { Task.isCancelled }
+        isCancelled: () -> Bool = { Task.isCancelled },
+        gpuTurn: GPUTurnScope? = nil
     ) throws -> SerialPromptSnapshot {
         let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard lease != nil,
@@ -15141,6 +15509,7 @@ maxTokens: maxTokens,
         while cursor < target {
             if isCancelled() { throw CancellationError() }
             let end = min(cursor + step, target)
+            gpuTurn?.yield(.prefillChunk(tokens: end - cursor))
             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
             currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
             eval(cache)
@@ -15170,7 +15539,8 @@ maxTokens: maxTokens,
         prefillStepSize: Int,
         modelID: String? = nil,
         state: LMOutput.State? = nil,
-        isCancelled: () -> Bool = { Task.isCancelled }
+        isCancelled: () -> Bool = { Task.isCancelled },
+        gpuTurn: GPUTurnScope? = nil
     ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
         // A role boundary would split an LFM reference, Qwen legacy or GLM
         // serial chunk and change its numerics. Snapshot only whole strides.
@@ -15200,6 +15570,7 @@ maxTokens: maxTokens,
             while start < position {
                 if isCancelled() { throw CancellationError() }
                 let end = min(start + max(1, prefillStepSize), position)
+                gpuTurn?.yield(.prefillChunk(tokens: end - start))
                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
                 currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
                 asyncEval(cache)

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1772,5 +1774,248 @@ func TestInferenceResponseEndServedPathDecode(t *testing.T) {
 	var old InferenceResponseEnd
 	if err := json.Unmarshal([]byte(`{"type":"inference_response_end","request_id":"r","status":"complete","chunks_sent":1}`), &old); err != nil || old.ServedPath != nil {
 		t.Fatalf("frame without served_path: %v %s", err, old.ServedPath)
+	}
+}
+
+const warmModelsTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func warmModelsHeartbeat() map[string]any {
+	return map[string]any{
+		"type": "heartbeat", "status": "ready", "model_id": "model-a", "model_params_b": 7.0, "ram_gb": 64,
+		"max_context_tokens": 32000, "max_concurrency": 4, "slots_free": 3, "slots_total": 4,
+		"throughput_tps_estimate": 40.5, "requests_served_since_last": 0, "avg_latency_ms_since_last": 0.0,
+		"throughput_tps_since_last": 0.0, "model_hash": warmModelsTestHash, "model_hash_algorithm": modelidentity.SnapshotManifestV1,
+		"warm_models": []any{
+			map[string]any{
+				"model_id": "model-a", "state": "warm", "primary": true, "pinned": true, "slots_total": 4, "slots_free": 3,
+				"max_context_tokens": 32000, "throughput_tps_estimate": 40.5, "model_params_b": 7.0,
+				"model_hash": warmModelsTestHash, "model_hash_algorithm": modelidentity.SnapshotManifestV1,
+			},
+			map[string]any{
+				"model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 1,
+				"max_context_tokens": 8000, "throughput_tps_estimate": 12.0, "model_params_b": 4.0,
+			},
+			map[string]any{"model_id": "model-c", "state": "loading", "primary": false, "pinned": true, "slots_total": 0},
+		},
+	}
+}
+
+func warmModelsEntry(payload map[string]any, i int) map[string]any {
+	return payload["warm_models"].([]any)[i].(map[string]any)
+}
+
+// SPEC-001-R016 / SPEC-002-R011: a well-formed warm set decodes primary first.
+func TestParseHeartbeatDecodesWarmModels(t *testing.T) {
+	hb, _, field, err := ParseHeartbeat(mustAuthJSON(t, warmModelsHeartbeat()))
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	want := []pool.WarmModel{
+		{ModelID: "model-a", State: pool.WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 4, SlotsFree: 3,
+			MaxContextTokens: 32000, ThroughputTPSEstimate: 40.5, ModelParamsB: 7,
+			ModelHash: warmModelsTestHash, ModelHashAlgorithm: modelidentity.SnapshotManifestV1},
+		{ModelID: "model-b", State: pool.WarmModelWarm, SlotsTotal: 2, SlotsFree: 1, MaxContextTokens: 8000,
+			ThroughputTPSEstimate: 12, ModelParamsB: 4},
+		{ModelID: "model-c", State: pool.WarmModelLoading, Pinned: true},
+	}
+	if !reflect.DeepEqual(hb.WarmModels, want) {
+		t.Fatalf("warm_models = %+v\nwant %+v", hb.WarmModels, want)
+	}
+}
+
+// An absent key is a provider without a warm set: nil, and nothing else
+// about the heartbeat changes.
+func TestParseHeartbeatWithoutWarmModelsIsNil(t *testing.T) {
+	payload := warmModelsHeartbeat()
+	delete(payload, "warm_models")
+	hb, _, field, err := ParseHeartbeat(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.WarmModels != nil {
+		t.Fatalf("warm_models = %+v, want nil", hb.WarmModels)
+	}
+	withSet, _, _, err := ParseHeartbeat(mustAuthJSON(t, warmModelsHeartbeat()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withSet.WarmModels = nil
+	if !reflect.DeepEqual(hb, withSet) {
+		t.Fatalf("warm_models changed other heartbeat fields:\n%+v\n%+v", hb, withSet)
+	}
+}
+
+func TestParseHeartbeatRejectsMalformedWarmModels(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"null":          func(p map[string]any) { p["warm_models"] = nil },
+		"not an array":  func(p map[string]any) { p["warm_models"] = map[string]any{} },
+		"empty":         func(p map[string]any) { p["warm_models"] = []any{} },
+		"entry not obj": func(p map[string]any) { p["warm_models"] = []any{"model-a"} },
+		"no primary":    func(p map[string]any) { warmModelsEntry(p, 0)["primary"] = false },
+		"two primaries": func(p map[string]any) { warmModelsEntry(p, 1)["primary"] = true },
+		"primary not 1st": func(p map[string]any) {
+			e := p["warm_models"].([]any)
+			e[0], e[1] = e[1], e[0]
+		},
+		"duplicate id casefolded": func(p map[string]any) { warmModelsEntry(p, 2)["model_id"] = "MODEL-B" },
+		"missing model_id":        func(p map[string]any) { delete(warmModelsEntry(p, 1), "model_id") },
+		"long model_id":           func(p map[string]any) { warmModelsEntry(p, 1)["model_id"] = strings.Repeat("m", 257) },
+		"unknown state":           func(p map[string]any) { warmModelsEntry(p, 1)["state"] = "cold" },
+		"missing state":           func(p map[string]any) { delete(warmModelsEntry(p, 1), "state") },
+		"missing pinned":          func(p map[string]any) { delete(warmModelsEntry(p, 1), "pinned") },
+		"missing slots_total":     func(p map[string]any) { delete(warmModelsEntry(p, 1), "slots_total") },
+		"slots_free on loading":   func(p map[string]any) { warmModelsEntry(p, 2)["slots_free"] = 0 },
+		"slots_free on evicting": func(p map[string]any) {
+			e := warmModelsEntry(p, 1)
+			e["state"] = "evicting"
+		},
+		"slots_free over total":  func(p map[string]any) { warmModelsEntry(p, 1)["slots_free"] = 3 },
+		"negative slots_free":    func(p map[string]any) { warmModelsEntry(p, 1)["slots_free"] = -1 },
+		"slots_total over bound": func(p map[string]any) { warmModelsEntry(p, 1)["slots_total"] = maxWarmModelSlots + 1 },
+		"negative context":       func(p map[string]any) { warmModelsEntry(p, 1)["max_context_tokens"] = -1 },
+		"context over bound":     func(p map[string]any) { warmModelsEntry(p, 1)["max_context_tokens"] = maxWarmModelContextTokens + 1 },
+		"negative throughput":    func(p map[string]any) { warmModelsEntry(p, 1)["throughput_tps_estimate"] = -1.0 },
+		"throughput over bound":  func(p map[string]any) { warmModelsEntry(p, 1)["throughput_tps_estimate"] = 2e6 },
+		"params over bound":      func(p map[string]any) { warmModelsEntry(p, 1)["model_params_b"] = 1e6 },
+		"bad hash algorithm":     func(p map[string]any) { warmModelsEntry(p, 1)["model_hash_algorithm"] = "md5" },
+		"algorithm without hash": func(p map[string]any) {
+			warmModelsEntry(p, 1)["model_hash_algorithm"] = modelidentity.SnapshotManifestV1
+		},
+		"weights without alg": func(p map[string]any) { warmModelsEntry(p, 1)["weights_manifest_sha256"] = warmModelsTestHash },
+		"bad cb_self_check":   func(p map[string]any) { warmModelsEntry(p, 1)["cb_self_check"] = map[string]any{"decision": ""} },
+		"too many entries": func(p map[string]any) {
+			entries := []any{warmModelsEntry(p, 0)}
+			for i := 0; i < maxWarmModels; i++ {
+				entries = append(entries, map[string]any{"model_id": fmt.Sprintf("m-%d", i), "state": "loading", "primary": false, "pinned": false, "slots_total": 0})
+			}
+			p["warm_models"] = entries
+		},
+		"primary model_id differs": func(p map[string]any) { warmModelsEntry(p, 0)["model_id"] = "model-x" },
+		"primary hash differs": func(p map[string]any) {
+			delete(warmModelsEntry(p, 0), "model_hash_algorithm")
+			delete(warmModelsEntry(p, 0), "model_hash")
+		},
+		"primary context differs":    func(p map[string]any) { warmModelsEntry(p, 0)["max_context_tokens"] = 16000 },
+		"primary throughput differs": func(p map[string]any) { warmModelsEntry(p, 0)["throughput_tps_estimate"] = 41.0 },
+		"primary slots_total":        func(p map[string]any) { warmModelsEntry(p, 0)["slots_total"] = 5 },
+		"primary slots_free":         func(p map[string]any) { warmModelsEntry(p, 0)["slots_free"] = 2 },
+		"primary loading vs warm":    func(p map[string]any) { p["loading"] = true },
+		"primary evicting": func(p map[string]any) {
+			e := warmModelsEntry(p, 0)
+			e["state"] = "evicting"
+			delete(e, "slots_free")
+		},
+		"primary extra cb_self_check": func(p map[string]any) {
+			warmModelsEntry(p, 0)["cb_self_check"] = map[string]any{"decision": "granted", "served_slots": 1, "verified_k": 1, "deferrals": 0}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := warmModelsHeartbeat()
+			mutate(payload)
+			if _, _, field, err := ParseHeartbeat(mustAuthJSON(t, payload)); err == nil || field != "warm_models" {
+				t.Fatalf("accepted malformed warm_models (field=%q err=%v)", field, err)
+			}
+		})
+	}
+}
+
+// The primary entry may say it is loading exactly when the top level does,
+// and then carries no slots_free.
+func TestParseHeartbeatAcceptsLoadingPrimary(t *testing.T) {
+	payload := warmModelsHeartbeat()
+	payload["loading"] = true
+	primary := warmModelsEntry(payload, 0)
+	primary["state"] = "loading"
+	delete(primary, "slots_free")
+	hb, _, field, err := ParseHeartbeat(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.WarmModels[0].State != pool.WarmModelLoading || hb.WarmModels[0].SlotsFree != 0 {
+		t.Fatalf("primary = %+v", hb.WarmModels[0])
+	}
+}
+
+func TestValidateWarmModelsSupported(t *testing.T) {
+	models := []pool.WarmModel{{ModelID: "model-a", Primary: true}, {ModelID: "Model-B"}}
+	for _, tc := range []struct {
+		name      string
+		supported []string
+		ok        bool
+	}{
+		{"all supported, case-folded", []string{"model-a", "model-b"}, true},
+		{"member not supported", []string{"model-a", "model-c"}, false},
+		{"more entries than supported", []string{"model-a"}, false},
+		{"no supported_models means the top-level model only", nil, false},
+	} {
+		if err := validateWarmModelsSupported(models, tc.supported, "model-a"); (err == nil) != tc.ok {
+			t.Fatalf("%s: err=%v", tc.name, err)
+		}
+	}
+	if err := validateWarmModelsSupported(models[:1], nil, "model-a"); err != nil {
+		t.Fatalf("a warm set of the top-level model alone: %v", err)
+	}
+	if err := validateWarmModelsSupported(nil, nil, "model-a"); err != nil {
+		t.Fatalf("no warm set: %v", err)
+	}
+}
+
+func TestParseHelloAndAuthInitialDecodeWarmModels(t *testing.T) {
+	primary := map[string]any{
+		"model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit", "state": "warm", "primary": true, "pinned": true,
+		"slots_total": 1, "slots_free": 1, "max_context_tokens": 50000, "throughput_tps_estimate": 19.8, "model_params_b": 7.0,
+	}
+	member := map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0}
+
+	auth := validAuthRequestInitial()
+	auth["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit", "model-b"}
+	auth["warm_models"] = []any{primary, member}
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if len(req.WarmModels) != 2 || req.WarmModels[1].ModelID != "model-b" || !req.WarmModels[0].Primary {
+		t.Fatalf("warm_models = %+v", req.WarmModels)
+	}
+	if hello := req.Hello(); !reflect.DeepEqual(hello.WarmModels, req.WarmModels) {
+		t.Fatalf("Hello() warm_models = %+v", hello.WarmModels)
+	}
+
+	// A malformed warm set is dropped; the session proceeds as legacy.
+	delete(auth, "supported_models")
+	if req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err != nil || req.WarmModels != nil || req.WarmModelsErr == nil {
+		t.Fatalf("auth initial member outside supported_models: field=%q err=%v warm_models=%+v dropped=%v", field, err, req.WarmModels, req.WarmModelsErr)
+	}
+	auth["warm_models"] = []any{primary}
+	if req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth)); err != nil || len(req.WarmModels) != 1 || req.WarmModelsErr != nil {
+		t.Fatalf("auth initial warm set of one: field=%q err=%v", field, err)
+	}
+
+	hello := map[string]any{
+		"type": "hello", "version": 1, "tier": 1, "provider_id": "m4-anon", "hostname": "provider.local",
+		"model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit", "model_params_b": 7.0, "ram_gb": 16,
+		"max_context_tokens": 50000, "max_concurrency": 1, "throughput_tps_estimate": 19.8, "binary_version": "0.1.0",
+		"warm_models": []any{primary},
+	}
+	h, field, err := ParseHello(mustAuthJSON(t, hello))
+	if err != nil || len(h.WarmModels) != 1 {
+		t.Fatalf("hello warm set of one: field=%q err=%v models=%+v", field, err, h.WarmModels)
+	}
+	hello["warm_models"] = []any{primary, member}
+	if h, field, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil || h.WarmModelsErr == nil || h.ModelID != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
+		t.Fatalf("hello member without supported_models: field=%q err=%v warm_models=%+v dropped=%v", field, err, h.WarmModels, h.WarmModelsErr)
+	}
+	contradicting := map[string]any{}
+	for k, v := range primary {
+		contradicting[k] = v
+	}
+	contradicting["max_context_tokens"] = 1
+	hello["warm_models"] = []any{contradicting}
+	if h, field, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil || h.WarmModelsErr == nil {
+		t.Fatalf("hello contradicting primary: field=%q err=%v warm_models=%+v", field, err, h.WarmModels)
+	}
+	delete(hello, "warm_models")
+	if h, _, err := ParseHello(mustAuthJSON(t, hello)); err != nil || h.WarmModels != nil {
+		t.Fatalf("legacy hello: err=%v warm_models=%+v", err, h.WarmModels)
 	}
 }

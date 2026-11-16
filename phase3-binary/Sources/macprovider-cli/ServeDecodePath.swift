@@ -301,7 +301,8 @@ extension ModelRuntime {
         prefillStepSize: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
-        cachedTurns: Bool
+        cachedTurns: Bool,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async -> ContinuousBatchScheduler? {
         let nativeMTPRoundByteCapacity: Int?
         if nativeMTPDrafterContainer != nil {
@@ -344,7 +345,8 @@ extension ModelRuntime {
             return makeContinuousBatchScheduler(
                 decision: decision, tuple: tuple,
                 backend: DeepseekV4ContinuousBatchBackend(
-                    container: container, nativeMTPDrafterContainer: nativeMTPDrafterContainer
+                    container: container, nativeMTPDrafterContainer: nativeMTPDrafterContainer,
+                    gpuTurnParticipant: gpuTurnParticipant
                 ),
                 maxBatch: maxBatch, queueLimit: queueLimit, queueWaitTimeoutMS: queueWaitTimeoutMS,
                 prefillTokensPerIteration: prefillTokensPerIteration, maxContextTokens: maxContextTokens,
@@ -385,7 +387,8 @@ extension ModelRuntime {
                 // hybrid (Qwen3.6) and KV-only layouts alike.
                 compiledDecode: false,
                 drafterContainer: nativeMTPDrafterContainer,
-                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter
+                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter,
+                gpuTurnParticipant: gpuTurnParticipant
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -422,10 +425,14 @@ extension ModelRuntime {
     /// A backend with a flattened-token cap (`glm5_next`) keys on the bound
     /// it actually serves under plus the cap itself, so a grant measured
     /// under one bound never survives a change to it.
+    /// SPEC-038 FR-CB9/FR-CB10: a stock order process measures other
+    /// kernels and compares 3+-row widths with another reference, so its key
+    /// carries the route; every row-invariant key is unchanged.
     static func continuousBatchingSelfCheckRuntimeBuild(
         forwardBound deviceBound: Int,
         routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
-        forwardTokenCap: Int? = nil
+        forwardTokenCap: Int? = nil,
+        smallMRoute: SmallMRoute = .rowInvariant
     ) -> String {
         let bound = min(deviceBound, forwardTokenCap ?? Int.max)
         let cap = forwardTokenCap.map { "+flat\($0)" } ?? ""
@@ -437,6 +444,7 @@ extension ModelRuntime {
             : ContinuousBatchingSelfCheck.glm5NextProbeVersion
         return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
             + "+\(probe)/route\(routeKeyBoundary)" + cap
+            + (smallMRoute == .stockOrder ? "+small_m_stock_order" : "")
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

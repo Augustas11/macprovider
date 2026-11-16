@@ -1,6 +1,13 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.18 (2026-11-13, `ttft_ms` timeline wording and buyer-cancel rule; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.19 (2026-11-15, a receipt binds the warm model that served it; LOCKED v0.4 tuple unchanged)
+**Change log v0.4.19 (2026-11-15, Related: #2338):** Adds §M.2.4. A provider
+process may keep several warm models (SPEC-001-R016). A receipt's `model_id`
+and `model_hash` come from the hash-tracking state of the warm member that
+served the request, never from the primary or another member. The receipt
+tuple, canonical shapes and verifier are unchanged; a single-model provider's
+receipts are unchanged.
+
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
 
 **Change log v0.4.18 (2026-11-13):** §9 measured `ttft_ms` from "provider
@@ -3066,6 +3073,17 @@ demand hash attestation MAY ship a deployment-specific verifier
 wrapper that filters `model_hash: null` results to "reject" —
 this is policy, not protocol. AC-32 pins the protocol behavior;
 the policy layer is out of scope.
+
+#### §M.2.4 Several warm models in one process (NORMATIVE, v0.4.19)
+
+When the provider keeps a warm set (SPEC-001-R016), "the provider's local
+SPEC-011 R-3.3.1 hash-tracking state" in §M.2 means the state of the warm
+member that served the request. The receipt's `model_id` and `model_hash`
+MUST be that member's, captured when the request is admitted to that member's
+runtime; §M.2.1 to §M.2.3 apply per member. A swap or eviction of another
+member never changes a receipt, and §M.2.2 is unaffected because a member
+with an in-flight request is never evicted or swapped mid-response
+(SPEC-001-R017, SPEC-011 §3.10).
 
 ### §M.3 Catalog-based verification (verify CLI extension)
 

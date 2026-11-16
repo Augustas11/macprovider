@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "265f94d6fa65c02a922a2225d1f694045cdb31eb64f7f9aa79bc74cd86642381",
-  "generated_at": "2026-11-15T03:40:00Z",
+  "autotune_candidates_sha256": "c3936f4c10fceb43336d68d20fcc294245175d04bcabbed1f8d443a15ef22d10",
+  "generated_at": "2026-11-16T00:00:00Z",
   "models": [
+    {
+      "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
+      "min_ram_gb": 230,
+      "model_id": "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+      "model_revision": "e45ff82cab94d9ecb46a86b12b891eeba3d1e198",
+      "sha256": "795d9cf46799deb2cf61822acfbf8586aa946fcaa880686e86be3ca77280368a"
+    },
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
       "min_ram_gb": 64,
@@ -193,6 +200,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-15-nemotron-3.5-bolt-listed-v289",
+  "release_id": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

@@ -593,7 +593,33 @@ actor CoordinatorClient {
     private let providerID: String
     private let endpointURL: String?
     private let wsTunneledMode: Bool
-    private let modelRuntime: any ModelRuntimeServing
+    /// The runtime the process booted with. The relay keeps its boot
+    /// identity for it (SPEC-001-R016 routing).
+    private let bootModelRuntime: any ModelRuntimeServing
+    /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
+    private let warmModels: (any WarmModelRouting)?
+    /// The `supported_models` the current session's handshake declared:
+    /// the v2 `auth_request` list, or empty after a legacy `hello`, which
+    /// declares none. `warm_models` never names a model outside it
+    /// (SPEC-002-R011 rejects such a frame whole).
+    private var warmModelsSessionModels: [String]?
+    /// SPEC-001-R018: the measured GPU contention the `warm_models`
+    /// estimates are scaled by.
+    private var warmSetContention: @Sendable () -> WarmSetContentionWindow? = { WarmSetContentionMeter.shared.window() }
+    /// The current primary: what every top-level handshake and heartbeat
+    /// field describes. A promotion (SPEC-011 R-3.10.3) moves it off the
+    /// boot runtime.
+    private var modelRuntime: any ModelRuntimeServing {
+        warmModels?.primaryServingRuntime() ?? bootModelRuntime
+    }
+    /// The runtime of the member `snapshot` names primary: what a
+    /// handshake or heartbeat built from that snapshot describes at the top
+    /// level. The table marks a promoted member primary a few awaits before
+    /// the provider status does; reading both through the snapshot keeps
+    /// the top-level fields and `warm_models` on one primary.
+    private func topLevelRuntime(for snapshot: ProviderSnapshot) -> any ModelRuntimeServing {
+        snapshot.primaryWarmMemberKey.flatMap { warmModels?.servingRuntime(memberKey: $0) } ?? modelRuntime
+    }
     /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
     /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
     private let runtimeSource: String?
@@ -936,6 +962,7 @@ actor CoordinatorClient {
     init?(
         config: AppConfig,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         runtimeSource: String? = nil,
         sendOverride: SendOverride? = nil,
@@ -1145,7 +1172,11 @@ actor CoordinatorClient {
         }
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
-        self.modelRuntime = modelRuntime
+        self.bootModelRuntime = modelRuntime
+        self.warmModels = warmModels
+        let primaryRuntime: @Sendable () -> any ModelRuntimeServing = {
+            warmModels?.primaryServingRuntime() ?? modelRuntime
+        }
         self.runtimeSource = runtimeSource
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
@@ -1258,13 +1289,15 @@ actor CoordinatorClient {
         self.computeScoreReference = config.computeScoreReference
         if let computeScoreExecutor {
             self.computeScoreExecutor = computeScoreExecutor
-        } else if let runtime = modelRuntime as? ModelRuntime {
-            self.computeScoreExecutor = { request in await runtime.runComputeScore(request) }
+        } else if let bootRuntime = modelRuntime as? ModelRuntime {
+            self.computeScoreExecutor = { request in
+                await ((primaryRuntime() as? ModelRuntime) ?? bootRuntime).runComputeScore(request)
+            }
         } else {
             self.computeScoreExecutor = nil
         }
         self.nativeMTPCanaryExecutor = nativeMTPCanaryExecutor ?? { request in
-            if let runtime = modelRuntime as? ModelRuntime {
+            if let runtime = primaryRuntime() as? ModelRuntime {
                 return await runtime.runNativeMTPCanary(request)
             }
             return Self.inconclusiveNativeMTPCanaryResult(
@@ -1273,7 +1306,7 @@ actor CoordinatorClient {
             )
         }
         self.nativeMTPTupleDisableHandler = nativeMTPTupleDisableHandler ?? { payload in
-            guard let runtime = modelRuntime as? ModelRuntime else { return }
+            guard let runtime = primaryRuntime() as? ModelRuntime else { return }
             if payload.reason == "bank_mismatch" {
                 // SPEC-048-R016 v0.1.48: fenced, kept for a re-offer.
                 await runtime.parkNativeMTPTupleForReoffer(
@@ -1290,7 +1323,7 @@ actor CoordinatorClient {
             }
         }
         self.nativeMTPTupleRestoreHandler = nativeMTPTupleRestoreHandler ?? { offer in
-            guard let runtime = modelRuntime as? ModelRuntime else { return .gone }
+            guard let runtime = primaryRuntime() as? ModelRuntime else { return .gone }
             return await runtime.restoreParkedNativeMTPTuple(offer)
         }
         self.nativeMTPServedBankDigest = nativeMTPServedBankDigest ?? {
@@ -1569,8 +1602,10 @@ actor CoordinatorClient {
     private func consumeSwapSignals() async {
         // Warm-swap signals are MLX-runtime specific; loopback serving runtimes
         // (SPEC-046 adapters) never swap, so there is nothing to consume.
-        guard let modelRuntime = modelRuntime as? ModelRuntime else { return }
-        let stream = await modelRuntime.swapSignals()
+        // A promotion (SPEC-011 R-3.10.3) hands this subscription to the new
+        // primary, so it keeps hearing the primary's swaps.
+        guard let signalSource = modelRuntime as? ModelRuntime else { return }
+        let stream = await signalSource.swapSignals()
         for await signal in stream {
             if Task.isCancelled {
                 return
@@ -1579,6 +1614,11 @@ actor CoordinatorClient {
             case .loadFinished:
                 continue
             case .completed:
+                if primaryPromotedOffBootRuntime() {
+                    // SPEC-048-R013: a pickup was computed for the boot model;
+                    // a promotion abandons it, sleeping or draining.
+                    nativeMTPAdmissionPickupTask?.cancel()
+                }
                 if catalogReleaseID != nil {
                     let runtimeSnapshot = await modelRuntime.currentSnapshot()
                     if await catalogRuntimeMatches(runtimeSnapshot) == false {
@@ -2129,7 +2169,8 @@ actor CoordinatorClient {
         let publicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
         guard let recoveryClient = CoordinatorClient(
             config: recoveryConfig,
-            modelRuntime: modelRuntime,
+            modelRuntime: bootModelRuntime,
+            warmModels: warmModels,
             providerStatus: providerStatus,
             runtimeSource: runtimeSource,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
@@ -2539,7 +2580,8 @@ actor CoordinatorClient {
     private func installTier2Session(_ session: Tier2ProviderSession, sendFrame: @escaping InferenceRelay.SendFrame) {
         tier2Session = session
         inferenceRelay = InferenceRelay(
-            modelRuntime: modelRuntime,
+            modelRuntime: bootModelRuntime,
+            warmModels: warmModels,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
             catalogModelIDAlias: PoolModelServe.requestAlias(
@@ -2784,6 +2826,8 @@ actor CoordinatorClient {
         // past the budget end the session (reconnect) rather than grow memory.
         let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
         let preflightCell = providerStatus.preflightCell
+        let preflightWarmModels = warmModels?.views
+        let preflightPrimaryNames = preflightPrimaryNames
         let preflightSendOverride = sendOverride
         let preflightInflight = CoordinatorInflightCounter(limit: coordinatorPreflightFastPathLimit)
         let inboundLiveness = inboundLiveness
@@ -2812,7 +2856,10 @@ actor CoordinatorClient {
                                 let ack = Self.preflightAck(
                                     requestID: preflight.requestID,
                                     estimatedTokens: preflight.estimatedTokens,
-                                    view: preflightCell.value
+                                    view: preflightCell.value,
+                                    servedModelID: preflight.servedModelID,
+                                    warmModels: preflightWarmModels?.value,
+                                    primaryNames: preflightPrimaryNames
                                 )
                                 if let preflightSendOverride {
                                     try? await preflightSendOverride(ack)
@@ -4170,6 +4217,10 @@ actor CoordinatorClient {
 
     func setWebSocketForTest(_ socket: ProviderWebSocketTask?) {
         webSocket = socket
+    }
+
+    func setWarmSetContentionForTest(_ window: WarmSetContentionWindow?) {
+        warmSetContention = { window }
     }
 
     private func handleOwnershipEvent(_ payload: [String: Any]) async throws {
@@ -6841,12 +6892,75 @@ actor CoordinatorClient {
         try await send(Self.preflightAck(
             requestID: message["request_id"] as? String ?? "",
             estimatedTokens: message["estimated_tokens"] as? Int ?? 0,
-            view: providerStatus.preflightCell.value
+            view: providerStatus.preflightCell.value,
+            servedModelID: Self.preflightServedModelID(message["served_model_id"]),
+            warmModels: warmModels?.views.value,
+            primaryNames: preflightPrimaryNames
         ))
+    }
+
+    /// The names the primary answers to outside the warm set: the boot model
+    /// and its catalog wire id.
+    private var preflightPrimaryNames: [String?] { [loadedModelID, catalogModelIDForCoordinator] }
+
+    /// R016 `served_model_id` on `preflight`: absent or null is the primary;
+    /// any other non-string names no member.
+    static func preflightServedModelID(_ wire: Any?) -> String?? {
+        switch wire {
+        case nil, is NSNull: return .some(nil)
+        case let value as String: return .some(value)
+        default: return .none
+        }
     }
 
     /// Issue #2246: the preflight ack is answered from the status actor's
     /// lock-protected preflight view, never by awaiting the actor or runtime.
+    /// SPEC-001-R016: with a warm set, a `served_model_id` naming a `warm`
+    /// secondary member is answered for that member (its context capacity,
+    /// the process health); one naming no `warm` member is refused
+    /// `model_not_loaded`. Absent, it is today's answer for the primary.
+    /// `servedModelID` is `.none` for a malformed (non-string) id.
+    static func preflightAck(
+        requestID: String,
+        estimatedTokens: Int,
+        view: ProviderPreflightView,
+        servedModelID: String?? = .some(nil),
+        warmModels: [WarmModelMemberView]? = nil,
+        primaryNames: [String?] = []
+    ) -> [String: Any] {
+        guard let warmModels else { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        guard let servedModelID else { return preflightModelNotLoaded(requestID: requestID) }
+        let trimmed = servedModelID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        let key = SupportedModels.foldedModelID(trimmed)
+        guard let member = warmModels.first(where: { $0.key == key }) else {
+            let namesPrimary = primaryNames.contains {
+                $0.map { SupportedModels.foldedModelID($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == key
+            }
+            return namesPrimary
+                ? preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view)
+                : preflightModelNotLoaded(requestID: requestID)
+        }
+        guard member.state == .warm else { return preflightModelNotLoaded(requestID: requestID) }
+        if member.primary { return preflightAck(requestID: requestID, estimatedTokens: estimatedTokens, view: view) }
+        // A secondary whose runtime has published nothing is not yet servable.
+        guard let info = member.info else { return preflightModelNotLoaded(requestID: requestID) }
+        return preflightAck(
+            requestID: requestID,
+            estimatedTokens: estimatedTokens,
+            view: ProviderPreflightView(status: view.status, modelLoaded: true, maxContextTokens: info.maxContextTokens)
+        )
+    }
+
+    private static func preflightModelNotLoaded(requestID: String) -> [String: Any] {
+        [
+            "type": "preflight_ack",
+            "request_id": requestID,
+            "accepted": false,
+            "reason": "model_not_loaded",
+        ]
+    }
+
     static func preflightAck(requestID: String, estimatedTokens: Int, view: ProviderPreflightView) -> [String: Any] {
         if estimatedTokens > view.maxContextTokens {
             return [
@@ -6890,7 +7004,7 @@ actor CoordinatorClient {
     /// ack does not queue behind slower inbound frames. Only short text frames
     /// are parsed; preflight is a few dozen bytes and inference frames can be
     /// megabytes.
-    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int)? {
+    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int, servedModelID: String??)? {
         guard case .string(let text) = message,
               text.utf8.count <= 4096,
               text.contains("\"preflight\""),
@@ -6898,7 +7012,7 @@ actor CoordinatorClient {
               object["type"] as? String == "preflight" else {
             return nil
         }
-        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0)
+        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0, preflightServedModelID(object["served_model_id"]))
     }
 
     func pauseByOperator() async -> ProviderControlCommandResult {
@@ -8124,6 +8238,7 @@ actor CoordinatorClient {
 
     private func buildHeartbeatPayload(resetWindow: Bool) async throws -> BuiltHeartbeat {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
+        let modelRuntime = topLevelRuntime(for: snapshot)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
         var payload: [String: Any] = [
             "type": "heartbeat",
@@ -8258,6 +8373,7 @@ actor CoordinatorClient {
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
         )
+        appendWarmModels(to: &payload, snapshot: snapshot)
         let shardGroupMessages = await buildShardGroupMessages(sessionStarted: false)
         if let heartbeatBeforeSendForTest {
             await heartbeatBeforeSendForTest()
@@ -8985,6 +9101,7 @@ actor CoordinatorClient {
     ) async -> [String: Any] {
         lastAdmissionProofPublicKey = nil
         let snapshot = await providerStatus.snapshot()
+        let modelRuntime = topLevelRuntime(for: snapshot)
         // Issue #203: when warm-swap is enabled, the authoritative
         // post-swap model metadata lives in `ModelRuntime.currentSnapshot()`,
         // not in `ProviderStatus` (which carries boot-time / pre-swap
@@ -9071,6 +9188,7 @@ actor CoordinatorClient {
             resolvedCatalog = [wireModelID]
         }
         message["supported_models"] = resolvedCatalog
+        warmModelsSessionModels = resolvedCatalog
         appendRelayBlindKeyRecords(to: &message)
         appendPrivacyKeyRecords(to: &message)
         if publishesSupportedModels {
@@ -9132,6 +9250,7 @@ actor CoordinatorClient {
             runtimeSource: runtimeSource,
             configuredModelID: loadedModelID
         )
+        appendWarmModels(to: &message, snapshot: snapshot)
         return message
     }
 
@@ -9163,6 +9282,10 @@ actor CoordinatorClient {
 
     func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
+        let modelRuntime = topLevelRuntime(for: snapshot)
+        // A hello declares no supported_models: its session serves the
+        // top-level model alone.
+        warmModelsSessionModels = []
         var message: [String: Any] = [
             "type": "hello",
             "version": 1,
@@ -9238,7 +9361,26 @@ actor CoordinatorClient {
             runtimeSource: runtimeSource,
             configuredModelID: loadedModelID
         )
+        appendWarmModels(to: &message, snapshot: snapshot)
         return message
+    }
+
+    /// SPEC-001-R016: `warm_models` beside the top-level fields, which keep
+    /// describing the primary and take the primary entry's values
+    /// (`WarmModelsWire.attach`). Absent without a warm set, so a provider
+    /// with none sends exactly today's message; a coordinator that predates
+    /// the field ignores the unknown key.
+    private func appendWarmModels(to message: inout [String: Any], snapshot: ProviderSnapshot) {
+        guard let warmModels else { return }
+        WarmModelsWire.attach(
+            to: &message,
+            primarySlotsTotal: snapshot.slotsTotal,
+            primarySlotsFree: snapshot.slotsFree,
+            primaryMemberKey: snapshot.primaryWarmMemberKey,
+            views: warmModels.views.value,
+            sessionModels: warmModelsSessionModels,
+            contention: warmSetContention()
+        )
     }
 
     /// Privacy mode never also advertises those keys as `relay_blind_key_records`.
@@ -9497,6 +9639,13 @@ actor CoordinatorClient {
         startNativeMTPAdmissionRefresh()
     }
 
+    func startSwapSignalConsumerForTest() {
+        guard swapHeartbeatTask == nil else { return }
+        swapHeartbeatTask = Task { [weak self] in
+            await self?.consumeSwapSignals()
+        }
+    }
+
     /// SPEC-048-R013: a verified catalog document for the loaded weights
     /// under a release other than the one this process started on may carry
     /// a new native-MTP admission. Each release is checked once, one at a
@@ -9528,8 +9677,18 @@ actor CoordinatorClient {
         }
         func reportRestartRequired() async {
             await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+                releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil, modelID: loadedModelID
             ))
+        }
+        // SPEC-048-R013: the check is computed for the boot model, and a
+        // restart brings the boot model back as the primary. Once a warm
+        // member has been promoted the pickup is abandoned instead: the
+        // admission is reported pending and nothing drains or exits.
+        func abandonIfPrimaryPromoted() async -> Bool {
+            guard !stopped, !signalShutdownStarted, primaryPromotedOffBootRuntime() else { return false }
+            await abandonNativeMTPAdmissionRestart(releaseID: releaseID, reopen: nativeMTPAdmissionRestartDraining)
+            log("abandoned_primary_promoted")
+            return true
         }
         let check = await hooks.newlyActivatable(envelope)
         guard check == .activatable else {
@@ -9544,7 +9703,7 @@ actor CoordinatorClient {
                 } else {
                     // Not dropped silently: the release was never resolved.
                     await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                        releaseID: releaseID, phase: .checkExhausted, drainNotBefore: nil
+                        releaseID: releaseID, phase: .checkExhausted, drainNotBefore: nil, modelID: loadedModelID
                     ))
                     log("check_exhausted")
                 }
@@ -9552,6 +9711,7 @@ actor CoordinatorClient {
             nativeMTPAdmissionPickupTask = nil
             return
         }
+        if await abandonIfPrimaryPromoted() { return }
         guard hooks.supervised() else {
             // Nothing restarts this process after an exit: report and keep serving.
             await reportRestartRequired()
@@ -9571,16 +9731,18 @@ actor CoordinatorClient {
         }
         let delay = NativeMTPAdmissionPickup.jitterSeconds(unit: hooks.randomUnit())
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay)
+            releaseID: releaseID, phase: .scheduled, drainNotBefore: Date().addingTimeInterval(delay), modelID: loadedModelID
         ))
         log("scheduled", " delay_s=\(Int(delay))")
         await hooks.sleep(delay)
+        if await abandonIfPrimaryPromoted() { return }
         let deadline = Date().addingTimeInterval(hooks.maxWaitSeconds)
         while true {
             // An update in flight replaces the process itself, and a pause
             // (requested or confirmed) is the operator's: never drain or exit
             // under either; carry on once it is over.
             while autoupdateInFlightOrPending() || operatorPaused || operatorPauseInProgress {
+                if await abandonIfPrimaryPromoted() { return }
                 guard !Task.isCancelled, !signalShutdownStarted else { return }
                 if Date() >= deadline {
                     await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
@@ -9589,11 +9751,12 @@ actor CoordinatorClient {
                 }
                 try? await Task.sleep(nanoseconds: NativeMTPAdmissionPickup.idlePollNanoseconds)
             }
+            if await abandonIfPrimaryPromoted() { return }
             guard !Task.isCancelled, !signalShutdownStarted else { return }
             nativeMTPAdmissionRestartDraining = true
             await providerStatus.raiseRestartDrainFence()
             await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-                releaseID: releaseID, phase: .waitingForIdle, drainNotBefore: nil
+                releaseID: releaseID, phase: .waitingForIdle, drainNotBefore: nil, modelID: loadedModelID
             ))
             log("waiting_for_idle")
             // New requests are refused from here, by the coordinator (draining
@@ -9603,6 +9766,7 @@ actor CoordinatorClient {
             case .idle:
                 break
             case .cancelled:
+                if await abandonIfPrimaryPromoted() { return }
                 if !signalShutdownStarted, !stopped {
                     await abandonNativeMTPAdmissionRestart(releaseID: releaseID)
                 }
@@ -9617,8 +9781,17 @@ actor CoordinatorClient {
             if operatorPaused || operatorPauseInProgress || autoupdateInFlightOrPending() { continue }
             break
         }
+        if await abandonIfPrimaryPromoted() { return }
         log("restarting")
         hooks.requestExit()
+    }
+
+    /// SPEC-001-R016: a warm member other than the runtime this process
+    /// started with is the primary (SPEC-011 R-3.10.3). A swap of the
+    /// primary reloads the boot runtime in place and never counts.
+    private func primaryPromotedOffBootRuntime() -> Bool {
+        guard let primary = warmModels?.primaryServingRuntime() else { return false }
+        return primary !== bootModelRuntime
     }
 
     /// An update being evaluated, applied, or not yet finalized after its
@@ -9637,15 +9810,17 @@ actor CoordinatorClient {
     /// Gives up a restart without cutting anything: the provider serves
     /// again and reports that the admission still needs a restart. The
     /// release stays checked, so the next release or the next start retries.
-    private func abandonNativeMTPAdmissionRestart(releaseID: String) async {
+    /// `reopen` false: the pickup never drained (a promotion during its
+    /// delay), so the serving state is not touched.
+    private func abandonNativeMTPAdmissionRestart(releaseID: String, reopen: Bool = true) async {
         nativeMTPAdmissionRestartDraining = false
         await providerStatus.lowerRestartDrainFence()
         await providerStatus.setNativeMTPAdmissionPending(NativeMTPAdmissionPendingStatus(
-            releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil
+            releaseID: releaseID, phase: .restartRequired, drainNotBefore: nil, modelID: loadedModelID
         ))
         // An update drain or an operator-pause drain in progress owns the
         // state; only the fence is lowered then.
-        if !autoupdateInFlightOrPending(), !operatorPauseInProgress {
+        if reopen, !autoupdateInFlightOrPending(), !operatorPauseInProgress {
             await setReadyUnlessOperatorPaused(reason: "native_mtp_admission_restart_abandoned")
             try? await sendStateUpdate(state: nil, reason: "native_mtp_admission_restart_abandoned")
         }

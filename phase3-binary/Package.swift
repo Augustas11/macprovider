@@ -17,6 +17,44 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.79 (#2338) on 3.32.3-macprovider.78: It is
+        // 3.32.3-macprovider.78 plus one commit that only moves its mlx-swift
+        // pin to 0.32.3-macprovider.25
+        // (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24
+        // plus two Swift-layer commits: a synchronous eval schedules the
+        // graph and copies its completion events under the process-wide
+        // evalLock, waits for the device without the lock, then retakes the
+        // lock to finish; recursive entry, a CPU stream and a failed
+        // asynchronous schedule keep the stock locked path. The core and C
+        // rows are unchanged and no Metal kernel changed.
+        // Tag 3.32.3-macprovider.78 (#2389) is 3.32.3-macprovider.76
+        // plus three commits that only move its
+        // mlx-swift pin to 0.32.3-macprovider.24
+        // (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX core
+        // v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d)
+        // adds the SPEC-038 FR-CB9 stock-order small-row route
+        // (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that
+        // native MTP serves on is unchanged.
+        // Tag 3.32.3-macprovider.76 (#2381) on 3.32.3-macprovider.71: Two
+        // upstream fixes as picks: the serial prefill chunk loop clears the
+        // MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710),
+        // behind PrefillParameters.clearsBufferCache (default true) for hosts
+        // without a Metal library, and an MLX error raised on the loader's
+        // worker threads is thrown instead of ending the process (port of
+        // ml-explore/mlx-swift-lm #698). No model source, decode step or
+        // kernel route changes; continuous-batch prefill does not use the
+        // chunk loop.
+        // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
+        // MiniMax M3 projects a refusal direction out of the attention and
+        // MLP/MoE outputs of the configured decoder layers when the
+        // refusal_ablation config key is present (the abliterated M3.1-Flash
+        // variant), refusing an alpha outside 0 < alpha <= 4 or a direction
+        // that is not a finite unit vector; an indexed checkpoint may store it
+        // as language_model.refusal_direction. The text sanitize drops stored
+        // model.layers.N.refusal_direction keys, so only the validated
+        // direction sets them. 29b5778 (04a1d29 plus the audit fixes) touches
+        // MiniMaxM3.swift and its tests only; a model without the key runs the
+        // unchanged fused path.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -150,8 +188,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.22, MLX
-        // core v0.32.4-macprovider.14 (0f26baba0) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.25, MLX
+        // core v0.32.4-macprovider.15 (4e9a71dc9) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -166,7 +204,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
+            revision: "92459644d702bf42959c66dd8be0c0416f1dd882"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

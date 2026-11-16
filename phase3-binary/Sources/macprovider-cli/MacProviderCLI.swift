@@ -58,7 +58,7 @@ struct MacProviderCLI: AsyncParsableCommand {
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self, ShardBenchCommand.self, DSV4ParityCommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self, ShardBenchCommand.self, DSV4ParityCommand.self, MultiModelBenchCommand.self]
         #else
         return []
         #endif
@@ -359,6 +359,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, only the configured model is advertised.")
     var supportedModels: String?
 
+    @Option(help: "Comma-separated list of further model IDs to load at boot beside --model, in order while they fit in memory. Overrides MACPROVIDER_WARM_MODELS and config key warm_models. Each must be in --supported-models when that is set.")
+    var warmModels: String?
+
     @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported model list to the network status service. Default off.")
     var publishSupportedModels: Bool?
 
@@ -607,17 +610,202 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
-        if resolved.supportedModels != nil {
+        if resolved.supportedModels != nil || !resolved.warmModels.isEmpty {
             do {
                 let catalog = try SupportedModels.validate(
                     model: resolved.model ?? "",
-                    supportedModels: resolved.supportedModels
+                    supportedModels: resolved.supportedModels,
+                    warmModels: resolved.warmModels
                 )
                 resolved.supportedModels = catalog
             } catch let error as SupportedModelsValidationError {
                 FileHandle.standardError.write(Data(("\(error)\n").utf8))
                 throw ExitCode(2)
             }
+        }
+    }
+
+    /// SPEC-001-R017 *Load*: what the shared budget decides a warm load on,
+    /// read from the model's local files before any weights load.
+    /// `loadPath` is the verified catalog artifact the member loads from.
+    static func warmSetLoadSpec(_ modelID: String, loadPath: String? = nil) throws -> WarmModelLoadSpec {
+        let target = loadPath ?? modelID
+        let directory = try ModelRuntime.localModelDirectory(for: target)
+        let perToken = MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory) ?? 0
+        return WarmModelLoadSpec(
+            modelID: modelID,
+            estimatedResidentBytes: SharedModelMemoryRules.estimatedResidentBytes(modelDirectory: directory),
+            minimumRowKVBytes: MLXMemoryBudget.kvBytes(tokens: SharedModelMemoryRules.minimumRowTokens, bytesPerToken: perToken),
+            modelFamily: ModelRuntime.localModelFamily(target)
+        )
+    }
+
+    /// A further member's catalog binding: the signed catalog row and the
+    /// locally verified artifact a switch to that model would load.
+    struct WarmSetMemberBinding: Sendable, Equatable {
+        let loadPath: String?
+        let artifactSHA256: String?
+        let catalogRevision: String?
+        /// The signed catalog row's key: what the member's native-MTP
+        /// admission is resolved for (SPEC-001-R019).
+        var catalogKey: String? = nil
+
+        static let unbound = WarmSetMemberBinding(loadPath: nil, artifactSHA256: nil, catalogRevision: nil)
+    }
+
+    /// The binding a further member loads with. A primary bound to a
+    /// verified catalog artifact admits only members that are bound the same
+    /// way, refused with the error a switch to an unbound target gets; an
+    /// unbound primary's members load as it did, by id.
+    static func warmSetMemberBinding(
+        modelID: String,
+        authorities: [String: ModelRuntimeTargetAuthority],
+        catalogKeys: [String: String] = [:],
+        primaryVerified: Bool
+    ) throws -> WarmSetMemberBinding {
+        if let authority = authorities[modelID] ?? authorities[modelID.lowercased(with: nil)] {
+            return WarmSetMemberBinding(
+                loadPath: authority.modelArgument, artifactSHA256: authority.artifactSHA256,
+                catalogRevision: authority.catalogRevision,
+                catalogKey: catalogKeys[modelID] ?? catalogKeys[modelID.lowercased(with: nil)])
+        }
+        guard !primaryVerified else {
+            throw ModelRuntimeLoadError(target: modelID, reason: "signed catalog identity unavailable")
+        }
+        return .unbound
+    }
+
+    /// The primary's switch targets: a member promoted to primary (SPEC-011
+    /// R-3.10.3) switches to them exactly as the boot primary would.
+    struct WarmSetSwitchTargets: Sendable {
+        let targetAuthorities: [String: ModelRuntimeTargetAuthority]
+        let authorizedSwitchModelIDs: [String]
+        let maxContextByTarget: [String: Int]
+        let maxBatchByTarget: [String: Int]
+        let contextProvenanceModelIDs: Set<String>
+    }
+
+    /// SPEC-001-R019: a further member's native-MTP inputs, as `serve`
+    /// gives the boot model's: the configured mode, and the signed admission
+    /// set and artifact authority resolved for the member's own catalog row
+    /// and verified artifact. The runtime admits native MTP only for a tuple
+    /// that set admits; otherwise it serves exactly as a single-model
+    /// provider of that model would.
+    struct WarmSetMemberNativeMTP {
+        let mode: NativeMTPMode
+        var sidecarPath: String? = nil
+        var artifactRoot: String? = nil
+        var authority: NativeMTPResolvedArtifactAuthority? = nil
+    }
+
+    static func warmSetMemberNativeMTP(
+        config: AppConfig,
+        binding: WarmSetMemberBinding,
+        catalogTrust: CatalogRuntimeTrust?,
+        resolve: (_ catalogTrust: CatalogRuntimeTrust, _ modelKey: String, _ authorityPath: String, _ authoritySHA256: String) async -> NativeMTPResolvedAdmission?
+    ) async -> WarmSetMemberNativeMTP {
+        var inputs = WarmSetMemberNativeMTP(mode: config.nativeMTPMode)
+        guard config.nativeMTPMode == .auto, let catalogTrust, let modelKey = binding.catalogKey,
+              let authorityPath = binding.loadPath, let sha256 = binding.artifactSHA256,
+              let resolved = await resolve(catalogTrust, modelKey, authorityPath, sha256) else { return inputs }
+        inputs.sidecarPath = resolved.sidecarPath
+        inputs.artifactRoot = resolved.artifactRoot
+        inputs.authority = resolved.authority
+        return inputs
+    }
+
+    /// SPEC-001-R016: a further warm member, built from the configuration
+    /// the primary is built from and loaded from its own catalog binding:
+    /// the runtime verifies the loaded artifact against the bound hash, as
+    /// it does the primary's, and reports that hash. It gets no draft model,
+    /// native MTP only through its own signed admission (SPEC-001-R019),
+    /// cannot be switched until it is promoted to primary (SPEC-011
+    /// R-3.10.3), never receives the provider status, and gets no KV disk
+    /// tier.
+    /// SPEC-001-R017: a further member's context override and rows. Each
+    /// limit the member has (`warm_model_limits`, or the limits its load
+    /// named) replaces the primary's value; without one it takes the
+    /// primary's `max_context_override` and `max_concurrency_override`.
+    struct WarmSetMemberCapacity: Equatable {
+        let maxContextOverride: Int?
+        let maxBatch: Int
+        /// The tokens one row is sized for.
+        var contextTokens: Int {
+            ProviderCapacity(maxContextOverride: maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+        }
+    }
+
+    static func warmSetMemberCapacity(config: AppConfig, limits: WarmModelLimits?) -> WarmSetMemberCapacity {
+        WarmSetMemberCapacity(
+            maxContextOverride: limits?.contextTokens ?? config.maxContextOverride,
+            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: limits?.slots ?? config.maxConcurrencyOverride))
+    }
+
+    static func makeWarmSetMemberRuntime(
+        modelID: String,
+        family: String?,
+        binding: WarmSetMemberBinding,
+        config: AppConfig,
+        limits: WarmModelLimits?,
+        acceptedTuples: [ContinuousBatchingAcceptedTuple],
+        policy: ContinuousBatchingPolicyLoadResult,
+        emergencyOffOverride: Bool,
+        autotuneCandidate: Bool,
+        switchTargets: WarmSetSwitchTargets,
+        nativeMTP: WarmSetMemberNativeMTP
+    ) async throws -> ModelRuntime {
+        let capacity = warmSetMemberCapacity(config: config, limits: limits)
+        let context = capacity.contextTokens
+        return try await ModelRuntime(
+            modelID: modelID,
+            modelLoadPath: binding.loadPath,
+            mlxCacheLimitMB: config.mlxCacheLimitMB,
+            maxContextTokensOverride: capacity.maxContextOverride,
+            kvBitsOverride: config.kvBitsOverride,
+            familyKVQuantDefault: true,
+            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(contextTokens: context),
+            prefillStepSize: config.prefillStepSize,
+            prefillStepSizeExplicitlyConfigured: config.prefillStepSizeExplicitlyConfigured,
+            maxBatch: capacity.maxBatch,
+            continuousBatchingMode: config.continuousBatching,
+            continuousBatchQueueLimit: config.continuousBatchQueueLimit,
+            continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS,
+            continuousBatchPrefillTokensPerIteration: config.continuousBatchPrefillTokensPerIteration,
+            continuousBatchingCachedTurns: config.continuousBatchingCachedTurns,
+            continuousBatchingAcceptanceCoverage: autotuneCandidate
+                ? ContinuousBatchingAcceptanceCoverage(acceptedTuples: acceptedTuples)
+                : .defaultOn(revocations: policy.selection.revocations, acceptedTuples: acceptedTuples),
+            continuousBatchingPolicyLoadResult: policy,
+            continuousBatchingEmergencyOffOverride: emergencyOffOverride,
+            continuousBatchingModeExplicitlyConfigured: config.continuousBatchingExplicitlyConfigured,
+            nativeMTPMode: nativeMTP.mode,
+            nativeMTPAdmissionSidecarPath: nativeMTP.sidecarPath,
+            nativeMTPAdmissionArtifactRoot: nativeMTP.artifactRoot,
+            nativeMTPResolvedArtifactAuthority: nativeMTP.authority,
+            nativeMTPAdmissionEventModelID: modelID,
+            warmSwapEnabled: false,
+            swapDrainTimeoutSeconds: config.swapDrainTimeoutSeconds,
+            verifiedModelArtifactSHA256: binding.artifactSHA256,
+            verifiedModelCatalogRevision: binding.catalogRevision,
+            targetAuthorities: switchTargets.targetAuthorities,
+            authorizedSwitchModelIDs: switchTargets.authorizedSwitchModelIDs,
+            switchMaxContextByTarget: switchTargets.maxContextByTarget,
+            switchMaxBatchByTarget: switchTargets.maxBatchByTarget,
+            switchContextProvenanceModelIDs: switchTargets.contextProvenanceModelIDs
+        )
+    }
+
+    /// Further warm models need a primary this process loads itself (an MLX
+    /// model), not a loopback model server or a shard group.
+    static func runWarmModelsRuntimePreflight(_ resolved: AppConfig, shardRole: Bool) throws {
+        let external: String? = shardRole
+            ? "a shard group"
+            : (LoopbackServeSelection.select(resolved.model) == nil ? nil : "a local model server")
+        do {
+            try WarmSetBoot<ModelRuntime>.requireLocalPrimary(warmModels: resolved.warmModels, externalRuntime: external)
+        } catch let error as WarmSetConfigurationError {
+            FileHandle.standardError.write(Data(("\(error)\n").utf8))
+            throw ExitCode(2)
         }
     }
 
@@ -1324,11 +1512,15 @@ struct ServeCommand: AsyncParsableCommand {
         case unavailable
     }
 
+    /// `modelKey` is the served model's signed catalog key: a further warm
+    /// member passes its own row (SPEC-001-R019); nil means the boot
+    /// model's `model_catalog_key`.
     /// `admissionRoot` is where a fetched set is written. Startup uses the
     /// default root, which the serve-path loader reads; the SPEC-048-R013
     /// pickup check passes a probe root so a running process's set stays.
     static func resolveNativeMTPAdmission(
         config: AppConfig,
+        modelKey: String? = nil,
         releaseID: String,
         catalogDigest: String,
         authorityPath: String,
@@ -1339,7 +1531,7 @@ struct ServeCommand: AsyncParsableCommand {
         admissionFetcher: @escaping NativeMTPAdmissionFeed.Fetcher = NativeMTPAdmissionFeed.defaultFetch
     ) async -> NativeMTPAdmissionResolution {
         guard config.nativeMTPMode == .auto,
-              let modelKey = config.modelCatalogKey,
+              let modelKey = modelKey ?? config.modelCatalogKey,
               !modelKey.isEmpty,
               !authoritySHA256.isEmpty
         else {
@@ -2524,6 +2716,7 @@ struct ServeCommand: AsyncParsableCommand {
             configPath: config,
             logLevel: logLevel,
             supportedModels: SupportedModels.parseCSV(supportedModels),
+            warmModels: SupportedModels.parseCSV(warmModels),
             publishesSupportedModels: publishSupportedModels,
             enableWarmSwap: enableWarmSwap,
             enableReceipts: enableReceipts,
@@ -2686,6 +2879,7 @@ struct ServeCommand: AsyncParsableCommand {
         // preflight bundle repeats this idempotent check after acquiring its
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
+        try Self.runWarmModelsRuntimePreflight(resolved, shardRole: shardGroup != nil || shardMember != nil)
 
         // Round-2 code MEDIUM-3: clear the resolved draft model for autotune
         // candidates so the speculative route is never taken and the probe
@@ -3116,6 +3310,9 @@ struct ServeCommand: AsyncParsableCommand {
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
+        // SPEC-001-R019: each verified target's signed catalog key, for a
+        // further warm member's own native-MTP admission.
+        var memberCatalogKeys: [String: String] = [:]
         // Switch targets start from the rows planned before the startup
         // model's signed ceiling; each target's own memory fit and ceiling
         // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
@@ -3127,6 +3324,9 @@ struct ServeCommand: AsyncParsableCommand {
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
             onVerifiedTarget: { ids, row, artifact in
+                if let key = ids.last {
+                    for id in ids { memberCatalogKeys[id] = key; memberCatalogKeys[id.lowercased(with: nil)] = key }
+                }
                 guard resolved.maxContextSource == .recommendationApply else { return }
                 let knobs = ModelSwitchContext.recomputedServeKnobs(
                     memoryGB: switchMemoryGB,
@@ -3246,12 +3446,32 @@ struct ServeCommand: AsyncParsableCommand {
             draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
             shardGroupRole: shardHeadConfig != nil || shardMemberConfig != nil,
             autotuneCandidate: autotuneCandidate,
-            otherSwitchTargets: authorizedSwitchModelIDs.contains { !startupModelIDs.contains($0.lowercased()) },
+            otherSwitchTargets: SmallMRoute.servesOtherModels(
+                switchTargets: authorizedSwitchModelIDs,
+                startupModelIDs: startupModelIDs,
+                warmModels: resolved.warmModels
+            ),
             selfCheckVerdict: smallMRouteStartupIdentity.map {
                 smallMRouteVerdictStore.verdict(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
-            } ?? .absent
+            } ?? .absent,
+            stockOrderFallback: smallMRouteStartupIdentity.flatMap {
+                smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
+            },
+            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant
         )
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only: run the same serve on a chosen batching route
+        // so two routes can be compared in one window. Never serial-only,
+        // which a process cannot leave and the batching entries refuse.
+        let decidedSmallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        let smallMRoute = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_SMALL_M_ROUTE"]
+            .flatMap(SmallMRoute.init(rawValue:))
+            .flatMap { $0 == .serialOnly ? nil : $0 }
+            .map { SmallMRoute.Decision(route: $0, reason: "lab_override_\(decidedSmallMRoute.reason)") }
+            ?? decidedSmallMRoute
+        #else
         let smallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        #endif
         // SPEC-048-R013 pickup: the slot count the startup loader matches an
         // admission tuple on, read before the self-check lowers the served count.
         let nativeMTPLoaderSlotCount = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
@@ -3263,10 +3483,11 @@ struct ServeCommand: AsyncParsableCommand {
             ),
             fields: smallMRouteInputs.logFields
         ).utf8))
-        // A one-row verdict this row-invariant process applies moves the next
-        // start of the same configuration to the serial route.
+        // A one-row verdict this batching process applies moves the next
+        // start of the same configuration to the serial route; a failure
+        // measured on stock order moves it to the row-invariant route.
         let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
-            guard appliedSmallMRoute == .rowInvariant,
+            guard appliedSmallMRoute != .serialOnly,
                   let identity = smallMRouteStartupIdentity,
                   SmallMRoute.verdictDecidesNextStart(smallMRouteInputs)
             else { return nil }
@@ -3274,6 +3495,7 @@ struct ServeCommand: AsyncParsableCommand {
                 store: smallMRouteVerdictStore,
                 selfCheckStore: cbSelfCheckStore,
                 startupIdentity: identity,
+                route: appliedSmallMRoute,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
         }()
@@ -3285,6 +3507,9 @@ struct ServeCommand: AsyncParsableCommand {
             modelID: resolved.model,
             operationID: lifecycleOperationID
         )
+        // SPEC-001-R016: further warm models are built from the same
+        // configuration the primary is built from below.
+        let warmSetConfig = resolved
         let modelRuntime: any ModelRuntimeServing
         // Non-nil only when a SPEC-046 loopback adapter serves (issue #1569);
         // threaded to the coordinator hello as `runtime_source`.
@@ -3556,6 +3781,13 @@ struct ServeCommand: AsyncParsableCommand {
                 ))
             }
         }
+        // SPEC-038 FR-CB9 (v0.3.56): a SPEC-039 attach probe that failed on
+        // stock order sends the next start to the row-invariant route, so a
+        // stock-order-only failure never leaves batching off on every start.
+        if appliedSmallMRoute == .stockOrder, let mlxRuntime = modelRuntime as? ModelRuntime,
+           await mlxRuntime.startupPagedKVAttachProbeFailed() {
+            smallMRouteVerdictRecorder?.stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to
         // the model runtime (data path) and the control socket (in-process
@@ -3682,13 +3914,149 @@ struct ServeCommand: AsyncParsableCommand {
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
+        // SPEC-001-R016/R017: an MLX primary heads a warm set (a set of one
+        // without `warm_models`). Only the primary has the provider status,
+        // the KV disk tier and the idle prewarmer; a further member is built
+        // from the primary's configuration and reports through the table.
+        let warmSet: WarmSetBoot<ModelRuntime>?
+        let warmSetMemberServices = WarmSetMemberServices()
+        let cbSelfCheckTurn = ContinuousBatchingSelfCheckTurn()
+        if let mlxPrimary = modelRuntime as? ModelRuntime, let primaryModelID = resolved.model {
+            let config = warmSetConfig
+            let acceptedTuples = effectiveAcceptedTuples
+            let policy = continuousBatchingPolicy
+            let switchTargets = WarmSetSwitchTargets(
+                targetAuthorities: targetAuthorities,
+                authorizedSwitchModelIDs: authorizedSwitchModelIDs,
+                maxContextByTarget: switchMaxContextByTarget,
+                maxBatchByTarget: switchMaxBatchByTarget,
+                contextProvenanceModelIDs: switchContextProvenanceModelIDs)
+            let primaryVerified = resolved.modelArtifactSHA256 != nil
+            let memberBinding: @Sendable (String) throws -> WarmSetMemberBinding = { [targetAuthorities, memberCatalogKeys] modelID in
+                try Self.warmSetMemberBinding(
+                    modelID: modelID, authorities: targetAuthorities, catalogKeys: memberCatalogKeys,
+                    primaryVerified: primaryVerified)
+            }
+            let memberCatalogTrust = startupPreflight.catalogTrust
+            let memberArtifactResolver = targetResolver
+            let table = WarmModelTable<ModelRuntime>()
+            // SPEC-001-R019: each further member runs its own self-check
+            // against its own tuple, from the store, plan and signed
+            // provisional grant the boot model's uses, one check at a time.
+            let memberServices = warmSetMemberServices
+            let memberPlan = autoServedSlots
+            let memberProvisional = cbProvisional
+            let memberStore = cbSelfCheckStore
+            let memberSerialOnly = appliedSmallMRoute == .serialOnly
+            let memberTurn = cbSelfCheckTurn
+            let drainSeconds = resolved.drainTimeoutSeconds
+            let boot = WarmSetBoot(
+                table: table,
+                loader: WarmModelLoader(table: table, factory: { spec in
+                    let binding = try memberBinding(spec.modelID)
+                    let nativeMTP = await Self.warmSetMemberNativeMTP(
+                        config: config, binding: binding, catalogTrust: memberCatalogTrust,
+                        resolve: { trust, key, path, sha256 in
+                            let resolution = await Self.resolveNativeMTPAdmission(
+                                config: config, modelKey: key,
+                                releaseID: trust.releaseID, catalogDigest: trust.digest,
+                                authorityPath: path, authoritySHA256: sha256,
+                                staticInputs: AutotuneStaticInputs(), artifactResolver: memberArtifactResolver)
+                            guard case .admitted(let admission) = resolution else { return nil }
+                            return admission
+                        })
+                    let runtime = try await Self.makeWarmSetMemberRuntime(
+                        modelID: spec.modelID, family: spec.modelFamily, binding: binding,
+                        config: config, limits: spec.limits,
+                        acceptedTuples: acceptedTuples, policy: policy,
+                        emergencyOffOverride: emergencyOffOverride, autotuneCandidate: autotuneCandidate,
+                        switchTargets: switchTargets, nativeMTP: nativeMTP)
+                    let memberID = runtime.memoryBudgetMemberID
+                    // SPEC-001-R018: the member's solo rate from the probe the
+                    // boot model runs at start, before it serves; a sibling
+                    // busy during the probe is divided out by the GPU share
+                    // the probe held.
+                    if !autotuneCandidate {
+                        let before = GPUTurnArbiter.shared.snapshot().counters[memberID] ?? GPUTurnParticipantCounters()
+                        let measured = await runtime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
+                        let after = GPUTurnArbiter.shared.snapshot().counters[memberID] ?? GPUTurnParticipantCounters()
+                        memberServices.setSoloThroughput(memberID: memberID, WarmSetContentionMeter.soloRate(
+                            measured: measured,
+                            busyNanoseconds: after.busyNanoseconds &- before.busyNanoseconds,
+                            waitNanoseconds: after.waitNanoseconds &- before.waitNanoseconds))
+                    }
+                    let driver = await WarmSetMemberServices.configureMemberSelfCheck(
+                        runtime: runtime, plan: memberPlan, serialOnlyRoute: memberSerialOnly,
+                        store: memberStore, provisional: memberProvisional,
+                        makeDriver: { ownerPinned in
+                            ContinuousBatchingSelfCheckDriver(
+                                runtime: runtime,
+                                providerStatus: providerStatus,
+                                store: memberStore,
+                                ownerPinnedSlots: ownerPinned,
+                                provisional: memberProvisional,
+                                admissionHoldDrainSeconds: drainSeconds,
+                                lifecycleLease: {
+                                    guard case .valid(let lease) = lifecycleLeaseStore.inspect() else { return nil }
+                                    return lease.kind.rawValue
+                                },
+                                turn: memberTurn,
+                                stepAllowed: { await memberServices.stepAllowed(memberID: memberID) },
+                                published: { await memberServices.published(memberID: memberID) },
+                                memberAdmissionHold: WarmMemberSelfCheckAdmissionHold(
+                                    memberID: memberID, hold: table, providerStatus: providerStatus,
+                                    allowed: { await memberServices.stepAllowed(memberID: memberID) }),
+                                log: { line in FileHandle.standardError.write(Data((line + " model=\(spec.modelID)\n").utf8)) }
+                            )
+                        },
+                        log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) })
+                    if let driver { memberServices.add(memberID: memberID, Task { await driver.run() }) }
+                    return runtime
+                }, beforeUnload: { runtime in
+                    await memberServices.stop(memberID: runtime.memoryBudgetMemberID)
+                }),
+                supportedModels: resolved.supportedModels,
+                // An unbound member is refused by the factory, with the
+                // switch's error, before any weights load.
+                loadSpec: { modelID in
+                    var spec = try Self.warmSetLoadSpec(modelID, loadPath: (try? memberBinding(modelID))?.loadPath)
+                    spec.limits = config.warmModelLimits(for: modelID)
+                    return spec
+                },
+                memberInfo: { runtime in
+                    let rows = await runtime.warmSetRowReservation()
+                    let snapshot = await runtime.currentSnapshot()
+                    return WarmModelMemberInfo(
+                        maxContextTokens: rows.tokensPerRow, slotsTotal: rows.rows,
+                        throughputTPSEstimate: memberServices.soloThroughput(memberID: runtime.memoryBudgetMemberID),
+                        modelHash: await runtime.loadedModelHash,
+                        modelHashAlgorithm: await runtime.loadedModelHashAlgorithm,
+                        weightsManifestSHA256: await runtime.loadedWeightsManifestSHA256,
+                        cbSelfCheck: snapshot.continuousBatching?.selfCheck,
+                        engine: WarmModelEngineState(snapshot: snapshot),
+                        visionCapability: WarmModelMemberInfo.visionCapability(snapshot: snapshot))
+                },
+                // SPEC-011 R-3.10.3: what only the primary holds moves with
+                // a promotion.
+                primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(
+                    providerStatus: providerStatus, memberServices: memberServices),
+                primaryMemberKeySource: { await providerStatus.currentPrimaryWarmMember() }
+            )
+            memberServices.gate = boot
+            try await boot.adoptPrimary(modelID: primaryModelID, runtime: mlxPrimary)
+            await mlxPrimary.setWarmSetSwapHooks(boot)
+            if let key = boot.primaryMemberKey { await providerStatus.setPrimaryWarmMember(key) }
+            warmSet = boot
+        } else {
+            warmSet = nil
+        }
         // SPEC-038 v0.3.15: qualify continuous batching on this Mac in the
         // background, only while idle; it never blocks serving.
         let cbSelfCheckTask: Task<Void, Never>? = {
             guard let plan = autoServedSlots, plan.selfChecked,
                   let mlxRuntime = modelRuntime as? ModelRuntime else { return nil }
             // SPEC-038 FR-CB9: a serial-only process never runs a self-check;
-            // a re-check waits for a start on the row-invariant route.
+            // a re-check waits for a start on a batching route.
             if appliedSmallMRoute == .serialOnly {
                 FileHandle.standardError.write(Data(
                     "event=cb_self_check action=deferred reason=small_m_route_serial_only next=restart\n".utf8
@@ -3709,6 +4077,18 @@ struct ServeCommand: AsyncParsableCommand {
                     return lease.kind.rawValue
                 },
                 verdictRecorder: smallMRouteVerdictRecorder,
+                // SPEC-001-R019: one check at a time with the further
+                // members' checks; once demoted, its own wire entry follows it.
+                turn: cbSelfCheckTurn,
+                published: { [memberID = mlxRuntime.memoryBudgetMemberID] in
+                    await warmSetMemberServices.published(memberID: memberID)
+                },
+                // Demoted by a promotion, it holds only its own member.
+                memberAdmissionHold: warmSet.map { [memberID = mlxRuntime.memoryBudgetMemberID] warmSet in
+                    WarmMemberSelfCheckAdmissionHold(
+                        memberID: memberID, hold: warmSet.table, providerStatus: providerStatus,
+                        allowed: { await warmSetMemberServices.stepAllowed(memberID: memberID) })
+                },
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }
@@ -3987,6 +4367,7 @@ struct ServeCommand: AsyncParsableCommand {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
+                warmModels: warmSet?.table,
                 providerStatus: providerStatus,
                 runtimeSource: helloRuntimeSource,
                 attestationGenerator: {
@@ -4067,7 +4448,8 @@ struct ServeCommand: AsyncParsableCommand {
             thermalGate: thermalGate,
             powerSource: SystemPowerSourceReporter(),
             config: IdlePrewarmConfig(appConfig: resolved),
-            logger: idlePrewarmLogger
+            logger: idlePrewarmLogger,
+            primaryRuntime: warmSet.map { warmSet in { warmSet.table.primaryRuntime() } }
         )
         // Issue #2364: a provider whose admitted requests get no first token
         // within a prompt-sized bound leaves routing until a one-token forward
@@ -4196,7 +4578,9 @@ struct ServeCommand: AsyncParsableCommand {
             pauseProvider: pauseProvider,
             resumeProvider: resumeProvider,
             watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
-            kvDiskTier: kvDiskTier
+            kvDiskTier: kvDiskTier,
+            warmSet: warmSet,
+            primaryRuntime: warmSet.map { warmSet in { warmSet.table.primaryRuntime() } }
         )
         } else {
             // SPEC-046 loopback serving runtime (#1569) exposes no MLX warm-swap,
@@ -4228,9 +4612,11 @@ struct ServeCommand: AsyncParsableCommand {
         let lifecycleReadyWriter: ProviderLifecycleWriter = operatorPausedInitially
             ? .operatorCommand
             : .serve
+        let warmBootModels = resolved.warmModels
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
+            warmModels: warmSet?.table,
             providerStatus: providerStatus,
             receiptBuilder: receiptRuntime.builder,
             idlePrewarmer: idlePrewarmer,
@@ -4266,19 +4652,85 @@ struct ServeCommand: AsyncParsableCommand {
                 Self.startCoordinatorAfterListening {
                     await coordinatorClient?.start()
                 }
+                // SPEC-001-R017: the boot warm models load once the primary
+                // serves, in list order, while they fit.
+                warmSet?.startBootLoads(warmBootModels)
             }
         )
+        // SPEC-023-R029: the unattended trigger. A serving provider checks
+        // every few hours whether its recommendation went stale (a new signed
+        // catalog, rate card, demand rank or binary). The detached child keeps
+        // the model unless a strictly better one passes admission, honours
+        // this provider's stagger offset, and restarts the provider itself.
+        // Only the canonical installed binary runs unattended; a binary the
+        // resolver rejects (for example a PATH entrypoint copy) never does.
+        let modelUpgradeExecutable = serveMarkerStore.resolveCanonicalInstallBinary(
+            launchedExecutableURL: Bundle.main.executableURL
+        )
+        let upgradeTriggerCandidate = autotuneCandidate
+        let upgradeTriggerNoJoin = noJoin
+        let upgradeTriggerIsolated = isolateLifecycle
+        // A candidate, `--no-join` or `--isolate-lifecycle` serve never starts
+        // a check: its child would stop this Mac's launchd provider.
+        let upgradeTriggerStaticSuppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false,
+            poolModelID: nil,
+            autotuneCandidate: upgradeTriggerCandidate,
+            noJoin: upgradeTriggerNoJoin,
+            isolateLifecycle: upgradeTriggerIsolated,
+            operatorPaused: false
+        )
+        let modelUpgradeTask: Task<Void, Never>? = upgradeTriggerStaticSuppression != nil ? nil : Task.detached(priority: .utility) {
+            [providerStatus, resolved] in
+            try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedFirstCheckDelaySeconds * 1_000_000_000)
+            while !Task.isCancelled {
+                // Only the provider the child would stop (launchd job first,
+                // then the first foreground serve) starts a check: a second
+                // serve on this Mac never does.
+                let suppression = AutotuneModelUpgrade.unattendedTickSuppression(
+                    triggerSuppression: AutotuneModelUpgrade.unattendedTriggerSuppression(
+                        donorMode: resolved.donorMode,
+                        poolModelID: resolved.poolModelID,
+                        autotuneCandidate: upgradeTriggerCandidate,
+                        noJoin: upgradeTriggerNoJoin,
+                        isolateLifecycle: upgradeTriggerIsolated,
+                        operatorPaused: await providerStatus.operatorPauseFence
+                    ),
+                    detected: try? ProviderConflictDetector().detect(),
+                    servePID: getpid(),
+                    systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled()
+                )
+                if let suppression {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=\(suppression)\n".utf8))
+                } else if let modelUpgradeExecutable {
+                    let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/macprovider", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+                    AutotuneModelUpgrade.spawnDetachedUnattendedUpgrade(
+                        executable: modelUpgradeExecutable,
+                        configPath: resolved.configPath,
+                        logPath: logDirectory.appendingPathComponent("model-upgrade.log").path
+                    )
+                } else {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=no_canonical_install_binary\n".utf8))
+                }
+                try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedCheckIntervalSeconds * 1_000_000_000)
+            }
+        }
         let terminationHandlers = installTerminationHandlers(
             coordinatorClient: coordinatorClient, controlSocket: controlSocket,
             idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
-            cbSelfCheckTask: cbSelfCheckTask
+            cbSelfCheckTask: cbSelfCheckTask,
+            warmSet: warmSet, warmSetIdleTimeoutSeconds: resolved.drainTimeoutSeconds
         )
         defer {
-            Task { [kvDiskTier] in
+            modelUpgradeTask?.cancel()
+            Task { [kvDiskTier, warmSet, warmSetIdleTimeoutSeconds = resolved.drainTimeoutSeconds] in
                 await idlePrewarmer.stop()
                 await firstTokenStallMonitor?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
+                await warmSet?.shutdown(idleTimeoutSeconds: warmSetIdleTimeoutSeconds)
                 // M-A: flush queued cold writes + release the namespace lock on the
                 // normal serve-teardown path as well.
                 await kvDiskTier?.shutdown()
@@ -5104,6 +5556,27 @@ struct UpdateCommand: AsyncParsableCommand {
             )
         } else {
             try await updater.run(checkOnly: check)
+            // SPEC-023-R029: after a successful update the installed (now
+            // updated) binary runs its own freshness check, because staleness
+            // is bound to the binary version this process no longer matches.
+            // A stale or missing recommendation re-tunes; the upgrade keeps the
+            // current model unless a strictly better one passes admission, so
+            // its failure never fails the update.
+            // Only the canonical installed binary re-tunes, on the config
+            // this update used, as the serve trigger does.
+            if !check {
+                guard let executable = updateMarkerStore.resolveCanonicalInstallBinary(
+                    launchedExecutableURL: Bundle.main.executableURL
+                ) else {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune skipped reason=no_canonical_install_binary\n".utf8))
+                    return
+                }
+                let status = AutotuneModelUpgrade.runAfterUpdate(executable: executable, configPath: resolvedConfig?.configPath)
+                if status != 0 {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune exited with status \(status)\n".utf8))
+                }
+                return
+            }
         }
         if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
             FileHandle.standardError.write(Data("""
@@ -5307,7 +5780,9 @@ private func installTerminationHandlers(
     controlSocket: ControlSocketServer?,
     idlePrewarmer: IdlePrewarmer?,
     kvDiskTier: KVDiskTier?,
-    cbSelfCheckTask: Task<Void, Never>?
+    cbSelfCheckTask: Task<Void, Never>?,
+    warmSet: (any WarmSetShutdown)?,
+    warmSetIdleTimeoutSeconds: Int
 ) -> [DispatchSourceSignal] {
     let latch = TerminationLatch()
     return [SIGTERM, SIGINT].map { signalNumber in
@@ -5344,6 +5819,10 @@ private func installTerminationHandlers(
                 await coordinatorClient?.drainForExit(
                     reason: "\(signalName(signalNumber)) received"
                 )
+                // SPEC-001-R017: stop warm-set loads (one in flight is not
+                // waited for) and unload every further member before the
+                // primary's teardown below.
+                await warmSet?.shutdown(idleTimeoutSeconds: warmSetIdleTimeoutSeconds)
                 // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
                 // release the namespace lock BEFORE exit, on the signal path too.
                 await kvDiskTier?.shutdown()
@@ -5394,6 +5873,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
     print("  continuous_batch_prefill_tokens_per_iteration: \(config.continuousBatchPrefillTokensPerIteration.map(String.init) ?? "<unset, 2048>")")
     print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
+    print("  small_m_route: \(config.smallMRouteRowInvariant ? "row_invariant" : "<unset, decided at serve>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  privacy_class_beta: \(config.privacyClassBeta)")

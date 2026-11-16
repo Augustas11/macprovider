@@ -97,6 +97,10 @@ func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transpo
 	case wsForwardQueueFull:
 		tr.markBusy = true
 		tr.retryable = true
+	case wsForwardEntryNotLoaded:
+		// Retried like queue-full, without the queue-full hold: the entry,
+		// not the session, is closed until its next heartbeat.
+		tr.retryable = true
 	case wsForwardProviderDisconnected:
 		// retryable=false: the WS-non-streaming loop fast-fails with
 		// 502 when failover misses (server.go:1217-1228) — it does
@@ -164,6 +168,8 @@ func classifyStreamResult(result wsForwardResult, status int, attempt requestLog
 		tr.status = http.StatusRequestEntityTooLarge
 	case wsForwardQueueFull:
 		tr.markBusy = true
+		tr.retryable = true
+	case wsForwardEntryNotLoaded:
 		tr.retryable = true
 	default:
 		// Other failures (failed, unavailable, timed_out): retryable

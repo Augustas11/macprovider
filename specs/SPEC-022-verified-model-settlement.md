@@ -1,11 +1,97 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.9
+Version: v0.4.16
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.16 (2026-11-16)
+
+Related: #2338. R-16.2a states the rule for holds named before holds were
+opened on the sanction identity. A key restored from a state stored under a
+catalog row key opens every new hold on the row's identity, never on the
+stored spelling. A hold opened earlier under the row key keeps matching: its
+credits are flag-0 attempts on the provider-wide match, and a recovery close
+or release applies to every held, open recovery hold of the provider whose
+`model_id` resolves to the key's identity, so none is left open. No schema,
+receipt, payout or trust tier changes.
+
+### v0.4.15 (2026-11-16)
+
+Related: #2338. R-16.2a compares sanction identities. A signed catalog row is
+reachable as its row key and as its `model_id`, and SPEC-036 holds are opened
+on the row's identity, its normalized `model_id` (SPEC-002-R011 sanction
+identity). The route snapshot keeps the provider's spelling in `model_id`,
+unchanged for receipts, and `served_model_dispatch` is 1 only when that
+spelling's canonical form is its sanction identity, so both sides of the
+predicate's `lower()` comparison are the row's identity. An attempt to an
+entry declared under another name of its row records 0 and keeps the
+provider-wide R-16.2 match: a model held under one name cannot escape the
+hold under the other. No schema, receipt, payout or trust tier changes.
+
+### v0.4.14 (2026-11-16)
+
+Related: #2338. R-16.2a states the exact flag rule: `served_model_dispatch`
+is 1 only for an attempt dispatched to an entry of a multi-model session
+whose own (provider, canonical model id) compute-integrity key is `passing`
+at the time the coordinator builds the route snapshot. A declared member
+counts toward a multi-model session only with `slots_total >= 1`. Every
+other attempt, including one to an entry whose key is unverified, suspect,
+failed or recovering, and every attempt while compute-integrity scoring is
+off, records 0 and keeps the provider-wide R-16.2 match. v0.4.13 set the flag
+for any entry of a session with two warm, `hash_verified` members; a public
+catalog hash and a zero-slot member were enough, so it did not hold that a
+credit could not escape a provider-wide hold. Model ids reach this predicate
+only in their canonical form (SPEC-002-R011 decode rule), so the database
+`lower()` compares canonical keys. No payout or trust tier changes.
+
+### v0.4.13
+
+Related: #2338. R-16.2a: `served_model_dispatch` is 1 only for an attempt
+to a multi-model session, one with at least two members `warm` and
+`hash_verified` (SPEC-002-R011). A session whose second member is still
+loading, evicting or unverified is a legacy session: flag 0 and the
+provider-wide R-16.2 match. v0.4.12 set the flag for any warm set of more
+than one member, so a credit of such a session could escape a
+provider-wide hold. (v0.4.14: two warm, verified members alone still let a
+credit escape that hold; the flag now also needs the served entry's own
+passing verification.) No payout or trust tier changes.
+
+### v0.4.12
+
+Related: #2338. R-16.2a names which sessions are warm-set dispatches: a
+session whose warm set has more than one member (SPEC-002-R011). A warm set
+of exactly one member is a legacy session: its attempts are dispatched
+without `served_model_id`, record `served_model_dispatch` 0 and keep the
+provider-wide R-16.2 match. In a session of more than one member the flag is
+1 for every entry, the primary included. No payout or trust tier changes.
+(v0.4.13: the flag is 1 only with at least two warm, verified members; the
+earlier "no money-positive path" did not hold for a session whose second
+member was not yet warm and verified.)
+
+### v0.4.11
+
+Related: #2338. R-16.2a states the predicate as built: the route snapshot
+records `served_model_dispatch` beside the snapshot, set for every attempt
+dispatched to a warm-set entry and never for a pool-model route; the
+served-model comparison is the database `lower()`, which folds ASCII letters
+only; and a flagged credit whose route snapshot is no longer in the hot store
+falls back to the provider-wide R-16.2 match. No money-positive path, payout
+or trust tier changes.
+
+### v0.4.10
+
+Related: #2338. A provider session may serve several warm models
+(SPEC-001-R016). R-16.2 gains R-16.2a: a credit whose attempt was dispatched
+with a `served_model_id` (a multi-model session, at least two members warm
+and verified, SPEC-002-R011; v0.4.13) is held only
+by a hold for that served model, so a failed key for one model does not hold
+credits another model of the same provider earned. Every other credit keeps
+the v0.4.9 provider-wide predicate, so single-model providers are unchanged.
+The route snapshot's model and hash fields come from the dispatched warm
+entry. No money-positive path, payout or trust tier changes.
 
 ### v0.4.9
 
@@ -2550,6 +2636,67 @@ would let alias-routed credits escape the hold. The hold's `model_id` names
 the verified model the hold was opened for. Because a held credit is not
 payable, R-15.2 does not archive its evidence while the
 hold is `held`.
+
+R-16.2a. (v0.4.10, amended v0.4.11, v0.4.13, v0.4.14 and v0.4.15) A credit whose attempt's
+route snapshot records `served_model_dispatch = 1` matches a hold only when
+the served model, as recorded in the attempt's route snapshot `model_id`, equals the
+hold's `model_id`. The served model is the warm entry the coordinator
+selected, never the buyer's requested string, so alias routing cannot escape
+the hold. As built:
+
+- The route snapshot row carries `served_model_dispatch` (0 or 1), stored
+  beside the snapshot and outside its digested preimage. It is 1 exactly
+  when both hold at the time the coordinator builds the route snapshot:
+  (a) the attempt is dispatched to an entry (the primary included) of a
+  multi-model session, one with at least two members `warm`,
+  `hash_verified` and, for a further member, `slots_total >= 1`
+  (SPEC-002-R011); and (b) the SPEC-036 FR-23 key of that provider and the
+  entry's canonical model id is in state `passing`, as published by the
+  compute-integrity engine into the session's entry view (at restore and on
+  every transition; cleared when the key leaves `passing` or is pruned);
+  and (c) the entry's `model_id` names its own sanction identity
+  (SPEC-002-R011): the canonical form of the spelling is the identity of
+  the catalog row it names, the row's normalized `model_id`, or, for an id
+  no catalog row carries, the canonical id itself.
+  It is 0 for every other attempt, including one to an entry declared
+  under a row key whose row's `model_id` differs: every attempt to a legacy session (one
+  member, or further members loading, evicting, unverified or without a
+  slot), every attempt to an entry whose key is unverified, `suspect`,
+  `failed` or `recovering`, every attempt while compute-integrity scoring is
+  off (no key is published as passing), and every pool-model route, which
+  reads the session and dispatches without `served_model_id`. A flag-0
+  attempt to a multi-model session is still dispatched with
+  `served_model_id`; only the hold match differs.
+- The predicate withholds a credit unless a route snapshot for the same
+  request, attempt and provider has `served_model_dispatch = 1` and a
+  `model_id` that differs from the hold's under the database `lower()`.
+  `lower()` folds ASCII letters only; the coordinator accepts only model ids
+  whose canonical form (trimmed, Unicode NFC, lower case) equals their ASCII
+  lower case and rejects every other spelling at decode (SPEC-002-R011), so
+  `lower()` of any accepted spelling is its canonical key. A hold is opened
+  on the sanction identity of its key (SPEC-036 FR-23 keys are sanction
+  identities), whatever spelling the key's stored state carries, and a
+  flagged snapshot's `model_id` is its own sanction identity by (c), so the
+  comparison is between sanction identities: a credit for any name of a
+  held catalog row matches the hold, either through the flag-1 comparison
+  or through the provider-wide match of a flag-0 attempt. A hold opened
+  before v0.4.16 may name a row key, the spelling its key's state was
+  stored under. Such a hold was opened before any snapshot could record
+  `served_model_dispatch = 1`, and while its recovery window stays open its
+  key is `recovering`, not `passing`, so every credit in its window is a
+  flag-0 attempt and keeps the provider-wide match. Its key closes or
+  releases it like any other: a recovery close or release applies to every
+  held, open recovery hold of the provider whose `model_id` resolves to the
+  key's sanction identity, under either name, so no earlier hold is left
+  open. The comparison is resolved in Go at snapshot time; no
+  column is added.
+- A credit whose route snapshot is no longer in the hot store (archived
+  before the hold opened) has no flag to read and keeps the provider-wide
+  R-16.2 match, as does every credit of an attempt dispatched without
+  `served_model_id`. R-15.2 does not archive the evidence of a credit a
+  `held` hold covers, so a flagged snapshot is not archived from under a
+  held hold.
+- The held-credit total a hold reports applies the same predicate.
 
 R-16.3. Credits already settled into a payout (`settled = 1`) are never
 withheld, so a hold can neither claw back a payout nor invalidate or strand a

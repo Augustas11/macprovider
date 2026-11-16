@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -100,23 +101,44 @@ func viewEarningsReference(ctx context.Context, q sqlQueryer, providerID string,
 		pending: one(`SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID),
 		faults:  one(`SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, with(providerID)...),
 		models:  []string{},
+		byModel: map[string]int64{},
 	}
 	if firstErr != nil {
 		return out, firstErr
 	}
-	rows, err := q.QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, with(providerID)...)
+	rows, err := q.QueryContext(ctx, `SELECT model, COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` GROUP BY model ORDER BY model`, with(providerID)...)
 	if err != nil {
 		return out, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m string
-		if err := rows.Scan(&m); err != nil {
+		var credits int64
+		if err := rows.Scan(&m, &credits); err != nil {
 			return out, err
 		}
 		out.models = append(out.models, m)
+		out.byModel[m] = credits
 	}
 	return out, rows.Err()
+}
+
+// checkCreditsByModelSumsToTotal pins the credits_by_model invariant: the
+// per-model split covers exactly the models served and adds up to total.
+func checkCreditsByModelSumsToTotal(t *testing.T, label string, got providerEarningsFigures) {
+	t.Helper()
+	var sum int64
+	for _, credits := range got.byModel {
+		sum += credits
+	}
+	if sum != got.total || len(got.byModel) != len(got.models) {
+		t.Fatalf("%s: credits_by_model %v sums to %d over %d models; total %d over models %v", label, got.byModel, sum, len(got.byModel), got.total, got.models)
+	}
+	for _, model := range got.models {
+		if _, ok := got.byModel[model]; !ok {
+			t.Fatalf("%s: credits_by_model %v misses served model %q", label, got.byModel, model)
+		}
+	}
 }
 
 func rollupTestWindows(today time.Time) []earningsWindows {
@@ -160,6 +182,7 @@ func checkRollupMatchesView(t *testing.T, store *Store, providers []string, wins
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("%s window %d (%+v): rollup=%+v view=%+v", provider, i, win, got, want)
 			}
+			checkCreditsByModelSumsToTotal(t, fmt.Sprintf("%s window %d", provider, i), got)
 			legacy, err := (&handler{store: store}).providerEarningsFiguresFromView(ctx, provider, win)
 			if err != nil {
 				t.Fatal(err)
@@ -973,6 +996,65 @@ func TestProviderEarningsEndpointServesRollupFigures(t *testing.T) {
 	for _, want := range []string{`"total_credits":800`, `"fault_count":1`, `"models_served":["model-a"]`, `"usdc_today":0.0005`, `"usdc_lifetime":0.0008`, `"usdc_pending":0.0008`} {
 		if rec.Code != http.StatusOK || !strings.Contains(body, want) {
 			t.Fatalf("status=%d body=%s; missing %s", rec.Code, body, want)
+		}
+	}
+}
+
+// credits_by_model splits total_credits by model over the same rows, from
+// the rollup and from the view: two models served by one provider sum to the
+// total, and a single-model provider gets one entry holding the total with
+// every other field as before.
+func TestProviderEarningsEndpointCreditsByModel(t *testing.T) {
+	now := time.Now().UTC()
+	type earningsBody struct {
+		TotalCredits   int64            `json:"total_credits"`
+		ModelsServed   []string         `json:"models_served"`
+		CreditsByModel map[string]int64 `json:"credits_by_model"`
+		USDCLifetime   float64          `json:"usdc_lifetime"`
+	}
+	read := func(t *testing.T, store *Store, provider string) earningsBody {
+		t.Helper()
+		handler := store.Handlers("operator", fakeTokens{"good": provider}, true, 60)
+		req := httptest.NewRequest(http.MethodGet, "/providers/"+provider+"/earnings", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var body earningsBody
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		var sum int64
+		for _, credits := range body.CreditsByModel {
+			sum += credits
+		}
+		if sum != body.TotalCredits {
+			t.Fatalf("credits_by_model %v sums to %d, total_credits %d", body.CreditsByModel, sum, body.TotalCredits)
+		}
+		return body
+	}
+	for _, drained := range []bool{false, true} {
+		_, store := newRequestAndBillingStores(t)
+		insertCredit(t, store.db, "provider-two", now.Add(-time.Hour), 500)
+		insertCredit(t, store.db, "provider-two", now.AddDate(0, 0, -3), 300)
+		insertRollupCredit(t, store.db, rollupCredit{requestID: "b1", provider: "provider-two", ts: sqliteTimeText(now.Add(-2 * time.Hour)), model: "model-b", credits: 70})
+		insertRollupCredit(t, store.db, rollupCredit{requestID: "b2", provider: "provider-two", ts: sqliteTimeText(now.AddDate(0, 0, -5)), model: "model-b", credits: 29})
+		insertRollupCredit(t, store.db, rollupCredit{requestID: "q", provider: "provider-two", ts: sqliteTimeText(now.Add(-3 * time.Hour)), model: "model-q", credits: 41, quarantined: true})
+		insertCredit(t, store.db, "provider-one", now.Add(-time.Hour), 250)
+		if drained {
+			drainRollup(t, store)
+		}
+		two := read(t, store, "provider-two")
+		if two.TotalCredits != 899 || !reflect.DeepEqual(two.ModelsServed, []string{"model-a", "model-b"}) ||
+			!reflect.DeepEqual(two.CreditsByModel, map[string]int64{"model-a": 800, "model-b": 99}) {
+			t.Fatalf("drained=%v two models: %+v", drained, two)
+		}
+		one := read(t, store, "provider-one")
+		if one.TotalCredits != 250 || !reflect.DeepEqual(one.ModelsServed, []string{"model-a"}) ||
+			!reflect.DeepEqual(one.CreditsByModel, map[string]int64{"model-a": 250}) || one.USDCLifetime != 0.00025 {
+			t.Fatalf("drained=%v single model: %+v", drained, one)
 		}
 	}
 }

@@ -292,6 +292,8 @@ actor ProviderAdmissionIdentityStatusRuntime {
 struct HTTPServer: Sendable {
     let config: AppConfig
     let modelRuntime: any ModelRuntimeServing
+    /// SPEC-001-R016 warm set. Nil serves every request on `modelRuntime`.
+    let warmModels: (any WarmModelRouting)?
     let providerStatus: ProviderStatus
     let receiptBuilder: ReceiptBuilder?
     let idlePrewarmer: IdlePrewarmer?
@@ -308,6 +310,7 @@ struct HTTPServer: Sendable {
     init(
         config: AppConfig,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
@@ -341,6 +344,7 @@ struct HTTPServer: Sendable {
         } else { self.images = nil }
         self.config = config
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.providerStatus = providerStatus
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
@@ -385,6 +389,7 @@ struct HTTPServer: Sendable {
                             providerID: config.providerID,
                             coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
+                            warmModels: warmModels,
                             providerStatus: providerStatus,
                             warmSwapEnabled: config.enableWarmSwap,
                             maxBodyBytes: config.maxRequestBodyBytes,
@@ -546,6 +551,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let coordinatorURL: String?
     private let images: LocalImageGeneration?
     private let modelRuntime: any ModelRuntimeServing
+    private let warmModels: (any WarmModelRouting)?
     private let providerStatus: ProviderStatus
     private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
@@ -589,6 +595,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerID: String?,
         coordinatorURL: String?,
         modelRuntime: any ModelRuntimeServing,
+        warmModels: (any WarmModelRouting)? = nil,
         providerStatus: ProviderStatus,
         warmSwapEnabled: Bool,
         maxBodyBytes: Int,
@@ -610,6 +617,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.providerID = providerID
         self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
+        self.warmModels = warmModels
         self.providerStatus = providerStatus
         self.warmSwapEnabled = warmSwapEnabled
         self.maxBodyBytes = maxBodyBytes
@@ -979,7 +987,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let writer = ResponseWriter(context: context)
         let images = images
         let providerStatus = providerStatus
-        let modelRuntime = modelRuntime
+        // SPEC-011 R-3.10.3: the top-level fields describe the current
+        // primary, which a promotion moves off the boot runtime.
+        let tablePrimaryRuntime = warmModels?.primaryServingRuntime() ?? self.modelRuntime
+        // The KV disk tier stays attached to the boot runtime.
+        let bootRuntime = self.modelRuntime
         let warmSwapEnabled = warmSwapEnabled
         let providerID = providerID
         let coordinatorURL = coordinatorURL
@@ -989,8 +1001,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let lifecycleStateStore = lifecycleStateStore
         let lifecycleLeaseStore = lifecycleLeaseStore
         let compatibilitySetManifest = compatibilitySetManifest
-        Task.detached { @Sendable [images, providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
+        let warmModels = warmModels
+        Task.detached { @Sendable [images, providerStatus, tablePrimaryRuntime, bootRuntime, warmModels, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
             let snapshot = await providerStatus.snapshot()
+            // The member the snapshot names primary, as the heartbeat reads it.
+            let modelRuntime = snapshot.primaryWarmMemberKey.flatMap { warmModels?.servingRuntime(memberKey: $0) } ?? tablePrimaryRuntime
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
             let checkedAssignedID = snapshot.coordinatorAssignedID
@@ -1005,7 +1020,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 assignedID: checkedAssignedID
             )
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
-            let kvDiskTierSnapshot = await modelRuntime.kvDiskTierSnapshot()
+            let kvDiskTierSnapshot = await bootRuntime.kvDiskTierSnapshot()
             let telemetryMatchesRuntime = !warmSwapEnabled
                 || runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
             let telemetryRuntimeEligible = !warmSwapEnabled
@@ -1040,7 +1055,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     lifecycleStateInspection: lifecycleStateStore.inspect(),
                     lifecycleLeaseInspection: lifecycleLeaseStore.inspect(),
                     compatibilitySetManifest: compatibilitySetManifest,
-                    localImageStatus: await images?.status()
+                    localImageStatus: await images?.status(),
+                    warmModels: warmModels?.views.value
                 )
             )
         }
@@ -1163,8 +1179,31 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 request = request.withMaxTokensLimit(maxOutputTokens)
             }
             parsedRequest = request
-            if !warmSwapEnabled {
-                try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
+            // SPEC-001-R016: the warm member this request runs on is leased
+            // before its runtime handle and released when its task ends.
+            let servingLease = try warmModels.map {
+                try Self.warmServingLease(
+                    $0,
+                    servedModelHeader: requestHead?.headers.first(name: WarmModelRoute.servedModelHeaderName),
+                    local: localLease != nil,
+                    bodyModel: request.model,
+                    primaryNames: [modelID, catalogModelIDAlias]
+                )
+            }
+            // A lease on the boot runtime serves on `modelRuntime` exactly as
+            // without a warm set; any other member (a secondary, or one
+            // promoted to primary) serves under its own id.
+            let member = servingLease.flatMap { $0.runsOn(modelRuntime) ? nil : $0 }
+            let servingRuntime = member?.runtime ?? modelRuntime
+            do {
+                if let member {
+                    try request.validateModelMatches(member.modelID, aliases: modelIDAliasList(member.modelID))
+                } else if !warmSwapEnabled {
+                    try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
+                }
+            } catch {
+                servingLease?.release()
+                throw error
             }
 
             // SPEC-038 AC-25: arm the disconnect flag before either inference
@@ -1180,7 +1219,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     request: request,
                     writer: writer,
                     disconnect: disconnect,
-                    modelRuntime: modelRuntime,
+                    modelRuntime: servingRuntime,
+                    servingLease: servingLease,
                     warmSwapEnabled: warmSwapEnabled,
                     receiptBuilder: receiptBuilder,
                     providerID: providerID,
@@ -1194,7 +1234,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
+            let task = Task.detached { @Sendable [modelRuntime = servingRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
+                defer { servingLease?.release() }
+                let warmMember = servingLease?.memberKey
                 var startedAt = requestAcceptedAt
                 var timeline = RequestTimeline(admittedAt: requestAcceptedAt)
                 var providerRequestStarted = false
@@ -1240,7 +1282,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         // validation and swap refusals never reach buyer stats.
                         handle = try await modelRuntime.acquireRequestHandle(request)
                         CBTrace.log(auditRequestID, "http_handle")
-                        let admission = await providerStatus.admitRequest()
+                        let admission = await providerStatus.admitRequest(warmMember: warmMember)
                         guard case .admitted(let admittedAt) = admission else {
                             Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                             writer.writeAPIError(
@@ -1270,7 +1312,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         // The buyer left while generation ran: a buyer
                         // disconnect, not a completion. No usage, receipt,
                         // or completion telemetry, and nothing is written.
-                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease, warmMember: warmMember)
                         if settlementMetadata != nil {
                             ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                         }
@@ -1283,7 +1325,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         settlementMetadata: settlementMetadata
                     )
                     let unixTsSeconds = Int64(Date().timeIntervalSince1970)
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease, warmMember: warmMember)
                     KVCacheTelemetry.emitRequestCompleted(
                         providerID: providerID,
                         requestID: logRequestID,
@@ -1339,7 +1381,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                } catch where localLease?.isPreempted == true {
 	                    // SPEC-001-R011: a network buyer needed the slot.
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease, warmMember: warmMember)
 	                    }
 	                    if disconnect.isDisconnected {
 	                        writer.close()
@@ -1359,7 +1401,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    // `withTaskCancellationHandler`, which runs
 	                    // `cancelWaiter`.
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease, warmMember: warmMember)
 	                    }
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
 	                    if disconnect.isDisconnected {
@@ -1371,14 +1413,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                } catch is DrainCancelledError {
 	                    CBTrace.log(auditRequestID, "http_catch_drain")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
 	                    }
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .modelSwapViolation)
 	                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
 	                } catch let apiErr as APIError {
 	                    CBTrace.log(auditRequestID, "http_catch_api_error")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
 	                    }
 	                    do {
                         let receipt = try Self.errorReceiptHeaderResult(
@@ -1412,7 +1454,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                } catch {
 	                    CBTrace.log(auditRequestID, "http_catch_other")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
 	                    }
 	                    // Do not stamp every unexpected error as model_not_loaded.
 	                    // Once the request was admitted the model was loaded; a
@@ -1455,6 +1497,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 disconnect.onDisconnect { task.cancel() }
                 localLease.onPreempt { task.cancel() }
             }
+        } catch let refusal as WarmRoutingRefusal {
+            // SPEC-001-R016: no `warm` member serves the named model. Nothing
+            // ran, so no receipt and no buyer error count.
+            writeAPIError(context: context, refusal.error)
         } catch let parseError as APIError {
             if localLease == nil {
                 Task { [providerStatus] in
@@ -1602,6 +1648,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         writer: ResponseWriter,
         disconnect: ClientDisconnectState,
         modelRuntime: any ModelRuntimeServing,
+        servingLease: WarmServingLease?,
         warmSwapEnabled: Bool,
         receiptBuilder: ReceiptBuilder?,
         providerID: String?,
@@ -1615,7 +1662,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let providerStatus = providerStatus
         let logRequestID = Self.logRequestID(requestID, localLease: localLease)
-        let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
+        let task = Task.detached { @Sendable [modelRuntime, servingLease, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
+            defer { servingLease?.release() }
+            let warmMember = servingLease?.memberKey
             var startedAt = Date()
             var timeline = RequestTimeline(admittedAt: startedAt)
             var providerRequestStarted = false
@@ -1643,7 +1692,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Network buyers keep the pre-R011 order: the swap-snapshot
                     // handle first, then provider admission.
                     handle = try await modelRuntime.acquireRequestHandle(request)
-                    let admission = await providerStatus.admitRequest()
+                    let admission = await providerStatus.admitRequest(warmMember: warmMember)
                     guard case .admitted(let admittedAt) = admission else {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                         writer.writeAPIError(
@@ -1731,7 +1780,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
                 completion.timeline = requestTimeline
-                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
+                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease, warmMember: warmMember)
                 // The buyer left after generation finished: the relay's
                 // cancelled-after-completion case. The tokens were generated,
                 // but nothing (usage, [DONE], receipt) can reach the buyer, so
@@ -1837,7 +1886,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             } catch where localLease?.isPreempted == true {
                 // SPEC-001-R011: a network buyer needed the slot.
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease, warmMember: warmMember)
                 }
                 let preempted = APIError.localPreempted(running: providerRequestStarted)
                 if disconnect.isDisconnected {
@@ -1850,7 +1899,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch let error as APIError {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
                 }
                 if sseStarted {
                     // SPEC-038 `:614` "or equivalent": the SSE head is long
@@ -1876,7 +1925,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // emitted. Non-settling either side of the first-token
                 // boundary: no receipt is built and no trailer is written.
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease, warmMember: warmMember)
                 }
                 if disconnect.isDisconnected {
                     // Nothing can reach a closed connection. A receipt that
@@ -1904,7 +1953,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch is DrainCancelledError {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
                 }
                 if sseStarted {
                     writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
@@ -1914,7 +1963,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
                 }
                 let apiError = Self.unexpectedInferenceAPIError(
                     error: error,
@@ -1954,6 +2003,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 type: "server_error",
                 code: "provider_paused"
             ))
+        }
+    }
+
+    /// R016: a coordinator dispatch names its member in
+    /// `X-MacProvider-Served-Model` (absent: the primary); a loopback local
+    /// request without it runs on the member named by the body `model`.
+    static func warmServingLease(
+        _ warmModels: any WarmModelRouting,
+        servedModelHeader: String?,
+        local: Bool,
+        bodyModel: String,
+        primaryNames: [String?]
+    ) throws -> WarmServingLease {
+        do {
+            if local, servedModelHeader == nil {
+                return try WarmModelRoute.leaseLocal(warmModels, bodyModel: bodyModel)
+            }
+            return try WarmModelRoute.lease(warmModels, servedModelID: servedModelHeader, primaryNames: primaryNames)
+        } catch let error as APIError {
+            throw WarmRoutingRefusal(error: error)
         }
     }
 
@@ -2666,7 +2735,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         lifecycleStateInspection: ProviderLifecycleStateInspection = .missing,
         lifecycleLeaseInspection: ProviderLifecycleLeaseInspection = .missing,
         compatibilitySetManifest: CompatibilitySetManifest? = nil,
-        localImageStatus: [String: Any]? = nil
+        localImageStatus: [String: Any]? = nil,
+        warmModels: [WarmModelMemberView]? = nil
     ) -> [String: Any] {
         let observedAt = Date()
         let observationID = UUID().uuidString.lowercased()
@@ -2893,6 +2963,27 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     configuredModelArtifactSHA256: catalogStatus.modelArtifactSHA256
                 )
             }
+        }
+        // SPEC-001-R016: the warm set, primary first; the fields above keep
+        // describing the primary.
+        if let warmModels {
+            var primaryFields: [String: Any] = [
+                "max_context_tokens": snapshot.capacity.maxContextTokens,
+                "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+                "model_hash": body["model_hash"] ?? NSNull(),
+                "model_hash_algorithm": body["model_hash_algorithm"] ?? NSNull(),
+                "weights_manifest_sha256": body["weights_manifest_sha256"] ?? NSNull(),
+                "weights_manifest_algorithm": body["weights_manifest_algorithm"] ?? NSNull(),
+            ]
+            if let effectiveModelID { primaryFields["model_id"] = effectiveModelID }
+            if runtimeSnapshot?.state == .loading || runtimeSnapshot?.state == .draining { primaryFields["loading"] = true }
+            body["warm_models"] = WarmModelsWire.entries(
+                primaryFields: primaryFields,
+                primarySlotsTotal: snapshot.slotsTotal,
+                primarySlotsFree: snapshot.slotsFree,
+                primaryMemberKey: snapshot.primaryWarmMemberKey,
+                views: warmModels
+            )
         }
         return body
     }
@@ -3590,6 +3681,11 @@ private extension Optional where Wrapped == String {
         guard let self else { return [] }
         return [(RouterHandler.receiptHeaderName, self)]
     }
+}
+
+/// A request refused by warm-set routing before any runtime call.
+struct WarmRoutingRefusal: Error {
+    let error: APIError
 }
 
 enum ReceiptEmissionError: Error, Equatable {

@@ -22,6 +22,7 @@ LAB_BUILD_SURFACES = {
     # Isolated loopback lab rig: builds the lab binary that reads the
     # static-feed lab override (#2364); never a release or signing path.
     ROOT / "scripts" / "lab" / "1690-m6" / "rig.sh",
+    ROOT / "scripts" / "lab" / "minimax" / "job-2376-parity.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.

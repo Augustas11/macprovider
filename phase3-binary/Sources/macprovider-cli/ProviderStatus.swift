@@ -485,12 +485,27 @@ struct ProviderSnapshot: Sendable {
     var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
     /// Issue #2364: the first-token stall hold keeps the provider out of routing.
     var firstTokenStallHeld = false
+    /// SPEC-001-R016: network requests in flight on each secondary warm
+    /// member, by routing key. `requestsInFlight` counts them too.
+    var secondaryRequestsInFlight: [String: Int] = [:]
+    /// SPEC-001-R016: the member key of the warm member every top-level
+    /// field describes, read in the same step as them. The wire picks the
+    /// primary `warm_models` entry and the top-level runtime by it.
+    var primaryWarmMemberKey: String? = nil
     /// SPEC-048-R013: a native-MTP admission waiting for this process to restart.
     var nativeMTPAdmissionPending: NativeMTPAdmissionPendingStatus? = nil
 
+    /// Network requests in flight on the primary, the model every top-level
+    /// capacity field describes.
+    var primaryRequestsInFlight: Int {
+        max(0, requestsInFlight - secondaryRequestsInFlight.values.reduce(0, +))
+    }
+
+    /// The primary's free rows: secondary members' traffic never consumes
+    /// them (R016 *Primary model*).
     var slotsFree: Int {
         if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true || firstTokenStallHeld { return 0 }
-        return max(0, capacity.maxConcurrency - requestsInFlight)
+        return max(0, capacity.maxConcurrency - primaryRequestsInFlight)
     }
 
     var slotsTotal: Int {
@@ -621,7 +636,24 @@ actor ProviderStatus {
     private var outputTokensToday: Int64 = 0
     private var inputTokensAllTime: Int64 = 0
     private var outputTokensAllTime: Int64 = 0
+    /// Every network request in flight, on any warm member: what drain,
+    /// pause and idle work wait for.
     private var requestsInFlight = 0
+    /// SPEC-001-R016: the network requests in flight on each warm member, by
+    /// the member key the request was admitted with. A request keeps its
+    /// member for its whole life; which member is primary can change
+    /// (SPEC-011 R-3.10.3), so the split is taken at read time.
+    private var memberInFlight: [String: Int] = [:]
+    /// The member key of the current primary; nil for a process without a
+    /// warm set, where every keyed request is a secondary's.
+    private var primaryMemberKey: String?
+
+    /// The part of `requestsInFlight` running on secondary members. The
+    /// primary's slots exclude it.
+    private var secondaryInFlight: [String: Int] {
+        guard let primaryMemberKey else { return memberInFlight }
+        return memberInFlight.filter { $0.key != primaryMemberKey }
+    }
     private var errorsTotal = 0
     private var restartCount = 0
     private var recentRestartsAt: [Date] = []
@@ -737,9 +769,12 @@ actor ProviderStatus {
         }
     }
 
-    func beginRequest(requestID: String? = nil) async -> Date {
+    func beginRequest(requestID: String? = nil, warmMember: String? = nil) async -> Date {
         noteRealRequestStart()
         requestsInFlight += 1
+        if let warmMember {
+            memberInFlight[warmMember, default: 0] += 1
+        }
         if let requestID {
             activeRequestIDs.insert(requestID)
         }
@@ -800,12 +835,16 @@ actor ProviderStatus {
     /// self-check admission hold (v0.3.36): it is admitted and waits behind
     /// the probe's exclusive inference permit; the hold yields only once a
     /// buyer has waited `selfCheckBuyerWaitYieldSeconds` behind that permit.
-    func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
+    ///
+    /// `warmMember` is the routing key of the secondary warm member the
+    /// request runs on (SPEC-001-R016), nil for the primary; pass the same
+    /// key to `finishRequest`.
+    func admitRequest(requestID: String? = nil, warmMember: String? = nil) async -> ProviderRequestAdmission {
         guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
         // Classified before beginRequest suspends: a hold that starts during
         // that suspension must still drain this request as pre-hold work.
         let holdAtArrival = cbAdmissionHold.active ? cbAdmissionHold.holdsTotal : nil
-        let startedAt = await beginRequest(requestID: requestID)
+        let startedAt = await beginRequest(requestID: requestID, warmMember: warmMember)
         if cbAdmissionHold.active, cbAdmissionHold.holdsTotal == holdAtArrival {
             cbAdmissionHoldArrivals.append(startedAt)
         }
@@ -829,6 +868,11 @@ actor ProviderStatus {
     }
 
     func requestsInFlightCount() -> Int { requestsInFlight }
+
+    /// Network requests in flight on the primary only.
+    private var primaryInFlight: Int {
+        max(0, requestsInFlight - secondaryInFlight.values.reduce(0, +))
+    }
 
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): hold admission so a due self-check
     /// can run: routing sees no free slot and local use is declined; a buyer
@@ -912,9 +956,15 @@ actor ProviderStatus {
         return max(1, Int(end.timeIntervalSince(now).rounded(.up)))
     }
 
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) async {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil, warmMember: String? = nil) async {
         noteRealRequestEnd()
         requestsInFlight = max(0, requestsInFlight - 1)
+        // Read before the decrement: telemetry below describes the member
+        // that is primary when the request ends.
+        let onPrimary = warmMember == nil || warmMember == primaryMemberKey
+        if let warmMember, let count = memberInFlight[warmMember] {
+            memberInFlight[warmMember] = count > 1 ? count - 1 : nil
+        }
         if let index = cbAdmissionHoldArrivals.firstIndex(of: startedAt) {
             cbAdmissionHoldArrivals.remove(at: index)
         }
@@ -935,16 +985,20 @@ actor ProviderStatus {
         if let completion {
             windowCompletionTokens += completion.completionTokens
             windowGenerationSeconds += elapsed
-            if completion.specDecodeGeneration == specDecodeGeneration {
-                specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
-                specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
+            // Speculative, decode-rate and native-MTP telemetry describe the
+            // primary's engine; a secondary member's rows stay out of it.
+            if onPrimary {
+                if completion.specDecodeGeneration == specDecodeGeneration {
+                    specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
+                    specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
+                }
+                if let sample = Self.decodeSample(completion) {
+                    windowDecodeTokens += sample.tokens
+                    windowDecodeMilliseconds += sample.milliseconds
+                }
+                windowNativeMTPProposedTokens += completion.nativeMTPProposedTokens
+                windowNativeMTPAcceptedTokens += completion.nativeMTPAcceptedTokens
             }
-            if let sample = Self.decodeSample(completion) {
-                windowDecodeTokens += sample.tokens
-                windowDecodeMilliseconds += sample.milliseconds
-            }
-            windowNativeMTPProposedTokens += completion.nativeMTPProposedTokens
-            windowNativeMTPAcceptedTokens += completion.nativeMTPAcceptedTokens
             recordTokenUsage(
                 promptTokens: completion.promptTokens,
                 completionTokens: completion.completionTokens
@@ -971,12 +1025,64 @@ actor ProviderStatus {
     }
 
     /// Routes a request's end to the buyer or the SPEC-001-R011 local books.
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?) async {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?, warmMember: String? = nil) async {
         if let localLease {
             finishLocalRequest(localLease, completion: completion, failed: failed)
         } else {
-            await finishRequest(startedAt: startedAt, completion: completion, failed: failed)
+            await finishRequest(startedAt: startedAt, completion: completion, failed: failed, warmMember: warmMember)
         }
+    }
+
+    /// SPEC-001-R016: network requests in flight per secondary warm member.
+    func secondaryRequestsInFlight() -> [String: Int] { secondaryInFlight }
+
+    /// SPEC-001-R016: the member key the wire names primary now
+    /// (`primaryWarmMemberKey` of the next snapshot).
+    func currentPrimaryWarmMember() -> String? { primaryMemberKey }
+
+    /// SPEC-001-R016: the member key the primary's requests are admitted
+    /// with, set once the warm set adopts the boot model.
+    func setPrimaryWarmMember(_ key: String) async {
+        primaryMemberKey = key
+        await refreshAvailabilityState()
+    }
+
+    /// SPEC-011 R-3.10.3: a warm secondary became the primary without a
+    /// load. The top-level model identity and capacity now describe it, and
+    /// the requests already running on each member move to the side their
+    /// member is now on: the new primary's count toward the primary's
+    /// slots, the old primary's toward a secondary's. The served-slot stamp
+    /// restarts, because the new primary's runtime stamps its own counts.
+    /// The primary's solo decode estimate: the start-up probe's result,
+    /// before any warm-set contention scaling (SPEC-001-R018).
+    func primarySoloThroughputEstimate() -> Double {
+        capacity.throughputTPSEstimate
+    }
+
+    func promoteWarmPrimary(
+        memberKey: String,
+        modelID: String,
+        modelHash: String?,
+        modelHashAlgorithm: String?,
+        weightsManifestSHA256: String?,
+        maxContextTokens: Int,
+        maxConcurrency: Int
+    ) async {
+        // The member key, identity and capacity switch before any
+        // suspension (`completeTargetSwap` sets them synchronously), so no
+        // snapshot sees one without the others: the wire's primary switches
+        // in this one step (SPEC-001-R016).
+        primaryMemberKey = memberKey
+        servedSlotsStamp = nil
+        await completeTargetSwap(
+            modelID: modelID,
+            modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
+            weightsManifestSHA256: weightsManifestSHA256,
+            maxContextTokens: max(1, maxContextTokens),
+            maxContextSource: capacity.maxContextSource,
+            maxConcurrency: max(1, maxConcurrency)
+        )
     }
 
     func currentSpecDecodeGeneration() -> Int {
@@ -1212,7 +1318,7 @@ actor ProviderStatus {
             inputTokensAllTime: inputTokensAllTime,
             outputTokensAllTime: outputTokensAllTime,
             requestsInFlight: requestsInFlight,
-            requestsQueued: max(0, requestsInFlight - capacity.maxConcurrency),
+            requestsQueued: max(0, primaryInFlight - capacity.maxConcurrency),
             errorsTotal: errorsTotal,
             restartCount: restartCount,
             memoryRSSMB: Self.memoryRSSMB(),
@@ -1255,6 +1361,8 @@ actor ProviderStatus {
         )
         snapshot.localUsage = currentLocalUsage()
         snapshot.firstTokenStallHeld = firstTokenStallHold
+        snapshot.secondaryRequestsInFlight = secondaryInFlight
+        snapshot.primaryWarmMemberKey = primaryMemberKey
         snapshot.nativeMTPAdmissionPending = nativeMTPAdmissionPending
         if resetWindow {
             windowStartedAt = Date()
@@ -1305,7 +1413,7 @@ actor ProviderStatus {
         let slots = max(1, capacity.maxConcurrency)
         let limit = operatorPauseFence ? slots : localPriorityPolicy.localSlotLimit(forServedSlots: slots)
         return localLeases.count < limit
-            && requestsInFlight + localLeases.count < slots
+            && primaryInFlight + localLeases.count < slots
     }
 
     /// Preempts every admitted local request (a self-check hold, a runtime
@@ -1430,7 +1538,7 @@ actor ProviderStatus {
     private func localExcess() -> Int {
         let slots = max(1, capacity.maxConcurrency)
         let active = localLeases.filter { !$0.isPreempted }
-        return requestsInFlight + active.count - slots
+        return primaryInFlight + active.count - slots
     }
 
     /// A buyer must never wait on local work: when buyers plus local
@@ -1564,14 +1672,14 @@ actor ProviderStatus {
             return
         }
         let held = cbAdmissionHold.active
-        let capacityFull = held || requestsInFlight >= capacity.maxConcurrency
+        let capacityFull = held || primaryInFlight >= capacity.maxConcurrency
         let nextState: ProviderHealthState = capacityFull ? .busy : .ready
         let reason = lastObservedThermalThrottle
             ? "thermal_throttled"
             : (held ? "cb_self_check_admission_hold" : (capacityFull ? "request_capacity_full" : "request_capacity_available"))
         let stateChanged = transition(to: nextState, reason: reason)
         let emittedState = lastObservedThermalThrottle ? .busy : nextState
-        let slotsFree = (lastObservedThermalThrottle || held) ? 0 : max(0, capacity.maxConcurrency - requestsInFlight)
+        let slotsFree = (lastObservedThermalThrottle || held) ? 0 : max(0, capacity.maxConcurrency - primaryInFlight)
         let baselineSlotsFree = pendingRequestCapacitySlotsFree ?? lastPublishedRequestCapacitySlotsFree
         let baselineSlotsTotal = pendingRequestCapacitySlotsTotal ?? lastPublishedRequestCapacitySlotsTotal
         let slotsChanged = baselineSlotsFree != slotsFree

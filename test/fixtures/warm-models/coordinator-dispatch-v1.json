@@ -1,0 +1,55 @@
+{
+  "inference_request": {
+    "type": "inference_request",
+    "request_id": "req-dispatch",
+    "stream": false,
+    "served_model_id": "model-b",
+    "body": "{\"model\":\"model-b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+  },
+  "inference_request_encrypted": {
+    "type": "inference_request",
+    "request_id": "req-dispatch",
+    "stream": false,
+    "served_model_id": "model-b",
+    "encrypted": true,
+    "enc": {
+      "alg": "A256GCM",
+      "seq": 0,
+      "nonce": "AQIDBAAAAAAAAAAA",
+      "aad": "bWFjcHJvdmlkZXIvc3BlYzAwOC9waWxsYXItYi9hYWQvdjEAAAAAEWluZmVyZW5jZV9yZXF1ZXN0AAAAA2MycAAAAAxyZXEtZGlzcGF0Y2gAAAAACnByb3ZpZGVyLWEAAAAJc2Vzc2lvbi1hAAAAAAAAAAA",
+      "ciphertext": "N4_rKbOIl-JqYwUegujv1Yg3y9Af9V8sdlmxhroiZIOAWCq2ib5foJXq4fjBcYHL7lYO-OWXQccuWhFS2JryScPfITfMQicsVTh0ckIl_3qnYEhq5-BG01Z_tusRPsTUl2mUSyeeT9mwVegpLI_cyJt_tKk03113vMrl-dQ",
+      "tag": "A0omb7YvHyOQ_IzlvZe9QA",
+      "kid": "kid-1"
+    }
+  },
+  "inference_request_relay_blind": {
+    "type": "inference_request",
+    "request_id": "req-dispatch",
+    "stream": false,
+    "served_model_id": "model-b",
+    "body": "{\"model\":\"model-b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "body_encoding": "relay-blind-request-v1",
+    "relay_blind_context": {
+      "execution_auth_digest": "",
+      "envelope_digest": "",
+      "kid": "kid-1",
+      "provider_binding_digest": "",
+      "buyer_binding_digest": "",
+      "assigned_session": "session-a",
+      "request_id": "req-dispatch",
+      "input_token_upper_bound": 0,
+      "max_output_tokens": 0
+    }
+  },
+  "preflight": {
+    "estimated_tokens": 64,
+    "request_id": "req-dispatch",
+    "served_model_id": "model-b",
+    "type": "preflight"
+  },
+  "served_model_header": {
+    "name": "X-MacProvider-Served-Model",
+    "value": "model-b"
+  },
+  "served_model_id": "model-b"
+}

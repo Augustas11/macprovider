@@ -122,6 +122,10 @@ type OutReason string
 const (
 	OutOfBandTop1    OutReason = "out_of_band_top1"
 	OutOfBandLogprob OutReason = "out_of_band_logprob"
+	// EntryWithdrawn is no score: a warm-set member's entry vanished or
+	// changed identity while its verification requests were in flight, too
+	// many times in a row (SPEC-036 FR-23 inconclusive rule).
+	EntryWithdrawn OutReason = "entry_withdrawn"
 )
 
 // Evaluate reports whether m is in band, and the first failed metric if not.

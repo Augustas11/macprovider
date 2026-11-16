@@ -1968,6 +1968,7 @@ final class MalibuAgent: ObservableObject {
         snapshot.restartCount7d = nil
         snapshot.payoutsEnabled = nil
         snapshot.lastPaidJobAt = nil
+        snapshot.earningsCreditsByModel = nil
         snapshot.malibuTrustProgress = nil
         snapshot.malibuEmission = nil
     }

@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-15-nemotron-3.5-bolt-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-15-minimax-m3.1-flash-abliterated-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-15T03:40:00Z",
+  "issued_at": "2026-11-15T16:55:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -64,6 +64,15 @@
       "min_ram_gb": 230,
       "notes": "Buyer-serving candidate minimaxai/minimax-m3.1-flash (#2189 MiniMax M3.1-Flash, native minimax_m3 engine, listed); identity from signed SPEC-023 row.",
       "sha256": "21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+      "min_ram_gb": 230,
+      "notes": "Buyer-serving candidate minimaxai/minimax-m3.1-flash-abliterated (#2376 abliterated MiniMax M3.1-Flash, native minimax_m3 engine, listed); identity from signed SPEC-023 row.",
+      "sha256": "795d9cf46799deb2cf61822acfbf8586aa946fcaa880686e86be3ca77280368a",
       "source": "operator-curated"
     },
     {
@@ -250,7 +259,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "FS97vzwihyCKuOh3OZ6y7UgKZYZdUvDCPQrUWEq54OOXkA-qLDXBvKSN7MFw1WemDgmSPDCvE6rPLKVCVX4ZDA"
+    "sig": "_jeZyJiKwpg9Su1J6V-8cedVLypV1giREzvXdgKFEfdcoZwTyM8Cra8LsHvSj_dOUc5I0zS0DmCHFfC9s6ZUDQ"
   },
   "version": 1
 }

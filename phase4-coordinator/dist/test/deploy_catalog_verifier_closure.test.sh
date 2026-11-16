@@ -178,10 +178,12 @@ fi
 # poison Python imports or neutralize ledger evolution through ambient state.
 mkdir "$tmp/pinned-repository" "$tmp/python-poison"
 printf '%s\n' 'raise SystemExit("poisoned json import")' > "$tmp/python-poison/json.py"
-# The fixture is the committed published catalog snapshot. A campaign can
+# The fixture is the committed published catalog snapshot: the last commit to
+# touch release.json or a signed feed sidecar, so a release staged and signed
+# in separate commits resolves to its signed state. A campaign can
 # change SwiftPM before cutting a replacement admission, so HEAD is not yet a
 # coherent release source. Production deploy still verifies its signed commit.
-catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json ':(glob)phase3-binary/dist/static/*.sig')"
 [ -n "$catalog_commit" ] || fail "missing catalog snapshot commit"
 GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$catalog_commit" \
   | tar -xf - -C "$tmp/pinned-repository"
@@ -193,7 +195,7 @@ GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar HEAD scripts \
   | tar -xf - -C "$tmp/pinned-repository"
 # This fixture verifies the committed publication, whose signed runtime may
 # precede the candidate fork. Production deploy still checks its signed source.
-catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json ':(glob)phase3-binary/dist/static/*.sig')"
 GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" show "$catalog_commit:phase3-binary/Package.resolved" \
   > "$tmp/pinned-repository/phase3-binary/Package.resolved"
 pinned_git_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)"
