@@ -482,6 +482,23 @@ final class NativeMTPJourneyRunner {
     static let defaultSelfTestChallengeID = "native-mtp-selftest-journey-0001"
     /// Whether the family signs the ordinary seeded sampled profile.
     private var admitsSampledRows = true
+    /// step-10: the new request after the swap completed on the swapped-in
+    /// snapshot. Reasoning text counts as output: the A3B and GLM step-10
+    /// records predate the split of an open `<think>` into `reasoning_content`
+    /// (#2109), so their 96-token reply was content then; a reasoning model
+    /// that is still thinking at the cap now has empty content and finish
+    /// `length`. The served-hash match and a normal terminal stay required.
+    static func warmSwapNewRequestCompleted(
+        content: String,
+        reasoningContent: String?,
+        finishReason: String,
+        modelHashObserved: String?,
+        expectedModelHash: String
+    ) -> Bool {
+        let produced = !content.isEmpty || !(reasoningContent ?? "").isEmpty
+        return produced && ["stop", "length"].contains(finishReason) && modelHashObserved == expectedModelHash
+    }
+
     /// step-05 forces rejections at the fixture's real paged-KV block
     /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
     static func boundaryBlockTokens(family: NativeMTPHardwareE2EFamily) -> Int {
@@ -1799,7 +1816,10 @@ final class NativeMTPJourneyRunner {
         step.check("same_runtime_identity_published", postSwapSnapshot.modelID == swappedModelID && postSwapSnapshot.modelHash == fixture.targetIdentity.digest)
         step.check("same_runtime_hash_algorithm_actual", postSwapSnapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1)
         step.check("same_runtime_native_disabled", !postSwapSnapshot.nativeMTPStatus.enabled && !postSwapSnapshot.nativeMTPStatus.supported && postSwapSnapshot.nativeMTPStatus.lastReason == .warmSwap)
-        step.check("new_request_completed", !newResult.content.isEmpty && newResult.modelHashObserved == fixture.targetIdentity.digest)
+        step.check("new_request_completed", Self.warmSwapNewRequestCompleted(
+            content: newResult.content, reasoningContent: newResult.reasoningContent,
+            finishReason: newResult.finishReason, modelHashObserved: newResult.modelHashObserved,
+            expectedModelHash: fixture.targetIdentity.digest))
         step.check("new_request_no_native_counters", newDelta.proposedTokens == 0
             && newDelta.acceptedTokens == 0
             && newDelta.rejectedTokens == 0
@@ -1825,6 +1845,9 @@ final class NativeMTPJourneyRunner {
             "native_supported": postSwapSnapshot.nativeMTPStatus.supported,
             "native_reset_generation": postSwapSnapshot.nativeMTPStatus.resetGeneration,
             "new_request_finish_reason": newResult.finishReason,
+            "new_request_content_chars": newResult.content.count,
+            "new_request_reasoning_chars": newResult.reasoningContent?.count ?? 0,
+            "new_request_model_hash_observed": newResult.modelHashObserved ?? "",
             "new_request_native_admissions": newAdmissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
         ]
         return step
