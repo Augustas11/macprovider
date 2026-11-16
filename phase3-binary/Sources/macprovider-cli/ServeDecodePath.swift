@@ -32,6 +32,7 @@ extension ModelRuntime {
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
         promptChunkCeiling: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
+        idlePromptChunkCeiling: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
@@ -42,6 +43,8 @@ extension ModelRuntime {
         // The family ceiling is the chunk unless the operator set
         // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
         let promptChunkTokens = min(max(1, prefillStepSize ?? promptChunkCeiling), promptChunkCeiling)
+        // The idle ceiling (no row decoding) is lowered the same way.
+        let idlePromptChunkTokens = idlePromptChunkCeiling.map { min(max(1, prefillStepSize ?? $0), $0) }
         return ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
             tuple: tuple,
@@ -57,6 +60,7 @@ extension ModelRuntime {
             maxPrefillTokensPerIteration: prefillTokensPerIteration
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
             maxPromptChunkTokens: promptChunkTokens,
+            maxIdlePromptChunkTokens: idlePromptChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
             serialPrefillStride: serialPrefillStride,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
@@ -95,12 +99,46 @@ extension ModelRuntime {
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Int {
         if backend is DeepseekV4ContinuousBatchBackend { return DeepseekV4ContinuousBatchBackend.prefillChunkTokens }
+        #if MACPROVIDER_LAB_HARNESS
+        if (backend as? PagedKVSharedForwardBackend)?.isQwenMoE == true,
+           LabQwenMoEPromptChunk.mode == .always2048 {
+            return qwenMoEIdlePromptChunkTokens
+        }
+        #endif
         guard let backend = backend as? PagedKVSharedForwardBackend,
               backend.cacheKinds.contains(where: \.isPagedMLA)
         else {
             return ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
         }
         return pagedMLAPromptChunkTokens
+    }
+
+    /// CB prompt chunk ceiling of a Qwen MoE backend while no row decodes
+    /// (SPEC-038 FR-CB2 idle prefill). Serial path, M3 Ultra,
+    /// Qwen3.6-35B-A3B: 2048-token chunks instead of 512 cut time to first
+    /// token from 1.660 to 1.537 s at 3514 prompt tokens and from 7.203 to
+    /// 6.320 s at 13965. While a row decodes the chunk stays 512, so running
+    /// rows do not wait four times longer per chunk.
+    static let qwenMoEIdlePromptChunkTokens = 2_048
+
+    /// The idle prompt chunk ceiling for this backend's family, or nil when
+    /// the family prefills idle rows in its ordinary chunk.
+    nonisolated static func schedulerIdlePromptChunkCeiling(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int? {
+        guard let backend = backend as? PagedKVSharedForwardBackend, backend.isQwenMoE else { return nil }
+        #if MACPROVIDER_LAB_HARNESS
+        // Both lab modes drop the idle ceiling: `512` is main's chunking and
+        // `always_2048` already prefills every chunk at 2048.
+        if LabQwenMoEPromptChunk.mode != nil { return nil }
+        #endif
+        return qwenMoEIdlePromptChunkTokens
+    }
+
+    /// The model is a Qwen mixture-of-experts model: every model whose
+    /// paged-KV family is `qwen` and that dispatches MoE layers.
+    nonisolated static func isQwenMoE(_ capabilities: PagedKVRuntimeModelCapabilities) -> Bool {
+        capabilities.modelFamily == "qwen" && capabilities.requiresMoEDispatch
     }
 
     /// MiniMax M3 (`pagedIndexedKV`) rows prefill in the serial path's stride
@@ -260,6 +298,7 @@ extension ModelRuntime {
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: prefillGrouping,
                 promptChunkCeiling: schedulerPromptChunkCeiling(backend: backend),
+                idlePromptChunkCeiling: schedulerIdlePromptChunkCeiling(backend: backend),
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
                 nativeMTPPromptRowsJoinRaggedPrefill: schedulerNativeMTPPromptRowsJoinRaggedPrefill(
@@ -397,7 +436,8 @@ extension ModelRuntime {
                 compiledDecode: false,
                 drafterContainer: nativeMTPDrafterContainer,
                 nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter,
-                gpuTurnParticipant: gpuTurnParticipant
+                gpuTurnParticipant: gpuTurnParticipant,
+                isQwenMoE: isQwenMoE(modelCapabilities)
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -697,3 +737,27 @@ extension ModelRuntime {
         return stopTokenIDs
     }
 }
+
+#if MACPROVIDER_LAB_HARNESS
+/// Lab measurement only (Related: #2402): run the Qwen MoE prompt chunk
+/// designs on one build so a window can compare them. `512` is main's
+/// chunking (ceiling 512, no idle ceiling); `always_2048` prefills every
+/// chunk up to 2048 whether or not rows decode, like `glm5_next`. Unset or
+/// any other value keeps the build's default (idle 2048, 512 while a row
+/// decodes). Read once per process.
+enum LabQwenMoEPromptChunk: String {
+    case ordinary512 = "512"
+    case always2048 = "always_2048"
+
+    static let environmentKey = "MACPROVIDER_LAB_QWEN_MOE_PROMPT_CHUNK"
+    static let mode: LabQwenMoEPromptChunk? = ProcessInfo.processInfo.environment[environmentKey]
+        .flatMap(LabQwenMoEPromptChunk.init(rawValue:))
+
+    /// The serve startup line naming the mode this process runs.
+    static var startupEvent: String {
+        let configured = ProcessInfo.processInfo.environment[environmentKey]
+        let source = configured == nil ? "default" : (mode == nil ? "invalid_ignored" : "lab_override")
+        return "event=lab_qwen_moe_prompt_chunk mode=\(mode?.rawValue ?? "idle_2048") source=\(source)\n"
+    }
+}
+#endif

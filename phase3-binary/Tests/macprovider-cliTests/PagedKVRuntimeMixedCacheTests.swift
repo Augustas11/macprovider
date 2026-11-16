@@ -120,7 +120,9 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     /// #2100: a glm5_next (pagedMLA) backend takes the 2048-token CB prompt
-    /// chunk ceiling; every other backend keeps the 512-token default.
+    /// chunk ceiling; every other backend keeps the 512-token default. Only a
+    /// Qwen MoE backend has an idle ceiling (2048, SPEC-038 FR-CB2): dense
+    /// Qwen has the same cache kinds and keeps none.
     func testSchedulerPromptChunkCeilingIsPerFamily() {
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
@@ -144,9 +146,26 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
             layerCount: 2,
             cacheKinds: [.recurrentMamba, .pagedAttention]
         )
+        let qwenMoE = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            isQwenMoE: true
+        )
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: glm), 2_048)
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: qwen), 512)
+        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: qwenMoE), 512)
         XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: nil), 512)
+        XCTAssertEqual(ModelRuntime.schedulerIdlePromptChunkCeiling(backend: qwenMoE), 2_048)
+        XCTAssertNil(ModelRuntime.schedulerIdlePromptChunkCeiling(backend: qwen))
+        XCTAssertNil(ModelRuntime.schedulerIdlePromptChunkCeiling(backend: glm))
+        XCTAssertNil(ModelRuntime.schedulerIdlePromptChunkCeiling(backend: nil))
+        XCTAssertTrue(ModelRuntime.isQwenMoE(.init(modelFamily: "qwen", requiresMoEDispatch: true)))
+        XCTAssertFalse(ModelRuntime.isQwenMoE(.init(modelFamily: "qwen", requiresMoEDispatch: false)))
+        XCTAssertFalse(ModelRuntime.isQwenMoE(.init(modelFamily: "glm5_next", requiresMoEDispatch: true)))
     }
 
     func testSchedulerNativeRaggedPrefillBindingKeepsQwenAndExistingGLMCapabilitiesClosed() {
