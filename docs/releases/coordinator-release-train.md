@@ -22,6 +22,12 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Several models per provider session (SPEC-001 R016 to R019, SPEC-002 R011) — merged 2026-11-16, not live
+
+[PR 2386](https://github.com/Augustas11/macprovider/pull/2386) merged as `354f13dd2` (Related: #2338). Coordinator: strict decode of a provider's `warm_models`; a session with at least two loaded, hash-verified members gets one pool entry per model with its own slots, routing, pins and queue; `served_model_id` on dispatch; `model_not_loaded` before the first byte fails over without settlement; compute-integrity sanctions per model, keyed on the catalog row. A provider with one loaded model is handled as today. Gateway: counts a multi-model session once; `/v1/models` and earnings per model. Schema: one defaulted column, `served_model_dispatch`, on the two route-snapshot tables (additive).
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator and gateway source change, additive schema change; state the about 1-2 min coordinator downtime first). No provider advertises a second model until a CLI cut carries the provider half (see the CLI release train), so this runtime changes nothing for the current fleet. Live probe after both: one provider serves buyer requests for two catalog models through the gateway in the same minute, with a receipt and billing row per model.
+
 ## Messages sessions partitioned by `metadata.user_id`; `cache_read_input_tokens` (SPEC-006 v0.9.81) — merged 2026-11-15, live in v1.8.290
 
 PR #2377 (`589fd8d24`), issue #2365. Live in v1.8.290 (2026-11-15 14:17 WITA); its own live probe (a follow-up Messages turn reporting `cache_read_input_tokens`) is not recorded here yet.
