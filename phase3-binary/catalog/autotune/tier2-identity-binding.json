@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "265f94d6fa65c02a922a2225d1f694045cdb31eb64f7f9aa79bc74cd86642381",
-  "generated_at": "2026-11-15T03:40:00Z",
+  "autotune_candidates_sha256": "7e146d42f23b4af2ce2cc583f51dbd807b7b6f5645d27a6dc9052abb52cc2816",
+  "generated_at": "2026-11-16T00:00:00Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -193,6 +193,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-15-nemotron-3.5-bolt-listed-v289",
+  "release_id": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

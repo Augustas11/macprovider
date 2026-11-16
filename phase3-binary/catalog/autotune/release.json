@@ -1,38 +1,38 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 25078,
-      "sha256": "e00e79a68fe0a279adf9b9a56894e2f4c530f6a0f4e3b65baf0782b1ce42a651",
+      "bytes": 25096,
+      "sha256": "a74b157c0860cd7a1b9165bb77c6637a8277526b7d1674675441bd729aee9af8",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-15-nemotron-3.5-bolt-listed-v289"
+      "version": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289"
     },
     "autotune-candidates.json": {
-      "bytes": 30057,
-      "sha256": "265f94d6fa65c02a922a2225d1f694045cdb31eb64f7f9aa79bc74cd86642381",
+      "bytes": 30066,
+      "sha256": "7e146d42f23b4af2ce2cc583f51dbd807b7b6f5645d27a6dc9052abb52cc2816",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-15-nemotron-3.5-bolt-listed-v289"
+      "version": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289"
     },
     "continuous-batching-policy.json": {
-      "bytes": 7299,
-      "sha256": "db96e1b2737fbd3d5f7c1790e25a06aedaf9440726b192356a15730cb094d200",
+      "bytes": 7308,
+      "sha256": "4a3b52d6a947624439018592b49ffd6cf7068fa484d43b1436b423f86b9cfb38",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-15-nemotron-3.5-bolt-listed-v289"
+      "version": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289"
     },
     "demand-rank.json": {
-      "bytes": 3128,
-      "sha256": "33ed581dc8218d7fe53390660672a5f25e36801d8af488c66b8f93a55110a3b5",
+      "bytes": 3137,
+      "sha256": "4f788499712e2cb98fd11d401416661a4a230f85a9bde4e4f020f62d3698ce01",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-15-nemotron-3.5-bolt-listed-v289"
+      "version": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289"
     },
     "native-mtp-admission.json": {
-      "bytes": 45682,
-      "sha256": "6867375659d1db5d67d1010288caf1de3a679f79bef732eb0d73ddce62f9df8e",
+      "bytes": 81916,
+      "sha256": "49eeb84ca9c3098e6786ea98f244d85910744e9489edc69dbcca95c89c4a6bcf",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-15-nemotron-3.5-bolt-listed-v289"
+      "version": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289"
     },
     "rate-card.json": {
       "bytes": 5594,
-      "sha256": "cb53a6ddcee8ece3cc6a485480a91b17473d5ce608c239bd0f0308f00d10b94d",
+      "sha256": "6da3090864e7f7720acb977d7a20b3c391ced52ae389c938f1b1dececd590b27",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "9db150e732d7474e5a7b91879a5c9abeff4b17142c07e994f177b611035b7e53"
     },
@@ -43,8 +43,8 @@
       "version": "macprovider-tier2-model-catalog-2026-11-15-nemotron-3.5-bolt-v1"
     }
   },
-  "generated_at": "2026-11-15T03:40:00Z",
+  "generated_at": "2026-11-16T00:00:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-15-nemotron-3.5-bolt-listed-v289",
+  "release_id": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289",
   "schema_version": "macprovider.autotune-release.v1"
 }
