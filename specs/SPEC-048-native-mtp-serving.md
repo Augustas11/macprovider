@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.110
+**Version:** 0.1.111
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.110",
+  "version": "0.1.111",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -644,12 +644,23 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.80` | `9317a903a9efb08a471c57be26744f7fa2a90ab9` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.81` | `2639874f835134c94c069d1825afe44604110a58` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.80` is on `3.32.3-macprovider.79`
+The mlx-swift-lm row `3.32.3-macprovider.81` is on `3.32.3-macprovider.80`
+(`9317a903a9efb08a471c57be26744f7fa2a90ab9`) (#2328), at
+`2639874f835134c94c069d1825afe44604110a58`: The three Gemma 4 commits of the
+campaign (packed assistant drafter, embedded assistant loader and target state
+emission; cache-owned attention for row-safe batching; the two K/V-read layers
+attend through the cache too), first carried by 3.32.3-macprovider.65 on .63,
+cherry-picked onto 3.32.3-macprovider.80 without conflicts; other model
+families, the native-MTP read-column pruning and the Swift, core and C rows
+are as in .80. Fork commits: `a02d0fa`, `51d8420`, `2639874` (branch
+`campaign/2328-gemma4-on-80`).
+
+The prior mlx-swift-lm row `3.32.3-macprovider.80` is on `3.32.3-macprovider.79`
 (`92459644d702bf42959c66dd8be0c0416f1dd882`) (#2393), at
 `9317a903a9efb08a471c57be26744f7fa2a90ab9`: On 3.32.3-macprovider.79, the last
 native-MTP layer (GLM-5-Next nextn head, Qwen 3.5/3.6 MTP predictor) runs its
@@ -2794,7 +2805,7 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
 | GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the R003-authorized tagged tuple and the GLM R015 record, which complete the R003 review record. An LFM-only tuple identity change follows MTP-13 and preserves the original measured GLM runtime/source identities. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
-| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.65` carries the Gemma 4 commits). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.110 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
+| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154`, `#2328` | Pending: the R005 and R015 one-row cells on the lab build (the R003 row `3.32.3-macprovider.81` carries the Gemma 4 commits). Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.34 mixed-class attach; the 0.1.110 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2834,6 +2845,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.111 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.81`
+  (`2639874f835134c94c069d1825afe44604110a58`) on `3.32.3-macprovider.80`
+  (#2328): The three Gemma 4 commits of the campaign (packed assistant
+  drafter, embedded assistant loader and target state emission; cache-owned
+  attention for row-safe batching; the two K/V-read layers attend through the
+  cache too), first carried by 3.32.3-macprovider.65 on .63, cherry-picked
+  onto 3.32.3-macprovider.80 without conflicts; other model families, the
+  native-MTP read-column pruning and the Swift, core and C rows are as in .80.
 - **0.1.110 (2026-11-16, Related: #2328)** — R002 defines the `gemma4_mtp_v1`
   artifact observation: the exact config identity, an MLX affine 8-bit target
   with bfloat16 scales and no exceptions, the discarded audio/vision

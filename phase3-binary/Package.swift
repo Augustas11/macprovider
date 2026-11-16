@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.81 (#2328) on 3.32.3-macprovider.80: The
+        // three Gemma 4 commits of the campaign (packed assistant drafter,
+        // embedded assistant loader and target state emission; cache-owned
+        // attention for row-safe batching; the two K/V-read layers attend
+        // through the cache too), first carried by 3.32.3-macprovider.65 on
+        // .63, cherry-picked onto 3.32.3-macprovider.80 without conflicts;
+        // other model families, the native-MTP read-column pruning and the
+        // Swift, core and C rows are as in .80.
         // Tag 3.32.3-macprovider.80 (#2393) on 3.32.3-macprovider.79: On
         // 3.32.3-macprovider.79, the last native-MTP layer (GLM-5-Next nextn
         // head, Qwen 3.5/3.6 MTP predictor) runs its post-attention norm and
@@ -213,7 +221,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "9317a903a9efb08a471c57be26744f7fa2a90ab9"
+            revision: "2639874f835134c94c069d1825afe44604110a58"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
