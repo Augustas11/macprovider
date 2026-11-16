@@ -2226,6 +2226,44 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(offers.count, 1)
     }
 
+    // Issue #2404: a canary timeout read as `tuple_revoked` in the provider
+    // status. The coordinator's reason now reaches `last_reason`.
+    func testNativeMTPCoordinatorDisableReasonReachesStatusLastReason() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, runtime, _) = try await makeNativeMTPReofferClient(recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "timeout"))
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.nativeMTPStatus.lastReason, .canaryTimeout)
+        XCTAssertFalse(snapshot.nativeMTPStatus.enabled)
+    }
+
+    func testNativeMTPStatusReasonMapsEveryCoordinatorDisableReason() {
+        let expected: [String: NativeMTPStatusReason] = [
+            "mismatch": .canaryMismatch,
+            "timeout": .canaryTimeout,
+            "expired": .canaryExpired,
+            "fallback": .canaryFallback,
+            "ordinary_or_classic": .canaryOrdinaryOrClassic,
+            "operator": .coordinatorOperator,
+        ]
+        for (reason, status) in expected {
+            XCTAssertEqual(CoordinatorClient.nativeMTPStatusReason(forCoordinatorDisable: reason), status, reason)
+        }
+        XCTAssertEqual(CoordinatorClient.nativeMTPStatusReason(forCoordinatorDisable: "something_new"), .tupleRevoked)
+    }
+
+    func testNativeMTPCanaryLogLineIsOneSanitizedLine() {
+        let line = CoordinatorClient.nativeMTPCanaryLogLine(
+            event: "native_mtp_canary_result_sent",
+            fields: [("challenge_id", "challenge-a"), ("diagnostic", "two words\ninjected=1")]
+        )
+        XCTAssertEqual(line, "event=native_mtp_canary_result_sent challenge_id=challenge-a diagnostic=two_words_injected=1\n")
+        XCTAssertEqual(line.filter { $0 == "\n" }.count, 1)
+    }
+
     func testRequestCapacityTransitionsSendCoordinatorStateUpdates() async throws {
         let recorder = CoordinatorFrameRecorder()
         let compatibilitySetID = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

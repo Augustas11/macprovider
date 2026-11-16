@@ -16,6 +16,14 @@ public enum NativeMTPStatusReason: String, CaseIterable, Sendable, Equatable {
     case lowAcceptanceDepthZero = "low_acceptance_depth_zero"
     case runtimeFailure = "runtime_failure"
     case warmSwap = "warm_swap"
+    /// A coordinator `native_mtp_tuple_disable_v1` with a canary reason
+    /// (SPEC-031-R033); `tuple_revoked` stays for a signed revocation.
+    case canaryMismatch = "canary_mismatch"
+    case canaryTimeout = "canary_timeout"
+    case canaryExpired = "canary_expired"
+    case canaryFallback = "canary_fallback"
+    case canaryOrdinaryOrClassic = "canary_ordinary_or_classic"
+    case coordinatorOperator = "coordinator_operator"
 }
 
 public enum NativeMTPStatusMode: String, Sendable, Equatable {
