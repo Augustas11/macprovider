@@ -1,0 +1,1 @@
+variant safetensors=185700864629 snapshot=189249390230 files=52 catalog_size_bytes=189249390230 donor_catalog_size_bytes=185947410196 donor_safetensors=185926672287 variant_le_donor_weights=yes

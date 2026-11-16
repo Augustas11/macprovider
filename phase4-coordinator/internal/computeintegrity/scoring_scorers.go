@@ -16,6 +16,10 @@ type ScorerCandidate struct {
 	ProviderID string
 	AssignedID string
 	ModelID    string
+	// ModelKey is ModelID case-folded by the coordinator's one model-id
+	// folding (pool.ModelKey); when set on both sides, scorer selection
+	// compares it instead of the spelling.
+	ModelKey string
 	// ManifestSHA256 is the cohort identity: the coordinator-verified
 	// catalog model hash of the session, never a provider-reported value,
 	// so a provider cannot move itself out of its scorer cohort.
@@ -31,6 +35,15 @@ type ScorerCandidate struct {
 	// a configured reference operator. It is chosen only for slots no
 	// eligible peer can fill.
 	Reference bool
+}
+
+// sameScorerModel reports whether a candidate runs the verified model: the
+// same folded key when both carry one, otherwise the same spelling.
+func sameScorerModel(c, verified ScorerCandidate) bool {
+	if c.ModelKey != "" && verified.ModelKey != "" {
+		return c.ModelKey == verified.ModelKey
+	}
+	return c.ModelID == verified.ModelID
 }
 
 // SelectScorers picks up to n scorers for a verified provider: distinct
@@ -51,7 +64,7 @@ func SelectScorers(
 	for _, c := range candidates {
 		if !c.Capable || !c.Ready ||
 			c.ProviderID == verified.ProviderID ||
-			c.ModelID != verified.ModelID ||
+			!sameScorerModel(c, verified) ||
 			c.ManifestSHA256 == "" || c.ManifestSHA256 != verified.ManifestSHA256 ||
 			c.OperatorKey == "" || c.OperatorKey == verified.OperatorKey {
 			continue

@@ -1,11 +1,10 @@
 package ws
 
 import (
-	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/text/unicode/norm"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 // AuthAttemptState retains the per-attempt SPEC-010 v1.5 R-3.1.10
@@ -126,5 +125,5 @@ func supportedModelsEqualUnderNFCASCIIFold(a, b []string) bool {
 }
 
 func normalizeSupportedModelEntry(s string) string {
-	return strings.ToLower(norm.NFC.String(s))
+	return pool.ModelKey(s)
 }

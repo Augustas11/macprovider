@@ -1350,6 +1350,41 @@ final class ServingKnobsConfigTests: XCTestCase {
         ))
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.56): `small_m_route` accepts only
+    /// `row_invariant`; absent leaves the route to serve's decision.
+    func testSmallMRouteAcceptsOnlyRowInvariant() throws {
+        XCTAssertFalse(AppConfig.defaults().smallMRouteRowInvariant)
+        let absent = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: on\n" }
+        )
+        XCTAssertFalse(absent.smallMRouteRowInvariant)
+        let accepted = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: on\nsmall_m_route: row_invariant\n" }
+        )
+        XCTAssertTrue(accepted.smallMRouteRowInvariant)
+        XCTAssertEqual(accepted.continuousBatching, .on)
+        for rejected in ["stock_order", "serial_only", "true", "1", "\"\"", "[row_invariant]"] {
+            XCTAssertThrowsError(try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in "small_m_route: \(rejected)\n" }
+            ), rejected) { error in
+                guard case let .invalidValue(key, _, expected)? = error as? ConfigError else {
+                    return XCTFail("\(rejected): \(error)")
+                }
+                XCTAssertEqual(key, "small_m_route", rejected)
+                XCTAssertEqual(expected, "row_invariant", rejected)
+            }
+        }
+    }
+
     func testContinuousBatchingCachedTurnsCLIFlagAndPreflightLine() throws {
         XCTAssertNil(try ServeCommand.parse([]).continuousBatchingCachedTurns)
         XCTAssertEqual(try ServeCommand.parse(["--continuous-batching-cached-turns"]).continuousBatchingCachedTurns, true)

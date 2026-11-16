@@ -18,28 +18,64 @@ another gate.
 Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14; the Live
 entry is updated for the 2026-11-15 MiniMax activation.
 
-- **Live:** `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`
-  (activated 2026-11-15 through `scripts/ops/catalog-activate.sh`, no
+- **Live:** `published-2026-11-15-nemotron-3.5-bolt-listed-v289`
+  (activated 2026-11-16 through `scripts/ops/catalog-activate.sh`, no
   coordinator restart), from
-  [#2344](https://github.com/Augustas11/macprovider/pull/2344) (`14c223516`).
-  It moves `minimaxai/minimax-m3.1-flash` from `listed` to `recommendable`.
-  Evidence (a)-(d) passed; (e) is owed for the MiniMax M3.1-Flash artifact
-  because no connected provider served it. The previous live release was
-  `published-2026-11-12-nemotron-3.5-lightning-listed-v283`.
-  `buyer_ux_conformance_owed` remains for `minimaxai/minimax-m3.1-flash`
-  (no conformance record yet), and the activation tool still lists
-  `live_probe` as pending: the canary serves the uncensored GLM-5.3-Flash
-  build, which has no native-MTP admission entry (#2382).
-- **Committed, not live:** `published-2026-11-15-nemotron-3.5-bolt-listed-v289`
-  from [PR 2385](https://github.com/Augustas11/macprovider/pull/2385)
-  (`61c3d02c3`): a `listed` row for Nemotron 3.5 Bolt 74B-A9B, serial
-  serving, `min_ram_gb` 84, rate class `class-120b-moe`. Order of live
-  steps: first a Pearl runtime release that carries the Bolt billing alias
-  (`scripts/ops/pearl-runtime.sh status`, then `next --run`), then
-  `scripts/ops/catalog-activate.sh status` and `next --run`. The activation
-  tool refuses this release until the running coordinator has the alias.
-  Live probe: one buyer request served on the Bolt row and billed at the
-  class rate, once a provider with at least 84 GB serves it.
+  [PR 2385](https://github.com/Augustas11/macprovider/pull/2385)
+  (`61c3d02c3`). It adds a `listed` row for Nemotron 3.5 Bolt 74B-A9B:
+  serial serving, `min_ram_gb` 84, rate class `class-120b-moe`, with the
+  rate-card row `nemotron-3.5-bolt-74b-a9b` (68,000 / 17,000 / 136,000
+  credits per million prompt / cache-hit / completion tokens; the operator
+  acknowledged the price table). Evidence (a)-(d) passed; (e) was not
+  required because the buyer-serving set adds or re-hashes nothing. The
+  gateway serves the release rate card. The previous live release was
+  `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`.
+  Not yet done: the buyer probe on the Bolt row (one request served and
+  billed at the class rate), which needs a provider with at least 84 GB
+  serving it. `buyer_ux_conformance_owed` remains for
+  `minimaxai/minimax-m3.1-flash` (no conformance record yet), and the
+  activation tool still lists `live_probe` and `gateway_proof` as pending:
+  the canary serves the uncensored GLM-5.3-Flash build, which has no
+  native-MTP admission entry (#2382).
+- **Merged, not live:** `published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289` from
+  [PR 2392](https://github.com/Augustas11/macprovider/pull/2392) (`cf64b09a6`, Related: #2376):
+  a `listed` row for the abliterated MiniMax M3.1-Flash, generated against the live Bolt v289
+  release. Activation needs the Pearl runtime carrying its billing alias first; the row serves
+  only on the next CLI cut (engine `.71`). Steps are in `docs/releases/cli-release-train.md`.
+- **Pending, `published-2026-11-16-glm53-flash-uncensored-native-mtp-v289`
+  (#2382, signed with `streamvc-autotune-static-v4`, stacked on the PR 2392
+  release):** the native-MTP admission set gains
+  `zai-org/glm-5.3-flash-uncensored` (`mlx-oq4e-uncensored-dflash2`, snapshot
+  `242f8fcf…`) as an MTP-13 variant of `zai-org/glm-5.3-flash`, with its own
+  quantization block and MTP-16 self-check record
+  (`docs/evidence/glm53-uncensored-native-mtp-variant-2026-11-16/`). Nothing
+  else changes; the Tier-2 catalog is unchanged from the PR 2392 release.
+  **Activation order:** (1) the Pearl runtime release carrying the MiniMax
+  abliterated billing aliases; (2) the PR 2392 catalog release
+  `published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289`; (3) this
+  release. **Live steps for this release:** (1) merge, then
+  `scripts/ops/catalog-activate.sh status` and `next --run` once (2) is live;
+  (2) the canary serving the uncensored build reports native MTP enabled
+  (`live_probe`); (3) one buyer request through the gateway is served with
+  native MTP (`gateway_proof`); (4) the next CLI cut bakes the release.
+- **Pending, `published-2026-11-16-qwen27b-native-mtp-v289`
+  (#2383, signed with `streamvc-autotune-static-v4`, stacked on the PR 2394
+  release):** the native-MTP admission set adds two entries,
+  `qwen/qwen3.6-27b` (`mlx-4bit`, snapshot `518ef47c…`) and
+  `qwen/qwen3.8-27b` (`mlx-4bit`, snapshot `8a8786e9…`). Both run at depth 1
+  with one native row, four slots and a 4096-token cap, with the self-test bank
+  entries recorded 2026-11-04. R005 and R015 are from 2026-11-04
+  (`docs/evidence/qwen27b-native-mtp-2026-11-04/`). Journey, security
+  negatives, window bound and quantization are from 2026-11-16
+  (`docs/evidence/qwen27b-native-mtp-2026-11-16/`). Nothing else changes.
+  **Activation order:** (1) the PR 2392 release
+  `published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289`; (2) the
+  PR 2394 release `published-2026-11-16-glm53-flash-uncensored-native-mtp-v289`;
+  (3) this release. **Live steps for this release:** (1) merge, then
+  `scripts/ops/catalog-activate.sh status` and `next --run` once (2) is live;
+  (2) a provider serving either 27B model reports native MTP enabled after its
+  self-check; (3) one buyer request on each model through the gateway is
+  served with native MTP; (4) the next CLI cut bakes the release.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since

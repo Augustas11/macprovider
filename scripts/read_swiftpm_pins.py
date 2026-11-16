@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 0f93fa38 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 0f26baba (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 12d26ef6 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 4e9a71dc (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,45 +42,38 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.65 (#2328) on 3.32.3-macprovider.63 (8f882166): the three
-# Gemma 4 commits of 3.32.3-macprovider.64 (packed assistant drafter and
-# embedded loader, cache-owned attention for row-safe batching, K/V-read layers
-# through the cache), cherry-picked without change. Other model families are
-# as in .63.
-# 3.32.3-macprovider.64 (#2328) on 3.32.3-macprovider.60 (a4b4b536): one
-# Gemma 4 commit. The two K/V-read layers attend through a cache that owns
-# attention and get its keys and values back, so the provider's native MTP
-# verify columns attend exactly as the decode step at their position. Other
-# model families are unchanged.
-# 3.32.3-macprovider.60 (#2328) on 3.32.3-macprovider.58: the Qwen2-VL commit
-# of 3.32.3-macprovider.59 (#2327: post-vision decode uses fused
-# non-traditional RoPE when the three M-RoPE axes share one rope delta) and
-# the Gemma 4 commits b2a45b0 (packed assistant drafter, embedded assistant
-# loader, target hidden-state and shared-K/V emission) and e198b9b (Gemma 4
-# layers attend through a cache that owns attention, so batched rows attend
-# only over their own keys), which the provider's gemma4_mtp_v1 adapter needs.
-# 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
-# can yield between evaluated tiles so other continuous-batch rows decode
-# while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
-# hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.65"
-SPEC048_MLX_SWIFT_LM_REVISION = "8cb290572057724090123f2aadcc15b443cf4c41"
+# 3.32.3-macprovider.80 (#2393) on 3.32.3-macprovider.79: On
+# 3.32.3-macprovider.79, the last native-MTP layer (GLM-5-Next nextn head,
+# Qwen 3.5/3.6 MTP predictor) runs its post-attention norm and MoE/MLP, and
+# Qwen's final norm, on each row's read column only, while attention and the
+# drafter cache write still run on every column (MLX_LM_MTP_LAST_COLUMN=0 runs
+# every column again); carries the #2373 candidate: TokenIterator settles
+# simple and rotating caches by their stored buffers, and Llama and Qwen3 run
+# SwiGLU as one compiled kernel.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.80"
+SPEC048_MLX_SWIFT_LM_REVISION = "9317a903a9efb08a471c57be26744f7fa2a90ab9"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
-# Fork tag 0.32.3-macprovider.22: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below.
-SPEC048_MLX_SWIFT_REVISION = "0f93fa380369a1abd1e17757a465cf42a72d8f69"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
+# Fork tag 0.32.3-macprovider.25: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below (.22 plus three commits that move the core
+# gitlink to the stock-order route and regenerate the quantized jit sources);
+# .25 is .24 (7fbcada9) plus a synchronous eval that waits for the device
+# without holding the process-wide evalLock (Swift layer only, core gitlink
+# unchanged).
+SPEC048_MLX_SWIFT_REVISION = "12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.14, seven commits on v0.32.4-macprovider.7
-# (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# Fork tag v0.32.4-macprovider.15, seven commits on v0.32.4-macprovider.14
+# (upstream MLX v0.32.4) that add the stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2) and its qmv_mma partial-sum count: the
+# reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.14"
-SPEC048_MLX_CORE_REVISION = "0f26baba0d1c1a10d74e7133614e0dc7f409ff80"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.15"
+SPEC048_MLX_CORE_REVISION = "4e9a71dc9e765f739003868f38d3aca05871e70d"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"

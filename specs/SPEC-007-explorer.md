@@ -1,6 +1,6 @@
 # SPEC-007 — Internal Operator Protocol Explorer
 
-**Version:** 0.5.2
+**Version:** 0.5.3
 **Status:** Implemented & shipped — the coordinator `internal/explorer` package enforces this spec's read-only + typed-path MUSTs (served at `/admin/explorer/*`). Restored to the canonical `specs/` root on 2026-07-10 (corpus-hygiene pass) from `specs/design/spec-007/`, where the supporting design, operator-decision, and audit records remain.
 
 Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/design/spec-007/SPEC-007-explorer-design.md`, and `specs/design/spec-007/SPEC-007-operator-decisions.md`.
@@ -12,6 +12,7 @@ settlement mutator. It is not a parallel analytics store.
 ## 1. Change log
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| v0.5.3 | 2026-11-16 | docs+impl (Related: #2338) | Multi-model providers (SPEC-002-R011): `pool.models_available` lists every warm-set entry's model, as the `/poolz` summary does, while the provider counts and slot totals stay per provider session. Each provider row in `/admin/explorer/providers` and the provider detail adds `warm_models`, one object per entry (primary first) with `model_id`, `primary`, `state`, `slots_total` and `slots_free`, empty when the provider reports no warm set. The new fields sit behind the same operator bearer as every explorer data route and carry the privacy tags of the neighbouring `model_id` and slot fields. |
 | v0.5.2 | 2026-10-13 | docs (#1793) | §12.3: lookups by `request_id` on `ledger_request_credits` use the unique `(request_id, attempt_n, provider_id)` key. SPEC-005 v0.6.20 dropped the redundant `idx_lrc_request` (SPEC-022 R-15.10). No explorer behavior changes. |
 | v0.5.1 | 2026-07-29 | docs+impl (B1) | Consumer note for SPEC-002 v1.5.6 `request_log.ttft_ms` / `request_log.decode_ms`: these nullable coordinator-observed provider timing columns are internal observability data. SPEC-007 MAY surface them in future operator-only views, but v0.5.1 does not require a response-schema expansion. |
 | v0.5 | 2026-06-30 | docs+impl (ISS-245) | Closes the v0.4 deprecation window per the v0.4 §5.6 + §6.4 commitments. **Trigger:** issue #245's option (2) — operator UI cutover — satisfied by this PR's dashboard.js change (the only first-party operator UI). Telemetry-quiet (14d) and 90-day cutoff triggers did NOT fire — the dashboard cutover IS the cutover. **§5.6 + §6.4 (path-segment typing, break mode):** the `{request_id}` path-segment MUST carry a typed prefix — `int_<coordinator-internal request_id>` for §5.6, `ext_<external_request_id>` for §6.4. Untyped (legacy bare-id) calls are rejected with `400 invalid_request_error` + `code: session_id_untyped`. The v0.4 `payout_explorer_path_segment_untyped` audit/log emit is removed because the path is no longer reachable. **IMPL:** `phase5-gateway/internal/router/explorer.go::handleExplorerSessionDetail` and `phase4-coordinator/internal/explorer/handlers.go::handleSessionDetail` return 400 when `parseTypedSegment` reports `typed=false` (gateway) or `strings.CutPrefix("int_")` returns `ok=false || stripped==""` (coordinator). `Handler.logPathSegmentUntyped` deleted (no longer reachable). `phase4-coordinator/internal/explorer/static/js/dashboard.js` `linkFor` emits `/admin/explorer/sessions/int_${encodeURIComponent(v)}` for both `request_id` columns and `link_target: session:` rows so coordinator-dashboard navigations match the new typed-prefix contract. **Tests:** `TestSessionDetail_UntypedReturns400` + `TestSessionDetail_EmptyIntPrefixReturns400` (coordinator) and `TestExplorerSessionDetail_UntypedReturns400` + `TestExplorerSessionDetail_EmptyExtPrefixReturns400` (gateway) replace the v0.4 deprecation-emit tests. Pre-v0.5 callers that still pass bare ids will receive 400 — operators MUST migrate to typed prefixes (the coordinator dashboard already emits them as of v0.5). |
@@ -655,6 +656,15 @@ Response schema:
       "assigned_id": "string",
       "hostname": "string",
       "model_id": "string",
+      "warm_models": [
+        {
+          "model_id": "string",
+          "primary": true,
+          "state": "loading|warm|evicting",
+          "slots_total": 0,
+          "slots_free": 0
+        }
+      ],
       "model_params_b": 0.0,
       "ram_gb": 0,
       "max_context_tokens": 0,
@@ -693,6 +703,15 @@ Response schema:
   "next_cursor": "string|null"
 }
 ```
+`warm_models` (v0.5.3) lists the provider's SPEC-002-R011 entries, primary
+first: each entry's `model_id`, whether it is the `primary`, its warm-set
+`state`, and the entry's own `slots_total` and `slots_free` (the primary's
+are the provider's top-level values; a further member that is not `warm` has
+`slots_free` 0). It is an empty array when the provider reports no warm set;
+`model_id` then names its only model. The overview's `pool.models_available`
+lists every entry's model, primary and further members alike, as the
+`/poolz` summary does; its provider counts and `slots_free`/`slots_total`
+stay per provider session.
 Underlying coordinator sources:
 - Live pool registry from `phase4-coordinator/internal/pool/provider.go`.
 - `provider_tokens`.
@@ -1925,6 +1944,11 @@ Fields:
 | `assigned_id` | operator-only |
 | `hostname` | operator-only |
 | `model_id` | public-raw |
+| `warm_models[].model_id` | public-raw |
+| `warm_models[].primary` | public-raw |
+| `warm_models[].state` | public-aggregate |
+| `warm_models[].slots_total` | public-aggregate |
+| `warm_models[].slots_free` | public-aggregate |
 | `model_params_b` | public-aggregate |
 | `state` | public-aggregate |
 | `tier` | operator-only |

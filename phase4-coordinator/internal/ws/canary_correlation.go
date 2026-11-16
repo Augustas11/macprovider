@@ -94,7 +94,7 @@ func (s *Server) shouldRouteThroughCorrelation(provider pool.Provider, class can
 	s.canaryCorrMu.Lock()
 	defer s.canaryCorrMu.Unlock()
 	if s.canaryCorrByModel != nil {
-		if _, open := s.canaryCorrByModel[strings.ToLower(modelID)]; open {
+		if _, open := s.canaryCorrByModel[pool.ModelKey(modelID)]; open {
 			return true
 		}
 	}
@@ -194,7 +194,7 @@ func (s *Server) applyCanaryViaCorrelation(provider pool.Provider, attempt canar
 	if modelID == "" || s.pool == nil {
 		return s.applyCanaryImmediate(provider, attempt, recoveryEpoch)
 	}
-	modelKey := strings.ToLower(modelID)
+	modelKey := pool.ModelKey(modelID)
 	fp := canaryChallengeFingerprint(attempt.challenge)
 	if fp == "" {
 		return s.applyCanaryImmediate(provider, attempt, recoveryEpoch)

@@ -28,6 +28,18 @@ export MACPROVIDER_OMLX_ORIGIN=http://127.0.0.1:19131
 export MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR=1
 export MACPROVIDER_AUTO_UPDATE_ENABLED=false
 export MACPROVIDER_MAX_CONCURRENCY_OVERRIDE="${MACPROVIDER_MAX_CONCURRENCY_OVERRIDE:-4}"
+# Signed static feeds (lab builds only, StaticFeedOrigin.labOverride): a
+# closed lab loopback port, so the fetch fails fast and the baked lab release
+# is used; the lab static key is trusted instead of production's. Refuse when
+# the lab release is missing: without the override the CLI would use the
+# production origin.
+for f in "$LAB/static/static-public-key.base64" "$LAB/static/autotune-candidates.json.sig"; do
+  [[ -s "$f" ]] || { echo "refusing: missing lab static release file $f (rig.sh build)" >&2; exit 2; }
+done
+export MACPROVIDER_LAB_STATIC_FEED_ORIGIN=http://127.0.0.1:19108
+MACPROVIDER_LAB_STATIC_FEED_KEY_ID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["key_id"])' "$LAB/static/autotune-candidates.json.sig")"
+MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY="$(tr -d '[:space:]' <"$LAB/static/static-public-key.base64")"
+export MACPROVIDER_LAB_STATIC_FEED_KEY_ID MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY
 case "$(grep -E '^coordinator_url:' "$MACPROVIDER_CONFIG")" in
   *"ws://127.0.0.1:191"*) ;;
   *) echo "refusing: lab config must point at a 191xx loopback coordinator" >&2; exit 2 ;;

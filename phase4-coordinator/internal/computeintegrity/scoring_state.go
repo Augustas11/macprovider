@@ -51,6 +51,7 @@ const (
 	ReasonInBandStreak           StateReason = "in_band_streak"
 	ReasonOutOfBandTop1          StateReason = "out_of_band_top1"
 	ReasonOutOfBandLogprob       StateReason = "out_of_band_logprob"
+	ReasonEntryWithdrawn         StateReason = "entry_withdrawn"
 	ReasonConfirmedFailure       StateReason = "confirmed_failure"
 	ReasonRecoveryPassed         StateReason = "recovery_passed"
 	ReasonEscalationPassed       StateReason = "escalation_passed"

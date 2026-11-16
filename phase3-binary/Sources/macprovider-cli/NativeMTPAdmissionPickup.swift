@@ -188,9 +188,14 @@ struct NativeMTPAdmissionPendingStatus: Sendable, Equatable {
     let phase: Phase
     /// When the drain starts, for `scheduled`.
     let drainNotBefore: Date?
+    /// The model the admission is for: the boot model, which a restart
+    /// brings back as the primary. After a promotion (SPEC-001-R016) the
+    /// top-level status fields describe another model.
+    var modelID: String? = nil
 
     func statusObject() -> [String: Any] {
         var object: [String: Any] = ["release_id": releaseID, "phase": phase.rawValue]
+        if let modelID { object["model_id"] = modelID }
         if let drainNotBefore {
             object["drain_not_before"] = ISO8601DateFormatter().string(from: drainNotBefore)
         }

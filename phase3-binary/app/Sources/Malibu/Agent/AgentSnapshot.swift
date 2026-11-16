@@ -186,6 +186,8 @@ struct AgentSnapshot: Equatable {
     // nil until a fresh projection from a peer that reports it arrives.
     var payoutsEnabled: Bool? = nil
     var lastPaidJobAt: Date? = nil
+    /// Lifetime provider credits per served model, from a fresh earnings read.
+    var earningsCreditsByModel: [String: Int64]? = nil
     var malibuTrustProgress: MalibuTrustProgress? = nil
     var malibuEmission: MalibuEmissionState? = nil
 
@@ -568,6 +570,7 @@ struct AgentSnapshot: Equatable {
             hasObservedProviderEarnings = true
             payoutsEnabled = providerEarnings.payoutsEnabled
             lastPaidJobAt = providerEarnings.lastPaidJobAt
+            earningsCreditsByModel = providerEarnings.creditsByModel
         }
         idlePrewarmSummary = providerEarnings.idlePrewarm
         guard rewardInputs.malibuProjectionFresh else {

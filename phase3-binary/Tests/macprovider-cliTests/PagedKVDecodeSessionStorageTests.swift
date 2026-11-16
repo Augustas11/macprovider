@@ -207,6 +207,41 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 
     // MARK: - Backend decode sessions
 
+    /// `finish` runs on the scheduler actor while a decode window may be
+    /// packing the surviving rows on the container (#2338: a terminal delivery
+    /// landing during the next window). It must leave every row cache alone
+    /// until the container is free; releasing the session in `finish` cut a
+    /// surviving row's layer history to one window
+    /// (`paged_kv_block_table_mismatch`). The surviving row still decodes
+    /// exactly afterwards.
+    func testFinishDuringAContainerOperationLeavesSurvivingRowsUntouched() async throws {
+        try requireMetal()
+        let target = try Self.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": Self.tinyPrompt(length: 37, salt: 11),
+            "b": Self.tinyPrompt(length: 70, salt: 12),
+        ]
+        let shared = try Rows(target: target, prompts: prompts)
+        for id in ["a", "b"] { try await shared.prefillAll(id) }
+        try await shared.decode(["a", "b"], steps: 3)
+        XCTAssertEqual(shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+
+        let backend = shared.backend
+        let survivingRowUntouched = try await backend.withTargetLockForTest {
+            backend.finish(requestID: "a")
+            return backend.rowHoldsOwnKVForTest(requestID: "b") == false
+        }
+        XCTAssertTrue(survivingRowUntouched, "finish released the session while the container was busy")
+
+        try await shared.decode(["b"], steps: 4)
+        let count = shared.generated["b"]!.count
+        XCTAssertEqual(
+            shared.generated["b"],
+            try Self.serialGreedy(target: target, prompt: prompts["b"]!, tokens: count),
+            "b diverged from serial KVCacheSimple after a finished during a container operation"
+        )
+    }
+
     /// Mixed-length rows (one past the 512-token chunk) decode in shared
     /// sessions that keep their batch across another row's prompt chunks,
     /// gain a row, lose a row, and take back a row that decoded alone. Every
@@ -264,7 +299,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private static func rowCache() -> PagedKVCache {
+    fileprivate static func rowCache() -> PagedKVCache {
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "session-storage-test", poolEpoch: 1)
         let binding = PagedKVStorageBinding(
             handle: handle,
@@ -310,7 +345,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
     }
 
     /// Two-layer KV-only Qwen3 with random weights.
-    private static func tinyQwen3() throws -> Qwen3Model {
+    fileprivate static func tinyQwen3() throws -> Qwen3Model {
         let configuration = try JSONDecoder().decode(Qwen3Configuration.self, from: Data("""
             {
               "hidden_size": 16,
@@ -332,7 +367,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         return target
     }
 
-    private static func tinyPrompt(length: Int, salt: Int) -> [Int] {
+    fileprivate static func tinyPrompt(length: Int, salt: Int) -> [Int] {
         var state = UInt64(truncatingIfNeeded: 0x9E37_79B9 &+ salt)
         return (0 ..< length).map { _ in
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
@@ -342,7 +377,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 
     /// Serial reference: one `KVCacheSimple` per layer, the same 512-token
     /// prompt chunks, greedy decode.
-    private static func serialGreedy(target: Qwen3Model, prompt: [Int], tokens: Int) throws -> [Int] {
+    fileprivate static func serialGreedy(target: Qwen3Model, prompt: [Int], tokens: Int) throws -> [Int] {
         let cache = try target.newCache(parameters: nil)
         var logits: MLXArray?
         var offset = 0
@@ -360,7 +395,7 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         return generated
     }
 
-    private final class Rows {
+    fileprivate final class Rows {
         let backend: PagedKVSharedForwardBackend
         let allocator: PagedKVBlockAllocator
         let prompts: [String: [Int]]
@@ -471,6 +506,311 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
+    }
+}
+
+/// #2396: the scheduler calls `finish` from a finished row's terminal
+/// delivery while the next decode window already runs on the model
+/// container (every one of the Studio overlaps logged an active operation).
+/// `finish` must therefore touch no row cache. It released the dropped
+/// session, which detached the remaining rows' layer caches while that window
+/// was repacking the same caches into its new batch. A layer packed from a
+/// half-detached row got no K/V, started a fresh lockstep buffer at the
+/// window's first token, and the row recorded that layer with 8 tokens
+/// against a 467-token block table (`paged_kv_block_table_mismatch`).
+///
+/// CPU device, random two-layer weights. Building the weights still loads
+/// the default metallib (a CI host aborted in `mlx_random_key`), so a host
+/// without one skips, like the other MLX-array tests.
+final class PagedKVDecodeSessionFinishTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
+    override func invokeTest() {
+        guard MLXTestDevice.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.cpu)) {
+            super.invokeTest()
+        }
+    }
+
+    /// Two equal-length rows ride one lockstep session (the Studio failure:
+    /// `r2` and `r0` at 458 tokens), one row finishes, and the other decodes
+    /// on alone. `finish` leaves the remaining row attached to the dropped
+    /// session's buffers; the next window repacks it on the container, and
+    /// its greedy tokens equal the row decoded alone and a serial run.
+    func testFinishLeavesRemainingRowCachesToTheNextWindow() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 21),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 22),
+        ]
+        let shared = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        try await shared.prefillAll("a")
+        try await shared.prefillAll("b")
+        try await shared.decode(["a", "b"], steps: 2)
+        XCTAssertEqual(shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+
+        // The retained record keeps the finished row's caches.
+        let finishedLayers = shared.backend.rowPagedCachesForTest(requestID: "a")
+        XCTAssertEqual(finishedLayers.count, 2)
+        let finishedTokens = shared.committed("a")
+        shared.backend.finish(requestID: "a")
+        XCTAssertEqual(
+            shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false,
+            "finish must not touch another row's caches: a window running beside it repacks them"
+        )
+
+        try await shared.decode(["b"], steps: 3)
+        // The next window releases the session finish dropped: the finished
+        // row's caches hold their own copy, so they pin no batch buffer.
+        XCTAssertTrue(finishedLayers.allSatisfy(\.holdsOwnKVBuffers), "a still rides the dropped batch")
+        XCTAssertEqual(finishedLayers.map(\.offset), [finishedTokens, finishedTokens])
+        try await shared.decode(["b"], steps: 2)
+        let count = shared.generated["b"]!.count
+        let lone = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: ["b": prompts["b"]!])
+        try await lone.prefillAll("b")
+        while lone.generated["b"]!.count < count {
+            try await lone.decode(["b"], steps: 1)
+        }
+        XCTAssertEqual(shared.generated["b"], lone.generated["b"], "b diverged from the row decoded alone")
+        XCTAssertEqual(
+            shared.generated["b"],
+            try PagedKVDecodeSessionStorageTests.serialGreedy(target: target, prompt: prompts["b"]!, tokens: count),
+            "b diverged from serial KVCacheSimple"
+        )
+    }
+
+    /// The Studio interleaving, replayed deterministically: a window rebuilds
+    /// its session for `b` while `a`'s `finish` runs on another thread. The
+    /// window waits after the previous session synced until `finish` is
+    /// halfway through detaching one of `b`'s layers (out of its batch slot,
+    /// not yet holding its own copy), then packs `b`, and only then lets the
+    /// detach complete. Every layer of `b` must still hold `b`'s history: the
+    /// window records `b` against its block table and `b` decodes the same
+    /// tokens as alone. Before the fix the packed layer got no K/V and the
+    /// window threw `paged_kv_block_table_mismatch`.
+    func testFinishBesideARebuildingWindowKeepsEveryLayerOfTheRemainingRow() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 31),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 32),
+        ]
+        let shared = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        try await shared.prefillAll("a")
+        try await shared.prefillAll("b")
+        try await shared.decode(["a", "b"], steps: 2)
+        let backend = shared.backend
+        let bLayers = Set(backend.rowPagedCachesForTest(requestID: "b").map(ObjectIdentifier.init))
+        XCTAssertEqual(bLayers.count, 2)
+
+        let state = InterleavingState()
+        let midDetach = DispatchSemaphore(value: 0)
+        let packed = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        PagedKVCache.detachObserverForTest = { cache in
+            guard bLayers.contains(ObjectIdentifier(cache)), state.claim("paused") else { return }
+            midDetach.signal()
+            _ = packed.wait(timeout: .now() + 5)
+        }
+        backend.rebuildObserverForTest = { point in
+            switch point {
+            case "prev_synced" where state.claim("finish_started"):
+                DispatchQueue.global().async {
+                    backend.finish(requestID: "a")
+                    finished.signal()
+                }
+                // Without a detach in `finish` this times out and the window
+                // goes on, as it does in production.
+                state.record(midDetach.wait(timeout: .now() + 0.5) == .success ? "finish_detached_b" : "finish_left_b")
+            case "packed" where state.claim("packed"):
+                packed.signal()
+            default:
+                break
+            }
+        }
+        defer {
+            PagedKVCache.detachObserverForTest = nil
+            backend.rebuildObserverForTest = nil
+        }
+
+        try await shared.decode(["b"], steps: 3)
+        _ = finished.wait(timeout: .now() + 5)
+        XCTAssertTrue(state.has("finish_started"), "the window never rebuilt its session")
+        XCTAssertFalse(state.has("finish_detached_b"), "finish detached b's caches while a window repacked them")
+        let committed = shared.committed("b")
+        XCTAssertEqual(backend.rowPagedCachesForTest(requestID: "b").map(\.offset), [committed, committed])
+
+        try await shared.decode(["b"], steps: 2)
+        let count = shared.generated["b"]!.count
+        let lone = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: ["b": prompts["b"]!])
+        try await lone.prefillAll("b")
+        while lone.generated["b"]!.count < count {
+            try await lone.decode(["b"], steps: 1)
+        }
+        XCTAssertEqual(shared.generated["b"], lone.generated["b"], "b diverged from the row decoded alone")
+    }
+
+    /// The invariant behind both off-container sites (`finish` and the
+    /// native-MTP verify entry): a row cache leaves a batch only while some
+    /// caller holds the backend's model container (its target lock). Windows
+    /// still release the sessions those sites dropped, so detaches happen.
+    func testRowCachesLeaveTheirBatchOnlyInsideTheModelContainer() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 41),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 42),
+            "c": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 43),
+        ]
+        let shared = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        for id in ["a", "b", "c"] { try await shared.prefillAll(id) }
+        try await shared.decode(["a", "b", "c"], steps: 2)
+        let backend = shared.backend
+        let state = InterleavingState()
+        PagedKVCache.detachObserverForTest = { _ in
+            state.record(backend.targetLockHeldForTest() ? "inside" : "outside")
+        }
+        defer { PagedKVCache.detachObserverForTest = nil }
+
+        // A finished row: `finish` runs beside windows.
+        backend.finish(requestID: "a")
+        XCTAssertFalse(state.has("outside"), "finish detached row caches outside the model container")
+        try await shared.decode(["b", "c"], steps: 2)
+
+        // Native-MTP verify drops the decode session before its container
+        // hop. This backend has no drafter, so the round itself fails.
+        let handle = shared.handles["b"]!
+        let binding = try await shared.allocator.binding(for: handle)
+        _ = try? await backend.verifyNativeMTPPackedRound(rows: [ContinuousBatchNativeMTPVerifyInput(
+            requestID: "b",
+            currentToken: shared.generated["b"]!.last!,
+            proposalTokens: [1],
+            generatedTokens: shared.generated["b"]!,
+            samplerSeed: 0,
+            binding: binding,
+            blockTable: binding.currentTable,
+            committedKVTokenCount: shared.committed("b"),
+            verifiedInputTokenCount: 2,
+            targetKVTokenCount: shared.committed("b") + 2,
+            packedRowIndex: 0,
+            samplerStep: shared.generated["b"]!.count
+        )])
+        XCTAssertFalse(state.has("outside"), "native-MTP verify detached row caches outside the model container")
+        XCTAssertTrue(state.has("inside"), "no window released a dropped session")
+    }
+
+    /// A finished row's retained record is read and trimmed off the model
+    /// container (`reattachPagedKVCache`, `trimRecordedContiguousCache`)
+    /// while a window may be detaching the same caches from the session they
+    /// left. A reader beside a detach sees the whole row, never the instant
+    /// between leaving the batch slot and holding its own copy.
+    func testReaderBesideADetachSeesTheWholeRow() throws {
+        let row = PagedKVDecodeSessionStorageTests.rowCache()
+        MLXRandom.seed(2396)
+        _ = row.update(keys: MLXRandom.normal([1, 2, 20, 4]), values: MLXRandom.normal([1, 2, 20, 4]))
+        let batch = PagedKVSharedForwardBackend.batchLayerCacheForTest(rowCaches: [row], attachRows: true)
+        XCTAssertFalse(row.holdsOwnKVBuffers)
+
+        let state = InterleavingState()
+        let read = DispatchSemaphore(value: 0)
+        PagedKVCache.detachObserverForTest = { cache in
+            guard cache === row, state.claim("paused") else { return }
+            DispatchQueue.global().async {
+                let stored = row.state
+                state.record(stored.count == 2 && stored[0].dim(2) == 20 && row.storedTokens == 20 ? "whole" : "torn")
+                read.signal()
+            }
+            // A reader that waits for the detach to finish times out here.
+            _ = read.wait(timeout: .now() + 0.3)
+        }
+        defer { PagedKVCache.detachObserverForTest = nil }
+        PagedKVSharedForwardBackend.detachBatchRowsForTest(batch)
+        _ = read.wait(timeout: .now() + 5)
+        XCTAssertTrue(state.has("paused"))
+        XCTAssertTrue(state.has("whole"), "a reader saw the row between its batch slot and its own copy")
+        XCTAssertTrue(row.holdsOwnKVBuffers)
+        XCTAssertEqual(row.state.first?.dim(2), 20)
+    }
+
+    /// Two rows of one session end in the same window: `finish(a)` retires
+    /// the session, and `b`'s terminal commit runs before any decode window
+    /// could release it. The commit must find `b` holding its own K/V and end
+    /// with its full history plus the committed token: the same K/V as the
+    /// same batch whose `a` has not finished.
+    func testTerminalCommitAfterABatchMatesFinishSeesItsOwnFullHistory() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 51),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 52),
+        ]
+        func batchCommittingB(finishingA: Bool) async throws -> (PagedKVDecodeSessionStorageTests.Rows, Int) {
+            let rows = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+            try await rows.prefillAll("a")
+            try await rows.prefillAll("b")
+            try await rows.decode(["a", "b"], steps: 2)
+            XCTAssertEqual(rows.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+            let committed = rows.committed("b")
+            if finishingA { rows.backend.finish(requestID: "a") }
+            let handle = rows.handles["b"]!
+            _ = try await rows.allocator.extend(handle, by: 1)
+            let binding = try await rows.allocator.binding(for: handle)
+            try await rows.backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                requestID: "b",
+                currentToken: rows.generated["b"]!.last!,
+                binding: binding,
+                blockTable: binding.currentTable,
+                committedKVTokenCount: committed,
+                targetKVTokenCount: committed + 1
+            ))
+            return (rows, committed)
+        }
+
+        let (finished, committed) = try await batchCommittingB(finishingA: true)
+        let layers = finished.backend.rowPagedCachesForTest(requestID: "b")
+        XCTAssertEqual(layers.count, 2)
+        XCTAssertTrue(layers.allSatisfy(\.holdsOwnKVBuffers), "b still rides the retired batch")
+        XCTAssertEqual(layers.map(\.offset), [committed + 1, committed + 1])
+        XCTAssertEqual(layers.map(\.storedTokens), [committed + 1, committed + 1])
+
+        let (reference, _) = try await batchCommittingB(finishingA: false)
+        XCTAssertEqual(
+            try finished.backend.rowTargetCacheDigestForTest(requestID: "b"),
+            try reference.backend.rowTargetCacheDigestForTest(requestID: "b"),
+            "b's committed K/V differs from the same batch without a's finish"
+        )
+    }
+}
+
+/// Flags shared by a test and the threads it interleaves.
+private final class InterleavingState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flags: Set<String> = []
+
+    /// Sets `flag`; true only for the first caller.
+    func claim(_ flag: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.insert(flag).inserted
+    }
+
+    func record(_ flag: String) {
+        lock.lock()
+        flags.insert(flag)
+        lock.unlock()
+    }
+
+    func has(_ flag: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.contains(flag)
     }
 }
 

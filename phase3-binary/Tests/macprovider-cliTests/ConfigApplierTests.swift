@@ -516,6 +516,138 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertTrue(hint.contains("gui/$UID/live.malibu.provider"))
     }
 
+    // MARK: - SPEC-001-R017 warm set
+
+    /// A config without warm keys is written exactly as before the warm set
+    /// existed (golden bytes).
+    func testApplyWithoutWarmKeysWritesGoldenBytes() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now, recordsProvenance: false)
+
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), """
+        # operator config
+        coordinator_endpoint: https://coordinator.example
+        model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+        kv_bits: 4
+        max_context_override: 4000
+        max_concurrency_override: 1
+        # important token comment
+        provider_token: keep-me
+        log_path: /tmp/provider.log
+        """)
+    }
+
+    func testWarmSetTextEditsNothingWithoutWarmKeys() throws {
+        for text in [sampleConfig(), "", "model: a\n", "model: a\r\nport: 1\r\n", "custom:\n  warm_models: [a]\nmodel: a"] {
+            XCTAssertEqual(try ConfigApplier.removingPrimaryFromWarmSet(text), text)
+        }
+    }
+
+    func testApplyRemovesTheNewPrimaryFromWarmModelsAndLimits() throws {
+        let fixture = try ConfigFixture()
+        let primary = recommendation().model
+        try fixture.writeConfig(sampleConfig() + """
+
+        warm_models: [other/model, \(primary)]
+        warm_model_limits:
+          \(primary): {context_tokens: 8192, slots: 2}
+          other/model: {slots: 1}
+        # after the warm set
+        """)
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now, recordsProvenance: false)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertTrue(post.contains("warm_models: [other/model]\nwarm_model_limits:\n  other/model: {slots: 1}\n# after the warm set"), post)
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path), environment: [:])
+        XCTAssertEqual(loaded.model, primary)
+        XCTAssertEqual(loaded.warmModels, ["other/model"])
+        XCTAssertEqual(loaded.warmModelLimits(for: "other/model"), WarmModelLimits(slots: 1))
+    }
+
+    func testApplyDropsWarmKeysWhenThePrimaryWasTheOnlyMember() throws {
+        let fixture = try ConfigFixture()
+        let primary = recommendation().model
+        try fixture.writeConfig("model: old-model\nwarm_models:\n  - \(primary.uppercased())\nport: 8080\n")
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now, recordsProvenance: false)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertFalse(post.contains("warm_models"), post)
+        XCTAssertTrue(post.contains("port: 8080\n"), post)
+        XCTAssertEqual(try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path), environment: [:]).warmModels, [])
+    }
+
+    func testRestoreOfAnOlderPrimaryAlsoLeavesAValidWarmSet() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig("model: new-model\nwarm_models: [old-model, third]\n")
+        try fixture.applier().restoreRecommendationOwnedFields(["model": "old-model"], now: fixture.now)
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), "model: old-model\nwarm_models: [third]\n")
+    }
+
+    func testSetWarmSetAddsUpdatesAndRemovesAMember() throws {
+        let fixture = try ConfigFixture()
+        let base = "# keep\nmodel: main/model\nsupported_models: [main/model]\nport: 8080\n"
+        try fixture.writeConfig(base)
+        let applier = fixture.applier()
+
+        XCTAssertNotNil(try applier.setWarmSet(.keep(modelID: "org/second", limits: nil), now: fixture.now))
+        XCTAssertEqual(try String(contentsOf: fixture.configURL),
+                       "# keep\nmodel: main/model\nsupported_models: [main/model, org/second]\nport: 8080\nwarm_models: [org/second]\n")
+        // Saying it again changes nothing and writes no backup.
+        XCTAssertNil(try applier.setWarmSet(.keep(modelID: "ORG/second", limits: nil), now: fixture.now))
+
+        try applier.setWarmSet(.keep(modelID: "org/second", limits: WarmSetConfigLimits(contextTokens: 8192, slots: 2)), now: fixture.now)
+        var loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path), environment: [:])
+        XCTAssertEqual(loaded.warmModels, ["org/second"])
+        XCTAssertEqual(loaded.warmModelLimits(for: "org/second"), WarmModelLimits(contextTokens: 8192, slots: 2))
+        XCTAssertEqual(loaded.supportedModels, ["main/model", "org/second"])
+
+        try applier.setWarmSet(.keep(modelID: "org/second", limits: nil), now: fixture.now)
+        loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path), environment: [:])
+        XCTAssertEqual(loaded.warmModelLimits, [:])
+
+        try applier.setWarmSet(.keep(modelID: "org/second", limits: WarmSetConfigLimits(slots: 1)), now: fixture.now)
+        try applier.setWarmSet(.remove(modelID: "Org/Second"), now: fixture.now)
+        XCTAssertEqual(try String(contentsOf: fixture.configURL),
+                       "# keep\nmodel: main/model\nsupported_models: [main/model, org/second]\nport: 8080\n")
+    }
+
+    func testSetWarmSetRefusesThePrimaryAndInvalidLimitsWithoutWriting() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig("model: main/model\n")
+        let applier = fixture.applier()
+        XCTAssertThrowsError(try applier.setWarmSet(.keep(modelID: "MAIN/model", limits: nil), now: fixture.now))
+        XCTAssertThrowsError(try applier.setWarmSet(
+            .keep(modelID: "org/second", limits: WarmSetConfigLimits(slots: AppConfig.warmModelSlotsLimit + 1)), now: fixture.now))
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), "model: main/model\n")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: fixture.tempDir.path).contains { $0.contains(".bak-") })
+    }
+
+    func testWarmSetTextReadsEveryListForm() throws {
+        let forms = [
+            "warm_models: [a, \"b c\", 'd''e']\n",
+            "warm_models: \"a, b c, d'e\"\n",
+            "warm_models: a, b c, d'e  # comment\n",
+            "warm_models:\n  - a\n  - \"b c\"\n  # note\n  - d'e\n",
+            "warm_models:\n- a\n- b c\n- d'e\n",
+        ]
+        for form in forms {
+            XCTAssertEqual(try WarmSetConfigText.read("model: p\n" + form).warmModels, ["a", "b c", "d'e"], form)
+        }
+        let text = "model: p\nwarm_models: [a]\nwarm_model_limits:\n  a:\n    context_tokens: 4096\n    slots: 3\n"
+        XCTAssertEqual(try WarmSetConfigText.read(text).limits(for: "A"), WarmSetConfigLimits(contextTokens: 4096, slots: 3))
+        XCTAssertThrowsError(try WarmSetConfigText.read("warm_model_limits: [a]\n"))
+        // A quoted id survives a rewrite and loads back as the same string.
+        let quoted = try WarmSetConfigText.setting("org/x:1", limits: WarmSetConfigLimits(slots: 2), in: "model: p\n")
+        XCTAssertEqual(quoted, "model: p\nwarm_models: [\"org/x:1\"]\nwarm_model_limits:\n  \"org/x:1\": {slots: 2}\n")
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: "/x"), environment: [:],
+                                           fileExists: { _ in true }, readFile: { _ in quoted })
+        XCTAssertEqual(loaded.warmModelLimits(for: "org/x:1"), WarmModelLimits(slots: 2))
+    }
+
     private func sampleConfig() -> String {
         """
         # operator config

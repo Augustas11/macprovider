@@ -1,9 +1,70 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.0-draft
-**Date:** 2026-11-07
+**Status:** v0.3.6-draft
+**Date:** 2026-11-16
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.6 (2026-11-16, Related: #2338 — keys on the resolved catalog row):**
+A verification key, its due time, its scorer pool, its tolerance key, the
+matching of an in-flight request and a FR-25 suspension key on the model's
+sanction identity (SPEC-002-R011), not on its spelling. A signed catalog row
+is reachable as its row key and as its `model_id`; both map to the row's
+normalized `model_id`. An id that names no catalog row keeps its canonical
+model id, as before. A provider suspended or under verification for a
+model keeps that state, due time and suspension when it declares the model
+under the row's other name, as a warm member or as its top-level model.
+Holds open on the key's identity (SPEC-022 v0.4.15 R-16.2a).
+
+**Change log v0.3.5 (2026-11-16, Related: #2338 — canonical model id, withdrawn members):**
+A model id has one canonical form: trimmed, Unicode NFC, then lower case
+(`pool.ModelKey`). The coordinator rejects at decode any model id with
+surrounding whitespace or a control character, or whose canonical form is
+not its ASCII lower case, so every accepted spelling folds to one key under
+both the key rule and the ASCII `lower()` of the settlement hold predicate.
+A further warm member whose entry is withdrawn while its verification
+request is in flight stays due; three such withdrawals in a row count as one
+out-of-band outcome with the new reason `entry_withdrawn`. The primary's
+handling is unchanged.
+
+**Change log v0.3.4 (2026-11-16, Related: #2338 — served model on verification only, folded keys):**
+A verification request names the served model only for a multi-model
+session (SPEC-002-R011: at least two warm, hash_verified members); a
+scoring job goes to the primary and carries no served model. Verification
+keys compare by case-folded model id, so a re-spelling is the same key with
+the same due time and an in-flight request still counts.
+
+**Change log v0.3.3 (2026-11-16, Related: #2338 — per-entry suspension and probing as built):**
+FR-19 and FR-25 say how a multi-model session is verified and suspended. The
+scheduler sweeps one verification key per warm entry: a further member is
+verifiable for its own model and its verification request names that model
+(`served_model_id`), while scorer candidates are drawn from the primary
+entries only, so a further member is verified but never scores. A `failed`
+key suspends routing of that entry only; the session's other entries keep
+serving. The suspension key folds model ids like the pool (Unicode NFC, then
+lower case). A warm set of exactly one member is a legacy session, one key.
+No scorer, threshold, trust tier or attestation label changes.
+
+**Change log v0.3.2 (2026-11-15, Related: #2338 — the hold as built):**
+FR-23's earnings hold for a multi-model session follows SPEC-022 R-16.2a as
+built: a credit of an attempt dispatched to a warm entry (route snapshot flag
+`served_model_dispatch`) is held only by a hold for its served model,
+compared with the database `lower()` (ASCII case folding only); every other
+credit, including one of a pool-model route and one whose route snapshot is
+no longer in the hot store, keeps the provider-wide hold. The v0.3.1 phrase
+"the key's model only" is narrowed accordingly. No scorer, threshold, trust
+tier or attestation label changes.
+
+**Change log v0.3.1 (2026-11-13, Related: #2338 — several warm models per session):**
+FR-19 no longer relies on a session serving one model. A provider session may
+serve several warm models (SPEC-001-R016); the verification key stays
+`(provider_id, model_id)`, where `model_id` is the served model of the warm
+entry that served the request, so a decision still names exactly the traffic
+it affects. The cohort hash is per (session, served model). FR-20 requests
+and FR-21 scoring jobs to a multi-model session name the served model
+(`served_model_id`). FR-23 consequences and the SPEC-022-R016 hold apply to
+the key's model only. No scorer, threshold, trust tier or attestation label
+changes.
 
 **Change log v0.3.0 (2026-11-07, issue #1644 — reference scorers):**
 Adds FR-26 (SPEC-036-R026). Until v0.2.1 a key could be verified only when a
@@ -2111,11 +2172,61 @@ serving.
 
 ### FR-19 Scope and keys (SPEC-036-R019)
 
-A **verification key** is `(provider_id, model_id)`. A provider session serves
-one model at a time, so the key names exactly the traffic a decision affects.
-The **cohort hash** of a session is its coordinator-verified catalog model
-hash. A provider cannot choose it, so a provider-reported value never decides
-which scorers a provider is compared with. A session's reported
+A **verification key** is `(provider_id, model_id)`, where `model_id` is the
+served model: the `model_id` of the warm entry (SPEC-001-R016) that served the
+request, never the buyer's requested alias. A provider session may serve
+several warm models; each is its own key, and every request is attributed to
+exactly one key through its route snapshot (SPEC-002-R011), so the key names
+exactly the traffic a decision affects. A request, scoring job or consequence
+for one key never reads or changes another key of the same session. The
+**cohort hash** of a session for a key is the coordinator-verified catalog
+model hash of that warm entry. A provider cannot choose it, so a
+provider-reported value never decides which scorers a provider is compared
+with. A verification request sent to a multi-model session (SPEC-002-R011:
+at least two members `warm` and `hash_verified`) MUST carry
+`served_model_id` naming the key's model, and is answered by that member's
+runtime only; a request to any other session carries none. A scoring job
+goes to a session's primary model and carries no `served_model_id`. As
+built, the scheduler sweeps one key per warm entry of every session
+(SPEC-002-R011 entry views), each verifiable for its own model under the
+rules below; a session that is not multi-model is a legacy session and one
+key. Only a session's primary entry can be a scorer candidate, so a further
+member is verified but never scores another provider. The `model_id` of a
+key, of a scorer pool and of every comparison between them is
+in one canonical form: trimmed, Unicode NFC, then lower case. The
+coordinator rejects at decode, through the field's existing invalid-frame
+path, any model id that is empty, has surrounding whitespace or a control
+character, or whose canonical form differs from its ASCII lower case (for
+example a Kelvin sign or an NFD sequence); ASCII case variants stay legal.
+Every accepted spelling therefore folds to the same key here and under the
+ASCII `lower()` that the SPEC-022 R-16 hold predicate applies, so a session
+that re-spells its model keeps one key, its state and its due time, and a
+verification request in flight across the re-spelling still counts.
+
+As built, the key's `model_id` is the model's sanction identity
+(SPEC-002-R011), not the spelling: a signed catalog row is reachable under
+its row key and under its `model_id`, and both map to the row's normalized
+`model_id`; an id that names no catalog row keeps its canonical form above.
+Verification keys, due times, scorer pools, tolerance keys, the matching of
+a scorer's answer to its in-flight request, the FR-25 suspension and the
+passing set that SPEC-022 R-16.2a reads all key on it. A session that
+declares its model under the row's other name, as a further warm member or
+as its top-level model, therefore keeps one key, its state, due time,
+suspension and withdrawal count. A key state stored before this rule under
+a row key restores onto the row's identity; an adverse state still wins.
+
+A verification request to a further warm member whose entry is withdrawn
+from the session (it left the warm set or its identity changed) before the
+answer arrives is inconclusive, but the key stays due rather than moving a
+full interval. Withdrawals count per key; the count resets on a complete answer
+and when the key's state is pruned. Every third withdrawal in a row is
+one out-of-band outcome with reason `entry_withdrawn`, scored by the
+operators of the scorers reserved for that request (reference-only when they
+were all reference scorers), so withholding answers by withdrawing the
+member walks the key through `suspect` to `failed` like any other
+out-of-band streak. The primary is unchanged: a primary model swap mid-probe
+stays an inconclusive `dispatch` and the key's due time moves a full
+interval. A session's reported
 `weights_manifest_sha256` is only what a scoring job to that session carries
 (FR-21).
 
@@ -2445,7 +2556,9 @@ Transitions:
   starts at the confirmation), or clears the key to `unverified`.
 
 Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
-`short_output`, `scorer_invalid`) change no state.
+`short_output`, `scorer_invalid`) change no state, except that a further
+warm member's third withdrawal in a row is an out-of-band outcome with
+reason `entry_withdrawn` (see the model-key rules above).
 
 A transition commits its SPEC-022 R-16 hold change and the new state in one
 database transaction (bounded at 5 s), and only then publishes the routing
@@ -2508,12 +2621,21 @@ Consequences of `failed`:
 - The provider is excluded from routing for that model: every buyer path
   (ordinary, pinned, slot queue, relay-blind and privacy-class binding, and
   their capability counts) skips it. Other models the provider may later serve
-  are unaffected. The provider stays connected, so it can recover; the
+  are unaffected. For a multi-model session the suspension is per warm
+  entry: only the entry serving that model is excluded, the session's other
+  entries keep serving, and the model is matched with the pool's folding
+  (Unicode NFC, then lower case). The provider stays connected, so it can recover; the
   pool-check `buyer_serving` session-liveness signal is unchanged, and the
   provider learns its state from the status surface below.
 - Its unsettled earnings inside the affected window are held under SPEC-022
   R-16, whatever model string the buyer requested, because a credit records
-  the requested model, which may be an alias of the served one. Nothing is burned. A hold has no expiry and is released
+  the requested model, which may be an alias of the served one. For a
+  multi-model session the hold is narrowed by SPEC-022 R-16.2a: a credit
+  whose attempt was dispatched to a warm entry (`served_model_dispatch`) is
+  held only when its served model equals the key's model under the database
+  `lower()` (ASCII case folding only); any other credit of the provider in
+  the window, including a pool-model route's and one whose route snapshot is
+  no longer in the hot store, is held provider-wide. Nothing is burned. A hold has no expiry and is released
   only by FR-23 recovery (recovery hold) or by an operator (any hold).
 
 Visibility:
@@ -2533,7 +2655,7 @@ Visibility:
   `POST /admin/compute-integrity/holds/<hold_id>/release`, each with an
   `operator_id` and a reason, and each audit-logged.
 - Reasons are a closed set: `in_band_streak`, `out_of_band_top1`,
-  `out_of_band_logprob`, `confirmed_failure`, `recovery_passed`,
+  `out_of_band_logprob`, `entry_withdrawn`, `confirmed_failure`, `recovery_passed`,
   `escalation_passed`, `escalation_inconclusive`, `operator_clear`,
   `cooldown_elapsed`, `reference_only_failure`.
 - The provider's view of a hold omits who released it and why; operators see

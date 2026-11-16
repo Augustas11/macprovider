@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -695,6 +696,32 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 	return s.autotuneCatalog, s.autotuneCompatibleCatalogs
 }
 
+// catalogSanctionIdentity is the registry's SanctionResolver: the identity
+// of the signed row a model id names (autotune.Catalog.CanonicalModelID) in
+// the active release, else in the first compatible release (by key order)
+// that carries it, so a session admitted on a retained previous release keys
+// its sanctions on its own row.
+func (s *Server) catalogSanctionIdentity(modelKey string) (string, bool) {
+	current, compatible := s.autotuneCatalogSnapshot()
+	if id, ok := current.CanonicalModelID(modelKey); ok {
+		return id, true
+	}
+	if len(compatible) == 0 {
+		return "", false
+	}
+	keys := make([]string, 0, len(compatible))
+	for key := range compatible {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if id, ok := compatible[key].CanonicalModelID(modelKey); ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // SetAutotuneCatalog atomically swaps the active + compatible catalogs. The
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
@@ -1350,6 +1377,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 			return s.verifyModelIdentity(req)
 		})(registry)
+		// SPEC-036 FR-25: every name of one signed catalog row keys one
+		// set of per-model sanctions.
+		pool.WithSanctionResolver(s.catalogSanctionIdentity)(registry)
 	}
 	if s.currentAutotuneCatalog() != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
 		go s.runAutotuneCatalogBridgeDeadline()
@@ -2607,6 +2637,10 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
 		return "", ""
 	}
+	if err := s.warmModelsSameCatalogRow(hello.WarmModels, nil); err != nil {
+		hello.WarmModels, hello.WarmModelsErr = nil, err
+	}
+	s.logHandshakeWarmModelsDropped(hello.ProviderID, "hello", hello.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
 		providerID:       hello.ProviderID,
 		authStage:        providerevents.AuthStageFirstMessage,
@@ -2806,6 +2840,10 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
+	if err := s.warmModelsSameCatalogRow(initial.WarmModels, initial.SupportedModels); err != nil {
+		initial.WarmModels, initial.WarmModelsErr = nil, err
+	}
+	s.logHandshakeWarmModelsDropped(initial.ProviderID, "auth_request", initial.WarmModelsErr)
 	s.rememberCloseEvent(conn, closeEventMeta{
 		providerID:       initial.ProviderID,
 		authStage:        providerevents.AuthStageFirstMessage,
@@ -3801,6 +3839,11 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
 		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
 	}
+	entry.WarmModels = s.warmModelsForPool(hello.WarmModels, func(modelID string) string {
+		member := hello
+		member.ModelID = modelID
+		return s.expectedAdmissionModelHashWithCatalog(member, catalogAdmissionMode, admissionCurrent, admissionCompatible)
+	})
 	if s.proofOfWeightsConfig().RequireAutotuneHelloGate {
 		entry.AdmissionCeilingExcluded = s.admissionCeilingRouteVerdict(*entry).excluded
 		entry.AdmissionSandboxed = admissionSandboxed
@@ -5482,6 +5525,11 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 		"request_id":       requestID,
 		"estimated_tokens": estimatedTokens,
 	}
+	// SPEC-001-R016: only an entry of a warm-set provider names its model, so
+	// a provider without warm_models gets the same preflight as before.
+	if provider.ServedModelID != "" {
+		msg["served_model_id"] = provider.ServedModelID
+	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return PreflightAck{}, false, err
@@ -6678,14 +6726,72 @@ func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string
 		Msg("provider verified-benchmark quarantine state changed")
 }
 
+// logHandshakeWarmModelsDropped logs a hello or auth_request whose malformed
+// warm_models was dropped; the session proceeds as legacy (SPEC-002-R011).
+func (s *Server) logHandshakeWarmModelsDropped(providerID, message string, err error) {
+	if err == nil {
+		return
+	}
+	s.log.Warn().
+		Err(err).
+		Str("event", "handshake_warm_models_dropped").
+		Str("field", warmModelsField).
+		Str("message_type", message).
+		Str("provider_id", providerID).
+		Msg("handshake warm_models dropped; session proceeds without a warm set")
+}
+
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
 	hb, presence, field, err := ParseHeartbeat(payload)
+	// SPEC-002-R011: a malformed warm_models on a heartbeat drops only the
+	// warm-set update; the previous member list stays and the rest of the
+	// heartbeat applies, so the session never goes stale over it.
+	var warmModelsErr error
+	if err != nil && field == warmModelsField {
+		if rest, ok := withoutWarmModels(payload); ok {
+			if restHB, restPresence, _, restErr := ParseHeartbeat(rest); restErr == nil {
+				warmModelsErr = err
+				hb, presence, field, err = restHB, restPresence, "", nil
+			}
+		}
+	}
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
 		if field == "model_hash" || field == "model_hash_algorithm" {
 			s.fenceInvalidModelIdentity(conn, providerID, assignedID)
 		}
 		return
+	}
+	if hb.WarmModels != nil {
+		// A warm set outside the session's supported_models is malformed.
+		var supported []string
+		if current, ok := s.pool.Resolve(providerID, assignedID); ok {
+			supported = current.SupportedModels
+		}
+		if err := validateWarmModelsSupported(hb.WarmModels, supported, hb.ModelID); err != nil {
+			warmModelsErr = err
+			hb.WarmModels = nil
+		} else if err := s.warmModelsSameCatalogRow(hb.WarmModels, supported); err != nil {
+			warmModelsErr = err
+			hb.WarmModels = nil
+		}
+	}
+	if warmModelsErr != nil {
+		var suppressed uint64
+		allow := true
+		if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+			suppressed, allow = session.allowWarmModelsRejectedLog(s.now())
+		}
+		if allow {
+			s.log.Warn().
+				Err(warmModelsErr).
+				Str("event", "heartbeat_warm_models_rejected").
+				Str("field", warmModelsField).
+				Str("provider_id", providerID).
+				Str("assigned_id", assignedID).
+				Uint64("suppressed_since_last", suppressed).
+				Msg("heartbeat warm_models rejected; previous warm set kept, rest of the heartbeat applied")
+		}
 	}
 	state := pool.State(hb.Status)
 	if !validState(state) {
@@ -6744,6 +6850,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
+	warmModels := s.warmModelsForPool(hb.WarmModels, func(modelID string) string {
+		return s.expectedProviderModelHash(providerID, assignedID, modelID)
+	})
 	// SPEC-047-R006(a)/(d): the registry mutation and the drift evaluation of
 	// the bound candidate are one linearization point under the provider's
 	// section (section → registry), so no decision or binding refresh
@@ -6786,6 +6895,8 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
 			SafetyTelemetry:           hb.SafetyTelemetry,
 			ConversationCache:         hb.ConversationCache,
+			WarmModels:                warmModels,
+			KeepWarmModels:            warmModelsErr != nil,
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {
@@ -7774,14 +7885,22 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	providers := s.pool.Snapshot()
-	if !tier2.ModelHashActive(s.tier2Config()) {
-		for i := range providers {
-			providers[i].ModelHash = ""
-			providers[i].HashStatus = ""
-		}
-	} else {
-		for i := range providers {
-			providers[i].HashStatus = providers[i].PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(providers[i]))).Status
+	// SPEC-002-R011: one pool row per (provider, model) entry; a provider
+	// without warm_models is one row, exactly its Snapshot value.
+	entries := make([]pool.Provider, 0, len(providers))
+	for _, p := range providers {
+		entries = append(entries, pool.EntryViews(p)...)
+	}
+	for _, list := range [][]pool.Provider{providers, entries} {
+		if !tier2.ModelHashActive(s.tier2Config()) {
+			for i := range list {
+				list[i].ModelHash = ""
+				list[i].HashStatus = ""
+			}
+		} else {
+			for i := range list {
+				list[i].HashStatus = list[i].PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(list[i]))).Status
+			}
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -7798,6 +7917,15 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		ByBinaryVersion map[string]poolzVersionSegment `json:"by_binary_version"`
 	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers, s.perf, s.now())}
 	cfg := s.tier2Config()
+	// The summary counts provider sessions; slot totals are the session's
+	// own (the primary entry's), since entry slots are not additive
+	// (SPEC-002-R011). Every entry's model is a served model.
+	for _, p := range entries {
+		if _, ok := modelSet[p.ModelID]; !ok {
+			modelSet[p.ModelID] = struct{}{}
+			summary.Models = append(summary.Models, p.ModelID)
+		}
+	}
 	for _, p := range providers {
 		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
 		// StateUpdateDoesNotPublish: FreeSlots aggregates buyer-usable
@@ -7816,10 +7944,6 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			summary.PolicyReady++
 		}
 		summary.TotalSlots += p.SlotsTotal
-		if _, ok := modelSet[p.ModelID]; !ok {
-			modelSet[p.ModelID] = struct{}{}
-			summary.Models = append(summary.Models, p.ModelID)
-		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -7838,10 +7962,15 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 		// SPEC-002 FR-O2 v1.6.31 measured-throughput fields.
 		routing.ThroughputView
+		// SPEC-002-R011 entry fields, present only on a provider that sent
+		// warm_models.
+		ServedModel string `json:"served_model,omitempty"`
+		Primary     *bool  `json:"primary,omitempty"`
+		WarmState   string `json:"warm_state,omitempty"`
 	}
 	now := s.now()
-	poolz := make([]poolzProvider, 0, len(providers))
-	for _, provider := range providers {
+	poolz := make([]poolzProvider, 0, len(entries))
+	for _, provider := range entries {
 		var receiptPubkey *string
 		if len(provider.ReceiptPubkey) > 0 {
 			encoded := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
@@ -7865,6 +7994,13 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			ReceiptPubkeyPrev: receiptPubkeyPrev,
 			ThroughputView:    routing.ProviderThroughput(provider, s.perf, now),
 		})
+		if member, ok := provider.EntryMember(); ok {
+			row := &poolz[len(poolz)-1]
+			row.ServedModel = member.ModelID
+			primary := member.Primary
+			row.Primary = &primary
+			row.WarmState = string(member.State)
+		}
 	}
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotation. The three
 	// `catalog_*` fields are present iff the catalog is effectively

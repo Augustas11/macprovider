@@ -98,9 +98,14 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("small-m-route"),
-        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route) or serial-only (the fork's pre-window per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0)."
+        help: "MLX small-row quantized matmul route: row-invariant (default, the batch-safe route), serial-only (the fork's pre-window per-row qmv, MLX_METAL_SMALL_M_ROW_INVARIANT=0) or stock-order (upstream's one-row kernel, an exact two-row kernel and the batch kernel from three rows, MLX_METAL_SMALL_M_ROW_INVARIANT=2)."
     )
     var smallMRoute: String = "row-invariant"
+    @Option(
+        name: .customLong("tokens-out"),
+        help: "Append each timed run's generated token IDs as one JSON line to this file (uncompiled path only)."
+    )
+    var tokensOut: String?
 
     func run() async throws {
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
@@ -119,7 +124,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
         guard let route = decodeBenchSmallMRoute(smallMRoute) else {
             FileHandle.standardError.write(Data(
-                "decode-bench: --small-m-route must be row-invariant or serial-only\n".utf8
+                "decode-bench: --small-m-route must be row-invariant, serial-only or stock-order\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -399,6 +404,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
         nonisolated(unsafe) var firstTokenAt: Date? = nil
         var promptTokens = 0
         var generationTokens = 0
+        nonisolated(unsafe) var generatedTokenIDs: [Int] = []
         let input = UserInput(chat: [.user(prompt)])
         try await container.perform(nonSendable: input) { context, input in
             let lmInput = try await context.processor.prepare(input: input)
@@ -420,6 +426,10 @@ struct DecodeBenchCommand: AsyncParsableCommand {
                 return GenerateDisposition.more
             }
             generationTokens = result.generationTokenCount
+            generatedTokenIDs = result.tokenIds
+        }
+        if let tokensOut, !isWarmup {
+            try appendDecodeBenchTokens(generatedTokenIDs, to: tokensOut)
         }
         let endAt = Date()
         let prefillEnd = firstTokenAt ?? endAt
@@ -456,11 +466,25 @@ func decodeBenchMLXPinTag() -> String {
     "mlxlm-" + String(KVBuildIdentity.mlxSwiftLMRevision.prefix(12))
 }
 
+/// One JSON array of token IDs per line, for comparing greedy runs across builds.
+func appendDecodeBenchTokens(_ tokens: [Int], to path: String) throws {
+    var line = try JSONEncoder().encode(tokens)
+    line.append(0x0A)
+    if !FileManager.default.fileExists(atPath: path) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
+    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: line)
+}
+
 /// `decode-bench --small-m-route` value, or nil when it names no route.
 func decodeBenchSmallMRoute(_ value: String) -> SmallMRoute? {
     switch value {
     case "row-invariant": return .rowInvariant
     case "serial-only": return .serialOnly
+    case "stock-order": return .stockOrder
     default: return nil
     }
 }

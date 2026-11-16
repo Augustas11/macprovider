@@ -210,7 +210,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertFalse(supported(depth: 2, kinds: [.pagedAttention]))
     }
 
-    /// SPEC-048 0.1.102: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
+    /// SPEC-048 0.1.110: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
     /// drafts 1...3 tokens from one position whatever its decoder depth, owns
     /// no drafter cache, and admits only the exact SPEC-039 v0.1.34 `gemma4`
     /// mixed class with the runtime caches in its config layout.
@@ -380,7 +380,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
     }
 
-    /// SPEC-048-R002 (0.1.102) `gemma4_mtp_v1`: the 8-bit target and bf16
+    /// SPEC-048-R002 (0.1.110) `gemma4_mtp_v1`: the 8-bit target and bf16
     /// assistant pair is recomputed from the observed artifact and matched
     /// field by field; no exceptions are admissible.
     func testGemma4EmbeddedAssistantObservationMustMatchSignedCapability() throws {
@@ -1645,7 +1645,9 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
     func testServingDecodeRunsThroughBlockingInferenceExecutor() throws {
         let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
-        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+BlockingGenerateResult\(generate\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
+        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+(?:(?!blockingInferenceExecutor)[\s\S]){0,1200}?BlockingGenerateResult\(generate\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
+        // The closure may bracket the decode in a GPU turn (SPEC-001-R018) before
+        // it calls `generate`; the call must still sit inside the executor closure.
         let matches = try NSRegularExpression(pattern: pattern).numberOfMatches(
             in: source,
             range: NSRange(source.startIndex..., in: source)
@@ -1656,7 +1658,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         // SPEC-001-R013: the speculative iterator (its prompt prefill) is built in
         // the request task so a cancel stops it; its decode loop stays on the executor.
         XCTAssertTrue(source.contains("let draftCache = try draftContext.model.newCache(parameters: parameters)\n                var iterator = try SpeculativeTokenIterator("))
-        XCTAssertTrue(source.contains("try prefillScope.markPrefillDone()\n                return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)"))
+        XCTAssertTrue(source.contains("try prefillScope.markPrefillDone()\n                return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    defer { gpuTurn?.end() }\n                    let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)"))
         XCTAssertTrue(source.contains("SpeculativeTokenIterator("), "speculative decode must use the blocking iterator route")
         XCTAssertFalse(source.contains("let stream = try generate(\n                    input: input,\n                    cache: cache"))
         XCTAssertFalse(source.contains("generateTokens("), "raw speculative startup/canary generation must not use AsyncStream token generation")

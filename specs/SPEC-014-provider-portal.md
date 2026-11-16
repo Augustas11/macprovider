@@ -1,8 +1,13 @@
 # SPEC-014 — Provider Portal (seller-facing web surface)
 
-**Version:** 0.12
+**Version:** 0.13
 **Status:** Draft (v0.10 operator-minted portal read session)
 **Date drafted:** 2026-06-21 (v0.10 operator-minted session 2026-08-22)
+**Change log v0.13 (2026-11-16, Related: #2338):**
+  `GET /providers/{id}/earnings` now returns `credits_by_model`, the
+    provider's credited total per model (SPEC-005 §11.4). The portal's
+    per-model view remains deferred (C.3): time bucketing and the per-day
+    chart still have no source fields. No portal behavior changes.
 **Change log v0.12 (2026-10-10, #1925 earnings read failures):**
   `GET /providers/{id}/earnings` answers `503 unavailable` with `Retry-After: 5`
     when any financial or settlement read (provider existence, credit totals,
@@ -265,9 +270,10 @@ explicit reason rooted in upstream specs:
   Cut. See Open Q4.
 - **Earnings breakdown.** Time bucketing (day/week/month),
   per-model credit breakdown, and per-day bar chart all need
-  fields SPEC-005 §11.4 does not return — the response is
-  aggregate-plus-ancillary, with no per-bucket or per-model
-  credit decomposition. Cut. See Open Q4.
+  fields SPEC-005 §11.4 does not fully return — the response is
+  aggregate-plus-ancillary; since v0.13 it carries per-model credit
+  totals (`credits_by_model`) but no per-bucket decomposition. Cut.
+  See Open Q4.
 - **Provider token rotation.** SPEC-002 §7.3 issues tokens via
   `coordinator-cli issue-token`; there is no provider self-service
   rotation endpoint. Cut. See Open Q6.
@@ -1344,8 +1350,8 @@ currently return. SPEC-005 §11.4 returns aggregate credits plus
 ancillary provider metadata (`provider_id`, `provider_share_bps`,
 `models_served`, `rate_card_excerpt`, `fault_count`); the
 ancillary fields are intentionally omitted from v0.1 because they
-are not the per-bucket / per-model credit decomposition C.3
-requires. See **Open Q4** for the SPEC-005 amendment that would
+are not the per-bucket credit decomposition C.3 requires
+(`credits_by_model`, added in v0.13, covers the per-model totals only). See **Open Q4** for the SPEC-005 amendment that would
 expose the missing breakdowns. v0.1 ships C.1 aggregate cards
 only. Do NOT invent a new endpoint inside SPEC-014.
 

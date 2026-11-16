@@ -4931,3 +4931,257 @@ func mustJSON(v any) []byte {
 func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http") + "/ws/provider"
 }
+
+func warmModelsPrimaryEntry() map[string]any {
+	hb := heartbeat()
+	return map[string]any{
+		"model_id": hb["model_id"], "state": "warm", "primary": true, "pinned": true,
+		"slots_total": hb["slots_total"], "slots_free": hb["slots_free"], "max_context_tokens": hb["max_context_tokens"],
+		"throughput_tps_estimate": hb["throughput_tps_estimate"], "model_params_b": hb["model_params_b"],
+	}
+}
+
+// SPEC-001-R016 / SPEC-002-R011: a hello may carry its warm set; one outside
+// the hello's model (a hello declares no supported_models) is malformed: it
+// is dropped with one structured warning and the session proceeds as legacy.
+func TestHelloWarmModelsHandshake(t *testing.T) {
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs))
+	ts := h.HTTP
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	hello := validHello("m4-anon")
+	hello["warm_models"] = []any{warmModelsPrimaryEntry()}
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil || ack.Type != "hello_ack" || ack.AssignedID == "" {
+		t.Fatalf("ack = %s err=%v", payload, err)
+	}
+	conn.Close()
+
+	hello["warm_models"] = []any{
+		warmModelsPrimaryEntry(),
+		map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0},
+	}
+	conn, _, _, err = gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err = wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	ack = providerws.HelloAck{}
+	if err := json.Unmarshal(payload, &ack); err != nil || ack.Type != "hello_ack" || ack.AssignedID == "" {
+		t.Fatalf("malformed warm set: ack = %s err=%v", payload, err)
+	}
+	if p, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || p.WarmModels != nil {
+		t.Fatalf("malformed warm set kept: %+v ok=%v", p.WarmModels, ok)
+	}
+	if got := strings.Count(logs.String(), `"event":"handshake_warm_models_dropped"`); got != 1 {
+		t.Fatalf("handshake_warm_models_dropped logged %d times, want 1: %s", got, logs.String())
+	}
+}
+
+func dialAndAuthV2ProviderWithInitial(t *testing.T, h providerHarness, mutate func(map[string]any)) (net.Conn, string) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	mutate(initial)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		conn.Close()
+		t.Fatalf("auth_response = %+v error = %s", response, authResponseErrorText(response))
+	}
+	return conn, challenge.AssignedID
+}
+
+// A v2 provider declares its warm set on the initial stage and repeats it on
+// every heartbeat. A heartbeat whose warm set leaves supported_models has a
+// malformed warm set: it is logged once, the previous warm set stays and the
+// rest of the heartbeat applies.
+func TestAuthV2WarmModelsHandshakeAndHeartbeat(t *testing.T) {
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	verifyEveryReportedHash(h.Registry)
+	// Hashes verify, so two warm members make the session multi-model.
+	withHash := func(m map[string]any) map[string]any {
+		m["model_hash"], m["model_hash_algorithm"] = warmEntryTestHash, modelidentity.SnapshotManifestV1
+		return m
+	}
+	member := map[string]any{"model_id": "model-b", "state": "loading", "primary": false, "pinned": false, "slots_total": 0}
+	conn, assignedID := dialAndAuthV2ProviderWithInitial(t, h, func(initial map[string]any) {
+		initial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit", "model-b"}
+		initial["warm_models"] = []any{warmModelsPrimaryEntry(), member}
+	})
+	defer conn.Close()
+
+	busy := withHash(heartbeat())
+	busy["status"] = "busy"
+	busy["slots_free"] = 0
+	primary := withHash(warmModelsPrimaryEntry())
+	primary["slots_free"] = 0
+	busy["warm_models"] = []any{primary, withHash(map[string]any{"model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 2})}
+	if err := wsutil.WriteClientText(conn, mustJSON(busy)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && p.State == pool.StateBusy && p.SlotsFree == 0
+	})
+	// The full primary leaves its warm sibling routable.
+	if member, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b"); !ok || member.State != pool.StateReady || member.SlotsFree != 2 || member.ServedModelID != "model-b" {
+		t.Fatalf("model-b entry = %+v ok=%v", member, ok)
+	}
+
+	bad := withHash(heartbeat())
+	bad["warm_models"] = []any{withHash(warmModelsPrimaryEntry()), withHash(map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1})}
+	if err := wsutil.WriteClientText(conn, mustJSON(bad)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		return strings.Count(logs.String(), `"field":"warm_models"`) == 1
+	})
+	if !strings.Contains(logs.String(), `"event":"heartbeat_warm_models_rejected"`) {
+		t.Fatalf("logs = %s", logs.String())
+	}
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && p.State == pool.StateReady && p.SlotsFree == 1
+	})
+	if member, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b"); !ok || member.ServedModelID != "model-b" {
+		t.Fatalf("previous warm set not kept: model-b entry = %+v ok=%v", member, ok)
+	}
+	if _, ok := h.Registry.ResolveEntry("m4-anon", assignedID, "model-z"); ok {
+		t.Fatal("the rejected warm set was applied")
+	}
+
+	// Further rejections inside the log interval are not logged again; the
+	// third consecutive one drops the kept list as stale.
+	for i, free := range []int{0, 1} {
+		again := withHash(heartbeat())
+		again["slots_free"] = free
+		again["warm_models"] = bad["warm_models"]
+		if err := wsutil.WriteClientText(conn, mustJSON(again)); err != nil {
+			t.Fatalf("write heartbeat: %v", err)
+		}
+		eventually(t, func() bool {
+			p, ok := h.Registry.Resolve("m4-anon", assignedID)
+			return ok && p.SlotsFree == free
+		})
+		_, kept := h.Registry.ResolveEntry("m4-anon", assignedID, "model-b")
+		if want := i == 0; kept != want {
+			t.Fatalf("rejection %d: model-b entry kept=%v, want %v", i+2, kept, want)
+		}
+	}
+	if got := strings.Count(logs.String(), `"event":"heartbeat_warm_models_rejected"`); got != 1 {
+		t.Fatalf("heartbeat_warm_models_rejected logged %d times in one interval, want 1", got)
+	}
+	if p, _ := h.Registry.Resolve("m4-anon", assignedID); p.WarmModels != nil || p.ServedModelID != "" {
+		t.Fatalf("stale warm set after three rejections: %+v", p.WarmModels)
+	}
+}
+
+// SPEC-002-R011: a malformed warm_models on auth_request initial is dropped
+// with one structured warning; the session authenticates as legacy.
+func TestAuthV2MalformedWarmModelsProceedsAsLegacy(t *testing.T) {
+	logs := &lockedBuffer{}
+	h := newProviderHarnessWithOptionsAndLogger(t, nil, nil, zerolog.New(logs), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2ProviderWithInitial(t, h, func(initial map[string]any) {
+		initial["warm_models"] = []any{warmModelsPrimaryEntry(), map[string]any{"model_id": "model-z", "state": "warm", "primary": false, "pinned": false, "slots_total": 1, "slots_free": 1}}
+	})
+	defer conn.Close()
+	p, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok || p.WarmModels != nil {
+		t.Fatalf("malformed warm set kept: %+v ok=%v", p.WarmModels, ok)
+	}
+	if got := strings.Count(logs.String(), `"event":"handshake_warm_models_dropped"`); got != 1 {
+		t.Fatalf("handshake_warm_models_dropped logged %d times, want 1: %s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"message_type":"auth_request"`) {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
+// SPEC-001-R016: a preflight to a warm-set entry names its model; one to a
+// provider without a warm set is byte-identical to before. A provider that
+// has no such warm entry answers model_not_loaded.
+func TestPreflightServedModelID(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	for _, tc := range []struct {
+		served string
+		want   string
+		reply  map[string]any
+	}{
+		{"", `{"estimated_tokens":9000,"request_id":"req-legacy","type":"preflight"}`,
+			map[string]any{"type": "preflight_ack", "request_id": "req-legacy", "accepted": true, "estimated_wait_ms": 0}},
+		{"model-b", `{"estimated_tokens":9000,"request_id":"req-entry","served_model_id":"model-b","type":"preflight"}`,
+			map[string]any{"type": "preflight_ack", "request_id": "req-entry", "accepted": false, "estimated_wait_ms": 0, "reason": "model_not_loaded"}},
+	} {
+		requestID := tc.reply["request_id"].(string)
+		resultCh := make(chan providerws.PreflightAck, 1)
+		go func() {
+			ack, ok, err := h.Provider.Preflight(pool.Provider{ProviderID: "m4-anon", AssignedID: assignedID, ServedModelID: tc.served}, requestID, 9000, 2*time.Second)
+			if !ok || err != nil {
+				t.Errorf("preflight %s ok=%v err=%v", requestID, ok, err)
+			}
+			resultCh <- ack
+		}()
+		payload, _, err := wsutil.ReadServerData(conn)
+		if err != nil {
+			t.Fatalf("read preflight: %v", err)
+		}
+		if string(payload) != tc.want {
+			t.Fatalf("preflight frame = %s, want %s", payload, tc.want)
+		}
+		if err := wsutil.WriteClientText(conn, mustJSON(tc.reply)); err != nil {
+			t.Fatalf("write preflight_ack: %v", err)
+		}
+		ack := <-resultCh
+		wantRejection := providerws.PreflightRejection("")
+		if tc.served != "" {
+			wantRejection = providerws.PreflightRejectionModelNotLoaded
+		}
+		if ack.Rejection() != wantRejection {
+			t.Fatalf("%s rejection = %q, want %q", requestID, ack.Rejection(), wantRejection)
+		}
+	}
+}

@@ -63,7 +63,8 @@ func (s *Server) CatalogMaterialMissingUnderEnforce(p pool.Provider) bool {
 
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
 	if b.state != nil && b.state.toolSelection != nil {
-		current, ok := b.server.pool.Resolve(provider.ProviderID, provider.AssignedID)
+		// SPEC-002-R011: re-resolve the entry dispatched to, not the primary.
+		current, ok := b.server.pool.ResolveEntry(provider.ProviderID, provider.AssignedID, provider.ServedModelID)
 		if !ok || !providerSupportsToolSelection(current, b.state.toolSelection) || current.ModelID != provider.ModelID {
 			return nil, errUnsupportedToolSelectionSession
 		}
@@ -339,6 +340,14 @@ func (b *billingRecorder) routeSnapshotFor(provider pool.Provider, prereq routeS
 		PoolID:             b.state.poolID,
 		ManifestVersion:    b.state.poolManifestVersion,
 		ManifestCoreDigest: b.state.poolManifestCoreDigest,
+		// SPEC-022 R-16.2a: an entry dispatch's ModelID is the served member;
+		// the hold narrows to it only while that model's own SPEC-036
+		// verification is passing, and only when ModelID is the spelling
+		// holds are keyed on (its sanction identity). A member declared
+		// under another name of its catalog row keeps the provider-wide
+		// match, so no name of a held model escapes the hold.
+		ServedModelDispatch: provider.ServedModelID != "" && provider.ComputeIntegrityPassing &&
+			b.server.pool.SanctionKey(provider.ModelID) == pool.ModelKey(provider.ModelID),
 	}
 }
 
