@@ -46,6 +46,10 @@ PR #2375 (`a8c2e6157`), epic #2355. Live in v1.8.290 (2026-11-15 14:17 WITA).
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
 
+## Pearl runtime v1.8.291 (2026-11-16)
+
+**Live 2026-11-16 15:29 WITA** (tag `v1.8.291` at `e7dde22b2`, release run 43821206016, applied through `scripts/ops/pearl-runtime.sh`). It carries the coordinator and gateway half of PR 2386 (several models per provider process; additive schema change) and the billing and gateway aliases for the abliterated MiniMax M3.1-Flash row from PR 2392. The apply held buyers with 503 for about two minutes; coordinator and gateway `/healthz` report `v1.8.291` with no buyer hold. Remaining live steps that depended on it: catalog activation of the PR 2392 release and then of the PR 2394 release through `scripts/ops/catalog-activate.sh` (see `docs/releases/catalog-release-train.md`), and the provider half of PR 2386 with the next CLI cut.
+
 ## Pearl runtime v1.8.290 (2026-11-15)
 
 **Live 2026-11-15 14:17 WITA** (tag `v1.8.290` at `5b02aa48b`, release run 43683666990, applied through `scripts/ops/pearl-runtime.sh`). It carries PR 2385 (Nemotron 3.5 Bolt billing alias and gateway model key), PR 2374 (busy providers are not degraded), PR 2377 (Messages sessions partitioned by `metadata.user_id`, `cache_read_input_tokens` reported) and PR 2375 (MiniMax M3.1-Flash follow-ups).
