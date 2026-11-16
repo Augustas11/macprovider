@@ -627,100 +627,167 @@ func applyProviderReport(t *testing.T, registry *Registry, ingress string, state
 	}
 }
 
+// registerWithForwarded registers a ready provider with slotsTotal seats and
+// forwards n chats to it.
+func registerWithForwarded(t *testing.T, slotsTotal, n int) *Registry {
+	t.Helper()
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: slotsTotal, SlotsFree: slotsTotal, MaxConcurrency: slotsTotal, MaxContextTokens: 8192}, nil)
+	for i := 0; i < n; i++ {
+		if !registry.ConsumeForwardedSlot("p1", "s1") {
+			t.Fatal("ConsumeForwardedSlot returned false")
+		}
+	}
+	return registry
+}
+
+func assertStateSlots(t *testing.T, registry *Registry, wantState State, wantFree int, what string) Provider {
+	t.Helper()
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatalf("%s: provider missing", what)
+	}
+	if got.State != wantState || got.SlotsFree != wantFree {
+		t.Fatalf("%s: state %q slots_free %d, want %s/%d", what, got.State, got.SlotsFree, wantState, wantFree)
+	}
+	return got
+}
+
 // #2399: a provider that degraded itself (first-token stall hold) and then
-// reports ready again leaves degraded while a chat is still forwarded to it.
-// The coordinator keeps owning the seat count, so the forwarded chat still
-// holds its seat and the provider's free-seat report is not applied.
+// sends a ready or busy state_update leaves degraded while a chat is still
+// forwarded to it. The coordinator keeps owning the seat count, so the
+// forwarded chat keeps its seat and the provider's free-seat report is not
+// applied.
 func TestSelfDegradedProviderReturnsWhileChatForwarded(t *testing.T) {
+	for _, degradedVia := range []string{"heartbeat", "state_update"} {
+		for _, report := range []State{StateReady, StateBusy} {
+			t.Run(degradedVia+"/"+string(report)+"/free_seats_left", func(t *testing.T) {
+				registry := registerWithForwarded(t, 4, 1)
+				applyProviderReport(t, registry, degradedVia, StateDegraded, 0, 4)
+				assertStateSlots(t, registry, StateDegraded, 3, "after degraded report")
+				applyProviderReport(t, registry, "state_update", report, 4, 4)
+				got := assertStateSlots(t, registry, StateReady, 3, "after "+string(report)+" state_update")
+				if n := registry.ForwardedInFlight("p1", "s1"); n != 1 {
+					t.Fatalf("forwarded in flight = %d, want 1", n)
+				}
+				if !got.RoutingEligible() {
+					t.Fatal("recovered provider with free seats is not routable")
+				}
+			})
+			t.Run(degradedVia+"/"+string(report)+"/every_seat_forwarded", func(t *testing.T) {
+				registry := registerWithForwarded(t, 1, 1)
+				applyProviderReport(t, registry, degradedVia, StateDegraded, 0, 1)
+				// The Mac reports its stalled chat retired before the coordinator
+				// saw it end; that seat is still the coordinator's.
+				applyProviderReport(t, registry, "state_update", report, 1, 1)
+				got := assertStateSlots(t, registry, StateBusy, 0, "after "+string(report)+" state_update")
+				if got.RoutingEligible() || !got.InService() {
+					t.Fatalf("full recovered provider: routable=%v in_service=%v, want false/true", got.RoutingEligible(), got.InService())
+				}
+				if !registry.RestoreForwardedSlot("p1", "s1") {
+					t.Fatal("RestoreForwardedSlot returned false")
+				}
+				assertStateSlots(t, registry, StateReady, 1, "after the forwarded chat ended")
+			})
+		}
+	}
+}
+
+// A smaller slots_total reported while chats are forwarded leaves only the
+// seats the forwarded chats do not hold: 4 to 2 with one forwarded is 1 free.
+func TestSmallerSlotsTotalWhileChatForwardedKeepsForwardedSeats(t *testing.T) {
 	for _, ingress := range []string{"heartbeat", "state_update"} {
-		t.Run(ingress+"/free_seats_left", func(t *testing.T) {
-			registry := NewRegistry(nil)
-			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4, MaxConcurrency: 4, MaxContextTokens: 8192}, nil)
-			if !registry.ConsumeForwardedSlot("p1", "s1") {
-				t.Fatal("ConsumeForwardedSlot returned false")
-			}
-			applyProviderReport(t, registry, ingress, StateDegraded, 3, 4)
-			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded || got.SlotsFree != 3 {
-				t.Fatalf("after degraded report = state %q slots_free %d, want degraded/3", got.State, got.SlotsFree)
-			}
-			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
-			got, _ := registry.Resolve("p1", "s1")
-			if got.State != StateReady || got.SlotsFree != 3 {
-				t.Fatalf("after ready report = state %q slots_free %d, want ready/3 (forwarded chat keeps its seat)", got.State, got.SlotsFree)
-			}
-			if n := registry.ForwardedInFlight("p1", "s1"); n != 1 {
-				t.Fatalf("forwarded in flight = %d, want 1", n)
-			}
-			if !got.RoutingEligible() {
-				t.Fatal("recovered provider with free seats is not routable")
-			}
+		t.Run(ingress+"/ready", func(t *testing.T) {
+			registry := registerWithForwarded(t, 4, 1)
+			applyProviderReport(t, registry, ingress, StateReady, 2, 2)
+			assertStateSlots(t, registry, StateReady, 1, "after ready with slots_total 2")
 		})
 		t.Run(ingress+"/every_seat_forwarded", func(t *testing.T) {
-			registry := NewRegistry(nil)
-			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 1, SlotsFree: 1, MaxConcurrency: 1, MaxContextTokens: 8192}, nil)
-			if !registry.ConsumeForwardedSlot("p1", "s1") {
-				t.Fatal("ConsumeForwardedSlot returned false")
+			registry := registerWithForwarded(t, 4, 2)
+			applyProviderReport(t, registry, ingress, StateReady, 2, 2)
+			if got := assertStateSlots(t, registry, StateReady, 0, "after ready with slots_total 2"); got.RoutingEligible() {
+				t.Fatal("provider with every seat forwarded is routable")
 			}
-			applyProviderReport(t, registry, ingress, StateDegraded, 0, 1)
-			// The Mac reports its stalled chat retired before the coordinator
-			// saw it end; that seat is still the coordinator's.
-			applyProviderReport(t, registry, ingress, StateReady, 1, 1)
-			got, _ := registry.Resolve("p1", "s1")
-			if got.State != StateBusy || got.SlotsFree != 0 {
-				t.Fatalf("after ready report = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+		})
+	}
+	t.Run("state_update/returns_from_degraded", func(t *testing.T) {
+		registry := registerWithForwarded(t, 4, 1)
+		applyProviderReport(t, registry, "state_update", StateDegraded, 0, 4)
+		applyProviderReport(t, registry, "state_update", StateReady, 2, 2)
+		assertStateSlots(t, registry, StateReady, 1, "after ready with slots_total 2")
+	})
+	t.Run("state_update/returns_from_degraded_full", func(t *testing.T) {
+		registry := registerWithForwarded(t, 4, 2)
+		applyProviderReport(t, registry, "state_update", StateDegraded, 0, 4)
+		applyProviderReport(t, registry, "state_update", StateReady, 2, 2)
+		assertStateSlots(t, registry, StateBusy, 0, "after ready with slots_total 2")
+	})
+}
+
+// SPEC-002 FR-P8: a wake-degraded provider waits for its warm_up-complete
+// state_update or the fallback. A heartbeat's ready does not end it while a
+// chat is forwarded; neither does it end a stall hold.
+func TestWakeWarmupWhileForwardedStaysDegradedUntilItsOwnExitCondition(t *testing.T) {
+	for _, exit := range []string{"warm_up_complete_state_update", "fallback"} {
+		t.Run(exit, func(t *testing.T) {
+			registry := registerWithForwarded(t, 4, 1)
+			// markDegradedForWarmup in internal/ws.
+			registry.MarkState("p1", "s1", StateDegraded)
+			for _, report := range []State{StateReady, StateBusy} {
+				applyProviderReport(t, registry, "heartbeat", report, 4, 4)
+				assertStateSlots(t, registry, StateDegraded, 3, "after "+string(report)+" heartbeat")
 			}
-			if got.RoutingEligible() || !got.InService() {
-				t.Fatalf("full recovered provider: routable=%v in_service=%v, want false/true", got.RoutingEligible(), got.InService())
+			if exit == "fallback" {
+				registry.MarkState("p1", "s1", StateReady)
+			} else {
+				applyProviderReport(t, registry, "state_update", StateReady, 4, 4)
 			}
-			if !registry.RestoreForwardedSlot("p1", "s1") {
-				t.Fatal("RestoreForwardedSlot returned false")
-			}
-			if got, _ := registry.Resolve("p1", "s1"); got.State != StateReady || got.SlotsFree != 1 {
-				t.Fatalf("after the forwarded chat ended = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
-			}
+			assertStateSlots(t, registry, StateReady, 3, "after "+exit)
 		})
 	}
 }
 
-// The #2399 return is only from a provider's own degraded state: a recovery
-// hold, a coordinator drain and a thermal report keep their state while a
-// chat is forwarded.
+// The #2399 return is only from degraded with no hold: a recovery hold, a
+// coordinator drain and a thermal report keep their state and the
+// coordinator's seat count while a chat is forwarded.
 func TestReadyWhileChatForwardedKeepsHeldDrainingAndThermalStates(t *testing.T) {
 	for _, ingress := range []string{"heartbeat", "state_update"} {
-		t.Run(ingress+"/recovery_hold", func(t *testing.T) {
-			registry := NewRegistry(nil)
-			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
-			registry.ConsumeForwardedSlot("p1", "s1")
-			if !registry.MarkDegradedForRecovery("p1", "s1", RecoveryReasonBreaker) {
-				t.Fatal("MarkDegradedForRecovery returned false")
+		for _, report := range []State{StateReady, StateBusy} {
+			t.Run(ingress+"/"+string(report)+"/recovery_hold", func(t *testing.T) {
+				registry := registerWithForwarded(t, 4, 1)
+				if !registry.MarkDegradedForRecovery("p1", "s1", RecoveryReasonBreaker) {
+					t.Fatal("MarkDegradedForRecovery returned false")
+				}
+				applyProviderReport(t, registry, ingress, report, 4, 4)
+				assertStateSlots(t, registry, StateDegraded, 3, "held provider")
+			})
+			t.Run(ingress+"/"+string(report)+"/draining", func(t *testing.T) {
+				registry := registerWithForwarded(t, 4, 1)
+				registry.MarkState("p1", "s1", StateDraining)
+				applyProviderReport(t, registry, ingress, report, 4, 4)
+				assertStateSlots(t, registry, StateDraining, 3, "draining provider")
+			})
+		}
+		t.Run(ingress+"/thermal", func(t *testing.T) {
+			registry := registerWithForwarded(t, 4, 1)
+			applyProviderReport(t, registry, "state_update", StateDegraded, 0, 4)
+			if ingress == "heartbeat" {
+				registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+					Status: StateReady, ModelID: "model-a", MaxContextTokens: 8192, MaxConcurrency: 4,
+					SlotsFree: 4, SlotsTotal: 4,
+					SafetyTelemetry: &ProviderSafetyTelemetry{ThermallyThrottled: true},
+					At:              time.Now().UTC(),
+				})
+			} else {
+				four := 4
+				registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, Reason: "thermal_throttled", SlotsFree: &four, SlotsTotal: &four})
 			}
-			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
-			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded {
-				t.Fatalf("held provider state = %q, want degraded", got.State)
-			}
-		})
-		t.Run(ingress+"/draining", func(t *testing.T) {
-			registry := NewRegistry(nil)
-			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
-			registry.ConsumeForwardedSlot("p1", "s1")
-			registry.MarkState("p1", "s1", StateDraining)
-			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
-			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDraining {
-				t.Fatalf("draining provider state = %q, want draining", got.State)
+			got := assertStateSlots(t, registry, StateDegraded, 0, "thermal ready report")
+			if got.RoutingEligible() {
+				t.Fatal("thermal degraded provider is routable")
 			}
 		})
 	}
-	t.Run("thermal", func(t *testing.T) {
-		registry := NewRegistry(nil)
-		registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
-		registry.ConsumeForwardedSlot("p1", "s1")
-		applyProviderReport(t, registry, "state_update", StateDegraded, 3, 4)
-		zero, four := 0, 4
-		registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, Reason: "thermal_throttled", SlotsFree: &zero, SlotsTotal: &four})
-		if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded {
-			t.Fatalf("thermal ready report state = %q, want degraded", got.State)
-		}
-	})
 }
 
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
