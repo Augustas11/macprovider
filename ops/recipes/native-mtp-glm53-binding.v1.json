@@ -35,8 +35,8 @@
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "51e3952f741abc19e3f38ac42d0a28076e039e6af9956f270ca7d4d36a69600a",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "a87c99465709ca258707f77295c22e45413829bbf747262cd598f5c744754a12",
-    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "64d2901105a3e4cc89bff9d6dfe11aebb46e455440f9b49bf9c041e1ba3c126a",
-    "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
+    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "c9028bec7eb65d3f89d3e374b8935f1e21b76670590eb4343d1a73664b641a11",
+    "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "3a8852f57dcdc29ec163d543d55b8103e57b9472d968c575d802966a958eb0d4",
     "phase3-binary/catalog/autotune/trusted-keys.json": "da1ca2cb3788ee4e63982808bb90223ae0040ec150cb6fa6e9af04e52c773de6"
   }
 }
