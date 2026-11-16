@@ -76,6 +76,24 @@ entry is updated for the 2026-11-15 MiniMax activation.
   (2) a provider serving either 27B model reports native MTP enabled after its
   self-check; (3) one buyer request on each model through the gateway is
   served with native MTP; (4) the next CLI cut bakes the release.
+- **Owed, short variant challenge id (PR 2407, Related: #2404):** a release
+  generated against the live `published-2026-11-16-qwen27b-native-mtp-v289`
+  whose self-test bank renames the GLM-5.3-Flash uncensored variant entry
+  `native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e` to
+  `native-mtp-selftest-glm53-flash-0001-vf4215a95296e` (bank sha256
+  `5109051f…`; nothing else changes). Why: the provider's canary cache
+  namespace `native_mtp:<64-hex tuple>:<challenge id>` is 133 bytes for the
+  old id, and CLI 1.8.289 to 1.8.292 refuse any canary request whose
+  `cache_namespace` exceeds 128 bytes with `invalid_message`, so every
+  canary for that model disables its native MTP. Base entries (36 bytes or
+  less) are unaffected. `catalog-release.py` now names variants
+  `<donor id>-v<12 hex>` and refuses any challenge id over 52 bytes; the
+  committed inputs are regenerated in PR 2407 but no release is generated or
+  signed there. **Live steps:** (1) merge PR 2407; (2) generate and sign the
+  release from the committed inputs, then `scripts/ops/catalog-activate.sh
+  status` and `next --run`; (3) live probe: after a GLM-5.3-Flash uncensored
+  provider on 1.8.289 starts, the coordinator logs
+  `native_mtp_canary_result_received` with outcome `pass`.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since

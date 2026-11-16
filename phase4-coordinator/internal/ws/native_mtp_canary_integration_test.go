@@ -708,3 +708,83 @@ func TestNativeMTPTupleOfferIsIndependentOfProviderCLIIdentity(t *testing.T) {
 		})
 	}
 }
+
+func nativeMTPCanaryNAKPayload(t *testing.T, inReplyTo, code string) []byte {
+	t.Helper()
+	return mustMarshalNativeMTP(t, Nak{Type: "nak", InReplyTo: inReplyTo, Error: NakError{Code: code, Message: "invalid " + inReplyTo}})
+}
+
+// Issue #2404: a provider that refuses the canary request answers with a NAK
+// and never sends a result. The NAK ends the canary at once as a failure of
+// the exact tuple instead of a silent 60 s timeout.
+func TestNativeMTPCanaryNAKDisablesTheTupleAtOnce(t *testing.T) {
+	h := newNativeMTPCanaryIntegrationHarness(t)
+	req := h.dispatchRequest(t)
+
+	h.server.handleNAK(h.provider.ProviderID, h.provider.AssignedID,
+		nativeMTPCanaryNAKPayload(t, "native_mtp_canary_request_v1", "invalid_message"))
+
+	disable := h.readDisable(t)
+	if disable.Reason != "mismatch" ||
+		disable.NativeMTPRuntimeTupleSHA256 != h.offer.NativeMTPRuntimeTupleSHA256 ||
+		disable.TargetGeneration != h.offer.TargetGeneration {
+		t.Fatalf("unexpected disable: %+v", disable)
+	}
+	updated := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if updated.NativeMTPCanary.Status != string(NativeMTPCanaryTupleDisabled) ||
+		updated.NativeMTPCanary.DisabledReason != "nak_invalid_message" ||
+		updated.NativeMTPCanary.LastReason != "nak_invalid_message" ||
+		updated.State != pool.StateReady || updated.CanaryFailCount != 0 {
+		t.Fatalf("unexpected state after NAK: provider=%+v native=%+v", updated, updated.NativeMTPCanary)
+	}
+	if req.ExpiresAt == "" {
+		t.Fatal("request without deadline")
+	}
+	// The deadline sweep has nothing left to time out.
+	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*h.now = expiresAt.Add(time.Second)
+	if h.server.maybeDispatchNativeMTPCanary(mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID), *h.now) {
+		t.Fatal("a disabled tuple must not dispatch again")
+	}
+	h.assertNoServerFrame(t)
+}
+
+func TestNativeMTPCanaryNAKWithoutInFlightRequestChangesNothing(t *testing.T) {
+	h := newNativeMTPCanaryIntegrationHarness(t)
+	h.server.handleNAK(h.provider.ProviderID, h.provider.AssignedID,
+		nativeMTPCanaryNAKPayload(t, "native_mtp_canary_request_v1", "invalid_message"))
+	h.assertNoServerFrame(t)
+	updated := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if updated.NativeMTPCanary.Status == string(NativeMTPCanaryTupleDisabled) {
+		t.Fatalf("NAK with no canary in flight disabled the tuple: %+v", updated.NativeMTPCanary)
+	}
+}
+
+func TestNativeMTPCanaryUnrelatedNAKLeavesTheCanaryInFlight(t *testing.T) {
+	h := newNativeMTPCanaryIntegrationHarness(t)
+	_ = h.dispatchRequest(t)
+	h.server.handleNAK(h.provider.ProviderID, h.provider.AssignedID,
+		nativeMTPCanaryNAKPayload(t, "privacy_posture_challenge", "invalid_message"))
+	h.assertNoServerFrame(t)
+	updated := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if updated.NativeMTPCanary.Status == string(NativeMTPCanaryTupleDisabled) {
+		t.Fatalf("an unrelated NAK disabled the tuple: %+v", updated.NativeMTPCanary)
+	}
+}
+
+func TestNativeMTPCanaryNAKCodeIsAClosedToken(t *testing.T) {
+	for code, want := range map[string]string{
+		"invalid_message":       "invalid_message",
+		"":                      "unrecognized",
+		"Bad Code":              "unrecognized",
+		strings.Repeat("a", 65): "unrecognized",
+		"unknown_message_type":  "unknown_message_type",
+	} {
+		if got := nativeMTPCanaryNAKCode(code); got != want {
+			t.Fatalf("%q: got %q want %q", code, got, want)
+		}
+	}
+}

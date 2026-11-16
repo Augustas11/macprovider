@@ -111,6 +111,28 @@ class NativeMTPVariantExpansionTests(unittest.TestCase):
         self.assertIn(VARIANT, out_manifest["models"])
         self.assertIn(DONOR, out_manifest["models"])
 
+    def test_variant_challenge_id_fits_the_provider_cache_namespace(self):
+        # Issue #2404: providers up to CLI 1.8.292 refuse a canary whose
+        # cache namespace `native_mtp:<64-hex>:<challenge_id>` exceeds 128
+        # bytes, so every bank challenge id stays within 52 bytes.
+        inputs, bank, manifest = committed()
+        _, out_bank, _ = expand(inputs, bank, manifest, variants())
+        for challenge in out_bank["entries"]:
+            namespace = f"native_mtp:{'0' * 64}:{challenge['challenge_id']}"
+            self.assertLessEqual(len(namespace.encode("utf-8")), 128, challenge["challenge_id"])
+        committed_ids = [c["challenge_id"] for c in bank["entries"]]
+        self.assertTrue(all(len(i.encode("utf-8")) <= catalog_release.NATIVE_MTP_CHALLENGE_ID_MAX_BYTES
+                            for i in committed_ids), committed_ids)
+
+    def test_overlong_challenge_id_is_refused(self):
+        inputs, bank, manifest = committed()
+        bank = copy.deepcopy(bank)
+        donor = next(c for c in bank["entries"] if c["model_id"] == DONOR)
+        donor["challenge_id"] = "native-mtp-selftest-" + "x" * 40
+        bank["entries"].sort(key=lambda entry: entry["challenge_id"])
+        with self.assertRaisesRegex(catalog_release.CatalogError, "exceeds 52 bytes"):
+            expand(inputs, bank, manifest, variants())
+
     def test_expansion_is_a_fixpoint(self):
         inputs, bank, manifest = committed()
         once = expand(inputs, bank, manifest, variants())

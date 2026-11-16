@@ -1677,6 +1677,40 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(results.count, 1)
     }
 
+    /// Issue #2404: a variant bank entry's challenge id makes the provider's
+    /// own cache namespace 133 bytes; 1.8.289 refused the request with
+    /// `invalid_message` at its 128-byte bound.
+    func testNativeMTPCanaryAcceptsAVariantLengthCacheNamespace() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in
+            Self.passingNativeMTPCanaryResult(request)
+        }
+        let initialCount = await recorder.frames.count
+        let namespace = "native_mtp:" + String(repeating: "7", count: 64)
+            + ":native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e"
+        XCTAssertEqual(namespace.utf8.count, 133)
+        var request = Self.nativeMTPCanaryRequest()
+        request["cache_namespace"] = namespace
+        var tuple = Self.nativeMTPRuntimeTuple()
+        tuple["cache_namespace"] = namespace
+        request["runtime_tuple"] = tuple
+
+        try await client.handleCoordinatorPayloadForTest(request)
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(result["terminal_reason"] as? String, "passed")
+        let naks = await recorder.frames.dropFirst(initialCount).filter { $0["type"] as? String == "nak" }
+        XCTAssertTrue(naks.isEmpty)
+        let tooLong = "native_mtp:" + String(repeating: "7", count: 64) + ":" + String(repeating: "c", count: 129)
+        var refused = Self.nativeMTPCanaryRequest()
+        refused["cache_namespace"] = tooLong
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        let beforeRefused = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest(refused)
+        let nak = try await waitForFrame(recorder, after: beforeRefused, type: "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
     func testNativeMTPCanaryWorkingProbeReturnsItsResult() async throws {
         let recorder = CoordinatorFrameRecorder()
         let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in

@@ -3939,6 +3939,9 @@ actor CoordinatorClient {
         return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// "native_mtp:" + 64-hex tuple + ":" + a challenge id of up to 128 bytes.
+    static let nativeMTPCacheNamespaceMaxBytes = 11 + 64 + 1 + 128
+
     private static let nativeMTPCanaryRequestKeys: Set<String> = [
         "type", "version", "request_id", "provider_id", "assigned_id",
         "model_id", "model_hash", "model_hash_algorithm", "target_generation",
@@ -3999,7 +4002,9 @@ actor CoordinatorClient {
         let sidecarDigest = try sha256String(object, "sidecar_digest")
         let providerBinarySHA256 = try sha256String(object, "provider_binary_sha256")
         let runtimeCDHash = try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64])
-        let cacheNamespace = try boundedString(object, "cache_namespace", maxBytes: 128)
+        // Issue #2404: the provider's own namespace is `native_mtp:<64-hex>:<challenge id>`
+        // and a challenge id may be 128 bytes, so 128 refused valid requests.
+        let cacheNamespace = try boundedString(object, "cache_namespace", maxBytes: Self.nativeMTPCacheNamespaceMaxBytes)
         let stateDigest = try sha256String(object, "state_digest")
         let challengeID = try boundedString(object, "challenge_id", maxBytes: 128)
         let challengeCorpusSHA256 = try sha256String(object, "challenge_corpus_sha256")
@@ -4129,7 +4134,7 @@ actor CoordinatorClient {
             sidecarDigest: try sha256String(object, "sidecar_digest"),
             providerBinarySHA256: try sha256String(object, "provider_binary_sha256"),
             runtimeCDHash: try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64]),
-            cacheNamespace: try boundedString(object, "cache_namespace", maxBytes: 128),
+            cacheNamespace: try boundedString(object, "cache_namespace", maxBytes: Self.nativeMTPCacheNamespaceMaxBytes),
             stateDigest: try sha256String(object, "state_digest"),
             proposalDepth: proposalDepth
         )

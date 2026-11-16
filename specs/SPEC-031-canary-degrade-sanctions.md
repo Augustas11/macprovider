@@ -1,6 +1,6 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.3.9
+**Status:** v0.3.10
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
@@ -812,7 +812,10 @@ is exactly `{challenge_id,model_id,model_hash,tokenizer_sha256,artifact_sha256,
 mtp_manifest_sha256,prompt_token_ids,max_completion_tokens,
 fixed_proposal_depth,expected_token_ids,expected_token_id_sha256,
 expected_terminal_reason,expected_counters,expected_committed_state_sha256}`.
-IDs use the existing bounded wire grammars; digests are lowercase 64-hex;
+IDs use the existing bounded wire grammars; **[v0.3.10]** a `challenge_id` is
+at most 52 bytes, so the provider's canary cache namespace
+`native_mtp:<64-hex admission tuple>:<challenge_id>` fits the 128 bytes that
+providers through CLI 1.8.292 accept; digests are lowercase 64-hex;
 `prompt_token_ids` contains 1..2,048 unsigned 32-bit integers and its serialized
 JSON is at most 8 KiB; `max_completion_tokens` is `1..64`;
 `fixed_proposal_depth` is `1..16`; `expected_token_ids` contains at most 64
@@ -909,7 +912,10 @@ release serves native MTP.
 A result passes only when identity/generation/tuple bindings match,
 `actual_decode_path == "native_mtp"`, `fallback_used == false`, and every
 expected digest/counter/terminal value matches. Failure or expiry disables only
-that exact native-MTP tuple. It MUST NOT increment generic `canary_fail_count`,
+that exact native-MTP tuple. **[v0.3.10]** A provider NAK whose `in_reply_to` is
+`native_mtp_canary_request_v1`, received while that provider's tuple has a
+request in flight, is a failure: it ends the request at once and disables only
+that exact tuple with reason `nak_<code>`, without waiting for the deadline. It MUST NOT increment generic `canary_fail_count`,
 degrade or ban the provider, alter routing for ordinary/classic paths, or create
 buyer usage, receipt, billing, settlement, reward, or payout activity. The
 profile has its own state and operator diagnostics. A provider-local SPEC-048
