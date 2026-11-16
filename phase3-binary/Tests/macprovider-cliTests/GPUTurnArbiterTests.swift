@@ -369,6 +369,9 @@ final class GPUTurnArbiterTests: XCTestCase {
         let stepSize = 4
         let total = 16
         var prefill = PrefillParameters.legacyRemainder(stepSize: stepSize)
+        // No MLX arrays pass through this loop and CI hosts have no default
+        // metallib, so the per-chunk buffer cache clear is off here.
+        prefill.clearsBufferCache = false
         prefill.progress = scope.prefillProgress(stepSize: stepSize)
         var turnAtForward: [Int] = []
         func fakeForward(_ tokens: Int) {
