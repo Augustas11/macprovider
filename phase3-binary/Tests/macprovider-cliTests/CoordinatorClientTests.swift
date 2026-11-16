@@ -9634,10 +9634,11 @@ final class CoordinatorClientTests: XCTestCase {
 
     private func makeHeldSessionClient(
         fixture: LifecycleFixture,
-        script: ReadinessScript
+        script: ReadinessScript,
+        status: ProviderStatus? = nil
     ) async throws -> CoordinatorClient {
         try await makeClient(
-            status: ProviderStatus(
+            status: status ?? ProviderStatus(
                 modelID: "model-a",
                 modelLoaded: true,
                 capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
@@ -9948,6 +9949,47 @@ final class CoordinatorClientTests: XCTestCase {
         // one read; the point is that the hold path never ran (no promotion).
         let calls = await script.calls
         XCTAssertEqual(calls, 1)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testFirstTokenStallHoldKeepsTheSessionWhenReadinessReadsNotServing() async throws {
+        // Issue #2364 (2026-11-16 Studio e2e): the stall hold publishes
+        // `degraded`, the coordinator then answers a bare false, and the
+        // readiness watch used to close the socket 13 s after the trip,
+        // failing the held request with dead_ws_mid_inference.
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let script = ReadinessScript([], then: .confirmed)
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script, status: status)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        XCTAssertEqual(try fixture.record().state, .servingBuyers)
+
+        await status.setFirstTokenStallHold(true)
+        await script.setFinal(.notServing(hold: nil))
+        let callsAtHold = await script.calls
+        for _ in 0 ..< 200 {
+            if await script.calls >= callsAtHold + 5 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let callsHeld = await script.calls
+        XCTAssertGreaterThanOrEqual(callsHeld, callsAtHold + 5, "the watch kept polling")
+        XCTAssertNotEqual(try fixture.record().reasonCode, "buyer_serving_readiness_unconfirmed")
+
+        // Control: the same false without the hold still reconnects.
+        await status.setFirstTokenStallHold(false)
+        let ended = try await waitForLifecycleReason(fixture, "buyer_serving_readiness_unconfirmed")
+        XCTAssertEqual(ended.reasonCode, "buyer_serving_readiness_unconfirmed")
         await client.cleanupConnectionForTest()
     }
 

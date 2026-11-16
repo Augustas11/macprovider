@@ -6242,6 +6242,14 @@ actor CoordinatorClient {
             if coordinatorRevocationNotice != nil {
                 return false
             }
+            // Issue #2364: the first-token stall hold publishes `degraded`, so
+            // the coordinator's false is this provider's own hold, not a lost
+            // binding. Reconnecting would fail the held requests mid-flight,
+            // count circuit-breaker faults and repeat every poll of a long
+            // stall; the recovery publishes `ready` and the next poll confirms.
+            if await providerStatus.firstTokenStallHeld() {
+                return false
+            }
             activeBuyerServingHold = nil
             _ = try? recordLifecycleTransition(
                 to: .locallyReadyConnecting,
