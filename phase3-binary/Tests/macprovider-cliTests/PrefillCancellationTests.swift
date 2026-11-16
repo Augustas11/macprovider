@@ -25,6 +25,15 @@ final class PrefillCancellationTests: XCTestCase {
         func increment() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
     }
 
+    /// The serial prefill chunk loop. These tests pass no MLX arrays through
+    /// it and CI test hosts have no default metallib, so the per-chunk buffer
+    /// cache clear (which needs the Metal allocator) is off here.
+    private static var chunkLoop: PrefillParameters {
+        var parameters = PrefillParameters(stepSize: 2048)
+        parameters.clearsBufferCache = false
+        return parameters
+    }
+
     /// Blocks the current chunk until the cancel has reached the operation's
     /// task, standing in for a GPU eval that is still running when it lands.
     private static func holdChunkUntilTaskCancelled() {
@@ -49,7 +58,7 @@ final class PrefillCancellationTests: XCTestCase {
             _ = try await ModelRuntime.withDrainAndClientCancellation(drain, shouldCancel: { cancelled.value }) {
                 try await gate.withPermit {
                     defer { unwound.raise() }
-                    return try PrefillParameters(stepSize: 2048).forEachChunk(total: 350_000) { _ in
+                    return try Self.chunkLoop.forEachChunk(total: 350_000) { _ in
                         if chunks.increment() == 3 {
                             cancelled.raise()
                             Self.holdChunkUntilTaskCancelled()
@@ -84,7 +93,7 @@ final class PrefillCancellationTests: XCTestCase {
             _ = try await ModelRuntime.withDrainAndClientCancellation(drain, shouldCancel: { true }) {
                 // Give the cancel watcher time to fire before the prefill starts.
                 try await Task.sleep(nanoseconds: 200_000_000)
-                return try PrefillParameters(stepSize: 2048).forEachChunk(total: 8192) { _ in
+                return try Self.chunkLoop.forEachChunk(total: 8192) { _ in
                     chunks.increment()
                 }
             }
@@ -100,7 +109,7 @@ final class PrefillCancellationTests: XCTestCase {
         let drain = DrainCancelToken()
         let chunks = Counter()
         let processed = try await ModelRuntime.withDrainAndClientCancellation(drain, shouldCancel: { false }) {
-            try PrefillParameters(stepSize: 2048).forEachChunk(total: 8193) { _ in
+            try Self.chunkLoop.forEachChunk(total: 8193) { _ in
                 chunks.increment()
             }
         }
@@ -115,7 +124,7 @@ final class PrefillCancellationTests: XCTestCase {
         let chunks = Counter()
         do {
             _ = try await ModelRuntime.withDrainAndClientCancellation(drain, shouldCancel: { false }) {
-                try PrefillParameters(stepSize: 2048).forEachChunk(total: 350_000) { _ in
+                try Self.chunkLoop.forEachChunk(total: 350_000) { _ in
                     if chunks.increment() == 2 {
                         drain.fire()
                         Self.holdChunkUntilTaskCancelled()
