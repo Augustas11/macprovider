@@ -1270,7 +1270,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 input: input,
                                 targetHidden: targetHidden,
                                 positionDeltas: output.state?[mtpPositionDeltasKey],
-                                sampledToken: sampledToken
+                                sampledToken: sampledToken,
+                                sharedKV: output.state?[mtpSharedKVStatesKey]
                             )
                         }
                         // Earlier chunks evaluate only cache state. The final
@@ -1344,7 +1345,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         input: ContinuousBatchPrefillInput,
         targetHidden: MLXArray,
         positionDeltas: MLXArray?,
-        sampledToken: Int?
+        sampledToken: Int?,
+        sharedKV: [String: (MLXArray, MLXArray)]? = nil
     ) async throws {
         try requireTargetLockHeld("seed_drafter_from_prefill")
         let tailToken: Int
@@ -1377,6 +1379,81 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 tailToken: tailToken
             )
         }
+        if input.isFinalChunk, let sharedKV {
+            try await seedPromptFreeDrafterFromPrefill(
+                targetModel: targetModel,
+                input: input,
+                targetHidden: targetHidden,
+                sharedKV: sharedKV,
+                firstBonusToken: tailToken
+            )
+        }
+    }
+
+    /// #2328: a prompt-free drafter (the Gemma 4 assistant attends over the
+    /// target's K/V) proposes its first token from the prompt's last hidden
+    /// column and the prefill's target K/V, the input
+    /// `MTPSpeculativeTokenIterator` gives its first round. Without this seed
+    /// the first native round verified one column with no proposal, so a
+    /// one-token answer ending at EOS never exercised a proposal (R005
+    /// `admission_passed` false on acceptance-short-19). Leaves the row
+    /// unseeded, as before, when the K/V does not end exactly at the
+    /// committed prefix (shared or padded prefill forwards).
+    private func seedPromptFreeDrafterFromPrefill(
+        targetModel: any LanguageModel,
+        input: ContinuousBatchPrefillInput,
+        targetHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        firstBonusToken: Int
+    ) async throws {
+        guard let drafterContainer,
+              Self.prefillSharedKVSeedsDrafter(sharedKV, committedTokens: input.targetKVTokenCount),
+              targetHidden.ndim == 3, targetHidden.dim(0) == 1,
+              !input.promptTokens.isEmpty, targetHidden.dim(1) >= input.promptTokens.count,
+              let state = nativeMTPDrafterState(for: input.requestID),
+              state.cache.isEmpty, nativeMTPDrafterSeedToken(for: input.requestID) == nil
+        else { return }
+        let column = input.promptTokens.count - 1
+        let row = MTPPackedDrafterAdvanceRow(
+            targetHidden: targetHidden[0..., column ..< (column + 1), 0...],
+            acceptedTokens: [],
+            finalToken: firstBonusToken,
+            positionDeltas: nil,
+            state: state,
+            sharedKV: sharedKV,
+            sharedKVOffset: input.targetKVTokenCount
+        )
+        let seeded = try await drafterContainer.perform(
+            nonSendable: (targetModel, row)
+        ) { drafterContext, values -> (state: MTPDrafterState, seed: Int)? in
+            let (targetModel, row) = values
+            guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel,
+                  !drafter.requiresPromptPrefill, drafter.requiresSharedTargetKV
+            else { return nil }
+            let advance = try drafter.advanceAndProposePacked(
+                target: targetModel,
+                rows: [row],
+                sampler: GenerateParameters(temperature: 0).sampler()
+            )
+            let seeds = advance.proposals.asType(.int32)
+            eval(advance.states.flatMap { $0.cache.flatMap(\.state) } + [seeds])
+            guard let state = advance.states.first, let seed = seeds.asArray(Int32.self).first else { return nil }
+            return (state, Int(seed))
+        }
+        guard let seeded else { return }
+        storeNativeMTPDrafterAdvance(requestIDs: [input.requestID], states: [seeded.state], seedTokens: [seeded.seed])
+    }
+
+    /// The prefill K/V seeds a drafter only when its full-attention entry is
+    /// one row spanning exactly the committed prefix.
+    static func prefillSharedKVSeedsDrafter(
+        _ sharedKV: [String: (MLXArray, MLXArray)],
+        committedTokens: Int
+    ) -> Bool {
+        guard committedTokens > 0, let full = sharedKV["full_attention"], sharedKV["sliding_attention"] != nil
+        else { return false }
+        return full.0.ndim == 4 && full.0.dim(0) == 1 && full.0.dim(2) == committedTokens
+            && full.0.shape == full.1.shape
     }
 
     private func makeBatchedCachesIfCompatible(

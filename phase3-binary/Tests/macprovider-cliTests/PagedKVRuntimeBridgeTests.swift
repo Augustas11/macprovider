@@ -1546,6 +1546,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
         let exact = try await native(NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter)
         XCTAssertEqual(exact.tokens, ordinary.tokens, "native diverged from ordinary greedy decode")
+        // The prefill seeds the first proposal, so the first decode step is
+        // already a two-column verify (R005 acceptance-short-19: a one-token
+        // answer ending at EOS ran its only round without a proposal).
+        XCTAssertEqual(exact.trace[1]?.path, "verify")
+        XCTAssertEqual(exact.trace[1]?.entry.width, 2, "the first native round proposed nothing")
         let verified = exact.trace.values.filter { $0.path == "verify" }
         XCTAssertTrue(verified.contains { $0.entry.source == "draft" }, "no draft was accepted")
         XCTAssertTrue(verified.contains { $0.entry.column == 1 }, "no second verify column was committed")
@@ -1568,6 +1573,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             return lhs.entry.margin.bitPattern != rhs.entry.margin.bitPattern
         }
         XCTAssertFalse(differing.isEmpty, "the control verify already matched decode bit for bit")
+    }
+
+    /// #2328: only a one-row full-attention K/V ending exactly at the
+    /// committed prefix seeds a prompt-free drafter from the prefill.
+    func testPrefillSharedKVSeedsDrafterOnlyAtTheCommittedPrefix() throws {
+        try requireMetal()
+        func kv(_ batch: Int, _ length: Int) -> (MLXArray, MLXArray) {
+            (MLXArray.zeros([batch, 1, length, 2]), MLXArray.zeros([batch, 1, length, 2]))
+        }
+        XCTAssertTrue(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 13), "sliding_attention": kv(1, 13)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 4), "sliding_attention": kv(1, 4)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(2, 13), "sliding_attention": kv(2, 13)], committedTokens: 13))
+        XCTAssertFalse(PagedKVSharedForwardBackend.prefillSharedKVSeedsDrafter(
+            ["full_attention": kv(1, 13)], committedTokens: 13))
     }
 
     func testPackedDrafterFailureReasonNamesTheCaseAndItsValues() {

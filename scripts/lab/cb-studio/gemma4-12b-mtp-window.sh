@@ -228,16 +228,17 @@ leg_r005() {
 }
 
 leg_r015() {
-  local d=$1 rc=0 arc=0 status=MISSING
+  # zsh reserves `status` (read-only $?); assigning it aborted this leg.
+  local d=$1 rc=0 arc=0 overall=MISSING
   cells $FORMAL/gemma4-r015-policy.json $d r015 \
     s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s2-p1536-o512 s4-p1536-o512 sustained || rc=$?
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py $d/r015.jsonl $FORMAL/gemma4-r015-policy.json \
     > $d/r015-analysis.json 2> $d/r015-analysis.err || arc=$?
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py --format markdown $d/r015.jsonl $FORMAL/gemma4-r015-policy.json \
     > $d/r015-analysis.md 2>&1 || true
-  status=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overall_status","MISSING"))' $d/r015-analysis.json 2>/dev/null || echo MISSING)
-  log "r015 bench=$rc analyzer=$arc overall_status=$status"
-  [[ $rc -eq 0 && $arc -eq 0 && $status == PASS ]]
+  overall=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overall_status","MISSING"))' $d/r015-analysis.json 2>/dev/null || echo MISSING)
+  log "r015 bench=$rc analyzer=$arc overall_status=$overall"
+  [[ $rc -eq 0 && $arc -eq 0 && $overall == PASS ]]
 }
 
 qualify() {
