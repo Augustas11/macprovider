@@ -78,11 +78,12 @@ def burst(port, model, ctx, rows, max_tokens, delays=None):
 def compare(rec, lone):
     a, b = lone["text"], rec["text"]
     if a == b:
-        return {"row": rec["row"], "equal_lone": True, "tokens": rec["tokens"], "text": b}
+        return {"row": rec["row"], "equal_lone": True, "tokens": rec["tokens"], "text": b,
+                "error": rec["error"]}
     i = next((j for j in range(min(len(a), len(b))) if a[j] != b[j]), min(len(a), len(b)))
     return {"row": rec["row"], "equal_lone": False, "first_diff_char": i, "tokens": rec["tokens"],
             "lone_tokens": lone["tokens"], "lone_at": a[max(0, i - 20):i + 20], "ours_at": b[max(0, i - 20):i + 20],
-            "text": b}
+            "text": b, "error": rec["error"]}
 
 
 def main(argv=None):

@@ -20,6 +20,7 @@ compare = module("compare")
 prompts = module("prompts")
 client = module("provider_client")
 margin = module("margin")
+cb_margin = module("cb_margin")
 
 MODEL = "m"
 TEXT = "The keeper lit the lamp."
@@ -360,6 +361,58 @@ class MarginTests(unittest.TestCase):
         json.dumps(rec)
         bf = margin.build_record(200, 128, 1, 1, 2, [1, 2], [20.0, 19.875], "bfloat16")
         self.assertAlmostEqual(bf["margin_steps"], 1.0)
+
+
+class CbMarginTests(unittest.TestCase):
+    @staticmethod
+    def cells():
+        def row(i, text, error=None):
+            return {"row": i, "text": text, "error": error, "equal_lone": False}
+        return {
+            "ctx": 200,
+            "lone": [{"row": 0, "text": "aaa"}, {"row": 1, "text": "bbb"}, {"row": 2, "text": "ccc"}],
+            "widths": [{"width": 2, "trial": 0, "rows": [row(0, "aaa"), row(1, "bbx")]},
+                       {"width": 3, "trial": 1, "rows": [row(0, "aXa"), row(1, "bbb"), row(2, "", "boom")]}],
+            "join": {"case": "join", "rows": [row(0, "aaa"), row(2, "ccd")]},
+        }
+
+    def test_selects_only_differing_rows_without_error(self):
+        got = cb_margin.select_divergences(self.cells())
+        self.assertEqual([(d["width"], d["trial"], d["row"]) for d in got],
+                         [(2, 0, 1), (3, 1, 0), ("join", None, 2)])
+        self.assertEqual((got[0]["lone_text"], got[0]["text"]), ("bbb", "bbx"))
+
+    def test_lone_error_skips_row(self):
+        c = self.cells()
+        c["lone"][1]["error"] = "x"
+        self.assertEqual([d["row"] for d in cb_margin.select_divergences(c)], [0, 2])
+
+    def test_old_shape_without_texts_is_refused(self):
+        old = {"lone": [{"row": 0, "tokens": 3}], "widths": []}
+        with self.assertRaises(cb_margin.MissingTexts):
+            cb_margin.select_divergences(old)
+        c = self.cells()
+        del c["widths"][0]["rows"][0]["text"]
+        with self.assertRaises(cb_margin.MissingTexts):
+            cb_margin.select_divergences(c)
+
+    def test_dedup_key(self):
+        self.assertEqual(cb_margin.dedup_key(1, 3, [5, 6, 7]), cb_margin.dedup_key(1, 3, (5, 6, 7)))
+        self.assertNotEqual(cb_margin.dedup_key(1, 3, [5, 6, 7]), cb_margin.dedup_key(2, 3, [5, 6, 7]))
+        self.assertNotEqual(cb_margin.dedup_key(1, 3, [5, 6, 7]), cb_margin.dedup_key(1, 3, [5, 6, 8]))
+        hash(cb_margin.dedup_key(1, 3, [5, 6, 7]))
+
+    def test_record_and_summary(self):
+        div = {"width": 4, "trial": 0, "row": 1}
+        rec = cb_margin.build_record(div, 200, 5, 11, 12, [11, 12], [20.0, 19.96875], "mlx.core.float16")
+        self.assertAlmostEqual(rec["margin_steps"], 2.0)
+        self.assertTrue(rec["both_in_top2"])
+        far = cb_margin.build_record(div, 200, 5, 11, 99, [11, 12], [20.0, 19.0], "float16")
+        self.assertFalse(far["both_in_top2"])
+        json.dumps(far)
+        s = cb_margin.summarize([rec, far], 3)
+        self.assertEqual((s["differing_rows"], s["distinct_points"], s["within_2_steps"]), (3, 2, 1))
+        self.assertAlmostEqual(s["max_margin_steps"], 64.0)
 
 
 class PromptTests(unittest.TestCase):
