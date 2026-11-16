@@ -2,7 +2,7 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "022ad01d137bc3f40b3d1dcdae96962f03ba1304b266f3e5ded301947cd78ece",
-    "challenge_bank_sha256": "5109051f486bce164c3afb605115dec3f9e0ba57980c9f0d3e36ce73d0e42e23",
+    "challenge_bank_sha256": "9794d0ab4663e889baf5e7de248e5d28200d50f82723067c924b6d08e24543c8",
     "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
     "provider_revision": "ec252246fbf91fbef8d218213e7bb465c0100771",
     "reproducible_build_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",

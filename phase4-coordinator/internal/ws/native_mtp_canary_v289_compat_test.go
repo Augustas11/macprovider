@@ -379,16 +379,31 @@ func TestNativeMTPCanaryV289RefusesThePublishedVariantEntryOnItsCacheNamespace(t
 	}
 }
 
-func TestNativeMTPCanaryV289AcceptsEveryRegeneratedBankEntry(t *testing.T) {
+// The catalog fix renames a variant to `<donor id>-v<12 hex>` and bounds a
+// challenge id at 52 bytes: 128 - len("native_mtp:") - 64 - 1. Every published
+// entry renamed that way, and any 52-byte id, must pass 1.8.289; 53 bytes must not.
+func TestNativeMTPCanaryV289AcceptsShortVariantIDsUpToFiftyTwoBytes(t *testing.T) {
 	now := time.Now().UTC()
-	regenerated := filepath.Join("..", "..", "..", "phase3-binary", "catalog", "autotune", "native-mtp-selftest-bank.json")
-	records := v289BankRecords(t, regenerated)
+	published := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static", "native-mtp-selftest-bank.json")
+	records := v289BankRecords(t, published)
 	if len(records) == 0 {
 		t.Fatal("empty bank")
 	}
 	for _, record := range records {
-		if err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now); err != nil {
-			t.Fatalf("%s: 1.8.289 refuses the regenerated entry: %v", record.ChallengeID, err)
+		if donor, suffix, ok := strings.Cut(record.ChallengeID, "-variant-"); ok {
+			record.ChallengeID = donor + "-v" + suffix
 		}
+		if err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now); err != nil {
+			t.Fatalf("%s: 1.8.289 refuses the short-named entry: %v", record.ChallengeID, err)
+		}
+	}
+	record := records[0]
+	record.ChallengeID = strings.Repeat("c", 52)
+	if err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now); err != nil {
+		t.Fatalf("a 52-byte challenge id must pass 1.8.289: %v", err)
+	}
+	record.ChallengeID = strings.Repeat("c", 53)
+	if err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now); err == nil || !strings.HasPrefix(err.Error(), "cache_namespace: exceeds 128 bytes") {
+		t.Fatalf("a 53-byte challenge id must be refused on cache_namespace, got %v", err)
 	}
 }
