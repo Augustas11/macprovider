@@ -55,7 +55,7 @@ PR 2385 (`61c3d02c3`), Related: #2329. Live in v1.8.290.
 - Coordinator: the served artifact id of Nemotron 3.5 Bolt resolves to its rate-card row (`class-120b-moe`) in `internal/billing/formula.go`.
 - Gateway: the same model key in `internal/config/model_key.go`, the demand-telemetry allowlist and the store allowlist.
 
-Remaining live step: the Bolt catalog activation through `scripts/ops/catalog-activate.sh status`, then `next --run`; it needs the canary provider serving.
+The Bolt catalog release `published-2026-11-15-nemotron-3.5-bolt-listed-v289` was activated on 2026-11-16 through `scripts/ops/catalog-activate.sh`; see `docs/releases/catalog-release-train.md`.
 
 ## Busy providers are not "degraded" (SPEC-017 v0.2.2, SPEC-002, SPEC-006) — live in v1.8.290 (merged 2026-11-14)
 
