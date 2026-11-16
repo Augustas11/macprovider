@@ -42,17 +42,16 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.79 (#2338) on 3.32.3-macprovider.78: It is
-# 3.32.3-macprovider.78 plus one commit that only moves its mlx-swift pin to
-# 0.32.3-macprovider.25 (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7),
-# 0.32.3-macprovider.24 plus two Swift-layer commits: a synchronous eval
-# schedules the graph and copies its completion events under the process-wide
-# evalLock, waits for the device without the lock, then retakes the lock to
-# finish; recursive entry, a CPU stream and a failed asynchronous schedule
-# keep the stock locked path. The core and C rows are unchanged and no Metal
-# kernel changed.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.79"
-SPEC048_MLX_SWIFT_LM_REVISION = "92459644d702bf42959c66dd8be0c0416f1dd882"
+# 3.32.3-macprovider.80 (#2393) on 3.32.3-macprovider.79: On
+# 3.32.3-macprovider.79, the last native-MTP layer (GLM-5-Next nextn head,
+# Qwen 3.5/3.6 MTP predictor) runs its post-attention norm and MoE/MLP, and
+# Qwen's final norm, on each row's read column only, while attention and the
+# drafter cache write still run on every column (MLX_LM_MTP_LAST_COLUMN=0 runs
+# every column again); carries the #2373 candidate: TokenIterator settles
+# simple and rotating caches by their stored buffers, and Llama and Qwen3 run
+# SwiGLU as one compiled kernel.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.80"
+SPEC048_MLX_SWIFT_LM_REVISION = "9317a903a9efb08a471c57be26744f7fa2a90ab9"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
