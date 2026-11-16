@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.79` | `92459644d702bf42959c66dd8be0c0416f1dd882` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.80` | `9317a903a9efb08a471c57be26744f7fa2a90ab9` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,16 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-16 the LM row is `3.32.3-macprovider.80` (`9317a90`), on
+`3.32.3-macprovider.79` (#2393): On 3.32.3-macprovider.79, the last native-MTP
+layer (GLM-5-Next nextn head, Qwen 3.5/3.6 MTP predictor) runs its
+post-attention norm and MoE/MLP, and Qwen's final norm, on each row's read
+column only, while attention and the drafter cache write still run on every
+column (MLX_LM_MTP_LAST_COLUMN=0 runs every column again); carries the #2373
+candidate: TokenIterator settles simple and rotating caches by their stored
+buffers, and Llama and Qwen3 run SwiGLU as one compiled kernel. No Swift, core
+or C pin changes.
 
 As of 2026-11-16 the LM row is `3.32.3-macprovider.79` (`9245964`), on
 `3.32.3-macprovider.78` (#2338): It is 3.32.3-macprovider.78 plus one commit
