@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.33
-Status: draft (normative design). v0.1.33 removes the `gpt_oss` family from
+Version: v0.1.34
+Status: draft (normative design). v0.1.34 states that the hybrid attach-time
+proof keeps its at-most-512-token partition for the hybrid Qwen MoE family,
+which now serves chunks of up to 2048 tokens like `glm5_next` (SPEC-038
+v0.3.59 FR-CB2, Related: #2402); the proof is unchanged. v0.1.33 removes the `gpt_oss` family from
 the model-family KV-quant default and makes an explicit `kv_bits` for a
 gpt-oss model fail closed: gpt-oss attention sinks have no quantized-KV
 attention path. v0.1.32 records the attach, isolation,
@@ -1137,10 +1140,12 @@ Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
 parity and isolation gates on the packaged runtime. For an allowlisted hybrid,
 the attach-time proof MUST compare at least 48 exact greedy tokens after a
-513-token prompt partitioned in the same at-most-512-token chunks used by
-production serving; a shorter, differently partitioned, or non-exact proof
-fails closed. For a sparse-attention family (`glm5_next`) the attach-time
-proof prompt MUST instead be at least
+513-token prompt partitioned in at-most-512-token chunks. The proof keeps
+this 512 partition; the production chunk is 2048 for `glm5_next` and the
+hybrid Qwen MoE family (SPEC-038 FR-CB2). A shorter, differently
+partitioned, or non-exact proof fails closed. For a
+sparse-attention family (`glm5_next`) the attach-time proof prompt MUST
+instead be at least
 `max(513, index_topk + 2 × block_size_tokens)` tokens, read from the resident
 model's `config.json` and the pool's configured block size (2560 for the
 admitted identity at block 256), in the same production chunks: a 513-token

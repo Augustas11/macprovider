@@ -32,6 +32,7 @@ extension ModelRuntime {
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
         promptChunkCeiling: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
+        idlePrefillCohortChunkTokens: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
@@ -57,6 +58,7 @@ extension ModelRuntime {
             maxPrefillTokensPerIteration: prefillTokensPerIteration
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
             maxPromptChunkTokens: promptChunkTokens,
+            idlePrefillCohortChunkTokens: idlePrefillCohortChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
             serialPrefillStride: serialPrefillStride,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
@@ -89,18 +91,50 @@ extension ModelRuntime {
     /// and 189 GB peak (#2100).
     static let pagedMLAPromptChunkTokens = 2_048
 
+    /// CB prompt chunk ceiling of a hybrid Qwen MoE backend. M3 Ultra,
+    /// Qwen3.6-35B-A3B, one request: TTFT 1.47 s at 512 vs 1.36 s at 2048
+    /// with ~3k prompt tokens, 6.39 vs 5.67 s with ~12k; same text alone and
+    /// under load. A decoding row waits about 0.8-1.2 s per chunk at prompts
+    /// up to ~12k on that Mac (#2402).
+    static let hybridQwenMoEPromptChunkTokens = 2_048
+
     /// The prompt chunk ceiling for this backend's family; every other
     /// family keeps `defaultPromptChunkTokens`.
     nonisolated static func schedulerPromptChunkCeiling(
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Int {
         if backend is DeepseekV4ContinuousBatchBackend { return DeepseekV4ContinuousBatchBackend.prefillChunkTokens }
+        if (backend as? PagedKVSharedForwardBackend)?.isHybridQwenMoE == true { return hybridQwenMoEPromptChunkTokens }
         guard let backend = backend as? PagedKVSharedForwardBackend,
               backend.cacheKinds.contains(where: \.isPagedMLA)
         else {
             return ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
         }
         return pagedMLAPromptChunkTokens
+    }
+
+    /// The chunk the idle prefill cohort is sized by, or nil for the prompt
+    /// chunk. A hybrid Qwen MoE backend sizes it by the 512-token default, so
+    /// rows arriving together share at most the per-iteration budget (2048
+    /// tokens by default) in one forward, the shape measured before its chunk
+    /// rose (SPEC-038 FR-CB2, #2402); each row keeps its own chunks.
+    nonisolated static func schedulerIdlePrefillCohortChunkTokens(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int? {
+        (backend as? PagedKVSharedForwardBackend)?.isHybridQwenMoE == true
+            ? ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens : nil
+    }
+
+    /// The model is a hybrid Qwen mixture-of-experts model (Qwen3.5/3.6
+    /// A3B): paged-KV family `qwen`, MoE dispatch and recurrent (gated-delta)
+    /// layers. Non-hybrid Qwen MoE and dense Qwen are not measured at the
+    /// 2048-token chunk and keep 512 (SPEC-038 FR-CB2, #2402).
+    nonisolated static func promptChunkFamilyIsHybridQwenMoE(
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) -> Bool {
+        modelCapabilities.modelFamily == "qwen" && modelCapabilities.requiresMoEDispatch
+            && cacheKinds.contains(.recurrentMamba)
     }
 
     /// MiniMax M3 (`pagedIndexedKV`) rows prefill in the serial path's stride
@@ -260,6 +294,7 @@ extension ModelRuntime {
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: prefillGrouping,
                 promptChunkCeiling: schedulerPromptChunkCeiling(backend: backend),
+                idlePrefillCohortChunkTokens: schedulerIdlePrefillCohortChunkTokens(backend: backend),
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
                 nativeMTPPromptRowsJoinRaggedPrefill: schedulerNativeMTPPromptRowsJoinRaggedPrefill(
@@ -397,7 +432,10 @@ extension ModelRuntime {
                 compiledDecode: false,
                 drafterContainer: nativeMTPDrafterContainer,
                 nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter,
-                gpuTurnParticipant: gpuTurnParticipant
+                gpuTurnParticipant: gpuTurnParticipant,
+                isHybridQwenMoE: promptChunkFamilyIsHybridQwenMoE(
+                    modelCapabilities: modelCapabilities, cacheKinds: cacheKinds
+                )
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -437,14 +475,19 @@ extension ModelRuntime {
     /// SPEC-038 FR-CB9/FR-CB10: a stock order process measures other
     /// kernels and compares 3+-row widths with another reference, so its key
     /// carries the route; every row-invariant key is unchanged.
+    /// A hybrid Qwen MoE backend prefilling above 512-token chunks keys on
+    /// its chunk (`promptChunkTokens`, v0.3.59), so a grant measured at 512
+    /// re-runs the probes; every other key is unchanged.
     static func continuousBatchingSelfCheckRuntimeBuild(
         forwardBound deviceBound: Int,
         routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
         forwardTokenCap: Int? = nil,
-        smallMRoute: SmallMRoute = .rowInvariant
+        smallMRoute: SmallMRoute = .rowInvariant,
+        promptChunkTokens: Int? = nil
     ) -> String {
         let bound = min(deviceBound, forwardTokenCap ?? Int.max)
         let cap = forwardTokenCap.map { "+flat\($0)" } ?? ""
+        let chunk = promptChunkTokens.map { "+chunk\($0)" } ?? ""
         // glm5_next (the only capped backend) measures a decode-only gain
         // (SPEC-038 v0.3.21) under its own probe version; every other key is
         // unchanged.
@@ -453,7 +496,7 @@ extension ModelRuntime {
             : ContinuousBatchingSelfCheck.glm5NextProbeVersion
         return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
             + "+\(probe)/route\(routeKeyBoundary)" + cap
-            + (smallMRoute == .stockOrder ? "+small_m_stock_order" : "")
+            + (smallMRoute == .stockOrder ? "+small_m_stock_order" : "") + chunk
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

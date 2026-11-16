@@ -893,6 +893,9 @@ final class NativeMTPHardwareE2ERunner {
         // Match production serve. Omitting the toggle leaves Qwen's `<think>`
         // open, so the acceptance budget is spent inside reasoning.
         let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: targetDirectory)
+        let isHybridQwenMoE = ModelRuntime.promptChunkFamilyIsHybridQwenMoE(
+            modelCapabilities: modelCapabilities, cacheKinds: cacheKinds
+        )
         let probeRuntime = await makeRuntime(
             modelSHA: targetIdentity.digest,
             tokenizerHashes: tokenizerHashes, labCBPolicy: labCBPolicy,
@@ -903,7 +906,8 @@ final class NativeMTPHardwareE2ERunner {
             modelCapabilities: modelCapabilities,
             prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
-            backend: makeBackend(container: targetContainer, cacheKinds: cacheKinds),
+            backend: makeBackend(container: targetContainer, cacheKinds: cacheKinds,
+                isHybridQwenMoE: isHybridQwenMoE),
             nativeCapability: nil,
             nativeAdmissionCapability: nil,
             drafterContainer: nil,
@@ -921,9 +925,11 @@ final class NativeMTPHardwareE2ERunner {
         }
         let proof = measurement.hardwareSizingProof
         let observed = measurement.observedRuntimeIdentity
-        let ordinaryBackend = makeBackend(container: targetContainer, cacheKinds: cacheKinds)
+        let ordinaryBackend = makeBackend(container: targetContainer, cacheKinds: cacheKinds,
+            isHybridQwenMoE: isHybridQwenMoE)
         let nativeBackend = makeBackend(container: targetContainer, cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer, familyAdapter: nativeAdmissionCapability.familyAdapter)
+            drafterContainer: drafterContainer, familyAdapter: nativeAdmissionCapability.familyAdapter,
+            isHybridQwenMoE: isHybridQwenMoE)
         let ordinary = await makeRuntime(
             modelSHA: targetIdentity.digest,
             tokenizerHashes: tokenizerHashes, labCBPolicy: labCBPolicy,
@@ -979,7 +985,8 @@ final class NativeMTPHardwareE2ERunner {
         container: ModelContainer,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         drafterContainer: MTPDrafterContainer? = nil,
-        familyAdapter: String? = nil
+        familyAdapter: String? = nil,
+        isHybridQwenMoE: Bool = false
     ) -> any ContinuousBatchSchedulerBackend {
         if family == .deepseekV4 {
             let backend = DeepseekV4ContinuousBatchBackend(container: container,
@@ -997,7 +1004,8 @@ final class NativeMTPHardwareE2ERunner {
         return PagedKVSharedForwardBackend(container: container,
             blockSizeTokens: family.blockSizeTokens, maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1, layerCount: cacheKinds.count, cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer, nativeMTPFamilyAdapter: familyAdapter)
+            drafterContainer: drafterContainer, nativeMTPFamilyAdapter: familyAdapter,
+            isHybridQwenMoE: isHybridQwenMoE)
     }
 
     private func makeRuntime(

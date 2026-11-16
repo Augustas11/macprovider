@@ -788,6 +788,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     let compiledDecode: Bool
     /// SPEC-001-R018: the owning runtime's GPU turn; nil outside a runtime.
     let gpuTurnParticipant: GPUTurnParticipant?
+    /// The served model is a hybrid Qwen mixture-of-experts model
+    /// (`ModelRuntime.promptChunkFamilyIsHybridQwenMoE`). Its cache kinds
+    /// match the dense hybrid Qwen, so the family rides here; it selects the
+    /// 2048-token prompt chunk and the 512-sized idle prefill cohort
+    /// (SPEC-038 FR-CB2).
+    let isHybridQwenMoE: Bool
     private let lock = NSLock()
     /// Holders of this backend's target `container.perform` (exclusive, so
     /// at most one). Every MLX evaluation of the native-MTP round runs
@@ -1023,10 +1029,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
         maxVerifyTokensPerForward: Int? = nil,
-        gpuTurnParticipant: GPUTurnParticipant? = nil
+        gpuTurnParticipant: GPUTurnParticipant? = nil,
+        isHybridQwenMoE: Bool = false
     ) {
         self.container = container
         self.gpuTurnParticipant = gpuTurnParticipant
+        self.isHybridQwenMoE = isHybridQwenMoE
         self.drafterContainer = drafterContainer
         self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
             familyAdapter: nativeMTPFamilyAdapter
@@ -1070,7 +1078,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
         maxVerifyTokensPerForward: Int? = nil,
-        gpuTurnParticipant: GPUTurnParticipant? = nil
+        gpuTurnParticipant: GPUTurnParticipant? = nil,
+        isHybridQwenMoE: Bool = false
     ) {
         self.init(
             container: container,
@@ -1086,7 +1095,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPFamilyAdapter: nativeMTPFamilyAdapter,
             nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap,
             maxVerifyTokensPerForward: maxVerifyTokensPerForward,
-            gpuTurnParticipant: gpuTurnParticipant
+            gpuTurnParticipant: gpuTurnParticipant,
+            isHybridQwenMoE: isHybridQwenMoE
         )
     }
 

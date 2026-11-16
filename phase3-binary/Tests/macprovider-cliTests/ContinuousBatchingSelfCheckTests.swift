@@ -820,6 +820,47 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertFalse(ContinuousBatchingSelfCheckTarget(key: qwen, maxRows: 8).decodeOnlyGain)
     }
 
+    /// #2402 (SPEC-038 v0.3.59): a hybrid Qwen MoE scheduler prefilling above
+    /// the 512-token default keys its grant on the chunk, so a grant measured
+    /// at 512 re-runs the probes; with no chunk every key, glm5_next's
+    /// included, is byte for byte the one stored before.
+    func testHybridQwenMoEChunkKeysTheSelfCheckAndLeavesEveryOtherKeyUnchanged() throws {
+        let base = ContinuousBatchingSelfCheckKey.currentRuntimeBuild
+        let plain = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
+        XCTAssertEqual(plain, "\(base)+cb-isolation-v1/decode11/verify11+cb-probe-v2/route1024")
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024, promptChunkTokens: 2_048),
+            plain + "+chunk2048"
+        )
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+                forwardBound: 11, routeKeyBoundary: 1024, smallMRoute: .stockOrder, promptChunkTokens: 2_048
+            ),
+            plain + "+small_m_stock_order+chunk2048"
+        )
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024, forwardTokenCap: 8),
+            "\(base)+cb-isolation-v1/decode8/verify8+cb-probe-v3/route1024+flat8"
+        )
+        let runtime = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ModelRuntime.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(runtime.contains("promptChunkTokens: scheduler.selfCheckPromptChunkTokens"))
+        let scheduler = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchScheduler.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(scheduler.contains(
+            "guard (backend as? PagedKVSharedForwardBackend)?.isHybridQwenMoE == true,\n"
+                + "              chunk > ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens"
+        ))
+    }
+
     /// The throughput passes time decode only on both sides for a
     /// `decodeOnlyGain` (glm5_next) target (v0.3.21): the batch runs as a
     /// cohort and its rate comes from the cohort span, the serial side from
