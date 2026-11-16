@@ -22,6 +22,12 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## A self-degraded provider returns while a chat is forwarded to it — not merged, not live
+
+Issue #2399. Coordinator: a `degraded` provider with no coordinator hold (for example the first-token stall hold of PR 2378) that sends a `ready` or `busy` `state_update` leaves `degraded` on it even while a chat the coordinator forwarded is still running on it. The coordinator keeps owning the seat count while chats are forwarded: the provider returns as `busy` or `ready` from that count, never from its own `slots_free`, and free seats never exceed `slots_total` minus the forwarded chats. A heartbeat's `ready` does not lift `degraded` while chats are forwarded, so wake warm-up (SPEC-002 FR-P8) still waits for its own exit. Recovery and breaker holds, coordinator drains and thermal reports are unchanged. No schema change, no wire change, no provider CLI change.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: a provider that trips its first-token stall watchdog and recovers is reported in service again (`/poolz` `ready` or `busy`, `in_service: true`) on its next state update while its held request is still running.
+
 ## Native-MTP canary steps logged on the coordinator (SPEC-031-R033, SPEC-048-R016) — open, not live
 
 [PR 2405](https://github.com/Augustas11/macprovider/pull/2405) (Related: #2404). The coordinator logs one structured line each for canary challenge sent (challenge id, request id, deadline, bank release id), challenge send failure, result received (outcome, reason, decode path, diagnostic), canary timeout, and native-MTP tuple disable sent (reason). Canary behaviour is unchanged: one timeout still disables the tuple, as SPEC-048-R016 requires.

@@ -3379,6 +3379,34 @@ func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal b
 	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold
 }
 
+// clampFreeToForwarded keeps free seats within slots_total minus the chats the
+// coordinator still has forwarded. A smaller slots_total reported while chats
+// are forwarded otherwise left more free seats than the provider has.
+func (p *Provider) clampFreeToForwarded() {
+	if p.forwardedInFlight <= 0 || p.SlotsTotal <= 0 {
+		return
+	}
+	if limit := max(p.SlotsTotal-p.forwardedInFlight, 0); p.SlotsFree > limit {
+		p.SlotsFree = limit
+	}
+}
+
+// coordinatorOccupancyState is the routable state the coordinator-owned seat
+// count gives. While that count is authoritative a provider's ready or busy
+// state_update says only that it is healthy again: a provider leaving
+// degraded with chats still forwarded to it returns as busy or ready from this
+// count, not from its report, so it never gains seats it does not have
+// (#2399). Only the explicit state_update does this. A heartbeat's ready does
+// not, so wake warm-up (SPEC-002 FR-P8) still waits for the provider's
+// warm_up-complete state_update or the fallback while chats are forwarded.
+// Draining is never left this way; the coordinator may have imposed it.
+func (p *Provider) coordinatorOccupancyState() State {
+	if p.SlotsFree > 0 && !p.capacitySafetyHold {
+		return StateReady
+	}
+	return StateBusy
+}
+
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
 	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
@@ -3497,6 +3525,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if p.SlotsTotal > 0 && p.SlotsFree > p.SlotsTotal {
 		p.SlotsFree = p.SlotsTotal
 	}
+	p.clampFreeToForwarded()
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
 	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
@@ -3724,6 +3753,7 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	}
 	thermal := update.Reason == "thermal_throttled"
 	staleCapacity := p.ignoreProviderOccupancy(update.State, slotsFree, thermal)
+	returnsFromDegraded := false
 	if r.canApplyProviderStateLocked(p, update.State) {
 		if update.State != "" && update.State != StateReady && update.State != StateBusy {
 			r.setStateLocked(p, update.State)
@@ -3731,6 +3761,8 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 			r.setStateLocked(p, StateBusy)
 		} else if !thermal && !staleCapacity {
 			r.setStateLocked(p, update.State)
+		} else if !thermal && p.State == StateDegraded && (update.State == StateReady || update.State == StateBusy) {
+			returnsFromDegraded = true
 		}
 	}
 	if update.SlotsFree != nil && !staleCapacity {
@@ -3741,6 +3773,10 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		if p.SlotsTotal > 0 && p.SlotsFree > p.SlotsTotal {
 			p.SlotsFree = p.SlotsTotal
 		}
+	}
+	p.clampFreeToForwarded()
+	if returnsFromDegraded {
+		r.setStateLocked(p, p.coordinatorOccupancyState())
 	}
 	if len(update.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], update.LastAutoupdateEvent...)
