@@ -366,6 +366,15 @@ extension ModelRuntime {
             ? nil : PagedKVRuntimeContiguousCacheBridge()
         let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         let prefillGrouping = await continuousBatchPrefillGrouping(container: container, modelID: modelID)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        PagedKVLabTrace.emit("config_backend", [
+            "model_id": modelID ?? "", "model_family": modelCapabilities.modelFamily,
+            "cache_kinds": cacheKinds.map { String(describing: $0) }, "hybrid": isHybrid,
+            "contiguous_bridge": contiguousCacheBridge != nil, "cached_turns": cachedTurns,
+            "lockstep_window": maxDecodeLockstepWindow, "max_batch": maxBatch,
+            "decode_row_bound": continuousBatchDecodeRowBound(cacheKinds: cacheKinds),
+        ])
+        #endif
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,

@@ -4506,6 +4506,13 @@ maxTokens: 1,
             cachedTurns: self.effectiveContinuousBatchingCachedTurns,
             gpuTurnParticipant: self.gpuTurnParticipant
         )
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        PagedKVLabTrace.emit("config_route", [
+            "model_id": modelID, "model_family": self.currentPagedKVModelCapabilities.modelFamily,
+            "small_m_route": self.smallMRoute.rawValue, "max_batch": self.maxBatch,
+            "scheduler_attached": self.continuousBatchScheduler != nil,
+        ])
+        #endif
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
             self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(

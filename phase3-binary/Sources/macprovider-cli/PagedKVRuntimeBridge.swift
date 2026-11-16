@@ -217,6 +217,9 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
 
     func record(caches: [PagedKVCache], binding: PagedKVStorageBinding) throws {
         let table = binding.currentTable
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if PagedKVLabTrace.enabled { Self.labTraceRecordMismatch(caches: caches, binding: binding) }
+        #endif
         try caches.forEach { cache in
             try Self.validateHandle(cache.binding.handle, matches: binding.handle)
             // Same offset/table/shape guards the eager host copy used to
@@ -378,6 +381,41 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
             throw PagedKVContiguousCacheBridgeError.blockTableMismatch
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396): the guards of `record` evaluated without throwing,
+    /// one event listing every layer that fails them. Nothing when all pass.
+    private static func labTraceRecordMismatch(caches: [PagedKVCache], binding: PagedKVStorageBinding) {
+        let table = binding.currentTable
+        let layers: [[String: Any]] = caches.enumerated().compactMap { layer, cache in
+            let blocks = PagedKVBlockLayout.blockCount(tokens: cache.storedTokens, blockSizeTokens: cache.blockSizeTokens)
+            var failed: [String] = []
+            if cache.binding.handle != binding.handle { failed.append("handle") }
+            if cache.offset != table.logicalTokenCount { failed.append("offset_vs_logical") }
+            if cache.blockSizeTokens != table.blockSizeTokens { failed.append("block_size") }
+            if blocks != table.physicalBlocks.count { failed.append("stored_blocks_vs_table_blocks") }
+            guard !failed.isEmpty else { return nil }
+            let slot = cache.labBatchSlot
+            return [
+                "layer": layer, "failed": failed,
+                "offset": cache.offset, "expected_logical": table.logicalTokenCount,
+                "stored": cache.storedTokens, "stored_blocks": blocks,
+                "expected_blocks": table.physicalBlocks.count,
+                "attached": slot != nil, "batch_row": slot?.row ?? -1,
+            ]
+        }
+        guard !layers.isEmpty else { return }
+        let signatures = Set(layers.map { "\($0["offset"]!)/\($0["stored"]!)/\($0["batch_row"]!)" })
+        PagedKVLabTrace.emit("record_mismatch", [
+            "handle": String(binding.handle.handleID.uuidString.prefix(8)),
+            "table": PagedKVLabTrace.table(table),
+            "layers_total": caches.count,
+            "layers_mismatched": layers.count,
+            "mismatched_layers_agree": signatures.count == 1,
+            "layers": layers,
+        ])
+    }
+    #endif
 
     private static func isSameTableIdentity(_ lhs: PagedKVBlockTable, _ rhs: PagedKVBlockTable) -> Bool {
         lhs.handleID == rhs.handleID
@@ -718,6 +756,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private struct DecodeSession {
+        let id = UUID()
         var requestIDs: [String]
         var batchedCaches: [PagedKVSharedLayerBatch]
         var compiledCaches: [KVCache]
@@ -759,7 +798,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         targetLockHolders += 1
         lock.unlock()
-        releaseRetiredDecodeSessions()
     }
 
     fileprivate func exitTargetLock() {
@@ -794,8 +832,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
-    /// Sessions ended outside the target container, waiting for the next
-    /// container operation to release their rows (`retireDecodeSession`).
+    /// Sessions dropped off the model container (`finish`, the native-MTP
+    /// verify entry) whose rows may still ride their buffers. The next
+    /// container caller releases them (`releaseRetiredDecodeSessions`).
     private var retiredDecodeSessions: [DecodeSession] = []
     private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
     /// Row-owned drafter state. Only prompt prefill and a committed finalize
@@ -1062,6 +1101,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
         let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             // SPEC-001-R018: a shared [B, L] forward (one chunk per row) is one
             // GPU turn; the per-row path below takes one turn per row's chunk.
             let gpuTurn = self.gpuTurnParticipant.map(GPUTurnScope.init)
@@ -1593,6 +1633,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if !pendingIDs.isEmpty {
             try await container.perform { context in
                 self.enterTargetLock(); defer { self.exitTargetLock() }
+                self.releaseRetiredDecodeSessions()
                 // SPEC-001-R018: the drafter catch-up forward is one GPU turn.
                 let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: pendingIDs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
                 try await self.flushNativeMTPDrafterColumns(
@@ -1637,8 +1678,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_duplicate_packed_row")
         }
 
-        // Outside the container: the group forwards release it under the lock.
-        retireDecodeSession(containingAnyOf: nil)
+        // Outside the model container: a window may be repacking the rows.
+        retireDecodeSession()
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
         let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
@@ -1696,6 +1737,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
+            self.releaseRetiredDecodeSessions()
             let rowStates = inputs.map {
                 self.rowState(
                     for: $0.requestID,
@@ -1800,6 +1842,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             // SPEC-001-R018: one GPU turn for the round's commit forward.
             let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
@@ -2015,7 +2058,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// Called on the scheduler actor, possibly while a window runs on the
     /// container: it never touches row caches itself (`retireDecodeSession`).
     func finish(requestID: String) {
-        retireDecodeSession(containingAnyOf: [requestID])
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceLiveRows("finish_before", finishing: requestID)
+        defer { labTraceLiveRows("finish_after", finishing: requestID) }
+        #endif
+        retireDecodeSession(containing: requestID)
         removeNativeMTPPendingTransaction(for: requestID)
         removeNativeMTPRowState(for: requestID)
         removeRowState(for: requestID, discardRecordedCache: false)
@@ -2034,6 +2081,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             guard let self, self.beginOperation() else { return }
             defer { self.endOperation() }
             try? await self.container.perform { _ in
+                self.enterTargetLock(); defer { self.exitTargetLock() }
                 self.releaseRetiredDecodeSessions()
             }
         }
@@ -2103,6 +2151,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         try await container.perform(nonSendable: input) { context, input in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             var state = self.rowState(
                 for: input.requestID,
                 binding: input.binding,
@@ -2335,6 +2385,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform { _ in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             self.invalidateDecodeSession(containing: requestID)
             let row = self.existingRowState(for: requestID)
             guard let row, row.caches.count == self.cacheKinds.count else { return nil }
@@ -2524,7 +2576,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge?.discardContiguousCache(handle: binding.handle)
             return
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if PagedKVLabTrace.enabled {
+            var fields = PagedKVLabTrace.row(requestID: requestID, index: nil, caches: state.caches, binding: binding)
+            fields["bridge"] = contiguousCacheBridge != nil
+            PagedKVLabTrace.emit("set_row_state", fields)
+        }
+        do {
+            try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        } catch {
+            var fields = PagedKVLabTrace.row(requestID: requestID, index: nil, caches: state.caches, binding: binding)
+            fields["error"] = ContinuousBatchingPolicy.prefillFailureReason(error)
+            PagedKVLabTrace.emit("set_row_state_throw", fields)
+            throw error
+        }
+        #else
         try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        #endif
         lock.lock()
         if !cancelRequested {
             rows[requestID] = state
@@ -2556,6 +2624,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_forward_token_cap")
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labWindow = PagedKVLabTrace.enabled ? PagedKVLabTrace.beginWindow() : 0
+        let labFreshRows = PagedKVLabTrace.enabled
+            ? supportedInputs.map { existingRowState(for: $0.requestID) == nil } : []
+        #endif
         var rowStates = supportedInputs.map {
             self.rowState(
                 for: $0.requestID,
@@ -2589,9 +2662,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let batchedCaches: [PagedKVSharedLayerBatch]
         if let existing = session, existing.requestIDs == requestIDs {
             batchedCaches = existing.batchedCaches
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_reuse", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+            #endif
         } else {
             let previous = session
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_begin", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: previous?.batchedCaches ?? [], fresh: labFreshRows,
+                               extra: ["previous_rids": previous?.requestIDs ?? []])
+            #endif
             previous?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_prev_synced", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: previous?.batchedCaches ?? [], fresh: labFreshRows)
+            #endif
+            #if DEBUG
+            rebuildObserverForTest?("prev_synced")
+            #endif
             // While rows ride the session, its batch buffers are their only
             // K/V. Hybrid (recurrent) sessions are rebuilt every window, so
             // their rows keep their own K/V.
@@ -2599,6 +2688,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 from: rowStates.map(\.caches),
                 attachRows: !cacheKinds.contains(.recurrentMamba)
             )
+            #if DEBUG
+            rebuildObserverForTest?("packed")
+            #endif
             // Packing re-attached the rows that ride on; rows that left with
             // the old session get their own K/V back. Build the new batch one
             // layer at a time and drop each replaced layer as soon as its
@@ -2620,7 +2712,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 compiledCaches: [],
                 compiledStep: nil
             )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_end", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+            #endif
         }
+        // After packing, so riding rows already left the retired buffers.
+        releaseRetiredDecodeSessions(inUse: session?.id)
         let cachesAsKV = batchedCaches.map(\.cache)
         // SPEC-001-R018: one GPU turn per decode step of the window, released
         // before each step's tokens go to the observer.
@@ -2894,6 +2992,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // reusable session that amortizes contiguous compiled decode. Inside a
         // window the packed state advances one token per step exactly as
         // one-step windows would; the window end is a token boundary.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceWindowRows("window_commit_begin", window: labWindow, inputs: supportedInputs,
+                           rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows, extra: [
+                               "decode_path": canCompile ? "compiled" : "eager",
+                               "batched_state": hasBatchedState,
+                               "capture_rows": captureIndices.count,
+                               "steps": decodeSteps, "ran_steps": ranSteps, "ended_early": endedEarly,
+                           ])
+        #endif
         if endedEarly {
             // Every row is cancelled and about to be released. Its KV now ends
             // before its block table (extended for the full window), so it
@@ -2922,6 +3029,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceWindowRows("window_commit_end", window: labWindow, inputs: supportedInputs,
+                           rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+        #endif
         if !capturedColumns.isEmpty {
             eval(capturedColumns.values.flatMap { $0.map(\.hidden) })
             lock.lock()
@@ -4278,6 +4389,41 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         invalidateDecodeSession(containingAnyOf: [requestID])
     }
 
+    /// For callers outside the model container (`finish`, the native-MTP
+    /// verify entry; #2396): forgets the decode session (the one holding
+    /// `requestID`, or any) without touching a row cache. The scheduler calls
+    /// `finish` while the next window runs, and that window may be repacking
+    /// these same caches into its new batch: releasing the session here
+    /// detached them mid-pack, and a layer packed from a half-detached row
+    /// started an empty one-token lockstep buffer. The session's rows stay
+    /// attached to its buffers (synced at its window end) until a container
+    /// caller repacks them or releases it (`releaseRetiredDecodeSessions`).
+    private func retireDecodeSession(containing requestID: String? = nil) {
+        lock.lock()
+        if let current = decodeSession, requestID.map(current.requestIDs.contains) ?? true {
+            decodeSession = nil
+            retiredDecodeSessions.append(current)
+        }
+        lock.unlock()
+    }
+
+    /// Inside the model container only: releases retired sessions, so rows
+    /// that left them (a finished row's retained caches) take a copy of
+    /// their own history and the batch buffers free. Rows a window already
+    /// repacked ride its new batch and are untouched. Skips the stored
+    /// session and `inUse` (a window that reused a session `finish` retired
+    /// meanwhile stores it back; it is released when replaced).
+    private func releaseRetiredDecodeSessions(inUse: UUID? = nil) {
+        lock.lock()
+        let storedID = decodeSession?.id
+        let retired = retiredDecodeSessions
+        retiredDecodeSessions.removeAll()
+        lock.unlock()
+        for session in retired where session.id != storedID && session.id != inUse {
+            session.batchedCaches.forEach { $0.releaseRows() }
+        }
+    }
+
     /// Ends the decode session only when one of `requestIDs` rides it. A
     /// prompt chunk for a row outside the session leaves the decoding rows'
     /// caches untouched, so their packed batch stays valid; dropping it made
@@ -4297,33 +4443,65 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         session?.batchedCaches.forEach { $0.releaseRows() }
     }
 
-    /// Ends the decode session (any session when `requestIDs` is nil) from
-    /// outside the target container. Releasing a session rewrites its rows'
-    /// caches, and a decode window may be packing those same rows on the
-    /// container thread right now: `finish` runs on the scheduler actor while
-    /// it awaits the window (a terminal delivery task). Releasing here raced
-    /// the window's repack and left a surviving row with one layer's history
-    /// cut to the window (`paged_kv_block_table_mismatch`). The session only
-    /// leaves `decodeSession`; the next container operation releases it.
-    private func retireDecodeSession(containingAnyOf requestIDs: [String]?) {
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396). Ids and counts read under `lock` only: `finish`
+    /// can run beside a window, so it never reads row caches.
+    private func labTraceLiveRows(_ event: String, finishing requestID: String) {
+        guard PagedKVLabTrace.enabled else { return }
         lock.lock()
-        if let current = decodeSession,
-           requestIDs.map({ $0.contains(where: current.requestIDs.contains) }) ?? true {
-            decodeSession = nil
-            retiredDecodeSessions.append(current)
-        }
+        let live = rows.keys.sorted()
+        let sessionIDs = decodeSession?.requestIDs
+        let operations = activeOperations
         lock.unlock()
+        PagedKVLabTrace.emit(event, [
+            "rid": requestID,
+            "live_rids": live,
+            "session_rids": sessionIDs ?? [],
+            "has_session": sessionIDs != nil,
+            "in_session": sessionIDs?.contains(requestID) ?? false,
+            "active_operations": operations,
+        ])
     }
 
-    /// Releases sessions `retireDecodeSession` ended. Only inside the target
-    /// container, before anything reads or packs row caches.
-    private func releaseRetiredDecodeSessions() {
-        lock.lock()
-        let retired = retiredDecodeSessions
-        retiredDecodeSessions = []
-        lock.unlock()
-        retired.forEach { $0.batchedCaches.forEach { $0.releaseRows() } }
+    /// Lab trace (#2396): one event per row of a decode window, plus the
+    /// batch's layer-0 state and whether every layer took the same sync path.
+    private func labTraceWindowRows(
+        _ event: String,
+        window: Int,
+        inputs: [ContinuousBatchDecodeInput],
+        rowStates: [RowState],
+        batches: [PagedKVSharedLayerBatch],
+        fresh: [Bool],
+        extra: [String: Any] = [:]
+    ) {
+        guard PagedKVLabTrace.enabled else { return }
+        let layers = batches.compactMap { $0.cache as? PagedKVBatchLayerCache }
+        let syncPaths = Set(layers.map(\.labLastSyncPath)).sorted()
+        for (index, input) in inputs.enumerated() {
+            var fields = PagedKVLabTrace.row(
+                requestID: input.requestID, index: index,
+                caches: rowStates.indices.contains(index) ? rowStates[index].caches : [],
+                binding: input.binding
+            )
+            fields.merge(extra) { current, _ in current }
+            fields["window"] = window
+            fields["width"] = inputs.count
+            fields["rids"] = inputs.map(\.requestID)
+            fields["committed"] = input.committedKVTokenCount
+            fields["target"] = input.targetKVTokenCount
+            fields["fresh_row"] = fresh.indices.contains(index) ? fresh[index] : false
+            fields["batch_layers"] = layers.count
+            fields["batch_storage"] = layers.first.map { String(UInt(bitPattern: ObjectIdentifier($0.labStorage).hashValue), radix: 16) } ?? ""
+            fields["batch_rows_attached"] = layers.first?.labRowsAttached ?? false
+            fields["batch_attaches_rows"] = layers.first?.labAttachesRows ?? false
+            fields["batch_batched_offset"] = layers.first?.labBatchedOffset ?? -1
+            fields["batch_deferred_offsets"] = layers.first?.labDeferredRowOffsets ?? []
+            fields["batch_sync_paths"] = syncPaths
+            fields["batch_sync_length"] = layers.first?.labLastSyncLength ?? -1
+            PagedKVLabTrace.emit(event, fields)
+        }
     }
+    #endif
 
     /// A row's stored drafter state, next proposal, and buffered depth-zero
     /// column count.
@@ -4344,6 +4522,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         enterTargetLock()
         defer { exitTargetLock() }
         return try rowTargetCacheDigest(requestID: requestID)
+    }
+    #endif
+
+    #if DEBUG
+    /// Tests (#2396): called by a window rebuilding its session, after the
+    /// previous session synced (`prev_synced`) and after the new batch packed
+    /// its rows (`packed`), on the model container.
+    var rebuildObserverForTest: ((String) -> Void)?
+
+    /// Whether some caller holds this backend's target `container.perform`.
+    func targetLockHeldForTest() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return targetLockHolders > 0
+    }
+
+    /// A retained row's paged attention layer caches, in layer order.
+    func rowPagedCachesForTest(requestID: String) -> [PagedKVCache] {
+        existingRowState(for: requestID).map { Self.pagedAttentionCaches(in: $0.caches) } ?? []
     }
     #endif
 
@@ -5333,6 +5530,18 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         attachesRows && rowCaches.allSatisfy { $0.isAttached(to: storage) }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396): which branch the last `syncRowsFromBatch` took and
+    /// the batch length it saw.
+    var labLastSyncPath = "never"
+    var labLastSyncLength = -1
+    var labStorage: PagedKVBatchStorage { storage }
+    var labRowsAttached: Bool { rowsAttached }
+    var labAttachesRows: Bool { attachesRows }
+    var labBatchedOffset: Int { batchedOffset ?? -1 }
+    var labDeferredRowOffsets: [Int] { deferredRowOffsets ?? [] }
+    #endif
+
     /// Ends this batch for its rows: syncs them, then gives every row still
     /// attached to it its own copy of its K/V. A row already re-attached to a
     /// newer batch keeps that batch's storage.
@@ -5411,6 +5620,12 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         // batch-max length and fail the next window with
         // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
         // Deferred ragged rows write back each row's own prefix instead.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labLastSyncPath = deferredRowOffsets != nil ? "deferred_flush"
+            : batchedOffset == nil ? "noop_ragged"
+            : rowsAttached ? "lockstep_attached_adopt" : "lockstep_state_restore"
+        labLastSyncLength = length
+        #endif
         if deferredRowOffsets != nil {
             flushDeferredRows()
             return

@@ -1,11 +1,21 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.57
+Version: v0.3.58
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.58 (2026-11-16, paged KV rows leave a decode batch only on the model container, Related: #2396):**
+No normative change. The provider's paged-KV backend detached the layer
+caches of rows still decoding when `finish` for a batch-mate ran on the
+scheduler while the next decode window repacked those caches, so a row
+failed with `paged_kv_block_table_mismatch` after one window decoded with
+some layers missing their history. `finish` and the native-MTP verify entry
+now only drop the decode session under the backend lock; the next operation
+on the model container releases its rows. The block-table check is unchanged.
+The decode-path digest changes.
+
 **Change log v0.3.57 (2026-11-16, further models keep the row-invariant route, Related: #2338):**
 FR-CB9 item 3: a `serve` process configured with further models
 (`warm_models`, SPEC-001-R017) counts as having another model and keeps
