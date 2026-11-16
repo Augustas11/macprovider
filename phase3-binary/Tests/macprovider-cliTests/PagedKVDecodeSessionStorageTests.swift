@@ -519,11 +519,20 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 /// window's first token, and the row recorded that layer with 8 tokens
 /// against a 467-token block table (`paged_kv_block_table_mismatch`).
 ///
-/// CPU only, random two-layer weights: runs without a metallib (CI).
+/// CPU device, random two-layer weights. Building the weights still loads
+/// the default metallib (a CI host aborted in `mlx_random_key`), so a host
+/// without one skips, like the other MLX-array tests.
 final class PagedKVDecodeSessionFinishTests: XCTestCase {
     override class func setUp() {
         super.setUp()
         MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
     }
 
     override func invokeTest() {
