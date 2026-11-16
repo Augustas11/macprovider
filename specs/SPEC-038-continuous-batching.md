@@ -6,23 +6,36 @@ Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.59 (2026-11-16, FR-CB2 idle prefill chunk for Qwen MoE, Related: #2402):**
-FR-CB2: a Qwen MoE backend (paged-KV family `qwen` with MoE dispatch:
-Qwen3.6-35B-A3B, Qwen3.5-35B-A3B, Qwen3-30B-A3B-Instruct-2507 and
-Qwen3-Coder-30B-A3B) has an idle prompt chunk ceiling of 2048 tokens: a
-chunk planned while no row decodes may take up to 2048 tokens, and a chunk
-planned while any row decodes keeps the 512-token limit, so running rows
-never wait for a larger chunk. Dense Qwen and every other family, including
-`glm5_next` and `deepseek_v4`, are unchanged. An operator-set
-`prefill_step_size` lowers the idle ceiling as it lowers the ordinary one;
-the prefill decode window still follows the ordinary chunk. With no row
-decoding the idle cohort turn budget is the idle chunk times the prefill
-row cap, so rows that arrive together still share forwards and finish
-together. Serial-path measurement, M3 Ultra, Qwen3.6-35B-A3B, 2048-token
-instead of 512-token prefill chunks: time to first token 1.660 s to 1.537 s
-at 3514 prompt tokens and 7.203 s to 6.320 s at 13965 (medians of 2). The
-change sits in the decode-path manifest, so the decode-path digest changes
-(SPEC-048 R013).
+**Change log v0.3.59 (2026-11-16, FR-CB2 Qwen MoE family prefills in 2048-token chunks, Related: #2402):**
+FR-CB2: the Qwen MoE family (every model whose paged-KV family is `qwen` and
+that dispatches MoE layers: Qwen3.6-35B-A3B, Qwen3.5-35B-A3B,
+Qwen3-30B-A3B-Instruct-2507 and Qwen3-Coder-30B-A3B) takes the 2048-token
+prompt chunk ceiling on the batching path, like `glm5_next`, whether or not
+other rows decode. Dense Qwen and every other family keep 512. An
+operator-set `prefill_step_size` still lowers the ceiling, and the prefill
+decode window scales to 32, capped by the 16-step lockstep window, so it is
+16. Measured on one lab-harness build, M3 Ultra, Qwen3.6-35B-A3B, batching
+path: one request's time to first token 1.472/1.491 s at 512 vs
+1.358/1.392 s at 2048 with about 3060 prompt tokens, and 6.386/6.382 s vs
+5.666/5.615 s with about 12250. With native MTP active (native-mtp-bench s1
+cells, 2048 for the lone row) native TTFT went from 1.804 to 1.588 s at
+p3500 and from 8.137 to 6.931 s at p14000 with 0 parity mismatches. Text:
+answers differ between chunk 512 and chunk 2048 in every one-request cell;
+in a stock mlx-lm run the margins at the first differing token were 0, 0, 1,
+1, 3 and 5 steps of the logit spacing, at most 0.625 logit. A row's text
+under load equals its text alone at both chunk sizes. An idle-only design
+(2048 while no row decodes, 512 otherwise) was measured on the same build
+and dropped: it made a prompt's text depend on load and gave nothing under
+load. Cost: a row decoding while a second ~12.1k-token prompt prefills waits
+up to about 1.2 s per chunk instead of 0.38 s (inter-token p95 794-806 ms
+vs 275 ms), while the second prompt's TTFT falls from 8.36/8.40 to
+6.54/6.63 s. Not measured: other chips; several rows prefilling at once
+(with a 2048-token chunk one row takes the whole default 2048-token
+per-iteration budget, so this family no longer shares a ragged prefill
+forward between rows; the budget is unchanged); peak memory beyond process
+RSS, 18.8 GB in all arms. Dense Qwen stays 512 because its serial-path gain
+was 0.5-1.7%. The change sits in the decode-path manifest, so the
+decode-path digest changes (SPEC-048 R013).
 
 **Change log v0.3.58 (2026-11-16, paged KV rows leave a decode batch only on the model container, Related: #2396):**
 No normative change. The provider's paged-KV backend detached the layer
@@ -1204,7 +1217,8 @@ sequence matches at step `k < W - 1` MUST keep its recurrent state after step
 names any other length below the hop end MUST fail closed (FR-CB4). A release
 that serves a hybrid tuple at `W > 1` MUST first pass the hybrid window proof
 on the served artifact and hardware class: a fixed greedy batch of at least
-16 rows, every prompt longer than the 512-token prefill chunk, decoded at the
+16 rows, every prompt longer than the 512-token prefill chunk the proof runs
+(the Qwen MoE family serves 2048-token chunks, FR-CB2), decoded at the
 production window and at `W = 1` through the production backend path, with
 the `W = 1` run repeating itself exactly and every row's tokens identical
 across the two windows (`msb-throughput --scenario hybrid-window`,
@@ -1274,9 +1288,11 @@ lengths, partitions, the kernel-route rule, the key-spread cap and the
 native-MTP grouping rules are unchanged; the order decides only which row
 leads and which compatible peers are considered first.
 
-**Per-row chunk limit (v0.3.28).** On the serve path the per-row chunk limit
-is the backend family's prompt chunk ceiling: 2048 tokens for a `glm5_next`
-(pagedMLA) backend, whose rows prefill alone, and 512 for every other family.
+**Per-row chunk limit (v0.3.28, v0.3.59).** On the serve path the per-row
+chunk limit is the backend family's prompt chunk ceiling: 2048 tokens for a
+`glm5_next` (pagedMLA) backend, whose rows prefill alone, and for the Qwen MoE
+family (every model whose paged-KV family is `qwen` and that dispatches MoE
+layers), and 512 for every other family.
 An operator-set `prefill_step_size` MAY lower the limit and MUST NOT raise it
 above the ceiling; when it is unset the limit is the ceiling. The
 per-iteration budget still bounds every chunk. The prefill decode window MUST
@@ -1285,25 +1301,6 @@ the default (8) at a 512-token chunk, proportionally more at a larger chunk,
 never below the default, and never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
-
-**Idle prefill chunk (v0.3.59).** A Qwen MoE backend (paged-KV family `qwen`
-with MoE dispatch, every such model alike) also has an idle prompt chunk
-ceiling of 2048 tokens. A chunk planned while no row is decoding MAY take up
-to the idle ceiling; a chunk planned while at least one row is decoding MUST
-stay within the ordinary limit above (512), so a running row never waits for
-an idle-sized chunk. The limit is decided each time a chunk is planned: once a
-row starts decoding, the next chunk of every prompt row falls back to the
-ordinary limit, and after the last decoding row leaves it may rise again.
-Every other family has no idle ceiling and keeps its ordinary limit. An
-operator-set `prefill_step_size` MUST lower the idle ceiling as it lowers the
-ordinary one, the per-iteration budget still bounds every chunk, and the
-prefill decode window follows the ordinary limit. With no row decoding the
-cohort turn budget is the idle chunk times the prefill row cap. Recurrent
-checkpoints, prompt snapshots and resume boundaries still end a span; the
-idle limit only changes how a span is split into balanced chunks. A
-reference (`deepseek_v4`) or serial-stride (`minimax_m3`) partition never
-takes an idle ceiling. An idle ceiling is set or raised only with the
-same-build measurement an ordinary ceiling needs.
 
 **MiniMax M3 serial prefill stride (v0.3.35).** A `minimax_m3` row MUST
 prefill in chunks of exactly the prompt chunk limit from its cursor, the
@@ -1556,9 +1553,9 @@ logits at the final prompt position when `max_output_tokens > 0`; that sampled
 token MUST enter the same row-local sampling, stop, streaming, usage, replay,
 and settlement accounting used by later decode tokens. A zero-output request
 MUST still commit the complete prompt but MUST NOT sample or emit a token. The
-production per-row partition is at most the FR-CB2 per-row chunk limit
-(including the idle chunk), bounded further by the configured prefill step
-size. Serial and shared-forward parity
+production per-row partition is at most the FR-CB2 per-row chunk limit (512
+prompt tokens; 2048 for `glm5_next` and the Qwen MoE family), bounded
+further by the configured prefill step size. Serial and shared-forward parity
 proofs MUST use the same partition so the proof cannot compare different model
 execution shapes. A ragged-offset parity proof compares each row with the same
 row prefilled alone over the identical chunk partition.

@@ -295,13 +295,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let prefillGrouping: ContinuousBatchPrefillGroupingRule
     let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
-    /// SPEC-038 FR-CB2 idle prefill: the per-row chunk limit for a chunk
-    /// planned while no row decodes. Such a chunk stalls no running row, so
-    /// a family with a measured gain (Qwen MoE) prefills in larger chunks;
-    /// while any row decodes the limit is `maxPromptChunkTokens`. Never
-    /// below it, and equal to it for a reference or serial-stride partition,
-    /// whose chunks must not depend on load.
-    let maxIdlePromptChunkTokens: Int
     /// Fixed per-row reference partition, independent of generic token budgets.
     let referencePrefillStepSize: Int?
     /// Prefill each row in chunks of exactly the chunk limit from its cursor
@@ -384,7 +377,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
-        maxIdlePromptChunkTokens: Int? = nil,
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
         allowsRaggedPrefillOffsets: Bool = false,
@@ -430,9 +422,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
-        self.maxIdlePromptChunkTokens = referencePrefillStepSize == nil && !serialPrefillStride
-            ? max(self.maxPromptChunkTokens, maxIdlePromptChunkTokens ?? self.maxPromptChunkTokens)
-            : self.maxPromptChunkTokens
         // Ragged grouping may shorten chunks to fit its generic token budget.
         // Reference pooling partitions must instead prefill each row alone.
         self.allowsRaggedPrefillOffsets = referencePrefillStepSize == nil && allowsRaggedPrefillOffsets
@@ -6611,7 +6600,7 @@ actor ContinuousBatchScheduler {
             // budget. If it crosses the turn budget, it is the sole bounded
             // extension: remainingTokens becomes negative and the turn ends.
             var availableTokens = turnBudget
-            let chunkLimit = promptChunkLimit()
+            let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
             for item in group {
                 guard let row = activePrompt[item.row.request.id],
                       row.prefillCursor == item.end,
@@ -6895,8 +6884,7 @@ actor ContinuousBatchScheduler {
     /// Prefill tokens one turn may take. While rows decode, the configured
     /// budget bounds how long a turn stalls them. With no row decoding, a
     /// turn stalls nobody, so rows that arrived together prefill in one
-    /// shared forward of up to `maxPrefillRowsPerIteration` idle chunks
-    /// (`maxIdlePromptChunkTokens`): their
+    /// shared forward of up to `maxPrefillRowsPerIteration` chunks: their
     /// first tokens and decode windows line up instead of each later row's
     /// prefill splitting the earlier rows' windows. Only rows with as many
     /// prompt tokens left as the head use the tokens past the configured
@@ -6905,23 +6893,10 @@ actor ContinuousBatchScheduler {
     private func prefillTurnTokenBudget() -> Int {
         let budget = configuration.maxPrefillTokensPerIteration
         guard activeDecode.isEmpty, configuration.referencePrefillStepSize == nil else { return budget }
-        let chunk = min(configuration.maxIdlePromptChunkTokens, budget)
+        let chunk = min(configuration.maxPromptChunkTokens, budget)
         let (cohort, overflow) = chunk.multipliedReportingOverflow(by: configuration.maxPrefillRowsPerIteration)
         guard !overflow else { return budget }
         return max(budget, min(cohort, ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration))
-    }
-
-    /// SPEC-038 FR-CB2: the per-row chunk limit at the moment a chunk is
-    /// planned. With no row decoding a chunk stalls nobody, so it may reach
-    /// the idle ceiling; while any row decodes it stays `maxPromptChunkTokens`,
-    /// the chunk the decode window while prefilling is sized for. FR-CB10
-    /// cohort rows held out of decode until their cohort has prefilled do
-    /// not decode, so the probe's rows keep the chunks of their lone runs.
-    private func promptChunkLimit() -> Int {
-        let chunk = activeDecode.isEmpty || selfCheckCohortDecodeHeld
-            ? configuration.maxIdlePromptChunkTokens
-            : configuration.maxPromptChunkTokens
-        return min(chunk, configuration.maxPrefillTokensPerIteration)
     }
 
     /// Prompt rows in the order this turn offers them to a group
@@ -6942,7 +6917,7 @@ actor ContinuousBatchScheduler {
     /// length. Every row keeps the chunk it prefills alone, so grouping never
     /// changes a row's chunk partition.
     private func selectEqualOffsetPrefillGroup(order: [String], tokenBudget: Int) -> [(row: Row, end: Int)] {
-        let chunkLimit = promptChunkLimit()
+        let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []
         var selectedOffset: Int?
         var selectedChunkCount: Int?
@@ -6991,7 +6966,7 @@ actor ContinuousBatchScheduler {
     /// Rows at any prompt offsets that all prefill the same chunk length in
     /// one shared forward (SPEC-038 FR-CB2 ragged shared prefill).
     private func selectRaggedPrefillGroup(order: [String], tokenBudget: Int) -> [(row: Row, end: Int)] {
-        let chunkLimit = promptChunkLimit()
+        let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var candidates: [ContinuousBatchPrefillCandidate] = []
         var rowsByID: [String: Row] = [:]
         for id in order {

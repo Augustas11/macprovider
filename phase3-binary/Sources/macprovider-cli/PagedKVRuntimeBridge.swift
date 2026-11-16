@@ -790,7 +790,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     let gpuTurnParticipant: GPUTurnParticipant?
     /// The served model is a Qwen mixture-of-experts model (family `qwen`
     /// with MoE dispatch). Its cache kinds match dense Qwen, so the family
-    /// rides here; it selects the idle prefill chunk (SPEC-038 FR-CB2).
+    /// rides here; it selects the 2048-token prompt chunk (SPEC-038 FR-CB2).
     let isQwenMoE: Bool
     private let lock = NSLock()
     /// Holders of this backend's target `container.perform` (exclusive, so

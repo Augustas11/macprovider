@@ -3483,9 +3483,6 @@ struct ServeCommand: AsyncParsableCommand {
             ),
             fields: smallMRouteInputs.logFields
         ).utf8))
-        #if MACPROVIDER_LAB_HARNESS
-        FileHandle.standardError.write(Data(LabQwenMoEPromptChunk.startupEvent.utf8))
-        #endif
         // A one-row verdict this batching process applies moves the next
         // start of the same configuration to the serial route; a failure
         // measured on stock order moves it to the row-invariant route.
