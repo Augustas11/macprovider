@@ -540,12 +540,14 @@ func TestDemandTelemetryKnowsGLM53FlashAbliteratedIdentitiesExactly(t *testing.T
 // #2189: MiniMax M3.1-Flash's catalog key, its OpenRouter-style slug and the served
 // artifact id are recorded exactly.
 func TestDemandTelemetryKnowsMiniMaxM3IdentitiesExactly(t *testing.T) {
-	for _, model := range []string{"minimaxai/minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"} {
+	for _, model := range []string{"minimaxai/minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+		"minimaxai/minimax-m3.1-flash-abliterated", "minimax/minimax-m3.1-flash-abliterated", "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated"} {
 		if got := sanitizeDemandModelID(model); got != model {
 			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
 		}
 	}
-	for _, model := range []string{"minimaxai/minimax-m3.1-flashx", "mlx-community/minimax-m3.1-flash-oq3e-mtp"} {
+	for _, model := range []string{"minimaxai/minimax-m3.1-flashx", "mlx-community/minimax-m3.1-flash-oq3e-mtp",
+		"aug11/minimax-m3.1-flash-oq3e-mtp-abliterated", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated"} {
 		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
 			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
 		}

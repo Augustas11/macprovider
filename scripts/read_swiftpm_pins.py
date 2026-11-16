@@ -42,12 +42,19 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63: MiniMax M3
+# projects a refusal direction out of the attention and MLP/MoE outputs of the
+# configured decoder layers when the refusal_ablation config key is present;
+# the loader refuses an out-of-range alpha or a non-unit direction and reads
+# language_model.refusal_direction from an indexed checkpoint; the text sanitize
+# drops stored model.layers.N.refusal_direction keys. 29b5778 (04a1d29 plus the
+# audit fixes) touches MiniMaxM3.swift and its tests only.
 # 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
 # can yield between evaluated tiles so other continuous-batch rows decode
 # while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
 # hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.63"
-SPEC048_MLX_SWIFT_LM_REVISION = "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.71"
+SPEC048_MLX_SWIFT_LM_REVISION = "29b5778b36ffba045786c4cd73427f5287c79a54"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"
