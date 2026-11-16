@@ -1,0 +1,19 @@
+{
+  "a3b_self_check": [
+    81788928,
+    83886080
+  ],
+  "complete_window_bytes_by_depth": [
+    193986560,
+    196083712
+  ],
+  "config_sha256": "ede24666ac51e6d5ab948a8a1e6c72fc6effd941ba3aabb6dd942eb517c78043",
+  "inputs": {
+    "conv_bytes_per_layer": 61440,
+    "full_layers": 16,
+    "linear_layers": 48,
+    "per_position_bytes": 1083392,
+    "ssm_bytes_per_layer": 3145728
+  },
+  "method": "A3B analytical conservative bound (admission-tuple-provenance.md), x1.25, whole MiB"
+}

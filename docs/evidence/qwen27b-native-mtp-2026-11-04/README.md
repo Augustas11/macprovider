@@ -3,8 +3,9 @@
 These are the committed records of the #2222 lab windows. A Qwen 27B
 native-MTP admission tuple binds them. Native MTP runs at proposal depth 1,
 with one native row and four qualified slots, on `apple-m3-ultra` with
-256 GiB RAM. No admission entry is published yet. See "Not admissible against
-CLI 1.8.281" below.
+256 GiB RAM. The admission entries are in
+`published-2026-11-16-qwen27b-native-mtp-v289` (#2383), with the missing items
+below recorded in `docs/evidence/qwen27b-native-mtp-2026-11-16/`.
 
 ## Files
 

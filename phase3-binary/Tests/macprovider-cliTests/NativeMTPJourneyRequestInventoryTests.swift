@@ -46,5 +46,23 @@ final class NativeMTPJourneyRequestInventoryTests: XCTestCase {
         XCTAssertTrue(ids.contains("journey-mixed-2-control"))
         XCTAssertTrue(ids.contains("journey-warm-swap-new-ordinary"))
     }
+
+    func testWarmSwapNewRequestCountsReasoningButKeepsHashAndTerminal() {
+        let hash = String(repeating: "a", count: 64)
+        let done = { (content: String, reasoning: String?, finish: String, observed: String?) in
+            NativeMTPJourneyRunner.warmSwapNewRequestCompleted(
+                content: content, reasoningContent: reasoning, finishReason: finish,
+                modelHashObserved: observed, expectedModelHash: hash)
+        }
+        XCTAssertTrue(done("Gulf Stream", nil, "length", hash))
+        XCTAssertTrue(done("", "The user asks for currents", "length", hash))
+        XCTAssertTrue(done("", "thinking", "stop", hash))
+        XCTAssertFalse(done("", nil, "length", hash))
+        XCTAssertFalse(done("", "", "stop", hash))
+        XCTAssertFalse(done("Gulf Stream", nil, "length", String(repeating: "b", count: 64)))
+        XCTAssertFalse(done("Gulf Stream", nil, "length", nil))
+        XCTAssertFalse(done("Gulf Stream", nil, "error", hash))
+        XCTAssertFalse(done("", "thinking", "cancelled", hash))
+    }
 }
 #endif
