@@ -523,8 +523,9 @@ enum AutotuneModelUpgrade {
     static let staggerWindowSeconds: UInt64 = 48 * 3600
 
     /// One digest over every input whose change makes the recommendation
-    /// stale: the signed catalog, rate card and demand rank content and the
-    /// binary version. It keys the stagger offset, the retry record and the
+    /// stale: the signed catalog, rate card and demand rank content, the CB
+    /// and native-MTP admission sets the decision reads, and the binary
+    /// version. It keys the stagger offset, the retry record and the
     /// recorded keep.
     static func inputsKey(inputDigests: [String], binaryVersion: String) -> String {
         let text = (inputDigests + ["binary=\(binaryVersion)"]).joined(separator: "\n")
@@ -532,8 +533,8 @@ enum AutotuneModelUpgrade {
     }
 
     /// Top-level feed fields a re-publish restamps without changing what the
-    /// decision reads.
-    static let restampFields: Set<String> = ["generated_at"]
+    /// decision reads (`renew-autotune-static-feed.sh` restamps both).
+    static let restampFields: Set<String> = ["generated_at", "version"]
 
     /// SHA-256 of a feed's content: its JSON with the restamp fields removed,
     /// re-serialized with sorted keys, so a pure re-stamp keeps the digest.
@@ -549,11 +550,27 @@ enum AutotuneModelUpgrade {
         return SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func upgradeInputDigests(catalog: Data, rateCard: Data, demandRank: Data) -> [String] {
-        [
+    /// The gate before prefetch and the keep recorded after the decision
+    /// both call this with the same loaded `acceleration`, so they compute
+    /// one key. The admission sets enter as the sorted admitted keys and
+    /// unverified set names the decision reads, so re-signing the same sets
+    /// keeps the key and any admission change is a new key.
+    static func upgradeInputDigests(
+        catalog: Data,
+        rateCard: Data,
+        demandRank: Data,
+        acceleration: AccelerationAdmissions
+    ) -> [String] {
+        func setDigest(_ set: Set<String>) -> String {
+            SHA256.hash(data: Data(set.sorted().joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        return [
             "candidate_catalog=" + contentDigest(catalog),
             "rate_card=" + contentDigest(rateCard),
             "demand_rank=" + contentDigest(demandRank),
+            "cb_admissions=" + setDigest(acceleration.continuousBatching),
+            "native_mtp_admissions=" + setDigest(acceleration.nativeMTP),
+            "acceleration_unverified=" + setDigest(acceleration.unverified),
         ]
     }
 
@@ -563,11 +580,7 @@ enum AutotuneModelUpgrade {
     /// later check may resolve.
     static func recordsKeep(_ decision: Decision, wroteRow: Bool) -> Bool {
         guard case let .keep(reason) = decision else { return false }
-        // Acceleration keeps depend on CB/native-MTP admission state that
-        // is not in the inputs key, so a later release can change them.
-        return !wroteRow
-            && reason != "acceleration_admission_unverified"
-            && reason != "challenger_lacks_incumbent_acceleration"
+        return !wroteRow && reason != "acceleration_admission_unverified"
     }
 
     /// Adds a keep for `inputsKey` to the record at `url`.
@@ -971,6 +984,21 @@ enum AutotuneModelUpgrade {
         "/Library/LaunchDaemons/live.malibu.provider.plist",
         "/Library/LaunchDaemons/live.streamvc.macprovider.plist",
     ]
+
+    /// The serve-side per-tick decision: nil spawns the unattended check,
+    /// any reason skips it. A trigger suppression wins; otherwise only the
+    /// provider the child would stop (this serve's pid, not a system
+    /// LaunchDaemon) starts a check, and a failed detection never does.
+    static func unattendedTickSuppression(
+        triggerSuppression: String?,
+        detected: ProviderConflict?,
+        servePID: Int32,
+        systemLaunchDaemonInstalled: Bool
+    ) -> String? {
+        if let triggerSuppression { return triggerSuppression }
+        guard let detected else { return "provider_detection_failed" }
+        return providerMismatch(detected, expectedPID: servePID, systemLaunchDaemonInstalled: systemLaunchDaemonInstalled)
+    }
 
     static func systemLaunchDaemonInstalled(
         paths: [String] = systemLaunchDaemonPlistPaths,

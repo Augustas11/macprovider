@@ -1757,15 +1757,16 @@ extension AutotuneModelUpgradeTests {
     }
 
     func testARecordedKeepHoldsUntilTheInputsChange() throws {
-        // A pure re-stamp keeps the content digest; a row change does not.
+        // A pure re-stamp (generated_at and version) keeps the content
+        // digest; a row change does not.
         let feed = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v1","rows":{"a":{"x":1}}}"#
-        let restamped = #"{"rows":{"a":{"x":1}},"version":"v1","generated_at":"2026-11-16T00:00:00Z"}"#
-        let newRelease = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v2","rows":{"a":{"x":1}}}"#
+        let restamped = #"{"rows":{"a":{"x":1}},"version":"v2","generated_at":"2026-11-16T00:00:00Z"}"#
         let changed = #"{"generated_at":"2026-11-15T03:40:00Z","version":"v1","rows":{"a":{"x":2}}}"#
         XCTAssertEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(restamped.utf8)))
         XCTAssertNotEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(changed.utf8)))
-        XCTAssertNotEqual(AutotuneModelUpgrade.contentDigest(Data(feed.utf8)), AutotuneModelUpgrade.contentDigest(Data(newRelease.utf8)))
-        XCTAssertFalse(AutotuneModelUpgrade.recordsKeep(.keep(reason: "challenger_lacks_incumbent_acceleration"), wroteRow: false))
+        // Acceleration keeps are recorded: the admission sets are in the key.
+        XCTAssertTrue(AutotuneModelUpgrade.recordsKeep(.keep(reason: "challenger_lacks_incumbent_acceleration"), wroteRow: false))
+        XCTAssertFalse(AutotuneModelUpgrade.recordsKeep(.keep(reason: "acceleration_admission_unverified"), wroteRow: false))
 
         XCTAssertTrue(AutotuneModelUpgrade.recordsKeep(.keep(reason: "no_eligible_candidate"), wroteRow: false))
         XCTAssertFalse(AutotuneModelUpgrade.recordsKeep(.keep(reason: "incumbent_selected"), wroteRow: true))
@@ -1775,34 +1776,204 @@ extension AutotuneModelUpgradeTests {
             .appendingPathComponent("r029-keep-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("model-upgrade-attempt.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let digests = AutotuneModelUpgrade.upgradeInputDigests(catalog: Data(feed.utf8), rateCard: Data(), demandRank: Data())
+        let admissions = AutotuneModelUpgrade.AccelerationAdmissions(continuousBatching: ["a", "b"], nativeMTP: ["a"])
+        let digests = AutotuneModelUpgrade.upgradeInputDigests(
+            catalog: Data(feed.utf8), rateCard: Data(), demandRank: Data(), acceleration: admissions
+        )
         let key = AutotuneModelUpgrade.inputsKey(inputDigests: digests, binaryVersion: "1.2.3")
         let keptAt = Date(timeIntervalSince1970: 1_800_000_000)
         try AutotuneModelUpgrade.recordKeep(inputsKey: key, at: keptAt, url: url)
 
-        func gate(_ catalog: String, binary: String = "1.2.3", now: Date) -> AutotuneModelUpgrade.UnattendedGate {
+        func gate(
+            _ catalog: String,
+            binary: String = "1.2.3",
+            acceleration: AutotuneModelUpgrade.AccelerationAdmissions = admissions,
+            now: Date
+        ) -> AutotuneModelUpgrade.UnattendedGate {
             AutotuneModelUpgrade.unattendedGate(
                 now: now,
                 feedGeneratedAt: [],
-                inputDigests: AutotuneModelUpgrade.upgradeInputDigests(catalog: Data(catalog.utf8), rateCard: Data(), demandRank: Data()),
+                inputDigests: AutotuneModelUpgrade.upgradeInputDigests(
+                    catalog: Data(catalog.utf8), rateCard: Data(), demandRank: Data(), acceleration: acceleration
+                ),
                 binaryVersion: binary,
                 providerKey: "provider",
                 readRecord: { AutotuneModelUpgrade.readAttempt(from: url) },
                 writeRecord: { try AutotuneModelUpgrade.writeAttempt($0, to: url) }
             )
         }
-        // Days later, and after a re-stamp, the kept inputs are not re-run.
+        // Days later, after a re-stamp of generated_at and version, and with
+        // the same admission sets re-signed, the kept inputs are not re-run.
         let later = keptAt.addingTimeInterval(10 * 86_400)
         XCTAssertEqual(gate(feed, now: later), .kept(since: keptAt))
         XCTAssertEqual(gate(restamped, now: later), .kept(since: keptAt))
-        // New content or a new binary runs again.
+        XCTAssertEqual(
+            gate(feed, acceleration: .init(continuousBatching: ["b", "a"], nativeMTP: ["a"]), now: later),
+            .kept(since: keptAt)
+        )
+        // New content, a new binary or a changed admission set runs again.
         if case .kept = gate(changed, now: later) { XCTFail("changed content is a new input") }
         if case .kept = gate(feed, binary: "1.2.4", now: later) { XCTFail("a new binary is a new input") }
+        for other in [
+            AutotuneModelUpgrade.AccelerationAdmissions(continuousBatching: ["a"], nativeMTP: ["a"]),
+            AutotuneModelUpgrade.AccelerationAdmissions(continuousBatching: ["a", "b"], nativeMTP: ["a", "b"]),
+            AutotuneModelUpgrade.AccelerationAdmissions(continuousBatching: ["a", "b"], nativeMTP: ["a"], unverified: ["native_mtp"]),
+        ] {
+            if case .kept = gate(feed, acceleration: other, now: later) { XCTFail("an admission change is a new input: \(other)") }
+        }
 
         // A record written before keeps existed still decodes.
         let legacy = #"{"binary_version":"1.2.3","attempts":[]}"#
         try Data(legacy.utf8).write(to: url)
         XCTAssertEqual(AutotuneModelUpgrade.readAttempt(from: url)?.keeps, [])
+    }
+
+    func testALostLeaseWritesNoConfigAndTheIncumbentIsRestored() async throws {
+        let command = try AutotuneCommand.parse(["--recommend", "--upgrade", "--apply"])
+        var events: [String] = []
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.writeStderr = { _ in }
+        deps.detectConflict = { .launchdManaged(pid: 42) }
+        deps.drainConflict = { _, _, _ in
+            events.append("stop")
+            return .drained
+        }
+        deps.restoreConflict = { _, _ in
+            events.append("restart")
+            return .restored
+        }
+        do {
+            try await command.drainThenIsolate(
+                dependencies: deps,
+                waitForIdle: { true },
+                isOperatorPaused: { false },
+                acquireLease: { AutotuneModelUpgrade.acquireMaintenanceLease(store: Self.temporaryLeaseStore()) },
+                startLaunchdRestoreGuard: { _ in nil }
+            ) {
+                try await AutotuneCommand.commitModelUpgrade(
+                    leaseHeld: { false },
+                    applyConfig: { events.append("apply") },
+                    commitsDecision: true,
+                    writeRecommendationState: { events.append("state") },
+                    submitHardwareEvidence: { events.append("evidence") },
+                    recordKeep: { events.append("keep") }
+                )
+            }
+            XCTFail("expected exit 75")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit.rawValue, 75)
+        }
+        XCTAssertEqual(events, ["stop", "restart"])
+    }
+
+    func testUpgradeCommitAppliesThenWritesStateThenEvidenceThenRecordsTheKeep() async throws {
+        var events: [String] = []
+        // An ineligible incumbent kept with its row re-applied.
+        try await AutotuneCommand.commitModelUpgrade(
+            leaseHeld: { true },
+            applyConfig: { events.append("apply") },
+            commitsDecision: true,
+            writeRecommendationState: { events.append("state") },
+            submitHardwareEvidence: { events.append("evidence") },
+            recordKeep: { events.append("keep") }
+        )
+        XCTAssertEqual(events, ["apply", "state", "evidence", "keep"])
+        // A keep that writes no config still submits evidence and records it.
+        events = []
+        try await AutotuneCommand.commitModelUpgrade(
+            leaseHeld: { false },
+            applyConfig: nil,
+            commitsDecision: true,
+            writeRecommendationState: { events.append("state") },
+            submitHardwareEvidence: { events.append("evidence") },
+            recordKeep: { events.append("keep") }
+        )
+        XCTAssertEqual(events, ["state", "evidence", "keep"])
+    }
+
+    private static func unattendedRunDependencies(
+        lockURL: URL,
+        detected: ProviderConflict,
+        stderr: @escaping (String) -> Void
+    ) -> AutotuneRunDependencies {
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.writeStderr = stderr
+        deps.detectConflict = { detected }
+        deps.drainConflict = { _, _, _ in
+            XCTFail("nothing is stopped")
+            return .drained
+        }
+        deps.upgradeRunLockURL = lockURL
+        return deps
+    }
+
+    func testRunTakesTheUpgradeRunLock() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r029-runlock-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lockURL = directory.appendingPathComponent("model-upgrade.lock")
+        guard case let .acquired(held) = AutotuneModelUpgrade.acquireRunLock(at: lockURL) else {
+            return XCTFail("the lock must be acquired")
+        }
+        defer { held.release() }
+        var stderr = ""
+        // A foreign provider makes a run that skipped the lock exit 75 with
+        // another message, before any feed read.
+        let deps = Self.unattendedRunDependencies(lockURL: lockURL, detected: .launchdManaged(pid: 7)) { stderr += $0 }
+        let command = try AutotuneCommand.parse([
+            "--recommend", "--upgrade", "--apply", "--unattended", "--upgrade-parent-pid", "42",
+            "--config", directory.appendingPathComponent("missing.yaml").path,
+        ])
+        do {
+            try await command.run(dependencies: deps)
+            XCTFail("expected exit 75")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit.rawValue, 75)
+        }
+        XCTAssertTrue(stderr.contains("another model upgrade run holds"), stderr)
+    }
+
+    func testUnattendedRunRefusesAForeignProviderBeforeAnyDownload() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r029-parentpid-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var stderr = ""
+        let deps = Self.unattendedRunDependencies(
+            lockURL: directory.appendingPathComponent("model-upgrade.lock"),
+            detected: .launchdManaged(pid: 7)
+        ) { stderr += $0 }
+        // A missing config ends a run that skipped the check before any download.
+        let command = try AutotuneCommand.parse([
+            "--recommend", "--upgrade", "--apply", "--unattended", "--upgrade-parent-pid", "42",
+            "--config", directory.appendingPathComponent("missing.yaml").path,
+        ])
+        do {
+            try await command.run(dependencies: deps)
+            XCTFail("expected exit 75")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit.rawValue, 75)
+        }
+        XCTAssertTrue(stderr.contains("reason=detected_provider_is_not_the_parent; nothing was downloaded"), stderr)
+    }
+
+    func testServeTickSpawnsOnlyForItsOwnProvider() {
+        func tick(_ suppression: String?, _ detected: ProviderConflict?, daemon: Bool = false) -> String? {
+            AutotuneModelUpgrade.unattendedTickSuppression(
+                triggerSuppression: suppression, detected: detected, servePID: 42, systemLaunchDaemonInstalled: daemon
+            )
+        }
+        XCTAssertNil(tick(nil, .launchdManaged(pid: 42)))
+        XCTAssertNil(tick(nil, .foreground(pid: 42, argv: ["macprovider-cli", "serve"])))
+        XCTAssertEqual(tick(nil, .launchdManaged(pid: 43)), "detected_provider_is_not_the_parent")
+        XCTAssertEqual(tick(nil, ProviderConflict.none), "no_detected_provider")
+        XCTAssertEqual(tick(nil, nil), "provider_detection_failed")
+        XCTAssertEqual(tick(nil, .foreground(pid: 42, argv: ["macprovider-cli", "serve"]), daemon: true), "system_launch_daemon_provider")
+        XCTAssertEqual(tick("operator_paused", .launchdManaged(pid: 42)), "operator_paused")
+        XCTAssertEqual(tick("no_join", nil), "no_join")
     }
 
     func testUnreadableLifecycleStateCountsAsPaused() throws {

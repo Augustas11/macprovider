@@ -4280,21 +4280,19 @@ struct ServeCommand: AsyncParsableCommand {
                 // Only the provider the child would stop (launchd job first,
                 // then the first foreground serve) starts a check: a second
                 // serve on this Mac never does.
-                let providerMismatch: String?
-                if let detected = try? ProviderConflictDetector().detect() {
-                    providerMismatch = AutotuneModelUpgrade.providerMismatch(detected, expectedPID: getpid(),
-                        systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled())
-                } else {
-                    providerMismatch = "provider_detection_failed"
-                }
-                let suppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
-                    donorMode: resolved.donorMode,
-                    poolModelID: resolved.poolModelID,
-                    autotuneCandidate: upgradeTriggerCandidate,
-                    noJoin: upgradeTriggerNoJoin,
-                    isolateLifecycle: upgradeTriggerIsolated,
-                    operatorPaused: await providerStatus.operatorPauseFence
-                ) ?? providerMismatch
+                let suppression = AutotuneModelUpgrade.unattendedTickSuppression(
+                    triggerSuppression: AutotuneModelUpgrade.unattendedTriggerSuppression(
+                        donorMode: resolved.donorMode,
+                        poolModelID: resolved.poolModelID,
+                        autotuneCandidate: upgradeTriggerCandidate,
+                        noJoin: upgradeTriggerNoJoin,
+                        isolateLifecycle: upgradeTriggerIsolated,
+                        operatorPaused: await providerStatus.operatorPauseFence
+                    ),
+                    detected: try? ProviderConflictDetector().detect(),
+                    servePID: getpid(),
+                    systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled()
+                )
                 if let suppression {
                     FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=\(suppression)\n".utf8))
                 } else if let modelUpgradeExecutable {
