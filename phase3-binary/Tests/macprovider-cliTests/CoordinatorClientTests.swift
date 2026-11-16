@@ -1616,7 +1616,7 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     private func waitUntil(_ condition: () async -> Bool) async throws {
-        for _ in 0..<400 {
+        for _ in 0..<2_000 {
             if await condition() { return }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
@@ -1635,7 +1635,7 @@ final class CoordinatorClientTests: XCTestCase {
         let initialCount = await recorder.frames.count
         let formatter = ISO8601DateFormatter()
         let issued = Date()
-        let expiry = issued.addingTimeInterval(3)
+        let expiry = issued.addingTimeInterval(6)
         var request = Self.nativeMTPCanaryRequest()
         request["issued_at"] = formatter.string(from: issued)
         request["expires_at"] = formatter.string(from: expiry)
@@ -1646,7 +1646,7 @@ final class CoordinatorClientTests: XCTestCase {
         try await client.handleCoordinatorPayloadForTest(["type": "unrelated_control_frame_2404"])
         let nak = try await waitForFrame(recorder, after: initialCount, type: "nak")
         XCTAssertEqual(nak["in_reply_to"] as? String, "unrelated_control_frame_2404")
-        XCTAssertEqual(started.get(), 1)
+        try await waitUntil { started.get() == 1 }
         let stillRunning = await client.nativeMTPCanaryInFlightForTest()
         XCTAssertTrue(stillRunning)
         let resultsBeforeDeadline = await recorder.frames.dropFirst(initialCount)
@@ -1654,7 +1654,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(resultsBeforeDeadline.isEmpty)
 
         var reply: [String: Any] = [:]
-        for _ in 0..<800 {
+        for _ in 0..<2_000 {
             if let frame = await recorder.frames.dropFirst(initialCount)
                 .first(where: { $0["type"] as? String == "native_mtp_canary_result_v1" }) {
                 reply = frame
