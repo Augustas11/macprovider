@@ -17,12 +17,23 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.72 (#2389) is .71 plus three commits that
-        // only move the mlx-swift pin: mlx-swift 0.32.3-macprovider.24
-        // (7fbcada9), MLX core v0.32.4-macprovider.15 (4e9a71dc9). The core
-        // adds the stock-order small-row route (MLX_METAL_SMALL_M_ROW_INVARIANT=2,
-        // SPEC-038 FR-CB9) with 8 qmv_mma partial sums on that route only;
-        // the row-invariant route is unchanged.
+        // Tag 3.32.3-macprovider.78 (#2389) is 3.32.3-macprovider.76
+        // plus three commits that only move its
+        // mlx-swift pin to 0.32.3-macprovider.24
+        // (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX core
+        // v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d)
+        // adds the SPEC-038 FR-CB9 stock-order small-row route
+        // (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that
+        // native MTP serves on is unchanged.
+        // Tag 3.32.3-macprovider.76 (#2381) on 3.32.3-macprovider.71: Two
+        // upstream fixes as picks: the serial prefill chunk loop clears the
+        // MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710),
+        // behind PrefillParameters.clearsBufferCache (default true) for hosts
+        // without a Metal library, and an MLX error raised on the loader's
+        // worker threads is thrown instead of ending the process (port of
+        // ml-explore/mlx-swift-lm #698). No model source, decode step or
+        // kernel route changes; continuous-batch prefill does not use the
+        // chunk loop.
         // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
         // MiniMax M3 projects a refusal direction out of the attention and
         // MLP/MoE outputs of the configured decoder layers when the
@@ -183,7 +194,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "fd4153e86a9adc6e8fef3924fc130a224fab693e"
+            revision: "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

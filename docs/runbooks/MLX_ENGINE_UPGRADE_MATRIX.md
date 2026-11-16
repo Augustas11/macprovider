@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.72` | `fd4153e86a9adc6e8fef3924fc130a224fab693e` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.78` | `6889f3b41b84041f1693ca1637b1e92e30d5a2d4` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,16 +47,20 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-16 (#2389) the LM row is `3.32.3-macprovider.72` (`fd4153e`),
-`.71` plus three commits that only move its mlx-swift pin. The Swift row is
-`0.32.3-macprovider.24` (`7fbcada`, `.22` plus three commits that move the
-core gitlink and regenerate the quantized jit sources) and the core row
-`v0.32.4-macprovider.15` (`4e9a71d`, seven commits on `.14`): the SPEC-038
-FR-CB9 stock-order small-row route, `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, with
-8 qmv_mma partial sums over K on that route only. The row-invariant route is
-unchanged. No C pin change.
+As of 2026-11-16 the LM row is `3.32.3-macprovider.78` (`6889f3b`), on
+`3.32.3-macprovider.76` (#2389): three commits that only move its mlx-swift pin. The Swift row is `0.32.3-macprovider.24` (`7fbcada`, `.22` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row `v0.32.4-macprovider.15` (`4e9a71d`, seven commits on `.14`): the SPEC-038 FR-CB9 stock-order small-row route, `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, with 8 qmv_mma partial sums over K on that route only. The row-invariant route is unchanged. No C pin change.
 
-Before that, as of 2026-11-16 the LM row was `3.32.3-macprovider.71` (`29b5778`), on
+As of 2026-11-16 the LM row is `3.32.3-macprovider.76` (`9489dde`), on
+`3.32.3-macprovider.71` (#2381): Two upstream fixes as picks: the serial
+prefill chunk loop clears the MLX buffer cache after each chunk
+(ml-explore/mlx-swift-lm #710), behind PrefillParameters.clearsBufferCache
+(default true) for hosts without a Metal library, and an MLX error raised on
+the loader's worker threads is thrown instead of ending the process (port of
+ml-explore/mlx-swift-lm #698). No model source, decode step or kernel route
+changes; continuous-batch prefill does not use the chunk loop. No Swift, core
+or C pin changes.
+
+As of 2026-11-16 the LM row is `3.32.3-macprovider.71` (`29b5778`), on
 `3.32.3-macprovider.63` (#2376): MiniMax M3 projects `alpha * r r^T` out of
 the attention and MLP/MoE outputs of the decoder layers the optional
 `refusal_ablation` config key names, so the abliterated M3.1-Flash variant

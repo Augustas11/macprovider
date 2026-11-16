@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.104
+**Version:** 0.1.105
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.104",
+  "version": "0.1.105",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,25 +585,25 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.72` | `fd4153e86a9adc6e8fef3924fc130a224fab693e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.78` | `6889f3b41b84041f1693ca1637b1e92e30d5a2d4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.72` is `3.32.3-macprovider.71`
-(`29b5778b36ffba045786c4cd73427f5287c79a54`) plus three commits that only move
-its mlx-swift pin (#2389), at `fd4153e86a9adc6e8fef3924fc130a224fab693e`. The Swift row
-moves to `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`,
-`.22` plus three commits that move the core gitlink and regenerate the
-quantized jit sources) and the core row to `v0.32.4-macprovider.15`
-(`4e9a71dc9e765f739003868f38d3aca05871e70d`, seven commits on `.14`). The core
-adds the stock-order small-row route: `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, read
-once per process, sends one row to upstream's one-row kernel, exactly two rows
-to a kernel whose rows equal the lone row bit for bit, and 3-16 rows to the
-batch kernel, which uses 8 partial sums over K instead of 4 on some GPU
-generations. The default (row-invariant) route and its output bits are
-unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is
-unchanged. The C row is unchanged.
+The mlx-swift-lm row `3.32.3-macprovider.78` is on `3.32.3-macprovider.76`
+(`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) (#2389), at
+`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`: three commits that only move its mlx-swift pin. The Swift row is `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`, `.22` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`, seven commits on `.14`). The core adds the stock-order small-row route: `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, read once per process, sends one row to upstream's one-row kernel, exactly two rows to a kernel whose rows equal the lone row bit for bit, and 3-16 rows to the batch kernel, which uses 8 partial sums over K instead of 4 on some GPU generations. The default (row-invariant) route and its output bits are unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is unchanged. The C row is unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.76` is on `3.32.3-macprovider.71`
+(`29b5778b36ffba045786c4cd73427f5287c79a54`) (#2381), at
+`9489ddeb74090d1a91ad1c8a01c0d0e117052450`: Two upstream fixes as picks: the
+serial prefill chunk loop clears the MLX buffer cache after each chunk
+(ml-explore/mlx-swift-lm #710), behind PrefillParameters.clearsBufferCache
+(default true) for hosts without a Metal library, and an MLX error raised on
+the loader's worker threads is thrown instead of ending the process (port of
+ml-explore/mlx-swift-lm #698). No model source, decode step or kernel route
+changes; continuous-batch prefill does not use the chunk loop. The Swift, core
+and C rows are unchanged.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
 (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
@@ -2741,15 +2741,19 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.104 (2026-11-16, Related: #2389)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.72` (`fd4153e86a9adc6e8fef3924fc130a224fab693e`),
-  mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`)
-  and MLX core `v0.32.4-macprovider.15`
-  (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038
-  FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`).
-  The row-invariant route that native MTP serves on is unchanged. The LM row
-  is `3.32.3-macprovider.71` plus three commits that only move its mlx-swift
-  pin; the C row is unchanged.
+- **0.1.105 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.78`
+  (`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`) on `3.32.3-macprovider.76`
+  (#2389): three commits that only move its mlx-swift pin. R003 also names mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`) and MLX core `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038 FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`). The row-invariant route that native MTP serves on is unchanged. Model sources and the C row are unchanged.
+- **0.1.104 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.76`
+  (`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) on `3.32.3-macprovider.71`
+  (#2381): Two upstream fixes as picks: the serial prefill chunk loop clears
+  the MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710), behind
+  PrefillParameters.clearsBufferCache (default true) for hosts without a Metal
+  library, and an MLX error raised on the loader's worker threads is thrown
+  instead of ending the process (port of ml-explore/mlx-swift-lm #698). No
+  model source, decode step or kernel route changes; continuous-batch prefill
+  does not use the chunk loop. Other model sources and the Swift, core and C
+  rows are unchanged.
 - **0.1.103 (2026-11-16, Related: #2382)** — MTP-13 variant: the signed
   entry carries the variant's own `quantization` block from
   `native-mtp-variants.json` (same `kind` as the donor), not the donor's, which

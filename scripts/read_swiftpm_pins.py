@@ -42,22 +42,15 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.72 (#2389) is .71 (29b5778, below) plus three commits
-# that only move the mlx-swift pin to the stock-order small-row route core
-# (SPEC-038 FR-CB9).
-# 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63: MiniMax M3
-# projects a refusal direction out of the attention and MLP/MoE outputs of the
-# configured decoder layers when the refusal_ablation config key is present;
-# the loader refuses an out-of-range alpha or a non-unit direction and reads
-# language_model.refusal_direction from an indexed checkpoint; the text sanitize
-# drops stored model.layers.N.refusal_direction keys. 29b5778 (04a1d29 plus the
-# audit fixes) touches MiniMaxM3.swift and its tests only.
-# 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
-# can yield between evaluated tiles so other continuous-batch rows decode
-# while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
-# hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.72"
-SPEC048_MLX_SWIFT_LM_REVISION = "fd4153e86a9adc6e8fef3924fc130a224fab693e"
+# 3.32.3-macprovider.78 (#2389) on 3.32.3-macprovider.76: It is
+# 3.32.3-macprovider.76 plus three commits that only move its mlx-swift pin to
+# 0.32.3-macprovider.24 (7fbcada97b58ddafab567121da63b959b8d092e3), whose MLX
+# core v0.32.4-macprovider.15 (4e9a71dc9e765f739003868f38d3aca05871e70d) adds
+# the SPEC-038 FR-CB9 stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2); the row-invariant route that native MTP
+# serves on is unchanged.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.78"
+SPEC048_MLX_SWIFT_LM_REVISION = "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.24"
