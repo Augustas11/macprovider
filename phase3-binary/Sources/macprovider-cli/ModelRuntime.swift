@@ -5806,14 +5806,17 @@ maxTokens: 1,
                 committedTokens: Int(counters.committedTokens),
                 terminalReason: schedulerResult.terminalStatus
             )
+            // Issue #2404: a tuple disable that lands mid-probe moves the row
+            // to ordinary decode; report the path the row finished on.
+            let finishedOrdinary = schedulerResult.finalDecodePath == .ordinary
             return result(
                 actualTokens: schedulerResult.generatedTokens,
                 terminal: schedulerResult.terminalStatus,
                 counters: counters,
                 committedState: committedState,
-                decodePath: .nativeMTP,
-                fallbackUsed: false,
-                diagnostic: nil
+                decodePath: finishedOrdinary ? .ordinary : .nativeMTP,
+                fallbackUsed: finishedOrdinary,
+                diagnostic: finishedOrdinary ? "tuple_disabled_mid_probe" : nil
             )
         } catch {
             return result(

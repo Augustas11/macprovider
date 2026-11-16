@@ -1115,6 +1115,20 @@ after listeners were already serving. Durable evidence and buyer serving stayed
 healthy, but the growing historical outbox remains open scaling work under
 #1793 rather than a quiet-rollout or backlog-closure claim.
 
+## Pending: PR 2407 coordinator half (Related: #2404)
+
+A provider NAK whose `in_reply_to` is `native_mtp_canary_request_v1`, received
+while the provider's tuple has a canary in flight, ends that canary at once as
+a failure: event `native_mtp_canary_nak` (code, challenge id, request id), the
+exact tuple is disabled with reason `nak_<code>` (wire disable reason
+`mismatch`), and the 60 s timeout no longer runs. The `provider nak` line gains
+`in_reply_to`, and every canary result rejection path logs
+`native_mtp_canary_result_rejected` with a reason (SPEC-031 v0.3.10). Live
+step: the next Pearl runtime release through `scripts/ops/pearl-runtime.sh
+status` then `next --run` (about 1-2 minutes of downtime). Live probe: a NAKed
+canary shows `native_mtp_canary_nak` in the coordinator journal in the same
+second as `native_mtp_canary_challenge_sent`.
+
 ## Open Pearl actions (not new code)
 
 - **Short chat prompt billing headroom — merged, rollout pending (#1905 / #1936).** Include `e23afb5a4` in the next reviewed signed coordinator runtime through `scripts/ops/pearl-runtime.sh` (`status`, then `next`; `next --run` executes one documented step). After rollout, verify a short chat whose provider-reported prompt count exceeds the bare byte estimate but fits within `estimateTokens(req.raw) + 64`: buyer usage and `ledger_request_credits.charged_prompt_tokens` must match, and the signed receipt must verify without changing the credited prompt. Existing regression evidence proves reported 62 bills 62, exact-cap 79 bills 79, and report 1079 bills 79; missing-usage estimation remains bare. This records merged code and its release acceptance check, not a completed live rollout. No historical ledger repricing is included.
