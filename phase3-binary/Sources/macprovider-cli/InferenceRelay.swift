@@ -473,6 +473,11 @@ actor InferenceRelay {
             firstTokenObserved: { stallTimeline.isMarked(.firstToken) }
         )
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if let hold = LabFirstTokenStall.consume() {
+                try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
+            }
+            #endif
             await Self.process(
                 requestID: requestID,
                 body: body,
