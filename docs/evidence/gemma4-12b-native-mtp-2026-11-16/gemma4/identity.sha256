@@ -1,0 +1,5 @@
+cf51c8c4f89dec9e60f98f7c18e9b2c8984497435caadbc84bf816d7a8d1cd06  <lab>/src/phase3-binary/.build/arm64-apple-macosx/release/macprovider-cli
+9ba197c57f042131f40f4e730a33169dbfb6fc3afcb961d1f44a1e197ea851d6  <lab>/src/phase3-binary/.build/arm64-apple-macosx/release/mlx.metallib
+fb2480dc6d321ba82a7ba017a5de87dba5eee6e2a2005a79877c03aa6f697dc4  <lab>/formal/gemma4-acceptance-corpus.json
+15031b7eb64a346ad2b41c7a16a74c5f9fc6df04e7d090f4544410a15b20f730  <lab>/formal/gemma4-acceptance-policy.json
+572bb187b0c89582c1ceb11798a4c12bb89e1417f526a81ce31544c30a354219  <lab>/formal/gemma4-r015-policy.json
