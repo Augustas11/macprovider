@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.103
+**Version:** 0.1.104
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.103",
+  "version": "0.1.104",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,23 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.71` | `29b5778b36ffba045786c4cd73427f5287c79a54` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.76` | `9489ddeb74090d1a91ad1c8a01c0d0e117052450` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
+The mlx-swift-lm row `3.32.3-macprovider.76` is on `3.32.3-macprovider.71`
+(`29b5778b36ffba045786c4cd73427f5287c79a54`) (#2381), at
+`9489ddeb74090d1a91ad1c8a01c0d0e117052450`: Two upstream fixes as picks: the
+serial prefill chunk loop clears the MLX buffer cache after each chunk
+(ml-explore/mlx-swift-lm #710), behind PrefillParameters.clearsBufferCache
+(default true) for hosts without a Metal library, and an MLX error raised on
+the loader's worker threads is thrown instead of ending the process (port of
+ml-explore/mlx-swift-lm #698). No model source, decode step or kernel route
+changes; continuous-batch prefill does not use the chunk loop. The Swift, core
+and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
 (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
 `29b5778b36ffba045786c4cd73427f5287c79a54`: MiniMax M3 projects
 `alpha * r r^T` out of the attention and MLP/MoE outputs of the decoder
@@ -2726,6 +2737,16 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.104 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.76`
+  (`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) on `3.32.3-macprovider.71`
+  (#2381): Two upstream fixes as picks: the serial prefill chunk loop clears
+  the MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710), behind
+  PrefillParameters.clearsBufferCache (default true) for hosts without a Metal
+  library, and an MLX error raised on the loader's worker threads is thrown
+  instead of ending the process (port of ml-explore/mlx-swift-lm #698). No
+  model source, decode step or kernel route changes; continuous-batch prefill
+  does not use the chunk loop. Other model sources and the Swift, core and C
+  rows are unchanged.
 - **0.1.103 (2026-11-16, Related: #2382)** — MTP-13 variant: the signed
   entry carries the variant's own `quantization` block from
   `native-mtp-variants.json` (same `kind` as the donor), not the donor's, which

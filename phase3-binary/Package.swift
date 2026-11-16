@@ -17,6 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.76 (#2381) on 3.32.3-macprovider.71: Two
+        // upstream fixes as picks: the serial prefill chunk loop clears the
+        // MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710),
+        // behind PrefillParameters.clearsBufferCache (default true) for hosts
+        // without a Metal library, and an MLX error raised on the loader's
+        // worker threads is thrown instead of ending the process (port of
+        // ml-explore/mlx-swift-lm #698). No model source, decode step or
+        // kernel route changes; continuous-batch prefill does not use the
+        // chunk loop.
         // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
         // MiniMax M3 projects a refusal direction out of the attention and
         // MLP/MoE outputs of the configured decoder layers when the
@@ -177,7 +186,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "29b5778b36ffba045786c4cd73427f5287c79a54"
+            revision: "9489ddeb74090d1a91ad1c8a01c0d0e117052450"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
