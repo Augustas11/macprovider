@@ -23,9 +23,14 @@ final class PagedKVGemma4MixedClassTests: XCTestCase {
         }
     }
 
+    // GPU, as PagedKVRuntimeBridgeTests: Gemma 4's shapeless compiled helpers
+    // (`_addRMSNorm`, `_geluMul`) are process-wide, and MLX keys their trace by
+    // the C default stream (the GPU) while a task-scoped CPU default records
+    // CPU ops into it. A CPU run here left later GPU Gemma 4 tests running
+    // those ops on the CPU.
     override func invokeTest() {
         guard MLXTestDevice.metallibAvailable else { return super.invokeTest() }
-        Device.withDefaultDevice(Device(.cpu)) {
+        Device.withDefaultDevice(Device(.gpu)) {
             super.invokeTest()
         }
     }
