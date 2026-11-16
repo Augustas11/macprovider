@@ -12,14 +12,42 @@ import MacProviderCore
 /// the MLX fork's pre-window per-row `qmv` below the `qmm` limit, which is faster for one row
 /// but not row-invariant. Only a process that can never batch decode rows may
 /// run it, and such a process refuses every batching entry point.
+/// `stockOrder` sets the value to 2: one row takes upstream's one-row kernel,
+/// a forward of exactly two rows takes an exact kernel whose rows equal the
+/// lone row bit for bit, and forwards of 3-16 rows take the batch kernel,
+/// whose rows equal each other across 3-16-row forwards but may differ from
+/// the lone row in low bits. A process that may batch ordinary rows but has
+/// no native MTP, draft model, shard-group role, autotune child or other
+/// switch target runs it; native MTP keeps `rowInvariant` because its verify
+/// window of depth + 1 rows must equal the request's own one-row decode.
 enum SmallMRoute: String, Sendable, Equatable {
     case rowInvariant = "row_invariant"
     case serialOnly = "serial_only"
+    case stockOrder = "stock_order"
 
     /// Read once per process by the MLX core at its first small-row dispatch;
-    /// unset, or a value `atoi` parses to non-zero, keeps the row-invariant
-    /// window (`route(environmentValue:)`).
+    /// unset, or a value `atoi` parses to neither 0 nor 2, keeps the
+    /// row-invariant window (`route(environmentValue:)`).
     static let environmentKey = "MLX_METAL_SMALL_M_ROW_INVARIANT"
+    /// The core's qmv_mma partial-sum count over K, also read once per
+    /// process. Its default follows the route (4 on the row-invariant route,
+    /// 8 on stock order on some GPU generations); an inherited value would
+    /// change a process's output bits with no self-check or cache key
+    /// noticing, so only lab builds keep it.
+    static let partialSumsEnvironmentKey = "MLX_METAL_QMV_MMA_WK"
+
+    /// Removes an inherited `partialSumsEnvironmentKey` outside lab builds.
+    /// Returns true when a value was removed.
+    @discardableResult
+    static func removeInheritedPartialSums() -> Bool {
+        #if MACPROVIDER_LAB_HARNESS
+        return false
+        #else
+        guard getenv(partialSumsEnvironmentKey) != nil else { return false }
+        unsetenv(partialSumsEnvironmentKey)
+        return true
+        #endif
+    }
 
     struct Decision: Sendable, Equatable {
         let route: SmallMRoute
@@ -102,6 +130,12 @@ enum SmallMRoute: String, Sendable, Equatable {
         /// without its own self-check here.
         var otherSwitchTargets: Bool
         var selfCheckVerdict: SelfCheckVerdict
+        /// SPEC-038 FR-CB9 (v0.3.56): why this startup identity left the
+        /// stock order route (`SmallMRouteVerdictStore.stockOrderFallback`),
+        /// or nil.
+        var stockOrderFallback: String? = nil
+        /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant`.
+        var operatorForcesRowInvariant: Bool = false
 
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
@@ -109,12 +143,16 @@ enum SmallMRoute: String, Sendable, Equatable {
             return "cb=\(cb) native_mtp=\(nativeMTPMode.rawValue) mtp_admission=\(nativeMTPAdmission.rawValue) "
                 + "draft=\(draftConfigured) shard=\(shardGroupRole) autotune_candidate=\(autotuneCandidate) "
                 + "switch_targets=\(otherSwitchTargets) self_check=\(selfCheckVerdict.rawValue)"
+                + (stockOrderFallback.map { " stock_order_fallback=\($0)" } ?? "")
+                + (operatorForcesRowInvariant ? " operator_small_m_route=row_invariant" : "")
         }
     }
 
     /// SPEC-038 FR-CB9: the route a `serve` process runs, decided once before
     /// MLX is first used, from state that cannot turn batching on later in
-    /// the same process. Serial-only needs all of:
+    /// the same process. A draft model, shard-group role, autotune child,
+    /// native MTP that may activate, or another switch target keeps the
+    /// row-invariant route. Otherwise serial-only needs all of:
     /// - native MTP inactive: mode `off`, or `auto` with no verified entry
     ///   for the loaded model and artifact digest (its rounds batch target
     ///   rows); an unreadable or unverifiable set keeps the invariant route;
@@ -124,13 +162,29 @@ enum SmallMRoute: String, Sendable, Equatable {
     ///   serves one row with no re-check scheduled;
     /// - no draft model, no shard-group role, no other switch target, and not
     ///   an autotune child (a child measures candidate configurations that
-    ///   may batch, and its numbers must hold for the invariant route the
-    ///   incumbent serves on).
-    /// A verdict recorded on the invariant route stays valid on the serial
-    /// route: it says batching gives no net gain against the invariant serial
-    /// baseline, and the serial route's baseline is faster, so the verdict
-    /// only gets more true. A serial-only process never measures, so no
-    /// serial-route number is ever compared with a batched one.
+    ///   may batch on the row-invariant route; autotune compares children
+    ///   only with each other, cached child results and catalog gates, never
+    ///   with the stopped incumbent's numbers).
+    /// Every other such process may batch ordinary rows and takes the stock
+    /// order route, with the self-check verdict as its reason, unless a
+    /// failure measured on stock order for this startup identity sent it to
+    /// the row-invariant route (`stockOrderFallback`, sticky for the
+    /// identity; a new runtime build is a new identity and re-decides). A
+    /// one-row verdict then counts only if it was measured on the
+    /// row-invariant route, as it does today.
+    /// `operatorForcesRowInvariant` turns only that stock order decision into
+    /// the row-invariant route (`operator_row_invariant`); it never changes a
+    /// serial-only or another row-invariant decision, and batching stays on.
+    /// A one-row verdict recorded on a batching route stays valid on the
+    /// serial route: it says batching gives no net gain against that route's
+    /// serial baseline (on stock order the same upstream one-row kernel the
+    /// serial route runs), or that rows diverged, which the serial route
+    /// never risks. A serial-only process never measures, so no serial-route
+    /// number is ever compared with a batched one.
+    /// The SPEC-039 two-row attach probe (`PagedKVRuntimeParityProbe`)
+    /// compares a two-row forward with serial decode exactly; on stock order
+    /// it stays valid only because the core's two-row kernel is exact against
+    /// its lone row.
     static func decide(_ inputs: Inputs) -> Decision {
         if inputs.draftConfigured { return Decision(route: .rowInvariant, reason: "draft_model") }
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }
@@ -142,17 +196,27 @@ enum SmallMRoute: String, Sendable, Equatable {
         if inputs.continuousBatchingExplicitlyConfigured, inputs.continuousBatching == .off {
             return Decision(route: .serialOnly, reason: "continuous_batching_off_by_configuration")
         }
+        if inputs.selfCheckVerdict == .grantsNoBatching {
+            return Decision(route: .serialOnly, reason: "self_check_no_batching")
+        }
+        if let fallback = inputs.stockOrderFallback {
+            return Decision(route: .rowInvariant, reason: fallback)
+        }
+        // Every decision left below is stock order.
+        if inputs.operatorForcesRowInvariant {
+            return Decision(route: .rowInvariant, reason: operatorRowInvariant)
+        }
         switch inputs.selfCheckVerdict {
         case .grantsNoBatching:
             return Decision(route: .serialOnly, reason: "self_check_no_batching")
         case .absent:
-            return Decision(route: .rowInvariant, reason: "self_check_verdict_absent")
+            return Decision(route: .stockOrder, reason: "self_check_verdict_absent")
         case .staleKey:
-            return Decision(route: .rowInvariant, reason: "self_check_key_changed")
+            return Decision(route: .stockOrder, reason: "self_check_key_changed")
         case .recheckPending:
-            return Decision(route: .rowInvariant, reason: "self_check_recheck_pending")
+            return Decision(route: .stockOrder, reason: "self_check_recheck_pending")
         case .grantsBatching:
-            return Decision(route: .rowInvariant, reason: "self_check_grants_batching")
+            return Decision(route: .stockOrder, reason: "self_check_grants_batching")
         }
     }
 
@@ -166,14 +230,57 @@ enum SmallMRoute: String, Sendable, Equatable {
             && !(inputs.continuousBatchingExplicitlyConfigured && inputs.continuousBatching == .off)
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.56) stock order fallback reasons.
+    static let stockOrderDivergence = "stock_order_divergence"
+    static let stockOrderCrash = "stock_order_crash"
+    static let stockOrderAttachFailed = "stock_order_attach_failed"
+    static let stockOrderReferenceUnfit = "stock_order_reference_unfit"
+    /// The reason when config `small_m_route: row_invariant` replaced stock order.
+    static let operatorRowInvariant = "operator_row_invariant"
+
+    /// The fallback a self-check result measured on stock order gives the
+    /// next start: any width whose rows diverged (a same-order reference
+    /// whose rows disagree is one), or a crashed step. Nil for every other
+    /// result, including no net gain, which says batching does not beat the
+    /// one-row kernel the serial route also runs.
+    static func stockOrderFallbackReason(
+        decision: ContinuousBatchingSelfCheckDecision,
+        anyWidthDiverged: Bool,
+        crashed: Bool
+    ) -> String? {
+        if anyWidthDiverged || decision.reason.hasPrefix("row_divergence_at_") { return stockOrderDivergence }
+        if crashed || decision.reason.hasPrefix("crashed_at_") { return stockOrderCrash }
+        return nil
+    }
+
+    /// Whether the SPEC-039 attach probes ran and failed: the paged parity
+    /// probe did not establish parity, or the two-row shared-forward probe
+    /// saw a row fail, rows diverge, or (with a distinguishing challenge)
+    /// tokens differ from serial decode. Probes that did not run (nil), or a
+    /// challenge that could not distinguish its rows, are not failures.
+    static func attachProbeFailed(
+        parity: PagedKVRuntimeParityProbeResult?,
+        isolation: PagedKVRuntimeMoEProbeResult?
+    ) -> Bool {
+        guard let parity, let isolation else { return false }
+        if !parity.established { return true }
+        if isolation.rowFailures > 0 || isolation.crossRowDivergences > 0 { return true }
+        return isolation.challengeDistinguishing && !isolation.sharedForwardParityProven
+    }
+
     /// The route the MLX core takes for a given environment value. The core
     /// parses a set value with C `atoi` and leaves the window off when it is
     /// 0, so "", "false", "00", "-0", " 0", "0abc" and, on Darwin, a value
-    /// that wraps to 0 such as "4294967296" are all serial-only. This calls
-    /// the same C library `atoi`, so the label always matches the core.
+    /// that wraps to 0 such as "4294967296" are all serial-only; a value that
+    /// parses to 2 ("2", "02", " 2") is stock order. This calls the same C
+    /// library `atoi`, so the label matches the core.
     static func route(environmentValue: String?) -> SmallMRoute {
         guard let environmentValue else { return .rowInvariant }
-        return environmentValue.withCString { atoi($0) } == 0 ? .serialOnly : .rowInvariant
+        switch environmentValue.withCString({ atoi($0) }) {
+        case 0: return .serialOnly
+        case 2: return .stockOrder
+        default: return .rowInvariant
+        }
     }
 
     /// SPEC-038 FR-CB9: the count a serial-only `serve` serves and reports,
@@ -211,16 +318,22 @@ enum SmallMRoute: String, Sendable, Equatable {
     }
 
     /// Sets the environment for this process before MLX's first small-row
-    /// dispatch. Row-invariant removes any inherited value, so a stray "0"
-    /// never reaches a process that can batch. The first call wins; a later
-    /// call returns the route already applied.
+    /// dispatch. Row-invariant removes any inherited value, so a stray "0" or
+    /// "2" never reaches a process that needs the invariant route. The first
+    /// call wins; a later call returns the route already applied.
     @discardableResult
     static func apply(_ route: SmallMRoute, reason: String = "applied") -> SmallMRoute {
         lock.lock()
         defer { lock.unlock() }
+        if removeInheritedPartialSums() {
+            FileHandle.standardError.write(Data(
+                "event=small_m_route action=inherited_value_removed variable=\(partialSumsEnvironmentKey)\n".utf8
+            ))
+        }
         if let applied { return applied }
         switch route {
         case .serialOnly: setenv(environmentKey, "0", 1)
+        case .stockOrder: setenv(environmentKey, "2", 1)
         case .rowInvariant: unsetenv(environmentKey)
         }
         applied = route
@@ -241,17 +354,19 @@ enum SmallMRoute: String, Sendable, Equatable {
 
     /// For every command other than `serve` and `decode-bench` that runs MLX
     /// compute: pins the row-invariant route before MLX starts, removing an
-    /// inherited value (any value `atoi` parses to 0), so the command never
-    /// runs the serial route. Exits 2 only when this process already applied
-    /// the serial route, which no command entry does.
+    /// inherited value (any value `atoi` parses to 0 or 2), so the command
+    /// never runs the serial or stock order route. Exits 2 only when this
+    /// process already applied another route, which no command entry does.
     static func requireRowInvariant(entry: String) throws {
         let inherited = ProcessInfo.processInfo.environment[environmentKey]
         let applied = apply(.rowInvariant, reason: "command")
-        if let refusal = batchingRefusal(route: applied, entry: entry) {
+        if applied != .rowInvariant {
+            let refusal = batchingRefusal(route: applied, entry: entry)
+                ?? "small_m_route_\(applied.rawValue): \(entry) needs the row-invariant small-row route, but this process already runs \(applied.rawValue)"
             FileHandle.standardError.write(Data("\(refusal)\n".utf8))
             throw ExitCode(2)
         }
-        if let inherited, route(environmentValue: inherited) == .serialOnly {
+        if let inherited, route(environmentValue: inherited) != .rowInvariant {
             FileHandle.standardError.write(Data(
                 "event=small_m_route action=inherited_value_removed entry=\(entry) mode=\(applied.rawValue)\n".utf8
             ))
@@ -259,11 +374,17 @@ enum SmallMRoute: String, Sendable, Equatable {
     }
 
     /// SPEC-037 FR-KVP4 item 10: the decode-path class in a disk-cache
-    /// envelope. KV written on one route is a clean miss on the other.
+    /// envelope. KV written on one route is a clean miss on every other.
+    /// Stock order has its own class, not serial-only's: a lone stock order
+    /// row runs the same one-row kernel as serial-only, but a stock order
+    /// process also writes KV from rows decoded in 3-16-row forwards (batch
+    /// kernel), which serial-only never produces; and its lone-row KV is not
+    /// the row-invariant route's either.
     var kvDecodePath: String {
         switch self {
         case .rowInvariant: return KVBuildIdentity.decodePathOrdinary
         case .serialOnly: return KVBuildIdentity.decodePathOrdinary + "+serial_small_m"
+        case .stockOrder: return KVBuildIdentity.decodePathOrdinary + "+stock_order_small_m"
         }
     }
 }
@@ -287,11 +408,22 @@ struct SmallMRouteVerdictStore: Sendable {
 
     struct Entry: Codable, Equatable {
         let startupIdentity: String
-        let key: ContinuousBatchingSelfCheckKey
+        /// The self-check key of a one-row verdict, or nil when the entry
+        /// only records a stock order fallback.
+        var key: ContinuousBatchingSelfCheckKey?
+        /// The route the one-row verdict was measured on; nil for entries
+        /// written before routes were recorded.
+        var route: String?
+        /// SPEC-038 FR-CB9 (v0.3.56): a failure measured on stock order
+        /// (`SmallMRoute.stockOrder*` reasons). Sticky for the startup
+        /// identity: the next starts take the row-invariant route.
+        var stockOrderFallback: String?
 
         enum CodingKeys: String, CodingKey {
             case startupIdentity = "startup_identity"
             case key
+            case route
+            case stockOrderFallback = "stock_order_fallback"
         }
     }
 
@@ -338,10 +470,10 @@ struct SmallMRouteVerdictStore: Sendable {
     /// `probe_shape_unavailable` (not even two exactness-probe rows fit).
     /// The last two are fixed by quantities the startup identity keys: the
     /// slot configuration, served context and paged-KV pool. Any change to
-    /// them is a new identity that starts row-invariant and re-measures. Any
-    /// other one-row reason (`serial_baseline_unavailable`,
+    /// them is a new identity that starts on a batching route and
+    /// re-measures. Any other one-row reason (`serial_baseline_unavailable`,
     /// `probe_shape_unmet_at_<k>`) re-runs on bound growth, which only a
-    /// row-invariant process can do, so it keeps that route.
+    /// process on a batching route can do, so it keeps that route.
     static func decidesOneRow(reason: String) -> Bool {
         reason == "no_net_gain" || reason == "single_row" || reason == "probe_shape_unavailable"
             || reason.hasPrefix("row_divergence_at_") || reason.hasPrefix("crashed_at_")
@@ -354,8 +486,22 @@ struct SmallMRouteVerdictStore: Sendable {
     }
 
     func verdict(startupIdentity: String, selfCheckStore: ContinuousBatchingSelfCheckStore) -> SmallMRoute.SelfCheckVerdict {
-        guard let entry = read().last(where: { $0.startupIdentity == startupIdentity }) else { return .absent }
-        return Self.verdict(record: selfCheckStore.record(for: entry.key))
+        guard let entry = read().last(where: { $0.startupIdentity == startupIdentity }),
+              let key = entry.key
+        else { return .absent }
+        return Self.verdict(record: selfCheckStore.record(for: key))
+    }
+
+    /// The stock order fallback recorded for the startup identity, or nil.
+    func stockOrderFallback(startupIdentity: String) -> String? {
+        read().last(where: { $0.startupIdentity == startupIdentity })?.stockOrderFallback
+    }
+
+    /// The route `SmallMRoute.decide` gives the next start of this identity
+    /// when nothing but the verdict and the fallback decide it.
+    func nextStartRoute(startupIdentity: String, selfCheckStore: ContinuousBatchingSelfCheckStore) -> SmallMRoute {
+        if verdict(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore) == .grantsNoBatching { return .serialOnly }
+        return stockOrderFallback(startupIdentity: startupIdentity) == nil ? .stockOrder : .rowInvariant
     }
 
     /// The stored decision behind a `grantsNoBatching` verdict, for the
@@ -365,28 +511,74 @@ struct SmallMRouteVerdictStore: Sendable {
         selfCheckStore: ContinuousBatchingSelfCheckStore
     ) -> (key: ContinuousBatchingSelfCheckKey, decision: ContinuousBatchingSelfCheckDecision)? {
         guard let entry = read().last(where: { $0.startupIdentity == startupIdentity }),
-              let record = selfCheckStore.record(for: entry.key),
+              let key = entry.key,
+              let record = selfCheckStore.record(for: key),
               Self.verdict(record: record) == .grantsNoBatching,
               let decision = record.decision
         else { return nil }
-        return (entry.key, decision)
+        return (key, decision)
     }
 
     /// Records the self-check key the startup identity resolved to when its
     /// decision serves one row, and forgets it otherwise. Returns true when
     /// the next start with this identity reads a one-row verdict.
+    /// `route` is the route the decision was measured on. On stock order a
+    /// `stockOrderFallback` (given now or recorded before for the identity)
+    /// replaces the one-row verdict: the next start takes the row-invariant
+    /// route and measures there, so a stock-order-only failure never sends a
+    /// start to the serial route. A recorded fallback is kept by every later
+    /// record for the identity.
     @discardableResult
-    func record(startupIdentity: String, key: ContinuousBatchingSelfCheckKey, decision: ContinuousBatchingSelfCheckDecision) -> Bool {
-        var entries = read().filter { $0.startupIdentity != startupIdentity }
-        let oneRow = decision.slots <= 1
-        if oneRow { entries.append(Entry(startupIdentity: startupIdentity, key: key)) }
-        if entries.count > Self.maxEntries { entries = Array(entries.suffix(Self.maxEntries)) }
+    func record(
+        startupIdentity: String,
+        key: ContinuousBatchingSelfCheckKey,
+        decision: ContinuousBatchingSelfCheckDecision,
+        route: SmallMRoute? = nil,
+        stockOrderFallback: String? = nil
+    ) -> Bool {
+        let all = read()
+        let fallback = all.last(where: { $0.startupIdentity == startupIdentity })?.stockOrderFallback
+            ?? (route == .stockOrder ? stockOrderFallback : nil)
+        var entries = all.filter { $0.startupIdentity != startupIdentity }
+        let oneRow = decision.slots <= 1 && !(route == .stockOrder && fallback != nil)
+        if oneRow || fallback != nil {
+            entries.append(Entry(
+                startupIdentity: startupIdentity,
+                key: oneRow ? key : nil,
+                route: oneRow ? route?.rawValue : nil,
+                stockOrderFallback: fallback
+            ))
+        }
+        return save(entries) && oneRow
+    }
+
+    /// Records a stock order fallback for the startup identity (an attach
+    /// probe or a same-order reference that failed before any decision).
+    /// The first reason recorded stays; a one-row verdict measured on stock
+    /// order is dropped with it. Returns true when the fallback is stored.
+    @discardableResult
+    func recordStockOrderFallback(startupIdentity: String, reason: String) -> Bool {
+        let all = read()
+        let existing = all.last(where: { $0.startupIdentity == startupIdentity })
+        var entries = all.filter { $0.startupIdentity != startupIdentity }
+        let keepVerdict = existing?.key != nil && existing?.route != SmallMRoute.stockOrder.rawValue
+        entries.append(Entry(
+            startupIdentity: startupIdentity,
+            key: keepVerdict ? existing?.key : nil,
+            route: keepVerdict ? existing?.route : nil,
+            stockOrderFallback: existing?.stockOrderFallback ?? reason
+        ))
+        return save(entries)
+    }
+
+    private func save(_ entries: [Entry]) -> Bool {
+        let entries = entries.count > Self.maxEntries ? Array(entries.suffix(Self.maxEntries)) : entries
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(Document(schemaVersion: Self.schemaVersion, entries: entries)),
               (try? write(data)) != nil
         else { return false }
-        return oneRow
+        return true
     }
 
     private func read() -> [Entry] {
@@ -427,12 +619,17 @@ struct SmallMRouteVerdictStore: Sendable {
 }
 
 /// Writes the startup model's applied self-check decision to the verdict
-/// store, once per key, and logs when it moves the next start to the serial
-/// route. Only built when every other serial-only condition holds.
+/// store, once per key, and logs the route it gives the next start. Only
+/// built when every other serial-only condition holds, so a start without a
+/// one-row verdict or a stock order fallback takes the stock order route.
+/// `route` is the route this process runs: a correctness failure, a crash,
+/// an attach-probe failure or an unfit same-order reference on stock order
+/// records a fallback instead of a one-row verdict.
 final class SmallMRouteVerdictRecorder: @unchecked Sendable {
     private let store: SmallMRouteVerdictStore
     private let selfCheckStore: ContinuousBatchingSelfCheckStore
     private let startupIdentity: String
+    private let route: SmallMRoute
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var startupModelSHA256: String?
@@ -442,11 +639,13 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         store: SmallMRouteVerdictStore,
         selfCheckStore: ContinuousBatchingSelfCheckStore,
         startupIdentity: String,
+        route: SmallMRoute = .rowInvariant,
         log: @escaping @Sendable (String) -> Void
     ) {
         self.store = store
         self.selfCheckStore = selfCheckStore
         self.startupIdentity = startupIdentity
+        self.route = route
         self.log = log
     }
 
@@ -459,8 +658,33 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         guard key.modelSHA256 == startupModelSHA256 else { return }
         if let lastRecorded, lastRecorded.0 == key, lastRecorded.1 == decision { return }
         lastRecorded = (key, decision)
-        store.record(startupIdentity: startupIdentity, key: key, decision: decision)
-        let next = store.verdict(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore) == .grantsNoBatching
-        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next ? SmallMRoute.serialOnly.rawValue : SmallMRoute.rowInvariant.rawValue)")
+        let measured = selfCheckStore.record(for: key)
+        let fallback = route == .stockOrder
+            ? SmallMRoute.stockOrderFallbackReason(
+                decision: decision,
+                anyWidthDiverged: measured?.measurements.contains { !$0.conformant } ?? false,
+                crashed: measured?.crashedSlots != nil
+            )
+            : nil
+        store.record(startupIdentity: startupIdentity, key: key, decision: decision, route: route, stockOrderFallback: fallback)
+        let next = store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore)
+        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next.rawValue)\(fallback.map { " fallback=\($0)" } ?? "")")
+    }
+
+    /// Records a stock order failure found outside a self-check decision
+    /// (`SmallMRoute.stockOrderAttachFailed`, `stockOrderReferenceUnfit`).
+    /// Ignored on any other route and, when `modelSHA256` is given, for any
+    /// model but the startup model.
+    func stockOrderFailed(reason: String, modelSHA256: String? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard route == .stockOrder else { return }
+        if let modelSHA256 {
+            if startupModelSHA256 == nil { startupModelSHA256 = modelSHA256 }
+            guard modelSHA256 == startupModelSHA256 else { return }
+        }
+        guard store.stockOrderFallback(startupIdentity: startupIdentity) == nil else { return }
+        store.recordStockOrderFallback(startupIdentity: startupIdentity, reason: reason)
+        log("event=small_m_route action=stock_order_fallback_recorded reason=\(reason) next_start=\(store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore).rawValue)")
     }
 }

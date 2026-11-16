@@ -2253,7 +2253,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private let switchContextProvenanceModelIDs: Set<String>
     /// SPEC-038 FR-CB9: the MLX small-row route this runtime's process runs.
     /// On `serialOnly` no self-check target, self-check batch or native-MTP
-    /// drafter exists here, so no row can be batched.
+    /// drafter exists here, so no row can be batched. On `stockOrder`
+    /// ordinary rows batch but no native-MTP drafter loads.
     let smallMRoute: SmallMRoute
     /// The configured `max_context_override` serve started with; a switch that
     /// serves exactly it serves the config value, not a recomputed one.
@@ -2317,6 +2318,9 @@ actor ModelRuntime: ModelRuntimeServing {
     }
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
+    /// SPEC-038 FR-CB9 (v0.3.56): the startup model's SPEC-039 attach probes
+    /// ran and failed (`SmallMRoute.attachProbeFailed`).
+    private var startupPagedKVAttachProbeFailedValue = false
     private var pagedKVRuntimeCacheClass: String
     private var pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
     private var pagedKVHardwareSizingProof: PagedKVHardwareSizingProof?
@@ -4376,6 +4380,7 @@ maxTokens: 1,
         if let recordable = parityProbe?.contiguousCacheRecordable {
             self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
+        self.startupPagedKVAttachProbeFailedValue = SmallMRoute.attachProbeFailed(parity: parityProbe, isolation: moeProbe)
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -6520,11 +6525,12 @@ maxTokens: 1,
 
     /// The self-check subject for the loaded model, or nil when there is
     /// nothing to check: a decision already exists, batching cannot run here
-    /// (emergency off, draft model, no attached scheduler), or a signed
-    /// revocation names this model on this runtime revision.
+    /// (serial-only route, emergency off, draft model, no attached
+    /// scheduler), or a signed revocation names this model on this runtime
+    /// revision.
     func continuousBatchingSelfCheckTarget(includeDecided: Bool = false) -> ContinuousBatchingSelfCheckTarget? {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
-              smallMRoute == .rowInvariant,
+              smallMRoute != .serialOnly,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
               let scheduler = continuousBatchScheduler,
@@ -6543,7 +6549,8 @@ maxTokens: 1,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
                 runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
                     forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
-                    forwardTokenCap: scheduler.forwardTokenCap
+                    forwardTokenCap: scheduler.forwardTokenCap,
+                    smallMRoute: smallMRoute
                 ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
@@ -6556,7 +6563,8 @@ maxTokens: 1,
             blockSizeTokens: scheduler.blockSizeTokens,
             // Paged MLA and DeepSeek row pools both use the eight-token decode cap.
             decodeOnlyGain: scheduler.forwardTokenCap != nil,
-            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
+            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256),
+            smallMRoute: smallMRoute
         )
     }
 
@@ -6696,7 +6704,7 @@ maxTokens: 1,
     /// is off by configuration), as a refused check reads on the invariant
     /// route. Kept across swaps. Serves `servedSlots`
     /// (`SmallMRoute.serialOnlyServedSlots`) and reports the count it serves.
-    /// Returns that count; nil (and no change) on the row-invariant route.
+    /// Returns that count; nil (and no change) on a batching route.
     @discardableResult
     func applySerialOnlySelfCheck(
         stored decision: ContinuousBatchingSelfCheckDecision?,
@@ -13229,13 +13237,27 @@ maxTokens: maxTokens,
         )
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.56): whether the startup model's SPEC-039
+    /// attach probes ran and failed.
+    func startupPagedKVAttachProbeFailed() -> Bool {
+        startupPagedKVAttachProbeFailedValue
+    }
+
     /// Why native MTP may not load in this process, or nil. A serial-only
     /// process (SPEC-038 FR-CB9) refuses it even if an admission set appears
-    /// after startup, because its rounds batch target rows.
+    /// after startup, because its rounds batch target rows. A stock order
+    /// process refuses it too: a verify window of three or more rows takes
+    /// the batch kernel, which may differ from the request's own one-row
+    /// decode (SPEC-048 R015/R016). `SmallMRoute.decide` keeps any process
+    /// whose native MTP may activate on the row-invariant route, so this is
+    /// reached only if an admission set appears after startup.
     nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
-        guard route == .rowInvariant else { return "small_m_route_serial_only" }
-        return nil
+        switch route {
+        case .rowInvariant: return nil
+        case .serialOnly: return "small_m_route_serial_only"
+        case .stockOrder: return "small_m_route_stock_order"
+        }
     }
 
     private static func loadNativeMTPDrafterIfAdmitted(

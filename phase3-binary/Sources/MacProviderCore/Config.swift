@@ -401,6 +401,11 @@ public struct AppConfig: Equatable, Sendable {
     // entry only by the served artifact hash.
     public var poolModelID: String? = nil
 
+    // SPEC-038 FR-CB9 (v0.3.56): yaml key `small_m_route`, whose only value
+    // is `row_invariant`. It puts a process that would take the stock order
+    // small-row route on the row-invariant route; batching stays on.
+    public var smallMRouteRowInvariant: Bool = false
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -967,6 +972,17 @@ public enum ConfigLoader {
             }
             config.continuousBatching = mode
             config.continuousBatchingExplicitlyConfigured = true
+        }
+        if dict["small_m_route"] != nil {
+            guard let rawRoute = rawNode?["small_m_route"]?.scalar?.string,
+                  rawRoute.lowercased() == "row_invariant" else {
+                throw ConfigError.invalidValue(
+                    key: "small_m_route",
+                    value: String(describing: dict["small_m_route"]),
+                    expected: "row_invariant"
+                )
+            }
+            config.smallMRouteRowInvariant = true
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
         try assign(
