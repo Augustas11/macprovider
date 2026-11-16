@@ -1,0 +1,18 @@
+{
+  "binds": [
+    "correctness_evidence_sha256",
+    "state_rollback_evidence_sha256",
+    "batch_evidence_sha256"
+  ],
+  "executed_steps_status": "partial",
+  "journey_sha256": "5ec6a7788483f5c357b2060d65f97ce283209c50420d5db86421d23fafe2b6b1",
+  "steps": {
+    "step-04-serial-token-oracle": "pass",
+    "step-05-cache-state-boundary": "pass",
+    "step-06-streaming-stop": "pass",
+    "step-07-08-mixed-multirow-capacity": "pass",
+    "step-09-cancellation": "pass",
+    "step-10-warm-swap": "pass",
+    "step-12-native-selftest": "partial"
+  }
+}

@@ -58,6 +58,24 @@ entry is updated for the 2026-11-15 MiniMax activation.
   (2) the canary serving the uncensored build reports native MTP enabled
   (`live_probe`); (3) one buyer request through the gateway is served with
   native MTP (`gateway_proof`); (4) the next CLI cut bakes the release.
+- **Pending, `published-2026-11-16-qwen27b-native-mtp-v289`
+  (#2383, signed with `streamvc-autotune-static-v4`, stacked on the PR 2394
+  release):** the native-MTP admission set adds two entries,
+  `qwen/qwen3.6-27b` (`mlx-4bit`, snapshot `518ef47c…`) and
+  `qwen/qwen3.8-27b` (`mlx-4bit`, snapshot `8a8786e9…`). Both run at depth 1
+  with one native row, four slots and a 4096-token cap, with the self-test bank
+  entries recorded 2026-11-04. R005 and R015 are from 2026-11-04
+  (`docs/evidence/qwen27b-native-mtp-2026-11-04/`). Journey, security
+  negatives, window bound and quantization are from 2026-11-16
+  (`docs/evidence/qwen27b-native-mtp-2026-11-16/`). Nothing else changes.
+  **Activation order:** (1) the PR 2392 release
+  `published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289`; (2) the
+  PR 2394 release `published-2026-11-16-glm53-flash-uncensored-native-mtp-v289`;
+  (3) this release. **Live steps for this release:** (1) merge, then
+  `scripts/ops/catalog-activate.sh status` and `next --run` once (2) is live;
+  (2) a provider serving either 27B model reports native MTP enabled after its
+  self-check; (3) one buyer request on each model through the gateway is
+  served with native MTP; (4) the next CLI cut bakes the release.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since
