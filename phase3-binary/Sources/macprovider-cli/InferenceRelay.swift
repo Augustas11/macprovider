@@ -492,12 +492,24 @@ actor InferenceRelay {
                 throw error
             }
         }
+        // Issue #2364: the request waits for its first token under the stall watchdog.
+        let stallTimeline = state.timeline
+        FirstTokenStallWatchdog.shared.register(
+            id: requestID,
+            promptTokens: FirstTokenStallPolicy.estimatedPromptTokens(bodyBytes: body.utf8.count),
+            firstTokenObserved: { stallTimeline.isMarked(.firstToken) }
+        )
         // A lease on the boot runtime serves on `modelRuntime` with today's
         // identity; any other member (a secondary, or one promoted to
         // primary) serves on its own runtime under its own id.
         let member = servingLease.flatMap { $0.runsOn(modelRuntime) ? nil : $0 }
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime, servingLease, member] in
             defer { servingLease?.release() }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if let hold = LabFirstTokenStall.consume() {
+                try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
+            }
+            #endif
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -524,6 +536,7 @@ actor InferenceRelay {
                 relayBlindRuntime: relayBlindRuntime,
                 sendFrame: releasingSendFrame
             )
+            FirstTokenStallWatchdog.shared.finish(id: requestID)
             await self?.removeActive(requestID, state: state)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
@@ -1146,6 +1159,12 @@ actor InferenceRelay {
             requestID: requestID,
             warmMember: warmMemberKey
         )
+        if let completionResult, let prefillMs = state.timeline.snapshot().prefillWallMs {
+            FirstTokenStallWatchdog.shared.recordPrefillSample(
+                uncachedPromptTokens: completionResult.promptTokens - completionResult.cachedPromptTokens,
+                prefillSeconds: Double(prefillMs) / 1000
+            )
+        }
         if relayBlindOpened == nil, !failed, !state.isCancelled, let completionResult {
             KVCacheTelemetry.emitRequestCompleted(
                 providerID: receiptProviderID,
