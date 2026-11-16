@@ -217,6 +217,9 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
 
     func record(caches: [PagedKVCache], binding: PagedKVStorageBinding) throws {
         let table = binding.currentTable
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if PagedKVLabTrace.enabled { Self.labTraceRecordMismatch(caches: caches, binding: binding) }
+        #endif
         try caches.forEach { cache in
             try Self.validateHandle(cache.binding.handle, matches: binding.handle)
             // Same offset/table/shape guards the eager host copy used to
@@ -378,6 +381,41 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
             throw PagedKVContiguousCacheBridgeError.blockTableMismatch
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396): the guards of `record` evaluated without throwing,
+    /// one event listing every layer that fails them. Nothing when all pass.
+    private static func labTraceRecordMismatch(caches: [PagedKVCache], binding: PagedKVStorageBinding) {
+        let table = binding.currentTable
+        let layers: [[String: Any]] = caches.enumerated().compactMap { layer, cache in
+            let blocks = PagedKVBlockLayout.blockCount(tokens: cache.storedTokens, blockSizeTokens: cache.blockSizeTokens)
+            var failed: [String] = []
+            if cache.binding.handle != binding.handle { failed.append("handle") }
+            if cache.offset != table.logicalTokenCount { failed.append("offset_vs_logical") }
+            if cache.blockSizeTokens != table.blockSizeTokens { failed.append("block_size") }
+            if blocks != table.physicalBlocks.count { failed.append("stored_blocks_vs_table_blocks") }
+            guard !failed.isEmpty else { return nil }
+            let slot = cache.labBatchSlot
+            return [
+                "layer": layer, "failed": failed,
+                "offset": cache.offset, "expected_logical": table.logicalTokenCount,
+                "stored": cache.storedTokens, "stored_blocks": blocks,
+                "expected_blocks": table.physicalBlocks.count,
+                "attached": slot != nil, "batch_row": slot?.row ?? -1,
+            ]
+        }
+        guard !layers.isEmpty else { return }
+        let signatures = Set(layers.map { "\($0["offset"]!)/\($0["stored"]!)/\($0["batch_row"]!)" })
+        PagedKVLabTrace.emit("record_mismatch", [
+            "handle": String(binding.handle.handleID.uuidString.prefix(8)),
+            "table": PagedKVLabTrace.table(table),
+            "layers_total": caches.count,
+            "layers_mismatched": layers.count,
+            "mismatched_layers_agree": signatures.count == 1,
+            "layers": layers,
+        ])
+    }
+    #endif
 
     private static func isSameTableIdentity(_ lhs: PagedKVBlockTable, _ rhs: PagedKVBlockTable) -> Bool {
         lhs.handleID == rhs.handleID
@@ -1990,6 +2028,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
 
     func finish(requestID: String) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceLiveRows("finish_before", finishing: requestID)
+        defer { labTraceLiveRows("finish_after", finishing: requestID) }
+        #endif
         invalidateDecodeSession(containing: requestID)
         removeNativeMTPPendingTransaction(for: requestID)
         removeNativeMTPRowState(for: requestID)
@@ -2480,7 +2522,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge?.discardContiguousCache(handle: binding.handle)
             return
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if PagedKVLabTrace.enabled {
+            var fields = PagedKVLabTrace.row(requestID: requestID, index: nil, caches: state.caches, binding: binding)
+            fields["bridge"] = contiguousCacheBridge != nil
+            PagedKVLabTrace.emit("set_row_state", fields)
+        }
+        do {
+            try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        } catch {
+            var fields = PagedKVLabTrace.row(requestID: requestID, index: nil, caches: state.caches, binding: binding)
+            fields["error"] = ContinuousBatchingPolicy.prefillFailureReason(error)
+            PagedKVLabTrace.emit("set_row_state_throw", fields)
+            throw error
+        }
+        #else
         try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        #endif
         lock.lock()
         if !cancelRequested {
             rows[requestID] = state
@@ -2512,6 +2570,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_forward_token_cap")
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labWindow = PagedKVLabTrace.enabled ? PagedKVLabTrace.beginWindow() : 0
+        let labFreshRows = PagedKVLabTrace.enabled
+            ? supportedInputs.map { existingRowState(for: $0.requestID) == nil } : []
+        #endif
         var rowStates = supportedInputs.map {
             self.rowState(
                 for: $0.requestID,
@@ -2545,9 +2608,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let batchedCaches: [PagedKVSharedLayerBatch]
         if let existing = session, existing.requestIDs == requestIDs {
             batchedCaches = existing.batchedCaches
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_reuse", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+            #endif
         } else {
             let previous = session
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_begin", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: previous?.batchedCaches ?? [], fresh: labFreshRows,
+                               extra: ["previous_rids": previous?.requestIDs ?? []])
+            #endif
             previous?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_prev_synced", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: previous?.batchedCaches ?? [], fresh: labFreshRows)
+            #endif
             // While rows ride the session, its batch buffers are their only
             // K/V. Hybrid (recurrent) sessions are rebuilt every window, so
             // their rows keep their own K/V.
@@ -2576,6 +2652,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 compiledCaches: [],
                 compiledStep: nil
             )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labTraceWindowRows("session_rebuild_end", window: labWindow, inputs: supportedInputs,
+                               rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+            #endif
         }
         let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
@@ -2840,6 +2920,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // reusable session that amortizes contiguous compiled decode. Inside a
         // window the packed state advances one token per step exactly as
         // one-step windows would; the window end is a token boundary.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceWindowRows("window_commit_begin", window: labWindow, inputs: supportedInputs,
+                           rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows, extra: [
+                               "decode_path": canCompile ? "compiled" : "eager",
+                               "batched_state": hasBatchedState,
+                               "capture_rows": captureIndices.count,
+                               "steps": decodeSteps, "ran_steps": ranSteps, "ended_early": endedEarly,
+                           ])
+        #endif
         if endedEarly {
             // Every row is cancelled and about to be released. Its KV now ends
             // before its block table (extended for the full window), so it
@@ -2868,6 +2957,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labTraceWindowRows("window_commit_end", window: labWindow, inputs: supportedInputs,
+                           rowStates: rowStates, batches: batchedCaches, fresh: labFreshRows)
+        #endif
         if !capturedColumns.isEmpty {
             eval(capturedColumns.values.flatMap { $0.map(\.hidden) })
             lock.lock()
@@ -4247,6 +4340,66 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         session?.batchedCaches.forEach { $0.releaseRows() }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396). Ids and counts read under `lock` only: `finish`
+    /// can run beside a window, so it never reads row caches.
+    private func labTraceLiveRows(_ event: String, finishing requestID: String) {
+        guard PagedKVLabTrace.enabled else { return }
+        lock.lock()
+        let live = rows.keys.sorted()
+        let sessionIDs = decodeSession?.requestIDs
+        let operations = activeOperations
+        lock.unlock()
+        PagedKVLabTrace.emit(event, [
+            "rid": requestID,
+            "live_rids": live,
+            "session_rids": sessionIDs ?? [],
+            "has_session": sessionIDs != nil,
+            "in_session": sessionIDs?.contains(requestID) ?? false,
+            "active_operations": operations,
+        ])
+    }
+
+    /// Lab trace (#2396): one event per row of a decode window, plus the
+    /// batch's layer-0 state and whether every layer took the same sync path.
+    private func labTraceWindowRows(
+        _ event: String,
+        window: Int,
+        inputs: [ContinuousBatchDecodeInput],
+        rowStates: [RowState],
+        batches: [PagedKVSharedLayerBatch],
+        fresh: [Bool],
+        extra: [String: Any] = [:]
+    ) {
+        guard PagedKVLabTrace.enabled else { return }
+        let layers = batches.compactMap { $0.cache as? PagedKVBatchLayerCache }
+        let syncPaths = Set(layers.map(\.labLastSyncPath)).sorted()
+        for (index, input) in inputs.enumerated() {
+            var fields = PagedKVLabTrace.row(
+                requestID: input.requestID, index: index,
+                caches: rowStates.indices.contains(index) ? rowStates[index].caches : [],
+                binding: input.binding
+            )
+            fields.merge(extra) { current, _ in current }
+            fields["window"] = window
+            fields["width"] = inputs.count
+            fields["rids"] = inputs.map(\.requestID)
+            fields["committed"] = input.committedKVTokenCount
+            fields["target"] = input.targetKVTokenCount
+            fields["fresh_row"] = fresh.indices.contains(index) ? fresh[index] : false
+            fields["batch_layers"] = layers.count
+            fields["batch_storage"] = layers.first.map { String(UInt(bitPattern: ObjectIdentifier($0.labStorage).hashValue), radix: 16) } ?? ""
+            fields["batch_rows_attached"] = layers.first?.labRowsAttached ?? false
+            fields["batch_attaches_rows"] = layers.first?.labAttachesRows ?? false
+            fields["batch_batched_offset"] = layers.first?.labBatchedOffset ?? -1
+            fields["batch_deferred_offsets"] = layers.first?.labDeferredRowOffsets ?? []
+            fields["batch_sync_paths"] = syncPaths
+            fields["batch_sync_length"] = layers.first?.labLastSyncLength ?? -1
+            PagedKVLabTrace.emit(event, fields)
+        }
+    }
+    #endif
+
     /// A row's stored drafter state, next proposal, and buffered depth-zero
     /// column count.
     func nativeMTPDrafterSnapshotForTest(
@@ -5255,6 +5408,18 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         attachesRows && rowCaches.allSatisfy { $0.isAttached(to: storage) }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab trace (#2396): which branch the last `syncRowsFromBatch` took and
+    /// the batch length it saw.
+    var labLastSyncPath = "never"
+    var labLastSyncLength = -1
+    var labStorage: PagedKVBatchStorage { storage }
+    var labRowsAttached: Bool { rowsAttached }
+    var labAttachesRows: Bool { attachesRows }
+    var labBatchedOffset: Int { batchedOffset ?? -1 }
+    var labDeferredRowOffsets: [Int] { deferredRowOffsets ?? [] }
+    #endif
+
     /// Ends this batch for its rows: syncs them, then gives every row still
     /// attached to it its own copy of its K/V. A row already re-attached to a
     /// newer batch keeps that batch's storage.
@@ -5333,6 +5498,12 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         // batch-max length and fail the next window with
         // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
         // Deferred ragged rows write back each row's own prefix instead.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labLastSyncPath = deferredRowOffsets != nil ? "deferred_flush"
+            : batchedOffset == nil ? "noop_ragged"
+            : rowsAttached ? "lockstep_attached_adopt" : "lockstep_state_restore"
+        labLastSyncLength = length
+        #endif
         if deferredRowOffsets != nil {
             flushDeferredRows()
             return

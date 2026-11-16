@@ -964,3 +964,12 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return value
     }
 }
+
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+extension PagedKVCache {
+    /// Lab trace (#2396): the batch this row rides, by storage identity.
+    var labBatchSlot: (storage: ObjectIdentifier, row: Int)? {
+        batchSlot.map { (ObjectIdentifier($0.storage), $0.row) }
+    }
+}
+#endif
