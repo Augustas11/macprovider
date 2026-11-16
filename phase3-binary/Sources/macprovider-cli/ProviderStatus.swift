@@ -684,6 +684,8 @@ actor ProviderStatus {
     /// get no first token and the model makes no progress; cleared only after
     /// a one-token recovery forward succeeds. Overlays ready/busy as degraded.
     private var firstTokenStallHold = false
+    /// Set with the hold; cleared only when the coordinator confirms serving.
+    private var firstTokenStallAwaitingReadiness = false
     private let thermalGate: ThermalGate?
     private let memoryPressureProvider: MemoryPressureProviding
     private let workloadTelemetryProvider: ProviderWorkloadTelemetryProviding
@@ -935,6 +937,7 @@ actor ProviderStatus {
     func setFirstTokenStallHold(_ held: Bool) async {
         guard firstTokenStallHold != held else { return }
         firstTokenStallHold = held
+        if held { firstTokenStallAwaitingReadiness = true }
         transitionID = UUID().uuidString.lowercased()
         transitionAt = Date()
         transitionReason = held ? "first_token_stall" : "first_token_stall_recovered"
@@ -942,6 +945,20 @@ actor ProviderStatus {
     }
 
     func firstTokenStallHeld() -> Bool { firstTokenStallHold }
+
+    /// Issue #2364: whether a coordinator not-serving readiness read is this
+    /// provider's own stall, not a lost binding. True while held, and after a
+    /// recovery while requests admitted before it are still in flight: the
+    /// coordinator keeps a provider degraded until its forwarded requests end
+    /// (#1684 occupancy gate), so reconnecting then would fail those requests.
+    func firstTokenStallExplainsUnconfirmedReadiness() -> Bool {
+        firstTokenStallHold || (firstTokenStallAwaitingReadiness && requestsInFlight > 0)
+    }
+
+    /// The coordinator confirmed buyer serving after a stall.
+    func clearFirstTokenStallAwaitingReadiness() {
+        firstTokenStallAwaitingReadiness = false
+    }
 
     /// Whether a held self-check may keep running: no operator pause, and the
     /// provider is still ready/busy (not draining, unavailable or degraded).

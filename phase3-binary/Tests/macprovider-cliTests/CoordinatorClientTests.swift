@@ -10613,8 +10613,22 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(callsHeld, callsAtHold + 5, "the watch kept polling")
         XCTAssertNotEqual(try fixture.record().reasonCode, "buyer_serving_readiness_unconfirmed")
 
-        // Control: the same false without the hold still reconnects.
+        // 2026-11-16 e2e: after the recovery the coordinator stays degraded
+        // while the request forwarded before it is still in flight, so the
+        // watch keeps the session until that request ends.
+        let startedAt = await status.beginRequest(requestID: "held")
         await status.setFirstTokenStallHold(false)
+        let callsAtRecovery = await script.calls
+        for _ in 0 ..< 200 {
+            if await script.calls >= callsAtRecovery + 5 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let callsRecovered = await script.calls
+        XCTAssertGreaterThanOrEqual(callsRecovered, callsAtRecovery + 5, "the watch kept polling after the recovery")
+        XCTAssertNotEqual(try fixture.record().reasonCode, "buyer_serving_readiness_unconfirmed")
+
+        // Control: once the request ended, the same false reconnects.
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: true, requestID: "held")
         let ended = try await waitForLifecycleReason(fixture, "buyer_serving_readiness_unconfirmed")
         XCTAssertEqual(ended.reasonCode, "buyer_serving_readiness_unconfirmed")
         await client.cleanupConnectionForTest()

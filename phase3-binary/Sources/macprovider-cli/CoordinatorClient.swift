@@ -6263,6 +6263,7 @@ actor CoordinatorClient {
         }
         switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
         case .confirmed:
+            await providerStatus.clearFirstTokenStallAwaitingReadiness()
             if let endedHold = activeBuyerServingHold {
                 activeBuyerServingHold = nil
                 let ended = Self.buyerServingHoldEnded(endedHold)
@@ -6295,10 +6296,11 @@ actor CoordinatorClient {
             }
             // Issue #2364: the first-token stall hold publishes `degraded`, so
             // the coordinator's false is this provider's own hold, not a lost
-            // binding. Reconnecting would fail the held requests mid-flight,
-            // count circuit-breaker faults and repeat every poll of a long
-            // stall; the recovery publishes `ready` and the next poll confirms.
-            if await providerStatus.firstTokenStallHeld() {
+            // binding, and stays false after the recovery until the requests
+            // forwarded before it end. Reconnecting would fail those requests
+            // mid-flight, count circuit-breaker faults and repeat every poll
+            // of a long stall; the coordinator confirms once they end.
+            if await providerStatus.firstTokenStallExplainsUnconfirmedReadiness() {
                 return false
             }
             activeBuyerServingHold = nil
