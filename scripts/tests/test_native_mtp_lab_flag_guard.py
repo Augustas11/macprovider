@@ -19,6 +19,7 @@ TEXT_SUFFIXES = {".bash", ".json", ".mjs", ".py", ".sh", ".yaml", ".yml"}
 LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "ops" / "studio-mtp-measurement.py",
     ROOT / "scripts" / "tests" / "test_studio_mtp_measurement.py",
+    ROOT / "scripts" / "lab" / "minimax" / "job-2376-parity.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.

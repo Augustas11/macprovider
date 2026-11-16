@@ -6601,6 +6601,11 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "b1084ba666329d5eefc9771aa358837305f3d840",
             json: #"{"text_config":{"max_position_embeddings":1048576,"num_hidden_layers":60,"hidden_size":6144,"num_attention_heads":64,"num_key_value_heads":4,"head_dim":128}}"#
         ),
+        // The abliterated build keeps the base geometry; refusal_ablation adds no KV (#2376).
+        "minimaxai/minimax-m3.1-flash-abliterated": (
+            revision: "e45ff82cab94d9ecb46a86b12b891eeba3d1e198",
+            json: #"{"text_config":{"max_position_embeddings":1048576,"num_hidden_layers":60,"hidden_size":6144,"num_attention_heads":64,"num_key_value_heads":4,"head_dim":128,"refusal_ablation":{"layers":[16,42],"alpha":1.5,"direction_file":"refusal_direction.safetensors","direction_key":"language_model.refusal_direction"}}}"#
+        ),
         "mlx-community/qwen2-vl-2b-instruct-4bit": (
             revision: "01af461cdb9574acc09084a0ef94e216e142b085",
             json: #"{"max_position_embeddings":32768,"num_hidden_layers":28,"hidden_size":1536,"num_attention_heads":12,"num_key_value_heads":2}"#

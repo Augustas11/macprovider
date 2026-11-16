@@ -115,6 +115,10 @@ var exactModelKeyAliases = map[string]string{
 	// and its OpenRouter-style slug bill as its catalog key (#2189).
 	"minimax-m3.1-flash-oq3e-mtp": "minimaxai/minimax-m3.1-flash",
 	"minimax/minimax-m3.1-flash":  "minimaxai/minimax-m3.1-flash",
+	// The abliterated M3.1-Flash build is its own labelled catalog key: its
+	// served artifact and OpenRouter-style slug bill as that key (#2376).
+	"aug11/minimax-m3.1-flash-oq3e-mtp-abliterated": "minimaxai/minimax-m3.1-flash-abliterated",
+	"minimax/minimax-m3.1-flash-abliterated":        "minimaxai/minimax-m3.1-flash-abliterated",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",

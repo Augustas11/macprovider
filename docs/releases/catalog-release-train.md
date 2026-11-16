@@ -37,6 +37,13 @@ entry is updated for the 2026-11-15 MiniMax activation.
   activation tool still lists `live_probe` and `gateway_proof` as pending:
   the canary serves the uncensored GLM-5.3-Flash build, which has no
   native-MTP admission entry (#2382).
+- **Merged, not live:** `published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289` from
+  [PR 2392](https://github.com/Augustas11/macprovider/pull/2392) (`cf64b09a6`, Related: #2376):
+  a `listed` row for the abliterated MiniMax M3.1-Flash, generated against the live Bolt v289
+  release. Activation needs the Pearl runtime carrying its billing alias first; the row serves
+  only on the next CLI cut (engine `.71`). Steps are in `docs/releases/cli-release-train.md`.
+  PR 2394, also generated against Bolt v289, must be regenerated on this release before it
+  activates.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since

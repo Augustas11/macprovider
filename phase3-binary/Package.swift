@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.67 (#2338) on 3.32.3-macprovider.63: only the
+        // Tag 3.32.3-macprovider.73 (#2338) on 3.32.3-macprovider.71: only the
         // mlx-swift pin moves, to 0.32.3-macprovider.23 (1cfafd1f), whose
         // synchronous eval schedules the graph and copies its completion
         // events under the process-wide evalLock, waits for the device
@@ -30,6 +30,17 @@ let package = Package(
         // 0.52 of its solo decode rate and the second model at 2 rows from
         // 0.82 to 0.57; output token ids were identical, and single-model
         // decode was unchanged.
+        // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
+        // MiniMax M3 projects a refusal direction out of the attention and
+        // MLP/MoE outputs of the configured decoder layers when the
+        // refusal_ablation config key is present (the abliterated M3.1-Flash
+        // variant), refusing an alpha outside 0 < alpha <= 4 or a direction
+        // that is not a finite unit vector; an indexed checkpoint may store it
+        // as language_model.refusal_direction. The text sanitize drops stored
+        // model.layers.N.refusal_direction keys, so only the validated
+        // direction sets them. 29b5778 (04a1d29 plus the audit fixes) touches
+        // MiniMaxM3.swift and its tests only; a model without the key runs the
+        // unchanged fused path.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -179,7 +190,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "2baaf9ecbc975e0d7a9fe131ba588f04fc453154"
+            revision: "d5ee65fd2bb5fdee2d7ac6ae12e59cc9be6a783a"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

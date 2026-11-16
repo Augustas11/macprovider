@@ -51,8 +51,8 @@ final class Build1PrivateAuthorityTests: XCTestCase {
            let next = json.range(of: "\"meta-llama/llama-3.1-8b-instruct\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
         }
-        // MiniMax M3.1-Flash was staged after this authority's historical
-        // catalog stamp (#2189).
+        // MiniMax M3.1-Flash and its abliterated build (#2376) were staged
+        // after this authority's historical catalog stamp (#2189).
         if let start = json.range(of: "\"minimaxai/minimax-m3.1-flash\":"),
            let next = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
