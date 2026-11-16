@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "6951c8d4067b9bddfdf15f0d1265288054e21ddb22d37c705eb1dc0f5fed070c",
-  "generated_at": "2026-11-15T16:55:00Z",
+  "autotune_candidates_sha256": "c3936f4c10fceb43336d68d20fcc294245175d04bcabbed1f8d443a15ef22d10",
+  "generated_at": "2026-11-16T00:00:00Z",
   "models": [
     {
       "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
@@ -200,6 +200,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-15-minimax-m3.1-flash-abliterated-listed-v289",
+  "release_id": "published-2026-11-16-glm53-flash-uncensored-native-mtp-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

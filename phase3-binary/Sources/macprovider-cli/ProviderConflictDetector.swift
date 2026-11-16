@@ -83,6 +83,9 @@ struct ProviderConflictDetector {
         let stdout = Pipe()
         process.standardOutput = stdout
         try process.run()
+        // Drain before waiting: output past the pipe buffer would block
+        // launchctl, and waitUntilExit would never return.
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         if process.terminationStatus != 0 {
             throw NSError(
@@ -91,7 +94,7 @@ struct ProviderConflictDetector {
                 userInfo: [NSLocalizedDescriptionKey: "/bin/launchctl list exited with status \(process.terminationStatus)"]
             )
         }
-        return String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return String(decoding: output, as: UTF8.self)
     }
 
     static func defaultProcessList() throws -> [(pid: Int32, argv: [String])] {

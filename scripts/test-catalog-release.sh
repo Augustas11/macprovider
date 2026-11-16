@@ -118,7 +118,9 @@ entries = value if isinstance(value, list) else [value]
 for item in entries:
     item["entry"]["runtime_revision"] = "0" * 40
     item["entry"]["ordinary_baseline"]["runtime_revision"] = "0" * 40
-path.write_text(json.dumps(value))
+# The committed layout, so the native-MTP variant expansion stays current and
+# the runtime-pin check is the refusal under test.
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 PY_TUPLE
 if python3 "$VERIFY" generate >"$TMP/runtime-pin.out" 2>&1; then
   fail "source generation accepted a mismatched native-MTP runtime pin"

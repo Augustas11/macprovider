@@ -11,6 +11,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     case candidateProbeFailed(modelKey: String, reason: String)
     case noHMACSecret
     case insufficientDiskSpace(modelID: String, requiredBytes: Int64, availableBytes: Int64)
+    case downloadBudgetExceeded(modelID: String, requiredBytes: Int64, remainingBytes: Int64)
 
     var description: String {
         switch self {
@@ -27,6 +28,9 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
         case .insufficientDiskSpace(let modelID, let requiredBytes, let availableBytes):
             let gb = { (bytes: Int64) in String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
             return "not enough free disk space to download \(modelID): need \(gb(requiredBytes)), \(gb(availableBytes)) available"
+        case .downloadBudgetExceeded(let modelID, let requiredBytes, let remainingBytes):
+            let gb = { (bytes: Int64) in String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
+            return "run download cap reached before \(modelID): need \(gb(requiredBytes)), \(gb(remainingBytes)) left in this run"
         }
     }
 
@@ -35,7 +39,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     var perCandidateSkipReason: String? {
         switch self {
         case .invalidArtifact(let message): return message
-        case .insufficientDiskSpace: return description
+        case .insufficientDiskSpace, .downloadBudgetExceeded: return description
         default: return nil
         }
     }
@@ -3031,6 +3035,24 @@ struct AutotuneRecommendEngine {
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
+    /// The §5 paid gates that need no benchmark, the same checks `isEligible`
+    /// applies before it reads the benchmark. Keep the two in step. The
+    /// SPEC-023-R029 upgrade plans its prefetch set with this predicate.
+    static func passesPreBenchmarkGates(
+        candidate: CandidateCatalog.Row,
+        demand: DemandRank.Row,
+        rateCardRow: RateCardProjection.Row?,
+        hardware: AutotuneRecommendHardware
+    ) -> Bool {
+        demand.recommendable
+            && candidate.runtimeStatus == "recommendable"
+            && rateCardRow != nil
+            && candidate.modelRevision != nil
+            && candidate.modelSHA256 != nil
+            && candidate.minRAMGB <= hardware.memoryGB - safetyMarginGB
+            && hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier)
+    }
+
     static func buyerTTFTCeilingExceeded(
         _ benchmark: CandidateBenchmark?,
         request: AutotuneRecommendRequest
@@ -3896,6 +3918,62 @@ final class ProbeSafetySampleBuffer: @unchecked Sendable {
     }
 }
 
+/// SPEC-023-R029: the byte budget of one model-upgrade run. A snapshot's whole
+/// advertised size is charged before its first byte is fetched; a refused
+/// snapshot charges nothing. When one source fails and the next source is
+/// tried for the same snapshot, the failed source's charge is returned first,
+/// so a snapshot is charged once; the last failure keeps its charge. A run
+/// fetches its snapshots one at a time.
+final class RunDownloadBudget: @unchecked Sendable {
+    let limitBytes: Int64
+    private var spentBytes_: Int64 = 0
+    private let lock = NSLock()
+
+    init(limitBytes: Int64) {
+        self.limitBytes = max(0, limitBytes)
+    }
+
+    var remainingBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return limitBytes - spentBytes_
+    }
+
+    static func total(_ sizes: [Int64]) -> Int64 {
+        sizes.reduce(Int64(0)) { sum, size in
+            let next = sum.addingReportingOverflow(max(size, 0))
+            return next.overflow ? .max : next.partialValue
+        }
+    }
+
+    var spentBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return spentBytes_
+    }
+
+    /// Returns every charge made after `mark` (a `spentBytes` reading).
+    func refund(toSpent mark: Int64) {
+        lock.lock()
+        spentBytes_ = min(spentBytes_, max(0, mark))
+        lock.unlock()
+    }
+
+    func reserve(bytes: Int64, modelID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = limitBytes - spentBytes_
+        guard bytes <= remaining else {
+            throw AutotuneRecommendError.downloadBudgetExceeded(
+                modelID: modelID,
+                requiredBytes: bytes,
+                remainingBytes: remaining
+            )
+        }
+        spentBytes_ += bytes
+    }
+}
+
 struct HuggingFaceSnapshotDownloader {
     struct ModelInfo: Decodable {
         var siblings: [Sibling]
@@ -3914,6 +3992,10 @@ struct HuggingFaceSnapshotDownloader {
     /// nil disables the check, for callers that enforce their own disk
     /// budget (SPEC-044 `models prepare`).
     var freeSpaceReserveBytes: Int64? = HuggingFaceSnapshotDownloader.downloadFreeSpaceReserveBytes
+
+    /// SPEC-023-R029: total bytes one model-upgrade run may download, shared
+    /// by every snapshot that run fetches. nil means no per-run cap.
+    var runDownloadBudget: RunDownloadBudget? = nil
 
     /// Bytes available for important use (APFS purgeable space included, as
     /// in `quarantineHasRoom`) on the volume holding `url`, or nil when it
@@ -4294,6 +4376,18 @@ struct HuggingFaceSnapshotDownloader {
         try Self.assertDeadlineActive(deadline)
         var failures = fallbackConfigurationDiagnostics
         let huggingFaceLast = !fallbackSources.isEmpty && reachability.preferFallbacks
+        // A source that fails before the next one is tried returns its
+        // budget charge, so the fallback does not charge the snapshot twice.
+        let budgetMark = runDownloadBudget?.spentBytes
+        func refundFailedSource() {
+            if let budgetMark { runDownloadBudget?.refund(toSpent: budgetMark) }
+        }
+        // A content-addressed source without the signed hash is skipped, so
+        // it is never "the next source" a refund is made for.
+        func willTry(_ source: ModelArtifactSource) -> Bool {
+            if case .contentAddressed = source { return expectedSHA256 != nil }
+            return true
+        }
         if !huggingFaceLast {
             do {
                 try await downloadHuggingFaceSnapshot(
@@ -4311,10 +4405,13 @@ struct HuggingFaceSnapshotDownloader {
                 if error is URLError {
                     reachability.markHuggingFaceUnreachable()
                 }
+                if fallbackSources.contains(where: willTry) {
+                    refundFailedSource()
+                }
                 failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
             }
         }
-        for source in fallbackSources {
+        for (index, source) in fallbackSources.enumerated() {
             try Self.assertDeadlineActive(deadline)
             do {
                 switch source {
@@ -4344,6 +4441,9 @@ struct HuggingFaceSnapshotDownloader {
             } catch {
                 if Self.stopsSourceWalk(error) {
                     throw error
+                }
+                if huggingFaceLast || fallbackSources[(index + 1)...].contains(where: willTry) {
+                    refundFailedSource()
                 }
                 failures.append("\(source.label): \(Self.sourceFailureSummary(error))")
             }
@@ -4379,6 +4479,10 @@ struct HuggingFaceSnapshotDownloader {
         // Every source writes to the same volume, so trying the next one
         // cannot help and would bury the typed error in a string summary.
         if case .insufficientDiskSpace? = error as? AutotuneRecommendError {
+            return true
+        }
+        // Every source draws on the same per-run download budget.
+        if case .downloadBudgetExceeded? = error as? AutotuneRecommendError {
             return true
         }
         if let calibration = error as? AutotuneContextCalibrationError, calibration == .deadlineExceeded {
@@ -4533,7 +4637,10 @@ struct HuggingFaceSnapshotDownloader {
     /// Refuses a download that would leave less than `freeSpaceReserveBytes`
     /// free on either the URLSession temporary volume or final destination.
     func requireDiskSpace(bytes sizes: [Int64], modelID: String, destination: URL) throws {
-        guard let reserve = freeSpaceReserveBytes else { return }
+        guard let reserve = freeSpaceReserveBytes else {
+            try runDownloadBudget?.reserve(bytes: RunDownloadBudget.total(sizes), modelID: modelID)
+            return
+        }
         guard !sizes.isEmpty else {
             throw AutotuneRecommendError.invalidArtifact("missing advertised download size for \(modelID)")
         }
@@ -4566,6 +4673,7 @@ struct HuggingFaceSnapshotDownloader {
                 )
             }
         }
+        try runDownloadBudget?.reserve(bytes: total, modelID: modelID)
     }
 
     private func populateStaging(
@@ -4986,6 +5094,7 @@ struct CachedModelArtifactResolver {
                         throw error
                     }
                     if case .insufficientDiskSpace? = error as? AutotuneRecommendError { throw error }
+                    if case .downloadBudgetExceeded? = error as? AutotuneRecommendError { throw error }
                     throw AutotuneRecommendError.invalidArtifact(
                         message + "; automatic repair failed: " + String(describing: error)
                     )
@@ -5114,6 +5223,7 @@ struct CachedModelArtifactResolver {
             )
         } catch {
             if case .insufficientDiskSpace? = error as? AutotuneRecommendError { throw error }
+            if case .downloadBudgetExceeded? = error as? AutotuneRecommendError { throw error }
             throw AutotuneRecommendError.invalidArtifact(
                 "isolated artifact prefetch failed: " + String(describing: error)
             )
@@ -5355,6 +5465,11 @@ struct PrefetchedModelArtifact: Codable, Equatable {
     let candidateRowIdentity: String
     let path: String
     let sha256: String
+    /// SPEC-023-R029: true when this run downloaded the artifact (no copy
+    /// existed before) and it now sits at its durable content-addressed path,
+    /// so the upgrade can remove it exactly if it is not selected.
+    /// Absent in older receipts, which never authorize a removal.
+    var downloadedByRun: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case modelKey = "model_key"
@@ -5363,6 +5478,7 @@ struct PrefetchedModelArtifact: Codable, Equatable {
         case candidateRowIdentity = "candidate_row_identity"
         case path
         case sha256
+        case downloadedByRun = "downloaded_by_run"
     }
 }
 
@@ -5465,10 +5581,17 @@ struct AutotuneRecommendationBenchmarker {
     var progress: (String) -> Void = { _ in }
     var probeCache: AutotuneProbeCacheStore? = nil
 
+    /// `modelKeyOrder` sets the download order (rows it omits follow in key
+    /// order). Every download keeps the downloader's free-space reserve.
+    /// With `removeRunDownloadsOnFailureKeeping` (a model upgrade), an error
+    /// that ends the prefetch first removes what this call downloaded, under
+    /// the R029 cleanup rules, except the model keys the closure returns.
     func prefetchArtifacts(
         candidateCatalog: CandidateCatalog,
         hardware: AutotuneRecommendHardware,
-        candidateModelIDs: Set<String>
+        candidateModelIDs: Set<String>,
+        modelKeyOrder: [String] = [],
+        removeRunDownloadsOnFailureKeeping: (() -> Set<String>)? = nil
     ) async throws -> ArtifactPrefetchOutcomes {
         var matchedModelKeysByID: [String: [String]] = [:]
         for modelKey in candidateCatalog.rows.keys.sorted() {
@@ -5493,7 +5616,21 @@ struct AutotuneRecommendationBenchmarker {
         var artifacts: [PrefetchedModelArtifact] = []
         var diagnostics: [PrefetchDiagnostic] = []
         var matchedModelIDs = Set<String>()
-        for modelKey in candidateCatalog.rows.keys.sorted() {
+        var completed = false
+        defer {
+            if !completed, let keep = removeRunDownloadsOnFailureKeeping {
+                AutotuneModelUpgrade.removeUnselectedRunDownloads(
+                    artifacts,
+                    keepModelKeys: keep(),
+                    catalog: candidateCatalog,
+                    resolver: artifactResolver
+                )
+            }
+        }
+        let ordered = modelKeyOrder.filter { candidateCatalog.rows[$0] != nil }
+        let orderedSet = Set(ordered)
+        let modelKeys = ordered + candidateCatalog.rows.keys.sorted().filter { !orderedSet.contains($0) }
+        for modelKey in modelKeys {
             guard let row = candidateCatalog.rows[modelKey], candidateModelIDs.contains(row.modelID) else {
                 continue
             }
@@ -5509,20 +5646,47 @@ struct AutotuneRecommendationBenchmarker {
                     diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: "missing signed artifact identity"))
                     continue
                 }
-                let artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
+                // A fresh download lands in the hash-qualified staging
+                // snapshot and is adopted into the durable store. It counts
+                // as this run's only when no copy existed in any location.
+                let staging = row.modelSHA256.map {
+                    artifactResolver.prefetchSnapshotURL(modelID: row.modelID, revision: revision, sha256: $0)
+                        .standardizedFileURL
+                }
+                let durable = row.modelSHA256.flatMap {
+                    try? artifactResolver.durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: $0)
+                        .standardizedFileURL
+                }
+                let locations = [staging, durable, artifactResolver.snapshotURL(modelID: row.modelID, revision: revision)]
+                var locationInfo = stat()
+                let preexisted = staging == nil || durable == nil
+                    || locations.contains { $0.map { lstat($0.path, &locationInfo) == 0 } ?? false }
+                let artifact: VerifiedModelArtifact
+                do {
+                    artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
+                } catch {
+                    // A snapshot this run created that then failed is useless:
+                    // remove it rather than leave it consuming disk.
+                    if !preexisted, let staging {
+                        try? FileManager.default.removeItem(at: staging)
+                    }
+                    throw error
+                }
                 artifacts.append(PrefetchedModelArtifact(
                     modelKey: modelKey,
                     modelID: row.modelID,
                     modelRevision: revision,
                     candidateRowIdentity: rowIdentity,
                     path: artifact.modelArgument,
-                    sha256: artifact.sha256
+                    sha256: artifact.sha256,
+                    downloadedByRun: !preexisted && artifact.modelArgument == durable?.path
                 ))
             } catch let error as AutotuneRecommendError {
                 guard let reason = error.perCandidateSkipReason else { throw error }
                 diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: reason))
             }
         }
+        completed = true
         return ArtifactPrefetchOutcomes(
             artifacts: artifacts,
             diagnostics: diagnostics,
