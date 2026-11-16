@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.42
+version: v0.22.43
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,46 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.43 (2026-11-14, Related: #2367, #2154)** — §9.4 adds a per-run
+  download cap of twice the Mac's memory (step 2) and the unattended
+  trigger (step 9): a serving provider checks every 6 hours, in its own
+  session, staggered per provider over 48 hours after each release of the
+  recommendation inputs and retried at most daily per input set. The automatic switch treats
+  the catalog bench gate as hard (manual `--recommend` keeps it advisory).
+  Audit fixes in the same version: one run at a time (an upgrade lock) and
+  the SPEC-020 maintenance lease around the stop; the operator pause is
+  re-read before the stop; a status error is not idle; the stagger and
+  retry key cover every staleness input (catalog, rate card, demand rank,
+  binary) with an 8-entry attempt history, and an unwritable record stops
+  the run; state and evidence name the served row; cleanup runs on every
+  exit after prefetch; a switch clears `draft_model`; a signed CB or
+  native-MTP admission is never traded away; `--no-join` serves start no
+  check; a source fallback does not charge the budget twice; `update`
+  re-tunes with the canonical binary and its config path. Audit round 2:
+  only the serve the child would stop starts a check (by pid; never an
+  `--isolate-lifecycle` serve), and the child refuses any other provider;
+  an unverified CB policy or native-MTP set keeps the incumbent; every
+  `--upgrade` mode takes the lock (attended runs wait); cleanup keeps the
+  row the config names when it runs; a keep that wrote no row is recorded
+  so its inputs are not re-run; an unreadable lifecycle state counts as
+  paused; a lost lease blocks the apply; evidence is submitted after apply.
+  Audit round 3: a headless system-LaunchDaemon provider starts no check;
+  the inputs key adds the CB and native-MTP admission sets the decision
+  reads, so a `challenger_lacks_incumbent_acceleration` keep is recorded
+  and holds until an admission set changes (a pure `generated_at` /
+  `version` re-stamp and a re-signed identical set keep the key); an
+  attended run says when it waits for the lock.
+  Prefetch fetches the likely winners first under the free-space reserve,
+  records what the run downloaded, and the run removes its unselected
+  downloads. A foreground provider is restarted on every exit. Registers `SPEC-023-R029`
+  (§9.4): a stale or missing recommendation re-tunes an existing provider
+  over every signed row that fits its Mac, not only the incumbent. The
+  provider switches only to a strictly better admitted model under the §4 /
+  §4.1 selection rule. The incumbent keeps serving through prefetch and hash
+  verification. A failure at any step leaves the config and model
+  unchanged. Donor-mode, pool-model and unsigned-identity configs keep their
+  model. The §2 non-goal "does not auto-switch models" is replaced with this
+  rule. The §9 re-run rule and AC-25 now name the upgrade; AC-52 is added.
 - **v0.22.42 (2026-11-13, Related: #2302)** — Adds §3.8 and registers
   `SPEC-023-R028`: each catalog release ships `release.json.sig`, one
   Ed25519 signature over its `release.json`, which binds every feed digest.
@@ -1102,7 +1142,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 ## 2. Non-goals
 
 - This SPEC does not solve "will buyers show up." It recommends a model from available market and hardware signals; it does not create market demand.
-- This SPEC does not auto-switch models without operator action. NiceHash QuickMiner-style profit switching is out of scope for v0.1.
+- This SPEC does not do continuous profit switching. A provider changes model only through an explicit recommendation apply or the stale-recommendation upgrade of `SPEC-023-R029` (§9.4). Coordinator SIGHUP, rate-card hot reload and market price changes do not by themselves start a re-tune. NiceHash QuickMiner-style profit switching stays out of scope.
 - This SPEC does not change rate-card content. Wave 1 owns the rate-card rows and prices.
 - This SPEC does not change gateway billing or coordinator settlement. Waves 0a/0b already shipped the money-path settlement and model-key normalization fixes.
 - This SPEC does not add provider-side TPS reputation feedback to the coordinator. That is deferred to v0.2.
@@ -3013,7 +3053,7 @@ validation.
 `autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
 1. Manual invocation: `malibu-cli autotune --recommend`.
-2. `malibu-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state.
+2. `malibu-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state. That re-tune is the `SPEC-023-R029` upgrade (§9.4) over every signed row that fits this Mac. It MUST NOT be limited to re-confirming the incumbent model.
 3. Installer rerun when no stored recommendation exists.
 
 v0.4 explicitly does not re-run automatically on coordinator SIGHUP or rate-card hot reload. Coordinator broadcast of recommendation changes is deferred to v0.2 follow-up.
@@ -3187,6 +3227,189 @@ model maximum, memory-safe context, draft cap)`, where:
      memory-safe context can exceed the three-quarters share by the KV of the
      4,000-token floor (item 3) while still fitting physical memory.
 
+### 9.4 Stale-recommendation model upgrade (v0.22.43)
+
+**SPEC-023-R029 — Stale-recommendation model upgrade.**
+When the stored recommendation is stale or missing under §9, an existing
+provider whose config carries a signed catalog identity MUST re-tune over
+the whole signed catalog for its Mac and MUST switch to a strictly better
+admitted model when one exists. `autotune --recommend --upgrade` is the
+single entry point. The installer re-tune and `malibu-cli update` MUST both
+use it.
+
+1. **Candidates.** The run plans the incumbent row plus every signed row
+   that passes the pre-benchmark §5 gates on this Mac: demand
+   `recommendable`, `runtime_status == "recommendable"`, a rate-card row, a
+   pinned revision and SHA-256, `min_ram_gb <= memory_gb - 4`, and the
+   minimum bandwidth tier. A `model_id` shared by more than one signed row
+   is not planned unless it is the incumbent, because prefetch requires an
+   exact row match. The run MUST NOT restrict candidates to the incumbent,
+   and it ignores `MACPROVIDER_CANDIDATE_MODELS` / `MACPROVIDER_MAX_MODEL_SIZE`.
+   A non-incumbent row whose cached probe on this Mac (same catalog row,
+   binary and hardware identity, within the §9 benchmark age) already fails
+   the step 5 bench gate is not planned, because it can never be switched to.
+2. **Prefetch.** Every planned row is downloaded and hash-verified against
+   its signed row while the incumbent keeps serving. Rows are fetched in
+   order: the incumbent first, then the rest by estimated §4 ordering score
+   (the row's cached probe TPS on this Mac, else its catalog
+   `min_sustained_tps`), so the likely winners are fetched first. Every
+   download MUST leave the advertised artifact size plus the downloader's
+   5 GiB free-space reserve available on its volumes, or it is refused before
+   any byte is written. One run MUST NOT download more than twice the Mac's
+   memory in total (`2 × memory_gb` GiB, summed over advertised snapshot
+   sizes and charged before a snapshot's first byte). Every planned
+   challenger fits in memory, so the cap always admits the best-ordered
+   challenger; a row the cap refuses is dropped like any failed prefetch,
+   and artifacts already on disk are not charged. A row whose prefetch fails is dropped with a
+   diagnostic, and a snapshot directory the run created for it is removed.
+   The receipt records `downloaded_by_run: true` for each row this run
+   downloaded: no copy of it existed before the run (durable store, Hugging
+   Face snapshot or prefetch staging), and it now sits at its durable
+   content-addressed path. The incumbent's
+   artifact MUST verify; otherwise the run fails before the provider is
+   stopped.
+3. **Drain.** Every `--upgrade` run (with or without a receipt, prefetch or
+   apply) holds an exclusive lock on `~/.config/macprovider/model-upgrade.lock`
+   for the whole process. An attended run waits for it; an unattended run
+   exits 75 before any download when another run holds it. When a provider is running, the run waits until it
+   reports zero `requests_in_flight` and zero `requests_queued`, for at most
+   600 seconds (the upper bound of `swap_drain_timeout_seconds`). A status
+   read that fails is not idle. A provider never confirmed idle is not
+   stopped; the run exits 75 and retries later. Right before the stop the
+   run re-reads the persisted operator pause (the lifecycle state record;
+   a record that exists but cannot be read counts as paused)
+   and takes the SPEC-020 `maintenance` lifecycle lease, as an autoupdate
+   does; a paused provider or a lease held by another operation is not
+   stopped, and the run exits 75. The lease is renewed while held; a failed
+   renewal marks it lost, and a run whose lease was lost writes no config
+   (exit 75, the incumbent is restored). The lease is
+   released right before the restart (the restarted provider takes its own
+   startup lease) and on every exit. `SPEC-023-R022` residency then stops the provider
+   through its normal SIGTERM drain and restores it on every exit: success,
+   failure and interrupt. A foreground provider is restarted too, on the
+   config this run leaves. The installer keeps its own cutover stop.
+4. **Benchmark.** Probes use only the prefetched, verified artifacts, so
+   nothing is downloaded while the incumbent is stopped. Each row runs the
+   same Stage-1 admission as any recommendation: swap and thermal vetoes,
+   the buyer-TTFT ceiling and the cached-evidence binding.
+5. **Decision.** The catalog bench gate is hard for the automatic switch:
+   a row whose measured sustained TPS is below its `bench_gate.min_sustained_tps`
+   (or not finite), or whose 4k TTFT exceeds `bench_gate.max_4k_ttft_ms`,
+   MUST NOT be switched to. The gate stays advisory for a manual
+   `--recommend`, which still selects and reports such a row. Let I be the
+   incumbent. The challengers are the eligible rows the engine orders ahead
+   of I (every eligible row when I is not eligible), in engine order; rows
+   failing the hard gate are skipped. The provider switches to the first
+   challenger S for which one of these holds: I is absent from the signed catalog or not eligible; I is
+   demoted by a §4.1 policy rule (RAM-class onboarding SKU or 8 GB tier
+   preference) and S is not; or S's unrounded ordering score (§4) is
+   strictly greater than I's. An equal score, or an order settled only by
+   the TPS, demand or model-key tiebreakers, keeps I. No margin beyond
+   strict greater-than applies. The client has no hysteresis constant, and
+   the demand-rank `min_dwell_hours` field is not client selection policy.
+   An automatic switch never gives up a signed acceleration admission: a
+   challenger is skipped when I holds a positive, unrevoked entry in the
+   live-verified continuous-batching policy, or an entry in the release's
+   signed native-MTP admission set (matched by served model and artifact
+   hash), and S does not (keep reason
+   `challenger_lacks_incumbent_acceleration`). When the CB policy is not
+   live-verified, or the native-MTP set cannot be read from the feed or this
+   Mac's materialized copy, no switch is made (keep reason
+   `acceleration_admission_unverified`).
+   When no challenger qualifies, I is kept.
+6. **Apply.** On a switch, `ConfigApplier` writes S's row and removes
+   `draft_model`, `draft_model_artifact_sha256` and `num_draft_tokens`: the
+   benchmark ran without a drafter, and I's drafter need not match S's
+   tokenizer. On a keep, the model does not change. When I passed admission
+   in this run, I's own benchmarked row is re-applied, as the pre-v0.22.43
+   re-tune did. Recommendation state and hardware evidence are written after
+   the config apply and name the row served: S on a switch, I on a keep when I
+   passed admission, and no model otherwise (the state stays stale). When any
+   step fails (prefetch of I, drain, benchmark, decision or apply), the run
+   writes no config and the provider is restored on its incumbent. On every
+   exit after prefetch (including an exit 75, a failed stop, a receipt or
+   input load failure and an interrupt), the run removes each artifact it
+   downloaded (`downloaded_by_run`) except I's, an applied target's and the
+   row the config file names when the cleanup runs (re-read then). A prefetch
+   that ends in an error removes what it downloaded under the same rules. A removal is
+   limited to the row's exact durable content-addressed path under the
+   current signed row and never touches a path a kept row uses; the
+   incumbent's artifact and any copy that existed before the run are never
+   removed.
+7. **Pins.** The upgrade never moves a provider whose config has
+   `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
+   (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
+   provider keeps its model. These are the only model pins the CLI has;
+   `draft_model` is not one (step 6). In every other case the upgrade is on
+   by default.
+8. **Entry points.** `--upgrade --apply` without a receipt runs steps 1–6 in
+   one process. It returns without a change when the recommendation is
+   fresh. `malibu-cli update` invokes it with the installed binary after
+   every successful mutating update, because freshness is bound to that
+   binary's version. The installer splits
+   it: `--upgrade --prefetch --prefetch-receipt <path>` while the incumbent
+   serves, then `--upgrade --apply --prefetch-receipt <path>` after its
+   cutover stop. With a receipt, the benchmark set is exactly the receipt's
+   rows. `--upgrade` cannot be combined with `--candidate-models`,
+   `--check-only`, `--freshness-check`, `--recover-hardware-admission` or
+   the calibration flags. `--donor-mode` requires a receipt.
+9. **Unattended trigger.** The binary autoupdate (SPEC-020) swaps the
+   binary and restarts the provider in-process; it does not run
+   `malibu-cli update`, and a signed catalog release changes no binary. So a
+   serving provider starts the check itself: 15 minutes after start and
+   then every 6 hours, `serve` spawns
+   `autotune --recommend --upgrade --apply --unattended` in its own session
+   (so the step 3 stop of the provider's launchd job does not end it), with
+   output appended to `~/Library/Logs/macprovider/model-upgrade.log`. No
+   check starts for an autotune candidate serve, a `--no-join` serve, an
+   `--isolate-lifecycle` serve, `donor_mode`, a `pool_model_id` or an
+   operator-paused provider, nor from a serve that is not the provider
+   `ProviderConflictDetector` would stop (the `live.malibu.provider` job,
+   else the first foreground serve), compared by pid. The serve passes its
+   pid (`--upgrade-parent-pid`, required with `--unattended`); the child
+   exits 75 with nothing downloaded or stopped when the detected provider
+   is not that pid, checked before any feed read and again at the stop. A
+   provider that looks foreground while a system LaunchDaemon
+   (`/Library/LaunchDaemons/live.malibu.provider.plist`) is installed is a
+   headless provider that SIGTERM cannot stop: it starts no check and the
+   child refuses it (`system_launch_daemon_provider`). Only the
+   canonical installed binary is spawned. `--unattended` requires
+   `--upgrade --apply` without a receipt and adds three gates after the
+   freshness and pin checks:
+   - **Recorded keep.** A completed run that kept I without writing a
+     benchmarked row (so §9 state stays stale) records the inputs key; an
+     unattended run for a recorded key exits 0 until the inputs change. A
+     keep for `acceleration_admission_unverified` is not recorded, since a
+     later check may read the admission sets; a
+     `challenger_lacks_incumbent_acceleration` keep is recorded, since the
+     admission sets are in the inputs key.
+   - **Stagger.** The inputs key is the SHA-256 over the signed candidate
+     catalog, rate card and demand rank content digests (each feed's JSON
+     without its top-level `generated_at` and `version`, keys sorted, so a
+     pure re-stamp keeps the key), the CB policy and native-MTP admission
+     sets the decision reads (the sorted admitted catalog keys of each, and
+     the names of any set that could not be verified, so re-signing the
+     same sets keeps the key) and the binary version, every input whose
+     change makes §9 stale or changes the decision. The admission sets are
+     loaded once, before the gate, and the same sets key the gate, the
+     decision and the recorded keep. The run acts only from
+     `anchor + offset`. `anchor` is the newest of the three feeds'
+     `generated_at` and the time this binary version was first seen by the
+     gate (persisted in the attempt record). `offset` is the first 8 bytes
+     of `SHA-256(diversification_id "\n" inputs_key)` modulo 48 hours. Each
+     input release therefore moves the fleet evenly over 48 hours, and the
+     order changes with every release. Before its offset the run exits 0
+     and the incumbent keeps serving.
+   - **Retry.** Before prefetch the run records the inputs key and time in
+     `~/.config/macprovider/model-upgrade-attempt.json`, which keeps the
+     last 8 attempts. A later unattended run for an inputs key attempted
+     within 24 hours waits, so a failing prefetch, a busy provider or a
+     selection that flips between input sets is retried daily, not every
+     check. When the record cannot be written, the run exits 75 before
+     anything is downloaded or stopped.
+   The installer and a manual `malibu-cli update` do not pass `--unattended`
+   and are not staggered.
+
 ## 10. Goodhart mitigations
 
 | ID | Mitigation | SPEC-023 implementation |
@@ -3245,7 +3468,7 @@ AC-23: Applying donor mode for a non-recommendable row does not auto-start or au
 
 AC-24: `malibu-cli status` shows `DONOR MODE` when `donor_mode: true`.
 
-AC-25: `malibu-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values and prompt re-tune when any changed or expired.
+AC-25 **[amended v0.22.43]**: `malibu-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values. When any changed or expired, they run the `SPEC-023-R029` upgrade re-tune over every signed row that fits the Mac, not an incumbent-only re-confirmation.
 
 AC-26: `malibu-cli status` emits the stale-recommendation warning in §9 when stored recommendation metadata differs from live metadata.
 
@@ -3321,6 +3544,49 @@ AC-51 (`SPEC-023-R027`, candidate filters): A signed candidate can be selected
 by catalog key or Hugging Face `model_id`. A filter containing unmatched
 entries fails explicitly and names every unmatched entry, even alongside a
 valid key; it does not silently return `no_eligible_model`.
+
+AC-52 (`SPEC-023-R029`, stale-recommendation upgrade): A strictly better
+admitted row (higher unrounded ordering score, or the incumbent demoted by a
+§4.1 policy rule) produces a switch. An equal score, or an incumbent that is
+still the selected row, keeps the incumbent. A better row whose prefetch
+failed or whose benchmark failed admission keeps the incumbent, and its own
+row is the only config target. A failed incumbent prefetch fails the run.
+`donor_mode`, `pool_model_id` and a config without signed catalog identity
+keep the model. The installer stale re-tune passes `--upgrade` to both the
+prefetch and the apply calls, with no `--candidate-models` allowlist. A
+challenger measured below its `min_sustained_tps` or above its
+`max_4k_ttft_ms` is never switched to, while manual `--recommend` still
+selects it; when no challenger clears the gate the incumbent is kept.
+Prefetch fetches the incumbent first and then rows by estimated score, a
+download without room for its size plus the free-space reserve is refused
+and leaves no directory, and after the decision only the run's own
+unselected `downloaded_by_run` snapshots are removed. The provider is
+stopped only after it reports idle, and it is restarted after success,
+failure and interrupt. A run whose downloads reach `2 × memory_gb` GiB drops
+the remaining rows and keeps the incumbent's verification. An unattended run
+exits without a change before its stagger offset, and again within 24 hours
+of an attempt on the same catalog and binary; its offsets are stable per
+provider, spread across the 48-hour window and reordered by a new catalog.
+The stagger anchors on the newest feed release or the first sighting of
+a binary, so a rate-card-only or binary-only change also waits for the
+offset; an unwritable attempt record stops the run, and an input set tried
+within 24 hours, even after a flip to another set, waits. A held upgrade lock
+or lifecycle lease, a persisted operator pause, or a provider never confirmed
+idle (a status error is not idle) exits 75 without a stop. This run's
+unselected downloads are removed after a failed stop too. A keep writes state
+naming the incumbent, a challenger lacking the incumbent's signed CB or
+native-MTP admission is not switched to, a switch removes `draft_model`, and
+a source fallback charges the download budget once and a source failure with
+no further source to try keeps its charge. The serve trigger is
+suppressed for donor, pool, operator-paused, `--no-join`,
+`--isolate-lifecycle` and autotune-candidate serves and for a serve that is
+not the detected provider; its child leads its own session and exits 75
+without a stop when the detected provider is not its parent pid. An
+unverified CB policy or unreadable native-MTP set keeps the incumbent. The
+installer's receipt steps take the upgrade lock and wait for it. Cleanup
+keeps the row the config names at cleanup time. A keep that wrote no row
+holds its inputs until their content or the binary changes. An unreadable
+lifecycle state counts as paused, and a lost lease blocks the apply.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

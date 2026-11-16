@@ -4250,12 +4250,73 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
+        // SPEC-023-R029: the unattended trigger. A serving provider checks
+        // every few hours whether its recommendation went stale (a new signed
+        // catalog, rate card, demand rank or binary). The detached child keeps
+        // the model unless a strictly better one passes admission, honours
+        // this provider's stagger offset, and restarts the provider itself.
+        // Only the canonical installed binary runs unattended; a binary the
+        // resolver rejects (for example a PATH entrypoint copy) never does.
+        let modelUpgradeExecutable = serveMarkerStore.resolveCanonicalInstallBinary(
+            launchedExecutableURL: Bundle.main.executableURL
+        )
+        let upgradeTriggerCandidate = autotuneCandidate
+        let upgradeTriggerNoJoin = noJoin
+        let upgradeTriggerIsolated = isolateLifecycle
+        // A candidate, `--no-join` or `--isolate-lifecycle` serve never starts
+        // a check: its child would stop this Mac's launchd provider.
+        let upgradeTriggerStaticSuppression = AutotuneModelUpgrade.unattendedTriggerSuppression(
+            donorMode: false,
+            poolModelID: nil,
+            autotuneCandidate: upgradeTriggerCandidate,
+            noJoin: upgradeTriggerNoJoin,
+            isolateLifecycle: upgradeTriggerIsolated,
+            operatorPaused: false
+        )
+        let modelUpgradeTask: Task<Void, Never>? = upgradeTriggerStaticSuppression != nil ? nil : Task.detached(priority: .utility) {
+            [providerStatus, resolved] in
+            try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedFirstCheckDelaySeconds * 1_000_000_000)
+            while !Task.isCancelled {
+                // Only the provider the child would stop (launchd job first,
+                // then the first foreground serve) starts a check: a second
+                // serve on this Mac never does.
+                let suppression = AutotuneModelUpgrade.unattendedTickSuppression(
+                    triggerSuppression: AutotuneModelUpgrade.unattendedTriggerSuppression(
+                        donorMode: resolved.donorMode,
+                        poolModelID: resolved.poolModelID,
+                        autotuneCandidate: upgradeTriggerCandidate,
+                        noJoin: upgradeTriggerNoJoin,
+                        isolateLifecycle: upgradeTriggerIsolated,
+                        operatorPaused: await providerStatus.operatorPauseFence
+                    ),
+                    detected: try? ProviderConflictDetector().detect(),
+                    servePID: getpid(),
+                    systemLaunchDaemonInstalled: AutotuneModelUpgrade.systemLaunchDaemonInstalled()
+                )
+                if let suppression {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=\(suppression)\n".utf8))
+                } else if let modelUpgradeExecutable {
+                    let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/macprovider", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+                    AutotuneModelUpgrade.spawnDetachedUnattendedUpgrade(
+                        executable: modelUpgradeExecutable,
+                        configPath: resolved.configPath,
+                        logPath: logDirectory.appendingPathComponent("model-upgrade.log").path
+                    )
+                } else {
+                    FileHandle.standardError.write(Data("model_upgrade: unattended check skipped reason=no_canonical_install_binary\n".utf8))
+                }
+                try? await Task.sleep(nanoseconds: AutotuneModelUpgrade.unattendedCheckIntervalSeconds * 1_000_000_000)
+            }
+        }
         let terminationHandlers = installTerminationHandlers(
             coordinatorClient: coordinatorClient, controlSocket: controlSocket,
             idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
             cbSelfCheckTask: cbSelfCheckTask
         )
         defer {
+            modelUpgradeTask?.cancel()
             Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
                 await controlSocket?.stop()
@@ -5085,6 +5146,27 @@ struct UpdateCommand: AsyncParsableCommand {
             )
         } else {
             try await updater.run(checkOnly: check)
+            // SPEC-023-R029: after a successful update the installed (now
+            // updated) binary runs its own freshness check, because staleness
+            // is bound to the binary version this process no longer matches.
+            // A stale or missing recommendation re-tunes; the upgrade keeps the
+            // current model unless a strictly better one passes admission, so
+            // its failure never fails the update.
+            // Only the canonical installed binary re-tunes, on the config
+            // this update used, as the serve trigger does.
+            if !check {
+                guard let executable = updateMarkerStore.resolveCanonicalInstallBinary(
+                    launchedExecutableURL: Bundle.main.executableURL
+                ) else {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune skipped reason=no_canonical_install_binary\n".utf8))
+                    return
+                }
+                let status = AutotuneModelUpgrade.runAfterUpdate(executable: executable, configPath: resolvedConfig?.configPath)
+                if status != 0 {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune exited with status \(status)\n".utf8))
+                }
+                return
+            }
         }
         if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
             FileHandle.standardError.write(Data("""
