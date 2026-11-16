@@ -622,6 +622,8 @@ EXACT_MODEL_KEY_ALIASES = {
     "rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx": "nemotron-3.5-bolt-74b-a9b",
     "minimax-m3.1-flash-oq3e-mtp": "minimaxai/minimax-m3.1-flash",
     "minimax/minimax-m3.1-flash": "minimaxai/minimax-m3.1-flash",
+    "aug11/minimax-m3.1-flash-oq3e-mtp-abliterated": "minimaxai/minimax-m3.1-flash-abliterated",
+    "minimax/minimax-m3.1-flash-abliterated": "minimaxai/minimax-m3.1-flash-abliterated",
     "tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
 }
@@ -2938,7 +2940,7 @@ def resolve_native_mtp_admission(
 
 # SPEC-048 0.1.81: the fields a variant declares. Every other tuple field,
 # every evidence digest and every bound comes from the donor's entry. The
-# quantization block (0.1.101) is the variant's own: the provider recomputes
+# quantization block (0.1.103) is the variant's own: the provider recomputes
 # every signed quantization field from the loaded artifact.
 NATIVE_MTP_VARIANT_KEYS = {
     "model_key", "donor_model_key", "artifact_id", "artifact_hash", "tokenizer_sha256",
@@ -3161,7 +3163,7 @@ def native_mtp_weight_bytes(artifact_obj: dict, model_key: str, artifact_id: str
 
 def require_native_mtp_variant_weight_fit(variants: list, donors: dict, artifact_obj: dict,
                                           manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR) -> None:
-    """R012 (SPEC-048 0.1.101): a variant's served weights are no larger than
+    """R012 (SPEC-048 0.1.103): a variant's served weights are no larger than
     its donor's, so the donor's fit evidence covers it. Non-weight snapshot
     files (GGUF, mmproj, docs) are not loaded and do not count."""
     for variant in variants:

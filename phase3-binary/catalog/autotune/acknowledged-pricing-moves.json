@@ -96,6 +96,16 @@
       "model": "nvidia/nemotron-3.5-bolt-74b-a9b",
       "from_row": "default",
       "to_row": "nemotron-3.5-bolt-74b-a9b"
+    },
+    {
+      "model": "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+      "from_row": "default",
+      "to_row": "minimaxai/minimax-m3.1-flash-abliterated"
+    },
+    {
+      "model": "minimaxai/minimax-m3.1-flash-abliterated",
+      "from_row": "default",
+      "to_row": "minimaxai/minimax-m3.1-flash-abliterated"
     }
   ]
 }

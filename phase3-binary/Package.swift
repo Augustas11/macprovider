@@ -17,6 +17,17 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
+        // MiniMax M3 projects a refusal direction out of the attention and
+        // MLP/MoE outputs of the configured decoder layers when the
+        // refusal_ablation config key is present (the abliterated M3.1-Flash
+        // variant), refusing an alpha outside 0 < alpha <= 4 or a direction
+        // that is not a finite unit vector; an indexed checkpoint may store it
+        // as language_model.refusal_direction. The text sanitize drops stored
+        // model.layers.N.refusal_direction keys, so only the validated
+        // direction sets them. 29b5778 (04a1d29 plus the audit fixes) touches
+        // MiniMaxM3.swift and its tests only; a model without the key runs the
+        // unchanged fused path.
         // Tag 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61:
         // DeepSeek V4 prefill can yield between evaluated tiles so other
         // continuous-batch rows decode while a reference prefill is in
@@ -166,7 +177,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "8f8821668c1a2dbb23ce33e43f31ed00d45f924f"
+            revision: "29b5778b36ffba045786c4cd73427f5287c79a54"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

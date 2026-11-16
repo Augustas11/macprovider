@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "7e146d42f23b4af2ce2cc583f51dbd807b7b6f5645d27a6dc9052abb52cc2816",
+  "autotune_candidates_sha256": "c3936f4c10fceb43336d68d20fcc294245175d04bcabbed1f8d443a15ef22d10",
   "generated_at": "2026-11-16T00:00:00Z",
   "models": [
+    {
+      "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
+      "min_ram_gb": 230,
+      "model_id": "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+      "model_revision": "e45ff82cab94d9ecb46a86b12b891eeba3d1e198",
+      "sha256": "795d9cf46799deb2cf61822acfbf8586aa946fcaa880686e86be3ca77280368a"
+    },
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
       "min_ram_gb": 64,

@@ -683,6 +683,8 @@ class RateCardSourceTest(unittest.TestCase):
             "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
             "nvidia/nemotron-3.5-bolt-74b-a9b",
+            # #2376: the abliterated MiniMax M3.1-Flash build, class-120b-moe.
+            "minimaxai/minimax-m3.1-flash-abliterated",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")

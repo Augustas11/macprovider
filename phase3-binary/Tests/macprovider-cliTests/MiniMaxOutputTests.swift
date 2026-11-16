@@ -69,7 +69,7 @@ final class MiniMaxOutputTests: XCTestCase {
     func testFamilyWinsOverTheGuessedTemplateFormat() {
         // The fork infers `json` from this template (`<tool_call>` and
         // `tool_call.name`); the MiniMax family decides.
-        for id in [Self.model, "minimaxai/minimax-m3.1-flash", "minimax/minimax-m3.1-flash"] {
+        for id in [Self.model, "minimaxai/minimax-m3.1-flash", "minimaxai/minimax-m3.1-flash-abliterated", "minimax/minimax-m3.1-flash"] {
             XCTAssertEqual(ToolCallGrammar.family(modelID: id), .minimax, id)
             XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: "json", modelID: id), .minimax, id)
         }

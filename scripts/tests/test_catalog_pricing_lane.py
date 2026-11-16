@@ -441,6 +441,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("nvidia/nemotron-3.5-lightning-30b-a3b", "default", "nemotron-3.5-lightning-30b-a3b"),
                 ("rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit", "default", "nemotron-3.5-bolt-74b-a9b"),
                 ("nvidia/nemotron-3.5-bolt-74b-a9b", "default", "nemotron-3.5-bolt-74b-a9b"),
+                ("aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated", "default", "minimaxai/minimax-m3.1-flash-abliterated"),
+                ("minimaxai/minimax-m3.1-flash-abliterated", "default", "minimaxai/minimax-m3.1-flash-abliterated"),
             },
         )
         for bad in (
