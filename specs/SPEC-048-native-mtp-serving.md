@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.108
+**Version:** 0.1.109
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.108",
+  "version": "0.1.109",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1701,7 +1701,13 @@ in proposal/verification bookkeeping since reset), and
 `throughput_delta_ppm` (signed integer loaded from the admitted sidecar's frozen
 R015 result, not a live estimate); `reset_generation` (nonnegative 64-bit
 integer incremented at each reset); and `last_reason` from the closed set
-`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|capacity_above_native_bound|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|capacity_above_native_bound|low_acceptance_depth_zero|runtime_failure|warm_swap|canary_mismatch|canary_timeout|canary_expired|canary_fallback|canary_ordinary_or_classic|coordinator_operator`.
+**(0.1.109)** A coordinator `native_mtp_tuple_disable_v1` sets `last_reason`
+from its reason: `mismatch`, `timeout`, `expired`, `fallback` and
+`ordinary_or_classic` become `canary_` plus that reason, and `operator`
+becomes `coordinator_operator`. `tuple_revoked` is kept for a signed
+revocation and for a disable reason the provider does not know.
+`bank_mismatch` parks the tuple (0.1.48) and does not set these values.
 `disabled_by_default` is a retained wire token: it reports that the resolved
 mode is `off` (an explicit operator `off`, or a configured classic draft
 model); a provider in the default `auto` mode without an admitted tuple reports
@@ -2774,6 +2780,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.109 (2026-11-16, Related: #2404)** — R010 status: the closed
+  `last_reason` set gains `canary_mismatch`, `canary_timeout`,
+  `canary_expired`, `canary_fallback`, `canary_ordinary_or_classic` and
+  `coordinator_operator`. A coordinator tuple disable now reports its own
+  reason instead of `tuple_revoked`, which stays for a signed revocation. The
+  R016 canary rule is unchanged: one timeout still disables the tuple.
 - **0.1.108 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.80`
   (`9317a903a9efb08a471c57be26744f7fa2a90ab9`) on `3.32.3-macprovider.79`
   (#2393): On 3.32.3-macprovider.79, the last native-MTP layer (GLM-5-Next

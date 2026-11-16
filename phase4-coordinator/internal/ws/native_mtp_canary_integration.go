@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -543,8 +544,15 @@ func (s *Server) maybeDispatchNativeMTPCanary(provider pool.Provider, now time.T
 	if !key.valid() {
 		return false
 	}
-	if _, err := s.nativeMTPCanaryStore.ExpireNativeMTPCanary(key, now); err != nil {
+	// The in-flight request is read before expiry clears it, so a timeout log
+	// names the challenge that went unanswered.
+	prior, _ := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, now)
+	expired, err := s.nativeMTPCanaryStore.ExpireNativeMTPCanary(key, now)
+	if err != nil {
 		return false
+	}
+	if expired {
+		s.logNativeMTPCanaryExpiry(provider, key, prior, now)
 	}
 	if state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, now); ok {
 		if updated, ok := s.recordNativeMTPCanaryState(provider.ProviderID, provider.AssignedID, key.RuntimeTupleSHA256, state); ok {
@@ -591,9 +599,51 @@ func (s *Server) maybeDispatchNativeMTPCanary(provider pool.Provider, now time.T
 			Reason:         "dispatch_send_failed",
 			TrustSemantics: "observe_only",
 		}, s.nativeMTPCanaryInterval(), now)
+		s.log.Warn().
+			Err(err).
+			Str("event", "native_mtp_canary_challenge_send_failed").
+			Str("provider_id", provider.ProviderID).
+			Str("assigned_id", provider.AssignedID).
+			Str("challenge_id", req.ChallengeID).
+			Str("request_id", req.RequestDigestSHA256).
+			Msg("native MTP canary challenge send failed; rescheduled")
 		return false
 	}
+	s.log.Info().
+		Str("event", "native_mtp_canary_challenge_sent").
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Uint64("target_generation", req.TargetGeneration).
+		Str("challenge_id", req.ChallengeID).
+		Str("request_id", req.RequestDigestSHA256).
+		Str("deadline", req.ExpiresAt.UTC().Format(time.RFC3339)).
+		Str("challenge_bank_release_id", provider.NativeMTPCanary.ChallengeBankReleaseID).
+		Msg("native MTP canary challenge sent")
 	return true
+}
+
+// logNativeMTPCanaryExpiry names what ExpireNativeMTPCanary just disabled: an
+// in-flight challenge past its deadline (timeout) or a pass past its freshness.
+func (s *Server) logNativeMTPCanaryExpiry(provider pool.Provider, key NativeMTPCanaryTupleKey, prior NativeMTPCanaryTupleState, now time.Time) {
+	if prior.InFlight != nil && !now.Before(prior.InFlightDeadline) {
+		s.log.Warn().
+			Str("event", "native_mtp_canary_timeout").
+			Str("provider_id", provider.ProviderID).
+			Str("assigned_id", provider.AssignedID).
+			Uint64("target_generation", key.TargetGeneration).
+			Str("challenge_id", prior.InFlight.ChallengeID).
+			Str("request_id", prior.InFlight.RequestDigestSHA256).
+			Str("deadline", prior.InFlightDeadline.UTC().Format(time.RFC3339)).
+			Msg("native MTP canary timed out: no result before the deadline")
+		return
+	}
+	s.log.Warn().
+		Str("event", "native_mtp_canary_fresh_expired").
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Uint64("target_generation", key.TargetGeneration).
+		Str("fresh_until", prior.FreshUntil.UTC().Format(time.RFC3339)).
+		Msg("native MTP canary pass expired without a fresh pass")
 }
 
 func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payload []byte) {
@@ -635,8 +685,13 @@ func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payl
 		return
 	}
 	s.log.Info().
+		Str("event", "native_mtp_canary_result_received").
 		Str("provider_id", providerID).
 		Str("assigned_id", assignedID).
+		Str("challenge_id", result.ChallengeID).
+		Str("request_id", result.RequestID).
+		Str("actual_decode_path", result.ActualDecodePath).
+		Str("diagnostic", result.Diagnostic).
 		Str("outcome", string(eval.Outcome)).
 		Str("reason", eval.Reason).
 		Msg("native MTP canary result recorded")
@@ -858,9 +913,29 @@ func (s *Server) sendNativeMTPTupleDisable(disable NativeMTPTupleDisable) bool {
 	}
 	session, ok := s.storedSessionFor(disable.ProviderID, disable.AssignedID)
 	if !ok {
+		s.logNativeMTPTupleDisableSend(disable, errors.New("no provider session"))
 		return false
 	}
-	return session.send(raw) == nil
+	err = session.send(raw)
+	s.logNativeMTPTupleDisableSend(disable, err)
+	return err == nil
+}
+
+func (s *Server) logNativeMTPTupleDisableSend(disable NativeMTPTupleDisable, err error) {
+	event := s.log.Info()
+	msg := "native MTP tuple disable sent"
+	if err != nil {
+		event = s.log.Warn().Err(err)
+		msg = "native MTP tuple disable send failed"
+	}
+	event.
+		Str("event", "native_mtp_tuple_disable_sent").
+		Str("provider_id", disable.ProviderID).
+		Str("assigned_id", disable.AssignedID).
+		Uint64("target_generation", disable.TargetGeneration).
+		Str("reason", disable.Reason).
+		Bool("sent", err == nil).
+		Msg(msg)
 }
 
 func nativeMTPTupleDisableFromDiagnostics(provider pool.Provider, reason string, issuedAt time.Time) NativeMTPTupleDisable {
