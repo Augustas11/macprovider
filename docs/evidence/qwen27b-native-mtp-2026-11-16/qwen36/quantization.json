@@ -1,0 +1,13 @@
+{
+  "alignment_bytes": null,
+  "block_size_elements": 64,
+  "kind": "mlx_affine",
+  "packed_data_dtype": "uint32",
+  "packed_layout": "mlx_array_native_v1",
+  "padding_rule": "none",
+  "per_layer_exceptions": [],
+  "representation_manifest_sha256": "7deae874e12e389e95e4b8b22bf4d5145a755b25d80a4add6c26e1aec9c6f92a",
+  "scale_dtype": "bfloat16",
+  "scale_layout": "per_block",
+  "unquantized_exceptions": []
+}
