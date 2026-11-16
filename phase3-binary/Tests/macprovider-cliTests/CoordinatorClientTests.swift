@@ -987,6 +987,466 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(CoordinatorClient.inboundPreflight(.string(#"{"type":"preflight","request_id":"x","estimated_tokens":7}"#))?.estimatedTokens, 7)
     }
 
+    // SPEC-001-R016: the heartbeat and hello carry `warm_models` beside the
+    // top-level fields, which keep describing the primary; a busy secondary
+    // member never moves the primary's slots_free.
+    func testHeartbeatAndHelloCarryWarmModelsAndKeepThePrimarysSlots() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 7_301, modelID: "model-a", hash: "a"))
+        let token = try table.beginLoading(modelID: "model-b", pinned: false)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 7_302, modelID: "model-b", hash: "b"))
+        table.updateInfo(token: token, .init(maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 21, modelHash: String(repeating: "b", count: 64), modelHashAlgorithm: "sha256", modelParamsB: 4))
+        _ = try table.beginLoading(modelID: "model-c", pinned: false)
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(status: status, recorder: recorder, warmModels: table)
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+
+        let lease = try table.lease(servedModelID: "model-b")
+        guard case .admitted(let startedAt) = await status.admitRequest(requestID: "secondary", warmMember: "model-b") else {
+            return XCTFail("secondary request was not admitted")
+        }
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertEqual(heartbeat["slots_free"] as? Int, 2)
+        XCTAssertEqual(heartbeat["slots_total"] as? Int, 2)
+        let entries = try XCTUnwrap(heartbeat["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["model_id"] as? String }, ["model-a", "model-b", "model-c"])
+        XCTAssertEqual(entries[0]["primary"] as? Bool, true)
+        XCTAssertEqual(entries[0]["state"] as? String, "warm")
+        XCTAssertEqual(entries[0]["slots_free"] as? Int, heartbeat["slots_free"] as? Int)
+        XCTAssertEqual(entries[0]["slots_total"] as? Int, heartbeat["slots_total"] as? Int)
+        XCTAssertEqual(entries[0]["max_context_tokens"] as? Int, heartbeat["max_context_tokens"] as? Int)
+        XCTAssertEqual(entries[1]["primary"] as? Bool, false)
+        XCTAssertEqual(entries[1]["state"] as? String, "warm")
+        XCTAssertEqual(entries[1]["slots_total"] as? Int, 3)
+        XCTAssertEqual(entries[1]["slots_free"] as? Int, 2)
+        XCTAssertEqual(entries[1]["max_context_tokens"] as? Int, 8_000)
+        XCTAssertEqual(entries[1]["model_hash"] as? String, String(repeating: "b", count: 64))
+        XCTAssertEqual(entries[2]["state"] as? String, "loading")
+        XCTAssertNil(entries[2]["slots_free"])
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "secondary", warmMember: "model-b")
+        lease.release()
+        // A legacy hello declares no supported_models, so the coordinator
+        // allows its top-level model alone (SPEC-002-R011): the primary.
+        let hello = await client.helloMessage()
+        let helloEntries = try XCTUnwrap(hello["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(helloEntries.map { $0["model_id"] as? String }, [hello["model_id"] as? String])
+        XCTAssertEqual(helloEntries[0]["slots_free"] as? Int, 2)
+    }
+
+    /// The cross-language `warm_models` contract (SPEC-001-R016/R018,
+    /// SPEC-002-R011): a heartbeat rendered while both members are busy,
+    /// checked into `test/fixtures/warm-models/` and decoded by the
+    /// coordinator's own parser in `internal/ws`
+    /// (`TestWarmModelsContractFixtureIsAccepted`). Regenerate with
+    /// `WARM_MODELS_CONTRACT_WRITE=1`.
+    func testContendedHeartbeatPrimaryEntryMatchesTopLevelContract() async throws {
+        let hash = { (c: Character) in String(repeating: c, count: 64) }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2, throughputTPSEstimate: 40),
+            modelHash: hash("a"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1
+        )
+        let table = WarmModelTable<WarmFakeRuntime>()
+        try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 1, modelID: "model-a", hash: "a"))
+        let token = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: token, runtime: WarmFakeRuntime(memberID: 2, modelID: "model-b", hash: "b"))
+        table.updateInfo(token: token, .init(
+            maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 30, modelHash: hash("b"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, modelParamsB: 4))
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status, recorder: recorder, warmModels: table, supportedModels: ["model-a", "model-b"])
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+        let second: UInt64 = 1_000_000_000
+        await client.setWarmSetContentionForTest(WarmSetContentionWindow(
+            wallNanoseconds: 10 * second,
+            busyNanoseconds: [1: 3 * second, 2: 6 * second],
+            waitNanoseconds: [1: 3 * second, 2: second]))
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        let entries = try XCTUnwrap(heartbeat["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["model_id"] as? String }, ["model-a", "model-b"])
+        // Both members busy: the primary's contended estimate on both sides.
+        XCTAssertEqual(heartbeat["throughput_tps_estimate"] as? Double, 20)
+        XCTAssertEqual(entries[1]["throughput_tps_estimate"] as? Double, 25.7)
+        for key in WarmModelsWire.primaryFieldKeys {
+            let top = heartbeat[key].flatMap { $0 is NSNull ? nil : $0 }
+            XCTAssertEqual(
+                try top.map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) },
+                try entries[0][key].map { try JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) }, key)
+        }
+        XCTAssertEqual(entries[0]["slots_total"] as? Int, heartbeat["slots_total"] as? Int)
+        XCTAssertEqual(entries[0]["slots_free"] as? Int, heartbeat["slots_free"] as? Int)
+
+        let rendered: [String: Any] = [
+            "supported_models": try XCTUnwrap(auth["supported_models"]),
+            "heartbeat": Self.contractFields(heartbeat, Self.contractHeartbeatKeys),
+        ]
+        try assertMatchesContractFixture("contended-heartbeat-v1.json", rendered)
+    }
+
+    // MARK: SPEC-001-R016 cross-language contract fixtures
+
+    /// The heartbeat fields the coordinator's heartbeat parser reads.
+    private static let contractHeartbeatKeys = WarmModelsWire.primaryFieldKeys + [
+        "type", "status", "ram_gb", "max_concurrency", "slots_free", "slots_total", "loading",
+        "requests_served_since_last", "avg_latency_ms_since_last", "throughput_tps_since_last", "warm_models",
+    ]
+
+    /// The `hello` / `auth_request` fields `warm_models` is checked against.
+    private static let contractHandshakeKeys = WarmModelsWire.primaryFieldKeys + [
+        "type", "stage", "ram_gb", "max_concurrency", "supported_models", "publishes_supported_models", "warm_models",
+    ]
+
+    private static func contractFields(_ frame: [String: Any], _ keys: [String]) -> [String: Any] {
+        frame.filter { keys.contains($0.key) }
+    }
+
+    private static func contractFixtureURL(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../test/fixtures/warm-models/\(name)").standardizedFileURL
+    }
+
+    /// Compares a provider-rendered contract with its checked-in fixture,
+    /// which the coordinator's decoders read in `internal/ws`
+    /// (`warm_models_contract_test.go`). `WARM_MODELS_CONTRACT_WRITE=1`
+    /// rewrites the fixture first.
+    private func assertMatchesContractFixture(
+        _ name: String, _ rendered: [String: Any], file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let fixture = Self.contractFixtureURL(name)
+        if ProcessInfo.processInfo.environment["WARM_MODELS_CONTRACT_WRITE"] == "1" {
+            try FileManager.default.createDirectory(at: fixture.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: rendered, options: [.sortedKeys, .prettyPrinted]).write(to: fixture)
+        }
+        let golden = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        // The memory and chip classes are this Mac's, not the contract's.
+        func portable(_ value: Any) -> Any {
+            switch value {
+            case let object as [String: Any]:
+                return object.filter { !["ram_gb", "ram_class_gb", "chip_class"].contains($0.key) }.mapValues(portable)
+            case let array as [Any]:
+                return array.map(portable)
+            default:
+                return value
+            }
+        }
+        XCTAssertEqual(
+            String(decoding: try JSONSerialization.data(withJSONObject: portable(golden), options: .sortedKeys), as: UTF8.self),
+            String(decoding: try JSONSerialization.data(withJSONObject: portable(rendered), options: .sortedKeys), as: UTF8.self),
+            "the provider's frames drifted from the coordinator contract fixture \(name)", file: file, line: line)
+    }
+
+    // MARK: SPEC-001-R016 promotion on the wire
+
+    /// One warm set mid-promotion: `model-a` primary, `model-b` warm and
+    /// about to be promoted, `model-c` loading.
+    private struct PromotionRig {
+        let status: ProviderStatus
+        let table: WarmModelTable<WarmFakeRuntime>
+        let recorder: CoordinatorFrameRecorder
+        let client: CoordinatorClient
+        let tokenA: UInt64
+        let tokenB: UInt64
+        static let members: Set<String> = ["model-a", "model-b", "model-c"]
+        static func hash(_ c: Character) -> String { String(repeating: c, count: 64) }
+        static let infoA = WarmModelMemberInfo(
+            maxContextTokens: 20_000, slotsTotal: 2, throughputTPSEstimate: 40, modelHash: hash("a"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, modelParamsB: 8)
+        static let infoB = WarmModelMemberInfo(
+            maxContextTokens: 8_000, slotsTotal: 3, throughputTPSEstimate: 30, modelHash: hash("b"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, modelParamsB: 4)
+
+        /// The provider status names `model-b` primary: the one step that
+        /// switches the wire.
+        func switchStatus() async {
+            await status.promoteWarmPrimary(
+                memberKey: WarmModelTable<WarmFakeRuntime>.memberKey(token: tokenB), modelID: "model-b",
+                modelHash: Self.hash("b"), modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+                weightsManifestSHA256: nil, maxContextTokens: 8_000, maxConcurrency: 3)
+        }
+
+        /// The auth initial stage and a heartbeat, as the coordinator would
+        /// receive them now.
+        func frames() async throws -> [(String, [String: Any])] {
+            let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+            try await client.sendHeartbeatBoundedForTest()
+            let recorded = await recorder.frames
+            let heartbeat = try XCTUnwrap(recorded.last { $0["type"] as? String == "heartbeat" })
+            return [("auth_request", auth), ("heartbeat", heartbeat)]
+        }
+    }
+
+    private func promotionRig() async throws -> PromotionRig {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2, throughputTPSEstimate: 40),
+            modelHash: PromotionRig.hash("a"),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1
+        )
+        let table = WarmModelTable<WarmFakeRuntime>()
+        let tokenA = try table.insertPrimary(modelID: "model-a", runtime: WarmFakeRuntime(memberID: 1, modelID: "model-a", hash: "a"))
+        let tokenB = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: tokenB, runtime: WarmFakeRuntime(memberID: 2, modelID: "model-b", hash: "b"))
+        table.updateInfo(token: tokenB, PromotionRig.infoB)
+        _ = try table.beginLoading(modelID: "model-c", pinned: false)
+        await status.setPrimaryWarmMember(WarmModelTable<WarmFakeRuntime>.memberKey(token: tokenA))
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status, recorder: recorder, warmModels: table, supportedModels: ["model-a", "model-b", "model-c"])
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+        await client.setWarmSetContentionForTest(nil)
+        return PromotionRig(
+            status: status, table: table, recorder: recorder, client: client, tokenA: tokenA, tokenB: tokenB)
+    }
+
+    /// Every warm member listed exactly once, exactly one primary, first,
+    /// and it is the model the top-level fields name.
+    private func assertOneAgreeingPrimary(
+        _ frame: [String: Any], _ label: String, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let entries = try XCTUnwrap(frame["warm_models"] as? [[String: Any]], label, file: file, line: line)
+        let ids = entries.compactMap { $0["model_id"] as? String }
+        XCTAssertEqual(ids.count, Set(ids).count, "\(label): a member is listed twice: \(ids)", file: file, line: line)
+        XCTAssertEqual(Set(ids), PromotionRig.members, "\(label): a member is missing: \(ids)", file: file, line: line)
+        XCTAssertEqual(entries.filter { $0["primary"] as? Bool == true }.count, 1, "\(label): primaries", file: file, line: line)
+        XCTAssertEqual(entries.first?["primary"] as? Bool, true, "\(label): primary first", file: file, line: line)
+        XCTAssertEqual(entries.first?["model_id"] as? String, frame["model_id"] as? String,
+                       "\(label): primary entry vs top-level model_id", file: file, line: line)
+    }
+
+    /// SPEC-001-R016: a promotion marks the new primary in the table, then
+    /// the provider status names it, then the demoted member publishes its
+    /// info. A frame built after each step lists every member once, with one
+    /// primary that is the top-level model: the wire switches in the
+    /// provider-status step alone.
+    func testFramesBuiltBetweenThePromotionStepsKeepEveryMemberAndOnePrimary() async throws {
+        let rig = try await promotionRig()
+        var topLevel: [String] = []
+        func check(_ step: String) async throws {
+            for (kind, frame) in try await rig.frames() {
+                try assertOneAgreeingPrimary(frame, "\(step) \(kind)")
+                if kind == "heartbeat" { topLevel.append(frame["model_id"] as? String ?? "") }
+            }
+        }
+        try await check("before")
+        _ = try rig.table.promote(modelID: "model-b")
+        try await check("table_promoted")
+        await rig.switchStatus()
+        try await check("status_switched")
+        rig.table.updateInfo(token: rig.tokenA, PromotionRig.infoA)
+        try await check("demoted_info_published")
+        XCTAssertEqual(topLevel, ["model-a", "model-a", "model-b", "model-b"])
+
+        // A legacy hello declares its top-level model alone: one entry, the
+        // primary the top level names.
+        let hello = await rig.client.helloMessage()
+        let helloEntries = try XCTUnwrap(hello["warm_models"] as? [[String: Any]])
+        XCTAssertEqual(helloEntries.map { $0["model_id"] as? String }, ["model-b"])
+        XCTAssertEqual(hello["model_id"] as? String, "model-b")
+    }
+
+    /// The same, through `WarmSetBoot.promoteInSwapTurn` itself: a frame is
+    /// rendered at every await the promotion makes (each member-info read
+    /// and both sides of the provider-status switch in the handoff).
+    func testFramesBuiltAtEveryAwaitOfAPromotionKeepEveryMemberAndOnePrimary() async throws {
+        let rig = try await promotionRig()
+        let rendered = PromotionFrames()
+        let render: @Sendable (String) async -> Void = { label in
+            await rendered.append(label, (try? await rig.frames()) ?? [])
+        }
+        let loader = WarmModelLoader(
+            table: rig.table, budget: SharedModelMemoryBudget(), limitBytes: { Int.max / 4 }, idlePollNanoseconds: 1_000_000
+        ) { spec in WarmFakeRuntime(memberID: 99, modelID: spec.modelID, hash: "x") }
+        let boot = WarmSetBoot(
+            table: rig.table, loader: loader, supportedModels: Array(PromotionRig.members),
+            loadSpec: { WarmModelLoadSpec(modelID: $0, estimatedResidentBytes: 1, minimumRowKVBytes: 0) },
+            memberInfo: { runtime in
+                await render("member_info \(runtime.memoryBudgetMemberID)")
+                return runtime.memoryBudgetMemberID == 1 ? PromotionRig.infoA : PromotionRig.infoB
+            },
+            primaryHandoff: { _, _ in
+                await render("handoff_before_status")
+                await rig.switchStatus()
+                await render("handoff_after_status")
+            },
+            log: { _ in })
+        await boot.runSwapTurn { try? await boot.promoteInSwapTurn("model-b") }
+        await render("done")
+        let all = await rendered.all
+        XCTAssertEqual(all.map(\.0), [
+            "member_info 1", "handoff_before_status", "handoff_after_status", "member_info 1", "done",
+        ])
+        for (label, frames) in all {
+            XCTAssertEqual(frames.count, 2, label)
+            for (kind, frame) in frames { try assertOneAgreeingPrimary(frame, "\(label) \(kind)") }
+        }
+        let heartbeatIDs = all.map { $0.1.last?.1["model_id"] as? String }
+        XCTAssertEqual(heartbeatIDs, ["model-a", "model-a", "model-b", "model-b", "model-b"])
+        // The demoted member's info was on the table before the status switch.
+        XCTAssertEqual(rig.table.views.value.first { $0.modelID == "model-a" }?.info, PromotionRig.infoA)
+    }
+
+    /// The cross-language handshake contract: `warm_models` on the
+    /// `auth_request` initial stage (with its `supported_models`) and on a
+    /// legacy `hello`, as `ParseAuthRequest` / `ParseHello` read them
+    /// (`TestWarmModelsContractHandshakesAreAccepted`).
+    func testHandshakeWarmModelsMatchTheContractFixture() async throws {
+        let rig = try await promotionRig()
+        let auth = await rig.client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let hello = await rig.client.helloMessage()
+        XCTAssertEqual((auth["warm_models"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual((hello["warm_models"] as? [[String: Any]])?.count, 1)
+        try assertMatchesContractFixture("provider-handshakes-v1.json", [
+            "auth_request": Self.contractFields(auth, Self.contractHandshakeKeys),
+            "hello": Self.contractFields(hello, Self.contractHandshakeKeys),
+        ])
+    }
+
+    /// The cross-language heartbeat contract at the three instants a member
+    /// changes state: a further member loading, a further member evicting,
+    /// and the promotion instant (the provider status names the new primary,
+    /// the demoted member has not yet published its info). The coordinator
+    /// parses each (`TestWarmModelsContractHeartbeatTransitionsAreAccepted`).
+    func testHeartbeatsAtMemberTransitionsMatchTheContractFixture() async throws {
+        func heartbeat(_ rig: PromotionRig) async throws -> [String: Any] {
+            let frames = try await rig.frames()
+            let frame = try XCTUnwrap(frames.last { $0.0 == "heartbeat" }?.1)
+            try assertOneAgreeingPrimary(frame, "heartbeat")
+            return Self.contractFields(frame, Self.contractHeartbeatKeys)
+        }
+        let loading = try await promotionRig()
+        let midLoad = try await heartbeat(loading)
+
+        let evicting = try await promotionRig()
+        _ = try evicting.table.beginEvicting(modelID: "model-b", allowPinned: true)
+        let midEviction = try await heartbeat(evicting)
+
+        let promoting = try await promotionRig()
+        _ = try promoting.table.promote(modelID: "model-b")
+        await promoting.switchStatus()
+        let promotionInstant = try await heartbeat(promoting)
+
+        let states = { (frame: [String: Any]) in
+            (frame["warm_models"] as? [[String: Any]] ?? []).map { "\($0["model_id"] ?? ""):\($0["state"] ?? "")" }
+        }
+        XCTAssertEqual(states(midLoad), ["model-a:warm", "model-b:warm", "model-c:loading"])
+        XCTAssertEqual(states(midEviction), ["model-a:warm", "model-b:evicting", "model-c:loading"])
+        XCTAssertEqual(states(promotionInstant), ["model-b:warm", "model-a:warm", "model-c:loading"])
+        try assertMatchesContractFixture("heartbeat-transitions-v1.json", [
+            "supported_models": Array(PromotionRig.members).sorted(),
+            "mid_load": midLoad,
+            "mid_eviction": midEviction,
+            "promotion_instant": promotionInstant,
+        ])
+    }
+
+    /// The cross-language `model_not_loaded` contract: a dispatch naming no
+    /// `warm` member is refused on the preflight ack, on the WebSocket end
+    /// frame and on the HTTP-forwarded path, each as the provider renders it
+    /// (`TestWarmModelsContractModelNotLoadedIsClassified`).
+    func testModelNotLoadedRefusalsMatchTheContractFixture() async throws {
+        let rig = try await promotionRig()
+        let ack = CoordinatorClient.preflightAck(
+            requestID: "req-not-loaded", estimatedTokens: 64,
+            view: ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 20_000),
+            servedModelID: .some("model-c"), warmModels: rig.table.views.value, primaryNames: ["model-a"])
+        let refusal: APIError
+        do {
+            let lease = try WarmModelRoute.lease(rig.table, servedModelID: "model-c", primaryNames: ["model-a"])
+            lease.release()
+            return XCTFail("a loading member was leased")
+        } catch let error as APIError {
+            refusal = error
+        }
+        let end = InferenceRelay.errorEndFrame(requestID: "req-not-loaded", error: refusal, chunksSent: 0)
+        XCTAssertEqual(ack["reason"] as? String, "model_not_loaded")
+        XCTAssertEqual(end["status"] as? String, "error_model_not_loaded")
+        XCTAssertEqual(refusal.status, 503)
+        try assertMatchesContractFixture("model-not-loaded-v1.json", [
+            "preflight_ack": ack,
+            "inference_response_end": end,
+            "http": ["status": refusal.status, "body": refusal.envelope] as [String: Any],
+        ])
+    }
+
+    /// The coordinator-rendered dispatch frames (`preflight`, the plain,
+    /// relay-blind and encrypted `inference_request`, and the HTTP
+    /// `X-MacProvider-Served-Model` header), written by the coordinator's own
+    /// renderers in `TestWarmModelsContractCoordinatorDispatch`, each lease the
+    /// member they name through the provider's own readers.
+    func testCoordinatorDispatchFixtureLeasesTheNamedMember() async throws {
+        let rig = try await promotionRig()
+        let fixture = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: Self.contractFixtureURL("coordinator-dispatch-v1.json")))
+                as? [String: Any])
+        let served = try XCTUnwrap(fixture["served_model_id"] as? String)
+        XCTAssertEqual(served, "model-b")
+
+        let preflightText = String(decoding: try JSONSerialization.data(
+            withJSONObject: try XCTUnwrap(fixture["preflight"])), as: UTF8.self)
+        let preflight = try XCTUnwrap(CoordinatorClient.inboundPreflight(.string(preflightText)))
+        XCTAssertEqual(preflight.servedModelID, .some(served))
+        let ack = CoordinatorClient.preflightAck(
+            requestID: preflight.requestID, estimatedTokens: preflight.estimatedTokens,
+            view: ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 20_000),
+            servedModelID: preflight.servedModelID, warmModels: rig.table.views.value, primaryNames: ["model-a"])
+        XCTAssertEqual(ack["accepted"] as? Bool, true, "\(ack)")
+
+        for kind in ["inference_request", "inference_request_relay_blind", "inference_request_encrypted"] {
+            let frame = try XCTUnwrap(fixture[kind] as? [String: Any], kind)
+            XCTAssertEqual(frame["type"] as? String, "inference_request", kind)
+            let lease = try InferenceRelay.warmServingLease(
+                rig.table, servedModelWire: frame["served_model_id"], primaryNames: ["model-a"])
+            XCTAssertEqual(lease.modelID, served, kind)
+            XCTAssertFalse(lease.primary, kind)
+            lease.release()
+        }
+        let encrypted = try XCTUnwrap(fixture["inference_request_encrypted"] as? [String: Any])
+        XCTAssertEqual(encrypted["encrypted"] as? Bool, true)
+        XCTAssertNil(encrypted["body"], "the encrypted frame carries no plaintext body")
+
+        let header = try XCTUnwrap(fixture["served_model_header"] as? [String: Any])
+        XCTAssertEqual(header["name"] as? String, WarmModelRoute.servedModelHeaderName)
+        let headerLease = try RouterHandler.warmServingLease(
+            rig.table, servedModelHeader: header["value"] as? String, local: false, bodyModel: "model-a",
+            primaryNames: ["model-a"])
+        XCTAssertEqual(headerLease.modelID, served)
+        headerLease.release()
+    }
+
+    func testNoWarmSetSendsNoWarmModels() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.setWebSocketForTest(FakeProviderWebSocketTask(receiveResults: []))
+        try await client.sendHeartbeatBoundedForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertNil(heartbeat["warm_models"])
+        XCTAssertEqual(heartbeat["slots_free"] as? Int, 2)
+        let hello = await client.helloMessage()
+        XCTAssertNil(hello["warm_models"])
+    }
+
     func testPreflightCellTracksStatusChanges() async {
         let status = ProviderStatus(
             modelID: "model-a",
@@ -8929,12 +9389,15 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         refreshed: @escaping @Sendable () async -> CoordinatorClient.CatalogEnvelope? = { CoordinatorClientTests.refreshedCatalogEnvelope() },
         hooks: NativeMTPAdmissionPickup.Hooks? = nil,
-        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds
+        refreshIntervalSeconds: Double = NativeMTPAdmissionPickup.refreshIntervalSeconds,
+        warmSet: AdmissionPickupWarmSet? = nil
     ) async throws -> CoordinatorClient {
         try await makeClient(
             status: status,
             recorder: recorder,
             drainTimeoutSeconds: 1,
+            enableWarmSwap: warmSet != nil,
+            modelRuntime: warmSet?.boot,
             catalogReleaseID: "release-a",
             catalogPolicyVersion: "policy-a",
             catalogCandidateSHA256: String(repeating: "a", count: 64),
@@ -8944,8 +9407,42 @@ final class CoordinatorClientTests: XCTestCase {
             catalogEnvelopeRefresher: refreshed,
             catalogEnvelopeRefreshMinimumInterval: 0,
             nativeMTPAdmissionPickup: hooks ?? probe.hooks,
-            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds
+            nativeMTPAdmissionRefreshIntervalSeconds: refreshIntervalSeconds,
+            warmModels: warmSet?.table,
+            supportedModels: warmSet == nil ? nil : ["model-a", "model-b"]
         )
+    }
+
+    /// A warm set whose primary is the client's boot runtime (`model-a`) and
+    /// a warm `model-b`. `promote` performs SPEC-011 R-3.10.3 as
+    /// `WarmSetBoot.promoteInSwapTurn` does: the table, the primary role
+    /// with its swap-signal subscribers, then `completed`.
+    private struct AdmissionPickupWarmSet {
+        let table: WarmModelTable<ModelRuntime>
+        let boot: ModelRuntime
+        let member: ModelRuntime
+
+        func promote(signal: Bool = true) async throws {
+            _ = try table.promote(modelID: "model-b")
+            _ = await boot.handOffPrimaryRole(to: member)
+            if signal { await member.announceSwitchCompleted(target: "model-b") }
+        }
+    }
+
+    private func admissionPickupWarmSet() throws -> AdmissionPickupWarmSet {
+        let boot = makeRuntime(modelID: "model-a", warmSwapEnabled: true)
+        let member = makeRuntime(modelID: "model-b", warmSwapEnabled: false)
+        let table = WarmModelTable<ModelRuntime>()
+        _ = try table.insertPrimary(modelID: "model-a", runtime: boot)
+        let token = try table.beginLoading(modelID: "model-b", pinned: true)
+        try table.finishLoading(token: token, runtime: member)
+        return AdmissionPickupWarmSet(table: table, boot: boot, member: member)
+    }
+
+    /// The client hears its primary's swap signals, as `start()` arranges.
+    private static func listenForSwapSignals(_ client: CoordinatorClient) async throws {
+        await client.startSwapSignalConsumerForTest()
+        try await Task.sleep(nanoseconds: 200_000_000)
     }
 
     private static func admissionPickupStatus() -> ProviderStatus {
@@ -9224,6 +9721,129 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .draining)
     }
 
+    /// SPEC-048-R013 with SPEC-001-R016: the pickup was computed for the
+    /// boot model, and a restart brings the boot model back as the primary.
+    /// A promotion during the delay abandons the pickup: no drain, no exit,
+    /// the admission reported pending.
+    func testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDelay() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        probe.holdSleep = true
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.sleeps.count == 1 }
+        var snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .scheduled)
+
+        try await warmSet.promote()
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        probe.releaseSleep()
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let frames = await recorder.frames
+        XCTAssertFalse(Self.isDraining(frames))
+        snapshot = await status.snapshot()
+        XCTAssertNotEqual(snapshot.status, .draining)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.phase, .restartRequired)
+        // The top level now describes model-b; the pending object names the
+        // model the admission is for.
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.statusObject()["model_id"] as? String, "model-a")
+        let admitted = await status.admitRequest(requestID: "after-promotion")
+        guard case .admitted(let startedAt) = admitted else { return XCTFail("the provider serves after the promotion") }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+    }
+
+    /// A promotion while the pickup waits for requests in flight abandons
+    /// it through the same path as an expired wait: nothing is cut, the
+    /// provider serves again, and the admission is reported pending.
+    func testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDrain() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .waitingForIdle
+        }
+        let draining = await status.snapshot().status
+        XCTAssertEqual(draining, .draining)
+
+        try await warmSet.promote()
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .ready)
+        XCTAssertEqual(snapshot.nativeMTPAdmissionPending?.releaseID, "release-b")
+        let admitted = await status.admitRequest(requestID: "after-promotion")
+        guard case .admitted(let next) = admitted else { return XCTFail("the provider serves again") }
+        await status.finishRequest(startedAt: next, completion: nil, failed: false)
+    }
+
+    /// The check before the exit holds without a swap signal: a promotion
+    /// that lands while the drain waits is seen when the wait ends.
+    func testAdmissionPickupChecksThePrimaryAgainBeforeItsExit() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(
+            probe: probe, status: status, recorder: CoordinatorFrameRecorder(), warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        let startedAt = await status.beginRequest(requestID: "long-request")
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .waitingForIdle
+        }
+        try await warmSet.promote(signal: false)
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+        try await Self.waitUntil {
+            await status.snapshot().nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(probe.exits, 0)
+        let state = await status.snapshot().status
+        XCTAssertEqual(state, .ready)
+    }
+
+    /// A warm set whose boot model stays the primary restarts exactly as a
+    /// single-model provider does.
+    func testAdmissionPickupWithAnUnpromotedWarmSetRestartsAsBefore() async throws {
+        let probe = NativeMTPAdmissionPickupProbe()
+        let recorder = CoordinatorFrameRecorder()
+        let status = Self.admissionPickupStatus()
+        let warmSet = try admissionPickupWarmSet()
+        let client = try await makeAdmissionPickupClient(probe: probe, status: status, recorder: recorder, warmSet: warmSet)
+        defer { Task { await client.stop() } }
+        try await Self.listenForSwapSignals(client)
+
+        try await Self.acceptSessionOnNewerCatalog(client)
+        try await Self.waitUntil { probe.exits == 1 }
+        let frames = await recorder.frames
+        XCTAssertTrue(Self.isDraining(frames))
+        let phase = await status.snapshot().nativeMTPAdmissionPending?.phase
+        XCTAssertEqual(phase, .waitingForIdle)
+    }
+
     /// Requests in flight are never cut: the wait outlasts `drain_timeout_s`,
     /// new requests are refused, and the exit comes only at zero in flight.
     func testAdmissionPickupWaitsForRequestsInFlightPastTheDrainTimeout() async throws {
@@ -9378,6 +9998,12 @@ final class CoordinatorClientTests: XCTestCase {
         try await Self.waitUntil {
             let snapshot = await status.snapshot()
             return snapshot.nativeMTPAdmissionPending?.phase == .restartRequired
+        }
+        // The abandon publishes the pending phase one step before it sets the
+        // provider ready again; wait for that step so the read is not racing it.
+        try await Self.waitUntil {
+            let snapshot = await status.snapshot()
+            return snapshot.status == .ready || snapshot.status == .busy
         }
         var snapshot = await status.snapshot()
         XCTAssertEqual(snapshot.requestsInFlight, 1, "the capped wait cuts nothing")
@@ -11400,7 +12026,9 @@ final class CoordinatorClientTests: XCTestCase {
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
-        coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider"
+        coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider",
+        warmModels: (any WarmModelRouting)? = nil,
+        supportedModels: [String]? = nil
     ) async throws -> CoordinatorClient {
         let resumeRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("coordinator-resume-\(UUID().uuidString)", isDirectory: true)
@@ -11421,6 +12049,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         config.losslessnessProbeEnabled = losslessnessProbeEnabled
         config.computeScoreReference = computeScoreReference
+        config.supportedModels = supportedModels
         let runtime: ModelRuntime
         if let modelRuntime {
             runtime = modelRuntime
@@ -11436,6 +12065,7 @@ final class CoordinatorClientTests: XCTestCase {
         return try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
+            warmModels: warmModels,
             providerStatus: status,
             runtimeSource: runtimeSource,
             sendOverride: useDefaultSendOverride ? (sendOverride ?? defaultSendOverride) : sendOverride,
@@ -12011,6 +12641,11 @@ private actor SwapLoaderGate {
     func release() {
         released = true
     }
+}
+
+private actor PromotionFrames {
+    private(set) var all: [(String, [(String, [String: Any])])] = []
+    func append(_ label: String, _ frames: [(String, [String: Any])]) { all.append((label, frames)) }
 }
 
 private actor CoordinatorFrameRecorder {

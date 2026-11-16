@@ -34,8 +34,8 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.78` | `6889f3b41b84041f1693ca1637b1e92e30d5a2d4` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.79` | `92459644d702bf42959c66dd8be0c0416f1dd882` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
 
@@ -46,6 +46,16 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-16 the LM row is `3.32.3-macprovider.79` (`9245964`), on
+`3.32.3-macprovider.78` (#2338): It is 3.32.3-macprovider.78 plus one commit
+that only moves its mlx-swift pin to 0.32.3-macprovider.25
+(12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two
+Swift-layer commits: a synchronous eval schedules the graph and copies its
+completion events under the process-wide evalLock, waits for the device
+without the lock, then retakes the lock to finish; recursive entry, a CPU
+stream and a failed asynchronous schedule keep the stock locked path. The core
+and C rows are unchanged and no Metal kernel changed.
 
 As of 2026-11-16 the LM row is `3.32.3-macprovider.78` (`6889f3b`), on
 `3.32.3-macprovider.76` (#2389): three commits that only move its mlx-swift pin. The Swift row is `0.32.3-macprovider.24` (`7fbcada`, `.22` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row `v0.32.4-macprovider.15` (`4e9a71d`, seven commits on `.14`): the SPEC-038 FR-CB9 stock-order small-row route, `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, with 8 qmv_mma partial sums over K on that route only. The row-invariant route is unchanged. No C pin change.

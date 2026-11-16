@@ -1,11 +1,32 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.56
+Version: v0.3.58
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.58 (2026-11-16, paged KV rows leave a decode batch only on the model container, Related: #2396):**
+No normative change. The provider's paged-KV backend detached the layer
+caches of rows still decoding when `finish` for a batch-mate ran on the
+scheduler while the next decode window repacked those caches, so a row
+failed with `paged_kv_block_table_mismatch` after one window decoded with
+some layers missing their history. `finish` and the native-MTP verify entry
+now only drop the decode session under the backend lock; the next operation
+on the model container releases its rows. The block-table check is unchanged.
+The decode-path digest changes.
+
+**Change log v0.3.57 (2026-11-16, further models keep the row-invariant route, Related: #2338):**
+FR-CB9 item 3: a `serve` process configured with further models
+(`warm_models`, SPEC-001-R017) counts as having another model and keeps
+`row_invariant` (reason `switch_targets` unless an earlier rule already
+names one), because the route is decided once
+from the startup model and a further model's native MTP needs the
+row-invariant pair. A process without `warm_models` is unchanged. A further
+model loaded later into a `stock_order` process (`models warm load`) runs its
+own FR-CB10 self-check on that route and its native-MTP drafter load is
+refused there, as for the startup model.
+
 **Change log v0.3.56 (2026-11-15, stock order small-row route, Related: #2389):**
 FR-CB9 adds a third MLX small-row route, `stock_order`
 (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`): one row takes upstream's one-row
@@ -1834,7 +1855,8 @@ these hold:
    pin, queue limit, context, `kv_bits`, prefill chunk, cached turns, paged-KV
    setting, paged-KV block size and pool, and native-MTP mode;
 3. no draft model, no shard-group role, no other warm-swap target (it would
-   be served without its own self-check), and not an autotune child (a child
+   be served without its own self-check), no configured further model
+   (`warm_models`, v0.3.57), and not an autotune child (a child
    measures candidate configurations that may batch on the invariant route;
    autotune compares children only with each other, cached child results
    and catalog gates, never with the stopped incumbent's numbers, v0.3.56).
@@ -1890,7 +1912,8 @@ of 1-16 rows on one of three routes:
 
 A `serve` process MUST take `stock_order` when items 1 and 3 above hold and
 item 2 does not: native MTP cannot activate, there is no draft model, no
-shard-group role and no other warm-swap target, it is not an autotune child,
+shard-group role, no other warm-swap target and no configured further
+model, it is not an autotune child,
 and continuous batching can activate (the self-check verdict is absent, on a
 changed key, pending a re-check, or grants batching). Its reason is the
 self-check verdict (`self_check_verdict_absent`, `self_check_key_changed`,

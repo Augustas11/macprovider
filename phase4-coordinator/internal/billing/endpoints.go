@@ -1341,8 +1341,12 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		"last_payout_ready":      lastPayout,
 		"provider_share_bps":     shareBps,
 		"models_served":          models,
-		"rate_card_excerpt":      rateCard,
-		"fault_count":            faultCount,
+		// credits_by_model splits total_credits by model over the same rows,
+		// in the same provider-credit unit; it sums to total_credits minus
+		// the credits on rows with no model, which no key names.
+		"credits_by_model":  figures.byModel,
+		"rate_card_excerpt": rateCard,
+		"fault_count":       faultCount,
 		// usdc_* are the USD figures the Malibu client (ProviderEarningsClient)
 		// decodes for the "today / wk / pending / life" card. Before this the
 		// endpoint emitted only *_credits, so every card read $0.00 regardless
@@ -1784,7 +1788,7 @@ func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, provi
 	if h.store.earningsViewReadHook != nil {
 		h.store.earningsViewReadHook()
 	}
-	out := providerEarningsFigures{total: payable.total, week: payable.week, today: payable.today, models: payable.models}
+	out := providerEarningsFigures{total: payable.total, week: payable.week, today: payable.today, models: payable.models, byModel: payable.byModel}
 	// Without a range the lifetime scan above is exactly the pending sum.
 	out.pending = out.total
 	if win.hasRange {
@@ -1846,6 +1850,9 @@ func sumOnQ(ctx context.Context, q sqlQueryer, query string, args ...any) (int64
 type providerPayableTotals struct {
 	total, week, today int64
 	models             []string
+	byModel            map[string]int64
+	// unattributed is the part of total on credits with no model.
+	unattributed int64
 }
 
 // providerPayableTotals reads the range-scoped payable total, the week and
@@ -1873,7 +1880,7 @@ SELECT model,
 		return providerPayableTotals{}, err
 	}
 	defer rows.Close()
-	out := providerPayableTotals{models: []string{}}
+	out := providerPayableTotals{models: []string{}, byModel: map[string]int64{}}
 	for rows.Next() {
 		var model sql.NullString
 		var total, week, today sql.NullInt64
@@ -1883,9 +1890,14 @@ SELECT model,
 		out.total += nullInt(total)
 		out.week += nullInt(week)
 		out.today += nullInt(today)
-		if model.Valid {
-			out.models = append(out.models, model.String)
+		// A credit with no model is in total but under no model key, so
+		// credits_by_model sums to total minus unattributed.
+		if !model.Valid {
+			out.unattributed += nullInt(total)
+			continue
 		}
+		out.models = append(out.models, model.String)
+		out.byModel[model.String] += nullInt(total)
 	}
 	if err := rows.Err(); err != nil {
 		return providerPayableTotals{}, err

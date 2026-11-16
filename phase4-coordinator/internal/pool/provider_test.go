@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -3649,5 +3651,446 @@ func TestShardMemberInServiceIgnoresCapacityHolds(t *testing.T) {
 	}
 	if (Provider{State: StateReady, SlotsTotal: 1}).ShardMemberInService() {
 		t.Fatal("a non-member is not a member in service")
+	}
+}
+
+// SPEC-002-R011 multi-model providers: one session, one entry per warm model.
+
+func warmTestMembers(primary string, members ...WarmModel) []WarmModel {
+	out := []WarmModel{{ModelID: primary, State: WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 2, MaxContextTokens: 20000, ThroughputTPSEstimate: 20, ModelHash: warmTestHash(primary)}}
+	return append(out, members...)
+}
+
+// warmTestHash is the reported hash of a test member; verifyWarmTestHashes
+// verifies every reported hash, so members carrying one are hash_verified and
+// a warm set of two such warm members is multi-model (SPEC-002-R011).
+func warmTestHash(modelID string) string { return "h-" + ModelKey(modelID) }
+
+func verifyWarmTestHashes(r *Registry) {
+	if r.modelIdentityResolver != nil || r.modelIdentityVerifier != nil || r.hashVerifier != nil {
+		return
+	}
+	WithModelIdentityVerifier(func(_, _, reported, _ string) HashStatus {
+		if reported == "" {
+			return HashStatusUncatalogued
+		}
+		return HashStatusVerified
+	})(r)
+}
+
+func warmTestMember(modelID string, state WarmModelState, total, free int) WarmModel {
+	m := WarmModel{ModelID: modelID, State: state, SlotsTotal: total, MaxContextTokens: 8000, ThroughputTPSEstimate: 12, ModelHash: warmTestHash(modelID)}
+	if state == WarmModelWarm {
+		m.SlotsFree = free
+	}
+	return m
+}
+
+// registerWarmHeartbeatProvider is registerHeartbeatProvider with a warm set:
+// primary model-a (2 seats), warm model-b (2 seats) and loading model-c.
+func registerWarmHeartbeatProvider(t *testing.T, registry *Registry, at time.Time) {
+	t.Helper()
+	verifyWarmTestHashes(registry)
+	registry.Register(&Provider{
+		ProviderID:                    "p1",
+		AssignedID:                    "current",
+		ModelID:                       "model-a",
+		ModelHash:                     warmTestHash("model-a"),
+		HashStatus:                    HashStatusVerified,
+		State:                         StateReady,
+		SlotsFree:                     2,
+		SlotsTotal:                    2,
+		LastHeartbeatAt:               at,
+		LastActivityAt:                at,
+		MaxConcurrency:                2,
+		MaxContextTokens:              20000,
+		ThroughputTPSEstimate:         20,
+		ModelAdmissionCandidateID:     "cand-a",
+		ModelAdmissionCatalogModelKey: "model-a",
+		CandidateRowIdentity:          "row-a",
+		NativeMTPCanary:               &NativeMTPCanaryDiagnostics{Offered: true, ModelID: "model-a"},
+		WarmModels: warmTestMembers("model-a",
+			warmTestMember("model-b", WarmModelWarm, 2, 2),
+			warmTestMember("model-c", WarmModelLoading, 0, 0)),
+	}, nil)
+}
+
+func warmHeartbeatUpdate(at time.Time, members []WarmModel) HeartbeatUpdate {
+	update := heartbeatUpdateAt(members[0].ModelID, at)
+	update.ModelHash, update.ModelHashPresent = warmTestHash(members[0].ModelID), true
+	update.MaxConcurrency = members[0].SlotsTotal
+	update.SlotsTotal = members[0].SlotsTotal
+	update.SlotsFree = members[0].SlotsFree
+	update.WarmModels = members
+	return update
+}
+
+func warmEntry(t *testing.T, registry *Registry, model string) Provider {
+	t.Helper()
+	entry, ok := registry.ResolveEntry("p1", "current", model)
+	if !ok {
+		t.Fatalf("no entry for %q", model)
+	}
+	return entry
+}
+
+func TestWarmEntryViewsProjectEachMember(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+
+	entries := registry.EntrySnapshot()
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+	primary := warmEntry(t, registry, "")
+	if primary.ServedModelID != "model-a" || primary.ModelID != "model-a" || primary.ModelAdmissionCandidateID != "cand-a" ||
+		primary.NativeMTPCanary == nil || primary.SlotsFree != 2 || primary.SortKey() != "p1/current#model-a" {
+		t.Fatalf("primary view = %+v", primary)
+	}
+	member := warmEntry(t, registry, "MODEL-B")
+	if member.ServedModelID != "model-b" || member.ModelID != "model-b" || member.SlotsTotal != 2 || member.MaxConcurrency != 2 ||
+		member.MaxContextTokens != 8000 || member.ThroughputTPSEstimate != 12 || member.State != StateReady || !member.RoutingEligible() {
+		t.Fatalf("member view = %+v", member)
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if _, bound := member.ModelAdmissionBinding(); bound || member.ModelAdmissionCatalogModelKey != "" || member.NativeMTPCanary != nil ||
+		member.CandidateRowIdentity != "" || (member.IdentityPin != nil && member.IdentityPin == session.IdentityPin) || member.ArtifactIdentity != nil {
+		t.Fatalf("member view kept a primary-only binding: %+v", member)
+	}
+	if member.SortKey() != "p1/current#model-b" {
+		t.Fatalf("member sort key = %q", member.SortKey())
+	}
+	loading := warmEntry(t, registry, "model-c")
+	if loading.State != StateUnavailable || loading.SlotsFree != 0 || loading.RoutingEligible() {
+		t.Fatalf("loading member view = %+v", loading)
+	}
+	if _, ok := registry.ResolveEntry("p1", "current", "model-z"); ok {
+		t.Fatal("resolved a model outside the warm set")
+	}
+	session, _ = registry.Resolve("p1", "current")
+	if session.ServedModelID != "" || session.SortKey() != "p1/current" {
+		t.Fatalf("session = %q %q", session.ServedModelID, session.SortKey())
+	}
+}
+
+func TestWarmEntryConsumeRestoreMarkFullStayOnTheMember(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+
+	if ok, unconfirmed := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok || unconfirmed {
+		t.Fatalf("first consume ok=%v unconfirmed=%v", ok, unconfirmed)
+	}
+	if ok, unconfirmed := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok || !unconfirmed {
+		t.Fatalf("second consume ok=%v unconfirmed=%v", ok, unconfirmed)
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.SlotsFree != 2 || session.State != StateReady || registry.ForwardedInFlight("p1", "current") != 0 {
+		t.Fatalf("member dispatches touched the session: slots_free=%d state=%s", session.SlotsFree, session.State)
+	}
+	if member := warmEntry(t, registry, "model-b"); member.SlotsFree != 0 || member.State != StateBusy {
+		t.Fatalf("member after two dispatches = %d %s", member.SlotsFree, member.State)
+	}
+	if free, ok := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); !ok || free != 0 {
+		t.Fatalf("routable member seats = %d %v", free, ok)
+	}
+	if !registry.RestoreForwardedSlotFor("p1", "current", "model-b") {
+		t.Fatal("restore failed")
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 1 {
+		t.Fatalf("after restore free = %d", free)
+	}
+	if !registry.MarkForwardedSlotFullFor("p1", "current", "model-b", true) {
+		t.Fatal("mark full failed")
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 0 || registry.ForwardedInFlightFor("p1", "current", "model-b") != 0 {
+		t.Fatalf("after mark full free=%d in_flight=%d", free, registry.ForwardedInFlightFor("p1", "current", "model-b"))
+	}
+	session, _ = registry.Resolve("p1", "current")
+	if session.SlotsFree != 2 || session.State != StateReady || session.capacitySafetyHold {
+		t.Fatalf("member refusal touched the session: %+v", session)
+	}
+
+	// The primary's seats are the session's.
+	if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "Model-A"); !ok {
+		t.Fatal("primary consume failed")
+	}
+	session, _ = registry.Resolve("p1", "current")
+	if session.SlotsFree != 1 || registry.ForwardedInFlight("p1", "current") != 1 {
+		t.Fatalf("primary consume: slots_free=%d", session.SlotsFree)
+	}
+	if member := warmEntry(t, registry, "model-b"); member.forwardedInFlight != 0 {
+		t.Fatalf("primary consume moved the member count: %d", member.forwardedInFlight)
+	}
+}
+
+func TestWarmEntrySessionStateOverridesEntryState(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+	for _, state := range []State{StateDegraded, StateDraining, StateUnavailable} {
+		registry.mu.Lock()
+		registry.providers["p1"].State = state
+		registry.mu.Unlock()
+		for _, model := range []string{"model-a", "model-b", "model-c"} {
+			if entry := warmEntry(t, registry, model); entry.State != state || entry.RoutingEligible() {
+				t.Fatalf("session %s: %s entry state = %s", state, model, entry.State)
+			}
+		}
+	}
+	// A primary that is full marks the session busy, not its siblings.
+	registry.mu.Lock()
+	registry.providers["p1"].State = StateBusy
+	registry.providers["p1"].SlotsFree = 0
+	registry.mu.Unlock()
+	if member := warmEntry(t, registry, "model-b"); member.State != StateReady || !member.RoutingEligible() {
+		t.Fatalf("busy primary blocked the member: %s", member.State)
+	}
+	// A thermal hold is session-wide.
+	registry.mu.Lock()
+	registry.providers["p1"].capacitySafetyHold = true
+	registry.mu.Unlock()
+	if member := warmEntry(t, registry, "model-b"); member.State != StateBusy || member.RoutingEligible() {
+		t.Fatalf("thermal hold left the member routable: %s", member.State)
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 0 {
+		t.Fatalf("thermal hold routable member seats = %d", free)
+	}
+}
+
+func TestWarmEntryEvictedMidFlight(t *testing.T) {
+	registry := NewRegistry(nil)
+	at := time.Now()
+	registerWarmHeartbeatProvider(t, registry, at)
+	if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok {
+		t.Fatal("consume failed")
+	}
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a",
+		warmTestMember("model-c", WarmModelWarm, 1, 1)))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if _, ok := registry.ResolveEntry("p1", "current", "model-b"); ok {
+		t.Fatal("evicted member still resolves")
+	}
+	if registry.RestoreForwardedSlotFor("p1", "current", "model-b") || registry.DropForwardedInFlightFor("p1", "current", "model-b") {
+		t.Fatal("restore for an evicted member was not a no-op")
+	}
+	if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); ok {
+		t.Fatal("consumed a seat on an evicted member")
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.SlotsFree != 2 || session.forwardedInFlight != 0 || len(session.WarmModels) != 2 {
+		t.Fatalf("eviction touched the session: %+v", session)
+	}
+	if c := warmEntry(t, registry, "model-c"); c.State != StateReady || c.SlotsFree != 1 {
+		t.Fatalf("model-c after load = %s %d", c.State, c.SlotsFree)
+	}
+}
+
+func TestWarmEntryInFlightSurvivesHeartbeatsAndPromotion(t *testing.T) {
+	registry := NewRegistry(nil)
+	at := time.Now()
+	registerWarmHeartbeatProvider(t, registry, at)
+	for i := 0; i < 2; i++ {
+		if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-b"); !ok {
+			t.Fatal("member consume failed")
+		}
+	}
+	if ok, _ := registry.ConsumeForwardedSlotFor("p1", "current", "model-a"); !ok {
+		t.Fatal("primary consume failed")
+	}
+
+	// The provider has not yet seen the member dispatches: the coordinator's
+	// lower count stays while its own dispatches are open.
+	primary := warmTestMembers("model-a")[0]
+	primary.SlotsFree = 1
+	members := []WarmModel{primary, warmTestMember("model-b", WarmModelWarm, 2, 2)}
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), members)); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if n := registry.ForwardedInFlightFor("p1", "current", "model-b"); n != 2 {
+		t.Fatalf("member in flight after heartbeat = %d", n)
+	}
+	if free, _ := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); free != 0 {
+		t.Fatalf("member seats after stale heartbeat = %d", free)
+	}
+	if n := registry.ForwardedInFlightFor("p1", "current", "model-a"); n != 1 {
+		t.Fatalf("primary in flight after heartbeat = %d", n)
+	}
+
+	// Promotion: model-b becomes the primary and model-a a further member.
+	promoted := WarmModel{ModelID: "model-b", State: WarmModelWarm, Primary: true, Pinned: true, SlotsTotal: 2, SlotsFree: 0, MaxContextTokens: 20000, ThroughputTPSEstimate: 20}
+	demoted := warmTestMember("model-a", WarmModelWarm, 2, 1)
+	demoted.Pinned = true
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(2*time.Second), []WarmModel{promoted, demoted})); !ok {
+		t.Fatal("promotion heartbeat failed")
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.ModelID != "model-b" || session.forwardedInFlight != 2 {
+		t.Fatalf("promoted session model=%s in_flight=%d", session.ModelID, session.forwardedInFlight)
+	}
+	if n := registry.ForwardedInFlightFor("p1", "current", "model-a"); n != 1 {
+		t.Fatalf("demoted member in flight = %d", n)
+	}
+	if !registry.RestoreForwardedSlotFor("p1", "current", "model-a") {
+		t.Fatal("restore on demoted member failed")
+	}
+	session, _ = registry.Resolve("p1", "current")
+	if session.forwardedInFlight != 2 || registry.ForwardedInFlightFor("p1", "current", "model-a") != 0 {
+		t.Fatalf("restore on the demoted member reached the session: %d", session.forwardedInFlight)
+	}
+	if !registry.RestoreForwardedSlotFor("p1", "current", "model-b") {
+		t.Fatal("restore on promoted primary failed")
+	}
+	if n := registry.ForwardedInFlight("p1", "current"); n != 1 {
+		t.Fatalf("promoted primary in flight after restore = %d", n)
+	}
+}
+
+func TestWarmEntryHashVerdictIsPerMember(t *testing.T) {
+	const goodHash = "1111111111111111111111111111111111111111111111111111111111111111"
+	const badHash = "2222222222222222222222222222222222222222222222222222222222222222"
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(modelID, expectedHash, reportedHash, _ string) HashStatus {
+		if reportedHash == expectedHash {
+			return HashStatusVerified
+		}
+		return HashStatusMismatch
+	}))
+	at := time.Now()
+	registerHeartbeatProvider(t, registry, "model-a", goodHash, HashStatusVerified, at)
+	good := warmTestMember("model-b", WarmModelWarm, 1, 1)
+	good.ModelHash, good.ExpectedModelHash = goodHash, goodHash
+	bad := warmTestMember("model-c", WarmModelWarm, 1, 1)
+	bad.ModelHash, bad.ExpectedModelHash = badHash, goodHash
+	update := warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a", good, bad))
+	update.ModelHash, update.ModelHashPresent, update.ExpectedModelHash = goodHash, true, goodHash
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", update); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	if a := warmEntry(t, registry, "model-a"); a.HashStatus != HashStatusVerified {
+		t.Fatalf("primary hash status = %s", a.HashStatus)
+	}
+	if b := warmEntry(t, registry, "model-b"); b.HashStatus != HashStatusVerified || b.ModelHash != goodHash {
+		t.Fatalf("model-b hash status = %s", b.HashStatus)
+	}
+	if c := warmEntry(t, registry, "model-c"); c.HashStatus != HashStatusMismatch {
+		t.Fatalf("model-c hash status = %s", c.HashStatus)
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.HashStatus != HashStatusVerified {
+		t.Fatalf("a member mismatch reached the session: %s", session.HashStatus)
+	}
+}
+
+func TestEntrySnapshotEqualsSnapshotWithoutWarmSet(t *testing.T) {
+	registry := NewRegistry(nil)
+	at := time.Now()
+	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, at)
+	registry.Register(&Provider{ProviderID: "p2", AssignedID: "s2", ModelID: "model-b", State: StateReady, SlotsFree: 1, SlotsTotal: 1,
+		CBSelfCheck: &ProviderCBSelfCheck{Decision: "granted"}, NativeMTPCanary: &NativeMTPCanaryDiagnostics{Offered: true}}, nil)
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", heartbeatUpdateAt("model-a", at.Add(time.Second))); !ok {
+		t.Fatal("heartbeat failed")
+	}
+	registry.ConsumeForwardedSlotFor("p1", "current", "model-a")
+	sorted := func(in []Provider) []Provider {
+		sort.Slice(in, func(i, j int) bool { return in[i].SortKey() < in[j].SortKey() })
+		return in
+	}
+	got, want := sorted(registry.EntrySnapshot()), sorted(registry.Snapshot())
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("EntrySnapshot = %+v\nSnapshot = %+v", got, want)
+	}
+	plain, _ := registry.Resolve("p1", "current")
+	for _, model := range []string{"", "model-a", "MODEL-A"} {
+		resolved, ok := registry.ResolveEntry("p1", "current", model)
+		if !ok || !reflect.DeepEqual(resolved, plain) {
+			t.Fatalf("ResolveEntry(%q) = %+v, Resolve = %+v", model, resolved, plain)
+		}
+	}
+	// Another model is not this legacy session's entry.
+	if _, ok := registry.ResolveEntry("p1", "current", "any-model"); ok {
+		t.Fatal("a legacy session resolved a model it does not serve")
+	}
+}
+
+func TestWarmEntryMarkNotLoadedUntilNextHeartbeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	at := time.Now()
+	registerWarmHeartbeatProvider(t, registry, at)
+
+	if !registry.MarkEntryNotLoaded("p1", "current", "MODEL-B") {
+		t.Fatal("mark not loaded failed")
+	}
+	if member := warmEntry(t, registry, "model-b"); member.State != StateUnavailable || member.SlotsFree != 0 || member.RoutingEligible() {
+		t.Fatalf("member after model_not_loaded = %s free=%d", member.State, member.SlotsFree)
+	}
+	if free, ok := registry.RoutableSlotsFreeFor("p1", "current", "model-b"); !ok || free != 0 {
+		t.Fatalf("routable member seats = %d %v", free, ok)
+	}
+	session, _ := registry.Resolve("p1", "current")
+	if session.State != StateReady || session.SlotsFree != 2 || !session.RoutingEligible() {
+		t.Fatalf("model_not_loaded touched the session: %s free=%d", session.State, session.SlotsFree)
+	}
+	if primary := warmEntry(t, registry, "model-a"); primary.State != StateReady || !primary.RoutingEligible() {
+		t.Fatalf("model_not_loaded touched the primary entry: %s", primary.State)
+	}
+
+	// A further mark on the primary entry leaves the session and Snapshot alone.
+	if !registry.MarkEntryNotLoaded("p1", "current", "model-a") {
+		t.Fatal("mark primary not loaded failed")
+	}
+	if primary := warmEntry(t, registry, "model-a"); primary.State != StateUnavailable || primary.RoutingEligible() {
+		t.Fatalf("primary entry after model_not_loaded = %s", primary.State)
+	}
+	if session, _ := registry.Resolve("p1", "current"); session.State != StateReady || !session.RoutingEligible() {
+		t.Fatalf("primary model_not_loaded touched the session: %s", session.State)
+	}
+
+	// The next heartbeat listing the members warm makes them routable again.
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", warmHeartbeatUpdate(at.Add(time.Second), warmTestMembers("model-a",
+		warmTestMember("model-b", WarmModelWarm, 2, 2)))); !ok {
+		t.Fatal("heartbeat rejected")
+	}
+	for _, model := range []string{"model-a", "model-b"} {
+		if entry := warmEntry(t, registry, model); entry.State != StateReady || !entry.RoutingEligible() {
+			t.Fatalf("%s after heartbeat = %s", model, entry.State)
+		}
+	}
+
+	if registry.MarkEntryNotLoaded("p1", "current", "model-z") || registry.MarkEntryNotLoaded("p1", "other", "model-b") || registry.MarkEntryNotLoaded("p1", "current", "") {
+		t.Fatal("marked an entry that does not exist")
+	}
+	legacy := NewRegistry(nil)
+	legacy.Register(&Provider{ProviderID: "p2", AssignedID: "s2", ModelID: "model-a", State: StateReady, SlotsTotal: 1, SlotsFree: 1}, nil)
+	if legacy.MarkEntryNotLoaded("p2", "s2", "model-a") {
+		t.Fatal("marked a provider without a warm set")
+	}
+}
+
+// EntryViews projects a Snapshot value exactly as EntrySnapshot does, and
+// EntryMember names each view's member; a provider without a warm set is
+// one view, itself, with no member.
+func TestEntryViewsMatchEntrySnapshot(t *testing.T) {
+	registry := NewRegistry(nil)
+	registerWarmHeartbeatProvider(t, registry, time.Now())
+	session, _ := registry.Resolve("p1", "current")
+	views := EntryViews(session)
+	entries := registry.EntrySnapshot()
+	if len(views) != 3 || len(entries) != 3 {
+		t.Fatalf("views=%d entries=%d", len(views), len(entries))
+	}
+	for i, v := range views {
+		if !reflect.DeepEqual(v, entries[i]) {
+			t.Fatalf("view %d = %+v, entry = %+v", i, v, entries[i])
+		}
+		member, ok := v.EntryMember()
+		if !ok || member.ModelID != session.WarmModels[i].ModelID || member.Primary != (i == 0) {
+			t.Fatalf("view %d member = %+v %v", i, member, ok)
+		}
+	}
+	legacy := Provider{ProviderID: "p2", ModelID: "model-a"}
+	if got := EntryViews(legacy); len(got) != 1 || !reflect.DeepEqual(got[0], legacy) {
+		t.Fatalf("legacy views = %+v", got)
+	}
+	if _, ok := legacy.EntryMember(); ok {
+		t.Fatal("a provider without a warm set has no member")
 	}
 }

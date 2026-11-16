@@ -177,6 +177,34 @@ final class StatusCommandTests: XCTestCase {
         }
     }
 
+    func testStatusListsEveryLoadedModelPrimaryFirst() {
+        var payload = status(providerID: "provider-a")
+        payload["network_state"] = "buyer_serving"
+        payload["warm_models"] = [
+            ["model_id": "model-a", "state": "warm", "primary": true, "pinned": true, "slots_total": 4, "slots_free": 3],
+            ["model_id": "model-b", "state": "warm", "primary": false, "pinned": false, "slots_total": 2, "slots_free": 2],
+            ["model_id": "model-c", "state": "loading", "primary": false, "pinned": false, "slots_total": 0],
+        ] as [[String: Any]]
+
+        let plain = LocalStatusFormatter.format(payload)
+        XCTAssertTrue(plain.contains("Loaded models:\n  model-a (main, ready)\n  model-b (ready)\n  model-c (loading)"), plain)
+        let policy = try! publicLanguagePolicy()
+        for term in policy.terms.map(\.internalTerm) {
+            XCTAssertFalse(plain.lowercased().contains(term), "\(term) leaked in:\n\(plain)")
+        }
+
+        let advanced = LocalStatusFormatter.format(payload, advanced: true)
+        XCTAssertTrue(advanced.contains(
+            "  Loaded models:\n    model-a (primary, warm, 3 of 4 slots free)\n    model-b (warm, 2 of 2 slots free)\n    model-c (loading)"
+        ), advanced)
+
+        // One model: the output has no such block.
+        payload["warm_models"] = [["model_id": "model-a", "state": "warm", "primary": true]] as [[String: Any]]
+        XCTAssertFalse(LocalStatusFormatter.format(payload).contains("Loaded models"))
+        payload.removeValue(forKey: "warm_models")
+        XCTAssertFalse(LocalStatusFormatter.format(payload, advanced: true).contains("Loaded models"))
+    }
+
     func testDefaultBlockedStatusShowsOneSafeNextStep() {
         var payload = status(providerID: "provider-a")
         payload["network_state"] = "not_buyer_serving"
@@ -278,6 +306,7 @@ final class StatusCommandTests: XCTestCase {
             ProviderContextSetCommand.helpMessage(),
             ProviderContextRollbackCommand.helpMessage(),
             ModelsSwitchCommand.helpMessage(),
+            ModelsWarmCommand.helpMessage(),
             AutotuneCommand.helpMessage(),
             Spec028CanaryCommand.helpMessage(),
             Spec028BenchmarkCommand.helpMessage(),

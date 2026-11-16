@@ -575,6 +575,7 @@ func providerMap(p pool.Provider, token map[string]any, measured routing.Through
 		"assigned_id":              p.AssignedID,
 		"hostname":                 p.Hostname,
 		"model_id":                 p.ModelID,
+		"warm_models":              warmModelRows(p),
 		"state":                    p.State,
 		"tier":                     p.Tier,
 		"inference_path":           p.InferencePath,
@@ -598,6 +599,27 @@ func providerMap(p pool.Provider, token map[string]any, measured routing.Through
 		// bearerless_duplicate / mint_failed).
 		"auth_state": p.AuthState,
 	}
+}
+
+// warmModelRows lists the provider's SPEC-002-R011 entries, primary first,
+// with each entry's own state and seats. It is empty when the provider
+// reports no warm set; model_id then names its only model.
+func warmModelRows(p pool.Provider) []map[string]any {
+	out := []map[string]any{}
+	if p.WarmModels == nil {
+		return out
+	}
+	for _, entry := range pool.EntryViews(p) {
+		member, _ := entry.EntryMember()
+		out = append(out, map[string]any{
+			"model_id":    member.ModelID,
+			"primary":     member.Primary,
+			"state":       member.State,
+			"slots_total": entry.SlotsTotal,
+			"slots_free":  entry.SlotsFree,
+		})
+	}
+	return out
 }
 
 func firstOrNil(rows []map[string]any) any {

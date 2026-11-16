@@ -2,7 +2,6 @@ package routing
 
 import (
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -182,10 +181,10 @@ type perfKey struct {
 	model      string
 }
 
-// newPerfKey case-folds the served model (SPEC-002 model equality), so every
-// spelling of one session's model shares a record.
+// newPerfKey case-folds the served model (SPEC-010 folding, pool.ModelKey),
+// so every spelling of one session's model shares a record.
 func newPerfKey(providerID, model string) perfKey {
-	return perfKey{providerID: providerID, model: strings.ToLower(model)}
+	return perfKey{providerID: providerID, model: pool.ModelKey(model)}
 }
 
 // PerfStore is the in-memory SPEC-002-R005 store keyed by provider and the

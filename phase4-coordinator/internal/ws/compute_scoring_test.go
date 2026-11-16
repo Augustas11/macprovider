@@ -217,7 +217,12 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 // sessions (FR-26) and configures referenceOperators.
 func newScoringHarnessWithReference(t *testing.T, providers map[string]string, cheaters map[string]bool, reference map[string]bool, referenceOperators []string) *scoringHarness {
 	t.Helper()
-	h := &scoringHarness{t: t, registry: pool.NewRegistry(nil), holds: &fakeHoldStore{}, cheaters: cheaters, logs: &lockedBuffer{}}
+	return newScoringHarnessOnRegistry(t, pool.NewRegistry(nil), providers, cheaters, reference, referenceOperators)
+}
+
+func newScoringHarnessOnRegistry(t *testing.T, registry *pool.Registry, providers map[string]string, cheaters map[string]bool, reference map[string]bool, referenceOperators []string) *scoringHarness {
+	t.Helper()
+	h := &scoringHarness{t: t, registry: registry, holds: &fakeHoldStore{}, cheaters: cheaters, logs: &lockedBuffer{}}
 	h.clock.Store(time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC).UnixNano())
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "op-key"

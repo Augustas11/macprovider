@@ -267,11 +267,14 @@ struct MalibuModelsListDocument: Decodable, Equatable, Sendable {
     }
 
     func validated() throws -> MalibuModelsListDocument {
+        // Several models may be loaded together; then the list must name
+        // the current one, and it must be one of them.
+        let warmRows = rows.filter { $0.state == "warm" }
         guard schemaVersion == "models_list.v1",
               ["control_socket", "config_fallback"].contains(source),
               currentModelID == nil || isSafeModelID(currentModelID),
               Self.isValidGeneratedAt(generatedAt),
-              rows.filter({ $0.state == "warm" }).count <= 1 else {
+              warmRows.count <= 1 || currentModelID != nil else {
             throw ModelManagementError.invalidCatalog
         }
         var seenModelKeys = Set<String>()
@@ -287,12 +290,16 @@ struct MalibuModelsListDocument: Decodable, Equatable, Sendable {
                 throw ModelManagementError.invalidCatalog
             }
         }
-        if let currentModelID,
-           let warm = rows.first(where: { $0.state == "warm" }),
-           warm.modelID != currentModelID {
+        if let currentModelID, !warmRows.isEmpty,
+           !warmRows.contains(where: { $0.modelID == currentModelID }) {
             throw ModelManagementError.invalidCatalog
         }
         return self
+    }
+
+    /// Whether `row` is loaded beside the current model rather than being it.
+    func isLoadedBesideCurrent(_ row: Row) -> Bool {
+        row.state == "warm" && rows.filter({ $0.state == "warm" }).count > 1 && row.modelID != currentModelID
     }
 
     private static func isValidGeneratedAt(_ value: String) -> Bool {
@@ -2466,6 +2473,18 @@ final class ModelManagementStore: ObservableObject {
         var bytesExpected: Int64?
     }
 
+    /// The model a Keep loaded or Unload command is running for.
+    @Published private(set) var loadedModelActionTarget: String?
+    /// The result of the last Keep loaded or Unload.
+    @Published private(set) var loadedModelActionLine: String?
+    /// Models config.yaml loads beside the main model at start, case-folded.
+    @Published private(set) var savedLoadedModelIDs: Set<String> = []
+
+    enum LoadedModelAction: Equatable {
+        case keep
+        case unload
+    }
+
     @Published private(set) var download: DownloadState?
 
     /// The last download's outcome, shown beside the row it was for.
@@ -2788,6 +2807,7 @@ final class ModelManagementStore: ObservableObject {
         background: Bool = false
     ) async {
         updatePeerEvidence(peer)
+        reloadSavedLoadedModels()
         if let pendingSwitch {
             switch operation {
             case .reconciling:
@@ -2864,7 +2884,11 @@ final class ModelManagementStore: ObservableObject {
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             let document = try decodeList(result.stdout).validated()
             self.currentModelID = document.currentModelID ?? configuredModel
-            self.rows = document.rows.map { MalibuModelRow(row: $0, currentModelID: self.currentModelID, warmSwapAvailable: document.warmSwapAvailable) }
+            self.rows = document.rows.map {
+                MalibuModelRow(
+                    row: $0, currentModelID: self.currentModelID, warmSwapAvailable: document.warmSwapAvailable,
+                    loadedBesideCurrent: document.isLoadedBesideCurrent($0))
+            }
             self.listState = document.warmSwapAvailable ? .ready : .viewOnly
             self.warmSwapAvailable = document.warmSwapAvailable
             self.statusLine = document.warmSwapAvailable
@@ -2932,6 +2956,49 @@ final class ModelManagementStore: ObservableObject {
             otherMLXModels = []
             otherMLXState = .unavailable(String(localized: "Other MLX models can't be listed right now.", comment: "Browse failed"))
         }
+    }
+
+    func reloadSavedLoadedModels() {
+        savedLoadedModelIDs = Set(ProviderConfig.readSavedWarmModels(paths: paths).map { $0.lowercased(with: nil) })
+    }
+
+    /// Keep loaded: `models warm load --save`, which also keeps the model
+    /// loaded after a restart. Unload: `models warm unload --save`.
+    func runLoadedModelAction(_ action: LoadedModelAction, modelID: String) async {
+        guard loadedModelActionTarget == nil else { return }
+        loadedModelActionTarget = modelID
+        defer { loadedModelActionTarget = nil }
+        let arguments = [
+            "models", "warm", action == .keep ? "load" : "unload", modelID, "--save",
+            "--config", paths.configFile.path,
+            "--ctl-socket-path", paths.controlSocket.path,
+        ]
+        do {
+            let result = try await cli.run(arguments: arguments, peer: peerEvidence, onLine: { _ in })
+            loadedModelActionLine = Self.loadedModelActionLine(action, modelID: modelID, result: result)
+        } catch {
+            loadedModelActionLine = Self.loadedModelActionLine(
+                action, modelID: modelID, result: ModelCLIResult(exitCode: 1, stdout: "", stderr: ""))
+        }
+        reloadSavedLoadedModels()
+    }
+
+    static func loadedModelActionLine(_ action: LoadedModelAction, modelID: String, result: ModelCLIResult) -> String {
+        let name = ShellText.display(modelID)
+        if result.exitCode == 0 {
+            if result.stderr.contains("Restart the provider to use it.") {
+                return String(localized: "\(name) is saved. Restart the provider to use it.", comment: "Keep loaded saved, restart needed")
+            }
+            return action == .keep
+                ? String(localized: "\(name) stays loaded, also after a restart.", comment: "Keep loaded result")
+                : String(localized: "\(name) is unloaded.", comment: "Unload result")
+        }
+        if result.exitCode == 3 {
+            return String(localized: "\(name) is serving a request. Try again when it is idle.", comment: "Unload refused while busy")
+        }
+        return action == .keep
+            ? String(localized: "\(name) could not be kept loaded.", comment: "Keep loaded failed")
+            : String(localized: "\(name) could not be unloaded.", comment: "Unload failed")
     }
 
     /// Escalation from SIGTERM to SIGKILL for a bounded read.
@@ -4274,7 +4341,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     var action: Action
     var blockReason: String?
 
-    init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool) {
+    /// `loadedBesideCurrent`: the row is a model loaded beside the current
+    /// one, classified like any other row, not as the current model.
+    init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool, loadedBesideCurrent: Bool = false) {
         id = row.actionModelID
         displayID = row.displayID
         modelKey = row.actionModelID
@@ -4304,7 +4373,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandWeight = nil
         canonicalIdentity = Self.canonicalIdentity(tag: "catalog", value: row.actionModelID)
         warningCodes = []
-        if row.modelID == currentModelID || row.state == "warm" {
+        if row.modelID == currentModelID || (row.state == "warm" && !loadedBesideCurrent) {
             category = .current
             action = .none
             blockReason = nil

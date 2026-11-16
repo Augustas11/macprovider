@@ -36,6 +36,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         let targetTokenIDs: [Int]
     }
     private let container: ModelContainer
+    /// SPEC-001-R018: the owning runtime's GPU turn; nil outside a runtime.
+    let gpuTurnParticipant: GPUTurnParticipant?
     private let nativeMTPDrafterContainer: MTPDrafterContainer?
     private let nativeMTPVerifyTokenBudget: Int
     private var nativeTransactions: [String: NativeTransaction] = [:]
@@ -62,8 +64,10 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
     #endif
 
     init(container: ModelContainer, nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
-         nativeMTPVerifyTokenBudget: Int = DeepseekV4ContinuousBatchBackend.maxDecodeRows) {
+         nativeMTPVerifyTokenBudget: Int = DeepseekV4ContinuousBatchBackend.maxDecodeRows,
+         gpuTurnParticipant: GPUTurnParticipant? = nil) {
         self.container = container
+        self.gpuTurnParticipant = gpuTurnParticipant
         self.nativeMTPDrafterContainer = nativeMTPDrafterContainer
         self.nativeMTPVerifyTokenBudget = max(1, nativeMTPVerifyTokenBudget)
     }
@@ -121,6 +125,9 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             var outputs: [ContinuousBatchPrefillOutput] = []
             for input in inputs {
                 do {
+                    // SPEC-001-R018: one GPU turn per row's reference prefill chunk.
+                    let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.prefillChunk(tokens: input.promptTokens.count)) ?? false
+                    defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
                     guard (!input.nativeMTPPromptPrefill || self.nativeMTPDrafterContainer != nil),
                           !input.promptTokens.isEmpty,
                           input.promptTokens.count <= Self.prefillChunkTokens,
@@ -161,7 +168,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID, failureCode: "continuous_batching_prefill_failed"))
                 }
             }
-            Memory.clearCache()
+            // SPEC-001-R017: through the shared budget (a plain clear with one runtime).
+            SharedModelMemoryBudget.shared.clearCacheAfterPrefill(callerID: self.gpuTurnParticipant?.id)
             return outputs
         }
     }
@@ -360,10 +368,17 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                 return (sampled, output.state?[mtpLastHiddenStatesKey])
             }
 
+            // SPEC-001-R018: one GPU turn per decode step, released before the
+            // step's tokens go to the observer.
+            let gpuTurn = self.gpuTurnParticipant.map(GPUTurnScope.init)
+            defer { gpuTurn?.close() }
+            let decodeTurn = GPUWorkKind.decodeStep(rows: eligible.count)
+            gpuTurn?.begin(decodeTurn)
             var pendingIndices = Array(eligible.indices)
             var pending = enqueue(MLXArray(eligible.map { Int32($0.0.currentToken) }), indices: pendingIndices, step: 0)
             var cancelledWindow = false
             for step in 0..<steps {
+                gpuTurn?.begin(decodeTurn)
                 let current = pending
                 let currentIndices = pendingIndices
                 // Stops from the previous host read are excluded before the
@@ -404,6 +419,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                         self.finish(requestID: input.requestID)
                     }
                 }
+                gpuTurn?.end()
                 if streaming, let onStep {
                     if !onStep(.init(stepIndex: step, tokens: sampled)) {
                         cancelledWindow = true
@@ -528,6 +544,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         }
         guard !inputs.isEmpty else { return [:] }
         return try await container.perform(nonSendable: inputs) { context, inputs in
+            // SPEC-001-R018: one GPU turn for this native-MTP round phase.
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let target = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }
@@ -621,6 +639,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                   && $0.targetKVTokenCount == $0.committedKVTokenCount.addingReportingOverflow($0.verifiedInputTokenCount).partialValue })
         else { throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_invalid_verification_width") }
         return try await container.perform(nonSendable: inputs) { context, inputs in
+            // SPEC-001-R018: one GPU turn for this native-MTP round phase.
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let model = context.model as? DeepseekV4Model, model.batchesExactly else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_exact_model_required")
             }
@@ -703,6 +723,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
     func finalizeNativeMTPPackedRound(rows inputs: [ContinuousBatchNativeMTPFinalizeInput]) async throws {
         guard !inputs.isEmpty else { return }
         try await container.perform(nonSendable: inputs) { context, inputs in
+            // SPEC-001-R018: one GPU turn for this native-MTP round phase.
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             guard let target = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }

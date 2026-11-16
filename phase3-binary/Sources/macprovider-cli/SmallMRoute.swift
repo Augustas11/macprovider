@@ -126,8 +126,11 @@ enum SmallMRoute: String, Sendable, Equatable {
         var draftConfigured: Bool
         var shardGroupRole: Bool
         var autotuneCandidate: Bool
-        /// Another model this process may warm-swap to; it would be served
-        /// without its own self-check here.
+        /// Another model this process may warm-swap to (it would be served
+        /// without its own self-check here) or loads beside the startup model
+        /// (`warm_models`): the route is decided once, from the startup model
+        /// only, and a further model's native MTP needs the row-invariant
+        /// route.
         var otherSwitchTargets: Bool
         var selfCheckVerdict: SelfCheckVerdict
         /// SPEC-038 FR-CB9 (v0.3.56): why this startup identity left the
@@ -185,6 +188,16 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// compares a two-row forward with serial decode exactly; on stock order
     /// it stays valid only because the core's two-row kernel is exact against
     /// its lone row.
+    /// `Inputs.otherSwitchTargets`: a switch target other than the startup
+    /// model, or any configured further model (SPEC-001-R017 `warm_models`).
+    static func servesOtherModels(
+        switchTargets: some Sequence<String>,
+        startupModelIDs: Set<String>,
+        warmModels: [String]
+    ) -> Bool {
+        !warmModels.isEmpty || switchTargets.contains { !startupModelIDs.contains($0.lowercased()) }
+    }
+
     static func decide(_ inputs: Inputs) -> Decision {
         if inputs.draftConfigured { return Decision(route: .rowInvariant, reason: "draft_model") }
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }

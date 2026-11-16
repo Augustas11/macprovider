@@ -1152,6 +1152,166 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertLessThanOrEqual(taskCount, 2)
     }
 
+    // MARK: - Warm-set control
+
+    func testEncodeDecodeWarmSetFrames() throws {
+        try assertRoundTrip(.warmSetRequest(action: "status", modelID: nil))
+        try assertRoundTrip(.warmSetRequest(action: "load", modelID: "mlx-community/Model-A"))
+        let entry = WarmSetControlEntry(
+            modelID: "mlx-community/Model-A", state: "warm", primary: false, pinned: true, leases: 2,
+            slotsTotal: 4, slotsFree: 2, maxContextTokens: 32_768, throughputTPSEstimate: 0, modelParamsB: 8,
+            modelHash: String(repeating: "a", count: 64), modelHashAlgorithm: "sha256")
+        let loading = WarmSetControlEntry(modelID: "B", state: "loading", primary: false, pinned: false, leases: 0, slotsTotal: 0)
+        try assertRoundTrip(.warmSetResponse(WarmSetControlReply(
+            action: "load", status: "loaded", modelID: "mlx-community/Model-A", entries: [entry, loading])))
+        try assertRoundTrip(.warmSetResponse(WarmSetControlReply(
+            action: "unload", status: "busy", modelID: "B", detail: nil, entries: [])))
+
+        let text = String(decoding: try ControlSocketCodec.encode(.warmSetResponse(WarmSetControlReply(
+            action: "status", status: "ok", entries: [loading]))), as: UTF8.self)
+        XCTAssertTrue(text.contains("\"type\":\"warm_set_response\""), text)
+        XCTAssertTrue(text.contains("\"slots_total\":0"), text)
+        XCTAssertFalse(text.contains("slots_free"), "a loading member carries no slots_free: \(text)")
+        XCTAssertThrowsError(try ControlSocketCodec.decode(Data("{\"type\":\"warm_set_request\"}".utf8)))
+    }
+
+    func testServerAnswersWarmSetRequestsThroughTheWarmSet() async throws {
+        let socketPath = try makeSocketPath()
+        let warmSet = RecordingWarmSetControl()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            idleTimeoutSeconds: 0.5,
+            warmSet: warmSet
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.warmSetRequest(action: "load", modelID: "model-b"))
+        let load = try await connection.receive(timeout: 2)
+        try await connection.send(.warmSetRequest(action: "unload", modelID: "model-b"))
+        let unload = try await connection.receive(timeout: 2)
+        try await connection.send(.warmSetRequest(action: "status", modelID: nil))
+        let status = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+
+        XCTAssertEqual(load, .warmSetResponse(WarmSetControlReply(
+            action: "load", status: "insufficient_memory", modelID: "model-b", detail: "needs 9 GiB",
+            entries: RecordingWarmSetControl.entries)))
+        XCTAssertEqual(unload, .warmSetResponse(WarmSetControlReply(
+            action: "unload", status: "busy", modelID: "model-b", entries: RecordingWarmSetControl.entries)))
+        XCTAssertEqual(status, .warmSetResponse(WarmSetControlReply(
+            action: "status", status: "ok", entries: RecordingWarmSetControl.entries)))
+        XCTAssertEqual(warmSet.calls, ["load model-b", "unload model-b"])
+    }
+
+    func testServerWithoutAWarmSetAnswersUnavailable() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            idleTimeoutSeconds: 0.5
+        )
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.warmSetRequest(action: "load", modelID: "model-b"))
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+        XCTAssertEqual(response, .warmSetResponse(WarmSetControlReply(
+            action: "load", status: "unavailable", modelID: "model-b", detail: "no_warm_set", entries: [])))
+    }
+
+    /// A stopping server shuts its clients' descriptors down; only each
+    /// connection closes its own, once. A number the system hands out again
+    /// after that close is never closed by the server.
+    func testStopNeverClosesADescriptorNumberTwice() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"), idleTimeoutSeconds: 30)
+        try await server.start()
+        let client = try rawConnect(socketPath: socketPath)
+        defer { close(client) }
+        try await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            await server.clientDescriptorsForTest().count == 1
+        }
+        let descriptors = await server.clientDescriptorsForTest()
+        let accepted = try XCTUnwrap(descriptors.first)
+        let number = try XCTUnwrap(accepted.current)
+
+        await server.stop()
+        // The idle client sees end of stream: stop woke the connection.
+        XCTAssertTrue(try waitForEOF(fd: client, timeout: 2.0))
+        try await waitUntil(timeoutNanoseconds: 2_000_000_000) { accepted.isClosed }
+
+        // The number is free again; whatever takes it next stays open after
+        // the descriptor is asked to close or shut down once more.
+        var pair: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        defer { close(pair[0]); close(pair[1]) }
+        accepted.shutdown()
+        accepted.close()
+        for fd in pair {
+            XCTAssertNotEqual(fcntl(fd, F_GETFD), -1, "descriptor \(fd) (accepted was \(number)) was closed")
+        }
+        let reply = Data("x".utf8)
+        XCTAssertEqual(reply.withUnsafeBytes { write(pair[0], $0.baseAddress, 1) }, 1)
+    }
+
+    /// SPEC-011 R-3.10.3: a switch to a warm member is acknowledged and
+    /// completes without a load; the status the socket answers afterwards
+    /// is the new primary's.
+    func testSwitchToAWarmMemberIsAcknowledgedAndCompletesOnTheNewPrimary() async throws {
+        let socketPath = try makeSocketPath()
+        let providerStatus = ProviderStatus(
+            modelID: "ready-model", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 32_768, maxConcurrencyOverride: 1))
+        let primary = makeRuntime(modelID: "ready-model")
+        let member = makeRuntime(modelID: "member-model", warmSwapEnabled: false)
+        await primary.setProviderStatus(providerStatus)
+        let table = WarmModelTable<ModelRuntime>()
+        let loader = WarmModelLoader(
+            table: table, budget: SharedModelMemoryBudget(), limitBytes: { Int.max / 4 }, idlePollNanoseconds: 1_000_000
+        ) { _ in member }
+        let boot = WarmSetBoot(
+            table: table, loader: loader, supportedModels: ["ready-model", "member-model"],
+            loadSpec: { WarmModelLoadSpec(modelID: $0, estimatedResidentBytes: 1, minimumRowKVBytes: 0) },
+            memberInfo: { _ in WarmModelMemberInfo(maxContextTokens: 4_096, slotsTotal: 1) },
+            primaryHandoff: WarmSetBoot<ModelRuntime>.modelRuntimePrimaryHandoff(providerStatus: providerStatus),
+            log: { _ in })
+        try await boot.adoptPrimary(modelID: "ready-model", runtime: primary)
+        await primary.setWarmSetSwapHooks(boot)
+        let loaded = await boot.load("member-model")
+        XCTAssertEqual(loaded, .loaded)
+        let server = ControlSocketServer(
+            socketPath: socketPath, modelRuntime: primary, idleTimeoutSeconds: 0.5, warmSet: boot,
+            primaryRuntime: { table.primaryRuntime() })
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.switchRequest(targetModelID: "member-model", requestedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+        var frames: [ControlSocketFrame] = []
+        for _ in 0..<4 {
+            let frame = try await connection.receive(timeout: 5)
+            frames.append(frame)
+            if case let .switchProgress(state, _, _, _, _) = frame, state == .loaded || state == .failed { break }
+        }
+        await connection.close()
+        let status = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await status.send(.statusRequest)
+        let current = try await status.receive(timeout: 2)
+        await status.close()
+        await server.stop()
+
+        XCTAssertEqual(frames.first, .switchAck(accepted: true, reason: nil, currentTarget: nil, secondsRemaining: nil))
+        guard case let .switchProgress(state, _, _, _, _)? = frames.last else {
+            return XCTFail("no terminal switch frame: \(frames)")
+        }
+        XCTAssertEqual(state, .loaded)
+        XCTAssertEqual(current, .statusResponse(currentModelID: "member-model", runtimeState: .ready))
+    }
+
     private func assertRoundTrip(_ frame: ControlSocketFrame) throws {
         XCTAssertEqual(try ControlSocketCodec.decode(try ControlSocketCodec.encode(frame)), frame)
     }
@@ -1796,4 +1956,31 @@ private final class LockedBool: @unchecked Sendable {
         defer { lock.unlock() }
         return value
     }
+}
+
+private final class RecordingWarmSetControl: WarmSetControl, @unchecked Sendable {
+    static let entries = [
+        WarmSetControlEntry(modelID: "ready-model", state: "warm", primary: true, pinned: true, leases: 0, slotsTotal: 4, slotsFree: 4),
+    ]
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var calls: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    func controlEntries() async -> [WarmSetControlEntry] { Self.entries }
+
+    func check(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetCheckOutcome {
+        WarmSetCheckOutcome(status: "fits", detail: nil, report: nil)
+    }
+
+    func load(_ modelID: String, limits: WarmModelLimits?) async -> WarmSetLoadOutcome {
+        record("load \(modelID)")
+        return .insufficientMemory(detail: "needs 9 GiB")
+    }
+
+    func unload(_ modelID: String) async -> WarmSetUnloadOutcome {
+        record("unload \(modelID)")
+        return .busy
+    }
+
+    private func record(_ call: String) { lock.lock(); recorded.append(call); lock.unlock() }
 }

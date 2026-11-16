@@ -17,6 +17,16 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.79 (#2338) on 3.32.3-macprovider.78: It is
+        // 3.32.3-macprovider.78 plus one commit that only moves its mlx-swift
+        // pin to 0.32.3-macprovider.25
+        // (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24
+        // plus two Swift-layer commits: a synchronous eval schedules the
+        // graph and copies its completion events under the process-wide
+        // evalLock, waits for the device without the lock, then retakes the
+        // lock to finish; recursive entry, a CPU stream and a failed
+        // asynchronous schedule keep the stock locked path. The core and C
+        // rows are unchanged and no Metal kernel changed.
         // Tag 3.32.3-macprovider.78 (#2389) is 3.32.3-macprovider.76
         // plus three commits that only move its
         // mlx-swift pin to 0.32.3-macprovider.24
@@ -178,7 +188,7 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.24, MLX
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.25, MLX
         // core v0.32.4-macprovider.15 (4e9a71dc9) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
@@ -194,7 +204,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "6889f3b41b84041f1693ca1637b1e92e30d5a2d4"
+            revision: "92459644d702bf42959c66dd8be0c0416f1dd882"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

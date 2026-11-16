@@ -1,6 +1,6 @@
 # SPEC-011 — Operator-Pushed Warm Swap
 
-**Version:** 0.5 (post round-3 polish pass — LOCK candidate)
+**Version:** 0.8 (2026-11-16, a promotion on a catalog-bound provider ends the coordinator session like any model change)
 **Status:** **LOCKED** at v0.5 (2026-06-06, Decision-log Entry 55 —
 codex round-4 returned 0/0/0). Implemented end-to-end (operator-pushed
 warm swap, NDJSON control socket, opt-in `model_hash`/`loading` heartbeat,
@@ -17,6 +17,33 @@ candidate per §6.2), SPEC-004 v0.3.1, SPEC-008 v0.3.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §7 OQ-1 (control-socket transport), OQ-2 (CLI block-vs-detach), and OQ-3 (audit-backfill for WS-drop-mid-load swaps) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-011.
+
+**Change log v0.8 (2026-11-16, Related: #2338 — post-lock amendment):**
+R-3.10.3 gains a current limit. A provider admitted on a signed catalog row is
+bound to that row's model: after a promotion its top-level model no longer
+matches the row, so it stops network admission and closes its coordinator
+session, exactly as after a warm swap to another model, and keeps serving
+locally until it is restarted with a catalog recommendation for the new
+primary. Serving two models needs no promotion. A pending native-MTP admission
+restart (SPEC-048-R013) is abandoned by a promotion.
+
+**Change log v0.7 (2026-11-15, Related: #2338 — post-lock amendment):**
+R-3.10.3 now states what the promotion does as built: it runs in the swap's
+warm-set turn, loads nothing, moves every primary-only attachment to the
+promoted member, and completes with the ordinary `switch_progress` `loaded`
+frame; a target that is still `loading` or `evicting` is refused. New
+R-3.10.7: a swap accepted while a warm-set load, evict or unload holds the
+turn reports the primary ready until its turn begins. R-3.10.5: the text
+table also shows a member that is still loading or evicting. No wire field of
+§3.3, no billing (L-5) and no trust tier changes.
+
+**Change log v0.6 (2026-11-13, Related: #2338 — post-lock amendment):**
+L-3 now reads per warm-set member: a provider process may keep several warm
+models (SPEC-001-R016). New §3.10 says how warm swap composes with that set:
+`models switch` replaces the primary member only, every other member keeps
+serving through the swap, and a target that is already warm is promoted
+without a load. A single-model provider swaps exactly as in v0.5. No wire
+field of §3.3, no billing (L-5) and no trust tier changes.
 
 **Change log v0.5 (round-3 polish pass — LOCK candidate):**
 Round-3 verdict was LOCK-READY pending narrow polish with
@@ -267,7 +294,7 @@ Non-negotiable inputs. Not subject to audit revision.
 |---|---|
 | L-1 | **Backward compatible (operator opt-in).** The default for the SPEC-011 binary is `--enable-warm-swap=false`. In that mode: the `models` CLI subcommand is unavailable, the runtime stays on the legacy synchronous load path, the control socket is not opened, and heartbeats DO NOT carry the new `loading` or `model_hash` fields. Behavior is byte-identical to pre-SPEC-011 binary. SPEC-011 normative surface (§3.x) activates only when the operator explicitly sets `--enable-warm-swap=true` on the `serve` subcommand. This means: an operator who upgrades to a SPEC-011 binary but does not change their startup flags sees zero behavior change. (A.1 round-1 CRITICAL fix.) |
 | L-2 | **Operator-initiated only.** No coordinator-side trigger for swap. Coordinator is a passive observer of provider-reported heartbeat changes. |
-| L-3 | **Single routing-eligible warm model per process at any moment.** During load, the binary still holds the OLD container in memory to serve in-flight requests until drain completes — that container is NOT routing-eligible for new dispatch. The provider has zero *routing-eligible* warm models while `loading: true`, while old-container drain may still be in progress. |
+| L-3 | **Single routing-eligible warm model per swapped member at any moment (amended v0.6).** A process may keep a set of warm models (SPEC-001-R016); a swap replaces one member, the primary, and the rules below apply to that member only (§3.10). During load, the binary still holds the OLD container in memory to serve in-flight requests until drain completes — that container is NOT routing-eligible for new dispatch. The provider has zero *routing-eligible* warm models for the swapped member while `loading: true`, while old-container drain may still be in progress. |
 | L-4 | **SPEC-008 Pillar A re-runs on hash arrival; no new hash_status value.** During load the provider is not routing-eligible, so the hash predicate is vacuously satisfied. On post-swap heartbeat with new `model_hash`, SPEC-008 §5.3-5.6 re-runs per R-3.5. |
 | L-5 | **No billing change.** Operator-pushed swap is not a billable inference attempt. No SPEC-005 ledger interaction. |
 | L-6 | **F-1.5 invariants preserved.** No new wire surface touches sticky derivation, `conv:`, or sticky TTL. The `operator_model_swap` audit event payload contains no buyer prompt text, no raw `account_id`, no sticky identifiers. |
@@ -1109,6 +1136,53 @@ No coordinator-side config additions (per L-7).
   transient, `$HOME/Library/Application Support/` for
   durable). AC-26 asserts this absence in spec text.
 
+### 3.10 Warm swap in a warm set (NORMATIVE, v0.6)
+
+- **R-3.10.1** `models switch <model-id>` replaces the **primary** warm
+  member (SPEC-001-R016). §3.2-§3.8 apply to the primary member only: its
+  `loading` / `draining` states, drain, rollback and `model_hash` transition
+  are the ones §3.3 reports on the top-level heartbeat fields, and the
+  primary's `warm_models` entry shows `loading` for the target while it
+  loads.
+- **R-3.10.2** Every other warm member stays `warm`, routing-eligible and
+  serving throughout the swap. A swap MUST NOT drain, unload, or turn
+  continuous batching or native MTP off for a member that is not the old
+  primary (SPEC-001-R019).
+- **R-3.10.3** If `<model-id>` is already a warm member, the switch promotes
+  it to primary without a load; the old primary stays warm, unpinned, and
+  becomes an LRU eviction candidate (SPEC-001-R017). Current limit: on a
+  provider admitted on a signed catalog row the promotion ends the
+  coordinator session as any change of the primary model does (the row is
+  model-specific); the provider serves locally until restarted with a
+  catalog recommendation for the new primary. The promoted member is
+  pinned with its rows reserved. The promotion runs in the swap's warm-set
+  turn (no load, evict or unload overlaps it) and moves every primary-only
+  attachment to the promoted member at once: provider status ownership, the
+  top-level handshake, heartbeat and `/v1/status` fields, the preflight
+  answer, the switch acknowledgement subscribers and the right to be
+  switched again. Requests already admitted on either member finish there
+  and are counted against that member. The switch completes with the
+  ordinary `switch_progress` `loaded` frame. A target that is still
+  `loading` or `evicting` is refused; a target whose load finished while the
+  switch waited for the turn is refused with a request to switch again,
+  never loaded a second time.
+- **R-3.10.4** The target's load is admitted against the shared memory
+  budget (SPEC-001-R017), with the old primary's weights counted as
+  available to it exactly as in a single-model swap; other members' weights
+  and rows are never counted as available. A target that does not fit fails
+  the swap with rollback per R-3.2.6 and leaves the warm set unchanged.
+- **R-3.10.5** `models list` (R-3.1.1) reports state `warm` for every warm
+  member and marks the primary. The text table also lists a member that is
+  still `loading` or `evicting` with that state; the JSON list keeps its
+  states.
+- **R-3.10.6** Warm swap, SPEC-012 `set_model` (`mode: "replace"` or
+  `"add"`), boot `warm_models` configuration and SPEC-001-R017 eviction are
+  the only ways warm-set membership changes.
+- **R-3.10.7** A swap accepted while a warm-set load, evict or unload holds
+  the warm-set turn reserves the runtime (a second switch is refused) but
+  has not started: the primary keeps serving and is reported ready, not
+  `loading`, until the swap's turn begins.
+
 ---
 
 ## 4. Backward compatibility
@@ -1742,7 +1816,7 @@ Open for v0.5 (if pursued):
 | `/v1/status.state` field with `loading` / `ready` / `down` | SPEC-012 | Operator-dashboard concern; only meaningful when coordinator-side swap state exists (SPEC-012's `SwapState`) |
 | `503 model_not_warm` error envelope | SPEC-012 | Only meaningful when buyers see cold-supported models |
 | Recommended catalog (`GET /v1/recommended-catalog`) | SPEC-013 (future) | Closes pain #4 (HF ID discovery) |
-| Multi-model serving in a single provider process | (none planned) | Architectural; L-3 |
+| Batching rows of different models in one forward | (none planned) | Several warm models per process are in scope since v0.6 (§3.10, SPEC-001-R016); each forward runs one model |
 
 ---
 

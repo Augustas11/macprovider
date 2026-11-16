@@ -883,20 +883,43 @@ enum ContinuousBatchingSelfCheck {
         log: @escaping @Sendable (String) -> Void,
         check: @escaping @Sendable () async -> Bool
     ) async -> AdmissionHoldOutcome {
+        await runUnderSelfCheckHold(
+            scope: ProcessSelfCheckAdmissionHold(providerStatus: providerStatus),
+            drainSeconds: drainSeconds, checkSeconds: checkSeconds, lifecycleLease: lifecycleLease,
+            stillValid: stillValid, buyerWaitSeconds: buyerWaitSeconds, buyerWaitYieldSeconds: buyerWaitYieldSeconds,
+            probeAwaitingResidency: probeAwaitingResidency, context: context, log: log, check: check)
+    }
+
+    /// The same hold over `scope`: the whole provider (the primary's check,
+    /// `ProcessSelfCheckAdmissionHold`) or one further warm member
+    /// (SPEC-001-R019, `WarmMemberSelfCheckAdmissionHold`).
+    static func runUnderSelfCheckHold(
+        scope hold: any SelfCheckAdmissionHoldScope,
+        drainSeconds: Int,
+        checkSeconds: Double = admissionHoldCheckSeconds,
+        lifecycleLease: @escaping @Sendable () -> String?,
+        stillValid: @escaping @Sendable () async -> Bool = { true },
+        buyerWaitSeconds: @escaping @Sendable () async -> Double? = { nil },
+        buyerWaitYieldSeconds: Double = selfCheckBuyerWaitYieldSeconds,
+        probeAwaitingResidency: @escaping @Sendable () async -> Bool = { false },
+        context: String,
+        log: @escaping @Sendable (String) -> Void,
+        check: @escaping @Sendable () async -> Bool
+    ) async -> AdmissionHoldOutcome {
         let drainBound = TimeInterval(max(0, drainSeconds))
         var refusal = lifecycleLease().map { "lifecycle_lease_\($0)" }
         if refusal == nil {
-            refusal = await providerStatus.beginSelfCheckAdmissionHold(
+            refusal = await hold.beginHold(
                 expectedEndAt: Date().addingTimeInterval(drainBound * 2 + checkSeconds)
             )
         }
         if let refusal {
-            await providerStatus.noteSelfCheckAdmissionHoldSkipped(reason: refusal)
+            await hold.noteHoldSkipped(reason: refusal)
             log("event=cb_self_check action=admission_hold_skipped reason=\(refusal) \(context)")
             return .skipped(reason: refusal)
         }
         let startedAt = Date()
-        log("event=cb_self_check action=admission_hold_start in_flight=\(await providerStatus.requestsInFlightCount()) drain_timeout_s=\(drainSeconds) \(context)")
+        log("event=cb_self_check action=admission_hold_start in_flight=\(await hold.heldRequestsInFlight()) drain_timeout_s=\(drainSeconds) \(context)")
         let buyerWait = AdmissionHoldBuyerWait()
         /// Why the hold must end now, or nil while it may continue.
         @Sendable func interruption() async -> String? {
@@ -913,30 +936,30 @@ enum ContinuousBatchingSelfCheck {
                 buyerWait.end()
             }
             if let lease = lifecycleLease() { return "lifecycle_lease_\(lease)" }
-            if await !providerStatus.isServingForSelfCheckAdmissionHold() { return "provider_not_serving" }
+            if await !hold.isServingForHold() { return "provider_not_serving" }
             if await !stillValid() { return "target_changed" }
             return nil
         }
         func end(_ outcome: AdmissionHoldOutcome, reason: String? = nil) async -> AdmissionHoldOutcome {
-            await providerStatus.endSelfCheckAdmissionHold(outcome: outcome.label)
+            await hold.endHold(outcome: outcome.label)
             log("event=cb_self_check action=admission_hold_end outcome=\(outcome.label)\(reason.map { " reason=\($0)" } ?? "") held_s=\(Int(Date().timeIntervalSince(startedAt))) \(context)")
             return outcome
         }
         let drainDeadline = startedAt.addingTimeInterval(drainBound)
-        let neededDrain = await providerStatus.hasInferenceWork()
+        let neededDrain = await hold.hasHeldWork()
         // The hold preempted admitted local work when it began; only buyer
         // work predating the hold makes a timeout a buyer drain timeout.
-        var sawBuyerWork = await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold()
+        var sawBuyerWork = await hold.hasBuyerWorkPredatingHold()
         // Buyers admitted during the hold are not drained: they queue behind
         // the check's probe (v0.3.36).
-        while await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold(), Date() < drainDeadline {
+        while await hold.hasWorkPredatingHold(), Date() < drainDeadline {
             if let reason = await interruption() { return await end(.yielded, reason: reason) }
             try? await Task.sleep(nanoseconds: 50_000_000)
-            if await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold() { sawBuyerWork = true }
+            if await hold.hasBuyerWorkPredatingHold() { sawBuyerWork = true }
         }
-        if await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold() { sawBuyerWork = true }
+        if await hold.hasBuyerWorkPredatingHold() { sawBuyerWork = true }
         let timeoutOutcome: AdmissionHoldOutcome = sawBuyerWork ? .drainTimeout : .localDrainTimeout
-        if await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold() { return await end(timeoutOutcome) }
+        if await hold.hasWorkPredatingHold() { return await end(timeoutOutcome) }
         if neededDrain, Date() >= drainDeadline { return await end(timeoutOutcome) }
         // Re-validate after the drain, immediately before any check work.
         if let reason = await interruption() { return await end(.yielded, reason: reason) }
@@ -1348,6 +1371,18 @@ actor ContinuousBatchingSelfCheckDriver {
     private let lifecycleLease: @Sendable () -> String?
     /// This Mac's 0..`admissionHoldJitterSeconds` offset on the first due time.
     private let admissionHoldJitter: Double
+    /// SPEC-001-R019: the drivers of one process measure one at a time.
+    private let turn: ContinuousBatchingSelfCheckTurn?
+    /// Whether this driver may act now; a further warm member waits while
+    /// it is not `warm` or while a warm-set load, eviction or swap runs.
+    private let stepAllowed: @Sendable () async -> Bool
+    /// Called after the runtime's self-check state or report changed, so a
+    /// further warm member's wire entry follows it.
+    private let published: @Sendable () async -> Void
+    /// SPEC-001-R019: the hold this runtime's check takes while it is a
+    /// further warm member: that member alone, never the primary. While the
+    /// runtime is the primary its check takes the provider-wide hold.
+    private let memberAdmissionHold: (any SelfCheckAdmissionHoldScope)?
     private var consecutiveDrainTimeouts = 0
     private var consecutiveCheckBounds = 0
     /// SPEC-038 FR-CB10 (stock order): the key whose same-order references
@@ -1380,8 +1415,16 @@ actor ContinuousBatchingSelfCheckDriver {
         lifecycleLease: @escaping @Sendable () -> String? = { nil },
         admissionHoldJitter: Double = Double.random(in: 0...ContinuousBatchingSelfCheck.admissionHoldJitterSeconds),
         verdictRecorder: SmallMRouteVerdictRecorder? = nil,
+        turn: ContinuousBatchingSelfCheckTurn? = nil,
+        stepAllowed: @escaping @Sendable () async -> Bool = { true },
+        published: @escaping @Sendable () async -> Void = {},
+        memberAdmissionHold: (any SelfCheckAdmissionHoldScope)? = nil,
         log: @escaping @Sendable (String) -> Void
     ) {
+        self.memberAdmissionHold = memberAdmissionHold
+        self.turn = turn
+        self.stepAllowed = stepAllowed
+        self.published = published
         self.runtime = runtime
         self.providerStatus = providerStatus
         self.store = store
@@ -1406,9 +1449,18 @@ actor ContinuousBatchingSelfCheckDriver {
         return [provisionalSlots, store.priorGrant(for: key)].compactMap { $0 }.filter { $0 > 1 }.max()
     }
 
+    /// Runs `body` holding the process's self-check turn, when there is one.
+    private func inTurn(_ body: () async -> Void) async {
+        guard let turn else { return await body() }
+        guard await turn.acquire() else { return }
+        await body()
+        await turn.release()
+    }
+
     func run() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+            guard await stepAllowed() else { continue }
             guard let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) else {
                 checkDueSince = nil
                 continue
@@ -1419,7 +1471,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 // The previous process died inside this step (including a
                 // re-measurement of a kept grant): never retry that width.
                 log("event=cb_self_check action=crash_recovered slots=\(crashed)")
-                await finish(record, crashedAt: crashed, target: target)
+                await inTurn { await finish(record, crashedAt: crashed, target: target) }
                 continue
             }
             if let record, let decision = record.decision {
@@ -1430,8 +1482,10 @@ actor ContinuousBatchingSelfCheckDriver {
                         if await runtime.continuousBatchingCachedTurnsSelfCheckResult() != parity {
                             await runtime.applyContinuousBatchingCachedTurnsSelfCheck(parity, expected: target)
                         }
-                    } else if Date() >= nextAttemptAt, await isIdle(), await measureCachedTurns(target) {
-                        continue
+                    } else if Date() >= nextAttemptAt, await isIdle() {
+                        var ran = false
+                        await inTurn { ran = await measureCachedTurns(target) }
+                        if ran { continue }
                     }
                 }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
@@ -1440,7 +1494,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 let due = record.remeasureAfter.flatMap(Self.parseDate).map { Date() >= $0 } ?? false
                 if due || ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: bound),
                    Date() >= nextAttemptAt, await isIdle() {
-                    await measure(target, remeasureOf: record)
+                    await inTurn { await measure(target, remeasureOf: record) }
                 }
                 continue
             }
@@ -1460,7 +1514,7 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             let idle = await isIdle()
             if idle {
-                if Date() >= nextAttemptAt { await measure(target, remeasureOf: nil) }
+                if Date() >= nextAttemptAt { await inTurn { await measure(target, remeasureOf: nil) } }
                 continue
             }
             // A busy Mac never finds an idle window under steady traffic: once
@@ -1470,19 +1524,19 @@ actor ContinuousBatchingSelfCheckDriver {
                 dueSince: due.at, notBefore: admissionHoldNotBefore,
                 after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
                ) {
-                await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at))
+                await inTurn { await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at)) }
             }
         }
     }
 
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the check under an admission hold
-    /// (`ContinuousBatchingSelfCheck.runUnderAdmissionHold`). A prior grant
+    /// (`ContinuousBatchingSelfCheck.runUnderSelfCheckHold`). A prior grant
     /// keeps serving until the check decides; holds are at least
     /// `admissionHoldAfterSeconds` apart.
     private func measureUnderAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget, dueSeconds: Double) async {
         let runtime = runtime
-        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: providerStatus,
+        let outcome = await ContinuousBatchingSelfCheck.runUnderSelfCheckHold(
+            scope: await admissionHoldScope(),
             drainSeconds: ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(
                 base: admissionHoldDrainSeconds, consecutiveDrainTimeouts: consecutiveDrainTimeouts
             ),
@@ -1504,6 +1558,20 @@ actor ContinuousBatchingSelfCheckDriver {
         consecutiveCheckBounds = outcome == .checkBound ? consecutiveCheckBounds + 1 : 0
         // Spaced from the end of this hold, not its start.
         admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)
+    }
+
+    /// The provider-wide hold while this runtime is the primary (the one
+    /// holding the provider status), else its own member's hold.
+    private func admissionHoldScope() async -> any SelfCheckAdmissionHoldScope {
+        Self.admissionHoldScope(
+            isPrimary: await runtime.hasProviderStatus(), member: memberAdmissionHold, providerStatus: providerStatus)
+    }
+
+    static func admissionHoldScope(
+        isPrimary: Bool, member: (any SelfCheckAdmissionHoldScope)?, providerStatus: ProviderStatus
+    ) -> any SelfCheckAdmissionHoldScope {
+        if !isPrimary, let member { return member }
+        return ProcessSelfCheckAdmissionHold(providerStatus: providerStatus)
     }
 
     /// The check under a hold: bounded by `admissionHoldCheckSeconds`, after
@@ -1978,7 +2046,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 // The count this Mac serves now (an owner pin can serve above
                 // the decision's own slots, up to its verified width), or a
                 // stored or provisional grant.
-                let served = await providerStatus.snapshot().capacity.maxConcurrency
+                let served = await servedSlotsNow()
                 let prior = [served, record.decision?.slots, priorGrant(for: target.key)]
                     .compactMap { $0 }.filter { $0 > 1 }.max()
                 let resume = ContinuousBatchingSelfCheck.backpressureResumeSeconds
@@ -2218,14 +2286,25 @@ actor ContinuousBatchingSelfCheckDriver {
         await apply(reconciled.decision, target: target, source: crashedAt == nil ? "measured" : "crash_recovered")
     }
 
+    /// The slots this runtime serves now: the provider status while it is
+    /// the primary (it alone writes it), else its own served count
+    /// (SPEC-001-R019: a further warm member reports its own).
+    private func servedSlotsNow() async -> Int {
+        if await runtime.hasProviderStatus() {
+            return await providerStatus.snapshot().capacity.maxConcurrency
+        }
+        return await runtime.warmSetRowReservation().rows
+    }
+
     private func report(decision: String, target: ContinuousBatchingSelfCheckTarget) async {
         await runtime.setContinuousBatchingSelfCheckReport(.init(
             decision: decision,
-            servedSlots: await providerStatus.snapshot().capacity.maxConcurrency,
+            servedSlots: await servedSlotsNow(),
             verifiedSlots: 1,
             deferrals: deferrals,
             key: target.key
         ))
+        await published()
     }
 
     private func apply(
@@ -2253,6 +2332,53 @@ actor ContinuousBatchingSelfCheckDriver {
         }
         log("event=cb_self_check action=applied source=\(source) reason=\(decision.reason) slots=\(slots) verified_k=\(decision.verifiedSlots) model_sha256=\(target.key.modelSHA256)")
         verdictRecorder?.applied(key: target.key, decision: decision)
+        await published()
+    }
+}
+
+/// SPEC-001-R019: the continuous-batching self-checks of one process (one
+/// per warm-set runtime) measure one at a time, so no check shares the GPU
+/// with another check or writes the shared journal beside it. FIFO; an
+/// uncontended `acquire` returns at once. A waiter that is cancelled leaves
+/// the queue and returns false without the turn.
+actor ContinuousBatchingSelfCheckTurn {
+    private var busy = false
+    private var waiters: [(id: UInt64, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var nextID: UInt64 = 0
+
+    /// True holding the turn; false only when cancelled while waiting.
+    @discardableResult
+    func acquire() async -> Bool {
+        guard busy else {
+            busy = true
+            return true
+        }
+        nextID &+= 1
+        let id = nextID
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters.append((id, continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    /// The turn passes straight to the next waiter.
+    func release() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().continuation.resume(returning: true) }
+    }
+
+    var isHeld: Bool { busy }
+    var waiterCount: Int { waiters.count }
+
+    private func cancelWaiter(_ id: UInt64) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(returning: false)
     }
 }
 
@@ -2279,4 +2405,40 @@ private final class AdmissionHoldBuyerWait: @unchecked Sendable {
     }
 
     func end() { lock.lock(); waiting = false; lock.unlock() }
+}
+
+/// What a self-check admission hold (SPEC-038 FR-CB10 item 3) closes,
+/// drains and re-opens: the whole provider for the primary's check, one
+/// further warm member for that member's (SPEC-001-R019).
+protocol SelfCheckAdmissionHoldScope: Sendable {
+    /// Closes admission; returns why it was refused, or nil once held.
+    func beginHold(expectedEndAt: Date) async -> String?
+    func endHold(outcome: String) async
+    func noteHoldSkipped(reason: String) async
+    /// The held check may keep running.
+    func isServingForHold() async -> Bool
+    /// Requests in flight on what the hold closes, for the log.
+    func heldRequestsInFlight() async -> Int
+    func hasHeldWork() async -> Bool
+    func hasBuyerWorkPredatingHold() async -> Bool
+    /// What the drain waits for: work admitted before the hold.
+    func hasWorkPredatingHold() async -> Bool
+}
+
+/// The primary's hold: the provider-wide admission hold, exactly as
+/// `ProviderStatus` runs it.
+struct ProcessSelfCheckAdmissionHold: SelfCheckAdmissionHoldScope {
+    let providerStatus: ProviderStatus
+
+    func beginHold(expectedEndAt: Date) async -> String? {
+        await providerStatus.beginSelfCheckAdmissionHold(expectedEndAt: expectedEndAt)
+    }
+
+    func endHold(outcome: String) async { await providerStatus.endSelfCheckAdmissionHold(outcome: outcome) }
+    func noteHoldSkipped(reason: String) async { await providerStatus.noteSelfCheckAdmissionHoldSkipped(reason: reason) }
+    func isServingForHold() async -> Bool { await providerStatus.isServingForSelfCheckAdmissionHold() }
+    func heldRequestsInFlight() async -> Int { await providerStatus.requestsInFlightCount() }
+    func hasHeldWork() async -> Bool { await providerStatus.hasInferenceWork() }
+    func hasBuyerWorkPredatingHold() async -> Bool { await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold() }
+    func hasWorkPredatingHold() async -> Bool { await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold() }
 }

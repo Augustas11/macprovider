@@ -23,6 +23,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsStagingInputCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
+            ModelsWarmCommand.self,
             ModelsBrowseCommand.self,
             ModelsAdoptRecommendationCommand.self,
         ]
@@ -1139,6 +1140,10 @@ struct ModelsListCommand: AsyncParsableCommand {
                 await connection.close()
                 throw ControlSocketConnectError.handshakeTimeout(path: socketPath.path)
             }
+            // SPEC-011 R-3.10.5: every warm member is listed `warm`; the
+            // current model (the primary) stays the one marked current.
+            let members = await readWarmSecondaries(connection: connection, primary: status.currentModelID)
+            let warmModelIDs = members.filter { $0.state == WarmModelState.warm.rawValue }.map(\.modelID)
             await connection.close()
             // Preserve every configured supported model for the catalog. The
             // running authority inventory only determines whether an idle row
@@ -1153,6 +1158,9 @@ struct ModelsListCommand: AsyncParsableCommand {
             if !models.contains(where: { modelIDKey($0) == modelIDKey(status.currentModelID) }) {
                 models.insert(status.currentModelID, at: 0)
             }
+            for member in members where !models.contains(where: { modelIDKey($0) == modelIDKey(member.modelID) }) {
+                models.append(member.modelID)
+            }
             if emitJSON {
                 try await emitJSONList(
                     currentModelID: status.currentModelID,
@@ -1160,10 +1168,13 @@ struct ModelsListCommand: AsyncParsableCommand {
                     source: "control_socket",
                     warmSwapAvailable: true,
                     authorizedModelIDs: Set(authorizedModelIDs.map(modelIDKey)),
+                    warmModelIDs: Set(warmModelIDs.map(modelIDKey)),
                     artifactResolver: CachedModelArtifactResolver.forConfig(resolved)
                 )
             } else {
-                printModelsTable(currentModelID: status.currentModelID, supportedModels: models)
+                printModelsTable(
+                    currentModelID: status.currentModelID, supportedModels: models,
+                    memberStates: Dictionary(members.map { (modelIDKey($0.modelID), $0.state) }, uniquingKeysWith: { first, _ in first }))
             }
         } catch ControlSocketConnectError.socketAbsent(let path) {
             let models = idleCatalog(from: resolved)
@@ -1483,6 +1494,282 @@ struct ModelsStatusCommand: AsyncParsableCommand {
         await connection.close()
         let data = try ControlSocketCodec.encode(.statusResponse(currentModelID: status.currentModelID, runtimeState: status.runtimeState))
         print(String(decoding: data.dropLast(), as: UTF8.self))
+    }
+}
+
+enum ModelsWarmAction: String, CaseIterable, ExpressibleByArgument {
+    case status
+    case load
+    case unload
+    case check
+}
+
+struct ModelsWarmCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "warm",
+        abstract: "Show, check, load or unload the extra models kept loaded beside the main model.",
+        discussion: """
+        status lists every loaded model with its state and active requests. \
+        check asks the running provider whether it would load a model now, \
+        beside every model it has loaded, without loading it; with no \
+        provider running it prints an estimate from the files on this Mac, \
+        which the provider decides again when it loads the model. \
+        load adds a supported model if it fits in memory beside the loaded ones. \
+        unload removes an extra model; the main model and a model that is \
+        serving a request are never unloaded. With --save, load and unload \
+        also change config.yaml, so the change lasts after a restart. Use \
+        models switch to change the main model.
+        """
+    )
+
+    @Argument(help: "status, check, load or unload.")
+    var action: ModelsWarmAction
+
+    @Argument(help: "HuggingFace model ID or local path to check, load or unload.")
+    var targetModelID: String?
+
+    @Option(name: .customLong("context"), help: "With load or check: the context in tokens for this model. Default: the main model's.")
+    var contextTokens: Int?
+
+    @Option(help: "With load or check: how many requests this model serves at once. Default: the main model's.")
+    var slots: Int?
+
+    @Flag(help: "With load or unload: also write the change to config.yaml.")
+    var save = false
+
+    @Flag(name: .customLong("json"), help: "With check: print the result as JSON.")
+    var emitJSON = false
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Control socket path override. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock.")
+    var ctlSocketPath: String?
+
+    func validate() throws {
+        switch action {
+        case .status:
+            if targetModelID != nil { throw ValidationError("status takes no model") }
+        case .load, .unload, .check:
+            if (targetModelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError("\(action.rawValue) needs a model")
+            }
+        }
+        if save, action != .load, action != .unload { throw ValidationError("--save works with load and unload") }
+        if contextTokens != nil || slots != nil, action != .load, action != .check {
+            throw ValidationError("--context and --slots work with load and check")
+        }
+        if let contextTokens, contextTokens < 1 { throw ValidationError("--context must be at least 1") }
+        if let slots, !(1...AppConfig.warmModelSlotsLimit).contains(slots) {
+            throw ValidationError("--slots must be from 1 to \(AppConfig.warmModelSlotsLimit)")
+        }
+        if emitJSON, action != .check { throw ValidationError("--json works with check") }
+    }
+
+    func run() async throws {
+        let resolved = try loadModelsConfig(config: config, model: nil, supportedModels: nil, ctlSocketPath: ctlSocketPath)
+        let socketPath = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+        if action == .check {
+            try await runCheck(resolved: resolved, socketPath: socketPath)
+            return
+        }
+        let target = targetModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let connection: ControlSocketConnection
+        do {
+            connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        } catch ControlSocketConnectError.socketAbsent(let path) {
+            if save, let target {
+                // Nothing is running to change: the saved config is the change.
+                try saveChange(target, resolved: resolved)
+                writeStderr("malibu-cli serve is not running; \(target) will be \(action == .load ? "loaded" : "left out") when the provider starts.")
+                return
+            }
+            writeStderr("malibu-cli serve is not running on this host (no control socket at \(path))")
+            throw ExitCode(4)
+        } catch ControlSocketConnectError.connectionRefused(let path) {
+            writeStderr("stale control socket at \(path) (no listener); remove the file and restart serve")
+            throw ExitCode(4)
+        }
+        // A load reads the model's weights from disk, which can take many
+        // minutes for a large model.
+        let timeout: TimeInterval = action == .status ? 10 : 3_600
+        let frame: ControlSocketFrame
+        do {
+            try await connection.send(.warmSetRequest(
+                action: action.rawValue, modelID: targetModelID, contextTokens: contextTokens, slots: slots))
+            frame = try await connection.receive(timeout: timeout)
+        } catch {
+            await connection.close()
+            writeStderr("serve did not answer the request: \(error)")
+            throw ExitCode(4)
+        }
+        await connection.close()
+        guard case let .warmSetResponse(reply) = frame else {
+            writeStderr("serve sent an unexpected reply")
+            throw ExitCode(4)
+        }
+        print(String(decoding: try ControlSocketCodec.encode(frame).dropLast(), as: UTF8.self))
+        switch reply.status {
+        case "ok":
+            return
+        case "loaded", "already_warm", "unloaded":
+            if save, let target { try saveChange(target, resolved: resolved) }
+            return
+        case "not_loaded" where save:
+            if let target { try saveChange(target, resolved: resolved) }
+            return
+        case "unsupported_model" where save && reply.detail == "not_in_supported_models":
+            // serve read supported_models when it started; the saved config
+            // adds the model, and a restart reads it.
+            if let target { try saveChange(target, resolved: resolved) }
+            writeStderr("Restart the provider to use it.")
+            return
+        case "unavailable":
+            writeStderr("this provider serves its model through another runtime and cannot load extra models")
+            throw ExitCode(4)
+        case "busy":
+            writeStderr("\(targetModelID ?? "") is serving a request; try again when it is idle")
+            throw ExitCode(3)
+        case "primary":
+            writeStderr("\(targetModelID ?? "") is the main model; use models switch to change it")
+            throw ExitCode(2)
+        default:
+            writeStderr("\(action.rawValue) refused: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")")
+            throw ExitCode(2)
+        }
+    }
+
+    /// Writes this load or unload to config.yaml through the config writer.
+    private func saveChange(_ modelID: String, resolved: AppConfig) throws {
+        let configURL = ModelsAdoptRecommendationCommand.effectiveConfigURL(explicit: config)
+        let change: ConfigApplier.WarmSetChange = action == .load
+            ? .keep(modelID: modelID, limits: contextTokens == nil && slots == nil
+                ? nil : WarmSetConfigLimits(contextTokens: contextTokens, slots: slots))
+            : .remove(modelID: modelID)
+        do {
+            try ConfigApplier(configPath: configURL).setWarmSet(change, now: Date())
+        } catch {
+            writeStderr("could not save the change to \(configURL.path): \(error)")
+            throw ExitCode(2)
+        }
+        writeStderr("saved to \(configURL.path)")
+    }
+
+    /// With a provider running, its own answer: the `warm_set check`
+    /// control action runs the load decision `load` would make now, against
+    /// the memory the loaded models really hold, the limit the process
+    /// applies and every model it has loaded. With none running (or one too
+    /// old to answer), an estimate from the files on this Mac, labelled as
+    /// one: the provider decides again when it loads the model.
+    private func runCheck(resolved: AppConfig, socketPath: URL) async throws {
+        guard let member = targetModelID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let primary = resolved.model, !primary.isEmpty else {
+            writeStderr("config.yaml names no main model")
+            throw ExitCode(2)
+        }
+        var primaryContext = resolved.maxContextOverride
+        var primarySlots = resolved.maxConcurrencyOverride
+        if let connection = try? await ControlSocketClient.connect(socketPath: socketPath) {
+            let checked = await Self.request(
+                .warmSetRequest(action: "check", modelID: member, contextTokens: contextTokens, slots: slots),
+                on: connection)
+            if let checked, checked.status == "unavailable" {
+                await connection.close()
+                writeStderr("this provider serves its model through another runtime and cannot load extra models")
+                throw ExitCode(4)
+            }
+            if let checked, !(checked.status == "invalid_request" && checked.detail == "unknown_action") {
+                await connection.close()
+                print(emitJSON ? Self.runtimeCheckJSON(checked, modelID: member) : Self.runtimeCheckSummary(checked, modelID: member))
+                return
+            }
+            // A provider that predates the check action: estimate around
+            // its main model's live context and slots.
+            if let status = await Self.request(.warmSetRequest(action: "status", modelID: nil), on: connection),
+               let entry = status.entries.first(where: \.primary) {
+                primaryContext = entry.maxContextTokens ?? primaryContext
+                primarySlots = entry.slotsTotal > 0 ? entry.slotsTotal : primarySlots
+            }
+            await connection.close()
+        }
+        guard let primaryContext, let primarySlots else {
+            writeStderr("the provider is not running and config.yaml sets no max_context_override and max_concurrency_override for \(primary)")
+            throw ExitCode(4)
+        }
+        let plan = AutotuneWarmSetPlan.compute(AutotuneWarmSetPlan.localInputs(
+            primaryModelID: primary,
+            primaryLoadPath: resolved.modelArtifactPath,
+            primaryContextTokens: primaryContext,
+            primarySlots: primarySlots,
+            primaryVerified: resolved.modelArtifactSHA256 != nil,
+            memberModelID: member))
+        print(emitJSON ? Self.checkJSON(plan, modelID: member) : AutotuneWarmSetPlan.estimateLabel + " " + plan.summary(memberModelID: member))
+    }
+
+    private static func request(_ frame: ControlSocketFrame, on connection: ControlSocketConnection) async -> WarmSetControlReply? {
+        guard (try? await connection.send(frame)) != nil,
+              case let .warmSetResponse(reply)? = try? await connection.receive(timeout: 10) else { return nil }
+        return reply
+    }
+
+    /// The estimate, as JSON: `source` is `estimate` (and the plan's own
+    /// `estimate` is true).
+    static func checkJSON(_ plan: AutotuneWarmSetPlan, modelID: String) -> String {
+        "{\"schema_version\":\"models_warm_check.v1\",\"model_id\":\(quoted(modelID)),\"source\":\"estimate\"," + plan.jsonString.dropFirst()
+    }
+
+    /// The running provider's answer, as JSON: `source` is
+    /// `running_provider`, `estimate` is false, and `status`, `detail` and
+    /// `check` are the control reply's.
+    static func runtimeCheckJSON(_ reply: WarmSetControlReply, modelID: String) -> String {
+        var object: [String: Any] = [
+            "schema_version": "models_warm_check.v1",
+            "model_id": modelID,
+            "source": "running_provider",
+            "estimate": false,
+            "status": reply.status,
+        ]
+        if let detail = reply.detail { object["detail"] = detail }
+        if let check = reply.check,
+           let data = try? JSONEncoder().encode(check),
+           let value = try? JSONSerialization.jsonObject(with: data) {
+            object["check"] = value
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// One line for a person, from the running provider's answer.
+    static func runtimeCheckSummary(_ reply: WarmSetControlReply, modelID: String) -> String {
+        func gb(_ bytes: Int?) -> String { bytes.map { String(format: "%.1f GB", Double($0) / 1e9) } ?? "an unknown amount" }
+        switch reply.status {
+        case "fits":
+            return "The running provider can load \(modelID) now, beside the models it has loaded."
+        case "fits_after_eviction":
+            let evict = reply.check?.evict ?? []
+            return "The running provider can load \(modelID) after unloading \(evict.isEmpty ? "idle models" : evict.joined(separator: ", ")), which \(evict.count == 1 ? "is" : "are") not serving requests."
+        case "insufficient_memory":
+            return "The running provider would not load \(modelID): it needs \(gb(reply.check?.requiredBytes)) and this Mac allows \(gb(reply.check?.limitBytes)) beside the models it has loaded."
+        case "already_warm":
+            return "\(modelID) is already loaded."
+        case "unsupported_model":
+            switch reply.detail {
+            case "not_in_supported_models"?: return "The running provider would not load \(modelID): it is not in supported_models."
+            case "model_unavailable"?: return "The running provider would not load \(modelID): it is not available on this Mac."
+            default: return "The running provider would not load \(modelID): it is not a model this provider can serve\(reply.detail.map { " (\($0))" } ?? "")."
+            }
+        case "command_buffer_budget_conflict":
+            return "The running provider would not load \(modelID): its model family requires a GPU command-buffer setting (MLX_MAX_MB_PER_BUFFER) other than the one the provider started with."
+
+        default:
+            return "The running provider would not load \(modelID) now: \(reply.status)\(reply.detail.map { " (\($0))" } ?? "")."
+        }
+    }
+
+    private static func quoted(_ text: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        return String(decoding: (try? encoder.encode(text)) ?? Data("null".utf8), as: UTF8.self)
     }
 }
 
@@ -2556,7 +2843,7 @@ extension ModelsAdoptRecommendationCommand {
         }
     }
 
-    fileprivate static func effectiveConfigURL(explicit: String?) -> URL {
+    static func effectiveConfigURL(explicit: String?) -> URL {
         let path = explicit
             ?? ProcessInfo.processInfo.environment["MACPROVIDER_CONFIG"]
             ?? AppConfig.defaultConfigPath
@@ -3010,8 +3297,34 @@ private func idleCatalog(from config: AppConfig) -> [String] {
     return []
 }
 
-private func printModelsTable(currentModelID: String?, supportedModels: [String]) {
-    print("model_id\tstate")
+/// The ids of the warm members beside the primary (SPEC-001-R016), read on
+/// an open control connection. Empty when serve keeps one model or does not
+/// answer the request.
+/// The warm set's other members and their states (`warm`, `loading`,
+/// `evicting`); empty without a warm set or on any failure.
+private func readWarmSecondaries(connection: ControlSocketConnection, primary: String) async -> [(modelID: String, state: String)] {
+    do {
+        try await connection.send(.warmSetRequest(action: "status", modelID: nil))
+        guard case let .warmSetResponse(reply) = try await connection.receive(timeout: 2.0) else { return [] }
+        return reply.entries
+            .filter { !$0.primary && modelIDKey($0.modelID) != modelIDKey(primary) }
+            .map { ($0.modelID, $0.state) }
+    } catch {
+        return []
+    }
+}
+
+/// `memberStates` (case-folded id to state) are the warm-set members beside
+/// the current model. With any, a `primary` column marks the current model
+/// (SPEC-011 R-3.10.5) and each member shows its state; with none the table
+/// is the single-model table.
+func printModelsTable(currentModelID: String?, supportedModels: [String], memberStates: [String: String] = [:]) {
+    modelsTableLines(currentModelID: currentModelID, supportedModels: supportedModels, memberStates: memberStates)
+        .forEach { print($0) }
+}
+
+func modelsTableLines(currentModelID: String?, supportedModels: [String], memberStates: [String: String] = [:]) -> [String] {
+    var lines = [memberStates.isEmpty ? "model_id\tstate" : "model_id\tstate\tprimary"]
     var rows: [String] = []
     var seen = Set<String>()
     for modelID in supportedModels where seen.insert(modelIDKey(modelID)).inserted {
@@ -3021,13 +3334,19 @@ private func printModelsTable(currentModelID: String?, supportedModels: [String]
         rows.insert(currentModelID, at: 0)
     }
     for modelID in rows {
-        let state = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true ? "warm" : "idle"
-        print("\(modelID)\t\(state)")
+        let current = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true
+        let state = current ? "warm" : memberStates[modelIDKey(modelID)] ?? "idle"
+        if memberStates.isEmpty {
+            lines.append("\(modelID)\t\(state)")
+        } else {
+            lines.append("\(modelID)\t\(state)\t\(current ? "yes" : "no")")
+        }
     }
+    return lines
 }
 
 private func modelIDKey(_ modelID: String) -> String {
-    modelID.lowercased(with: nil)
+    SupportedModels.foldedModelID(modelID)
 }
 
 private func writeStderr(_ line: String) {
@@ -3044,6 +3363,7 @@ private func emitJSONList(
     source: String,
     warmSwapAvailable: Bool,
     authorizedModelIDs: Set<String>? = nil,
+    warmModelIDs: Set<String> = [],
     artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws {
     do {
@@ -3053,6 +3373,7 @@ private func emitJSONList(
             source: source,
             warmSwapAvailable: warmSwapAvailable,
             authorizedModelIDs: authorizedModelIDs,
+            warmModelIDs: warmModelIDs,
             artifactResolver: artifactResolver
         )
         try ModelSwitchingWireCodec.printJSON(document)
@@ -3066,12 +3387,16 @@ private func emitJSONList(
     }
 }
 
-private func makeModelsListWire(
+/// `warmModelIDs` (case-folded) are the warm members beside the current
+/// model: listed `warm` (SPEC-011 R-3.10.5); `current_model_id` marks the
+/// primary.
+func makeModelsListWire(
     currentModelID: String?,
     supportedModels: [String],
     source: String,
     warmSwapAvailable: Bool,
     authorizedModelIDs: Set<String>? = nil,
+    warmModelIDs: Set<String> = [],
     artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws -> ModelsListWire {
     var effectiveModels = supportedModels
@@ -3089,7 +3414,8 @@ private func makeModelsListWire(
     for modelID in effectiveModels {
         guard ModelSwitchingWireCodec.safeID(modelID) else { throw ModelsListWireError.invalidModelID }
         guard seen.insert(modelIDKey(modelID)).inserted else { continue }
-        let state = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true ? "warm" : "idle"
+        let current = currentModelID.map { modelIDKey(modelID) == modelIDKey($0) } == true
+        let state = current || warmModelIDs.contains(modelIDKey(modelID)) ? "warm" : "idle"
         let verdict = ModelFit.evaluate(modelID: modelID, ramGB: ModelFit.detectRAMGB())
         let estimate = ModelFit.estimateWeightSizeGB(modelID: modelID).map(Double.init)
         let weightsPresent: Bool

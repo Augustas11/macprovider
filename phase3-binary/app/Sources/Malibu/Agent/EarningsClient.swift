@@ -308,6 +308,9 @@ struct ProviderEarnings: Codable, Equatable {
     let usdcWeek: Double?
     let usdcPending: Double?
     let usdcLifetime: Double?
+    /// Provider credits per served model over the lifetime rows; nil from
+    /// peers that do not report it.
+    let creditsByModel: [String: Int64]?
     let malibuToday: Double?
     let malibuAllTime: Double?
     let trustCriteriaMet: Int?
@@ -349,6 +352,7 @@ struct ProviderEarnings: Codable, Equatable {
         case usdcWeek = "usdc_week"
         case usdcPending = "usdc_pending"
         case usdcLifetime = "usdc_lifetime"
+        case creditsByModel = "credits_by_model"
         case malibuToday = "malibu_today"
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
@@ -382,6 +386,7 @@ struct ProviderEarnings: Codable, Equatable {
         usdcWeek = try c.decodeIfPresent(Double.self, forKey: .usdcWeek)
         usdcPending = try c.decodeIfPresent(Double.self, forKey: .usdcPending)
         usdcLifetime = try c.decodeIfPresent(Double.self, forKey: .usdcLifetime)
+        creditsByModel = try? c.decodeIfPresent([String: Int64].self, forKey: .creditsByModel)
         malibuToday = try c.decodeIfPresent(Double.self, forKey: .malibuToday)
         malibuAllTime = try c.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
@@ -430,6 +435,7 @@ struct ProviderEarnings: Codable, Equatable {
         try c.encodeIfPresent(usdcWeek, forKey: .usdcWeek)
         try c.encodeIfPresent(usdcPending, forKey: .usdcPending)
         try c.encodeIfPresent(usdcLifetime, forKey: .usdcLifetime)
+        try c.encodeIfPresent(creditsByModel, forKey: .creditsByModel)
         try c.encodeIfPresent(malibuToday, forKey: .malibuToday)
         try c.encodeIfPresent(malibuAllTime, forKey: .malibuAllTime)
         try c.encodeIfPresent(trustCriteriaMet, forKey: .trustCriteriaMet)
@@ -474,6 +480,7 @@ struct ProviderEarnings: Codable, Equatable {
         usdcWeek: Double?,
         usdcPending: Double?,
         usdcLifetime: Double?,
+        creditsByModel: [String: Int64]? = nil,
         malibuToday: Double?,
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
@@ -505,6 +512,7 @@ struct ProviderEarnings: Codable, Equatable {
         self.usdcWeek = usdcWeek
         self.usdcPending = usdcPending
         self.usdcLifetime = usdcLifetime
+        self.creditsByModel = creditsByModel
         self.malibuToday = malibuToday
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet

@@ -137,6 +137,9 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let usdcWeek: Double?
     public let usdcPending: Double?
     public let usdcLifetime: Double?
+    /// Provider credits per served model over the same rows as the lifetime
+    /// total (`credits_by_model`); nil from coordinators that omit it.
+    public let creditsByModel: [String: Int64]?
     public let malibuToday: Double?
     public let malibuAllTime: Double?
     public let trustCriteriaMet: Int?
@@ -180,6 +183,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case usdcWeek = "usdc_week"
         case usdcPending = "usdc_pending"
         case usdcLifetime = "usdc_lifetime"
+        case creditsByModel = "credits_by_model"
         case malibuToday = "malibu_today"
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
@@ -219,6 +223,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         usdcWeek = try container.decodeIfPresent(Double.self, forKey: .usdcWeek)
         usdcPending = try container.decodeIfPresent(Double.self, forKey: .usdcPending)
         usdcLifetime = try container.decodeIfPresent(Double.self, forKey: .usdcLifetime)
+        // Additive field: a malformed map is dropped, never fatal.
+        creditsByModel = try? container.decodeIfPresent([String: Int64].self, forKey: .creditsByModel)
         malibuToday = try container.decodeIfPresent(Double.self, forKey: .malibuToday)
         malibuAllTime = try container.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
@@ -268,6 +274,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         try container.encodeIfPresent(usdcWeek, forKey: .usdcWeek)
         try container.encodeIfPresent(usdcPending, forKey: .usdcPending)
         try container.encodeIfPresent(usdcLifetime, forKey: .usdcLifetime)
+        try container.encodeIfPresent(creditsByModel, forKey: .creditsByModel)
         try container.encodeIfPresent(malibuToday, forKey: .malibuToday)
         try container.encodeIfPresent(malibuAllTime, forKey: .malibuAllTime)
         try container.encodeIfPresent(trustCriteriaMet, forKey: .trustCriteriaMet)
@@ -310,6 +317,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         usdcWeek: Double?,
         usdcPending: Double?,
         usdcLifetime: Double?,
+        creditsByModel: [String: Int64]? = nil,
         malibuToday: Double?,
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
@@ -340,6 +348,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.usdcWeek = usdcWeek
         self.usdcPending = usdcPending
         self.usdcLifetime = usdcLifetime
+        self.creditsByModel = creditsByModel
         self.malibuToday = malibuToday
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
@@ -373,6 +382,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcWeek: usdcWeek,
             usdcPending: usdcPending,
             usdcLifetime: usdcLifetime,
+            creditsByModel: creditsByModel,
             malibuToday: malibuToday,
             malibuAllTime: malibuAllTime,
             trustCriteriaMet: trustCriteriaMet,
@@ -404,6 +414,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcWeek: usdcWeek,
             usdcPending: usdcPending,
             usdcLifetime: usdcLifetime,
+            creditsByModel: creditsByModel,
             malibuToday: nil,
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet,
@@ -444,6 +455,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcWeek: usdcWeek,
             usdcPending: usdcPending,
             usdcLifetime: usdcLifetime,
+            creditsByModel: creditsByModel,
             malibuToday: nil,
             malibuAllTime: amounts.accruedMALIBU,
             trustCriteriaMet: inputs.criteriaMet,
@@ -477,6 +489,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcWeek: usdcWeek,
             usdcPending: usdcPending,
             usdcLifetime: usdcLifetime,
+            creditsByModel: creditsByModel,
             malibuToday: nil,
             malibuAllTime: nil,
             trustCriteriaMet: nil,
@@ -541,6 +554,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcWeek: usdcWeek,
             usdcPending: usdcPending,
             usdcLifetime: usdcLifetime,
+            creditsByModel: creditsByModel,
             malibuToday: malibuToday,
             malibuAllTime: malibuAllTime,
             trustCriteriaMet: trustCriteriaMet,

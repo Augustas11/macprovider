@@ -125,7 +125,11 @@ struct IdlePrewarmLogger: Sendable {
 }
 
 actor IdlePrewarmer {
-    private let modelRuntime: any ModelRuntimeServing
+    private let bootModelRuntime: any ModelRuntimeServing
+    /// SPEC-011 R-3.10.3: the warm set's current primary; nil means the boot
+    /// runtime. Each warmup runs on the primary of the moment it fires.
+    private let primaryRuntime: (@Sendable () -> (any ModelRuntimeServing)?)?
+    private var modelRuntime: any ModelRuntimeServing { primaryRuntime?() ?? bootModelRuntime }
     private let providerStatus: ProviderStatus
     private let thermalGate: ThermalGate
     private let powerSource: PowerSourceReporting
@@ -159,9 +163,11 @@ actor IdlePrewarmer {
         thermalGate: ThermalGate,
         powerSource: PowerSourceReporting,
         config: IdlePrewarmConfig,
-        logger: IdlePrewarmLogger
+        logger: IdlePrewarmLogger,
+        primaryRuntime: (@Sendable () -> (any ModelRuntimeServing)?)? = nil
     ) {
-        self.modelRuntime = modelRuntime
+        self.bootModelRuntime = modelRuntime
+        self.primaryRuntime = primaryRuntime
         self.providerStatus = providerStatus
         self.thermalGate = thermalGate
         self.powerSource = powerSource

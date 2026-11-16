@@ -1155,6 +1155,10 @@ SELECT model, SUM(provider_credits),
 			return err
 		}
 		rangeTotal += total
+		if out.byModel == nil {
+			out.byModel = map[string]int64{}
+		}
+		out.byModel[model] += total
 		out.week += week
 		out.today += today
 		out.faults += faults
