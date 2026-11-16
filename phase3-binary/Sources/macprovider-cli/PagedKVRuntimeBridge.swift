@@ -2032,7 +2032,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         labTraceLiveRows("finish_before", finishing: requestID)
         defer { labTraceLiveRows("finish_after", finishing: requestID) }
         #endif
-        invalidateDecodeSession(containing: requestID)
+        dropDecodeSession(containing: requestID)
         removeNativeMTPPendingTransaction(for: requestID)
         removeNativeMTPRowState(for: requestID)
         removeRowState(for: requestID, discardRecordedCache: false)
@@ -4320,6 +4320,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private func invalidateDecodeSession(containing requestID: String) {
         invalidateDecodeSession(containingAnyOf: [requestID])
+    }
+
+    /// `finish` only (#2396): forgets the session a finished row rides and
+    /// touches no row cache. The scheduler calls `finish` while the next
+    /// window runs, and that window may be repacking these same caches into
+    /// its new batch: releasing the session here detached them mid-pack, and
+    /// a layer packed from a half-detached row started an empty one-token
+    /// lockstep buffer. The remaining rows stay attached to the dropped
+    /// session's buffers (synced at its window end); the next window repacks
+    /// them on the model container.
+    private func dropDecodeSession(containing requestID: String) {
+        lock.lock()
+        if decodeSession?.requestIDs.contains(requestID) == true {
+            decodeSession = nil
+        }
+        lock.unlock()
     }
 
     /// Ends the decode session only when one of `requestIDs` rides it. A
