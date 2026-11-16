@@ -1633,6 +1633,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if !pendingIDs.isEmpty {
             try await container.perform { context in
                 self.enterTargetLock(); defer { self.exitTargetLock() }
+                self.releaseRetiredDecodeSessions()
                 // SPEC-001-R018: the drafter catch-up forward is one GPU turn.
                 let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: pendingIDs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
                 try await self.flushNativeMTPDrafterColumns(
@@ -1841,6 +1842,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             // SPEC-001-R018: one GPU turn for the round's commit forward.
             let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: inputs.count)) ?? false; defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
@@ -2150,6 +2152,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         try await container.perform(nonSendable: input) { context, input in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             var state = self.rowState(
                 for: input.requestID,
                 binding: input.binding,
@@ -2383,6 +2386,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         return try await container.perform { _ in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
             self.invalidateDecodeSession(containing: requestID)
             let row = self.existingRowState(for: requestID)
             guard let row, row.caches.count == self.cacheKinds.count else { return nil }

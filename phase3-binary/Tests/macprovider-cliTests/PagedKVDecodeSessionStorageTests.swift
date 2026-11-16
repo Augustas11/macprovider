@@ -739,6 +739,54 @@ final class PagedKVDecodeSessionFinishTests: XCTestCase {
         XCTAssertTrue(row.holdsOwnKVBuffers)
         XCTAssertEqual(row.state.first?.dim(2), 20)
     }
+
+    /// Two rows of one session end in the same window: `finish(a)` retires
+    /// the session, and `b`'s terminal commit runs before any decode window
+    /// could release it. The commit must find `b` holding its own K/V and end
+    /// with its full history plus the committed token: the same K/V as the
+    /// same batch whose `a` has not finished.
+    func testTerminalCommitAfterABatchMatesFinishSeesItsOwnFullHistory() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 51),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 52),
+        ]
+        func batchCommittingB(finishingA: Bool) async throws -> (PagedKVDecodeSessionStorageTests.Rows, Int) {
+            let rows = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+            try await rows.prefillAll("a")
+            try await rows.prefillAll("b")
+            try await rows.decode(["a", "b"], steps: 2)
+            XCTAssertEqual(rows.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+            let committed = rows.committed("b")
+            if finishingA { rows.backend.finish(requestID: "a") }
+            let handle = rows.handles["b"]!
+            _ = try await rows.allocator.extend(handle, by: 1)
+            let binding = try await rows.allocator.binding(for: handle)
+            try await rows.backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                requestID: "b",
+                currentToken: rows.generated["b"]!.last!,
+                binding: binding,
+                blockTable: binding.currentTable,
+                committedKVTokenCount: committed,
+                targetKVTokenCount: committed + 1
+            ))
+            return (rows, committed)
+        }
+
+        let (finished, committed) = try await batchCommittingB(finishingA: true)
+        let layers = finished.backend.rowPagedCachesForTest(requestID: "b")
+        XCTAssertEqual(layers.count, 2)
+        XCTAssertTrue(layers.allSatisfy(\.holdsOwnKVBuffers), "b still rides the retired batch")
+        XCTAssertEqual(layers.map(\.offset), [committed + 1, committed + 1])
+        XCTAssertEqual(layers.map(\.storedTokens), [committed + 1, committed + 1])
+
+        let (reference, _) = try await batchCommittingB(finishingA: false)
+        XCTAssertEqual(
+            try finished.backend.rowTargetCacheDigestForTest(requestID: "b"),
+            try reference.backend.rowTargetCacheDigestForTest(requestID: "b"),
+            "b's committed K/V differs from the same batch without a's finish"
+        )
+    }
 }
 
 /// Flags shared by a test and the threads it interleaves.
