@@ -807,6 +807,43 @@ final class ProviderContextTests: XCTestCase {
         XCTAssertTrue(aboveModel.text.contains("262144"), aboveModel.text)
     }
 
+    /// SPEC-001-R017: `max_context_override` also sizes every further model
+    /// without its own `context_tokens`, so the value is checked against
+    /// each of those models too; a model with its own context is not.
+    func testSetIsCheckedAgainstEveryFurtherModelThatUsesTheContext() async throws {
+        let fixture = try Fixture()
+        try fixture.writeConfig("model: m\nwarm_models: [small/model, own/context]\nwarm_model_limits:\n  own/context: {context_tokens: 8192}\n")
+        var workflow = fixture.workflow()
+        workflow.warmMemberFacts = { modelID, _ in
+            modelID == "small/model"
+                ? .init(declaredMax: 32_768, tokenizerMax: nil, kvBytesPerToken: 65_536, weightsBytes: 4 << 30)
+                : .init(declaredMax: 16_384, tokenizerMax: nil, kvBytesPerToken: 65_536, weightsBytes: 4 << 30)
+        }
+
+        let refused = try await workflow.set(tokens: 65_536, preflight: false, apply: false)
+        XCTAssertEqual(refused.exitCode, 1)
+        XCTAssertTrue(refused.text.contains("small/model") && refused.text.contains("32768"), refused.text)
+        XCTAssertFalse(refused.text.contains("own/context"), refused.text)
+        XCTAssertEqual(try fixture.load().maxContextOverride, nil, "nothing written")
+
+        // Above own/context's limit, but it keeps its own 8192.
+        let accepted = try await workflow.set(tokens: 32_768, preflight: false, apply: false)
+        XCTAssertEqual(accepted.exitCode, 0, accepted.text)
+        XCTAssertEqual(try fixture.load().maxContextOverride, 32_768)
+        XCTAssertEqual(try fixture.load().warmModelLimits(for: "own/context")?.contextTokens, 8_192)
+    }
+
+    func testContextFingerprintCoversTheFurtherModels() throws {
+        var config = AppConfig.defaults()
+        config.model = "m"
+        let alone = ProviderContextWorkflow.contextFingerprint(config)
+        config.warmModels = ["a"]
+        let withMember = ProviderContextWorkflow.contextFingerprint(config)
+        config.warmModelLimits = ["a": WarmModelLimits(contextTokens: 4_096)]
+        XCTAssertNotEqual(alone, withMember)
+        XCTAssertNotEqual(withMember, ProviderContextWorkflow.contextFingerprint(config))
+    }
+
     func testRollbackRestoresNewestBackupAndSavesCurrentFirst() async throws {
         let fixture = try Fixture()
         try fixture.writeConfig("model: m\nmax_context_override: 4000\nprovider_token: keep-me\n")

@@ -258,6 +258,9 @@ struct ProviderContextWorkflow {
     var installedService: () -> InstalledServiceLookup
     var now: () -> Date = Date.init
     var environment: [String: String] = [:]
+    /// The model facts of a further warm model (SPEC-001-R017); nil reads
+    /// them from the model's local copy, as `modelFacts` does the primary's.
+    var warmMemberFacts: ((_ modelID: String, _ config: AppConfig) -> ModelFacts)? = nil
 
     private static let gib: UInt64 = 1 << 30
 
@@ -616,6 +619,8 @@ struct ProviderContextWorkflow {
             config.draftModel,
             config.maxContextOverride.map(String.init),
             config.maxContextProvenance?.yamlFlowValue,
+            config.warmModels.joined(separator: ","),
+            config.warmModels.map { config.warmModelLimits(for: $0)?.contextTokens.map(String.init) ?? "-" }.joined(separator: ","),
         ].map { $0 ?? "<unset>" }
     }
 
@@ -654,6 +659,15 @@ struct ProviderContextWorkflow {
         }
         if let limit = facts.limit, tokens > limit {
             return .refused("Refused: \(tokens) is above this model's limit of \(limit) tokens.")
+        }
+        // SPEC-001-R017: a further model without its own context in
+        // warm_model_limits is served at this context too.
+        for member in config.warmModels where config.warmModelLimits(for: member)?.contextTokens == nil {
+            let memberFacts = warmMemberFacts?(member, config)
+                ?? modelFacts(Self.servedModelArtifactPath(modelID: member, config: config))
+            if let limit = memberFacts.limit, tokens > limit {
+                return .refused("Refused: \(tokens) is above the limit of \(limit) tokens of \(member), which is also loaded and uses this context. Give it its own context_tokens under warm_model_limits in config.yaml, or choose a smaller context. Nothing was written.")
+            }
         }
         if let draftLimit = ProviderCapacity.draftModelContextLimit(physicalMemoryGB: physicalMemoryGB, draftModel: draftModel),
            tokens > draftLimit {

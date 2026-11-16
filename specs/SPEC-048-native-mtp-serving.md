@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.105
+**Version:** 0.1.107
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.105",
+  "version": "0.1.107",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,23 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.78` | `6889f3b41b84041f1693ca1637b1e92e30d5a2d4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.24` | `7fbcada97b58ddafab567121da63b959b8d092e3` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.79` | `92459644d702bf42959c66dd8be0c0416f1dd882` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.78` is on `3.32.3-macprovider.76`
+The mlx-swift-lm row `3.32.3-macprovider.79` is on `3.32.3-macprovider.78`
+(`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`) (#2338), at
+`92459644d702bf42959c66dd8be0c0416f1dd882`: It is 3.32.3-macprovider.78 plus
+one commit that only moves its mlx-swift pin to 0.32.3-macprovider.25
+(12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two
+Swift-layer commits: a synchronous eval schedules the graph and copies its
+completion events under the process-wide evalLock, waits for the device
+without the lock, then retakes the lock to finish; recursive entry, a CPU
+stream and a failed asynchronous schedule keep the stock locked path. The core
+and C rows are unchanged and no Metal kernel changed.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.78` is on `3.32.3-macprovider.76`
 (`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) (#2389), at
 `6889f3b41b84041f1693ca1637b1e92e30d5a2d4`: three commits that only move its mlx-swift pin. The Swift row is `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`, `.22` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`, seven commits on `.14`). The core adds the stock-order small-row route: `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, read once per process, sends one row to upstream's one-row kernel, exactly two rows to a kernel whose rows equal the lone row bit for bit, and 3-16 rows to the batch kernel, which uses 8 partial sums over K instead of 4 on some GPU generations. The default (row-invariant) route and its output bits are unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is unchanged. The C row is unchanged.
 
@@ -2030,15 +2041,26 @@ route (R003):
    without reaching that exit (a request that never ends, a long pause), the
    provider abandons the restart without cutting anything, serves again and
    reports `restart_required`; the next release or the next process start
-   picks the admission up.
+   picks the admission up. The pickup is computed for the boot model (the
+   configured `model`), which a restart brings back as the primary. On a
+   provider with a warm set (SPEC-001 §6.16), once a warm member other than
+   the boot model's runtime has been promoted to primary (SPEC-011
+   R-3.10.3), the pickup is abandoned the same way, with nothing cut: a
+   promotion during the delay or the drain cancels it at once, and the
+   primary is checked again before the drain and before the exit. The
+   provider serves on and reports `restart_required`. A swap of the primary
+   that reloads the boot runtime is not a promotion. A provider that never
+   promotes a warm member restarts exactly as above.
 4. Only the provider LaunchAgent's process exits: its parent is launchd and
    launchd names it as the provider job (`XPC_SERVICE_NAME` equals the
    provider label) or it carries the installer plist's
    `MACPROVIDER_LAUNCHD_DOMAIN`. Any other process does not exit; it reports
    the pending admission and keeps serving. Local `/v1/status` reports
-   `native_mtp_admission_pending` (`release_id`, `phase` of `scheduled`,
-   `waiting_for_idle`, `restart_required` or `check_exhausted`, and
-   `drain_not_before` while scheduled), else null.
+   `native_mtp_admission_pending` (`release_id`, `model_id` of the boot
+   model the admission is for, `phase` of `scheduled`, `waiting_for_idle`,
+   `restart_required` or `check_exhausted`, and `drain_not_before` while
+   scheduled), else null. After a promotion the top-level status fields
+   describe the new primary and `model_id` still names the boot model.
 5. A revocation never restarts a provider; the live revocation feed (R014)
    disables the tuple in place. An autotune child, a shard-group process and
    a process with an operator-placed admission set do not pick up.
@@ -2741,6 +2763,25 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.107 (2026-11-16, Related: #2338)** — R013: the admission pickup
+  follows the boot model. When a warm member has been promoted to primary,
+  a pending pickup is abandoned without cutting anything (cancelled at the
+  promotion during its delay or drain, and checked again before the drain
+  and before the exit) and reports `restart_required`, so a restart never
+  undoes the promotion. `native_mtp_admission_pending` names the boot model
+  in a new `model_id` field. A provider that never promotes a warm member is
+  unchanged.
+- **0.1.106 (2026-11-16, Related: #2338)** — R003 names mlx-swift-lm `3.32.3-macprovider.79`
+  (`92459644d702bf42959c66dd8be0c0416f1dd882`) on `3.32.3-macprovider.78`
+  (#2338): It is 3.32.3-macprovider.78 plus one commit that only moves its
+  mlx-swift pin to 0.32.3-macprovider.25
+  (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two
+  Swift-layer commits: a synchronous eval schedules the graph and copies its
+  completion events under the process-wide evalLock, waits for the device
+  without the lock, then retakes the lock to finish; recursive entry, a CPU
+  stream and a failed asynchronous schedule keep the stock locked path. The
+  core and C rows are unchanged and no Metal kernel changed. Model sources
+  are unchanged.
 - **0.1.105 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.78`
   (`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`) on `3.32.3-macprovider.76`
   (#2389): three commits that only move its mlx-swift pin. R003 also names mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`) and MLX core `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038 FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`). The row-invariant route that native MTP serves on is unchanged. Model sources and the C row are unchanged.

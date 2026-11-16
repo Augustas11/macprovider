@@ -220,6 +220,42 @@ enum ModelsPresentation {
         }
     }
 
+    static let alsoLoadedTitle = String(localized: "Also loaded", comment: "Models section: models loaded beside the served one")
+
+    /// Slots and context of a model loaded beside the served one, or what it
+    /// is doing while it loads or unloads.
+    static func alsoLoadedDetail(_ model: ProviderEngineStatus.LoadedModel) -> String {
+        switch model.state {
+        case "loading": return String(localized: "Loading…", comment: "Also loaded model state")
+        case "evicting": return String(localized: "Unloading…", comment: "Also loaded model state")
+        default: break
+        }
+        var parts: [String] = []
+        if let slots = model.slotsTotal, slots > 0 {
+            parts.append(slots == 1
+                ? String(localized: "1 slot", comment: "Also loaded model slots")
+                : String(localized: "\(slots) slots", comment: "Also loaded model slots"))
+        }
+        if let context = model.maxContextTokens, context > 0 {
+            parts.append(String(localized: "\(context.formatted()) tokens of context", comment: "Also loaded model context"))
+        }
+        return parts.isEmpty ? String(localized: "Ready", comment: "Also loaded model state") : parts.joined(separator: " · ")
+    }
+
+    /// The "Also loaded" section's strings; none when one model is loaded.
+    static func alsoLoadedStrings(_ models: [ProviderEngineStatus.LoadedModel], saved: Set<String>) -> [String] {
+        guard !models.isEmpty else { return [] }
+        return [alsoLoadedTitle] + models.map { model in
+            var actions: [String] = []
+            if !saved.contains(model.modelID.lowercased(with: nil)) {
+                actions.append(String(localized: "Keep loaded", comment: "Also loaded action"))
+            }
+            actions.append(String(localized: "Unload", comment: "Also loaded action"))
+            return [readableTitle(model.modelID), ShellText.display(model.modelID), alsoLoadedDetail(model), actions.joined(separator: ", ")]
+                .joined(separator: " | ")
+        }
+    }
+
     static var hostMemoryGB: Int {
         Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824)
     }
@@ -229,7 +265,9 @@ enum ModelsPresentation {
         rows: [MalibuModelRow],
         listState: ModelManagementStore.ListState,
         warmSwapAvailable: Bool = true,
-        filter: String = ""
+        filter: String = "",
+        alsoLoaded: [ProviderEngineStatus.LoadedModel] = [],
+        savedLoadedModelIDs: Set<String> = []
     ) -> [String] {
         var strings = [
             String(localized: "Models", comment: "Models screen title"),
@@ -248,6 +286,7 @@ enum ModelsPresentation {
                 strings.append(line)
             }
         }
+        strings += alsoLoadedStrings(alsoLoaded, saved: savedLoadedModelIDs)
         strings.append(switchingCost)
         return strings
     }
@@ -427,6 +466,10 @@ struct ModelsScreen: View {
                             Divider().padding(.leading, 20)
                         }
                     }
+                    let alsoLoaded = agent.snapshot.providerEngine?.alsoLoaded ?? []
+                    if !alsoLoaded.isEmpty {
+                        alsoLoadedSection(alsoLoaded)
+                    }
                     revertAndHistory
                         .padding(20)
                 }
@@ -557,6 +600,61 @@ struct ModelsScreen: View {
             .help(String(localized: "Why this model can or can't be served here", comment: "Model details help"))
             .accessibilityLabel(Text(String(localized: "Details for \(ShellText.display(row.displayID))", comment: "Model details accessibility label")))
         }
+    }
+
+    /// Models loaded beside the served one, with their slots and context.
+    private func alsoLoadedSection(_ models: [ProviderEngineStatus.LoadedModel]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(ModelsPresentation.alsoLoadedTitle)
+                .font(.headline)
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+            ForEach(models) { model in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ModelsPresentation.readableTitle(model.modelID))
+                            .font(.body.weight(.medium))
+                            .help(ShellText.display(model.modelID))
+                        Text(ShellText.display(model.modelID))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(ModelsPresentation.alsoLoadedDetail(model))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        if !store.savedLoadedModelIDs.contains(model.modelID.lowercased(with: nil)) {
+                            Button(String(localized: "Keep loaded", comment: "Also loaded action")) {
+                                Task { await store.runLoadedModelAction(.keep, modelID: model.modelID) }
+                            }
+                            .help(String(localized: "Keep this model loaded, also after a restart.", comment: "Keep loaded help"))
+                        }
+                        Button(String(localized: "Unload", comment: "Also loaded action")) {
+                            Task { await store.runLoadedModelAction(.unload, modelID: model.modelID) }
+                        }
+                        .help(String(localized: "Unload this model and stop loading it at start.", comment: "Unload help"))
+                    }
+                    .disabled(store.loadedModelActionTarget != nil || model.state != "warm")
+                    .frame(width: 170, alignment: .trailing)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .accessibilityElement(children: .contain)
+                Divider().padding(.leading, 20)
+            }
+            if let line = store.loadedModelActionLine {
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+            }
+        }
+        .accessibilityIdentifier("malibu.models.alsoLoaded")
     }
 
     private func start(_ row: MalibuModelRow) {

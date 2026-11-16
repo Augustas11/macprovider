@@ -207,6 +207,41 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
 
     // MARK: - Backend decode sessions
 
+    /// `finish` runs on the scheduler actor while a decode window may be
+    /// packing the surviving rows on the container (#2338: a terminal delivery
+    /// landing during the next window). It must leave every row cache alone
+    /// until the container is free; releasing the session in `finish` cut a
+    /// surviving row's layer history to one window
+    /// (`paged_kv_block_table_mismatch`). The surviving row still decodes
+    /// exactly afterwards.
+    func testFinishDuringAContainerOperationLeavesSurvivingRowsUntouched() async throws {
+        try requireMetal()
+        let target = try Self.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": Self.tinyPrompt(length: 37, salt: 11),
+            "b": Self.tinyPrompt(length: 70, salt: 12),
+        ]
+        let shared = try Rows(target: target, prompts: prompts)
+        for id in ["a", "b"] { try await shared.prefillAll(id) }
+        try await shared.decode(["a", "b"], steps: 3)
+        XCTAssertEqual(shared.backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+
+        let backend = shared.backend
+        let survivingRowUntouched = try await backend.withTargetLockForTest {
+            backend.finish(requestID: "a")
+            return backend.rowHoldsOwnKVForTest(requestID: "b") == false
+        }
+        XCTAssertTrue(survivingRowUntouched, "finish released the session while the container was busy")
+
+        try await shared.decode(["b"], steps: 4)
+        let count = shared.generated["b"]!.count
+        XCTAssertEqual(
+            shared.generated["b"],
+            try Self.serialGreedy(target: target, prompt: prompts["b"]!, tokens: count),
+            "b diverged from serial KVCacheSimple after a finished during a container operation"
+        )
+    }
+
     /// Mixed-length rows (one past the 512-token chunk) decode in shared
     /// sessions that keep their batch across another row's prompt chunks,
     /// gain a row, lose a row, and take back a row that decoded alone. Every

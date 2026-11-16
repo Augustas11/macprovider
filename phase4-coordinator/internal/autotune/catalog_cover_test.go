@@ -37,6 +37,29 @@ func TestParseCatalogRejectsInvalidDocuments(t *testing.T) {
 	}
 }
 
+// A row key that is another row's model_id would resolve to two rows (row
+// key first for the tier, model_id first for the sanction identity), so the
+// catalog is rejected. A row whose key is its own model_id, and two rows
+// sharing one model_id, keep one identity and parse.
+func TestParseCatalogRejectsRowKeyNamingAnotherRowsModelID(t *testing.T) {
+	t.Parallel()
+	for _, rows := range []string{
+		`{"model-b":{"model_id":"model-a"},"public-b":{"model_id":"model-b"}}`,
+		`{" Model-B ":{"model_id":"model-a"},"public-b":{"model_id":"MODEL-B"}}`,
+	} {
+		_, err := autotune.ParseCatalog([]byte(coverCatalogJSON(rows)))
+		if err == nil || !strings.Contains(err.Error(), "is the model_id of another row") {
+			t.Errorf("%s: err = %v, want the collision rejected", rows, err)
+		}
+	}
+	c := mustCatalog(t, coverCatalogJSON(`{"model-a":{"model_id":"model-a"},"model-a-8bit":{"model_id":"model-a"},"public-b":{"model_id":"model-b"}}`))
+	for name, want := range map[string]string{"model-a": "model-a", "model-a-8bit": "model-a", "public-b": "model-b", "model-b": "model-b"} {
+		if got, ok := c.CanonicalModelID(name); !ok || got != want {
+			t.Errorf("CanonicalModelID(%q) = %q, %v; want %q", name, got, ok, want)
+		}
+	}
+}
+
 func TestParseCatalogDefaultsPolicyVersionAndCopiesRaw(t *testing.T) {
 	t.Parallel()
 	raw := []byte(coverCatalogJSON(`{"k":{"model_id":"M"}}`))

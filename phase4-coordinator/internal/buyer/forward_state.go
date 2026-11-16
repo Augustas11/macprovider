@@ -143,7 +143,9 @@ type forwardState struct {
 	// helper-level assertions do not retain request-scoped capacity leases.
 	slotReservationsEnabled bool
 
-	// queuedSlotProviderID is set when routing reserves a provider slot for
+	// queuedSlotProviderID is the slot key (slotKey) of the seat routing
+	// reserved; for a provider without a warm set it is the provider id. It
+	// is set when routing reserves a provider slot for
 	// this request, either directly at selection time or after the slot queue
 	// observes a recovered provider slot. It is released when the provider
 	// has accepted the request (WS relay start / HTTP headers), so in-flight
@@ -160,6 +162,10 @@ type forwardState struct {
 	slotConsumedOnAccept bool
 	consumedProviderID   string
 	consumedAssignedID   string
+	// consumedServedModelID is the served model the consumed seat was booked
+	// for (pool.ConsumeForwardedSlotBooked, SPEC-002-R011); empty for a
+	// provider without a warm set.
+	consumedServedModelID string
 	// acceptedOnUnconfirmedOccupancy records that the latest accepted
 	// attempt took its seat while the coordinator, not a Mac report, owned
 	// that provider's occupancy (pool.ConsumeForwardedSlotDetailed).

@@ -53,6 +53,9 @@ targets:
       # SPEC-049 §4.13: the code-bound statement and attestor channel are
       # framed from one source shared with macprovider-cli.
       - path: ../Sources/macprovider-cli/PrivacyCodeBoundShared.swift
+      # SPEC-001-R017: the config's warm-set keys are edited by one source
+      # shared with macprovider-cli.
+      - path: ../Sources/macprovider-cli/WarmSetConfigText.swift
     resources:
       # payout-signer is deliberately EXCLUDED here and copied as a directory
       # by the "Bundle payout-signer" post-build step below. XcodeGen 2.45.4's

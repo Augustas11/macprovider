@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.43
+version: v0.22.44
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,13 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.44 (2026-11-16, Related: #2338)** — §6: `autotune --recommend
+  --warm-set <model>` adds a `warm_set` member, last, to the recommendation
+  JSON: the SPEC-001 §6.16 fit plan for that model beside the recommended
+  model at its recommended context and slots, or `null` when there is no
+  apply-ready serving configuration. Without the flag the output is
+  unchanged byte for byte. Human output adds one line. Nothing is loaded,
+  evicted or downloaded.
 - **v0.22.43 (2026-11-14, Related: #2367, #2154)** — §9.4 adds a per-run
   download cap of twice the Mac's memory (step 2) and the unattended
   trigger (step 9): a serving provider checks every 6 hours, in its own
@@ -2907,6 +2914,7 @@ Schema rules:
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - The human transcript MUST render the selected candidate's `confidence`, `bench_gate_provenance`, and `bench_gate_drift` fields. Empty drift is rendered as `none`.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
+- `warm_set` (v0.22.44) appears only when `--warm-set <model>` is given, which requires `--recommend` and cannot be combined with `--prefetch`, `--freshness-check` or `--recover-hardware-admission`. It is added as the last member of the object; without the flag the document is byte for byte what it is without this revision. Its value is the SPEC-001 §6.16 fit plan (`decision`, `reason`, `members`, `primary_fit`, `limit_bytes`, `required_bytes`, keys sorted) for the named model beside `serve_config.model` at `serve_config.max_context_override` and `serve_config.max_concurrency_override`, or `null` when `serve_config` is `null`. The plan is arithmetic only: it loads, evicts and downloads nothing and never lowers the recommended model. Human output adds the plan as one line.
 - `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`; v0.8.1 restores `rate_card_default_tier_used` as the visible signal for default-row pricing fallback; v0.8.6 adds `rate_card_integrity_failure`, `rate_card_update_required`, and `rate_card_stale`; v0.10.0 adds `catalog_artifact_feed_fallback_used`, `catalog_artifact_feed_integrity_failure`, `catalog_artifact_feed_update_required`, and `catalog_artifact_feed_stale` (§3.7.6). Any integrity/update-required warning of the §3.2–§3.4 feeds blocks a paid recommendation; the `catalog_artifact_feed_*` codes never do (§3.7.6 rule 6). For artifact-derived capabilities, only `catalog_artifact_feed_integrity_failure` and `catalog_artifact_feed_update_required` fail closed; `catalog_artifact_feed_stale` is advisory only (§3.7.6 rule 4).
 
 ## 7. Per-token payout semantics

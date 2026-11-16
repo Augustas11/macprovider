@@ -102,6 +102,16 @@ final class SmallMRouteTests: XCTestCase {
     /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant` turns
     /// a stock order decision into the row-invariant route and leaves every
     /// serial-only and row-invariant decision, reason included, as it was.
+    /// SPEC-038 FR-CB9 (v0.3.57): a configured further model keeps the
+    /// process on the row-invariant route, like another switch target.
+    func testConfiguredFurtherModelCountsAsAnotherModel() {
+        let startup: Set<String> = ["org/main"]
+        XCTAssertFalse(SmallMRoute.servesOtherModels(switchTargets: ["Org/Main"], startupModelIDs: startup, warmModels: []))
+        XCTAssertTrue(SmallMRoute.servesOtherModels(switchTargets: ["org/other"], startupModelIDs: startup, warmModels: []))
+        XCTAssertTrue(SmallMRoute.servesOtherModels(switchTargets: [String](), startupModelIDs: startup, warmModels: ["org/second"]))
+        XCTAssertTrue(SmallMRoute.servesOtherModels(switchTargets: ["org/main"], startupModelIDs: startup, warmModels: ["org/second"]))
+    }
+
     func testOperatorRowInvariantOnlyReplacesStockOrder() {
         let cases: [(SmallMRoute.Inputs, SmallMRoute.Decision)] = [
             (inputs(explicit: false, nativeMTP: .auto, verdict: .absent), .init(route: .rowInvariant, reason: "operator_row_invariant")),

@@ -73,7 +73,7 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 	now := e.s.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	key := computeScoringKey{providerID, modelID}
+	key := e.scoringKey(providerID, modelID)
 	st := e.states[key]
 	if st == nil {
 		return false, nil
@@ -99,7 +99,7 @@ func (e *computeScoringEngine) operatorConfirmFailure(ctx context.Context, provi
 	now := e.s.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	st := e.states[computeScoringKey{providerID, modelID}]
+	st := e.states[e.scoringKey(providerID, modelID)]
 	if st == nil {
 		return false, nil
 	}

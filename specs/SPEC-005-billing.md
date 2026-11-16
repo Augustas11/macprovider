@@ -1,7 +1,19 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.25 (2026-10-18, provider earnings payout state and last paid job)
+**Version:** 0.6.27 (2026-11-16, provider earnings per model: rows without a model)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.27 (2026-11-16, Related: #2338):** §11.4 states the
+`credits_by_model` sum exactly: its values sum to `total_credits` minus the
+credits of payable rows that carry no model, which no key names. Text only;
+no ledger, settlement, or payout change.
+
+**Change log v0.6.26 (2026-11-16, Related: #2338):** §11.4 `GET
+/providers/{provider_id}/earnings` adds `credits_by_model`: `total_credits`
+split by model, over the same payable rows and in the same provider-credit
+unit, so its values sum to `total_credits` and its keys are `models_served`.
+Additive; every existing field is unchanged. Read-only: no ledger,
+settlement, or payout change.
 
 **Change log v0.6.25 (2026-10-18, #2029):** §11.4 `GET
 /providers/{provider_id}/earnings` documents the `usdc_*` fields it already
@@ -2335,6 +2347,7 @@ No HTML, chart markup, Slack payload, or email body is returned.
   },
   "provider_share_bps": 9000,
   "models_served": ["mlx-community/Qwen2.5-7B-Instruct-4bit"],
+  "credits_by_model": {"mlx-community/Qwen2.5-7B-Instruct-4bit": 640000},
   "rate_card_excerpt": {
     "mlx-community/Qwen2.5-7B-Instruct-4bit": {
       "prompt_credits_per_mtok": 1000000,
@@ -2350,6 +2363,17 @@ No HTML, chart markup, Slack payload, or email body is returned.
   "last_paid_job_at_utc": "2026-05-24T19:49:00Z"
 }
 ```
+
+`credits_by_model` (v0.6.26) maps each model in `models_served` to its share
+of `total_credits`: the same payable rows (hot ledger, earnings rollup and
+settled ledger rollups, honouring any `from`/`to` range), grouped by the
+`model` of each row, in the same integer provider-credit
+unit with no rounding. A payable row with no `model` (NULL) counts in
+`total_credits` and under no key, so the values sum to `total_credits`
+minus the credits of such rows, and to `total_credits` exactly when every
+row names a model. It is a
+read of the rows the totals already read; it changes no credit, settlement
+or payout.
 
 `usdc_*` are `provider_credits / 1,000,000` (SPEC-016 §4.3); `usdc_today` is
 the current UTC day and `usdc_week` starts Monday 00:00 UTC. `payouts_enabled`

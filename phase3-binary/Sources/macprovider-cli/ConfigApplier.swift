@@ -15,6 +15,7 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
     case stringEncodingFailed(String)
     case draftCapacityShortfall(String)
     case draftModelUnresolved(String)
+    case warmSet(String)
 
     var description: String {
         switch self {
@@ -38,6 +39,8 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
             return "draft_model_capacity_shortfall: \(message)"
         case .draftModelUnresolved(let message):
             return "draft_model_unresolved: \(message)"
+        case .warmSet(let message):
+            return message
         }
     }
 }
@@ -114,13 +117,13 @@ struct ConfigApplier {
                 benchmarkID: benchmarkID,
                 generatedAt: ISO8601DateFormatter().string(from: now)
             ) : nil
-            let updatedText = try updatedConfigText(
+            let updatedText = try Self.removingPrimaryFromWarmSet(updatedConfigText(
                 originalText,
                 recommendation: written,
                 donorMode: donorMode,
                 provenance: provenance,
                 clearedKeys: clearDraftModel ? Self.draftModelKeys : []
-            )
+            ))
             try validateYAML(updatedText)
             guard let updatedData = updatedText.data(using: .utf8) else {
                 throw ConfigApplierError.stringEncodingFailed(configPath.path)
@@ -687,7 +690,75 @@ struct ConfigApplier {
             output += missing.joined(separator: "\n")
             output += "\n"
         }
-        return output
+        return try Self.removingPrimaryFromWarmSet(output)
+    }
+
+    /// SPEC-001-R017: a write that sets `model` takes that model out of
+    /// `warm_models` and `warm_model_limits`, so the file never names the
+    /// primary as a further model. A config without warm keys is unchanged.
+    static func removingPrimaryFromWarmSet(_ text: String) throws -> String {
+        do {
+            return try WarmSetConfigText.removingPrimary(from: text)
+        } catch let error as WarmSetConfigTextError {
+            throw ConfigApplierError.warmSet(error.description)
+        }
+    }
+
+    /// One change to the further models the config loads at start.
+    enum WarmSetChange: Equatable {
+        /// Keep `modelID` loaded beside the primary with exactly these
+        /// limits (nil: the primary's context and slots).
+        case keep(modelID: String, limits: WarmSetConfigLimits?)
+        /// Stop loading `modelID` at start.
+        case remove(modelID: String)
+    }
+
+    /// Writes one `warm_models` / `warm_model_limits` change (and adds the
+    /// model to an explicit `supported_models`), after a backup, under the
+    /// config lock. The result must load as a valid config, or nothing is
+    /// written. Returns the backup path, or nil when the file already said so.
+    @discardableResult
+    func setWarmSet(_ change: WarmSetChange, now: Date) throws -> URL? {
+        let directory = configPath.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try validateConfigPathSafety()
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            let originalText = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+            try validateYAML(originalText)
+            let updatedText = try Self.settingWarmSet(change, in: originalText, configPath: configPath.path)
+            guard updatedText != originalText else { return nil }
+            let unixTS = Int(now.timeIntervalSince1970)
+            let backupPath = try writeBackupExclusively(
+                Data(ProviderTokenPersist.removingProviderTokenLines(in: originalText).utf8),
+                unixTS: unixTS
+            )
+            try atomicWrite(Data(updatedText.utf8), to: configPath, unixTS: unixTS)
+            return backupPath
+        }
+    }
+
+    /// The config `setWarmSet` would write over `originalText`.
+    static func settingWarmSet(_ change: WarmSetChange, in originalText: String, configPath: String) throws -> String {
+        let updatedText: String
+        do {
+            switch change {
+            case let .keep(modelID, limits):
+                updatedText = try WarmSetConfigText.setting(modelID, limits: limits, in: originalText)
+            case let .remove(modelID):
+                updatedText = try WarmSetConfigText.removing(modelID, from: originalText)
+            }
+        } catch let error as WarmSetConfigTextError {
+            throw ConfigApplierError.warmSet(error.description)
+        }
+        do {
+            _ = try Yams.load(yaml: updatedText)
+            _ = try ConfigLoader.load(
+                cli: CLIOverrides(configPath: configPath), environment: [:],
+                fileExists: { _ in true }, readFile: { _ in updatedText }, resolveCredentials: false)
+        } catch {
+            throw ConfigApplierError.warmSet("the change would leave \(configPath) invalid: \(error)")
+        }
+        return updatedText
     }
 
     /// The draft-model keys a model switch removes (SPEC-023-R029 step 6).

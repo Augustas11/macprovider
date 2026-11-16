@@ -101,6 +101,38 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).usdcSummary.hasSuffix("$-0.0047 today (UTC)"))
     }
 
+    private func earnSnapshot(creditsByModelJSON: String?) throws -> AgentSnapshot {
+        let field = creditsByModelJSON.map { #","credits_by_model":"# + $0 } ?? ""
+        let earnings = try JSONDecoder().decode(ProviderEarnings.self, from: Data("""
+        {"earnings_projection_fresh":true,"usdc_today":0.04,"usdc_week":0.5,"usdc_lifetime":1.25\(field)}
+        """.utf8))
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.applyProviderEarnings(earnings, providerProjectionEligible: true)
+        return snapshot
+    }
+
+    func testEarnShowsEarningsPerModelWhenSeveralModelsEarned() throws {
+        let snapshot = try earnSnapshot(creditsByModelJSON: #"{"model-a":250000,"model-b":1000000,"model-idle":0}"#)
+        let card = AgentSnapshotPresenter.earningsCard(snapshot)
+        XCTAssertEqual(card.usdcSummary, "$1.25 lifetime · $0.50 this week · $0.04 today (UTC)")
+        XCTAssertEqual(card.modelLines, ["model-b: $1.00 lifetime", "model-a: $0.25 lifetime"])
+        let strings = DashboardCopy.defaultPublicStrings(snapshot)
+        let summary = try XCTUnwrap(strings.firstIndex(of: card.usdcSummary))
+        XCTAssertEqual(Array(strings[(summary + 1)...(summary + 2)]), card.modelLines)
+    }
+
+    func testEarnWithOneModelIsUnchanged() throws {
+        let legacy = try earnSnapshot(creditsByModelJSON: nil)
+        let oneModel = try earnSnapshot(creditsByModelJSON: #"{"model-a":1250000}"#)
+        let oneEarning = try earnSnapshot(creditsByModelJSON: #"{"model-a":1250000,"model-b":0}"#)
+        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(legacy).modelLines, [])
+        for snapshot in [oneModel, oneEarning] {
+            XCTAssertEqual(AgentSnapshotPresenter.earningsCard(snapshot), AgentSnapshotPresenter.earningsCard(legacy))
+            XCTAssertEqual(DashboardCopy.defaultPublicStrings(snapshot), DashboardCopy.defaultPublicStrings(legacy))
+        }
+    }
+
     func testLastKnownUsdcIsLabelled() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

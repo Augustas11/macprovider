@@ -112,6 +112,13 @@ enum ProviderConfig {
         return parseTopLevelValue(named: "model", from: contents)
     }
 
+    /// The models config.yaml loads beside the main model at start.
+    static func readSavedWarmModels(paths: ProviderPaths = .current) -> [String] {
+        guard let contents = readTrustedConfigContents(paths: paths),
+              let snapshot = try? WarmSetConfigText.read(contents) else { return [] }
+        return snapshot.warmModels
+    }
+
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
         guard let contents = readTrustedConfigContents(paths: paths),
               let value = parseTopLevelValue(named: "port", from: contents),
@@ -261,7 +268,10 @@ enum ProviderConfig {
         let lockFD = try acquireConfigMutationLock(paths: paths)
         defer { releaseConfigMutationLock(lockFD) }
         let contents = (try? String(contentsOf: paths.configFile)) ?? ""
-        let rewritten = upsertingRecommendationConfigLines(into: contents, config: config)
+        // SPEC-001-R017: the new main model is never also a further model,
+        // or the provider would refuse to start; the CLI writer does the same.
+        let rewritten = try WarmSetConfigText.removingPrimary(
+            from: upsertingRecommendationConfigLines(into: contents, config: config))
         try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
     }
 

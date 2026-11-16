@@ -1,0 +1,504 @@
+import Foundation
+import MacProviderCore
+
+/// A runtime a warm-set member holds (SPEC-001-R016). `ModelRuntime`
+/// conforms; tests use fakes that load no model.
+protocol WarmModelRuntime: AnyObject, Sendable {
+    /// SPEC-001-R017: the runtime's key in `SharedModelMemoryBudget`.
+    var memoryBudgetMemberID: Int { get }
+    /// R017 *Pinning*: the rows (`slots_total`) and per-row token bound a
+    /// pinned member keeps through a later load.
+    func warmSetRowReservation() async -> WarmModelRowReservation
+    /// Releases the model and every per-runtime registration once the
+    /// member is idle; never writes the process-wide provider status.
+    func unloadForWarmSet() async
+}
+
+struct WarmModelRowReservation: Sendable, Equatable {
+    let rows: Int
+    let tokensPerRow: Int
+}
+
+extension ModelRuntime: WarmModelRuntime {}
+
+/// SPEC-001-R016 entry state. Only `warm` is routing-eligible.
+enum WarmModelState: String, Sendable, Equatable {
+    case loading
+    case warm
+    case evicting
+}
+
+enum WarmModelTableError: Error, Equatable, CustomStringConvertible {
+    /// No `warm` entry has the id (absent, loading or evicting): the
+    /// `model_not_loaded` refusal of R016 *Request routing*.
+    case notLoaded(modelID: String)
+    case duplicate(modelID: String)
+    case primaryExists
+    case notEvictable(modelID: String, reason: String)
+
+    var reason: String {
+        switch self {
+        case .notLoaded: return "model_not_loaded"
+        case .duplicate: return "model_already_loaded"
+        case .primaryExists: return "primary_exists"
+        case let .notEvictable(_, reason): return reason
+        }
+    }
+
+    var description: String {
+        switch self {
+        case let .notLoaded(modelID): return "model_not_loaded model=\(modelID)"
+        case let .duplicate(modelID): return "model_already_loaded model=\(modelID)"
+        case .primaryExists: return "primary_exists"
+        case let .notEvictable(modelID, reason): return "\(reason) model=\(modelID)"
+        }
+    }
+}
+
+/// One member as the wire and the router see it at one instant.
+struct WarmModelTableEntry<Runtime: WarmModelRuntime>: Sendable {
+    /// Identifies the member across a primary re-key; leases and state
+    /// transitions address it.
+    let token: UInt64
+    /// The id as configured or requested.
+    let modelID: String
+    /// `modelID` case-folded (SPEC-010): the routing key.
+    let key: String
+    /// Nil only while `loading`.
+    let runtime: Runtime?
+    let state: WarmModelState
+    let primary: Bool
+    let pinned: Bool
+    let leases: Int
+    /// Monotonic nanoseconds of the latest lease; 0 before the first.
+    let lastAdmissionAt: UInt64
+    /// Nil only while `loading`.
+    let memberID: Int?
+}
+
+/// SPEC-001-R016 warm set: which runtime serves which model id, and how many
+/// requests hold each runtime. Every method is synchronous and never awaits
+/// while the lock is held, so the coordinator preflight answer can read it
+/// inline.
+final class WarmModelTable<Runtime: WarmModelRuntime>: @unchecked Sendable {
+    private struct Member {
+        var token: UInt64
+        var modelID: String
+        var key: String
+        var runtime: Runtime?
+        var state: WarmModelState
+        var primary: Bool
+        var pinned: Bool
+        var leases = 0
+        var lastAdmissionAt: UInt64 = 0
+        var memberID: Int?
+        var info: WarmModelMemberInfo?
+        /// SPEC-001-R019: the generation of this member's own self-check
+        /// hold while one is active, nil otherwise.
+        var selfCheckHold: UInt64?
+        /// Leases taken during the active hold and not yet released: they
+        /// queue behind the check and its drain does not wait for them.
+        var holdArrivals = 0
+    }
+
+    private let lock = NSLock()
+    /// The member views preflight and the wire read; republished under the
+    /// lock after every change.
+    let views = WarmModelViewCell()
+    /// Insertion order; `entries()` lists the primary first.
+    private var members: [Member] = []
+    private var nextToken: UInt64 = 0
+    private var nextHoldGeneration: UInt64 = 0
+    private let now: @Sendable () -> UInt64
+
+    init(now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
+        self.now = now
+    }
+
+    static func key(_ modelID: String) -> String { SupportedModels.foldedModelID(modelID) }
+
+    // MARK: Lookup
+
+    /// R016 *Request routing* for `served_model_id`: absent means the
+    /// primary, exactly as a single-model provider; present names a `warm`
+    /// member or is refused.
+    func resolve(servedModelID: String?) throws -> WarmModelTableEntry<Runtime> {
+        lock.lock(); defer { lock.unlock() }
+        return snapshot(try resolvedIndexLocked(servedModelID: servedModelID))
+    }
+
+    /// R016 loopback local request: the `warm` member whose id equals the
+    /// body `model`, else the primary. Nil only with no primary.
+    func resolveLocal(bodyModel: String?) -> WarmModelTableEntry<Runtime>? {
+        lock.lock(); defer { lock.unlock() }
+        return localIndexLocked(bodyModel: bodyModel).map(snapshot)
+    }
+
+    /// Primary first, then insertion order.
+    func entries() -> [WarmModelTableEntry<Runtime>] {
+        lock.lock(); defer { lock.unlock() }
+        return (members.filter(\.primary) + members.filter { !$0.primary }).map(snapshot)
+    }
+
+    func entry(modelID: String) -> WarmModelTableEntry<Runtime>? {
+        lock.lock(); defer { lock.unlock() }
+        return indexLocked(key: Self.key(modelID)).map { snapshot(members[$0]) }
+    }
+
+    func entry(token: UInt64) -> WarmModelTableEntry<Runtime>? {
+        lock.lock(); defer { lock.unlock() }
+        return indexLocked(token: token).map { snapshot(members[$0]) }
+    }
+
+    // MARK: Leases
+
+    /// Holds the routed runtime for one request. Taken before the runtime's
+    /// request handle, so an evicting or loading member never admits a row.
+    func lease(servedModelID: String?) throws -> WarmModelLease<Runtime> {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        return leaseLocked(try resolvedIndexLocked(servedModelID: servedModelID))
+    }
+
+    func leaseLocal(bodyModel: String?) throws -> WarmModelLease<Runtime> {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = localIndexLocked(bodyModel: bodyModel) else {
+            throw WarmModelTableError.notLoaded(modelID: bodyModel ?? "")
+        }
+        return leaseLocked(index)
+    }
+
+    fileprivate func release(_ lease: WarmModelLease<Runtime>) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard !lease.released else { return }
+        lease.released = true
+        guard let index = indexLocked(token: lease.token) else { return }
+        members[index].leases = max(0, members[index].leases - 1)
+        if let generation = lease.holdGeneration, members[index].selfCheckHold == generation {
+            members[index].holdArrivals = max(0, members[index].holdArrivals - 1)
+        }
+    }
+
+    private func leaseLocked(_ index: Int) -> WarmModelLease<Runtime> {
+        members[index].leases += 1
+        members[index].lastAdmissionAt = now()
+        let lease = WarmModelLease(
+            table: self, token: members[index].token, modelID: members[index].modelID,
+            primary: members[index].primary, runtime: members[index].runtime!)
+        if let generation = members[index].selfCheckHold {
+            members[index].holdArrivals += 1
+            lease.holdGeneration = generation
+        }
+        return lease
+    }
+
+    // MARK: Member self-check hold (SPEC-001-R019)
+
+    /// Closes the further member `memberID` for its own self-check: its
+    /// entry reports no free slot until `endSelfCheckHold`. A request that
+    /// still arrives is leased and queues behind the check, as on the
+    /// primary under the provider-wide hold. Nothing else changes: the
+    /// primary's slots and every other member are untouched. Returns why the
+    /// hold was refused, or nil.
+    func beginSelfCheckHold(memberID: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = members.firstIndex(where: { $0.memberID == memberID }) else { return "not_in_warm_set" }
+        guard members[index].state == .warm else { return "member_\(members[index].state.rawValue)" }
+        guard !members[index].primary else { return "primary" }
+        guard members[index].selfCheckHold == nil else { return "already_held" }
+        nextHoldGeneration &+= 1
+        members[index].selfCheckHold = nextHoldGeneration
+        members[index].holdArrivals = 0
+        publishLocked()
+        return nil
+    }
+
+    func endSelfCheckHold(memberID: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = members.firstIndex(where: { $0.memberID == memberID }),
+              members[index].selfCheckHold != nil else { return }
+        members[index].selfCheckHold = nil
+        members[index].holdArrivals = 0
+        publishLocked()
+    }
+
+    /// The member's leases, and those of them taken before its active hold
+    /// (all of them without one): what the hold's drain waits for.
+    func selfCheckHoldWork(memberID: Int) -> (inFlight: Int, predatingHold: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard let member = members.first(where: { $0.memberID == memberID }) else { return (0, 0) }
+        return (member.leases, max(0, member.leases - (member.selfCheckHold == nil ? 0 : member.holdArrivals)))
+    }
+
+    // MARK: State transitions
+
+    /// The boot model, or a runtime adopted as primary: `warm` at once.
+    @discardableResult
+    func insertPrimary(modelID: String, runtime: Runtime, pinned: Bool = true) throws -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard !members.contains(where: \.primary) else { throw WarmModelTableError.primaryExists }
+        return try insertLocked(Member(
+            token: 0, modelID: modelID, key: Self.key(modelID), runtime: runtime, state: .warm,
+            primary: true, pinned: pinned, memberID: runtime.memoryBudgetMemberID))
+    }
+
+    /// A `loading` entry: listed on the wire, never routed or leased.
+    func beginLoading(modelID: String, pinned: Bool) throws -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        return try insertLocked(Member(
+            token: 0, modelID: modelID, key: Self.key(modelID), runtime: nil, state: .loading,
+            primary: false, pinned: pinned))
+    }
+
+    func finishLoading(token: UInt64, runtime: Runtime) throws {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(token: token), members[index].state == .loading else {
+            throw WarmModelTableError.notLoaded(modelID: "\(token)")
+        }
+        members[index].runtime = runtime
+        members[index].memberID = runtime.memoryBudgetMemberID
+        members[index].state = .warm
+    }
+
+    /// A failed load leaves the table as it was before `beginLoading`.
+    func cancelLoading(token: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(token: token), members[index].state == .loading else { return }
+        members.remove(at: index)
+    }
+
+    /// R017 *Eviction*: only a `warm`, non-primary member with no lease may
+    /// start evicting; a pinned one only when `allowPinned` (an explicit
+    /// unload, never a load's LRU eviction). From then on it refuses leases.
+    func beginEvicting(modelID: String, allowPinned: Bool) throws -> WarmModelTableEntry<Runtime> {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(key: Self.key(modelID)) else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        try checkEvictableLocked(index, allowPinned: allowPinned)
+        members[index].state = .evicting
+        return snapshot(members[index])
+    }
+
+    /// Marks every listed budget member `evicting` or none of them: each
+    /// must pass `beginEvicting`'s rules with `allowPinned` false.
+    func beginEvicting(memberIDs: [Int]) throws -> [WarmModelTableEntry<Runtime>] {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        var indexes: [Int] = []
+        for memberID in memberIDs {
+            guard let index = members.firstIndex(where: { $0.memberID == memberID }) else {
+                throw WarmModelTableError.notEvictable(modelID: "member-\(memberID)", reason: "not_in_warm_set")
+            }
+            try checkEvictableLocked(index, allowPinned: false)
+            indexes.append(index)
+        }
+        for index in indexes { members[index].state = .evicting }
+        return indexes.map { snapshot(members[$0]) }
+    }
+
+    /// The model ids of the listed budget members when `beginEvicting`
+    /// would mark every one of them, nil otherwise; changes nothing.
+    func evictableModelIDs(memberIDs: [Int]) -> [String]? {
+        lock.lock(); defer { lock.unlock() }
+        var ids: [String] = []
+        for memberID in memberIDs {
+            guard let index = members.firstIndex(where: { $0.memberID == memberID }),
+                  (try? checkEvictableLocked(index, allowPinned: false)) != nil else { return nil }
+            ids.append(members[index].modelID)
+        }
+        return ids
+    }
+
+    /// Returns an `evicting` member to `warm` (its eviction was abandoned).
+    func cancelEvicting(token: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(token: token), members[index].state == .evicting else { return }
+        members[index].state = .warm
+    }
+
+    /// Removes an `evicting` member once its runtime is unloaded.
+    func finishEvicting(token: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(token: token), members[index].state == .evicting else { return }
+        members.remove(at: index)
+    }
+
+    /// SPEC-011 warm swap of the primary: the same runtime now serves
+    /// `modelID`. Outstanding leases keep counting against the primary.
+    func rekeyPrimary(to modelID: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = members.firstIndex(where: \.primary) else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        let key = Self.key(modelID)
+        if let other = indexLocked(key: key), other != index { throw WarmModelTableError.duplicate(modelID: modelID) }
+        members[index].modelID = modelID
+        members[index].key = key
+    }
+
+    /// SPEC-011 R-3.10.3: a switch to a `warm` secondary promotes it without
+    /// a load. It becomes the pinned primary; the old primary stays `warm`
+    /// but unpinned, an LRU eviction candidate (SPEC-001-R017). Leases keep
+    /// their member: a request keeps running on the runtime it was routed
+    /// to. Returns the old and the new primary.
+    func promote(modelID: String) throws -> (old: WarmModelTableEntry<Runtime>, new: WarmModelTableEntry<Runtime>) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let target = indexLocked(key: Self.key(modelID)), members[target].state == .warm,
+              !members[target].primary, members[target].runtime != nil else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        guard let old = members.firstIndex(where: \.primary) else {
+            throw WarmModelTableError.notLoaded(modelID: modelID)
+        }
+        members[old].primary = false
+        members[old].pinned = false
+        members[target].primary = true
+        members[target].pinned = true
+        // The new primary keeps its info: until the provider status names
+        // it primary, the wire still lists it as a further member
+        // (`WarmModelsWire.entries`). Once it is primary its entry comes
+        // from the top-level fields and this info is not read.
+        return (snapshot(members[old]), snapshot(members[target]))
+    }
+
+    /// The runtime of the member `memberKey` names (`memberKey(token:)`),
+    /// whatever its role; nil when no member has it.
+    func runtime(memberKey: String) -> Runtime? {
+        lock.lock(); defer { lock.unlock() }
+        return members.first { Self.memberKey(token: $0.token) == memberKey }?.runtime
+    }
+
+    /// The runtime of the current primary, nil without one.
+    func primaryRuntime() -> Runtime? {
+        lock.lock(); defer { lock.unlock() }
+        return members.first(where: \.primary)?.runtime
+    }
+
+    /// The `ProviderStatus` key a request on member `token` is counted
+    /// under; stable across a re-key of the primary and a promotion.
+    static func memberKey(token: UInt64) -> String { "warm-member-\(token)" }
+
+    /// Records what the member's runtime reports (R016 wire, preflight).
+    func updateInfo(token: UInt64, _ info: WarmModelMemberInfo) {
+        lock.lock(); defer { lock.unlock() }
+        defer { publishLocked() }
+        guard let index = indexLocked(token: token) else { return }
+        members[index].info = info
+    }
+
+    /// Primary first, then insertion order.
+    func memberViews() -> [WarmModelMemberView] {
+        lock.lock(); defer { lock.unlock() }
+        return viewsLocked()
+    }
+
+    // MARK: Private
+
+    private func viewsLocked() -> [WarmModelMemberView] {
+        (members.filter(\.primary) + members.filter { !$0.primary }).map {
+            WarmModelMemberView(
+                modelID: $0.modelID, key: $0.key, state: $0.state, primary: $0.primary, pinned: $0.pinned,
+                inFlight: $0.leases, info: $0.info, memberID: $0.memberID, memberKey: Self.memberKey(token: $0.token),
+                selfCheckHeld: $0.selfCheckHold != nil)
+        }
+    }
+
+    private func publishLocked() { views.publish(viewsLocked()) }
+
+    private func insertLocked(_ member: Member) throws -> UInt64 {
+        guard indexLocked(key: member.key) == nil else { throw WarmModelTableError.duplicate(modelID: member.modelID) }
+        nextToken &+= 1
+        var member = member
+        member.token = nextToken
+        members.append(member)
+        return nextToken
+    }
+
+    private func checkEvictableLocked(_ index: Int, allowPinned: Bool) throws {
+        let member = members[index]
+        guard member.state == .warm else {
+            throw WarmModelTableError.notEvictable(modelID: member.modelID, reason: "not_warm")
+        }
+        guard !member.primary else {
+            throw WarmModelTableError.notEvictable(modelID: member.modelID, reason: "primary")
+        }
+        guard allowPinned || !member.pinned else {
+            throw WarmModelTableError.notEvictable(modelID: member.modelID, reason: "pinned")
+        }
+        guard member.leases == 0 else {
+            throw WarmModelTableError.notEvictable(modelID: member.modelID, reason: "busy")
+        }
+    }
+
+    private func resolvedIndexLocked(servedModelID: String?) throws -> Int {
+        guard let servedModelID else {
+            guard let primary = members.firstIndex(where: \.primary) else {
+                throw WarmModelTableError.notLoaded(modelID: "")
+            }
+            return primary
+        }
+        guard let index = indexLocked(key: Self.key(servedModelID)), members[index].state == .warm else {
+            throw WarmModelTableError.notLoaded(modelID: servedModelID)
+        }
+        return index
+    }
+
+    private func localIndexLocked(bodyModel: String?) -> Int? {
+        if let bodyModel, let index = indexLocked(key: Self.key(bodyModel)), members[index].state == .warm {
+            return index
+        }
+        return members.firstIndex(where: \.primary)
+    }
+
+    private func indexLocked(key: String) -> Int? { members.firstIndex { $0.key == key } }
+    private func indexLocked(token: UInt64) -> Int? { members.firstIndex { $0.token == token } }
+
+    private func snapshot(_ index: Int) -> WarmModelTableEntry<Runtime> { snapshot(members[index]) }
+
+    private func snapshot(_ member: Member) -> WarmModelTableEntry<Runtime> {
+        WarmModelTableEntry(
+            token: member.token, modelID: member.modelID, key: member.key, runtime: member.runtime,
+            state: member.state, primary: member.primary, pinned: member.pinned, leases: member.leases,
+            lastAdmissionAt: member.lastAdmissionAt, memberID: member.memberID)
+    }
+}
+
+/// One request's hold on a warm member. `release()` is idempotent; a lease
+/// dropped without release is released by `deinit`.
+final class WarmModelLease<Runtime: WarmModelRuntime>: @unchecked Sendable {
+    let token: UInt64
+    let modelID: String
+    /// The member was the primary when the lease was taken.
+    let primary: Bool
+    let runtime: Runtime
+    private let table: WarmModelTable<Runtime>
+    /// Guarded by the table's lock.
+    fileprivate var released = false
+    /// The member's self-check hold the lease arrived during, if any.
+    /// Guarded by the table's lock.
+    fileprivate var holdGeneration: UInt64?
+
+    fileprivate init(table: WarmModelTable<Runtime>, token: UInt64, modelID: String, primary: Bool, runtime: Runtime) {
+        self.table = table
+        self.token = token
+        self.modelID = modelID
+        self.primary = primary
+        self.runtime = runtime
+    }
+
+    func release() { table.release(self) }
+
+    deinit { table.release(self) }
+}

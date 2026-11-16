@@ -301,7 +301,8 @@ extension ModelRuntime {
         prefillStepSize: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
-        cachedTurns: Bool
+        cachedTurns: Bool,
+        gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async -> ContinuousBatchScheduler? {
         let nativeMTPRoundByteCapacity: Int?
         if nativeMTPDrafterContainer != nil {
@@ -344,7 +345,8 @@ extension ModelRuntime {
             return makeContinuousBatchScheduler(
                 decision: decision, tuple: tuple,
                 backend: DeepseekV4ContinuousBatchBackend(
-                    container: container, nativeMTPDrafterContainer: nativeMTPDrafterContainer
+                    container: container, nativeMTPDrafterContainer: nativeMTPDrafterContainer,
+                    gpuTurnParticipant: gpuTurnParticipant
                 ),
                 maxBatch: maxBatch, queueLimit: queueLimit, queueWaitTimeoutMS: queueWaitTimeoutMS,
                 prefillTokensPerIteration: prefillTokensPerIteration, maxContextTokens: maxContextTokens,
@@ -385,7 +387,8 @@ extension ModelRuntime {
                 // hybrid (Qwen3.6) and KV-only layouts alike.
                 compiledDecode: false,
                 drafterContainer: nativeMTPDrafterContainer,
-                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter
+                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter,
+                gpuTurnParticipant: gpuTurnParticipant
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
