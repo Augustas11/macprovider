@@ -40,8 +40,8 @@ buyer account. This is separate from local Chat and provider earnings credential
 
 | Client | Configuration | API | Compatibility boundary |
 | --- | --- | --- | --- |
-| Codex | Isolated `CODEX_HOME`, generated model catalog | Responses | Launcher requires the parser-validated CLI version 0.163.0. |
-| OpenCode | Managed `OPENCODE_CONFIG` with environment-key reference | Chat Completions | Uses the OpenAI-compatible adapter. |
+| Codex | Isolated `CODEX_HOME`, generated model catalog | Responses | Launcher still requires the parser-validated CLI version 0.163.0; see Codex 0.168 and later below. |
+| OpenCode | Managed `OPENCODE_CONFIG` with environment-key reference | Chat Completions | Uses the OpenAI-compatible adapter. See OpenCode 2.2.6 and later below. |
 | Goose | Separate `custom_providers/malibu.json` | Chat Completions | Uses its documented custom OpenAI provider. |
 | Crush | Isolated XDG configuration with `crushrc` | Chat Completions | Uses its OpenAI-compatible provider. |
 | Cursor | Manual Settings handoff | Verify in installed client | Malibu does not edit Cursor's internal settings or claim its API compatibility. |
@@ -52,6 +52,42 @@ window. OpenCode config uses the documented model `limit.context` and
 1,024 tokens (or the smaller served context/published output limit). The app does not infer that metadata from an alias. Client binaries are
 not installed or updated by Malibu. Cursor also routes requests through Cursor
 servers; verify custom endpoint/model support in the installed version.
+
+### Codex 0.168 and later
+
+Codex 0.168.0 added a provider-management API and a default-provider picker.
+Codex 0.169.0 lets a user add or edit a custom provider in the TUI. The
+launcher above is not yet validated against these versions. Its generated
+catalog and version check still target 0.163.0.
+
+What the gateway does for Codex on `/v1/responses`:
+
+- **Spend cap.** When a wallet-session cap is spent, the gateway answers HTTP 400
+  with `error.code: "budget_reached"`. Codex 0.168 treats that code as a
+  terminal error. A cap blocked only by in-flight reservations keeps HTTP 402
+  `wallet_session_exhausted`, because a retry can succeed once they settle.
+- **Over-context requests.** The gateway answers HTTP 400 with
+  `error.code: "context_length_exceeded"`. Codex 0.169 compacts the history and
+  retries on that code.
+
+### OpenCode 2.2.6 and later
+
+OpenCode 2.2.6 reads `store`, `tools.strict`, `streamUsage` and
+`promptCacheKey` for the OpenAI-compatible adapter from the model's
+`capabilities`. The older config `compatibility` block now maps only
+`supportsPromptCacheKey`, `streamUsage` and `supportsEffortUpdates`.
+`supportsStrictMode` and `supportsStore` are ignored. Set these options under
+`capabilities`, not `compatibility`.
+
+For a host OpenCode does not know, such as Malibu, OpenCode sends `strict: false`
+on every function tool, no `store`, `include_usage: true` and no
+`prompt_cache_key`.
+
+### Model metadata for models.dev
+
+Keep `freeform` out of any Malibu models.dev entry. OpenCode 2.3.0 sends
+freeform tool input to a model that lists `capabilities.freeform`, and the
+gateway does not support custom tools yet.
 
 ## Restore or change a setup
 
