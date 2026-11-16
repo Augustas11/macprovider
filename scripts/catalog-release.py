@@ -154,6 +154,11 @@ NATIVE_MTP_VARIANTS_PATH = CATALOG_DIR / "native-mtp-variants.json"
 SNAPSHOT_MANIFESTS_DIR = CATALOG_DIR / "snapshot-manifests"
 NATIVE_MTP_VARIANTS_SCHEMA = "macprovider.native-mtp-variants.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# Issue #2404: the provider's canary cache namespace is
+# `native_mtp:<64-hex tuple>:<challenge_id>`, and providers up to CLI 1.8.292
+# refuse a canary request whose namespace exceeds 128 bytes as
+# `invalid_message`. 128 - len("native_mtp:") - 64 - 1 = 52.
+NATIVE_MTP_CHALLENGE_ID_MAX_BYTES = 52
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 FULL_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -3061,7 +3066,7 @@ def expand_native_mtp_variants(
         else:
             fail(f"{vlabel}: the donor's drafter is a separate artifact; declare mtp_artifact_sha256")
         challenge.update({
-            "challenge_id": f"{challenge['challenge_id']}-variant-{sha256(variant['model_key'].encode('utf-8'))[:12]}",
+            "challenge_id": f"{challenge['challenge_id']}-v{sha256(variant['model_key'].encode('utf-8'))[:12]}",
             "model_id": variant["model_key"],
             "model_hash": variant["artifact_hash"],
             "tokenizer_sha256": variant["tokenizer_sha256"],
@@ -3087,6 +3092,11 @@ def expand_native_mtp_variants(
     ids = [entry["challenge_id"] for entry in out_bank]
     if len(set(ids)) != len(ids):
         fail(f"{NATIVE_MTP_BANK_NAME}: duplicate challenge_id after variant expansion")
+    for challenge_id in ids:
+        if len(challenge_id.encode("utf-8")) > NATIVE_MTP_CHALLENGE_ID_MAX_BYTES:
+            fail(f"{NATIVE_MTP_BANK_NAME}: challenge_id {challenge_id!r} exceeds "
+                 f"{NATIVE_MTP_CHALLENGE_ID_MAX_BYTES} bytes; the provider's canary cache namespace "
+                 "native_mtp:<tuple sha256>:<challenge_id> must fit 128 bytes")
     out_inputs.sort(key=lambda item: item["entry"]["model_key"])
     return out_inputs, {**bank, "entries": out_bank}, json.loads(generator.build_projection(models))
 
