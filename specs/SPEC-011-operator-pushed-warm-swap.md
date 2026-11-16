@@ -1,6 +1,6 @@
 # SPEC-011 — Operator-Pushed Warm Swap
 
-**Version:** 0.7 (2026-11-15, a switch to a warm member promotes it in the swap turn)
+**Version:** 0.8 (2026-11-16, a promotion on a catalog-bound provider ends the coordinator session like any model change)
 **Status:** **LOCKED** at v0.5 (2026-06-06, Decision-log Entry 55 —
 codex round-4 returned 0/0/0). Implemented end-to-end (operator-pushed
 warm swap, NDJSON control socket, opt-in `model_hash`/`loading` heartbeat,
@@ -17,6 +17,15 @@ candidate per §6.2), SPEC-004 v0.3.1, SPEC-008 v0.3.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §7 OQ-1 (control-socket transport), OQ-2 (CLI block-vs-detach), and OQ-3 (audit-backfill for WS-drop-mid-load swaps) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-011.
+
+**Change log v0.8 (2026-11-16, Related: #2338 — post-lock amendment):**
+R-3.10.3 gains a current limit. A provider admitted on a signed catalog row is
+bound to that row's model: after a promotion its top-level model no longer
+matches the row, so it stops network admission and closes its coordinator
+session, exactly as after a warm swap to another model, and keeps serving
+locally until it is restarted with a catalog recommendation for the new
+primary. Serving two models needs no promotion. A pending native-MTP admission
+restart (SPEC-048-R013) is abandoned by a promotion.
 
 **Change log v0.7 (2026-11-15, Related: #2338 — post-lock amendment):**
 R-3.10.3 now states what the promotion does as built: it runs in the swap's
@@ -1141,7 +1150,11 @@ No coordinator-side config additions (per L-7).
   primary (SPEC-001-R019).
 - **R-3.10.3** If `<model-id>` is already a warm member, the switch promotes
   it to primary without a load; the old primary stays warm, unpinned, and
-  becomes an LRU eviction candidate (SPEC-001-R017). The promoted member is
+  becomes an LRU eviction candidate (SPEC-001-R017). Current limit: on a
+  provider admitted on a signed catalog row the promotion ends the
+  coordinator session as any change of the primary model does (the row is
+  model-specific); the provider serves locally until restarted with a
+  catalog recommendation for the new primary. The promoted member is
   pinned with its rows reserved. The promotion runs in the swap's warm-set
   turn (no load, evict or unload overlaps it) and moves every primary-only
   attachment to the promoted member at once: provider status ownership, the

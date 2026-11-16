@@ -12128,6 +12128,9 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testCatalogReleaseAdmittingNativeMTPRestartsRunningProviderIntoAdmission",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupWaitsForRequestsInFlightPastTheDrainTimeout",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionPickupTests.swift:testJitterStaysInsideItsBoundForAnySample",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupIsAbandonedWhenAWarmMemberIsPromotedDuringItsDelay",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupChecksThePrimaryAgainBeforeItsExit",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testAdmissionPickupWithAnUnpromotedWarmSetRestartsAsBefore",
         "scripts/tests/test_catalog_native_mtp_admission.py:NativeMTPAdmissionReleaseTest"
       ],
       "journeys": [
@@ -15918,6 +15921,7 @@
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testCommandBufferBudgetRule",
         "phase3-binary/Tests/macprovider-cliTests/WarmSetBootTests.swift:testDefaultRequirementMemberLoadsUnderAnExplicitPrimaryBudget",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneWarmSetPlanTests.swift:testCommandBufferBudgetConflictDoesNotFit",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneWarmSetPlanTests.swift:testANonIntegerOperatorCommandBufferValueIsTheOperatorsInThePlanAndTheLoader",
         "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testModelsWarmLoadReportsACommandBufferBudgetConflictUnderItsOwnCode"
       ],
       "journeys": [],
