@@ -213,9 +213,11 @@ class AssemblyTests(unittest.TestCase):
 
     def test_public_tensor_identifiers_only_exempt_dns_heuristic(self):
         for token in ('language_model.model.layers.0.mlp.gate','language_model.model.layers.17.self_attn.indexer.wk',
-                      'language_model.mtp.1.block.self_attn.indexer.wk'):
+                      'language_model.mtp.1.block.self_attn.indexer.wk','model.language_model.layers',
+                      'model.language_model.layers.3.mlp','model.language_model.layers.17.self_attn.indexer.wk'):
             privacy.assert_bundle_redacted(privacy.Bundle('test',{'public.json':json.dumps({'module':token}).encode()},b''))
         for token in ('language_model.model.layers.0.mlp.gate.example.com','language_model.model.layers.0.mlp.evil',
+                      'model.language_model.layers.0.mlp.evil','model.language_model.example.com',
                       'private-studio.local','https://private-studio.local/x','/Users/operator/private',
                       ('-----BEGIN ' + 'RSA PRIVATE KEY-----')):
             with self.subTest(token=token),self.assertRaises(privacy.PrivacyEvidenceError):
