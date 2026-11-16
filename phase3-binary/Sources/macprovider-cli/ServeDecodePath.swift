@@ -94,7 +94,8 @@ extension ModelRuntime {
     /// CB prompt chunk ceiling of a hybrid Qwen MoE backend. M3 Ultra,
     /// Qwen3.6-35B-A3B, one request: TTFT 1.47 s at 512 vs 1.36 s at 2048
     /// with ~3k prompt tokens, 6.39 vs 5.67 s with ~12k; same text alone and
-    /// under load. A decoding row waits up to ~1.2 s per chunk (#2402).
+    /// under load. A decoding row waits about 0.8-1.2 s per chunk at prompts
+    /// up to ~12k on that Mac (#2402).
     static let hybridQwenMoEPromptChunkTokens = 2_048
 
     /// The prompt chunk ceiling for this backend's family; every other

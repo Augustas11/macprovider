@@ -27,7 +27,8 @@ Ultra (256 GB), Qwen3.6-35B-A3B, batching path, route `row_invariant` set by
 a lab override, one row prefilling: one request's time to first token
 1.472/1.491 s at 512 vs 1.358/1.392 s at 2048 with about 3060 prompt
 tokens, and 6.386/6.382 s vs 5.666/5.615 s with about 12250. Decode speed
-changed by under 1% (107.7-107.8 to 107.2-107.4 tok/s; 101.8 to
+changed by about 1% (means -0.4% and -0.9%, largest single trial
+-1.2%: 107.7-107.8 to 107.2-107.4 tok/s; 101.8 to
 100.6-101.2). With native MTP active (native-mtp-bench s1 cells, 2048 for
 the lone row, exploratory bench policy) native TTFT went from 1.804 to
 1.588 s at p3500 and from 8.137 to 6.931 s at p14000 with 0 parity
