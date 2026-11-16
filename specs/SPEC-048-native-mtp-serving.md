@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.103
+**Version:** 0.1.104
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.103",
+  "version": "0.1.104",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,26 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.71` | `29b5778b36ffba045786c4cd73427f5287c79a54` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.74` | `a8394de83549c6d0e6301f17ef6b4a71a0931321` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
+The mlx-swift-lm row `3.32.3-macprovider.74` is on `3.32.3-macprovider.71`
+(`29b5778b36ffba045786c4cd73427f5287c79a54`) (#2393, #2373), at
+`a8394de83549c6d0e6301f17ef6b4a71a0931321`: the last native-MTP layer (the GLM-5-Next
+nextn head and the Qwen 3.5/3.6 MTP predictor) runs its post-attention norm
+and MoE/MLP, and Qwen's final norm, on each row's read column only (the last
+valid column of a right-padded packed commit). Attention and the drafter
+cache write still run on every column, so the drafter cache is unchanged;
+one-column forwards are untouched, and `MLX_LM_MTP_LAST_COLUMN=0` runs every
+column again. Every emitted token is still the target's own pick; the drafter
+proposals may move because the MLP's matrix shapes change. TokenIterator
+settles `KVCacheSimple` and `RotatingKVCache` by their stored buffers, and
+the Llama and Qwen3 MLP run SwiGLU as one compiled kernel (#2373; values
+unchanged). The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
 (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
 `29b5778b36ffba045786c4cd73427f5287c79a54`: MiniMax M3 projects
 `alpha * r r^T` out of the attention and MLP/MoE outputs of the decoder
@@ -2726,6 +2740,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.104 (2026-11-16, Related: #2393, #2373)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.74` (`a8394de83549c6d0e6301f17ef6b4a71a0931321`) on
+  `3.32.3-macprovider.71`: the last native-MTP layer runs its post-attention
+  norm and MoE/MLP (and Qwen's final norm) on each row's read column only,
+  with attention and the drafter cache write on every column; TokenIterator
+  settles simple and rotating caches by their stored buffers; Llama and Qwen3
+  run SwiGLU as one compiled kernel. The Swift, core and C rows are unchanged.
 - **0.1.103 (2026-11-16, Related: #2382)** — MTP-13 variant: the signed
   entry carries the variant's own `quantization` block from
   `native-mtp-variants.json` (same `kind` as the donor), not the donor's, which

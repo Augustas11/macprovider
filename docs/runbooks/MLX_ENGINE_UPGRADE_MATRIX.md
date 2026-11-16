@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.71` | `29b5778b36ffba045786c4cd73427f5287c79a54` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.74` | `a8394de83549c6d0e6301f17ef6b4a71a0931321` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,7 +47,16 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-16 the LM row is `3.32.3-macprovider.71` (`29b5778`), on
+As of 2026-11-16 the LM row is `3.32.3-macprovider.74` (`a8394de`), on
+`3.32.3-macprovider.71` (#2393, #2373): the last native-MTP layer (GLM-5-Next,
+Qwen 3.5/3.6) runs its post-attention norm and MoE/MLP, and Qwen's final norm,
+on each row's read column only; attention and the drafter cache write still
+run on every column (`MLX_LM_MTP_LAST_COLUMN=0` runs every column again).
+TokenIterator settles simple and rotating caches by their stored buffers, and
+Llama and Qwen3 run SwiGLU as one compiled kernel. No Swift, core or C pin
+changes.
+
+The prior LM row `3.32.3-macprovider.71` (`29b5778`) is on
 `3.32.3-macprovider.63` (#2376): MiniMax M3 projects `alpha * r r^T` out of
 the attention and MLP/MoE outputs of the decoder layers the optional
 `refusal_ablation` config key names, so the abliterated M3.1-Flash variant

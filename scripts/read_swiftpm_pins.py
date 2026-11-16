@@ -42,6 +42,12 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.74 (#2393, #2373) on 3.32.3-macprovider.71: the last
+# native-MTP layer (GLM-5-Next, Qwen 3.5/3.6) runs its post-attention norm and
+# MoE/MLP, and Qwen's final norm, on each row's read column only; attention and
+# the drafter cache write still run on every column. TokenIterator settles
+# simple and rotating caches by their stored buffers; Llama and Qwen3 run
+# SwiGLU as one compiled kernel (#2373).
 # 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63: MiniMax M3
 # projects a refusal direction out of the attention and MLP/MoE outputs of the
 # configured decoder layers when the refusal_ablation config key is present;
@@ -53,8 +59,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # can yield between evaluated tiles so other continuous-batch rows decode
 # while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
 # hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.71"
-SPEC048_MLX_SWIFT_LM_REVISION = "29b5778b36ffba045786c4cd73427f5287c79a54"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.74"
+SPEC048_MLX_SWIFT_LM_REVISION = "a8394de83549c6d0e6301f17ef6b4a71a0931321"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.22"

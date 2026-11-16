@@ -17,6 +17,16 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.74 (#2393, #2373) on 3.32.3-macprovider.71:
+        // the last native-MTP layer (GLM-5-Next nextn head, Qwen 3.5/3.6 MTP
+        // predictor) runs its post-attention norm and MoE/MLP, and Qwen's final
+        // norm, on each row's read column only; attention and the drafter
+        // cache write still run on every column (MLX_LM_MTP_LAST_COLUMN=0 runs
+        // every column again). TokenIterator settles simple and rotating caches
+        // by their stored buffers, and the Llama and Qwen3 MLP run SwiGLU as
+        // one compiled kernel (#2373). a8394de touches GLM5NextMTP.swift,
+        // Qwen35MTP.swift, MTPReadColumns.swift, Evaluate.swift, SwiGLU.swift,
+        // Llama.swift, Qwen3.swift and their tests.
         // Tag 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63:
         // MiniMax M3 projects a refusal direction out of the attention and
         // MLP/MoE outputs of the configured decoder layers when the
@@ -177,7 +187,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "29b5778b36ffba045786c4cd73427f5287c79a54"
+            revision: "a8394de83549c6d0e6301f17ef6b4a71a0931321"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
