@@ -619,6 +619,8 @@ EXACT_MODEL_KEY_ALIASES = {
     "rapid-mlx/nvidia-nemotron-3.5-bolt-74b-a9b-mlx": "nemotron-3.5-bolt-74b-a9b",
     "minimax-m3.1-flash-oq3e-mtp": "minimaxai/minimax-m3.1-flash",
     "minimax/minimax-m3.1-flash": "minimaxai/minimax-m3.1-flash",
+    "aug11/minimax-m3.1-flash-oq3e-mtp-abliterated": "minimaxai/minimax-m3.1-flash-abliterated",
+    "minimax/minimax-m3.1-flash-abliterated": "minimaxai/minimax-m3.1-flash-abliterated",
     "tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
 }

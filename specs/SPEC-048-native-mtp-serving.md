@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.100
+**Version:** 0.1.102
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.100",
+  "version": "0.1.102",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,28 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.63` | `8f8821668c1a2dbb23ce33e43f31ed00d45f924f` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.71` | `29b5778b36ffba045786c4cd73427f5287c79a54` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.22` | `0f93fa380369a1abd1e17757a465cf42a72d8f69` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
+The mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
+(`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
+`29b5778b36ffba045786c4cd73427f5287c79a54`: MiniMax M3 projects
+`alpha * r r^T` out of the attention and MLP/MoE outputs of the decoder
+layers the optional `refusal_ablation` config key names, before each
+residual add, in float32. Commit `29b5778` (`04a1d29` plus its audit fixes)
+touches `MiniMaxM3.swift` and its tests only; a model without the key runs the
+unchanged fused path. The loader refuses `alpha` outside finite
+`0 < alpha <= 4` and assigns the direction only when it is a finite
+`[hidden_size]` vector with `|norm - 1| <= 1e-3` under a `direction_key` that
+names no base weight; otherwise the load fails. An indexed checkpoint may
+store it as `language_model.refusal_direction`. The text sanitize drops
+stored `model.layers.N.refusal_direction` keys, so only the validated
+direction sets the per-layer directions. The
+Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
 (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
 `8f8821668c1a2dbb23ce33e43f31ed00d45f924f`: DeepSeek V4 prefill can yield
 between evaluated tiles so other continuous-batch rows decode while a
@@ -2699,6 +2715,22 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.102 (2026-11-16, Related: #2376)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.71` (`29b5778b36ffba045786c4cd73427f5287c79a54`), which is
+  `3.32.3-macprovider.69` plus one commit: the MiniMax M3 text sanitize drops
+  stored `model.layers.N.refusal_direction` keys, so a checkpoint cannot skip
+  direction validation when the ablated range is a single layer. `29b5778`
+  touches `MiniMaxM3.swift` and its tests only. Other model sources and the
+  Swift, core and C rows are unchanged.
+- **0.1.101 (2026-11-15, Related: #2376)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.69` (`a089112e8535bf6e25206963f681826d38befad2`) on
+  `3.32.3-macprovider.63`: MiniMax M3 projects `alpha * r r^T` out of the
+  attention and MLP/MoE outputs of the decoder layers the optional
+  `refusal_ablation` config key names; the loader refuses an out-of-range
+  `alpha` (finite, `0 < alpha <= 4`) or a direction that is not a finite unit
+  `[hidden_size]` vector, and reads `language_model.refusal_direction` from an
+  indexed checkpoint. `a089112` touches `MiniMaxM3.swift` and its tests only. Other model sources and the Swift, core and C rows are
+  unchanged.
 - **0.1.100 (2026-11-15)** — R013 adds the admission pickup: a running
   provider re-fetches the admission set when its catalog refresh sees another
   release and, if a fresh start would newly admit its loaded model, restarts
