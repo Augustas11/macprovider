@@ -17,7 +17,10 @@ import Foundation
 ///   (v0.3.19) submits rows of unequal key lengths on both sides of the
 ///   device's vector-attention route boundary, holds them until all of them
 ///   decode together, and requires every row to have decoded at least
-///   `minimumCohortDecodeTokens` tokens beside the whole cohort;
+///   `minimumCohortDecodeTokens` tokens beside the whole cohort. On the stock
+///   order small-row route a width from three rows compares each row with
+///   its prompt run three times together instead of alone
+///   (`usesSameOrderReference`);
 /// - throughput: the batch's aggregate tokens/s must beat stock serial decode
 ///   by `minimumAggregateGain`.
 ///
@@ -108,6 +111,10 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// SPEC-038 FR-CB11 (v0.3.22): the signed policy's `max_served_slots` for
     /// this model artifact. Nil: no policy ceiling.
     var policyCeiling: Int? = nil
+    /// SPEC-038 FR-CB9: the small-row route of the process that checks. On
+    /// stock order, widths from three rows compare with same-order
+    /// references (`ContinuousBatchingSelfCheck.usesSameOrderReference`).
+    var smallMRoute: SmallMRoute = .rowInvariant
 
     /// The most slots any grant may serve on this target: the scheduler rows,
     /// queue limit and signed policy ceiling, capped by the widest
@@ -384,6 +391,30 @@ enum ContinuousBatchingSelfCheck {
         return max(1, bound)
     }
 
+    /// SPEC-038 FR-CB10 (stock order): the widest k at most
+    /// `exactnessProbeBound` whose same-order references all fit: for every
+    /// row i < k, `sameOrderReferenceRows` copies of probe prompt i together
+    /// within the pool. Widths 1 and 2 need no reference, so the result is
+    /// at least min(2, the probe bound). The ladder on stock order stops
+    /// here; the grant bound (`exactnessProbeBound`) does not change.
+    static func stockOrderReferenceBound(target: ContinuousBatchingSelfCheckTarget, maxCount: Int) -> Int {
+        let bound = exactnessProbeBound(target: target, maxCount: maxCount)
+        guard bound >= sameOrderReferenceRows else { return bound }
+        let outputTokens = exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
+        var fit = 0
+        for length in exactnessPromptLengths(
+            count: maxCount, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
+        ).prefix(bound) {
+            guard let cost = exactnessRowCost(
+                promptTokens: length, outputTokens: outputTokens, blockSizeTokens: target.blockSizeTokens
+            ) else { break }
+            let (copies, overflow) = cost.multipliedReportingOverflow(by: sameOrderReferenceRows)
+            guard !overflow, copies <= target.poolTokens else { break }
+            fit += 1
+        }
+        return fit >= sameOrderReferenceRows ? fit : min(2, bound)
+    }
+
     /// Exactness-probe texts: the task first, then background notes long
     /// enough to cut to `lengths` tokens (`fitPrompt`).
     static func exactnessTexts(lengths: [Int]) -> [String] {
@@ -471,6 +502,77 @@ enum ContinuousBatchingSelfCheck {
         if !aloneConformant { return (false, margin, "alone_outside_serial_top2") }
         guard let margin, margin <= tolerance else { return (false, margin, "margin_above_tolerance") }
         return (true, margin, "near_tie")
+    }
+
+    /// SPEC-038 FR-CB10 (stock order): identical rows run together to make
+    /// one prompt's same-order reference.
+    static let sameOrderReferenceRows = 3
+
+    /// Whether width `slots` compares each row with its prompt's same-order
+    /// reference instead of its lone run. On stock order a lone row and a
+    /// two-row forward share one reduction order and forwards of 3-16 rows
+    /// share another (the batch kernel), so from three rows the lone run is
+    /// not the row's reference. The row-invariant route keeps one order for
+    /// 1-16 rows and always compares with lone runs.
+    static func usesSameOrderReference(route: SmallMRoute, slots: Int) -> Bool {
+        route == .stockOrder && slots >= sameOrderReferenceRows
+    }
+
+    /// Row 0 of a same-order reference run (`sameOrderReferenceRows`
+    /// identical rows decoded together), or nil when the run has another row
+    /// count or its rows differ: rows of one batch-kernel forward must be
+    /// bit-identical, so a difference fails the width on its own.
+    static func sameOrderReference(_ outputs: [[Int]]) -> [Int]? {
+        guard outputs.count == sameOrderReferenceRows, let first = outputs.first,
+              outputs.allSatisfy({ $0 == first })
+        else { return nil }
+        return first
+    }
+
+    /// The reference each row of width `slots` is compared with: the
+    /// same-order references where `usesSameOrderReference`, else the lone
+    /// runs.
+    static func rowReferences(route: SmallMRoute, slots: Int, lone: [[Int]], sameOrder: [[Int]]) -> [[Int]] {
+        Array((usesSameOrderReference(route: route, slots: slots) ? sameOrder : lone).prefix(slots))
+    }
+
+    /// SPEC-038 FR-CB10 (stock order, from three rows): whether every row of
+    /// a cohort run decoded each of its tokens in a step that held the whole
+    /// cohort and nothing else (`cohortDecodeTokens` equals the row's tokens
+    /// after the prefill token). Only then is each row's forward, and so its
+    /// kernel order, fixed for its whole run: the cohort's row set, its
+    /// admission order and the positional row-bound split are all constant.
+    /// A run where any row also decoded in a narrower step (the cohort hold
+    /// released early) may mix orders mid-run; it is judged neither way and
+    /// its width is a shape not met.
+    static func cohortRowsRanInOneOrder(outputs: [[Int]], cohortDecodeTokens: [Int]) -> Bool {
+        !outputs.isEmpty && outputs.count == cohortDecodeTokens.count
+            && zip(outputs, cohortDecodeTokens).allSatisfy { !$0.isEmpty && $1 == $0.count - 1 }
+    }
+
+    /// Each distinct (row, output) of `passes` that differs from the row's
+    /// reference and, when one is given, from the row's exact alternate. On
+    /// stock order the alternate of a width from three rows is the lone run:
+    /// a row the FR-CB2 decode row bound split into a forward of one or two
+    /// rows decodes in the lone row's order. `countMismatch`: a pass with
+    /// another row count than `references`.
+    static func rowsDifferingFromReference(
+        passes: [[[Int]]],
+        references: [[Int]],
+        exactAlternates: [[Int]] = []
+    ) -> (rows: [(row: Int, pair: ([Int], [Int]))], countMismatch: Bool) {
+        var rows: [(row: Int, pair: ([Int], [Int]))] = []
+        var countMismatch = false
+        for pass in passes {
+            for (row, pair) in zip(pass, references).enumerated()
+            where pair.0 != pair.1
+                && !(exactAlternates.indices.contains(row) && pair.0 == exactAlternates[row])
+                && !rows.contains(where: { $0.row == row && $0.pair.0 == pair.0 }) {
+                rows.append((row, pair))
+            }
+            if pass.count != references.count { countMismatch = true }
+        }
+        return (rows, countMismatch)
     }
 
     /// Slot counts to measure: the R009 ladder from 2 up to `maxRows`.
@@ -1075,6 +1177,15 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// SPEC-038 AC-26 leg (a) (v0.3.41): keyed cached turns resumed in a
         /// CB row matched the same turns sent cold. Nil until it runs.
         var cachedTurnsParity: Bool?
+        /// SPEC-038 FR-CB10 (stock order): each prompt's same-order reference
+        /// (`ContinuousBatchingSelfCheck.sameOrderReference`) and the SHA-256
+        /// of the prompt each was generated from, for the throughput prompts
+        /// and the exactness-probe prompts; reused only for the same prompt
+        /// and completion length.
+        var sameOrderOutputs: [[Int]]?
+        var sameOrderPromptSHA256s: [String]?
+        var probeSameOrderOutputs: [[Int]]?
+        var probeSameOrderPromptSHA256s: [String]?
 
         mutating func prepareWidth(slots: Int, prompts: [[Int]], probePrompts: [[Int]]) {
             let promptDigests = prompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
@@ -1105,6 +1216,10 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case probePromptSHA256s = "probe_prompt_sha256s"
             case widthProgress = "width_progress"
             case cachedTurnsParity = "cached_turns_parity"
+            case sameOrderOutputs = "same_order_outputs"
+            case sameOrderPromptSHA256s = "same_order_prompt_sha256s"
+            case probeSameOrderOutputs = "probe_same_order_outputs"
+            case probeSameOrderPromptSHA256s = "probe_same_order_prompt_sha256s"
         }
     }
 
@@ -1270,6 +1385,9 @@ actor ContinuousBatchingSelfCheckDriver {
     private let memberAdmissionHold: (any SelfCheckAdmissionHoldScope)?
     private var consecutiveDrainTimeouts = 0
     private var consecutiveCheckBounds = 0
+    /// SPEC-038 FR-CB10 (stock order): the key whose same-order references
+    /// do not fit; this process neither measures it nor holds admission for it.
+    private var stockOrderReferenceUnfitKey: ContinuousBatchingSelfCheckKey?
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
     /// When the check for this key first found no stored decision.
@@ -1401,7 +1519,7 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             // A busy Mac never finds an idle window under steady traffic: once
             // the check has been due long enough, hold admission and run it.
-            if let due = checkDueSince, Date() >= nextAttemptAt,
+            if let due = checkDueSince, Date() >= nextAttemptAt, stockOrderReferenceUnfitKey != target.key,
                ContinuousBatchingSelfCheck.admissionHoldDue(
                 dueSince: due.at, notBefore: admissionHoldNotBefore,
                 after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
@@ -1585,9 +1703,28 @@ actor ContinuousBatchingSelfCheckDriver {
             queueLimit: target.queueLimit,
             policyCeiling: target.policyCeiling
         )
-        let maxSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
+        let ladderBound = ContinuousBatchingSelfCheck.ladderUpperBound(
             target: target, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots
         )
+        // SPEC-038 FR-CB10 (stock order): a width from three rows needs each
+        // prompt's same-order reference, three copies at once. When a width
+        // the ladder would probe has references that cannot fit the pool,
+        // this process measures nothing on stock order: the next start takes
+        // the row-invariant route (`stock_order_reference_unfit`) and
+        // measures there. A shorter ladder here could lower a kept or prior
+        // grant (`reconcile` keeps only verified widths) or decide one row,
+        // so an unfit reference never does either.
+        if target.smallMRoute == .stockOrder,
+           ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: ladderBound) < ladderBound {
+            if stockOrderReferenceUnfitKey != target.key {
+                stockOrderReferenceUnfitKey = target.key
+                let referenceBound = ContinuousBatchingSelfCheck.stockOrderReferenceBound(target: target, maxCount: ladderBound)
+                log("event=cb_self_check action=stock_order_reference_unfit ladder_bound=\(ladderBound) reference_bound=\(referenceBound) model_sha256=\(target.key.modelSHA256)")
+                verdictRecorder?.stockOrderFailed(reason: SmallMRoute.stockOrderReferenceUnfit, modelSHA256: target.key.modelSHA256)
+            }
+            return
+        }
+        let maxSlots = ladderBound
         let rungs = Set(ContinuousBatchingSelfCheck.ladder(maxRows: maxSlots))
         var record: ContinuousBatchingSelfCheckStore.Record
         if let previous {
@@ -1611,7 +1748,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // verifies no width.
             let reason = configuredSlots >= 2 ? "probe_shape_unavailable" : "single_row"
             record.decision = .init(slots: 1, reason: reason, verifiedSlots: 1)
-            record.ladderBound = maxSlots
+            record.ladderBound = ladderBound
             // Decided: it re-runs when the bound grows, not on a timer.
             record.inProgressSlots = nil
             record.remeasureInProgress = nil
@@ -1678,6 +1815,25 @@ actor ContinuousBatchingSelfCheckDriver {
                     record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
                     try save(record)
                 }
+                // Stock order from three rows: each row's reference is its
+                // prompt's same-order run; its lone run stays an exact
+                // alternate (`rowsDifferingFromReference`).
+                let sameOrder = ContinuousBatchingSelfCheck.usesSameOrderReference(route: target.smallMRoute, slots: slots)
+                var probeSameOrder: [[Int]] = []
+                if sameOrder {
+                    let references = try await sameOrderReferences(
+                        &record, probe: true, prompts: probePrompts, slots: slots, outputTokens: probeTokens,
+                        idPrefix: "cb-self-check-\(attempt)-probe-same-order"
+                    )
+                    if let failure = references.failure {
+                        try failWidth(&record, slots: slots, divergence: failure)
+                        break
+                    }
+                    probeSameOrder = references.outputs
+                }
+                let probeReferences = ContinuousBatchingSelfCheck.rowReferences(
+                    route: target.smallMRoute, slots: slots, lone: probeAlone, sameOrder: probeSameOrder
+                )
                 let probe: ContinuousBatchingSelfCheckBatchRun
                 do {
                     if let completed = record.widthProgress?.probe {
@@ -1696,8 +1852,18 @@ actor ContinuousBatchingSelfCheckDriver {
                     // The cohort never all reached a row: its shape was not met.
                     throw StepError.probeShapeUnmet(slots: slots)
                 }
+                if sameOrder, !ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                    outputs: probe.outputs, cohortDecodeTokens: probe.cohortDecodeTokens
+                ) {
+                    // Checked before any row is judged: a run that may mix
+                    // orders gives no correctness result either way.
+                    record.widthProgress?.probe = nil
+                    log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=probe_mixed_order cohort_decode_tokens=\(probe.cohortDecodeTokens.map(String.init).joined(separator: ","))")
+                    throw StepError.probeShapeUnmet(slots: slots)
+                }
                 let probeCheck = try await checkRows(
-                    passes: [probe.outputs], alone: Array(probeAlone.prefix(slots)), prompts: probePrompts, label: "probe"
+                    passes: [probe.outputs], alone: probeReferences, prompts: probePrompts, label: "probe",
+                    exactAlternates: sameOrder ? Array(probeAlone.prefix(slots)) : []
                 )
                 var conformant = probeCheck.conformant
                 var nearTieRows = probeCheck.nearTieRows
@@ -1720,13 +1886,32 @@ actor ContinuousBatchingSelfCheckDriver {
                     record.aloneOutputs.append(row.outputs[0])
                     try save(record)
                 }
+                var batchSameOrder: [[Int]] = []
+                if conformant, sameOrder {
+                    let references = try await sameOrderReferences(
+                        &record, probe: false, prompts: prompts, slots: slots, outputTokens: tokens,
+                        idPrefix: "cb-self-check-\(attempt)-same-order"
+                    )
+                    if let failure = references.failure {
+                        try failWidth(&record, slots: slots, divergence: failure)
+                        break
+                    }
+                    batchSameOrder = references.outputs
+                }
+                let batchReferences = ContinuousBatchingSelfCheck.rowReferences(
+                    route: target.smallMRoute, slots: slots, lone: record.aloneOutputs, sameOrder: batchSameOrder
+                )
                 // Rungs: repeats of stock serial then batched, back to back on
                 // the same prompts; the gain is the median ratio. For a
                 // `decodeOnlyGain` target (glm5_next, v0.3.21) both are decode
                 // rates: serial tokens after each first token over their time,
                 // batched cohort decode tokens over the span all rows decoded
                 // together (the batch runs as a cohort, so no row decodes while
-                // another prefills). Other widths: one batch for isolation
+                // another prefills). On stock order from three rows every
+                // batch also runs as a cohort, so each row keeps one forward
+                // and one kernel order (`cohortRowsRanInOneOrder`); its gain
+                // stays end-to-end but no longer credits prefill overlapping
+                // another row's decode. Other widths: one batch for isolation
                 // only. A width whose probe already diverged runs neither.
                 let isRung = rungs.contains(slots)
                 let batchPrompts = Array(prompts.prefix(slots))
@@ -1748,14 +1933,35 @@ actor ContinuousBatchingSelfCheckDriver {
                             }
                         }
                         let decodeOnly = target.decodeOnlyGain
-                        batch = try await yieldingToRequests {
-                            try await runtime.runContinuousBatchingSelfCheckBatch(
-                                prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
-                                cohort: decodeOnly
-                            )
+                        do {
+                            batch = try await yieldingToRequests {
+                                try await runtime.runContinuousBatchingSelfCheckBatch(
+                                    prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
+                                    cohort: decodeOnly || sameOrder
+                                )
+                            }
+                        } catch where sameOrder && (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
+                            throw StepError.probeShapeUnmet(slots: slots)
                         }
-                        record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
-                        try save(record)
+                        if !sameOrder || ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                            outputs: batch.outputs, cohortDecodeTokens: batch.cohortDecodeTokens
+                        ) {
+                            record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
+                            try save(record)
+                        }
+                    }
+                    if sameOrder, !ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                        outputs: batch.outputs, cohortDecodeTokens: batch.cohortDecodeTokens
+                    ) {
+                        // Stock order from three rows: every pass runs as a
+                        // cohort and is judged only if each row kept one
+                        // forward for its whole run; a pass that may mix
+                        // orders is not stored and gives no result either way.
+                        if let stored = record.widthProgress?.passes, stored.count > pass {
+                            record.widthProgress?.passes = Array(stored.prefix(pass))
+                        }
+                        log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=pass_mixed_order pass=\(pass) cohort_decode_tokens=\(batch.cohortDecodeTokens.map(String.init).joined(separator: ","))")
+                        throw StepError.probeShapeUnmet(slots: slots)
                     }
                     let decodeOnly = target.decodeOnlyGain
                     let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS
@@ -1778,7 +1984,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
                 if !passes.isEmpty {
                     let passCheck = try await checkRows(
-                        passes: passes, alone: Array(record.aloneOutputs.prefix(slots)), prompts: prompts, label: "batch"
+                        passes: passes, alone: batchReferences, prompts: prompts, label: "batch",
+                        exactAlternates: sameOrder ? Array(record.aloneOutputs.prefix(slots)) : []
                     )
                     conformant = passCheck.conformant
                     nearTieRows += passCheck.nearTieRows
@@ -1802,7 +2009,7 @@ actor ContinuousBatchingSelfCheckDriver {
             deferrals = 0
             nextAttemptAt = .distantPast
             backpressureRefusal = nil
-            record.ladderBound = maxSlots
+            record.ladderBound = ladderBound
             await finish(record, crashedAt: nil, target: target)
         } catch {
             // Yielded to a real request, a transient failure, or a journal
@@ -1825,7 +2032,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 log("event=cb_self_check action=ladder_ended reason=probe_shape_unmet slots=\(slots) verified_k=\(record.measurements.last?.slots ?? 1) remeasure_in_s=\(Int(resume))")
                 deferrals = 0
                 nextAttemptAt = .distantPast
-                record.ladderBound = maxSlots
+                record.ladderBound = ladderBound
                 await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume, probeShapeUnmetAt: slots)
                 return
             }
@@ -1861,7 +2068,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     log("event=cb_self_check action=ladder_ended reason=backpressure refused_slots=\(refusedAt) verified_k=\(verifiedPrefix) remeasure_in_s=\(Int(resume))")
                     deferrals = 0
                     nextAttemptAt = .distantPast
-                    record.ladderBound = maxSlots
+                    record.ladderBound = ladderBound
                     await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume)
                     return
                 case .deferStep:
@@ -1881,6 +2088,79 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(max(0, nextAttemptAt.timeIntervalSinceNow))) reason=\(Self.deferralReason(error))")
         }
+    }
+
+    /// SPEC-038 FR-CB10 (stock order): the same-order references of the
+    /// first `slots` prompts, each row 0 of its prompt run
+    /// `sameOrderReferenceRows` times as one cohort through the production
+    /// scheduler, so every decode forward of it takes the batch kernel.
+    /// Stored references are reused only for the same prompt and completion
+    /// length. `failure` names the first prompt whose rows differed; no
+    /// reference is stored for it.
+    private func sameOrderReferences(
+        _ record: inout ContinuousBatchingSelfCheckStore.Record,
+        probe: Bool,
+        prompts: [[Int]],
+        slots: Int,
+        outputTokens: Int,
+        idPrefix: String
+    ) async throws -> (outputs: [[Int]], failure: String?) {
+        let runtime = runtime
+        typealias Record = ContinuousBatchingSelfCheckStore.Record
+        let outputsPath: WritableKeyPath<Record, [[Int]]?> =
+            probe ? \Record.probeSameOrderOutputs : \Record.sameOrderOutputs
+        let digestsPath: WritableKeyPath<Record, [String]?> =
+            probe ? \Record.probeSameOrderPromptSHA256s : \Record.sameOrderPromptSHA256s
+        var references = ContinuousBatchingSelfCheck.reusableLoneOutputs(
+            record[keyPath: outputsPath] ?? [], digests: record[keyPath: digestsPath] ?? [],
+            prompts: prompts, outputTokens: outputTokens
+        )
+        while references.count < slots {
+            let index = references.count
+            let rows = Array(repeating: prompts[index], count: ContinuousBatchingSelfCheck.sameOrderReferenceRows)
+            let id = "\(idPrefix)-\(index)"
+            let run: ContinuousBatchingSelfCheckBatchRun
+            do {
+                run = try await yieldingToRequests {
+                    try await runtime.runContinuousBatchingSelfCheckBatch(
+                        prompts: rows, maxOutputTokens: outputTokens, idPrefix: id, cohort: true
+                    )
+                }
+            } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
+                // The reference cohort never all reached a row: its shape was not met.
+                throw StepError.probeShapeUnmet(slots: slots)
+            }
+            guard ContinuousBatchingSelfCheck.cohortRowsRanInOneOrder(
+                outputs: run.outputs, cohortDecodeTokens: run.cohortDecodeTokens
+            ) else {
+                // A row also decoded in a narrower step, so the rows may not
+                // share one order: judged neither way.
+                log("event=cb_self_check action=probe_shape_unmet slots=\(slots) reason=same_order_reference_mixed_order index=\(index)")
+                throw StepError.probeShapeUnmet(slots: slots)
+            }
+            guard let reference = ContinuousBatchingSelfCheck.sameOrderReference(run.outputs) else {
+                return (references, "\(probe ? "probe" : "batch")_same_order_reference:\(index):rows_differ")
+            }
+            references.append(reference)
+            record[keyPath: outputsPath] = references
+            record[keyPath: digestsPath] = prompts.prefix(references.count).map(ContinuousBatchingSelfCheck.promptSHA256)
+            try save(record)
+        }
+        return (references, nil)
+    }
+
+    /// Records width `slots` as failed for a correctness reason found before
+    /// its rows were compared (a same-order reference whose rows differ).
+    private func failWidth(
+        _ record: inout ContinuousBatchingSelfCheckStore.Record,
+        slots: Int,
+        divergence: String
+    ) throws {
+        record.measurements.append(.init(slots: slots, conformant: false, aggregateTPS: 0, throughputMeasured: false))
+        record.inProgressSlots = nil
+        record.widthProgress = nil
+        try save(record)
+        log("event=cb_self_check action=measured slots=\(slots) conformant=false divergent_rows=\(divergence)")
     }
 
     /// The exactness-probe prompts for `count` rows, each cut to its
@@ -1910,27 +2190,25 @@ actor ContinuousBatchingSelfCheckDriver {
         }
     }
 
-    /// Compares every batched row with its prompt run alone and judges each
-    /// first divergence (`ContinuousBatchingSelfCheck.divergenceVerdict`).
+    /// Compares every batched row with its reference (its prompt run alone,
+    /// or on stock order from three rows its same-order run) and judges each
+    /// first divergence (`ContinuousBatchingSelfCheck.divergenceVerdict`). A
+    /// row equal to its exact alternate passes.
     private func checkRows(
         passes: [[[Int]]],
         alone: [[Int]],
         prompts: [[Int]],
-        label: String
+        label: String,
+        exactAlternates: [[Int]] = []
     ) async throws -> (conformant: Bool, nearTieRows: Int, divergences: [String]) {
         let runtime = runtime
-        var conformant = true
         var nearTieRows = 0
         var divergences: [String] = []
-        var rowsToCheck: [(row: Int, pair: ([Int], [Int]))] = []
-        for pass in passes {
-            for (row, pair) in zip(pass, alone).enumerated()
-            where pair.0 != pair.1 && !rowsToCheck.contains(where: { $0.row == row && $0.pair.0 == pair.0 }) {
-                rowsToCheck.append((row, pair))
-            }
-            if pass.count != alone.count { conformant = false }
-        }
-        for (row, pair) in rowsToCheck {
+        let differing = ContinuousBatchingSelfCheck.rowsDifferingFromReference(
+            passes: passes, references: alone, exactAlternates: exactAlternates
+        )
+        var conformant = !differing.countMismatch
+        for (row, pair) in differing.rows {
             let index = Array(zip(pair.0, pair.1)).firstIndex { $0.0 != $0.1 }
             var verdictText = "length"
             var marginText = "na"

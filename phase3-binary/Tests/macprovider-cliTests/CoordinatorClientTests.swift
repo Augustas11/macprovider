@@ -9562,7 +9562,8 @@ final class CoordinatorClientTests: XCTestCase {
             shardGroupRole: false,
             autotuneCandidate: false,
             otherSwitchTargets: false,
-            selfCheckVerdict: .grantsNoBatching
+            selfCheckVerdict: .grantsNoBatching,
+            operatorForcesRowInvariant: false
         ))
         XCTAssertEqual(nextStart, SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_entry_for_model"))
         XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: nextStart.route))

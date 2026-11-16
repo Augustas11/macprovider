@@ -3446,12 +3446,32 @@ struct ServeCommand: AsyncParsableCommand {
             draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
             shardGroupRole: shardHeadConfig != nil || shardMemberConfig != nil,
             autotuneCandidate: autotuneCandidate,
-            otherSwitchTargets: authorizedSwitchModelIDs.contains { !startupModelIDs.contains($0.lowercased()) },
+            otherSwitchTargets: SmallMRoute.servesOtherModels(
+                switchTargets: authorizedSwitchModelIDs,
+                startupModelIDs: startupModelIDs,
+                warmModels: resolved.warmModels
+            ),
             selfCheckVerdict: smallMRouteStartupIdentity.map {
                 smallMRouteVerdictStore.verdict(startupIdentity: $0, selfCheckStore: cbSelfCheckStore)
-            } ?? .absent
+            } ?? .absent,
+            stockOrderFallback: smallMRouteStartupIdentity.flatMap {
+                smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
+            },
+            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant
         )
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only: run the same serve on a chosen batching route
+        // so two routes can be compared in one window. Never serial-only,
+        // which a process cannot leave and the batching entries refuse.
+        let decidedSmallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        let smallMRoute = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_SMALL_M_ROUTE"]
+            .flatMap(SmallMRoute.init(rawValue:))
+            .flatMap { $0 == .serialOnly ? nil : $0 }
+            .map { SmallMRoute.Decision(route: $0, reason: "lab_override_\(decidedSmallMRoute.reason)") }
+            ?? decidedSmallMRoute
+        #else
         let smallMRoute = SmallMRoute.decide(smallMRouteInputs)
+        #endif
         // SPEC-048-R013 pickup: the slot count the startup loader matches an
         // admission tuple on, read before the self-check lowers the served count.
         let nativeMTPLoaderSlotCount = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
@@ -3463,10 +3483,11 @@ struct ServeCommand: AsyncParsableCommand {
             ),
             fields: smallMRouteInputs.logFields
         ).utf8))
-        // A one-row verdict this row-invariant process applies moves the next
-        // start of the same configuration to the serial route.
+        // A one-row verdict this batching process applies moves the next
+        // start of the same configuration to the serial route; a failure
+        // measured on stock order moves it to the row-invariant route.
         let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
-            guard appliedSmallMRoute == .rowInvariant,
+            guard appliedSmallMRoute != .serialOnly,
                   let identity = smallMRouteStartupIdentity,
                   SmallMRoute.verdictDecidesNextStart(smallMRouteInputs)
             else { return nil }
@@ -3474,6 +3495,7 @@ struct ServeCommand: AsyncParsableCommand {
                 store: smallMRouteVerdictStore,
                 selfCheckStore: cbSelfCheckStore,
                 startupIdentity: identity,
+                route: appliedSmallMRoute,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
         }()
@@ -3759,6 +3781,13 @@ struct ServeCommand: AsyncParsableCommand {
                 ))
             }
         }
+        // SPEC-038 FR-CB9 (v0.3.56): a SPEC-039 attach probe that failed on
+        // stock order sends the next start to the row-invariant route, so a
+        // stock-order-only failure never leaves batching off on every start.
+        if appliedSmallMRoute == .stockOrder, let mlxRuntime = modelRuntime as? ModelRuntime,
+           await mlxRuntime.startupPagedKVAttachProbeFailed() {
+            smallMRouteVerdictRecorder?.stockOrderFailed(reason: SmallMRoute.stockOrderAttachFailed)
+        }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to
         // the model runtime (data path) and the control socket (in-process
@@ -4027,7 +4056,7 @@ struct ServeCommand: AsyncParsableCommand {
             guard let plan = autoServedSlots, plan.selfChecked,
                   let mlxRuntime = modelRuntime as? ModelRuntime else { return nil }
             // SPEC-038 FR-CB9: a serial-only process never runs a self-check;
-            // a re-check waits for a start on the row-invariant route.
+            // a re-check waits for a start on a batching route.
             if appliedSmallMRoute == .serialOnly {
                 FileHandle.standardError.write(Data(
                     "event=cb_self_check action=deferred reason=small_m_route_serial_only next=restart\n".utf8
@@ -5825,6 +5854,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
     print("  continuous_batch_prefill_tokens_per_iteration: \(config.continuousBatchPrefillTokensPerIteration.map(String.init) ?? "<unset, 2048>")")
     print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
+    print("  small_m_route: \(config.smallMRouteRowInvariant ? "row_invariant" : "<unset, decided at serve>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  privacy_class_beta: \(config.privacyClassBeta)")

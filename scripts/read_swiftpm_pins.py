@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 1cfafd1f the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 0f26baba (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 12d26ef6 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 4e9a71dc (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,39 +42,39 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.73 (#2338) on 3.32.3-macprovider.71: .71 plus only the
-# mlx-swift 0.32.3-macprovider.23 pin move.
-# 3.32.3-macprovider.71 (#2376) on 3.32.3-macprovider.63: MiniMax M3
-# projects a refusal direction out of the attention and MLP/MoE outputs of the
-# configured decoder layers when the refusal_ablation config key is present;
-# the loader refuses an out-of-range alpha or a non-unit direction and reads
-# language_model.refusal_direction from an indexed checkpoint; the text sanitize
-# drops stored model.layers.N.refusal_direction keys. 29b5778 (04a1d29 plus the
-# audit fixes) touches MiniMaxM3.swift and its tests only.
-# 3.32.3-macprovider.63 (#2352) on 3.32.3-macprovider.61: DeepSeek V4 prefill
-# can yield between evaluated tiles so other continuous-batch rows decode
-# while a reference prefill is in flight. 8f88216 cherry-picks the .62 pause
-# hook (505f368, DeepseekV4.swift only) onto ef656c59.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.73"
-SPEC048_MLX_SWIFT_LM_REVISION = "d5ee65fd2bb5fdee2d7ac6ae12e59cc9be6a783a"
+# 3.32.3-macprovider.79 (#2338) on 3.32.3-macprovider.78: It is
+# 3.32.3-macprovider.78 plus one commit that only moves its mlx-swift pin to
+# 0.32.3-macprovider.25 (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7),
+# 0.32.3-macprovider.24 plus two Swift-layer commits: a synchronous eval
+# schedules the graph and copies its completion events under the process-wide
+# evalLock, waits for the device without the lock, then retakes the lock to
+# finish; recursive entry, a CPU stream and a failed asynchronous schedule
+# keep the stock locked path. The core and C rows are unchanged and no Metal
+# kernel changed.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.79"
+SPEC048_MLX_SWIFT_LM_REVISION = "92459644d702bf42959c66dd8be0c0416f1dd882"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.23"
-# Fork tag 0.32.3-macprovider.23: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below; .23 is .22 plus a synchronous eval that
-# waits for the device without holding the process-wide evalLock (Swift layer
-# only, core gitlink unchanged).
-SPEC048_MLX_SWIFT_REVISION = "1cfafd1faa2ea502329d50cd851d97764ce20d1d"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
+# Fork tag 0.32.3-macprovider.25: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below (.22 plus three commits that move the core
+# gitlink to the stock-order route and regenerate the quantized jit sources);
+# .25 is .24 (7fbcada9) plus a synchronous eval that waits for the device
+# without holding the process-wide evalLock (Swift layer only, core gitlink
+# unchanged).
+SPEC048_MLX_SWIFT_REVISION = "12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.14, seven commits on v0.32.4-macprovider.7
-# (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# Fork tag v0.32.4-macprovider.15, seven commits on v0.32.4-macprovider.14
+# (upstream MLX v0.32.4) that add the stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2) and its qmv_mma partial-sum count: the
+# reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.14"
-SPEC048_MLX_CORE_REVISION = "0f26baba0d1c1a10d74e7133614e0dc7f409ff80"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.15"
+SPEC048_MLX_CORE_REVISION = "4e9a71dc9e765f739003868f38d3aca05871e70d"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"

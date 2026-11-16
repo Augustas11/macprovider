@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.105
+**Version:** 0.1.107
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.105",
+  "version": "0.1.107",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,31 +585,36 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.73` | `d5ee65fd2bb5fdee2d7ac6ae12e59cc9be6a783a` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.23` | `1cfafd1faa2ea502329d50cd851d97764ce20d1d` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.14` | `0f26baba0d1c1a10d74e7133614e0dc7f409ff80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.79` | `92459644d702bf42959c66dd8be0c0416f1dd882` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.73` is on `3.32.3-macprovider.71`
-(`29b5778b36ffba045786c4cd73427f5287c79a54`) (#2338), at
-`d5ee65fd2bb5fdee2d7ac6ae12e59cc9be6a783a`: `.71` plus only the mlx-swift pin
-move. The Swift row moves to `0.32.3-macprovider.23`
-(`1cfafd1faa2ea502329d50cd851d97764ce20d1d`), `0.32.3-macprovider.22`
-(`0f93fa380369a1abd1e17757a465cf42a72d8f69`) plus two Swift-layer commits: a
-synchronous eval schedules the graph and copies its completion events under
-the process-wide evalLock, waits for the device without the lock, then
-retakes the lock to finish; recursive entry, a CPU stream and a failed
-asynchronous schedule keep the stock locked path. The new files are under
-`Source/Cmlx` only. The core and C rows are unchanged and no Metal kernel
-changed (the metallib bytes are identical). On an M3 Ultra, one process with
-a main model at 1 row beside a second model at 2 rows (1024-token prompts,
-180 s phases, two repeats, stock against patched from one source tree), the
-main model went from 0.20 to 0.52 of its solo decode rate (7.9 / 7.7 to
-20.4 / 20.4 tok/s) and the second model from 0.82 to 0.57 (26.0 / 26.1 to
-18.2 / 18.1 tok/s), about 34 to 38.5 tok/s in total. Output token ids were
-identical between the two builds on every compared request. Single-model
-serving was unchanged: 26.9 against 27.0 tok/s decode, identical token ids,
-and identical native MTP journey token ids.
+The mlx-swift-lm row `3.32.3-macprovider.79` is on `3.32.3-macprovider.78`
+(`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`) (#2338), at
+`92459644d702bf42959c66dd8be0c0416f1dd882`: It is 3.32.3-macprovider.78 plus
+one commit that only moves its mlx-swift pin to 0.32.3-macprovider.25
+(12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two
+Swift-layer commits: a synchronous eval schedules the graph and copies its
+completion events under the process-wide evalLock, waits for the device
+without the lock, then retakes the lock to finish; recursive entry, a CPU
+stream and a failed asynchronous schedule keep the stock locked path. The core
+and C rows are unchanged and no Metal kernel changed.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.78` is on `3.32.3-macprovider.76`
+(`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) (#2389), at
+`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`: three commits that only move its mlx-swift pin. The Swift row is `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`, `.22` plus three commits that move the core gitlink and regenerate the quantized jit sources) and the core row `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`, seven commits on `.14`). The core adds the stock-order small-row route: `MLX_METAL_SMALL_M_ROW_INVARIANT=2`, read once per process, sends one row to upstream's one-row kernel, exactly two rows to a kernel whose rows equal the lone row bit for bit, and 3-16 rows to the batch kernel, which uses 8 partial sums over K instead of 4 on some GPU generations. The default (row-invariant) route and its output bits are unchanged, so native MTP, which keeps that route (SPEC-038 FR-CB9), is unchanged. The C row is unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.76` is on `3.32.3-macprovider.71`
+(`29b5778b36ffba045786c4cd73427f5287c79a54`) (#2381), at
+`9489ddeb74090d1a91ad1c8a01c0d0e117052450`: Two upstream fixes as picks: the
+serial prefill chunk loop clears the MLX buffer cache after each chunk
+(ml-explore/mlx-swift-lm #710), behind PrefillParameters.clearsBufferCache
+(default true) for hosts without a Metal library, and an MLX error raised on
+the loader's worker threads is thrown instead of ending the process (port of
+ml-explore/mlx-swift-lm #698). No model source, decode step or kernel route
+changes; continuous-batch prefill does not use the chunk loop. The Swift, core
+and C rows are unchanged.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.71` is on `3.32.3-macprovider.63`
 (`8f8821668c1a2dbb23ce33e43f31ed00d45f924f`) (#2376), at
@@ -624,8 +629,8 @@ unchanged fused path. The loader refuses `alpha` outside finite
 names no base weight; otherwise the load fails. An indexed checkpoint may
 store it as `language_model.refusal_direction`. The text sanitize drops
 stored `model.layers.N.refusal_direction` keys, so only the validated
-direction sets the per-layer directions. The
-Swift, core and C rows were unchanged by it.
+direction sets the per-layer directions. It
+changed no Swift, core or C row.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.63` is on `3.32.3-macprovider.61`
 (`ef656c59adc2424ddf1f1bcfca0338536befcc25`) (#2352), at
@@ -2758,7 +2763,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.105 (2026-11-16, Related: #2338)** — R013: the admission pickup
+- **0.1.107 (2026-11-16, Related: #2338)** — R013: the admission pickup
   follows the boot model. When a warm member has been promoted to primary,
   a pending pickup is abandoned without cutting anything (cancelled at the
   promotion during its delay or drain, and checked again before the drain
@@ -2766,14 +2771,30 @@ requests.
   undoes the promotion. `native_mtp_admission_pending` names the boot model
   in a new `model_id` field. A provider that never promotes a warm member is
   unchanged.
-- **0.1.104 (2026-11-16, Related: #2338)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.73` (`d5ee65fd2bb5fdee2d7ac6ae12e59cc9be6a783a`) on
-  `3.32.3-macprovider.71`, `.71` plus only the mlx-swift pin move, and
-  mlx-swift `0.32.3-macprovider.23`
-  (`1cfafd1faa2ea502329d50cd851d97764ce20d1d`) on `0.32.3-macprovider.22`: a
-  synchronous eval waits for the device without holding the process-wide
-  evalLock (Swift layer only). Model sources, the core and C rows and the
-  metallib are unchanged.
+- **0.1.106 (2026-11-16, Related: #2338)** — R003 names mlx-swift-lm `3.32.3-macprovider.79`
+  (`92459644d702bf42959c66dd8be0c0416f1dd882`) on `3.32.3-macprovider.78`
+  (#2338): It is 3.32.3-macprovider.78 plus one commit that only moves its
+  mlx-swift pin to 0.32.3-macprovider.25
+  (12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7), 0.32.3-macprovider.24 plus two
+  Swift-layer commits: a synchronous eval schedules the graph and copies its
+  completion events under the process-wide evalLock, waits for the device
+  without the lock, then retakes the lock to finish; recursive entry, a CPU
+  stream and a failed asynchronous schedule keep the stock locked path. The
+  core and C rows are unchanged and no Metal kernel changed. Model sources
+  are unchanged.
+- **0.1.105 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.78`
+  (`6889f3b41b84041f1693ca1637b1e92e30d5a2d4`) on `3.32.3-macprovider.76`
+  (#2389): three commits that only move its mlx-swift pin. R003 also names mlx-swift `0.32.3-macprovider.24` (`7fbcada97b58ddafab567121da63b959b8d092e3`) and MLX core `v0.32.4-macprovider.15` (`4e9a71dc9e765f739003868f38d3aca05871e70d`): the core adds the SPEC-038 FR-CB9 stock-order small-row route (`MLX_METAL_SMALL_M_ROW_INVARIANT=2`). The row-invariant route that native MTP serves on is unchanged. Model sources and the C row are unchanged.
+- **0.1.104 (2026-11-16)** — R003 names mlx-swift-lm `3.32.3-macprovider.76`
+  (`9489ddeb74090d1a91ad1c8a01c0d0e117052450`) on `3.32.3-macprovider.71`
+  (#2381): Two upstream fixes as picks: the serial prefill chunk loop clears
+  the MLX buffer cache after each chunk (ml-explore/mlx-swift-lm #710), behind
+  PrefillParameters.clearsBufferCache (default true) for hosts without a Metal
+  library, and an MLX error raised on the loader's worker threads is thrown
+  instead of ending the process (port of ml-explore/mlx-swift-lm #698). No
+  model source, decode step or kernel route changes; continuous-batch prefill
+  does not use the chunk loop. Other model sources and the Swift, core and C
+  rows are unchanged.
 - **0.1.103 (2026-11-16, Related: #2382)** — MTP-13 variant: the signed
   entry carries the variant's own `quantization` block from
   `native-mtp-variants.json` (same `kind` as the donor), not the donor's, which
