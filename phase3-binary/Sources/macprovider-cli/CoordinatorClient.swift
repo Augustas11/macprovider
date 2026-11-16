@@ -3522,7 +3522,6 @@ actor CoordinatorClient {
         let delay = Self.nativeMTPCanaryReplyDelay(
             issuedAt: request.issuedAt,
             expiresAt: request.expiresAt,
-            now: Date(),
             margin: nativeMTPCanaryReplyMarginSeconds
         )
         let executor = nativeMTPCanaryExecutor
@@ -3548,28 +3547,32 @@ actor CoordinatorClient {
 
     /// Issue #2404: the reply must reach the coordinator before `expires_at`
     /// (SPEC-048 MTP-16: 60 s), or its sweep records a timeout and disables
-    /// the tuple. The bound is the shorter of the wall-clock time left and the
-    /// issued-to-expiry window counted from receipt, so provider clock skew
-    /// cannot push the reply past the deadline. The margin covers transit and
-    /// the coordinator's evaluation, which rejects any result after
-    /// `expires_at`.
+    /// the tuple. The bound is the request's own issued-to-expiry window,
+    /// counted on the provider's monotonic clock from when the request is
+    /// handled, minus the margin; wall clocks are never compared, so provider
+    /// clock skew cannot move it. A window that is absent, malformed or not
+    /// positive counts as the coordinator's default 60 s. The margin covers
+    /// transit and the coordinator's evaluation, which rejects any result
+    /// after `expires_at`.
     static let nativeMTPCanaryReplyMarginDefaultSeconds: TimeInterval = 10
+    static let nativeMTPCanaryDefaultWindowSeconds: TimeInterval = 60
 
     static func nativeMTPCanaryReplyDelay(
         issuedAt: String,
         expiresAt: String,
-        now: Date,
         margin: TimeInterval
     ) -> TimeInterval {
-        guard let issued = parseISO8601Date(issuedAt),
-              let expiry = parseISO8601Date(expiresAt)
-        else {
-            return 0
+        var window = nativeMTPCanaryDefaultWindowSeconds
+        if let issued = parseISO8601Date(issuedAt),
+           let expiry = parseISO8601Date(expiresAt) {
+            let parsed = expiry.timeIntervalSince(issued)
+            if parsed.isFinite, parsed > 0 {
+                window = parsed
+            }
         }
-        let bound = min(expiry.timeIntervalSince(issued), expiry.timeIntervalSince(now)) - margin
-        guard bound.isFinite, bound > 0 else { return 0 }
         // Far-future test windows only; a real window is 60 s.
-        return min(bound, 3_600)
+        let bound = min(window, 3_600) - margin
+        return bound > 0 ? bound : 0
     }
 
     private func finishNativeMTPCanary(

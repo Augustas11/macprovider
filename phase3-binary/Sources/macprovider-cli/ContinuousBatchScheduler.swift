@@ -789,6 +789,70 @@ final class ContinuousBatchPromptSnapshotHandoff: @unchecked Sendable, Equatable
 /// Its handler consumes one newly visible token at a time and therefore never
 /// replays a generated prefix. Equality intentionally ignores identity/state
 /// because the observer is not part of request semantics or dedupe identity.
+/// Issue #2404: resumes an integrity probe's caller exactly once, with the
+/// probe's own outcome or with `CancellationError` when the caller is
+/// cancelled first; cancelling also cancels the inner submit task.
+final class NativeMTPIntegrityProbeRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>?
+    private var inner: Task<Void, Never>?
+    private var cancelled = false
+    private var finished = false
+
+    /// False when the caller was already cancelled; the caller is then
+    /// resumed with `CancellationError` here.
+    func install(_ continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>) -> Bool {
+        lock.lock()
+        if cancelled {
+            finished = true
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func setInner(_ task: Task<Void, Never>) {
+        lock.lock()
+        let cancelNow = cancelled
+        inner = task
+        lock.unlock()
+        if cancelNow { task.cancel() }
+    }
+
+    func resume(_ outcome: Result<ContinuousBatchSchedulerResult, Error>) {
+        lock.lock()
+        guard !finished, let continuation else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: outcome)
+    }
+
+    /// True when this call ended the wait (the caller sees cancellation).
+    func cancel() -> Bool {
+        lock.lock()
+        cancelled = true
+        let task = inner
+        guard !finished, let continuation else {
+            lock.unlock()
+            task?.cancel()
+            return false
+        }
+        finished = true
+        self.continuation = nil
+        lock.unlock()
+        task?.cancel()
+        continuation.resume(throwing: CancellationError())
+        return true
+    }
+}
+
 final class ContinuousBatchCanonicalStopObserver: @unchecked Sendable, Equatable {
     private let lock = NSLock()
     private let handler: @Sendable (Int) -> Bool
@@ -872,6 +936,10 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// Issue #2341: the row's served path and mean active rows. Load-dependent,
     /// not compared by `==`; nil on a replayed result.
     var servedPath: ServedPath? = nil
+    /// Issue #2404: the row's decode path when it finished. A native row a
+    /// tuple disable moved to ordinary mid-request reports `.ordinary`.
+    /// Not compared by `==`.
+    var finalDecodePath: DecodePath? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -896,7 +964,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             nativeMTPCounters: nativeMTPCounters,
             selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
             selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds,
-            servedPath: servedPath
+            servedPath: servedPath,
+            finalDecodePath: finalDecodePath
         )
     }
 
@@ -921,7 +990,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             nativeMTPCounters: nativeMTPCounters,
             selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
             selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds,
-            servedPath: servedPath
+            servedPath: servedPath,
+            finalDecodePath: finalDecodePath
         )
     }
 
@@ -2687,6 +2757,11 @@ actor ContinuousBatchScheduler {
     private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
     private var nativeMTPRowsWithStagedMutation: Set<String> = []
     private var nativeMTPIntegrityProbeInFlight = false
+    /// Issue #2404: the production integrity probe (canary or self-check) now
+    /// in flight. Buyer submits wait it out instead of being refused; the lab
+    /// probe group keeps refusing them.
+    private var activeNativeMTPIntegrityProbe: UInt64?
+    private var nativeMTPIntegrityProbeCounter: UInt64 = 0
     /// SPEC-048-R007 in-flight load gate. Engages as soon as active rows exceed
     /// the smallest signed bound among native rows; releases only after
     /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
@@ -2803,6 +2878,14 @@ actor ContinuousBatchScheduler {
         if cleanupFailedClosed {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_scheduler_failed_closed")
+        }
+        if !request.nativeMTPIntegrityProbe {
+            do {
+                try await waitOutNativeMTPIntegrityProbe()
+            } catch {
+                await discardUnacceptedRetainedCache(for: request)
+                throw error
+            }
         }
         if nativeMTPIntegrityProbeInFlight && !request.nativeMTPIntegrityProbe {
             await discardUnacceptedRetainedCache(for: request)
@@ -3194,8 +3277,61 @@ actor ContinuousBatchScheduler {
             throw ContinuousBatchSchedulerError.backpressure
         }
         nativeMTPIntegrityProbeInFlight = true
-        defer { nativeMTPIntegrityProbeInFlight = false }
-        return try await submit(request)
+        nativeMTPIntegrityProbeCounter &+= 1
+        let probeID = nativeMTPIntegrityProbeCounter
+        activeNativeMTPIntegrityProbe = probeID
+        // Issue #2404: the probe returns as soon as its caller is cancelled
+        // (the canary deadline), wherever inside submit it is waiting, and
+        // the exclusion ends on every exit path. The row itself is cancelled
+        // and retires through the pump as any cancelled row does.
+        let race = NativeMTPIntegrityProbeRace()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard race.install(continuation) else {
+                    endNativeMTPIntegrityProbe(probeID, cancelRequestID: request.id)
+                    return
+                }
+                race.setInner(Task {
+                    let outcome: Result<ContinuousBatchSchedulerResult, Error>
+                    do {
+                        outcome = .success(try await self.submit(request))
+                    } catch {
+                        outcome = .failure(error)
+                    }
+                    await self.endNativeMTPIntegrityProbe(probeID, cancelRequestID: nil)
+                    race.resume(outcome)
+                })
+            }
+        } onCancel: {
+            if race.cancel() {
+                Task { await self.endNativeMTPIntegrityProbe(probeID, cancelRequestID: request.id) }
+            }
+        }
+    }
+
+    private func endNativeMTPIntegrityProbe(_ probeID: UInt64, cancelRequestID: String?) {
+        if let cancelRequestID {
+            cancel(requestID: cancelRequestID)
+        }
+        guard activeNativeMTPIntegrityProbe == probeID else { return }
+        activeNativeMTPIntegrityProbe = nil
+        nativeMTPIntegrityProbeInFlight = false
+    }
+
+    /// The longest a buyer submit waits for an integrity probe before the
+    /// old `.backpressure` refusal. The canary deadline (50 s of its 60 s
+    /// window) cancels the probe well before this.
+    static let nativeMTPIntegrityProbeBuyerWaitNanoseconds: UInt64 = 60_000_000_000
+
+    private func waitOutNativeMTPIntegrityProbe() async throws {
+        guard activeNativeMTPIntegrityProbe != nil else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        while activeNativeMTPIntegrityProbe != nil {
+            if DispatchTime.now().uptimeNanoseconds &- started >= Self.nativeMTPIntegrityProbeBuyerWaitNanoseconds {
+                throw ContinuousBatchSchedulerError.backpressure
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     private func stopPendingTerminalDeliveriesForDrain() {
@@ -7244,7 +7380,8 @@ actor ContinuousBatchScheduler {
             nativeMTPCounters: row.nativeMTPCounters,
             selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
             selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row),
-            servedPath: servedPath(of: row)
+            servedPath: servedPath(of: row),
+            finalDecodePath: row.decodePath
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -7281,7 +7418,8 @@ actor ContinuousBatchScheduler {
             nativeMTPCounters: row.nativeMTPCounters,
             selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
             selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row),
-            servedPath: servedPath(of: row)
+            servedPath: servedPath(of: row),
+            finalDecodePath: row.decodePath
         )
         complete(requestID: row.request.id, result: result)
     }
