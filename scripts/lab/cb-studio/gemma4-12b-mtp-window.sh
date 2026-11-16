@@ -58,7 +58,7 @@ LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
 LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.gemma4-mtp-window.lock
-RELEASE_METALLIB_SHA256=41863424710154758311c118db69a23231eadb0cc542abded55ac5859b51e3b2
+RELEASE_METALLIB_SHA256=9ba197c57f042131f40f4e730a33169dbfb6fc3afcb961d1f44a1e197ea851d6
 MODEL_ID=google/gemma-4-12b-it
 ROOT=${ROOT:-$LAB/fixtures/gemma4}
 # The R005 corpus (qualified_slots 4...4), the R005 redaction and the

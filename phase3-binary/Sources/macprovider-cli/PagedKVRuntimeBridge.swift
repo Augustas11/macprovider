@@ -860,7 +860,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// one token and its own copied `[1, 1, hidden]` row, never a view of the
     /// batch output. A row holds at most `nativeMTPDrafterColumnCap` columns:
     /// a held row about to pass it catches its drafter up early, before its
-    /// next ordinary window.
+    /// next ordinary window. A prompt-free drafter buffers none: its held
+    /// rows go straight to the state a flush would give them
+    /// (`storePromptFreeHeldDrafterState`).
     private var nativeMTPPendingDrafterColumns: [String: [(token: Int, hidden: MLXArray)]] = [:]
     /// Far above the R015 cells' 512-token completions, so the cap never
     /// fires in a measured gated cell; it bounds the buffer's memory, which
@@ -1639,11 +1641,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 steps: 1
             )
             guard !decodable.isEmpty else { return capFailures }
-            return try self.performDecode(
+            let promptFreeState = await self.promptFreeDrafterStateForHeldRows(decodable)
+            let outcomes = try self.performDecode(
                 model: context.model,
                 supportedInputs: decodable,
-                steps: 1
-            ) + capFailures
+                steps: 1,
+                capturesDrafterColumns: promptFreeState == nil
+            )
+            if let promptFreeState {
+                self.storePromptFreeHeldDrafterState(promptFreeState, inputs: decodable, outcomes: outcomes)
+            }
+            return outcomes + capFailures
         }
         for outcome in decoded {
             if case .rowFailure(let requestID) = outcome {
@@ -1690,12 +1698,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 steps: steps
             )
             guard !decodable.isEmpty else { return capFailures }
-            return try self.performDecode(
+            let promptFreeState = await self.promptFreeDrafterStateForHeldRows(decodable)
+            let outcomes = try self.performDecode(
                 model: context.model,
                 supportedInputs: decodable,
                 steps: steps,
-                onStep: onStep
-            ) + capFailures
+                onStep: onStep,
+                capturesDrafterColumns: promptFreeState == nil
+            )
+            if let promptFreeState {
+                self.storePromptFreeHeldDrafterState(promptFreeState, inputs: decodable, outcomes: outcomes)
+            }
+            return outcomes + capFailures
         }
         for outcome in decoded {
             if case .rowFailure(let requestID) = outcome {
@@ -2740,7 +2754,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         model: any LanguageModel,
         supportedInputs: [ContinuousBatchDecodeInput],
         steps: Int,
-        onStep: ContinuousBatchDecodeWindowStepObserver? = nil
+        onStep: ContinuousBatchDecodeWindowStepObserver? = nil,
+        capturesDrafterColumns: Bool = true
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
         // A capped backend (`pagedMLA`) never forms a wider forward; the
@@ -2769,7 +2784,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // Native rows riding this forward need the target hidden state of
         // every step for their drafter. Capture asks the target to emit it;
         // that output state is diagnostic only and never becomes row state.
-        let captureIndices = drafterContainer == nil
+        // A prompt-free drafter consumes no columns (the caller passes
+        // `capturesDrafterColumns` false), so its held rows ride the forward
+        // exactly as ordinary rows do: no emission, pipelined steps.
+        let captureIndices = drafterContainer == nil || !capturesDrafterColumns
             ? []
             : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
         if !captureIndices.isEmpty && (hasBatchedState || rowStates.contains(where: { $0.state != nil })) {
@@ -3747,6 +3765,42 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 dueIDs.map { .rowFailure(requestID: $0) }
             )
         }
+    }
+
+    /// #2328 R015 gated cells: the fresh state a prompt-free drafter (the
+    /// Gemma 4 assistant) is left with by a held window, or nil when no row
+    /// of the window is held or the drafter consumes columns. Buffering
+    /// columns for such a drafter made the shared forward emit drafter state
+    /// and read every step on the host before queuing the next, costing every
+    /// row of the window about 2.3 ms per token (s2/s4 cells 0.949/0.958),
+    /// for columns the flush then discarded.
+    private func promptFreeDrafterStateForHeldRows(_ inputs: [ContinuousBatchDecodeInput]) async -> MTPDrafterState? {
+        guard let drafterContainer, inputs.contains(where: \.captureNativeMTPDrafterColumns) else { return nil }
+        return (try? await Self.promptFreeDrafterState(drafterContainer)) ?? nil
+    }
+
+    /// Leaves each held row that decoded with the state the column flush
+    /// gives a prompt-free drafter (`flushNativeMTPDrafterColumns`): its
+    /// fresh state and no seed, as an unseeded prefill also leaves it. Its
+    /// next native round proposes nothing and verifies one column, whose
+    /// finalize proposes from that round's target hidden state and K/V.
+    private func storePromptFreeHeldDrafterState(
+        _ state: MTPDrafterState,
+        inputs: [ContinuousBatchDecodeInput],
+        outcomes: [ContinuousBatchDecodeOutcome]
+    ) {
+        let decoded = Set(outcomes.compactMap { outcome -> String? in
+            if case .output(let output) = outcome { return output.requestID }
+            return nil
+        })
+        lock.lock()
+        for input in inputs where input.captureNativeMTPDrafterColumns && decoded.contains(input.requestID)
+            && nativeMTPDrafterStates[input.requestID] != nil {
+            nativeMTPDrafterStates[input.requestID] = state
+            nativeMTPDrafterSeedTokens.removeValue(forKey: input.requestID)
+            nativeMTPPendingDrafterColumns.removeValue(forKey: input.requestID)
+        }
+        lock.unlock()
     }
 
     private func pendingNativeMTPDrafterColumnCount(for requestID: String) -> Int {

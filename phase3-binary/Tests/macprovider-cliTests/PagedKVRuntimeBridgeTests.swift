@@ -1575,6 +1575,86 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(differing.isEmpty, "the control verify already matched decode bit for bit")
     }
 
+    /// #2328 R015 gated cells: a Gemma 4 native row the load gate holds
+    /// (depth 1 -> 0 for many rounds -> 1) rides the ordinary forward with no
+    /// drafter columns buffered, so that forward is the ordinary one (no
+    /// drafter emission, pipelined steps). While held, its drafter is in the
+    /// state an unseeded prefill leaves (fresh, no seed); the first round
+    /// after the hold verifies one column, as before; every later proposal
+    /// equals the never-held run's at the same step, and every token equals
+    /// ordinary greedy decode.
+    func testGemma4HeldNativeRowBuffersNoColumnsAndRestoresTheUninterruptedProposals() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 2328, vocabulary: 64)
+        let budget = 48
+        let ordinary = try await Self.tracedRun(
+            backend: try Self.tinyGemma4ColumnExactBackend(drafter: nil, familyAdapter: nil),
+            request: Self.tinyNativeRequest("a", prompt, budget, decodePath: .ordinary)
+        )
+        XCTAssertGreaterThan(Set(ordinary.tokens).count, 3, "random weights degenerated")
+        func drafter() -> RuntimeBridgeOracleGemmaDrafter {
+            RuntimeBridgeOracleGemmaDrafter(
+                reference: ordinary.tokens, promptLength: prompt.count, vocabulary: 64, wrongEvery: 3
+            )
+        }
+
+        let uninterrupted = try Self.tinyGemma4ColumnExactBackend(
+            drafter: drafter(), familyAdapter: NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+        )
+        let uninterruptedResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: uninterrupted, maxPhysicalBlocks: 256
+        ).submit(Self.tinyNativeRequest("a", prompt, budget))
+        XCTAssertTrue(uninterrupted.capturedDecodeStepsByRow().isEmpty)
+        XCTAssertEqual(uninterruptedResult.generatedTokens, ordinary.tokens)
+
+        let held = try Self.tinyGemma4ColumnExactBackend(
+            drafter: drafter(), familyAdapter: NativeMTPAdmissionSidecar.gemma4MTPFamilyAdapter
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: held, maxPhysicalBlocks: 256)
+        let peer = RuntimeBridgeTaskBox()
+        let maxPending = RuntimeBridgePendingColumnsBox()
+        let heldResult = try await scheduler.submit(
+            Self.tinyNativeRequest("a", prompt, budget, maximumActiveRows: 1)
+        ) { event in
+            if event.tokenIndex == 3 {
+                peer.start {
+                    try await scheduler.submit(Self.tinyNativeRequest(
+                        "peer", Self.tinyPrompt(length: 6, salt: 9, vocabulary: 64), 20, decodePath: .ordinary
+                    ))
+                }
+            }
+            let pending = held.base.nativeMTPDrafterSnapshotForTest(requestID: "a").pendingColumns
+            maxPending.record(max(maxPending.value() ?? 0, pending))
+        }
+        let peerResult = try await peer.value()
+        XCTAssertEqual(heldResult.terminalStatus, .length, heldResult.errorCode ?? "")
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+        XCTAssertEqual(heldResult.generatedTokens, ordinary.tokens, "held native row diverged from ordinary")
+
+        let heldSteps = held.capturedDecodeStepsByRow()["a"] ?? []
+        XCTAssertGreaterThanOrEqual(
+            heldSteps.count, ContinuousBatchScheduler.nativeMTPLoadGateReleaseRounds + 1,
+            "gate never held the native row on the ordinary forward"
+        )
+        XCTAssertEqual(maxPending.value() ?? 0, 0, "a prompt-free drafter buffered held columns")
+
+        let lastHeldStep = try XCTUnwrap(heldSteps.max())
+        let reference = uninterrupted.proposalsByStep()["a"] ?? [:]
+        let heldProposals = held.proposalsByStep()["a"] ?? [:]
+        let restored = heldProposals.filter { $0.key > lastHeldStep }
+        XCTAssertGreaterThanOrEqual(restored.count, 5, "native proposals did not resume: \(heldProposals)")
+        // Rounds of the two runs start at different steps once one of them
+        // accepts a draft the other did not get to propose; compare every
+        // step at which both proposed.
+        let shared = restored.keys.filter { reference[$0] != nil }
+        XCTAssertGreaterThanOrEqual(shared.count, 3, "too few common proposal steps after restore")
+        for (step, proposal) in heldProposals.sorted(by: { $0.key < $1.key }) {
+            guard let expected = reference[step] else { continue }
+            XCTAssertEqual(proposal, expected, "held-run proposal at step \(step) differs from never-held")
+        }
+        XCTAssertEqual(held.base.retainedRowCountForTest(), 0)
+    }
+
     /// #2328: only a one-row full-attention K/V ending exactly at the
     /// committed prefix seeds a prompt-free drafter from the prefill.
     func testPrefillSharedKVSeedsDrafterOnlyAtTheCommittedPrefix() throws {
