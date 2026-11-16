@@ -1480,6 +1480,7 @@ final class CoordinatorClientTests: XCTestCase {
 
         try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
 
+        _ = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
         let frames = await recorder.frames.dropFirst(initialCount)
         XCTAssertEqual(frames.count, 1)
         let result = try XCTUnwrap(frames.first)
@@ -1525,6 +1526,378 @@ final class CoordinatorClientTests: XCTestCase {
         let frames = await recorder.frames.dropFirst(initialCount)
         XCTAssertEqual(frames.first?["type"] as? String, "nak")
         XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
+    // MARK: Issue #2404 detached, bounded native-MTP canary
+
+    /// A canary result the provider would accept from a working probe.
+    private static func passingNativeMTPCanaryResult(
+        _ request: CoordinatorClient.NativeMTPCanaryRequestPayload
+    ) -> CoordinatorClient.NativeMTPCanaryResultPayload {
+        let counters = request.expectedCounters
+        let digest = CoordinatorClient.nativeMTPCanaryResultDigest(
+            requestID: request.requestID,
+            providerID: request.providerID,
+            assignedID: request.assignedID,
+            requestDigest: request.requestDigest,
+            targetGeneration: request.targetGeneration,
+            providerRevision: request.providerRevision,
+            runtimeRevision: request.runtimeRevision,
+            challengeID: request.challengeID,
+            challengeBankSHA256: request.challengeBankSHA256,
+            nonce: request.nonce,
+            nativeMTPRuntimeTupleSHA256: request.nativeMTPRuntimeTupleSHA256,
+            expectedTokenIDSHA256: request.expectedTokenIDSHA256,
+            actualTokenIDSHA256: request.expectedTokenIDSHA256,
+            terminalReason: "passed",
+            counters: counters,
+            committedStateSHA256: request.expectedCommittedStateSHA256,
+            actualDecodePath: "native_mtp",
+            fallbackUsed: false,
+            runtimeTuple: request.runtimeTuple,
+            diagnostic: nil
+        )
+        return CoordinatorClient.NativeMTPCanaryResultPayload(
+            requestID: request.requestID,
+            providerID: request.providerID,
+            assignedID: request.assignedID,
+            requestDigest: request.requestDigest,
+            resultDigest: digest,
+            targetGeneration: request.targetGeneration,
+            providerRevision: request.providerRevision,
+            runtimeRevision: request.runtimeRevision,
+            challengeID: request.challengeID,
+            challengeBankSHA256: request.challengeBankSHA256,
+            nonce: request.nonce,
+            nativeMTPRuntimeTupleSHA256: request.nativeMTPRuntimeTupleSHA256,
+            expectedTokenIDSHA256: request.expectedTokenIDSHA256,
+            actualTokenIDSHA256: request.expectedTokenIDSHA256,
+            terminalReason: "passed",
+            counters: counters,
+            committedStateSHA256: request.expectedCommittedStateSHA256,
+            actualDecodePath: "native_mtp",
+            fallbackUsed: false,
+            runtimeTuple: request.runtimeTuple,
+            diagnostic: nil
+        )
+    }
+
+    /// Runs until cancelled, like a probe stuck on scheduler admission.
+    private static func stuckNativeMTPCanaryExecutor(
+        started: LockedBox<Int>,
+        cancelled: LockedBox<Bool>
+    ) -> CoordinatorClient.NativeMTPCanaryExecutor {
+        { request in
+            started.update { $0 += 1 }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            cancelled.set(true)
+            return passingNativeMTPCanaryResult(request)
+        }
+    }
+
+    private func makeNativeMTPCanaryClient(
+        recorder: CoordinatorFrameRecorder,
+        executor: @escaping CoordinatorClient.NativeMTPCanaryExecutor
+    ) async throws -> CoordinatorClient {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, nativeMTPCanaryExecutor: executor)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        return client
+    }
+
+    private func waitUntil(_ condition: () async -> Bool) async throws {
+        for _ in 0..<2_000 {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("condition not met")
+    }
+
+    func testNativeMTPCanaryStuckProbeRepliesBeforeExpiryAndDoesNotBlockLaterFrames() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let started = LockedBox(0)
+        let cancelled = LockedBox(false)
+        let client = try await makeNativeMTPCanaryClient(
+            recorder: recorder,
+            executor: Self.stuckNativeMTPCanaryExecutor(started: started, cancelled: cancelled)
+        )
+        await client.setNativeMTPCanaryReplyMarginForTest(seconds: 2)
+        let initialCount = await recorder.frames.count
+        let formatter = ISO8601DateFormatter()
+        let issued = Date()
+        let expiry = issued.addingTimeInterval(6)
+        var request = Self.nativeMTPCanaryRequest()
+        request["issued_at"] = formatter.string(from: issued)
+        request["expires_at"] = formatter.string(from: expiry)
+
+        try await client.handleCoordinatorPayloadForTest(request)
+        // The handler returned with the probe still running; an unrelated
+        // control frame behind it is answered while the canary runs.
+        try await client.handleCoordinatorPayloadForTest(["type": "unrelated_control_frame_2404"])
+        let nak = try await waitForFrame(recorder, after: initialCount, type: "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "unrelated_control_frame_2404")
+        try await waitUntil { started.get() == 1 }
+        let stillRunning = await client.nativeMTPCanaryInFlightForTest()
+        XCTAssertTrue(stillRunning)
+        let resultsBeforeDeadline = await recorder.frames.dropFirst(initialCount)
+            .filter { $0["type"] as? String == "native_mtp_canary_result_v1" }
+        XCTAssertTrue(resultsBeforeDeadline.isEmpty)
+
+        var reply: [String: Any] = [:]
+        for _ in 0..<2_000 {
+            if let frame = await recorder.frames.dropFirst(initialCount)
+                .first(where: { $0["type"] as? String == "native_mtp_canary_result_v1" }) {
+                reply = frame
+                break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let repliedAt = Date()
+        XCTAssertLessThan(repliedAt, try XCTUnwrap(formatter.date(from: request["expires_at"] as! String)))
+        XCTAssertEqual(reply["terminal_reason"] as? String, "inconclusive")
+        XCTAssertEqual(reply["actual_decode_path"] as? String, "unavailable")
+        XCTAssertEqual(reply["diagnostic"] as? String, "native MTP canary deadline: probe did not finish")
+        XCTAssertEqual(reply["request_digest"] as? String, String(repeating: "6", count: 64))
+        try await waitUntil { cancelled.get() }
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        // The probe's late result is never sent after the deadline reply.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let results = await recorder.frames.dropFirst(initialCount)
+            .filter { $0["type"] as? String == "native_mtp_canary_result_v1" }
+        XCTAssertEqual(results.count, 1)
+    }
+
+    /// Issue #2404: a variant bank entry's challenge id makes the provider's
+    /// own cache namespace 133 bytes; 1.8.289 refused the request with
+    /// `invalid_message` at its 128-byte bound.
+    func testNativeMTPCanaryAcceptsAVariantLengthCacheNamespace() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in
+            Self.passingNativeMTPCanaryResult(request)
+        }
+        let initialCount = await recorder.frames.count
+        let namespace = "native_mtp:" + String(repeating: "7", count: 64)
+            + ":native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e"
+        XCTAssertEqual(namespace.utf8.count, 133)
+        var request = Self.nativeMTPCanaryRequest()
+        request["cache_namespace"] = namespace
+        var tuple = Self.nativeMTPRuntimeTuple()
+        tuple["cache_namespace"] = namespace
+        request["runtime_tuple"] = tuple
+
+        try await client.handleCoordinatorPayloadForTest(request)
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(result["terminal_reason"] as? String, "passed")
+        let naks = await recorder.frames.dropFirst(initialCount).filter { $0["type"] as? String == "nak" }
+        XCTAssertTrue(naks.isEmpty)
+        let tooLong = "native_mtp:" + String(repeating: "7", count: 64) + ":" + String(repeating: "c", count: 129)
+        var refused = Self.nativeMTPCanaryRequest()
+        refused["cache_namespace"] = tooLong
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        let beforeRefused = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest(refused)
+        let nak = try await waitForFrame(recorder, after: beforeRefused, type: "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
+    func testNativeMTPCanaryWorkingProbeReturnsItsResult() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in
+            Self.passingNativeMTPCanaryResult(request)
+        }
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(result["terminal_reason"] as? String, "passed")
+        XCTAssertEqual(result["actual_decode_path"] as? String, "native_mtp")
+        XCTAssertEqual(result["fallback_used"] as? Bool, false)
+        XCTAssertNil(result["diagnostic"])
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.count, 1)
+    }
+
+    func testNativeMTPCanarySessionEndCancelsProbeAndDropsReply() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let started = LockedBox(0)
+        let cancelled = LockedBox(false)
+        let client = try await makeNativeMTPCanaryClient(
+            recorder: recorder,
+            executor: Self.stuckNativeMTPCanaryExecutor(started: started, cancelled: cancelled)
+        )
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+        try await waitUntil { started.get() == 1 }
+        await client.cleanupConnectionForTest()
+
+        try await waitUntil { cancelled.get() }
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        let results = await recorder.frames.dropFirst(initialCount)
+            .filter { $0["type"] as? String == "native_mtp_canary_result_v1" }
+        XCTAssertTrue(results.isEmpty)
+    }
+
+    func testNativeMTPCanarySecondRequestWhileRunningGetsBusyReply() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let started = LockedBox(0)
+        let cancelled = LockedBox(false)
+        let client = try await makeNativeMTPCanaryClient(
+            recorder: recorder,
+            executor: Self.stuckNativeMTPCanaryExecutor(started: started, cancelled: cancelled)
+        )
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+
+        // The busy reply is sent before the second handler returns.
+        let frames = await recorder.frames.dropFirst(initialCount)
+        let busy = try XCTUnwrap(frames.first { $0["type"] as? String == "native_mtp_canary_result_v1" })
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(busy["terminal_reason"] as? String, "inconclusive")
+        XCTAssertEqual(busy["actual_decode_path"] as? String, "unavailable")
+        XCTAssertEqual(busy["diagnostic"] as? String, "native MTP canary already running")
+        try await waitUntil { started.get() == 1 }
+        XCTAssertEqual(started.get(), 1)
+
+        await client.cleanupConnectionForTest()
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+    }
+
+    func testNativeMTPCanaryReplyDelayUsesTheRequestWindowNotTheWallClock() {
+        let formatter = ISO8601DateFormatter()
+        func delay(issued: TimeInterval, expires: TimeInterval) -> TimeInterval {
+            // Dates far from this host's clock: skew must not matter.
+            let base = Date(timeIntervalSince1970: 4_000_000_000)
+            return CoordinatorClient.nativeMTPCanaryReplyDelay(
+                issuedAt: formatter.string(from: base.addingTimeInterval(issued)),
+                expiresAt: formatter.string(from: base.addingTimeInterval(expires)),
+                margin: CoordinatorClient.nativeMTPCanaryReplyMarginDefaultSeconds
+            )
+        }
+        XCTAssertEqual(delay(issued: 0, expires: 60), 50, accuracy: 0.001)
+        XCTAssertEqual(delay(issued: -1_000, expires: -940), 50, accuracy: 0.001)
+        XCTAssertEqual(delay(issued: 0, expires: 30), 20, accuracy: 0.001)
+        // A window no longer than the margin: reply at once.
+        XCTAssertEqual(delay(issued: 0, expires: 5), 0, accuracy: 0.001)
+        // Not positive, absent or malformed: the default 60 s window.
+        XCTAssertEqual(delay(issued: 60, expires: 0), 50, accuracy: 0.001)
+        XCTAssertEqual(delay(issued: 0, expires: 0), 50, accuracy: 0.001)
+        for (issued, expires) in [("", "2026-11-16T00:01:00Z"), ("2026-11-16T00:00:00Z", "not-a-date"), ("", "")] {
+            XCTAssertEqual(CoordinatorClient.nativeMTPCanaryReplyDelay(
+                issuedAt: issued,
+                expiresAt: expires,
+                margin: CoordinatorClient.nativeMTPCanaryReplyMarginDefaultSeconds
+            ), 50, accuracy: 0.001)
+        }
+    }
+
+    func testNativeMTPCanaryWindowShorterThanMarginRepliesAtOnce() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let started = LockedBox(0)
+        let cancelled = LockedBox(false)
+        let client = try await makeNativeMTPCanaryClient(
+            recorder: recorder,
+            executor: Self.stuckNativeMTPCanaryExecutor(started: started, cancelled: cancelled)
+        )
+        let initialCount = await recorder.frames.count
+        let formatter = ISO8601DateFormatter()
+        let issued = Date()
+        var request = Self.nativeMTPCanaryRequest()
+        request["issued_at"] = formatter.string(from: issued)
+        request["expires_at"] = formatter.string(from: issued.addingTimeInterval(5))
+
+        try await client.handleCoordinatorPayloadForTest(request)
+
+        let reply = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(reply["actual_decode_path"] as? String, "unavailable")
+        XCTAssertEqual(reply["diagnostic"] as? String, "native MTP canary deadline: probe did not finish")
+        try await waitUntil { cancelled.get() }
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+    }
+
+    func testNativeMTPCanaryLateResultAfterReconnectIsNotSentOnTheNewSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let release = LockedBox(false)
+        let started = LockedBox(0)
+        // Ignores cancellation: returns only when released.
+        let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in
+            started.update { $0 += 1 }
+            while !release.get() {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return Self.passingNativeMTPCanaryResult(request)
+        }
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+        try await waitUntil { started.get() == 1 }
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        let afterReconnect = await recorder.frames.count
+
+        release.set(true)
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let results = await recorder.frames.dropFirst(afterReconnect)
+            .filter { $0["type"] as? String == "native_mtp_canary_result_v1" }
+        XCTAssertTrue(results.isEmpty)
+    }
+
+    func testNativeMTPCanaryProbeIgnoringCancellationStillGetsDeadlineReplyThenFreesTheSlot() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let release = LockedBox(false)
+        let calls = LockedBox(0)
+        let client = try await makeNativeMTPCanaryClient(recorder: recorder) { request in
+            calls.update { $0 += 1 }
+            if calls.get() == 1 {
+                while !release.get() {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+            }
+            return Self.passingNativeMTPCanaryResult(request)
+        }
+        await client.setNativeMTPCanaryReplyMarginForTest(seconds: 59)
+        let initialCount = await recorder.frames.count
+        let formatter = ISO8601DateFormatter()
+        let issued = Date()
+        var first = Self.nativeMTPCanaryRequest()
+        first["issued_at"] = formatter.string(from: issued)
+        first["expires_at"] = formatter.string(from: issued.addingTimeInterval(60))
+
+        try await client.handleCoordinatorPayloadForTest(first)
+        let deadline = try await waitForFrame(recorder, after: initialCount, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(deadline["diagnostic"] as? String, "native MTP canary deadline: probe did not finish")
+        let afterDeadline = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+        let busy = try await waitForFrame(recorder, after: afterDeadline, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(busy["diagnostic"] as? String, "native MTP canary already running")
+        XCTAssertEqual(calls.get(), 1)
+
+        release.set(true)
+        try await waitUntil { await !client.nativeMTPCanaryInFlightForTest() }
+        let afterRelease = await recorder.frames.count
+        // The late first result is not sent; the slot is free for the next.
+        await client.setNativeMTPCanaryReplyMarginForTest(seconds: 10)
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+        let next = try await waitForFrame(recorder, after: afterRelease, type: "native_mtp_canary_result_v1")
+        XCTAssertEqual(next["terminal_reason"] as? String, "passed")
+        XCTAssertEqual(calls.get(), 2)
+        let sinceRelease = await recorder.frames.dropFirst(afterRelease)
+        XCTAssertEqual(sinceRelease.count, 1)
     }
 
     // MARK: SPEC-036 FR-21 compute scoring job
@@ -12094,6 +12467,7 @@ final class CoordinatorClientTests: XCTestCase {
         nativeMTPTupleDisableHandler: CoordinatorClient.NativeMTPTupleDisableHandler? = nil,
         nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil,
         nativeMTPTupleRestoreHandler: CoordinatorClient.NativeMTPTupleRestoreHandler? = nil,
+        nativeMTPCanaryExecutor: CoordinatorClient.NativeMTPCanaryExecutor? = nil,
         computeScoreExecutor: CoordinatorClient.ComputeScoreExecutor? = nil,
         computeScoreReference: Bool = false,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
@@ -12184,6 +12558,7 @@ final class CoordinatorClientTests: XCTestCase {
             installedCompatibilityManifest: installedCompatibilityManifest ?? { _, _ in nil },
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
+            nativeMTPCanaryExecutor: nativeMTPCanaryExecutor,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
             nativeMTPTupleRestoreHandler: nativeMTPTupleRestoreHandler,
             nativeMTPServedBankDigest: nativeMTPServedBankDigest ?? { nil },

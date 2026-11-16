@@ -907,6 +907,16 @@ actor CoordinatorClient {
     /// SPEC-036 FR-26 scorer-only mode: no buyer request is served.
     private let computeScoreReference: Bool
     private var computeScoreInFlight = false
+    private struct NativeMTPCanaryRun {
+        let id: UInt64
+        var replied: Bool
+        let probe: Task<Void, Never>?
+        let deadline: Task<Void, Never>?
+    }
+    /// Issue #2404: at most one canary probe task alive at a time.
+    private var nativeMTPCanaryRun: NativeMTPCanaryRun?
+    private var nativeMTPCanaryRunCounter: UInt64 = 0
+    private var nativeMTPCanaryReplyMarginSeconds = CoordinatorClient.nativeMTPCanaryReplyMarginDefaultSeconds
     private let coordinatorReadiness: CoordinatorReadiness
     /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
     /// literal loopback coordinator URL): that relaxation skips the catalog
@@ -2927,6 +2937,11 @@ actor CoordinatorClient {
         // A new session re-offers a parked or unsent tuple by itself.
         stopNativeMTPServedBankPoll()
         stopNativeMTPTupleOfferRetry()
+        // Issue #2404: the session's canary ends with it. The slot stays held
+        // until the probe task returns, so a probe that ignores cancellation
+        // still blocks a second one.
+        nativeMTPCanaryRun?.probe?.cancel()
+        nativeMTPCanaryRun?.deadline?.cancel()
         heartbeatTask?.cancel()
         heartbeatTask = nil
         let watchdogGeneration = heartbeatWatchdogGeneration
@@ -3484,30 +3499,167 @@ actor CoordinatorClient {
         ))
 
         let started = DispatchTime.now().uptimeNanoseconds
-        let result = await nativeMTPCanaryExecutor(request)
-        var sent = result
+        let epoch = connectionEpoch
+        // Issue #2404: the canary runs off the inbound handler, like compute
+        // score, so a probe waiting on scheduler admission cannot hold up the
+        // frames behind it. The slot is held until the probe task itself ends,
+        // so a probe that ignores cancellation never gets a second one beside
+        // it; a request meanwhile gets the `unavailable` reply at once.
+        guard nativeMTPCanaryRun == nil else {
+            await sendNativeMTPCanaryReply(
+                Self.inconclusiveNativeMTPCanaryResult(
+                    request: request,
+                    diagnostic: "native MTP canary already running"
+                ),
+                epoch: epoch,
+                started: started,
+                outcome: "busy"
+            )
+            return
+        }
+        nativeMTPCanaryRunCounter &+= 1
+        let runID = nativeMTPCanaryRunCounter
+        let delay = Self.nativeMTPCanaryReplyDelay(
+            issuedAt: request.issuedAt,
+            expiresAt: request.expiresAt,
+            margin: nativeMTPCanaryReplyMarginSeconds
+        )
+        let executor = nativeMTPCanaryExecutor
+        // Both tasks hold self weakly: the client owns them, and a probe that
+        // never returns must not keep the client alive.
+        let probe = Task { [weak self] in
+            let result = await executor(request)
+            await self?.finishNativeMTPCanary(
+                runID: runID,
+                request: request,
+                result: result,
+                epoch: epoch,
+                started: started
+            )
+        }
+        let deadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.expireNativeMTPCanary(runID: runID, request: request, epoch: epoch, started: started)
+        }
+        nativeMTPCanaryRun = NativeMTPCanaryRun(id: runID, replied: false, probe: probe, deadline: deadline)
+    }
+
+    /// Issue #2404: the reply must reach the coordinator before `expires_at`
+    /// (SPEC-048 MTP-16: 60 s), or its sweep records a timeout and disables
+    /// the tuple. The bound is the request's own issued-to-expiry window,
+    /// counted on the provider's monotonic clock from when the request is
+    /// handled, minus the margin; wall clocks are never compared, so provider
+    /// clock skew cannot move it. A window that is absent, malformed or not
+    /// positive counts as the coordinator's default 60 s. The margin covers
+    /// transit and the coordinator's evaluation, which rejects any result
+    /// after `expires_at`.
+    static let nativeMTPCanaryReplyMarginDefaultSeconds: TimeInterval = 10
+    static let nativeMTPCanaryDefaultWindowSeconds: TimeInterval = 60
+
+    static func nativeMTPCanaryReplyDelay(
+        issuedAt: String,
+        expiresAt: String,
+        margin: TimeInterval
+    ) -> TimeInterval {
+        var window = nativeMTPCanaryDefaultWindowSeconds
+        if let issued = parseISO8601Date(issuedAt),
+           let expiry = parseISO8601Date(expiresAt) {
+            let parsed = expiry.timeIntervalSince(issued)
+            if parsed.isFinite, parsed > 0 {
+                window = parsed
+            }
+        }
+        // Far-future test windows only; a real window is 60 s.
+        let bound = min(window, 3_600) - margin
+        return bound > 0 ? bound : 0
+    }
+
+    private func finishNativeMTPCanary(
+        runID: UInt64,
+        request: NativeMTPCanaryRequestPayload,
+        result: NativeMTPCanaryResultPayload,
+        epoch: UInt64,
+        started: UInt64
+    ) async {
+        guard let run = nativeMTPCanaryRun, run.id == runID else { return }
+        run.deadline?.cancel()
+        nativeMTPCanaryRun = nil
+        guard !run.replied else { return }
+        var reply = result
+        var outcome = "result"
         do {
             try Self.validateNativeMTPCanaryResult(result, request: request)
-            try await send(result.wireObject)
         } catch {
-            sent = Self.inconclusiveNativeMTPCanaryResult(
+            reply = Self.inconclusiveNativeMTPCanaryResult(
                 request: request,
                 diagnostic: "native MTP canary executor returned invalid result"
             )
-            try await send(sent.wireObject)
+            outcome = "invalid_result"
         }
+        await sendNativeMTPCanaryReply(reply, epoch: epoch, started: started, outcome: outcome)
+    }
+
+    private func expireNativeMTPCanary(
+        runID: UInt64,
+        request: NativeMTPCanaryRequestPayload,
+        epoch: UInt64,
+        started: UInt64
+    ) async {
+        guard var run = nativeMTPCanaryRun, run.id == runID, !run.replied else { return }
+        run.replied = true
+        run.probe?.cancel()
+        nativeMTPCanaryRun = run
+        await sendNativeMTPCanaryReply(
+            Self.inconclusiveNativeMTPCanaryResult(
+                request: request,
+                diagnostic: "native MTP canary deadline: probe did not finish"
+            ),
+            epoch: epoch,
+            started: started,
+            outcome: "deadline"
+        )
+    }
+
+    /// Sends on the session the request arrived on; a reply for an ended
+    /// session is dropped with a log line, never sent on a later session.
+    private func sendNativeMTPCanaryReply(
+        _ reply: NativeMTPCanaryResultPayload,
+        epoch: UInt64,
+        started: UInt64,
+        outcome: String
+    ) async {
         let elapsedMS = (DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000
+        var dropReason: String?
+        if connectionEpoch != epoch || !coordinatorSessionAccepted {
+            dropReason = "session_ended"
+        } else {
+            do {
+                try await send(reply.wireObject)
+            } catch {
+                dropReason = "send_failed"
+            }
+        }
         Self.logNativeMTPCanary(Self.nativeMTPCanaryLogLine(
-            event: "native_mtp_canary_result_sent",
+            event: dropReason == nil ? "native_mtp_canary_result_sent" : "native_mtp_canary_result_dropped",
             fields: [
-                ("challenge_id", sent.challengeID),
-                ("request_id", sent.requestID),
-                ("terminal_reason", sent.terminalReason),
-                ("decode_path", sent.actualDecodePath),
-                ("diagnostic", sent.diagnostic ?? "none"),
+                ("challenge_id", reply.challengeID),
+                ("request_id", reply.requestID),
+                ("terminal_reason", reply.terminalReason),
+                ("decode_path", reply.actualDecodePath),
+                ("diagnostic", reply.diagnostic ?? "none"),
+                ("outcome", outcome),
                 ("elapsed_ms", String(elapsedMS)),
-            ]
+            ] + (dropReason.map { [("reason", $0)] } ?? [])
         ))
+    }
+
+    func setNativeMTPCanaryReplyMarginForTest(seconds: TimeInterval) {
+        nativeMTPCanaryReplyMarginSeconds = seconds
+    }
+
+    func nativeMTPCanaryInFlightForTest() -> Bool {
+        nativeMTPCanaryRun != nil
     }
 
     /// Issue #2404: one line per native-MTP canary and disable step, so a
@@ -3787,6 +3939,9 @@ actor CoordinatorClient {
         return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// "native_mtp:" + 64-hex tuple + ":" + a challenge id of up to 128 bytes.
+    static let nativeMTPCacheNamespaceMaxBytes = 11 + 64 + 1 + 128
+
     private static let nativeMTPCanaryRequestKeys: Set<String> = [
         "type", "version", "request_id", "provider_id", "assigned_id",
         "model_id", "model_hash", "model_hash_algorithm", "target_generation",
@@ -3847,7 +4002,9 @@ actor CoordinatorClient {
         let sidecarDigest = try sha256String(object, "sidecar_digest")
         let providerBinarySHA256 = try sha256String(object, "provider_binary_sha256")
         let runtimeCDHash = try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64])
-        let cacheNamespace = try boundedString(object, "cache_namespace", maxBytes: 128)
+        // Issue #2404: the provider's own namespace is `native_mtp:<64-hex>:<challenge id>`
+        // and a challenge id may be 128 bytes, so 128 refused valid requests.
+        let cacheNamespace = try boundedString(object, "cache_namespace", maxBytes: Self.nativeMTPCacheNamespaceMaxBytes)
         let stateDigest = try sha256String(object, "state_digest")
         let challengeID = try boundedString(object, "challenge_id", maxBytes: 128)
         let challengeCorpusSHA256 = try sha256String(object, "challenge_corpus_sha256")
@@ -3977,7 +4134,7 @@ actor CoordinatorClient {
             sidecarDigest: try sha256String(object, "sidecar_digest"),
             providerBinarySHA256: try sha256String(object, "provider_binary_sha256"),
             runtimeCDHash: try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64]),
-            cacheNamespace: try boundedString(object, "cache_namespace", maxBytes: 128),
+            cacheNamespace: try boundedString(object, "cache_namespace", maxBytes: Self.nativeMTPCacheNamespaceMaxBytes),
             stateDigest: try sha256String(object, "state_digest"),
             proposalDepth: proposalDepth
         )

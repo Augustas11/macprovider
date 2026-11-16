@@ -649,11 +649,11 @@ func (s *Server) logNativeMTPCanaryExpiry(provider pool.Provider, key NativeMTPC
 func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payload []byte) {
 	result, field, err := ParseNativeMTPCanaryResult(payload)
 	if err != nil {
-		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid native MTP canary result")
+		s.log.Warn().Err(err).Str("event", "native_mtp_canary_result_rejected").Str("reason", "invalid_result").Str("field", field).Str("provider_id", providerID).Msg("invalid native MTP canary result")
 		return
 	}
 	if result.ProviderID != providerID || result.AssignedID != assignedID {
-		s.log.Warn().Str("provider_id", providerID).Msg("native MTP canary result rejected: stale session binding")
+		s.log.Warn().Str("event", "native_mtp_canary_result_rejected").Str("reason", "stale_session").Str("provider_id", providerID).Msg("native MTP canary result rejected: stale session binding")
 		return
 	}
 	provider, ok := s.pool.Resolve(providerID, assignedID)
@@ -665,23 +665,23 @@ func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payl
 		result.TargetGeneration != key.TargetGeneration ||
 		result.NativeMTPRuntimeTupleSHA256 != key.RuntimeTupleSHA256 ||
 		result.ChallengeBankSHA256 != key.ChallengeBankSHA256 {
-		s.log.Warn().Str("provider_id", providerID).Msg("native MTP canary result rejected: tuple binding mismatch")
+		s.log.Warn().Str("event", "native_mtp_canary_result_rejected").Str("reason", "tuple_binding_mismatch").Str("provider_id", providerID).Msg("native MTP canary result rejected: tuple binding mismatch")
 		return
 	}
 	state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, s.now())
 	if !ok || state.InFlight == nil {
-		s.log.Warn().Str("provider_id", providerID).Msg("native MTP canary result rejected: no in-flight tuple request")
+		s.log.Warn().Str("event", "native_mtp_canary_result_rejected").Str("reason", "no_in_flight_request").Str("provider_id", providerID).Msg("native MTP canary result rejected: no in-flight tuple request")
 		return
 	}
 	record, ok := s.nativeMTPChallengeForProvider(provider)
 	if !ok || record.ChallengeID != result.ChallengeID {
-		s.log.Warn().Str("provider_id", providerID).Msg("native MTP canary result rejected: challenge mismatch")
+		s.log.Warn().Str("event", "native_mtp_canary_result_rejected").Str("reason", "challenge_mismatch").Str("provider_id", providerID).Msg("native MTP canary result rejected: challenge mismatch")
 		return
 	}
 	core := nativeMTPCanaryCoreResultFromWire(result)
 	eval := EvaluateNativeMTPCanaryCoreResult(*state.InFlight, record, core, s.now())
 	if err := s.nativeMTPCanaryStore.CompleteNativeMTPCanary(key, *state.InFlight, core, eval, s.nativeMTPCanaryInterval(), s.now()); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("native MTP canary result rejected")
+		s.log.Warn().Err(err).Str("event", "native_mtp_canary_result_rejected").Str("reason", "complete_failed").Str("provider_id", providerID).Msg("native MTP canary result rejected")
 		return
 	}
 	s.log.Info().
@@ -696,6 +696,88 @@ func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payl
 		Str("reason", eval.Reason).
 		Msg("native MTP canary result recorded")
 	if state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, s.now()); ok {
+		if updated, ok := s.recordNativeMTPCanaryState(providerID, assignedID, key.RuntimeTupleSHA256, state); ok {
+			if state.Status == NativeMTPCanaryTupleDisabled {
+				s.sendNativeMTPTupleDisableOnce(updated, state.DisabledReason, state.DisabledAt)
+			}
+		}
+	}
+}
+
+const nativeMTPCanaryRequestType = "native_mtp_canary_request_v1"
+
+// nativeMTPCanaryNAKCode keeps a provider-authored NAK code a short closed
+// token before it becomes a stored reason.
+func nativeMTPCanaryNAKCode(code string) string {
+	if code == "" || len(code) > 64 {
+		return "unrecognized"
+	}
+	for _, r := range code {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '_' {
+			return "unrecognized"
+		}
+	}
+	return code
+}
+
+// handleNativeMTPCanaryNAK ends the in-flight canary of the provider's tuple
+// at once when the provider refuses the request (issue #2404): the provider
+// will send no result, so waiting out the 60 s deadline only delays the
+// same outcome. A refused challenge is a failed canary (SPEC-031-R033):
+// it disables only the exact tuple, with reason `nak_<code>`.
+func (s *Server) handleNativeMTPCanaryNAK(providerID, assignedID, code string) {
+	reject := func(reason string) {
+		s.log.Warn().
+			Str("event", "native_mtp_canary_nak_rejected").
+			Str("provider_id", providerID).
+			Str("assigned_id", assignedID).
+			Str("code", code).
+			Str("reason", reason).
+			Msg("native MTP canary NAK not tied to an in-flight canary")
+	}
+	if s.nativeMTPCanaryStore == nil {
+		reject("canary_disabled")
+		return
+	}
+	provider, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		reject("stale_session")
+		return
+	}
+	key := nativeMTPTupleKeyFromProvider(provider)
+	if !key.valid() {
+		reject("no_offered_tuple")
+		return
+	}
+	now := s.now()
+	state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, now)
+	if !ok || state.InFlight == nil {
+		reject("no_in_flight_request")
+		return
+	}
+	inFlight := *state.InFlight
+	eval := NativeMTPCanaryEvaluation{
+		Outcome:          NativeMTPCanaryFail,
+		Reason:           "nak_" + nativeMTPCanaryNAKCode(code),
+		DisableTupleOnly: true,
+		TrustSemantics:   "observe_only",
+	}
+	if err := s.nativeMTPCanaryStore.CompleteNativeMTPCanary(key, inFlight, NativeMTPCanaryCoreResult{}, eval, s.nativeMTPCanaryInterval(), now); err != nil {
+		reject("complete_failed")
+		return
+	}
+	s.log.Warn().
+		Str("event", "native_mtp_canary_nak").
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Uint64("target_generation", key.TargetGeneration).
+		Str("challenge_id", inFlight.ChallengeID).
+		Str("request_id", inFlight.RequestDigestSHA256).
+		Str("code", code).
+		Str("outcome", string(eval.Outcome)).
+		Str("reason", eval.Reason).
+		Msg("native MTP canary refused by the provider; tuple disabled")
+	if state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, now); ok {
 		if updated, ok := s.recordNativeMTPCanaryState(providerID, assignedID, key.RuntimeTupleSHA256, state); ok {
 			if state.Status == NativeMTPCanaryTupleDisabled {
 				s.sendNativeMTPTupleDisableOnce(updated, state.DisabledReason, state.DisabledAt)

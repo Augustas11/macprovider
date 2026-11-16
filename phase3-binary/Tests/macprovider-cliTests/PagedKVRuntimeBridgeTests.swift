@@ -3587,7 +3587,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotEqual(sampledHot, greedyHot)
     }
 
-    func testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion() async throws {
+    func testNativeMTPIntegrityProbeHoldsBuyerAdmissionAndServesItAfterCompletion() async throws {
         let prefillGate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(
             scripts: ["probe": [11], "buyer": [21, 22], "buyer-after": [31, 32]],
@@ -3609,21 +3609,27 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             ))
         }
         try await Task.sleep(nanoseconds: 20_000_000)
-        do {
-            _ = try await scheduler.submit(Self.schedulerRequest(
+        // Issue #2404: a buyer arriving mid-probe waits it out and is served
+        // after it; it is not refused.
+        let buyerTask = Task {
+            try await scheduler.submit(Self.schedulerRequest(
                 id: "buyer",
                 promptTokens: [20],
                 maxOutputTokens: 2
             ))
-            XCTFail("buyer admission should be rejected while integrity probe is actor-held")
-        } catch {
-            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
         }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let queuedBeforeProbeEnds = await scheduler.metrics().waitingCount
+        XCTAssertEqual(queuedBeforeProbeEnds, 0, "the buyer waits outside the queue while the probe runs")
 
         await prefillGate.open()
         let probe = try await probeTask.value
         XCTAssertEqual(probe.terminalStatus, .length)
         XCTAssertEqual(probe.nativeMTPCounters?.acceptedTokens, 1)
+        XCTAssertEqual(probe.finalDecodePath, .nativeMTP)
+        let buyer = try await buyerTask.value
+        XCTAssertEqual(buyer.terminalStatus, .length)
+        XCTAssertEqual(buyer.generatedTokens, [21, 22])
 
         let buyerAfter = try await scheduler.submit(Self.schedulerRequest(
             id: "buyer-after",
@@ -3632,6 +3638,78 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ))
         XCTAssertEqual(buyerAfter.terminalStatus, .length)
         XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
+    }
+
+    func testCancelledStuckIntegrityProbeReturnsAtOnceAndBuyerIsServedAfter() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["probe": [11], "buyer": [21, 22]],
+            nativeProposalScripts: ["probe": [[12]]],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let probeTask = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: Self.nativeMTPFence(),
+                nativeMTPIntegrityProbe: true
+            ))
+        }
+        try await Self.eventually { await prefillGate.waitingCount() == 1 }
+        let buyerTask = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "buyer",
+                promptTokens: [20],
+                maxOutputTokens: 2
+            ))
+        }
+        // The canary deadline cancels the probe while its prefill is stuck:
+        // the probe call returns at once, before the backend moves.
+        probeTask.cancel()
+        do {
+            _ = try await probeTask.value
+            XCTFail("a cancelled probe must throw")
+        } catch is CancellationError {
+        }
+        let stillWaiting = await prefillGate.waitingCount()
+        XCTAssertEqual(stillWaiting, 1, "the probe returned while the backend was still stuck")
+
+        await prefillGate.open()
+        let buyer = try await buyerTask.value
+        XCTAssertEqual(buyer.terminalStatus, .length)
+        XCTAssertEqual(buyer.generatedTokens, [21, 22])
+        try await Self.eventually { await scheduler.isQuiescentForNativeMTPProbe() }
+    }
+
+    func testIntegrityProbeReportsOrdinaryWhenItsTupleIsDisabledMidProbe() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["probe": [11, 13, 15]],
+            nativeProposalScripts: ["probe": [[12]]],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+        let probeTask = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: fence,
+                nativeMTPIntegrityProbe: true
+            ))
+        }
+        try await Self.eventually { await prefillGate.waitingCount() == 1 }
+        await scheduler.disableNativeMTPTuple(fence)
+        await prefillGate.open()
+        let probe = try await probeTask.value
+        XCTAssertEqual(probe.finalDecodePath, .ordinary)
     }
 
     func testLabFourRowNativeProbeCompositionKeepsBuyersExcluded() async throws {

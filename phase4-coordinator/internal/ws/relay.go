@@ -2487,8 +2487,11 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid nak")
 		return
 	}
+	if nak.InReplyTo == nativeMTPCanaryRequestType {
+		s.handleNativeMTPCanaryNAK(providerID, assignedID, nak.Error.Code)
+	}
 	if nak.Error.Code != "unknown_message_type" && nak.Error.Code != "duplicate_request_id" && nak.Error.Code != "tier2_aead_decrypt_failed" && nak.Error.Code != "tier2_encrypted_frame_required" {
-		s.log.Warn().Str("provider_id", providerID).Str("code", nak.Error.Code).Msg("provider nak")
+		s.log.Warn().Str("provider_id", providerID).Str("code", nak.Error.Code).Str("in_reply_to", nak.InReplyTo).Msg("provider nak")
 		return
 	}
 	session, ok := s.sessionFor(providerID, assignedID)
