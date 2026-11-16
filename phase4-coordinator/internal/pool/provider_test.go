@@ -607,6 +607,122 @@ func TestMetricsFreeBusyStateUpdateDoesNotFlipRestoredSeat(t *testing.T) {
 	}
 }
 
+// applyProviderReport sends one provider-originated status through the
+// heartbeat or the state_update ingress.
+func applyProviderReport(t *testing.T, registry *Registry, ingress string, state State, slotsFree, slotsTotal int) {
+	t.Helper()
+	if ingress == "heartbeat" {
+		if _, _, ok := registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+			Status: state, ModelID: "model-a", MaxContextTokens: 8192, MaxConcurrency: slotsTotal,
+			SlotsFree: slotsFree, SlotsTotal: slotsTotal, At: time.Now().UTC(),
+		}); !ok {
+			t.Fatal("ApplyHeartbeat returned false")
+		}
+		return
+	}
+	if _, ok := registry.ApplyStateUpdate("p1", "s1", StateUpdate{
+		State: state, SlotsFree: &slotsFree, SlotsTotal: &slotsTotal, At: time.Now().UTC(),
+	}); !ok {
+		t.Fatal("ApplyStateUpdate returned false")
+	}
+}
+
+// #2399: a provider that degraded itself (first-token stall hold) and then
+// reports ready again leaves degraded while a chat is still forwarded to it.
+// The coordinator keeps owning the seat count, so the forwarded chat still
+// holds its seat and the provider's free-seat report is not applied.
+func TestSelfDegradedProviderReturnsWhileChatForwarded(t *testing.T) {
+	for _, ingress := range []string{"heartbeat", "state_update"} {
+		t.Run(ingress+"/free_seats_left", func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4, MaxConcurrency: 4, MaxContextTokens: 8192}, nil)
+			if !registry.ConsumeForwardedSlot("p1", "s1") {
+				t.Fatal("ConsumeForwardedSlot returned false")
+			}
+			applyProviderReport(t, registry, ingress, StateDegraded, 3, 4)
+			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded || got.SlotsFree != 3 {
+				t.Fatalf("after degraded report = state %q slots_free %d, want degraded/3", got.State, got.SlotsFree)
+			}
+			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
+			got, _ := registry.Resolve("p1", "s1")
+			if got.State != StateReady || got.SlotsFree != 3 {
+				t.Fatalf("after ready report = state %q slots_free %d, want ready/3 (forwarded chat keeps its seat)", got.State, got.SlotsFree)
+			}
+			if n := registry.ForwardedInFlight("p1", "s1"); n != 1 {
+				t.Fatalf("forwarded in flight = %d, want 1", n)
+			}
+			if !got.RoutingEligible() {
+				t.Fatal("recovered provider with free seats is not routable")
+			}
+		})
+		t.Run(ingress+"/every_seat_forwarded", func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 1, SlotsFree: 1, MaxConcurrency: 1, MaxContextTokens: 8192}, nil)
+			if !registry.ConsumeForwardedSlot("p1", "s1") {
+				t.Fatal("ConsumeForwardedSlot returned false")
+			}
+			applyProviderReport(t, registry, ingress, StateDegraded, 0, 1)
+			// The Mac reports its stalled chat retired before the coordinator
+			// saw it end; that seat is still the coordinator's.
+			applyProviderReport(t, registry, ingress, StateReady, 1, 1)
+			got, _ := registry.Resolve("p1", "s1")
+			if got.State != StateBusy || got.SlotsFree != 0 {
+				t.Fatalf("after ready report = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+			}
+			if got.RoutingEligible() || !got.InService() {
+				t.Fatalf("full recovered provider: routable=%v in_service=%v, want false/true", got.RoutingEligible(), got.InService())
+			}
+			if !registry.RestoreForwardedSlot("p1", "s1") {
+				t.Fatal("RestoreForwardedSlot returned false")
+			}
+			if got, _ := registry.Resolve("p1", "s1"); got.State != StateReady || got.SlotsFree != 1 {
+				t.Fatalf("after the forwarded chat ended = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+			}
+		})
+	}
+}
+
+// The #2399 return is only from a provider's own degraded state: a recovery
+// hold, a coordinator drain and a thermal report keep their state while a
+// chat is forwarded.
+func TestReadyWhileChatForwardedKeepsHeldDrainingAndThermalStates(t *testing.T) {
+	for _, ingress := range []string{"heartbeat", "state_update"} {
+		t.Run(ingress+"/recovery_hold", func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
+			registry.ConsumeForwardedSlot("p1", "s1")
+			if !registry.MarkDegradedForRecovery("p1", "s1", RecoveryReasonBreaker) {
+				t.Fatal("MarkDegradedForRecovery returned false")
+			}
+			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
+			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded {
+				t.Fatalf("held provider state = %q, want degraded", got.State)
+			}
+		})
+		t.Run(ingress+"/draining", func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
+			registry.ConsumeForwardedSlot("p1", "s1")
+			registry.MarkState("p1", "s1", StateDraining)
+			applyProviderReport(t, registry, ingress, StateReady, 4, 4)
+			if got, _ := registry.Resolve("p1", "s1"); got.State != StateDraining {
+				t.Fatalf("draining provider state = %q, want draining", got.State)
+			}
+		})
+	}
+	t.Run("thermal", func(t *testing.T) {
+		registry := NewRegistry(nil)
+		registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
+		registry.ConsumeForwardedSlot("p1", "s1")
+		applyProviderReport(t, registry, "state_update", StateDegraded, 3, 4)
+		zero, four := 0, 4
+		registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, Reason: "thermal_throttled", SlotsFree: &zero, SlotsTotal: &four})
+		if got, _ := registry.Resolve("p1", "s1"); got.State != StateDegraded {
+			t.Fatalf("thermal ready report state = %q, want degraded", got.State)
+		}
+	})
+}
+
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
 	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
 		t.Run(string(state), func(t *testing.T) {

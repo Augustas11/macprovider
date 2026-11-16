@@ -3379,6 +3379,19 @@ func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal b
 	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold
 }
 
+// coordinatorOccupancyState is the routable state the coordinator-owned seat
+// count gives. While that count is authoritative a provider's ready or busy
+// says only that it is healthy again: a provider leaving its own degraded
+// state with chats still forwarded to it returns as busy or ready from this
+// count, not from its report, so it never gains seats it does not have
+// (#2399). Draining is not left this way; the coordinator may have imposed it.
+func (p *Provider) coordinatorOccupancyState() State {
+	if p.SlotsFree > 0 && !p.capacitySafetyHold {
+		return StateReady
+	}
+	return StateBusy
+}
+
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
 	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
@@ -3534,6 +3547,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		staleBusy := ignoreOccupancy && (hb.Status == StateReady || hb.Status == StateBusy)
 		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
+		} else if staleBusy && p.State == StateDegraded && r.canApplyProviderStateLocked(p, hb.Status) {
+			r.setStateLocked(p, p.coordinatorOccupancyState())
 		}
 	}
 	if hb.LoadingPresent {
@@ -3731,6 +3746,8 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 			r.setStateLocked(p, StateBusy)
 		} else if !thermal && !staleCapacity {
 			r.setStateLocked(p, update.State)
+		} else if !thermal && p.State == StateDegraded && (update.State == StateReady || update.State == StateBusy) {
+			r.setStateLocked(p, p.coordinatorOccupancyState())
 		}
 	}
 	if update.SlotsFree != nil && !staleCapacity {
