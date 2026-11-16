@@ -76,26 +76,27 @@ entry is updated for the 2026-11-15 MiniMax activation.
   (2) a provider serving either 27B model reports native MTP enabled after its
   self-check; (3) one buyer request on each model through the gateway is
   served with native MTP; (4) the next CLI cut bakes the release.
-- **Owed, short variant challenge id (Related: #2404; found in PR 2407):** the
-  next catalog release must rename the GLM-5.3-Flash uncensored variant entry
-  `native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e` (57 bytes) in
-  the self-test bank. Why: the provider's canary cache namespace
-  `native_mtp:<64-hex tuple>:<challenge id>` is then 133 bytes, and CLI
-  1.8.289 to 1.8.292 refuse any canary request whose `cache_namespace` is over
-  128 bytes with `invalid_message`. Every canary for that model therefore
-  disables its native MTP. Base entries (36 bytes or less) are unaffected.
-  The release PR changes `expand_native_mtp_variants` in
-  `scripts/catalog-release.py` to name variants `<donor id>-v<first 12 hex of
-  sha256(model_key)>`, giving `native-mtp-selftest-glm53-flash-0001-vf4215a95296e`.
-  It also makes that function refuse any challenge id over 52 bytes (SPEC-031
-  v0.3.10 FR-CAN33). The same PR runs `catalog-release.py native-mtp-variants`
-  and generates and signs the release: the bank, the admission feed and the
-  ledger must change together, or `catalog-release.py verify` reports drift.
-  `native_mtp_canary_v289_compat_test.go` checks that names of this shape pass
-  the 1.8.289 decoder. **Live steps:** (1) the catalog release PR, then
+- **Pending, `published-2026-11-17-glm53-uncensored-short-challenge-id-v289`
+  (Related: #2404, found in PR 2407; signed with `streamvc-autotune-static-v4`,
+  generated on the live `published-2026-11-16-qwen27b-native-mtp-v289`):** the
+  self-test bank renames the GLM-5.3-Flash uncensored variant entry
+  `native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e` (57 bytes, cache
+  namespace 133 bytes) to `native-mtp-selftest-glm53-flash-0001-vf4215a95296e`
+  (50 bytes, namespace 126 bytes). CLI 1.8.289 to 1.8.292 refuse a canary
+  request whose `cache_namespace` is over 128 bytes with `invalid_message`, so
+  every canary for that model disabled its native MTP. `expand_native_mtp_variants`
+  in `scripts/catalog-release.py` names variants `<donor id>-v<first 12 hex of
+  sha256(model_key)>` and refuses any challenge id over 52 bytes (SPEC-031
+  v0.3.10 FR-CAN33). No other bank field changes; the admission entries change
+  only in `challenge_bank_sha256` (`9794d0ab…` to `de272f1a…`) and the release
+  stamps; the tuple input, projection manifest and rate rows are unchanged.
+  `native_mtp_canary_v289_compat_test.go` checks every published entry against
+  the 1.8.289 decoder. **Live steps:** (1) merge, then
   `scripts/ops/catalog-activate.sh status` and `next --run`; (2) live probe:
-  after a GLM-5.3-Flash uncensored provider on 1.8.289 starts, the coordinator
-  logs a canary `pass` for it.
+  after the canary provider restarts onto the release, the coordinator logs a
+  native-MTP canary result with outcome `pass` for the uncensored build and the
+  provider's `/v1/status` reports `native_mtp` enabled past two minutes;
+  (3) the next CLI cut bakes the release.
 - **`buyer_serving_e2e` owed:** the MiniMax M3.1-Flash artifact (since
   `published-2026-11-13-minimax-m3.1-flash-recommendable-v287`), the
   GLM-5.3-Flash uncensored artifact (since

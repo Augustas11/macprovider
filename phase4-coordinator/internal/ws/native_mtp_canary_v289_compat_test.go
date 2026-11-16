@@ -17,8 +17,8 @@ import (
 // GLM-5.3-Flash uncensored variant with `invalid_message`. These tests feed
 // the request this coordinator builds into a faithful copy of the 1.8.289
 // decoder (CoordinatorClient.swift `decodeNativeMTPCanaryRequest` and
-// `decodeNativeMTPRuntimeTuple` at tag v1.8.289), using the bank entries as
-// published and as regenerated.
+// `decodeNativeMTPRuntimeTuple` at tag v1.8.289), using the published bank
+// entries and the long variant id they replaced.
 
 var (
 	v289Hex64  = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -357,45 +357,54 @@ func v289WireRequest(t *testing.T, record NativeMTPChallengeRecord, now time.Tim
 	return raw
 }
 
-func TestNativeMTPCanaryV289RefusesThePublishedVariantEntryOnItsCacheNamespace(t *testing.T) {
+// The release before the fix (published-2026-11-16-qwen27b-native-mtp-v289)
+// named the uncensored GLM-5.3-Flash variant entry with a 57-byte id; its
+// 133-byte cache namespace is what 1.8.289 refused.
+const v289LongVariantChallengeID = "native-mtp-selftest-glm53-flash-0001-variant-f4215a95296e"
+
+var v289ShortVariantID = regexp.MustCompile(`-v[0-9a-f]{12}$`)
+
+func TestNativeMTPCanaryV289RefusesTheLongVariantIDOnItsCacheNamespace(t *testing.T) {
 	now := time.Now().UTC()
 	published := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static", "native-mtp-selftest-bank.json")
-	var variants int
 	for _, record := range v289BankRecords(t, published) {
-		err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now)
-		if strings.Contains(record.ChallengeID, "-variant-") {
-			variants++
-			if err == nil || !strings.HasPrefix(err.Error(), "cache_namespace: exceeds 128 bytes") {
-				t.Fatalf("%s: 1.8.289 should refuse on cache_namespace, got %v", record.ChallengeID, err)
-			}
+		if !v289ShortVariantID.MatchString(record.ChallengeID) {
 			continue
 		}
-		if err != nil {
-			t.Fatalf("%s: a base entry must be accepted by 1.8.289: %v", record.ChallengeID, err)
+		record.ChallengeID = v289LongVariantChallengeID
+		err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now)
+		if err == nil || !strings.HasPrefix(err.Error(), "cache_namespace: exceeds 128 bytes") {
+			t.Fatalf("%s: 1.8.289 should refuse on cache_namespace, got %v", record.ChallengeID, err)
 		}
+		return
 	}
-	if variants == 0 {
-		t.Fatal("published bank has no variant entry; update this test")
-	}
+	t.Fatal("published bank has no variant entry; update this test")
 }
 
-// The catalog fix renames a variant to `<donor id>-v<12 hex>` and bounds a
-// challenge id at 52 bytes: 128 - len("native_mtp:") - 64 - 1. Every published
-// entry renamed that way, and any 52-byte id, must pass 1.8.289; 53 bytes must not.
-func TestNativeMTPCanaryV289AcceptsShortVariantIDsUpToFiftyTwoBytes(t *testing.T) {
+// The catalog fix names a variant `<donor id>-v<12 hex>` and bounds a
+// challenge id at 52 bytes: 128 - len("native_mtp:") - 64 - 1. Every entry of
+// the published bank, and any 52-byte id, must pass 1.8.289; 53 bytes must not.
+func TestNativeMTPCanaryV289AcceptsEveryPublishedBankEntry(t *testing.T) {
 	now := time.Now().UTC()
 	published := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static", "native-mtp-selftest-bank.json")
 	records := v289BankRecords(t, published)
 	if len(records) == 0 {
 		t.Fatal("empty bank")
 	}
+	var variants int
 	for _, record := range records {
-		if donor, suffix, ok := strings.Cut(record.ChallengeID, "-variant-"); ok {
-			record.ChallengeID = donor + "-v" + suffix
+		if strings.Contains(record.ChallengeID, "-variant-") {
+			t.Fatalf("%s: the published bank still carries a long variant id", record.ChallengeID)
+		}
+		if v289ShortVariantID.MatchString(record.ChallengeID) {
+			variants++
 		}
 		if err := decodeV289CanaryRequest(v289WireRequest(t, record, now), now); err != nil {
-			t.Fatalf("%s: 1.8.289 refuses the short-named entry: %v", record.ChallengeID, err)
+			t.Fatalf("%s: 1.8.289 refuses the published entry: %v", record.ChallengeID, err)
 		}
+	}
+	if variants == 0 {
+		t.Fatal("published bank has no variant entry; update this test")
 	}
 	record := records[0]
 	record.ChallengeID = strings.Repeat("c", 52)
