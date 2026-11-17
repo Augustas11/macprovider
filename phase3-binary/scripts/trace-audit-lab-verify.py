@@ -341,7 +341,8 @@ def verify_opening(path, model, mx, prompt_tokens=None, generated_tokens=None, n
         points_out.append({"role": d["role"], "block": l, "position": p, "block_ratio": ratio,
                            "internal": point_internal, "seconds": time.time() - t1})
     res["checks"]["block"] = {"pass": bool(block_ok), "worst": block_worst}
-    res["checks"]["internal"] = {"pass": bool(internal_ok), "worst": internal_worst, "nonce_2": nonce2.hex()}
+    # Recorded only (SPEC-036 FR-31 check 3): honest attention links exceed 5e-2 at long context.
+    res["checks"]["internal"] = {"recorded_only": True, "pass": bool(internal_ok), "worst": internal_worst, "nonce_2": nonce2.hex()}
     res["points"] = points_out
 
     # Checks 6 and 7 through the verifier's own teacher-forced forward over the committed ids.

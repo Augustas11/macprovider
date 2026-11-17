@@ -204,7 +204,14 @@ struct TraceAuditLabMeasureCommand: AsyncParsableCommand {
         _ = try await runCell(Array(prompts.prefix(1)), decode: 8, tag: "warm")
 
         // 1. Overhead cells. A loaded Mac gives no timing.
-        let loadAtStart = Self.loadAverages()
+        // The model load and warm-up raise the 1-minute average themselves;
+        // give it up to 3 minutes to settle before refusing.
+        var loadAtStart = Self.loadAverages()
+        for _ in 0 ..< 18 {
+            guard let oneMinute = loadAtStart.first, oneMinute > maxLoadAverage else { break }
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            loadAtStart = Self.loadAverages()
+        }
         FileHandle.standardError.write(Data("trace-audit-lab: load average at start \(loadAtStart)\n".utf8))
         if let oneMinute = loadAtStart.first, oneMinute > maxLoadAverage {
             throw ValidationError("load average \(oneMinute) is above \(maxLoadAverage): timed cells refused")

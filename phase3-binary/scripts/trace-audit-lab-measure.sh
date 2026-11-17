@@ -20,6 +20,10 @@
 #  3. Writes OUT.json = {host, measure, verify}. Residual files and openings
 #     are deleted on exit (KEEP_TRACE_AUDIT_LAB=1 keeps them for debugging).
 #
+# PYTHON selects the interpreter for the verifier (default python3); it must
+# import mlx and mlx_lm. The script checks that before the timed part, and keeps
+# the measure result in OUT.json even when the verifier fails.
+#
 # Load: the script prints the load average at start and refuses to run the
 # timed part when the 1-minute value is above 4. The measure command records the load
 # average before every cell, per mode, and refuses its timed cells above 4.
@@ -52,6 +56,9 @@ chmod 700 "$WORK"
 cleanup() { [ "${KEEP_TRACE_AUDIT_LAB:-0}" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 
+PYTHON=${PYTHON:-python3}
+"$PYTHON" -c "import mlx.core, mlx_lm, numpy" || { echo "trace-audit-lab: $PYTHON cannot import mlx, mlx_lm and numpy; set PYTHON" >&2; exit 2; }
+
 MAX_LOAD=4
 LOAD_START=$(sysctl -n vm.loadavg)
 echo "trace-audit-lab: load average at start: $LOAD_START" >&2
@@ -72,11 +79,12 @@ MACPROVIDER_TRACE_AUDIT_LAB_DIR="$WORK/store" \
     2> "$WORK/measure.log" || { tail -n 20 "$WORK/measure.log" >&2; exit 1; }
 
 set +e
-python3 "$HERE/trace-audit-lab-verify.py" --model "$MODEL" \
+cp "$WORK/measure.json" "$OUT.measure-only.json"
+"$PYTHON" "$HERE/trace-audit-lab-verify.py" --model "$MODEL" \
   --manifest "$WORK/openings/manifest.json" --out "$WORK/verify.json"
 VERIFY_RC=$?
 set -e
-[ -f "$WORK/verify.json" ] || { echo "verifier wrote no result (rc=$VERIFY_RC)" >&2; exit 1; }
+[ -f "$WORK/verify.json" ] || { echo "verifier wrote no result (rc=$VERIFY_RC); measure result kept at $OUT.measure-only.json" >&2; exit 1; }
 
 python3 - "$WORK" "$OUT" "$MODEL" "$LOAD_START" "$VERIFY_RC" "$(git -C "$PKG" rev-parse HEAD 2>/dev/null || echo unknown)" <<'PY'
 import json, platform, subprocess, sys
@@ -90,6 +98,8 @@ doc = {"schema": "macprovider.trace-audit-lab.result.v1", "host": host, "model":
        "measure": json.load(open(f"{work}/measure.json")),
        "verify": json.load(open(f"{work}/verify.json")), "verify_exit_code": int(rc)}
 json.dump(doc, open(out, "w"), indent=1, sort_keys=True)
+import os
+os.remove(out + ".measure-only.json")
 print(json.dumps({"out": out, "load_average_at_start": load.strip(),
                   "load_average_by_mode": doc["measure"].get("load_average_by_mode"),
                   "verify": doc["verify"]["summary"]}))
