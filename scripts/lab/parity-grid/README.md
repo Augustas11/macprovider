@@ -116,7 +116,8 @@ passes arguments to the reference, `--ref-model-path` points it at another
 snapshot, `--outputs` / `--contexts` cut the grid, `--model-id` with
 `--model-sha256` serves the snapshot under its catalog id, `--config-extra`
 appends serve-config lines (e.g. a CB accepted tuple), `--skip-compare` stops
-after the client.
+after the client, and `--trials-by-rows 4=1` sets the provider's trial count
+for one row count (a serially served model's 4-row cells only queue).
 
 ## Provider vs provider (`compare.py --baseline`)
 

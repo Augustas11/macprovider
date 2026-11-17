@@ -5,13 +5,14 @@
 # pauses, restores or restarts either, and refuses to start if :8080 listens on the
 # Studio, live.malibu.provider is loaded or a macprovider-cli serve process runs.
 #
-# Copies scripts/lab/{parity-grid,ablit-perf}, the two MiniMax helpers and the signed CB
-# policy to ~/lab-ablit-perf/job and this checkout's phase3-binary to ~/lab-ablit-perf/src,
+# Copies scripts/lab/{parity-grid,ablit-perf}, the two MiniMax helpers, the signed CB
+# policy, the R015 analyzer and the exploratory native-mtp-bench policy template to
+# ~/lab-ablit-perf/job and this checkout's phase3-binary to ~/lab-ablit-perf/src,
 # takes the Studio GPU lock, starts job.sh detached in its own process group, watches it
 # (stall watcher only, no wall-clock deadline), pulls ~/lab-ablit-perf/results/<run> back
 # to $POC/scratchpad/ablit-perf/results/<run>, releases the lock at exit.
 #
-# Usage: studio-ablit-perf.sh                  both models (MODELS="glm minimax")
+# Usage: studio-ablit-perf.sh                  all models (MODELS="qwen27 glm minimax")
 #        MODELS=minimax studio-ablit-perf.sh   one model alone
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB
 # SKIP_BUILD and every <KEY>_<FIELD> model variable job.sh reads (see its header).
@@ -34,7 +35,8 @@ say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 blocker() { say "BLOCKER: $*"; }
 
 [ -f "$LOCKSH" ] || { blocker "no lock helper at $LOCKSH"; exit 2; }
-dirty=$(git -C "$REPO" status --porcelain -- phase3-binary scripts/lab/parity-grid scripts/lab/ablit-perf scripts/lab/minimax)
+dirty=$(git -C "$REPO" status --porcelain -- phase3-binary scripts/lab/parity-grid scripts/lab/ablit-perf scripts/lab/minimax \
+  scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json)
 [ -z "$dirty" ] || { blocker "uncommitted changes in the built or copied paths; commit first: $(echo "$dirty" | head -n 3 | tr '\n' ' ')"; exit 2; }
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 
@@ -49,20 +51,22 @@ case "$pre" in
 esac
 
 # Job environment: only the names job.sh reads, each value shell-quoted for the remote side.
-KEYS=$(echo "glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n' | grep . | sort -u | paste -sd '|' -)
+KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n' | grep . | sort -u | paste -sd '|' -)
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|STAGE_REPO|STAGE_REVISION))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID commit=$COMMIT env:${ENVS:- (defaults)}"
 
-"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
+"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
   || { blocker "mkdir failed"; exit 2; }
 rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/parity-grid/ >> "$LOG" 2>&1 \
   && rsync -a --delete "$REPO/scripts/lab/ablit-perf/" macstudio:lab-ablit-perf/job/ablit-perf/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/scripts/lab/minimax/minimax_ablate.py" "$REPO/scripts/lab/minimax/publish_abliterated.py" \
        macstudio:lab-ablit-perf/job/minimax/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/phase3-binary/catalog/autotune/continuous-batching-policy.json" macstudio:lab-ablit-perf/job/catalog/ >> "$LOG" 2>&1 \
+  && rsync -a "$REPO/scripts/native_mtp_r015_analyze.py" "$REPO/scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json" \
+       macstudio:lab-ablit-perf/job/mtp/ >> "$LOG" 2>&1 \
   && rsync -a --delete --exclude '.build*' --exclude '.swiftpm' "$REPO/phase3-binary/" macstudio:lab-ablit-perf/src/phase3-binary/ >> "$LOG" 2>&1 \
   || { blocker "copy to the Studio failed"; exit 2; }
 
@@ -107,7 +111,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|STAGE_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|STAGE|CLONE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break

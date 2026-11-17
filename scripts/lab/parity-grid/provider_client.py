@@ -5,6 +5,7 @@ usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
                           [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
+                          [--trials-by-rows 4=1]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
 http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
@@ -328,12 +329,15 @@ def main(argv=None):
                     help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
     ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
+    ap.add_argument("--trials-by-rows", default="",
+                    help="comma list ROWS=TRIALS overriding --trials for cells of that row count, e.g. 4=1")
     args = ap.parse_args(argv)
 
     grid = prompts.load_grid(args.grid)
     if args.rows:
         grid["rows"] = [int(x) for x in args.rows.split(",")]
     trials = args.trials or grid.get("trials", 3)
+    trials_by_rows = {int(k): int(v) for k, v in (x.split("=") for x in args.trials_by_rows.split(",") if x)}
     stream_options = not args.no_stream_options
 
     warm = run_request(args.port, args.model, prompts.build_messages(200, 9999),
@@ -345,7 +349,7 @@ def main(argv=None):
     failures = 0
     with open(args.out, "a") as out:
         for ctx, max_tokens, rows in prompts.expand_cells(grid, args.max_context):
-            for trial in range(trials):
+            for trial in range(trials_by_rows.get(rows, trials)):
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
                                         rows, trial, stream_options, args.label, args.turns,
                                         args.conversation_header, args.turn2_history)

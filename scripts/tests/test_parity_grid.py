@@ -1,6 +1,10 @@
 """Offline checks for the parity-grid measurement check (scripts/lab/parity-grid)."""
+import contextlib
 import importlib.util
+import io
 import json
+import os
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -639,6 +643,22 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(agg["errors"], [])
         self.assertTrue(all(r["text"] == "The keeper lit the" for r in records))
         self.assertEqual(records[0]["cell"], prompts.cell_key(MODEL, 200, 4, 3))
+
+    def test_trials_by_rows_overrides_trials_for_that_row_count(self):
+        with tempfile.TemporaryDirectory() as d:
+            grid = os.path.join(d, "grid.json")
+            with open(grid, "w") as f:
+                json.dump({"outputs": [4], "contexts": [{"name": "short", "tokens": 200}], "rows": [1, 4],
+                           "trials": 3, "warmup_tokens": 2}, f)
+            out = os.path.join(d, "ours.jsonl")
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = client.main(["--port", str(self.port), "--model", "model-x", "--model-name", MODEL,
+                                  "--out", out, "--grid", grid, "--trials-by-rows", "4=1"])
+            self.assertEqual(rc, 0)
+            with open(out) as f:
+                aggs = [r for r in map(json.loads, f) if r["kind"] == "aggregate"]
+        self.assertEqual(sorted((a["rows"], a["trial"]) for a in aggs),
+                         [(1, 0), (1, 1), (1, 2), (4, 0)])
 
     def test_http_error_recorded(self):
         res = client.run_request(1, "model-x", prompts.build_messages(200, 0), 4, timeout=2)

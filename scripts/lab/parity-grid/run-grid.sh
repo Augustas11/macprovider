@@ -12,7 +12,7 @@
 #                    [--reference mlx-lm|mlx-vlm] [--ref-arg ARG]... [--ref-model-path DIR]
 #                    [--outputs 128,512] [--contexts short,4k|200,4000]
 #                    [--model-id ID --model-sha256 SHA] [--config-extra FILE]
-#                    [--skip-compare]
+#                    [--skip-compare] [--trials-by-rows 4=1]
 #
 # --reference picks the reference script: reference_mlxlm.py (default) or
 # reference_mlxvlm.py for families mlx-lm cannot load; --ref-arg passes one
@@ -26,7 +26,9 @@
 # the serve) and sends that id as the request model; --config-extra appends
 # raw YAML lines to the serve config (e.g. a continuous_batching accepted
 # tuple, which a --no-join serve takes as its CB authority). --skip-compare
-# stops after the client (exit 7 if it failed, else 0).
+# stops after the client (exit 7 if it failed, else 0). --trials-by-rows sets
+# the provider's trial count per row count (e.g. 4=1 for serial-served models,
+# whose 4-row cells only queue); the reference is unaffected.
 #
 # --turns 2 adds the two-turn cell: after each turn-1 trial the provider client sends turn 2
 # ([user1, assistant1 = its own turn-1 text, short follow-up]) and records TTFT and
@@ -80,6 +82,7 @@ REF_MODEL_PATH=""
 OUTPUTS="" CONTEXTS=""
 MODEL_ID="" MODEL_SHA="" CONFIG_EXTRA=""
 SKIP_COMPARE=0
+TRIALS_BY_ROWS=""
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -113,6 +116,7 @@ while [ $# -gt 0 ]; do
     --model-sha256) MODEL_SHA="$2"; shift 2 ;;
     --config-extra) CONFIG_EXTRA="$2"; shift 2 ;;
     --skip-compare) SKIP_COMPARE=1; shift ;;
+    --trials-by-rows) TRIALS_BY_ROWS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -245,7 +249,7 @@ if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
   (sleep 8; sample "$SP" "$SAMPLE_SECS" -file "$OUT_DIR/serve-sample.txt" >/dev/null 2>&1 || true) &
 fi
 /usr/bin/python3 -I "$HERE/provider_client.py" --port "$PORT" --model "$REQUEST_MODEL" --out "$OURS" \
-  "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} || client_rc=$?
+  "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} ${TRIALS_BY_ROWS:+--trials-by-rows "$TRIALS_BY_ROWS"} || client_rc=$?
 stop_serve
 trap - EXIT
 if [ "$SKIP_REF" = 0 ] && [ "$TURNS" = 2 ]; then

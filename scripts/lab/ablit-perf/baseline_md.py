@@ -40,6 +40,59 @@ def text_identical(c):
     return f"no ({gate})"
 
 
+def median(xs):
+    xs = sorted(x for x in xs if isinstance(x, (int, float)))
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def mtp_section(model_dir):
+    """Native MTP vs ordinary from MODEL_DIR/mtp/bench.jsonl (native-mtp-bench run records)."""
+    path = os.path.join(model_dir, "mtp", "bench.jsonl")
+    if not os.path.exists(path):
+        return []
+    runs = []
+    with open(path) as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("record_type") == "run" and not r.get("warmup"):
+                runs.append(r)
+    analysis = load(os.path.join(model_dir, "mtp", "analysis.json")) or {}
+    out = ["", "## Native MTP vs ordinary (native-mtp-bench, 1 row)", "",
+           "Exploratory policy, 5 paired blocks: below the SPEC-048 R015 gate (10 blocks), baseline only, "
+           f"no verdict. Analyzer status: `{analysis.get('overall_status', 'unavailable')}`. "
+           "Committed tok/s includes prefill; decode tok/s excludes it. Medians over the blocks.", "",
+           "| cell | blocks | native committed tok/s | ordinary committed tok/s | native / ordinary "
+           "| native decode tok/s | ordinary decode tok/s | native TTFT p50/p95 s | ordinary TTFT p50/p95 s "
+           "| acceptance | parity mismatches |",
+           "|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|"]
+    for cell in sorted({r.get("cell_id") for r in runs}, key=str):
+        by = {p: [r for r in runs if r.get("cell_id") == cell and r.get("path") == p]
+              for p in ("native_mtp", "ordinary")}
+        m = {p: {k: median(r.get(k) for r in rs) for k in
+                 ("aggregate_committed_tps", "aggregate_decode_tps", "ttft_p50_seconds", "ttft_p95_seconds")}
+             for p, rs in by.items()}
+        nat, ordi = m["native_mtp"]["aggregate_committed_tps"], m["ordinary"]["aggregate_committed_tps"]
+        proposed = sum(r.get("mtp_proposed_tokens") or 0 for r in by["native_mtp"])
+        accepted = sum(r.get("mtp_accepted_tokens") or 0 for r in by["native_mtp"])
+        mismatches = sum(1 for rs in by.values() for r in rs if r.get("parity_mismatch"))
+        ttft = {p: f"{fmt(m[p]['ttft_p50_seconds'], '.3f')} / {fmt(m[p]['ttft_p95_seconds'], '.3f')}" for p in m}
+        out.append(
+            f"| {cell} | {min(len(by['native_mtp']), len(by['ordinary']))} | {fmt(nat)} | {fmt(ordi)} | "
+            f"{fmt(nat / ordi if nat and ordi else None, '.3f')} | "
+            f"{fmt(m['native_mtp']['aggregate_decode_tps'])} | {fmt(m['ordinary']['aggregate_decode_tps'])} | "
+            f"{ttft['native_mtp']} | {ttft['ordinary']} | "
+            f"{fmt(accepted / proposed if proposed else None, '.3f')} | {mismatches} |")
+    if not runs:
+        out.append("| (no run records) | | | | | | | | | | |")
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("model_dir")
@@ -97,8 +150,9 @@ def main(argv=None):
 
     base = load(os.path.join(a.model_dir, "base", "vs-main.json"))
     if base is not None:
-        out += ["", "## Projection price: unmodified base vs this row in our runtime (1 row)", "",
-                "| cell | base req tok/s | ablated req tok/s | ablated / base - 1 | base decode tok/s | ablated decode tok/s |",
+        out += ["", "## Unmodified base vs this row in our runtime (1 row)", "",
+                "| cell | base req tok/s | this row req tok/s | this row / base - 1 | base decode tok/s "
+                "| this row decode tok/s |",
                 "|---|---:|---:|---:|---:|---:|"]
         for c in base["cells"]:
             b, m = c.get("cand_request_tps"), c.get("base_request_tps")
@@ -106,7 +160,8 @@ def main(argv=None):
             out.append(f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {fmt(b)} | {fmt(m)} | "
                        f"{'-' if cost is None else format(cost, '+.3f')} | {fmt(c.get('cand_decode_tps'))} | "
                        f"{fmt(c.get('base_decode_tps'))} |")
-    path = os.path.join(a.model_dir, "baseline.md")
+    out += mtp_section(a.model_dir)
+    path =os.path.join(a.model_dir, "baseline.md")
     with open(path, "w") as f:
         f.write("\n".join(out) + "\n")
     print(path)
