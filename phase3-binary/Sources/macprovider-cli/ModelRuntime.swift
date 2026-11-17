@@ -3694,6 +3694,14 @@ maxTokens: 1,
                 .lowercased()
                 .filter { $0.isLetter || $0.isNumber }
         }
+        // Qwen3.8-Flash-Next (`qwen4_exp`, text model `qwen4_exp_text`, #2409):
+        // QSA sparse attention, hyper-connections and an n-gram embedding on
+        // a non-stock cache. Not a paged-KV family, so attach fails closed on
+        // identity and the model serves serial. Checked before the generic
+        // `qwen` label, whose hybrid paths assume the Qwen3.5 layout.
+        if normalizedLabels.contains(where: { $0 == "qwen4exp" || $0 == "qwen4expforconditionalgeneration" }) {
+            return "qwen4_exp"
+        }
         if normalizedLabels.contains(where: { $0.contains("qwen") }) { return "qwen" }
         if normalizedLabels.contains(where: { $0.contains("llama") }) { return "llama" }
         if normalizedLabels.contains(where: { $0.contains("gptoss") }) { return "gpt_oss" }
