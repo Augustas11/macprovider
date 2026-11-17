@@ -608,6 +608,108 @@ final class GPUTurnArbiterTests: XCTestCase {
             XCTAssertEqual(drains.value, 0, name)
         }
     }
+
+    /// Drains of two sharing scenarios under `policy`: A's turn while B is
+    /// idle, then A's turn ending while B waits in `beginTurn` (B's own turn
+    /// follows, with A idle).
+    private func drainCounts(_ policy: any GPUTurnPolicy) -> (idle: Int, waiter: Int) {
+        let drains = Counter()
+        let arbiter = GPUTurnArbiter(policy: policy, drainQueuedWork: { drains.increment() })
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        a.withTurn(.decodeStep(rows: 1)) {}
+        let idle = drains.value
+        XCTAssertTrue(a.beginTurn(.decodeStep(rows: 1)))
+        let bDone = onThread("B turn after A") { b.withTurn(.decodeStep(rows: 1)) {} }
+        XCTAssertTrue(waitUntil { arbiter.stateForTest().participant(b.id)?.isWaiting == true })
+        a.endTurn()
+        wait(for: [bDone], timeout: 5)
+        return (idle, drains.value - idle)
+    }
+
+    func testDrainModeAlwaysDrainsEveryLastHeldTurn() {
+        let counts = drainCounts(AlternateGPUTurnPolicy())
+        XCTAssertEqual(counts.idle, 1)
+        XCTAssertEqual(counts.waiter, 2, "A's turn and B's turn")
+        let timeslice = drainCounts(TimeSliceGPUTurnPolicy(drain: .always))
+        XCTAssertEqual(timeslice.idle, 1)
+    }
+
+    func testDrainModeNeverDrains() {
+        let counts = drainCounts(AlternateGPUTurnPolicy(drain: .never))
+        XCTAssertEqual(counts.idle, 0)
+        XCTAssertEqual(counts.waiter, 0)
+    }
+
+    /// `handoff` drains A's turn because B waits and is admitted once it ends;
+    /// neither A's turn beside an idle B nor B's turn beside an idle A drains.
+    func testDrainModeHandoffDrainsOnlyWhenTheTurnChangesHands() {
+        let counts = drainCounts(AlternateGPUTurnPolicy(drain: .handoff))
+        XCTAssertEqual(counts.idle, 0)
+        XCTAssertEqual(counts.waiter, 1)
+    }
+
+    /// `handoff` under time slices: B waiting in A's slice does not take the
+    /// GPU when A's turn ends, so that turn does not drain; at the slice
+    /// boundary B runs.
+    func testDrainModeHandoffSkipsAWaiterThePolicyKeepsWaiting() {
+        let clock = ManualClock()
+        let drains = Counter()
+        let arbiter = GPUTurnArbiter(
+            policy: TimeSliceGPUTurnPolicy(quantumMilliseconds: 100, drain: .handoff),
+            clock: { clock.now() }, drainQueuedWork: { drains.increment() })
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        a.beginWork()
+        // Clock 1000 ns: slice 0 belongs to A (lowest id).
+        XCTAssertTrue(a.beginTurn(.decodeStep(rows: 1)))
+        let bDone = onThread("B waits for its slice") { b.withTurn(.decodeStep(rows: 1)) {} }
+        XCTAssertTrue(waitUntil { arbiter.stateForTest().participant(b.id)?.isWaiting == true })
+        a.endTurn()
+        XCTAssertEqual(drains.value, 0, "B is still kept waiting in A's slice")
+        XCTAssertEqual(arbiter.stateForTest().participant(b.id)?.isWaiting, true)
+        clock.advance(100_000_000)
+        wait(for: [bDone], timeout: 5)
+        a.endWork()
+        XCTAssertEqual(drains.value, 0, "A was not waiting when B's turn ended")
+    }
+
+    func testDrainParameterParsesForTimeSliceAndAlternate() throws {
+        let timeslice = try GPUTurnPolicyRegistry.make("timeslice:drain=handoff")
+        XCTAssertEqual(timeslice.drain, .handoff)
+        XCTAssertEqual(timeslice.parameters, ["quantum_ms": "100", "stall_ms": "10000", "drain": "handoff"])
+        let alternate = try GPUTurnPolicyRegistry.make("alternate:drain=never")
+        XCTAssertEqual(alternate.drain, .never)
+        XCTAssertEqual(alternate.parameters["drain"], "never")
+        XCTAssertEqual(try GPUTurnPolicyRegistry.make("alternate:drain=always").drain, .always)
+        for name in GPUTurnPolicyRegistry.names {
+            let policy = try GPUTurnPolicyRegistry.make(name)
+            XCTAssertEqual(policy.drain, .always, name)
+            XCTAssertNil(policy.parameters["drain"], "the default is not recorded: \(name)")
+        }
+        XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("timeslice:drain=sometimes")) { error in
+            XCTAssertEqual(error as? GPUTurnPolicyError, .invalidParameter(policy: "timeslice", name: "drain", value: "sometimes"))
+        }
+        XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("alternate:drain=")) { error in
+            XCTAssertEqual(error as? GPUTurnPolicyError, .invalidParameter(policy: "alternate", name: "drain", value: ""))
+        }
+        XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("fairshare:drain=never"))
+        XCTAssertThrowsError(try GPUTurnPolicyRegistry.make("passthrough:drain=never"))
+    }
+
+    func testDrainSpecRoundTripsThroughTheRegistry() throws {
+        for spec in ["timeslice:quantum_ms=40,drain=handoff", "alternate:burst=2,drain=never", "timeslice", "alternate:drain=always"] {
+            let policy = try GPUTurnPolicyRegistry.make(spec)
+            let label = MultiModelCheckPolicyRun.label(policy)
+            let again = try GPUTurnPolicyRegistry.make(label)
+            XCTAssertEqual(again.name, policy.name, spec)
+            XCTAssertEqual(again.drain, policy.drain, spec)
+            XCTAssertEqual(again.parameters, policy.parameters, spec)
+        }
+        XCTAssertEqual(
+            MultiModelCheckPolicyRun.label(try GPUTurnPolicyRegistry.make("timeslice:drain=handoff")),
+            "timeslice:drain=handoff,quantum_ms=100,stall_ms=10000")
+    }
 }
 
 private final class TurnTimes: @unchecked Sendable {
