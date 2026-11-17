@@ -123,7 +123,7 @@ struct MultiModelBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("config"), help: "--check: provider config.yaml (a lab copy), resolved by serve's ConfigLoader; its paged_kv, queue, prefill, cache-limit, context, cached-turns and native_mtp_mode settings build both runtimes. CB mode stays --cb-x.")
     var configPath: String?
 
-    @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in passthrough. Recorded in the check JSON.")
+    @Option(name: .customLong("gpu-turn-policy"), help: "--check: GPU turn policy between the two runtimes, name[:k=v,...] (SPEC-001-R018, #2338). Default: env \(GPUTurnPolicyRegistry.labEnvironmentKey), else the compiled-in default (alternate:drain=never). Recorded in the check JSON.")
     var gpuTurnPolicy: String?
 
     @Option(name: .customLong("gpu-turn-policies"), help: "--check: several GPU turn policies measured in one load, name[:k=v,...] separated by ';'. Load, warmup, solo and reference phases run once under passthrough; then each policy runs one contended phase and, with --soak-seconds, its own soak. Prints one POLICY (and SOAK) line per policy; the final GATE line fails if any policy failed and GOAL is the first policy's.")

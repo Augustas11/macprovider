@@ -22,9 +22,15 @@ import MLX
 // at once, nothing drains and prefill chunks keep their full size: asyncEval
 // pipelining is untouched.
 //
-// The compiled-in policy is `PassthroughGPUTurnPolicy` (always proceed), so
-// serving behaviour is unchanged. Lab builds (`DEBUG || MACPROVIDER_LAB_HARNESS`)
-// may select another registered policy by name to compare candidates.
+// The compiled-in policy is `alternate` with `drain=never` (#2397): while two
+// models are busy they take single turns in alternation and no turn drains.
+// Measured on an M3 Ultra, GLM-5.3-Flash beside a 27B model on one serial row:
+// under passthrough the main model kept 0.21 of its solo rate and the second
+// 0.87; alternating gives 0.44 and 0.67 (0.61 and 0.46 with the main model at
+// three rows, the same rate per stream), with identical tokens. A provider
+// with one model, or with one busy model, never waits. Lab builds
+// (`DEBUG || MACPROVIDER_LAB_HARNESS`) may select another registered policy by
+// name to compare candidates.
 
 /// One unit of GPU work a participant asks a turn for.
 enum GPUWorkKind: Sendable, Equatable {
@@ -334,8 +340,9 @@ enum GPUTurnPolicyRegistry {
         FairShareGPUTurnPolicy.factory,
     ]
 
-    /// The policy every build serves with.
-    static let compiledDefault: any GPUTurnPolicy = PassthroughGPUTurnPolicy()
+    /// The policy every build serves with: single turns in alternation while
+    /// two or more models are busy, no per-turn drain (#2397).
+    static let compiledDefault: any GPUTurnPolicy = AlternateGPUTurnPolicy(drain: .never)
 
     static var names: [String] { factories.map(\.name) }
 

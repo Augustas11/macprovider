@@ -317,7 +317,38 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.parse("x:novalue"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.parse("x:a=1,a=2"))
         XCTAssertThrowsError(try GPUTurnPolicyRegistry.parse(":a=1"))
-        XCTAssertEqual(GPUTurnPolicyRegistry.compiledDefault.name, "passthrough")
+    }
+
+    /// #2397: every build serves with single-turn alternation and no drain.
+    func testCompiledDefaultAlternatesWithoutDrain() {
+        let policy = GPUTurnPolicyRegistry.compiledDefault
+        XCTAssertEqual(policy.name, "alternate")
+        XCTAssertEqual(policy.parameters, ["burst": "1", "stall_ms": "10000", "drain": "never"])
+        XCTAssertEqual(policy.drain, .never)
+        XCTAssertFalse(policy.alwaysProceeds)
+        XCTAssertNil(policy.prefillChunkTargetNanoseconds, "prefill chunks keep their full size")
+        XCTAssertEqual(GPUTurnArbiter().snapshot().policy, "alternate")
+    }
+
+    /// The default never makes a model wait for a sibling that has no work,
+    /// and never drains: one model alone, or one busy model beside an idle
+    /// one, runs as it does without an arbiter.
+    func testCompiledDefaultNeverWaitsOrDrainsBesideAnIdleSibling() {
+        let drains = Counter()
+        let arbiter = GPUTurnArbiter(policy: GPUTurnPolicyRegistry.compiledDefault, drainQueuedWork: { drains.increment() })
+        let a = arbiter.register(modelID: "a")
+        a.beginWork()
+        for _ in 0..<3 { a.withTurn(.decodeStep(rows: 1)) {} }
+        _ = arbiter.register(modelID: "b")
+        // Same thread: a wait here would never return.
+        a.withTurn(.prefillChunk(tokens: 512)) {}
+        for _ in 0..<50 { a.withTurn(.decodeStep(rows: 4)) {} }
+        a.endWork()
+        let stats = arbiter.snapshot().participants
+        XCTAssertEqual(stats[0].turns, 54)
+        XCTAssertEqual(stats[0].waitedTurns, 0)
+        XCTAssertEqual(stats[0].stallOverrides, 0)
+        XCTAssertEqual(drains.value, 0)
     }
 
     func testLabSelectionPrefersFlagOverEnvironment() throws {
