@@ -1122,6 +1122,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
         let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let traceLab = TraceAuditLab.active
+            traceLab?.markNativeMTP(inputs.filter(\.nativeMTPPromptPrefill).map(\.requestID))
+            defer { traceLab?.drainAll() }
+            #endif
             self.releaseRetiredDecodeSessions()
             // SPEC-001-R018: a shared [B, L] forward (one chunk per row) is one
             // GPU turn; the per-row path below takes one turn per row's chunk.
@@ -1168,9 +1173,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         emit[mtpEmitFlagKey] = true
                         sharedState = emit
                     }
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let traceForward = traceLab?.beginForward(
+                        model: context.model,
+                        rows: TraceAuditForwardRow.rows(
+                            requestIDs: inputs.map(\.requestID),
+                            committedKVTokenCounts: inputs.map(\.committedKVTokenCount),
+                            tokensPerRow: chunkLength
+                        )
+                    )
+                    #endif
                     let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                         context.model(text, cache: cachesAsKV, state: sharedState)
                     }
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    traceForward?.end()
+                    #endif
                     let promptHidden = hasNativeRows
                         ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
                         : nil
@@ -1292,9 +1310,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             modelState = modelState ?? LMOutput.State()
                             modelState?[mtpEmitFlagKey] = true
                         }
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        let traceForward = traceLab?.beginForward(
+                            model: context.model,
+                            rows: [TraceAuditForwardRow(
+                                row: 0, requestID: input.requestID,
+                                startPosition: input.committedKVTokenCount,
+                                tokenCount: input.promptTokens.count
+                            )]
+                        )
+                        #endif
                         let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
                             context.model(text, cache: state.caches, state: modelState)
                         }
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        traceForward?.end()
+                        #endif
                         if input.sampleFirstToken {
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
                             if ContinuousBatchLabFirstTokenLogits.enabled {
@@ -1730,6 +1761,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         rows inputs: [ContinuousBatchNativeMTPProposalInput]
     ) async throws -> [String: [Int]]? {
         guard !inputs.isEmpty else { return [:] }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        TraceAuditLab.active?.markNativeMTP(inputs.map(\.requestID))
+        #endif
         guard let drafterContainer else { return nil }
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
@@ -1785,6 +1819,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         rows inputs: [ContinuousBatchNativeMTPVerifyInput]
     ) async throws -> [NativeMTPVerifiedRow] {
         guard !inputs.isEmpty else { return [] }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        TraceAuditLab.active?.markNativeMTP(inputs.map(\.requestID))
+        #endif
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
@@ -2750,6 +2787,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// A compiled decode step runs the hooks only while tracing, so a lab
+    /// capture uses the uncompiled step (serving already does: `compiledDecode`
+    /// is false on the serve path).
+    private static var traceAuditLabCapturing: Bool {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        return TraceAuditLab.active?.isEnabled ?? false
+        #else
+        return false
+        #endif
+    }
+
     private func performDecode(
         model: any LanguageModel,
         supportedInputs: [ContinuousBatchDecodeInput],
@@ -2758,6 +2806,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         capturesDrafterColumns: Bool = true
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let traceLab = TraceAuditLab.active
+        traceLab?.markNativeMTP(supportedInputs.filter(\.captureNativeMTPDrafterColumns).map(\.requestID))
+        defer { traceLab?.drainAll() }
+        #endif
         // A capped backend (`pagedMLA`) never forms a wider forward; the
         // scheduler splits decode steps to fit.
         guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
@@ -2873,6 +2926,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && cacheKinds.allSatisfy({ $0 == .pagedAttention })
             && rowStates.allSatisfy({ $0.state == nil })
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
+            && !Self.traceAuditLabCapturing
 
         let sampledByRow: [[Int]]
         // Set when the step observer ends the window because every row in it
@@ -3070,9 +3124,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     emit[mtpEmitFlagKey] = true
                     stepState = emit
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                let traceForward = traceLab?.beginForward(
+                    model: model,
+                    rows: TraceAuditForwardRow.rows(
+                        requestIDs: supportedInputs.map(\.requestID),
+                        committedKVTokenCounts: supportedInputs.map(\.committedKVTokenCount),
+                        tokensPerRow: 1,
+                        stepIndex: stepIndex
+                    )
+                )
+                #endif
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                traceForward?.end()
+                #endif
                 if hasBatchedState, let invariantStateModel, let stepState {
                     do {
                         try invariantStateModel.validateBatchDecodeState(output.state, against: stepState)

@@ -2869,6 +2869,32 @@ actor ContinuousBatchScheduler {
         tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in },
         onStarted: (@Sendable () -> Void)? = nil
     ) async throws -> ContinuousBatchSchedulerResult {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // Trace audit lab (#2419): a request is captured only between these
+        // two calls; the backend writes residuals for registered rows only.
+        if let traceLab = TraceAuditLab.active {
+            traceLab.register(request)
+            do {
+                let result = try await submitScheduled(
+                    request, admissionWaitPolicy: admissionWaitPolicy, tokenSink: tokenSink, onStarted: onStarted)
+                traceLab.finalize(request, result: result)
+                return result
+            } catch {
+                traceLab.finalize(request, result: nil)
+                throw error
+            }
+        }
+        #endif
+        return try await submitScheduled(
+            request, admissionWaitPolicy: admissionWaitPolicy, tokenSink: tokenSink, onStarted: onStarted)
+    }
+
+    private func submitScheduled(
+        _ request: ContinuousBatchSchedulerRequest,
+        admissionWaitPolicy: ContinuousBatchAdmissionWaitPolicy,
+        tokenSink: @escaping ContinuousBatchSchedulerTokenSink,
+        onStarted: (@Sendable () -> Void)?
+    ) async throws -> ContinuousBatchSchedulerResult {
         do {
             try Task.checkCancellation()
         } catch {
