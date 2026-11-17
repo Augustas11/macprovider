@@ -5,8 +5,9 @@ usage: baseline_md.py MODEL_DIR [--model NAME] [--build SHA] [--commit SHA]
 
 Reads MODEL_DIR/main/summary.json (compare.py, reference vs ours), and when present
 MODEL_DIR/noise/vs-main.json (compare.py --baseline: the short-context 1-row cells
-rerun on a fresh serve) and MODEL_DIR/base/vs-main.json (the unmodified base in our
-runtime, 1 row). Exits 2 when main/summary.json is missing or has no cells.
+rerun on a fresh serve), MODEL_DIR/base/vs-main.json (the unmodified base in our
+runtime, 1 row) and MODEL_DIR/base/summary.json (base model: our provider vs the reference
+on the same base weights, 1 row; written when <K>_BASE_REFERENCE=1). Exits 2 when main/summary.json is missing or has no cells.
 
 Columns: request tok/s = completion_tokens / (last token - request start), summed over
 the rows of a multi-row cell (the goal metric); decode tok/s and TTFT are its parts.
@@ -46,6 +47,26 @@ def median(xs):
         return None
     n = len(xs)
     return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+TABLE_HEAD = [
+    "| cell | prompt_tokens | completion_tokens | ref decode tok/s | ours decode tok/s | ratio "
+    "| ref TTFT s | ours TTFT s | ref req tok/s | ours req tok/s | req ratio | text identical "
+    "| ours noise | ref noise |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+
+
+def cell_rows(cells):
+    out = []
+    for c in cells:
+        out.append(
+            f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {c.get('prompt_tokens', '-')} | "
+            f"{c.get('completion_tokens', '-')} | {fmt(c.get('ref_tps'))} | {fmt(c.get('ours_tps'))} | "
+            f"{fmt(c.get('ratio'), '.3f')} | {fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
+            f"{fmt(c.get('request_ratio'), '.3f')} | {text_identical(c)} | "
+            f"{fmt(c.get('ours_request_noise'), '.3f')} | {fmt(c.get('ref_request_noise'), '.3f')} |")
+    return out
 
 
 def mtp_section(model_dir):
@@ -108,19 +129,8 @@ def main(argv=None):
     out = [f"# Baseline: {name}", "",
            f"Build `{a.build}` (commit `{a.commit}`), production route (no autotune flag, batching auto). "
            "Request tok/s = completion_tokens / (last token - request start), summed over concurrent rows; "
-           "noise = (max - min) / median over the trials of one side.", "",
-           "| cell | prompt_tokens | completion_tokens | ref decode tok/s | ours decode tok/s | ratio "
-           "| ref TTFT s | ours TTFT s | ref req tok/s | ours req tok/s | req ratio | text identical "
-           "| ours noise | ref noise |",
-           "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
-    for c in main_summary["cells"]:
-        out.append(
-            f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {c.get('prompt_tokens', '-')} | "
-            f"{c.get('completion_tokens', '-')} | {fmt(c.get('ref_tps'))} | {fmt(c.get('ours_tps'))} | "
-            f"{fmt(c.get('ratio'), '.3f')} | {fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
-            f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
-            f"{fmt(c.get('request_ratio'), '.3f')} | {text_identical(c)} | "
-            f"{fmt(c.get('ours_request_noise'), '.3f')} | {fmt(c.get('ref_request_noise'), '.3f')} |")
+           "noise = (max - min) / median over the trials of one side.", ""]
+    out += TABLE_HEAD + cell_rows(main_summary["cells"])
     mismatched = [c for c in main_summary["cells"] if c.get("prompt_ok") is False]
     if mismatched:
         out += ["", "prompt_tokens differ from the reference in: "
@@ -160,6 +170,12 @@ def main(argv=None):
             out.append(f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {fmt(b)} | {fmt(m)} | "
                        f"{'-' if cost is None else format(cost, '+.3f')} | {fmt(c.get('cand_decode_tps'))} | "
                        f"{fmt(c.get('base_decode_tps'))} |")
+    base_ref = load(os.path.join(a.model_dir, "base", "summary.json"))
+    if base_ref and base_ref.get("cells"):
+        out += ["", "## Base model: our provider vs reference on the same base weights (1 row)", "",
+                "The unmodified base checkpoint, served by our provider and run by the reference "
+                "implementation in the same window; same columns as the main table.", ""]
+        out += TABLE_HEAD + cell_rows(base_ref["cells"])
     out += mtp_section(a.model_dir)
     path =os.path.join(a.model_dir, "baseline.md")
     with open(path, "w") as f:

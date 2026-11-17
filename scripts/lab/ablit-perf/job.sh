@@ -18,7 +18,13 @@
 #     its signed CB policy tuple as the --no-join serve's accepted tuple and must show
 #     batched admissions; every other model is served serially, so its 4-row cells only
 #     queue and run 1 trial (<K>_TRIALS_BY_ROWS, default 4=1);
-#  4. <K>_BASE_PATH set: one 1-row pass of the unmodified base in our runtime;
+#  4. <K>_BASE_PATH set: one 1-row pass of the unmodified base in our runtime. With
+#     <K>_BASE_REFERENCE=1 (default for qwen27) the same reference kind, venv and flags
+#     also run on the BASE weights over those 1-row cells (BASE_TRIALS trials), and the base
+#     pass is compared with that reference (baseline.md: "base model: our provider vs
+#     reference on the same base weights"); without it the base pass reuses the main
+#     model's reference. Extra time for a 27B at ~30 tok/s: 3 contexts x (128+512+2048)
+#     = 8064 tokens, ~4.5 min decode, plus prefill and a model load: ~10 min;
 #  5. <K>_MTP_BENCH=1: native-mtp-bench on the lab harness, native MTP against ordinary,
 #     s1 x prompt 1536/4096 x output 128/512, one process per cell, under an exploratory
 #     policy with 5 paired blocks (below the R015 gate: baseline only);
@@ -29,7 +35,7 @@
 # Models: MODELS="qwen27 glm minimax" (default). A model key K reads <K>_NAME, <K>_PATH,
 # <K>_ID, <K>_SHA256 (ID optional; without it the snapshot is served by path), <K>_REF
 # (mlx-lm|mlx-vlm), <K>_REF_PY, <K>_REF_PATH, <K>_REF_ARGS, <K>_ROWS, <K>_TRIALS_BY_ROWS,
-# <K>_CB_FROM_POLICY, <K>_CONFIG_EXTRA, <K>_BASE_PATH/_BASE_ID/_BASE_SHA256 and the
+# <K>_CB_FROM_POLICY, <K>_CONFIG_EXTRA, <K>_BASE_PATH/_BASE_ID/_BASE_SHA256/_BASE_REFERENCE and the
 # staging fields: <K>_CLONE_FROM (PATH = APFS clone of it, verified against SHA256),
 # <K>_BASE_CLONE_FROM (the same for BASE_PATH), <K>_HF_REPO/_HF_REVISION/_HF_SUBFOLDER
 # (download one subfolder into PATH), <K>_STAGE_REPO/_STAGE_REVISION (PATH = APFS clone
@@ -80,6 +86,7 @@ store_dir() {
 : "${QWEN27_BASE_ID:=qwen/qwen3.8-27b}"
 : "${QWEN27_BASE_SHA256:=8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05}"
 : "${QWEN27_BASE_PATH:=$LAB/models/Qwen3.8-27B-4bit}"
+: "${QWEN27_BASE_REFERENCE:=1}"
 : "${QWEN27_BASE_CLONE_FROM:=$(store_dir mlx-community--Qwen3.8-27B-4bit "$QWEN27_BASE_SHA256")}"
 : "${GLM_NAME:=glm53-flash-uncensored}"
 : "${GLM_ID:=zai-org/glm-5.3-flash-uncensored}"
@@ -487,15 +494,26 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
   fi
   if [ $ok = 0 ] && [ -n "$(v "$k" BASE_PATH)" ]; then
     log "BASE_START $name base=$(v "$k" BASE_ID)"
-    mkdir -p "$M/base" && cp "$M/main/reference.jsonl" "$M/base/"
-    if TRIALS=$BASE_TRIALS grid "$k" "$M/base" --model-path "$(v "$k" BASE_PATH)" --model-id "$(v "$k" BASE_ID)" \
-        --model-sha256 "$(v "$k" BASE_SHA256)" --rows 1 --contexts "$CONTEXTS" --skip-reference --skip-compare; then
-      # Text differs by design (a different checkpoint): the rc is not a gate.
+    mkdir -p "$M/base"
+    local base_ref=() base_rcs="0"
+    if [ "$(v "$k" BASE_REFERENCE)" = 1 ]; then
+      base_ref=(--python "$(v "$k" REF_PY)" --reference "$(v "$k" REF)" --ref-model-path "$(v "$k" BASE_PATH)"
+                ${ref_args[@]+"${ref_args[@]}"})
+      base_rcs="0 1"
+    else
+      cp "$M/main/reference.jsonl" "$M/base/" && base_ref=(--skip-reference --skip-compare)
+    fi
+    TRIALS=$BASE_TRIALS grid "$k" "$M/base" --model-path "$(v "$k" BASE_PATH)" --model-id "$(v "$k" BASE_ID)" \
+      --model-sha256 "$(v "$k" BASE_SHA256)" --rows 1 --contexts "$CONTEXTS" "${base_ref[@]}"
+    local brc=$?
+    # rc 1 = a cell fails the ratio/text gates against the base reference: a finding, not a failure.
+    if case " $base_rcs " in *" $brc "*) true ;; *) false ;; esac; then
       /usr/bin/python3 -I "$GRID/compare.py" --baseline "$M/main/provider.jsonl" --ours "$M/base/provider.jsonl" \
         --subset --json "$M/base/vs-main.json" > "$M/base/vs-main.md"
+      [ ! -f "$M/base/summary.md" ] || sed -n '/^| model/,/^$/p' "$M/base/summary.md"
       log "BASE_DONE $name"
     else
-      blocker "model $k: base pass failed: $(tail -n 3 "$M/base/run.log" | tr '\n' ' ')"; ok=1
+      blocker "model $k: base pass failed rc=$brc: $(tail -n 3 "$M/base/run.log" | tr '\n' ' ')"; ok=1
     fi
   fi
   if [ "$(v "$k" MTP_BENCH)" = 1 ]; then mtp_run "$k" || ok=1; fi
