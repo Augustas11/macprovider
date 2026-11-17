@@ -69,6 +69,10 @@ for f in dsv4/dsv4_abliterated_splice.py dsv4/dsv4_reference_bench.py dsv4/dsv4_
 done
 BASE_FROM=""
 for d in "$STORE/TensorFold--DeepSeek-V4-Flash-0731-MXFP4-MLX"/*/"$BASE_SHA256"; do [ -f "$d/config.json" ] && BASE_FROM=$d; done
+# Fallback: a plain download of the same revision left by another lab job (read-only input;
+# the manifest check below decides whether it is the catalog artifact).
+BASE_ALT=${DSV4_BASE_DIR:-$HOME/lab-upstream/dsv4/models/DeepSeek-V4-Flash-0731-MXFP4-MLX}
+[ -n "$BASE_FROM" ] || { [ -f "$BASE_ALT/config.json" ] && BASE_FROM=$BASE_ALT; }
 [ -n "$BASE_FROM" ] || [ -f "$BASE/config.json" ] || die "no DeepSeek V4-Flash snapshot in the provider store and none at $BASE" 11
 
 manifest() {  # macprovider.snapshot-manifest.v1 of DIR, the catalog's model_sha256
