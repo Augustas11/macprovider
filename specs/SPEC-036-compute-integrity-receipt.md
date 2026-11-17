@@ -3045,7 +3045,9 @@ model has them, grouped-query head mapping, the causal mask over `0 .. p`, and
 any sliding window the layer config sets. In the pilot it recomputes with MLX
 in the committed activation dtype, the configuration round 2 measured. A
 recompute in float32 or float64 needs its own calibration record before it is
-used; round 2 did not measure it.
+used. Round 3 recomputed one honest float16 trace in float32 on one chip (M5):
+over 128 positions the median was 2.9e-3, the 99th percentile 4.5e-3 and the
+worst 4.4e-2, above `tol_block`; float32 recompute stays uncalibrated.
 
 The checks:
 
@@ -3053,7 +3055,7 @@ The checks:
 |---|---|---|
 | 1 | Merkle proofs | every committed leaf in the opening is in the tree under `root` at its index |
 | 2 | Block recompute | for every opened point, `‖recomputed − committed_next‖ / (‖recomputed − committed_input‖ + 2^-14) ≤ tol_block` (L2 over the hidden vector, the round-2 metric) |
-| 3 | Internal links | at the `nonce_2` elements, each provider-supplied internal value is checked as a link: the verifier applies that one operation in float64 to the provider-supplied (or committed) inputs of the operation and compares within the link tolerance of its kind, with the round-2 normalisers. It locates a failure inside a block; check 2 decides the block |
+| 3 | Internal links | at the `nonce_2` elements, each provider-supplied internal value is checked as a link: the verifier applies that one operation in float64 to the provider-supplied (or committed) inputs of the operation and compares within the link tolerance of its kind, with the round-2 normalisers. Recorded on the verdict with the worst value per link kind, never a fail in the pilot: on 7B at 4k and 8k positions the honest attention link reached 0.42 against 5e-2 (round 3). It locates a deviation inside a block; check 2 decides the block |
 | 4 | Tokens | the committed input ids of the prompt positions equal the verifier's tokenization of the request body (FR-21 rule); `prompt_positions` equals that count; `served_token_id[p] = input_token_id[p+1]` for `p = prompt_positions − 1 .. N − 2`; the served text (FR-21 composition of reasoning and output) equals the detokenization of the emitted ids by the serving path's detokenizer and reasoning parser, special tokens skipped, except that the detokenization may continue past the served text with a suffix that starts with a stop sequence the request named |
 | 5 | Prompt binding | every prompt position's block-0 input equals the embedding row of its token within `tol_embedding` |
 | 6 | Output binding | the verifier runs one teacher-forced forward over the committed input ids of all positions (the FR-21 scoring forward, MLX float16); at each output point its argmax equals the served token. When it differs and the verifier's top logit exceeds the served token's logit by less than `tol_output_tie`, the point is `inconclusive:near_tie`, not a fail |
@@ -3069,6 +3071,12 @@ logit bias and no constrained decoding (response format or tool grammar);
 any other request is `output_binding: skipped`. For a request with temperature it is
 skipped and the verdict records `output_binding: skipped`; binding sampled
 output needs a committed sampler seed and is a non-goal of the pilot (§9).
+Round 3 found that a committed seed alone is not enough: MLX's sampler on the
+committed logits with the committed seed reproduced every served token
+(1,920 of 1,920), but sampling from the verifier's own one-chunk forward
+disagreed with an honest provider at up to 9.4% of positions (Qwen 0.5B,
+temperature 1.0), so sampled binding needs the logits themselves committed and
+bound.
 Checks 1 to 5 run on every verified response.
 
 **Calibration record.** Tolerances live in a closed, versioned record keyed
@@ -3101,10 +3109,15 @@ cases on two chips with a margin:
 | GLU link | 2.2e-3 | 5e-3 |
 | Residual add | 4.9e-4 | 1e-3 |
 | Attention head | 2.6e-2 | 5e-2 |
-| Block recompute, L2 share of the update, MLX float16 | 8.0e-3 (M3) | 2e-2 |
+| Block recompute, L2 share of the update, MLX float16 | 8.0e-3 (M3, M1) | 2e-2 |
 
 The block tolerance sits 2.5x above the worst honest vector and 2.1x below the
-nearest cheat measured (8-bit weights claimed as 4-bit, 4.2e-2).
+nearest cheat measured (8-bit weights claimed as 4-bit, 4.2e-2). Round 3 found
+the same worst values on a third chip (M1). On 7B at 4k and 8k positions the
+block recompute stayed at or below 2.2e-3, measured over decode positions only
+(commit and recompute both prefilled the prompt in chunks); the round-2 worst
+shape, chunked commit against token-by-token recompute, is not measured at
+long context. The attention tolerance does not hold there (check 3).
 `tol_output_tie` is not a measured value: round 2 found the served greedy
 tokens identical across prefill shapes and chips with a smallest honest top-1
 margin of 0.08 (Qwen 0.5B); 0.05 only turns a near tie into `inconclusive`,
@@ -3136,7 +3149,7 @@ vectors (FR-21 rule). A verification job holds one serial inference permit,
 like an FR-21 scoring job, and a verifier runs one at a time.
 
 **Verdicts.** Closed set: `pass`, `structural_pass`, `fail:<check>` with
-`<check>` in `merkle`, `block`, `internal`, `tokens`, `prompt_binding`,
+`<check>` in `merkle`, `block`, `tokens`, `prompt_binding`,
 `output_binding`, `opening_missing`, and `inconclusive:<reason>` with
 `<reason>` in `no_verifier`, `verifier_timeout`, `verifier_invalid`,
 `unavailable`, `near_tie`. A response's verdict is the worst over its checks
@@ -3211,8 +3224,8 @@ shape it actually ran:
 
 ### Threat model of §5B
 
-Per-point shares are round-2 values on Qwen 0.5B and Llama 1B (cheat scoring
-did not run at 7B). "Per verified response" is `1 − (1 − share)^2`: 2 block
+Per-point shares are round-2 values on Qwen 0.5B and Llama 1B, except the
+steering and C2 rows, which are round 3 (cheat scoring did not run at 7B). "Per verified response" is `1 − (1 − share)^2`: 2 block
 points, or 2 output points. Round 2
 scored the full chain with committed internal leaves; the rows for block
 recompute use its separate residual measurements.
@@ -3225,7 +3238,8 @@ recompute use its separate residual measurements.
 | B, every other block skipped | 50% | 75% | block recompute |
 | B, one block of 28 skipped | 3.6% | about 7% | block recompute |
 | C1, true matmul products of shuffled inputs | 100% | 100% | block recompute |
-| C2, honest trace of a near-duplicate prompt, its block-0 leaves left as committed | — | every response whose prompt differs in a token | prompt binding (check 5), token check |
+| C2, honest trace of a near-duplicate prompt, its block-0 leaves left as committed | — | 12 of 12 pairs on Qwen 0.5B and 12 of 12 on Llama 1B (round 3) | prompt binding (check 5), token check |
+| Steering: block outputs perturbed inside the block tolerance to make the honest second choice the served token | at a per-block share of 0.019, 118 (Qwen 0.5B) and 121 (Llama 1B) of 128 positions pass check 2 with the token flipped; at 0.005, 68 and 49 | not caught by check 2 | output binding on greedy requests (not measured on a steered trace); on sampled requests, nothing |
 | C2, same, block-0 leaves at the differing positions patched to the right embedding | not measured | not measured | the block-0 point when it lands on a patched position; check 7 records the inconsistency but does not decide in the pilot |
 
 What these rates do not cover:
@@ -3250,15 +3264,19 @@ What these rates do not cover:
 - **Repeated prompts.** A stored honest trace of an identical greedy request
   can be served again; its root repeats and is counted `duplicate_root`, and
   its output is the honest output.
-- **Steering inside the tolerance.** A cheater who perturbs each block's
-  output inside `tol_block` on purpose to change tokens: not measured; round 3
-  measures it.
+- **Steering inside the tolerance.** Block recompute does not bind the token:
+  round 3 flipped most generated tokens to the honest second choice while
+  every block stayed inside `tol_block`, and still about half at a quarter of
+  it. Only check 6 can catch it, on greedy requests. An element-wise bound on
+  the residual add stopped the measured attack only at a bound tighter than
+  float16 rounding, so it is not a usable defence (round 3).
 - **A2 is not free for the cheater:** the root precedes the draw, so it runs a
   full forward pass of the real model for every response. §5A measures the
   same cheat statistically; the two are complements.
-- **Outside round 2:** the mlx-swift serving path, positions beyond 72 to 78,
-  a third chip and a recompute in float32 or float64 are measured by the
-  prototype and round 3 before any enforce proposal.
+- **Not yet measured:** the mlx-swift serving path (the prototype report),
+  a calibrated float32 or float64 recompute, and output binding on a steered
+  trace. Round 3 covered sampling, positions up to 8k on 7B, steering, prompt
+  binding and a third chip.
 
 ### §5B evidence
 
@@ -3274,9 +3292,16 @@ All in `Augustas11/keryx-watch`, `research/`:
 - `Apple_M5.v2.q3.{replay,residual}.<model>.json` and the M3 equivalents:
   replay reproducibility and the block-recompute error (FR-31 check 2).
 
-Round 3 (`RESULTS-v3.md`) and the prototype report
-(`docs/reports/trace-audit-prototype.md`) add the mlx-swift, sampling, long
-context and steering measurements.
+- `RESULTS-v3.md`: round 3, quoted in §5B for sampling, long context,
+  steering, prompt binding and the third chip.
+- `Apple_M5.v3.q1.*.json` (sampling), `Apple_M5.v3.q2.*.json` (7B at 4k and
+  8k), `Apple_M5.v3.q3.*.json` (steering), `Apple_M5.v3.q4.*.json` (prompt
+  binding, C2), `Apple_M5.v3.run.log`.
+- `Apple_M1.v2.q1.<model>.json`, `Apple_M1.v2.q3.residual.<model>.json`,
+  `Apple_M1.v2.run.log`: the third chip.
+
+The mlx-swift measurements are in `docs/reports/trace-audit-prototype.md` in
+this repository.
 
 ## 6. Migration
 
