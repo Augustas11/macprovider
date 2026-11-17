@@ -169,15 +169,19 @@ final class TraceAuditTests: XCTestCase {
     }
 
     /// One forward through the store, packed exactly as the capture drains
-    /// it: rows in batch order, `[position][slot][hidden]` per row.
-    private func forward(_ store: TraceAuditStore, _ rows: [TraceAuditForwardRow], salt: Int = 0) {
+    /// it: rows in batch order, `[position][slot][hidden]` per row. Row r
+    /// writes to `tokens[r.requestID]`, the residuals of `as ?? requestID`.
+    private func forward(
+        _ store: TraceAuditStore, _ tokens: [String: TraceAuditCaptureToken], _ rows: [TraceAuditForwardRow],
+        salt: Int = 0, as residualID: String? = nil
+    ) {
         for row in rows {
             var bytes: [UInt8] = []
             for t in 0 ..< row.tokenCount {
-                for slot in 0 ... blocks { bytes += vector(row.requestID, row.startPosition + t, slot, salt: salt) }
+                for slot in 0 ... blocks { bytes += vector(residualID ?? row.requestID, row.startPosition + t, slot, salt: salt) }
             }
             bytes.withUnsafeBytes {
-                store.write(requestID: row.requestID, startPosition: row.startPosition, positionCount: row.tokenCount,
+                store.write(token: tokens[row.requestID]!, startPosition: row.startPosition, positionCount: row.tokenCount,
                             blocks: blocks, hidden: hidden, bytes: $0)
             }
         }
@@ -205,37 +209,38 @@ final class TraceAuditTests: XCTestCase {
 
     func testRowsJoinLeaveAndReorderMapToRequestPositions() async throws {
         let store = try tempStore()
+        var t: [String: TraceAuditCaptureToken] = [:]
         let promptA = [11, 12, 13, 14, 15], promptB = [21, 22, 23], promptC = [31, 32, 33, 34]
-        store.register(requestID: "A", promptTokens: promptA)
-        store.register(requestID: "B", promptTokens: promptB)
-        store.register(requestID: "C", promptTokens: promptC)
+        t["A"] = store.register(requestID: "A", promptTokens: promptA)
+        t["B"] = store.register(requestID: "B", promptTokens: promptB)
+        t["C"] = store.register(requestID: "C", promptTokens: promptC)
 
         // Shared [2, 3] prefill: A 0..2, B 0..2.
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["A", "B"], committedKVTokenCounts: [0, 0], tokensPerRow: 3))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["A", "B"], committedKVTokenCounts: [0, 0], tokensPerRow: 3))
         // The same chunk again (serial fallback after a rejected shared forward): overwrites in place.
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["B"], committedKVTokenCounts: [0], tokensPerRow: 3))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["B"], committedKVTokenCounts: [0], tokensPerRow: 3))
         // A's last prompt chunk alone: 3..4.
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["A"], committedKVTokenCounts: [3], tokensPerRow: 2))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["A"], committedKVTokenCounts: [3], tokensPerRow: 2))
         // Decode window of 2 steps over [A, B]: A 5, 6; B 3, 4.
         for step in 0 ..< 2 {
-            forward(store, TraceAuditForwardRow.rows(requestIDs: ["A", "B"], committedKVTokenCounts: [5, 3], tokensPerRow: 1, stepIndex: step))
+            forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["A", "B"], committedKVTokenCounts: [5, 3], tokensPerRow: 1, stepIndex: step))
         }
         // C joins with its whole prompt.
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["C"], committedKVTokenCounts: [0], tokensPerRow: 4))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["C"], committedKVTokenCounts: [0], tokensPerRow: 4))
         // New session, rows reordered: [B, C, A]: B 5, 6; C 4, 5; A 7, 8.
         for step in 0 ..< 2 {
-            forward(store, TraceAuditForwardRow.rows(requestIDs: ["B", "C", "A"], committedKVTokenCounts: [5, 4, 7], tokensPerRow: 1, stepIndex: step))
+            forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["B", "C", "A"], committedKVTokenCounts: [5, 4, 7], tokensPerRow: 1, stepIndex: step))
         }
         // A leaves: 4 emitted tokens -> 5 + 4 - 1 = 8 positions; its window
         // overshoot (position 8) is cut.
         let genA = [100, 101, 102, 103]
-        store.finalize(requestID: "A", generatedTokens: genA, completed: true)
+        store.finalize(token: t["A"]!, generatedTokens: genA, completed: true)
         // [C, B]: C 6; B 7.
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["C", "B"], committedKVTokenCounts: [6, 7], tokensPerRow: 1))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["C", "B"], committedKVTokenCounts: [6, 7], tokensPerRow: 1))
         let genB = [200, 201, 202, 203, 204, 205]  // 3 + 6 - 1 = 8 positions
         let genC = [300, 301, 302, 303]            // 4 + 4 - 1 = 7 positions
-        store.finalize(requestID: "B", generatedTokens: genB, completed: true)
-        store.finalize(requestID: "C", generatedTokens: genC, completed: true)
+        store.finalize(token: t["B"]!, generatedTokens: genB, completed: true)
+        store.finalize(token: t["C"]!, generatedTokens: genC, completed: true)
 
         for (id, prompt, gen) in [("A", promptA, genA), ("B", promptB, genB), ("C", promptC, genC)] {
             let commitment = await store.awaitCommitment(id)
@@ -260,28 +265,29 @@ final class TraceAuditTests: XCTestCase {
 
     func testMarkersPrefixGapCapPrivacyAndDiscard() async throws {
         let store = try tempStore(maxBytesPerRequest: 3 * (2 + 1) * 4 * 2)  // three positions
+        var t: [String: TraceAuditCaptureToken] = [:]
         // First captured position above 0: positions below it came from a cache.
-        store.register(requestID: "D", promptTokens: [1, 2, 3, 4])
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["D"], committedKVTokenCounts: [2], tokensPerRow: 2))
-        store.finalize(requestID: "D", generatedTokens: [9], completed: true)
+        t["D"] = store.register(requestID: "D", promptTokens: [1, 2, 3, 4])
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["D"], committedKVTokenCounts: [2], tokensPerRow: 2))
+        store.finalize(token: t["D"]!, generatedTokens: [9], completed: true)
         // A missed position.
-        store.register(requestID: "E", promptTokens: [1, 2])
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["E"], committedKVTokenCounts: [0], tokensPerRow: 1))
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["E"], committedKVTokenCounts: [2], tokensPerRow: 1))
-        store.finalize(requestID: "E", generatedTokens: [9, 9], completed: true)
+        t["E"] = store.register(requestID: "E", promptTokens: [1, 2])
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["E"], committedKVTokenCounts: [0], tokensPerRow: 1))
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["E"], committedKVTokenCounts: [2], tokensPerRow: 1))
+        store.finalize(token: t["E"]!, generatedTokens: [9, 9], completed: true)
         // Over the byte cap.
-        store.register(requestID: "F", promptTokens: [1, 2, 3, 4])
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["F"], committedKVTokenCounts: [0], tokensPerRow: 4))
-        store.finalize(requestID: "F", generatedTokens: [9], completed: true)
+        t["F"] = store.register(requestID: "F", promptTokens: [1, 2, 3, 4])
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["F"], committedKVTokenCounts: [0], tokensPerRow: 4))
+        store.finalize(token: t["F"]!, generatedTokens: [9], completed: true)
         // Privacy class: never stored.
-        store.register(requestID: "G", promptTokens: [1, 2], unavailable: .privacyClass)
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["G"], committedKVTokenCounts: [0], tokensPerRow: 2))
-        XCTAssertFalse(store.isCapturing("G"))
-        store.finalize(requestID: "G", generatedTokens: [9], completed: true)
+        t["G"] = store.register(requestID: "G", promptTokens: [1, 2], unavailable: .privacyClass)
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["G"], committedKVTokenCounts: [0], tokensPerRow: 2))
+        XCTAssertFalse(store.isCapturing(t["G"]!))
+        store.finalize(token: t["G"]!, generatedTokens: [9], completed: true)
         // Failed request: nothing committed.
-        store.register(requestID: "H", promptTokens: [1, 2])
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["H"], committedKVTokenCounts: [0], tokensPerRow: 2))
-        store.finalize(requestID: "H", generatedTokens: [], completed: false)
+        t["H"] = store.register(requestID: "H", promptTokens: [1, 2])
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["H"], committedKVTokenCounts: [0], tokensPerRow: 2))
+        store.finalize(token: t["H"]!, generatedTokens: [], completed: false)
 
         let d = await store.awaitCommitment("D")
         let e = await store.awaitCommitment("E")
@@ -322,9 +328,10 @@ final class TraceAuditTests: XCTestCase {
         XCTAssertEqual(defaults.windowSeconds, 600)
 
         let store = try tempStore()
-        store.register(requestID: "W", promptTokens: [1, 2])
-        forward(store, TraceAuditForwardRow.rows(requestIDs: ["W"], committedKVTokenCounts: [0], tokensPerRow: 2))
-        store.finalize(requestID: "W", generatedTokens: [5], completed: true)
+        var t: [String: TraceAuditCaptureToken] = [:]
+        t["W"] = store.register(requestID: "W", promptTokens: [1, 2])
+        forward(store, t, TraceAuditForwardRow.rows(requestIDs: ["W"], committedKVTokenCounts: [0], tokensPerRow: 2))
+        store.finalize(token: t["W"]!, generatedTokens: [5], completed: true)
         let commitment = await store.awaitCommitment("W")
         guard case .some(.root(_, _, _)) = commitment else { return XCTFail("no root: \(String(describing: commitment))") }
         let resid = store.url(for: "W", suffix: "resid").path
@@ -332,5 +339,73 @@ final class TraceAuditTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: resid), "inside the window")
         store.purgeExpired(now: Date().addingTimeInterval(601))
         XCTAssertFalse(FileManager.default.fileExists(atPath: resid), "window ended")
+    }
+
+    func testSameRequestIDRegistrationsStayIsolated() async throws {
+        let store = try tempStore()
+        let prompt = [1, 2, 3]
+        // A CB request "S" owns the files; a serial request reusing "S" gets
+        // its own, refused entry.
+        let cb = store.register(requestID: "S", promptTokens: prompt)
+        let serial = store.register(requestID: "S", promptTokens: [7, 7, 7, 7])
+        XCTAssertNotEqual(cb, serial)
+        XCTAssertTrue(store.isCapturing(cb))
+        XCTAssertFalse(store.isCapturing(serial))
+
+        forward(store, ["S": cb], TraceAuditForwardRow.rows(requestIDs: ["S"], committedKVTokenCounts: [0], tokensPerRow: 3))
+        // The serial forwards, at its own offsets and with other residuals,
+        // do not reach the CB request's file.
+        forward(store, ["S": serial], TraceAuditForwardRow.rows(requestIDs: ["S"], committedKVTokenCounts: [0], tokensPerRow: 4),
+                as: "Z")
+        store.markUnavailable(serial, .quantizedKV)
+        XCTAssertTrue(store.isCapturing(cb))
+        // The serial finalize resolves only its own entry.
+        store.finalize(token: serial, generatedTokens: [9, 9, 9, 9, 9], completed: true)
+        XCTAssertTrue(store.isCapturing(cb))
+        XCTAssertEqual(store.commitment("S"), .pending)
+
+        forward(store, ["S": cb], TraceAuditForwardRow.rows(requestIDs: ["S"], committedKVTokenCounts: [3], tokensPerRow: 1))
+        let generated = [40, 41]
+        store.finalize(token: cb, generatedTokens: generated, completed: true)
+        let commitment = await store.awaitCommitment("S")
+        let positions = prompt.count + generated.count - 1
+        XCTAssertEqual(commitment, .root(expectedRoot("S", prompt: prompt, generated: generated),
+                                         positions: positions, leaves: positions * (blocks + 2)))
+        var expected: [UInt8] = []
+        for p in 0 ..< positions { for slot in 0 ... blocks { expected += vector("S", p, slot) } }
+        XCTAssertEqual([UInt8](try Data(contentsOf: store.url(for: "S", suffix: "resid"))), expected)
+
+        // While the committed entry is held, a replay of the ID is refused too.
+        let replay = store.register(requestID: "S", promptTokens: prompt)
+        XCTAssertFalse(store.isCapturing(replay))
+        store.finalize(token: replay, generatedTokens: [], completed: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.url(for: "S", suffix: "resid").path))
+        XCTAssertEqual(store.commitment("S"), commitment)
+    }
+
+    func testOnlyTheRegisteringSubmissionFinalizes() async throws {
+        let store = try tempStore()
+        let prompt = [1, 2]
+        let canonical = store.register(requestID: "K", promptTokens: prompt)
+        forward(store, ["K": canonical], TraceAuditForwardRow.rows(requestIDs: ["K"], committedKVTokenCounts: [0], tokensPerRow: 2))
+        // A duplicate waiter (or a rejected mismatched duplicate) registers,
+        // then throws before the canonical row ends.
+        let duplicate = store.register(requestID: "K", promptTokens: prompt)
+        store.finalize(token: duplicate, generatedTokens: [], completed: false)
+        XCTAssertTrue(store.isCapturing(canonical), "the canonical capture survives")
+        XCTAssertEqual(store.commitment("K"), .pending)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.url(for: "K", suffix: "resid").path))
+
+        forward(store, ["K": canonical], TraceAuditForwardRow.rows(requestIDs: ["K"], committedKVTokenCounts: [2], tokensPerRow: 1))
+        let generated = [5, 6]
+        store.finalize(token: canonical, generatedTokens: generated, completed: true)
+        let commitment = await store.awaitCommitment("K")
+        XCTAssertEqual(commitment, .root(expectedRoot("K", prompt: prompt, generated: generated),
+                                         positions: 3, leaves: 3 * (blocks + 2)))
+        // Releasing the request removes the owner's files; the refused entry
+        // never had any and goes with the window.
+        store.release("K")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.url(for: "K", suffix: "resid").path))
+        XCTAssertNil(store.commitment("K"))
     }
 }

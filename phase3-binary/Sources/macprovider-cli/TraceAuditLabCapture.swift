@@ -60,15 +60,33 @@ enum TraceAuditLab {
 /// One open capture forward; `end()` right after the model call returns.
 final class TraceAuditLabForward {
     fileprivate let runtime: TraceAuditLabRuntime
-    fileprivate init(runtime: TraceAuditLabRuntime) { self.runtime = runtime }
-    func end() { runtime.endForward() }
+    fileprivate let thread: mach_port_t
+    fileprivate init(runtime: TraceAuditLabRuntime, thread: mach_port_t) {
+        self.runtime = runtime
+        self.thread = thread
+    }
+    func end() { runtime.endForward(thread: thread) }
+}
+
+/// One scheduler submission's registration. Only the submission holding it
+/// finalizes the entry, so a duplicate waiter or a rejected duplicate cannot
+/// end the canonical request's capture.
+struct TraceAuditLabSubmission {
+    fileprivate let token: TraceAuditCaptureToken
+    fileprivate let key: TraceAuditLabRuntime.BackendRequest
 }
 
 final class TraceAuditLabRuntime: @unchecked Sendable {
     let store: TraceAuditStore
     private let lock = NSLock()
     private var installations: [ObjectIdentifier: Installation] = [:]
-    private var collector: Collector?
+    /// Open CB forwards, per calling Mach thread, so backends forwarding on
+    /// different threads at once each keep their own.
+    private var collectors: [mach_port_t: Collector] = [:]
+    /// The token a backend's rows write to: the first live registration of
+    /// that request ID on that backend. A serial request with the same ID, or
+    /// the same ID on another backend, holds a different token.
+    private var backendTokens: [BackendRequest: TraceAuditCaptureToken] = [:]
     private var pending: [PendingForward] = []
     /// The measurement command turns capture off per block (hooks removed).
     private var enabled = true
@@ -79,18 +97,24 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         let module: Module
     }
 
+    fileprivate struct BackendRequest: Hashable {
+        let backend: ObjectIdentifier
+        let requestID: String
+    }
+
     private final class Collector {
-        let owner: pthread_t
         let rows: [TraceAuditForwardRow]
+        /// `tokens[i]` is the store entry of `rows[i]`.
+        let tokens: [TraceAuditCaptureToken]
         let batchRows: Int
         let blocks: Int
         var inputs: [MLXArray?]
         var finalMid: MLXArray?
         var finalUpdate: MLXArray?
 
-        init(owner: pthread_t, rows: [TraceAuditForwardRow], batchRows: Int, blocks: Int) {
-            self.owner = owner
+        init(rows: [TraceAuditForwardRow], tokens: [TraceAuditCaptureToken], batchRows: Int, blocks: Int) {
             self.rows = rows
+            self.tokens = tokens
             self.batchRows = batchRows
             self.blocks = blocks
             self.inputs = Array(repeating: nil, count: blocks)
@@ -107,6 +131,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
 
     private struct SerialBinding {
         let request: TraceAuditLabSerialRequest
+        let token: TraceAuditCaptureToken
         let cache: [KVCache]
         let blocks: Int
     }
@@ -122,6 +147,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         /// `[rows, T, blocks + 1, hidden]` float16, rows = `rows` in order.
         let array: MLXArray
         let rows: [TraceAuditForwardRow]
+        let tokens: [TraceAuditCaptureToken]
     }
 
     init(store: TraceAuditStore) {
@@ -130,7 +156,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
 
     // MARK: request lifecycle (scheduler)
 
-    func register(_ request: ContinuousBatchSchedulerRequest) {
+    func register(_ request: ContinuousBatchSchedulerRequest, backend: AnyObject) -> TraceAuditLabSubmission {
         let reason: TraceAuditUnavailableReason?
         if request.ingestProvenance == .privacy {
             reason = .privacyClass
@@ -140,23 +166,40 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         } else {
             reason = nil
         }
-        store.register(requestID: request.id, promptTokens: request.promptTokens, unavailable: reason)
+        let token = store.register(requestID: request.id, promptTokens: request.promptTokens, unavailable: reason)
+        let key = BackendRequest(backend: ObjectIdentifier(backend), requestID: request.id)
+        lock.lock()
+        // A duplicate on the same backend keeps the first submission's token.
+        if backendTokens[key] == nil { backendTokens[key] = token }
+        lock.unlock()
+        return TraceAuditLabSubmission(token: token, key: key)
     }
 
-    func finalize(_ request: ContinuousBatchSchedulerRequest, result: ContinuousBatchSchedulerResult?) {
+    func finalize(_ submission: TraceAuditLabSubmission, result: ContinuousBatchSchedulerResult?) {
+        lock.lock()
+        if backendTokens[submission.key] == submission.token { backendTokens[submission.key] = nil }
+        lock.unlock()
         if result?.finalDecodePath == .nativeMTP {
-            store.markUnavailable(request.id, .nativeMTP)
+            store.markUnavailable(submission.token, .nativeMTP)
         }
         let completed = result.map { $0.terminalStatus == .stop || $0.terminalStatus == .length } ?? false
         store.finalize(
-            requestID: request.id,
+            token: submission.token,
             generatedTokens: result?.generatedTokens ?? [],
             completed: completed
         )
     }
 
-    func markNativeMTP<S: Sequence>(_ requestIDs: S) where S.Element == String {
-        for id in requestIDs { store.markUnavailable(id, .nativeMTP) }
+    func markNativeMTP<S: Sequence>(backend: AnyObject, _ requestIDs: S) where S.Element == String {
+        let tokens = self.tokens(backend: backend, requestIDs: requestIDs)
+        for token in tokens.compactMap({ $0 }) { store.markUnavailable(token, .nativeMTP) }
+    }
+
+    private func tokens<S: Sequence>(backend: AnyObject, requestIDs: S) -> [TraceAuditCaptureToken?]
+    where S.Element == String {
+        let id = ObjectIdentifier(backend)
+        lock.lock(); defer { lock.unlock() }
+        return requestIDs.map { backendTokens[BackendRequest(backend: id, requestID: $0)] }
     }
 
     // MARK: hooks
@@ -243,8 +286,16 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
 
     /// Opens a capture for one model call over `rows`. Nil (no capture) when
     /// no row is being captured, capture is off, or the model is unsupported.
-    func beginForward(model: any LanguageModel, rows: [TraceAuditForwardRow]) -> TraceAuditLabForward? {
-        let wanted = rows.filter { store.isCapturing($0.requestID) }
+    func beginForward(
+        model: any LanguageModel, backend: AnyObject, rows: [TraceAuditForwardRow]
+    ) -> TraceAuditLabForward? {
+        var wanted: [TraceAuditForwardRow] = []
+        var wantedTokens: [TraceAuditCaptureToken] = []
+        for (row, token) in zip(rows, tokens(backend: backend, requestIDs: rows.map(\.requestID))) {
+            guard let token, store.isCapturing(token) else { continue }
+            wanted.append(row)
+            wantedTokens.append(token)
+        }
         guard !wanted.isEmpty, isEnabled else { return nil }
         let blocks: Int?
         do {
@@ -254,24 +305,25 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         }
         guard let blocks else {
             // Not a qwen2/llama model, or the hooks could not be installed.
-            for row in wanted { store.markUnavailable(row.requestID, .uncalibrated) }
+            for token in wantedTokens { store.markUnavailable(token, .uncalibrated) }
             return nil
         }
+        let thread = pthread_mach_thread_np(pthread_self())
         lock.lock()
         defer { lock.unlock() }
-        collector = Collector(owner: pthread_self(), rows: wanted, batchRows: rows.count, blocks: blocks)
-        return TraceAuditLabForward(runtime: self)
+        collectors[thread] = Collector(rows: wanted, tokens: wantedTokens, batchRows: rows.count, blocks: blocks)
+        return TraceAuditLabForward(runtime: self, thread: thread)
     }
 
     fileprivate func record(slot: Int, _ x: MLXArray) {
         var closed: (Collector, TraceAuditLabSerialRequest)?
+        let thread = pthread_mach_thread_np(pthread_self())
         lock.lock()
-        if let collector, pthread_equal(collector.owner, pthread_self()) != 0 {
+        if let collector = collectors[thread] {
             collector.store(slot: slot, x)
             lock.unlock()
             return
         }
-        let thread = pthread_mach_thread_np(pthread_self())
         guard let binding = serialBindings[thread] else {
             lock.unlock()
             return
@@ -281,7 +333,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
                 row: 0, requestID: binding.request.requestID,
                 startPosition: binding.cache.first?.offset ?? 0, tokenCount: x.ndim == 3 ? x.dim(1) : 0)
             serialForwards[thread] = (
-                Collector(owner: pthread_self(), rows: [row], batchRows: 1, blocks: binding.blocks), binding.request
+                Collector(rows: [row], tokens: [binding.token], batchRows: 1, blocks: binding.blocks), binding.request
             )
         }
         if let open = serialForwards[thread] {
@@ -297,10 +349,9 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         }
     }
 
-    fileprivate func endForward() {
+    fileprivate func endForward(thread: mach_port_t) {
         lock.lock()
-        let done = collector
-        collector = nil
+        let done = collectors.removeValue(forKey: thread)
         lock.unlock()
         guard let done, let packed = pack(done) else { return }
         lock.lock()
@@ -317,7 +368,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
               done.inputs.allSatisfy({ $0 != nil }),
               let first = done.inputs.first ?? nil,
               first.ndim == 3, first.dim(0) == done.batchRows, first.dim(1) == tokens else {
-            for row in done.rows { store.markUnavailable(row.requestID, .storage) }
+            for token in done.tokens { store.markUnavailable(token, .storage) }
             return nil
         }
         // Same float16 addition the last block performs (`h + r`).
@@ -328,11 +379,11 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         }
         guard packed.dtype == .float16 else {
             // The calibration record covers float16 activations only.
-            for row in done.rows { store.markUnavailable(row.requestID, .uncalibrated) }
+            for token in done.tokens { store.markUnavailable(token, .uncalibrated) }
             return nil
         }
         asyncEval(packed)
-        return PendingForward(array: packed, rows: done.rows)
+        return PendingForward(array: packed, rows: done.rows, tokens: done.tokens)
     }
 
     /// Copies evaluated captures to the store. Call on the model's thread;
@@ -363,7 +414,7 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         data.withUnsafeBytes { raw in
             for (index, row) in next.rows.enumerated() {
                 store.write(
-                    requestID: row.requestID, startPosition: row.startPosition, positionCount: positions,
+                    token: next.tokens[index], startPosition: row.startPosition, positionCount: positions,
                     blocks: blocks, hidden: hidden,
                     bytes: UnsafeRawBufferPointer(rebasing: raw[index * rowBytes ..< (index + 1) * rowBytes])
                 )
@@ -394,9 +445,12 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
         return serialRequests[ObjectIdentifier(timeline)]
     }
 
-    fileprivate func bindSerial(_ request: TraceAuditLabSerialRequest, cache: [KVCache], blocks: Int) {
+    fileprivate func bindSerial(
+        _ request: TraceAuditLabSerialRequest, token: TraceAuditCaptureToken, cache: [KVCache], blocks: Int
+    ) {
         lock.lock()
-        serialBindings[pthread_mach_thread_np(pthread_self())] = SerialBinding(request: request, cache: cache, blocks: blocks)
+        serialBindings[pthread_mach_thread_np(pthread_self())] = SerialBinding(
+            request: request, token: token, cache: cache, blocks: blocks)
         lock.unlock()
     }
 
@@ -415,7 +469,8 @@ final class TraceAuditLabRuntime: @unchecked Sendable {
 }
 
 /// One request on the serial route (complete, stream, and the draft-model
-/// speculative path). Registered on the first `attach`; finalized by
+/// speculative path). Registered on the first `attach`, which keeps the
+/// store token; finalized by
 /// `finish` with the returned tokens, or by `close` as not completed.
 ///
 /// The serial generate loop drops the stop token (mlx-swift-lm
@@ -429,7 +484,9 @@ final class TraceAuditLabSerialRequest: @unchecked Sendable {
     private let privacy: Bool
     private unowned let runtime: TraceAuditLabRuntime
     private let lock = NSLock()
-    private var registered = false
+    /// This request's own store entry, set by the first `attach`. Writes,
+    /// markers and finalize name it, never the bare request ID.
+    private var token: TraceAuditCaptureToken?
     private var finished = false
     private var model: (any LanguageModel)?
     private var cache: [KVCache] = []
@@ -453,16 +510,15 @@ final class TraceAuditLabSerialRequest: @unchecked Sendable {
     func attach(model: any LanguageModel, cache: [KVCache], quantizedKV: Bool, prefixReused: Bool) {
         let store = runtime.store
         lock.lock()
-        if !registered {
-            registered = true
-            store.register(requestID: requestID, promptTokens: promptTokens, unavailable: privacy ? .privacyClass : nil)
-        }
+        let token = self.token ?? store.register(
+            requestID: requestID, promptTokens: promptTokens, unavailable: privacy ? .privacyClass : nil)
+        self.token = token
         self.model = model
         self.cache = cache
         lock.unlock()
-        if quantizedKV { store.markUnavailable(requestID, .quantizedKV) }
-        if prefixReused { store.markUnavailable(requestID, .prefixCache) }
-        guard store.isCapturing(requestID) else { return }
+        if quantizedKV { store.markUnavailable(token, .quantizedKV) }
+        if prefixReused { store.markUnavailable(token, .prefixCache) }
+        guard store.isCapturing(token) else { return }
         let hooked: Int?
         do {
             hooked = try runtime.install(model)
@@ -470,24 +526,26 @@ final class TraceAuditLabSerialRequest: @unchecked Sendable {
             hooked = nil
         }
         guard let hooked else {
-            store.markUnavailable(requestID, .uncalibrated)
+            store.markUnavailable(token, .uncalibrated)
             return
         }
         lock.lock()
         blocks = hooked
         lock.unlock()
-        runtime.bindSerial(self, cache: cache, blocks: hooked)
+        runtime.bindSerial(self, token: token, cache: cache, blocks: hooked)
     }
 
     /// Binds another thread (the decode executor) to the attached cache.
     func bindThread() {
         lock.lock()
-        let (cache, blocks) = (self.cache, self.blocks)
+        let (cache, blocks, token) = (self.cache, self.blocks, self.token)
         lock.unlock()
-        guard let blocks, runtime.store.isCapturing(requestID) else { return }
-        runtime.bindSerial(self, cache: cache, blocks: blocks)
+        guard let blocks, let token, runtime.store.isCapturing(token) else { return }
+        runtime.bindSerial(self, token: token, cache: cache, blocks: blocks)
     }
 
+    /// Idempotent: a thread not bound to this request is left as it is, so a
+    /// `defer` may repeat an explicit unbind.
     func unbindThread() {
         runtime.unbindSerial(self, allThreads: false)
         drain(keepingNewest: 0)
@@ -516,12 +574,12 @@ final class TraceAuditLabSerialRequest: @unchecked Sendable {
     /// The response was produced: commit through the returned tokens.
     func finish(generatedTokens: [Int]) {
         lock.lock()
-        let open = registered && !finished
+        let open = finished ? nil : token
         finished = true
         lock.unlock()
-        guard open else { return }
+        guard let open else { return }
         drain(keepingNewest: 0)
-        runtime.store.finalize(requestID: requestID, generatedTokens: generatedTokens, completed: true)
+        runtime.store.finalize(token: open, generatedTokens: generatedTokens, completed: true)
     }
 
     /// End of the request scope: unbinds every thread and finalizes a
@@ -529,12 +587,12 @@ final class TraceAuditLabSerialRequest: @unchecked Sendable {
     func close() {
         runtime.unbindSerial(self, allThreads: true)
         lock.lock()
-        let open = registered && !finished
+        let open = finished ? nil : token
         finished = true
         lock.unlock()
         drain(keepingNewest: 0)
-        if open {
-            runtime.store.finalize(requestID: requestID, generatedTokens: [], completed: false)
+        if let open {
+            runtime.store.finalize(token: open, generatedTokens: [], completed: false)
         }
     }
 }

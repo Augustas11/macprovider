@@ -1124,7 +1124,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             self.enterTargetLock(); defer { self.exitTargetLock() }
             #if DEBUG || MACPROVIDER_LAB_HARNESS
             let traceLab = TraceAuditLab.active
-            traceLab?.markNativeMTP(inputs.filter(\.nativeMTPPromptPrefill).map(\.requestID))
+            traceLab?.markNativeMTP(backend: self, inputs.filter(\.nativeMTPPromptPrefill).map(\.requestID))
             defer { traceLab?.drainAll() }
             #endif
             self.releaseRetiredDecodeSessions()
@@ -1175,7 +1175,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                     #if DEBUG || MACPROVIDER_LAB_HARNESS
                     let traceForward = traceLab?.beginForward(
-                        model: context.model,
+                        model: context.model, backend: self,
                         rows: TraceAuditForwardRow.rows(
                             requestIDs: inputs.map(\.requestID),
                             committedKVTokenCounts: inputs.map(\.committedKVTokenCount),
@@ -1312,7 +1312,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         }
                         #if DEBUG || MACPROVIDER_LAB_HARNESS
                         let traceForward = traceLab?.beginForward(
-                            model: context.model,
+                            model: context.model, backend: self,
                             rows: [TraceAuditForwardRow(
                                 row: 0, requestID: input.requestID,
                                 startPosition: input.committedKVTokenCount,
@@ -1762,7 +1762,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws -> [String: [Int]]? {
         guard !inputs.isEmpty else { return [:] }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        TraceAuditLab.active?.markNativeMTP(inputs.map(\.requestID))
+        TraceAuditLab.active?.markNativeMTP(backend: self, inputs.map(\.requestID))
         #endif
         guard let drafterContainer else { return nil }
         guard beginOperation() else {
@@ -1820,7 +1820,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws -> [NativeMTPVerifiedRow] {
         guard !inputs.isEmpty else { return [] }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        TraceAuditLab.active?.markNativeMTP(inputs.map(\.requestID))
+        TraceAuditLab.active?.markNativeMTP(backend: self, inputs.map(\.requestID))
         #endif
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
@@ -2808,7 +2808,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let decodeSteps = max(1, steps)
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         let traceLab = TraceAuditLab.active
-        traceLab?.markNativeMTP(supportedInputs.filter(\.captureNativeMTPDrafterColumns).map(\.requestID))
+        traceLab?.markNativeMTP(backend: self, supportedInputs.filter(\.captureNativeMTPDrafterColumns).map(\.requestID))
         defer { traceLab?.drainAll() }
         #endif
         // A capped backend (`pagedMLA`) never forms a wider forward; the
@@ -3126,7 +3126,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 #if DEBUG || MACPROVIDER_LAB_HARNESS
                 let traceForward = traceLab?.beginForward(
-                    model: model,
+                    model: model, backend: self,
                     rows: TraceAuditForwardRow.rows(
                         requestIDs: supportedInputs.map(\.requestID),
                         committedKVTokenCounts: supportedInputs.map(\.committedKVTokenCount),

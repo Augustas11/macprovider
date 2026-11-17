@@ -11159,6 +11159,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             traceSerial?.attach(
                                 model: generationContext.model, cache: kvCache, quantizedKV: ownsQuantizedConversationCache,
                                 prefixReused: iteratorInput.text.tokens.size != promptTokenIds.count)
+                            // A throw before the unbind below must not leave this thread bound.
+                            defer { traceSerial?.unbindThread() }
                             #endif
                             if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
@@ -11675,6 +11677,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     traceSerial?.attach(
                         model: targetContext.model, cache: cache, quantizedKV: parameters.kvBits != nil, prefixReused: false)
                 }
+                // A throw before the unbind below must not leave this thread bound.
+                defer { traceSerial?.unbindThread() }
                 #endif
                 var iterator = try SpeculativeTokenIterator(
                     input: input,
@@ -12320,6 +12324,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         traceSerial?.attach(
                             model: generationContext.model, cache: kvCache, quantizedKV: ownsQuantizedConversationCache,
                             prefixReused: iteratorInput.text.tokens.size != promptTokenIds.count)
+                        // A throw before the unbind below must not leave this thread bound.
+                        defer { traceSerial?.unbindThread() }
                         #endif
                         if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a

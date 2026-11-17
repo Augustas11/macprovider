@@ -357,6 +357,11 @@ public struct TraceAuditForwardRow: Sendable, Equatable {
 
 // MARK: - Request store
 
+/// One registration in `TraceAuditStore`, unique per store for the process.
+public struct TraceAuditCaptureToken: Sendable, Hashable {
+    let value: UInt64
+}
+
 /// Closed reasons a request carries instead of a root.
 public enum TraceAuditUnavailableReason: String, Sendable, Equatable, Codable {
     /// Positions before the first captured one came from a reused prompt cache.
@@ -457,7 +462,10 @@ public enum TraceAuditStoreError: Error, Equatable, CustomStringConvertible {
 ///   <key>.tokens  u32le input, u32le served per committed position
 ///   <key>.lh      32-byte leaf hashes in leaf order (for openings)
 ///   <key>.meta.json
-/// `<key>` is the hex SHA-256 of the request ID. The root is computed at
+/// `<key>` is the hex SHA-256 of the request ID. Entries are addressed by the
+/// `TraceAuditCaptureToken` that `register` returns, never by the bare request
+/// ID, so two submissions that share an ID cannot write into, or finalize,
+/// each other's entry. The root is computed at
 /// finalize by streaming the residual file through `TraceAuditIncrementalMerkle`
 /// on a background queue, so the capture path itself only copies bytes.
 /// On the byte cap the request is marked `storage`, its files are deleted and
@@ -466,12 +474,19 @@ public final class TraceAuditStore: @unchecked Sendable {
     public let configuration: TraceAuditStoreConfiguration
     private let lock = NSLock()
     private let rootQueue = DispatchQueue(label: "macprovider.trace-audit-lab.root", qos: .utility)
-    private var entries: [String: Entry] = [:]
+    private var entries: [UInt64: Entry] = [:]
+    /// Request ID -> the entry that owns that ID's files.
+    private var owners: [String: UInt64] = [:]
+    private var lastToken: UInt64 = 0
     private var totalBytes = 0
 
     private final class Entry {
+        let token: UInt64
         let requestID: String
         let key: String
+        /// False for a refused duplicate registration: it never had files,
+        /// and the files named by its request ID belong to another entry.
+        let ownsFiles: Bool
         let promptTokens: [Int]
         let createdAt: Date
         /// When the root was resolved; the FR-30 window runs from here.
@@ -489,9 +504,11 @@ public final class TraceAuditStore: @unchecked Sendable {
         var finalized = false
         var waiters: [CheckedContinuation<TraceAuditCommitment?, Never>] = []
 
-        init(requestID: String, key: String, promptTokens: [Int], createdAt: Date) {
+        init(token: UInt64, requestID: String, key: String, ownsFiles: Bool, promptTokens: [Int], createdAt: Date) {
+            self.token = token
             self.requestID = requestID
             self.key = key
+            self.ownsFiles = ownsFiles
             self.promptTokens = promptTokens
             self.createdAt = createdAt
         }
@@ -524,29 +541,42 @@ public final class TraceAuditStore: @unchecked Sendable {
 
     // MARK: lifecycle
 
-    /// Starts tracking a request. A second registration of the same ID (a
-    /// duplicate waiter, a replay) is ignored.
-    public func register(requestID: String, promptTokens: [Int], unavailable: TraceAuditUnavailableReason? = nil) {
+    /// Starts tracking one submission and returns the token that every later
+    /// write, marker and finalize for it must name.
+    ///
+    /// Files are named by request ID, so only one entry per ID can hold them.
+    /// A registration whose ID is still in the store (a duplicate waiter, a
+    /// serial request reusing a live CB request's ID, a replay inside the
+    /// audit window) is refused: it gets its own entry, marked `storage` from
+    /// the start, that never writes and whose finalize resolves only itself.
+    /// Refusing is simpler than a second file set, and the opening tools keep
+    /// finding a request's files by its ID.
+    public func register(
+        requestID: String, promptTokens: [Int], unavailable: TraceAuditUnavailableReason? = nil
+    ) -> TraceAuditCaptureToken {
         lock.lock(); defer { lock.unlock() }
-        guard entries[requestID] == nil else { return }
+        lastToken += 1
+        let ownsFiles = owners[requestID] == nil
         let entry = Entry(
-            requestID: requestID, key: Self.key(for: requestID),
+            token: lastToken, requestID: requestID, key: Self.key(for: requestID), ownsFiles: ownsFiles,
             promptTokens: promptTokens, createdAt: Date()
         )
-        entry.unavailable = unavailable
-        entries[requestID] = entry
+        entry.unavailable = ownsFiles ? unavailable : .storage
+        entries[lastToken] = entry
+        if ownsFiles { owners[requestID] = lastToken }
+        return TraceAuditCaptureToken(value: lastToken)
     }
 
-    public func isCapturing(_ requestID: String) -> Bool {
+    public func isCapturing(_ token: TraceAuditCaptureToken) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let entry = entries[requestID] else { return false }
+        guard let entry = entries[token.value] else { return false }
         return entry.unavailable == nil && !entry.finalized
     }
 
     /// First reason wins. Deletes whatever was stored.
-    public func markUnavailable(_ requestID: String, _ reason: TraceAuditUnavailableReason) {
+    public func markUnavailable(_ token: TraceAuditCaptureToken, _ reason: TraceAuditUnavailableReason) {
         lock.lock(); defer { lock.unlock() }
-        guard let entry = entries[requestID], entry.unavailable == nil, !entry.finalized else { return }
+        guard let entry = entries[token.value], entry.unavailable == nil, !entry.finalized else { return }
         entry.unavailable = reason
         dropFilesLocked(entry)
     }
@@ -554,11 +584,11 @@ public final class TraceAuditStore: @unchecked Sendable {
     /// Writes `positionCount` positions starting at `startPosition`.
     /// `bytes` is `[position][slot 0...blocks][hidden]` float16.
     public func write(
-        requestID: String, startPosition: Int, positionCount: Int,
+        token: TraceAuditCaptureToken, startPosition: Int, positionCount: Int,
         blocks: Int, hidden: Int, bytes: UnsafeRawBufferPointer
     ) {
         lock.lock(); defer { lock.unlock() }
-        guard let entry = entries[requestID], entry.unavailable == nil, !entry.finalized,
+        guard let entry = entries[token.value], entry.ownsFiles, entry.unavailable == nil, !entry.finalized,
               positionCount > 0, blocks > 0, hidden > 0 else { return }
         if entry.blocks == 0 {
             entry.blocks = blocks
@@ -596,7 +626,7 @@ public final class TraceAuditStore: @unchecked Sendable {
             totalBytes += grow
         }
         if entry.fd < 0 {
-            let path = url(for: requestID, suffix: "resid").path
+            let path = url(for: entry.requestID, suffix: "resid").path
             entry.fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
             if entry.fd < 0 {
                 failLocked(entry, .storage)
@@ -620,10 +650,11 @@ public final class TraceAuditStore: @unchecked Sendable {
     /// The response is final: `generatedTokens` are the raw sampled tokens
     /// (stop tokens included). Commits positions 0 ..< P + G - 1: the prompt
     /// and every generated token that was fed back. Returns at once; the
-    /// root is built on a background queue (`awaitCommitment`).
-    public func finalize(requestID: String, generatedTokens: [Int], completed: Bool) {
+    /// root is built on a background queue (`awaitCommitment`). Only the
+    /// registration that holds `token` can finalize its entry.
+    public func finalize(token: TraceAuditCaptureToken, generatedTokens: [Int], completed: Bool) {
         lock.lock()
-        guard let entry = entries[requestID], !entry.finalized else {
+        guard let entry = entries[token.value], !entry.finalized else {
             lock.unlock()
             return
         }
@@ -653,7 +684,7 @@ public final class TraceAuditStore: @unchecked Sendable {
             return
         }
         let job = RootJob(
-            requestID: requestID, key: entry.key, blocks: entry.blocks, hidden: entry.hidden,
+            requestID: entry.requestID, key: entry.key, blocks: entry.blocks, hidden: entry.hidden,
             promptTokens: entry.promptTokens, generatedTokens: generatedTokens, positions: positions
         )
         lock.unlock()
@@ -665,7 +696,7 @@ public final class TraceAuditStore: @unchecked Sendable {
                 result = .unavailable(.storage)
             }
             lock.lock()
-            if let entry = entries[requestID] {
+            if let entry = entries[token.value] {
                 if case .unavailable(let reason) = result {
                     entry.unavailable = reason
                     dropFilesLocked(entry)
@@ -677,15 +708,17 @@ public final class TraceAuditStore: @unchecked Sendable {
         }
     }
 
+    /// The commitment of the entry that owns `requestID`'s files.
     public func commitment(_ requestID: String) -> TraceAuditCommitment? {
         lock.lock(); defer { lock.unlock() }
-        return entries[requestID]?.commitment
+        return ownerLocked(requestID)?.commitment
     }
 
+    /// The commitment of the entry that owns `requestID`'s files.
     public func awaitCommitment(_ requestID: String) async -> TraceAuditCommitment? {
         await withCheckedContinuation { (continuation: CheckedContinuation<TraceAuditCommitment?, Never>) in
             lock.lock()
-            guard let entry = entries[requestID] else {
+            guard let entry = ownerLocked(requestID) else {
                 lock.unlock()
                 continuation.resume(returning: nil)
                 return
@@ -704,12 +737,17 @@ public final class TraceAuditStore: @unchecked Sendable {
     /// Deletes a request's files (after its audit window or opening).
     public func release(_ requestID: String) {
         lock.lock(); defer { lock.unlock() }
-        guard let entry = entries[requestID] else { return }
+        guard let entry = ownerLocked(requestID) else { return }
         releaseLocked(entry)
     }
 
+    private func ownerLocked(_ requestID: String) -> Entry? {
+        owners[requestID].flatMap { entries[$0] }
+    }
+
     private func releaseLocked(_ entry: Entry) {
-        entries[entry.requestID] = nil
+        entries[entry.token] = nil
+        if entry.ownsFiles { owners[entry.requestID] = nil }
         if entry.fd >= 0 { close(entry.fd); entry.fd = -1 }
         dropFilesLocked(entry)
         if case .pending = entry.commitment { resolveLocked(entry, .discarded) }
@@ -717,10 +755,8 @@ public final class TraceAuditStore: @unchecked Sendable {
 
     /// Window end: delete every trace.
     public func endWindow() {
-        lock.lock()
-        let ids = Array(entries.keys)
-        lock.unlock()
-        ids.forEach(release)
+        lock.lock(); defer { lock.unlock() }
+        Array(entries.values).forEach(releaseLocked)
     }
 
     /// Deletes every finalized trace whose window (from its commitment, or
@@ -754,7 +790,7 @@ public final class TraceAuditStore: @unchecked Sendable {
 
     private func dropFilesLocked(_ entry: Entry) {
         if entry.fd >= 0 { close(entry.fd); entry.fd = -1 }
-        for suffix in ["resid", "tokens", "lh", "meta.json"] {
+        for suffix in ["resid", "tokens", "lh", "meta.json"] where entry.ownsFiles {
             try? FileManager.default.removeItem(
                 at: configuration.directory.appendingPathComponent("\(entry.key).\(suffix)"))
         }

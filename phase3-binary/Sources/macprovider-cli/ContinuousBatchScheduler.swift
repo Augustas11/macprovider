@@ -2872,15 +2872,17 @@ actor ContinuousBatchScheduler {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         // Trace audit lab (#2419): a request is captured only between these
         // two calls; the backend writes residuals for registered rows only.
+        // Each submission finalizes only the entry its own registration made,
+        // so a duplicate waiter that ends early cannot end the canonical row's.
         if let traceLab = TraceAuditLab.active {
-            traceLab.register(request)
+            let traceSubmission = traceLab.register(request, backend: backend as AnyObject)
             do {
                 let result = try await submitScheduled(
                     request, admissionWaitPolicy: admissionWaitPolicy, tokenSink: tokenSink, onStarted: onStarted)
-                traceLab.finalize(request, result: result)
+                traceLab.finalize(traceSubmission, result: result)
                 return result
             } catch {
-                traceLab.finalize(request, result: nil)
+                traceLab.finalize(traceSubmission, result: nil)
                 throw error
             }
         }
