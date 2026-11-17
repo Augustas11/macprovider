@@ -59,7 +59,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-048 | Native Multi-Token Prediction Serving | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
 | SPEC-049 | Operator-Constrained Privacy Class | draft | complete | pending: 36 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 | SPEC-050 | MALIBU Stake Allowance | draft | complete | pending: 14 | [SPEC-050-malibu-stake-allowance.md](SPEC-050-malibu-stake-allowance.md) |
-| SPEC-051 | Multi-Mac Shard Groups | draft | complete | pending: 30 | [SPEC-051-multi-mac-shard-groups.md](SPEC-051-multi-mac-shard-groups.md) |
+| SPEC-051 | Multi-Mac Shard Groups | draft | complete | pending: 33 | [SPEC-051-multi-mac-shard-groups.md](SPEC-051-multi-mac-shard-groups.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

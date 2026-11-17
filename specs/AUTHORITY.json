@@ -509,7 +509,8 @@
         "SPEC-001",
         "SPEC-030",
         "SPEC-038",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -812,7 +813,8 @@
         "SPEC-036",
         "SPEC-037",
         "SPEC-038",
-        "SPEC-039"
+        "SPEC-039",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
