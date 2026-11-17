@@ -34,7 +34,8 @@
 # <K>_BASE_CLONE_FROM (the same for BASE_PATH), <K>_HF_REPO/_HF_REVISION/_HF_SUBFOLDER
 # (download one subfolder into PATH), <K>_STAGE_REPO/_STAGE_REVISION (PATH = APFS clone
 # of BASE_PATH plus the published repo's non-shard files, verified against SHA256) and
-# <K>_MTP_BENCH/_MTP_TEMPLATE. Built-in defaults exist for qwen27, glm and minimax.
+# <K>_MTP_BENCH/_MTP_TEMPLATE. Built-in defaults exist for qwen27, glm, minimax and dsv4abl
+# (the abliterated DeepSeek V4-Flash that job-dsv4-abliterated.sh splices; not in MODELS by default).
 # Grid: OUTPUTS (128,512,2048), CONTEXTS (short,4k,16k), TRIALS (3), BASE_TRIALS (1).
 #
 # Every failure prints a `BLOCKER:` line; the job ends with JOB_PASS (exit 0) or JOB_FAIL
@@ -100,6 +101,13 @@ store_dir() {
 : "${MINIMAX_REF:=mlx-vlm}"
 : "${MINIMAX_REF_PATH:=$MINIMAX_BASE_PATH}"
 : "${MINIMAX_REF_ARGS:=--refusal-ablation $MINIMAX_PATH}"
+: "${DSV4ABL_NAME:=deepseek-v4-flash-abliterated}"
+: "${DSV4ABL_PATH:=$LAB/models/DeepSeek-V4-Flash-0731-abliterated-MXFP4-MLX}"  # made by job-dsv4-abliterated.sh
+: "${DSV4ABL_REF:=mlx-vlm}"
+: "${DSV4ABL_BASE_ID:=deepseek/deepseek-v4-flash}"
+: "${DSV4ABL_BASE_SHA256:=58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c}"
+: "${DSV4ABL_BASE_PATH:=$LAB/models/DeepSeek-V4-Flash-0731-MXFP4-MLX}"
+: "${DSV4ABL_BASE_CLONE_FROM:=$(store_dir TensorFold--DeepSeek-V4-Flash-0731-MXFP4-MLX "$DSV4ABL_BASE_SHA256")}"
 
 # v K FIELD: the value of <K>_FIELD (empty when unset); setv K FIELD VALUE sets it.
 kname() { echo "$(echo "$1" | tr 'a-z-' 'A-Z_')_$2"; }

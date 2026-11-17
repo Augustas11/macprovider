@@ -14,6 +14,8 @@
 #
 # Usage: studio-ablit-perf.sh                  all models (MODELS="qwen27 glm minimax")
 #        MODELS=minimax studio-ablit-perf.sh   one model alone
+#        JOB_SCRIPT=job-dsv4-abliterated.sh studio-ablit-perf.sh   the abliterated DeepSeek V4-Flash
+#          splice and its checks (also copies scripts/lab/dsv4 and glm53_oracle_json.py)
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB
 # SKIP_BUILD and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
@@ -29,6 +31,8 @@ LOCKSH=$POC/scratchpad/studio-lock.sh
 OWNER=ablit-perf
 STALL_MIN=30
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
+JOB_SCRIPT=${JOB_SCRIPT:-job.sh}
+case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh or job-dsv4-abliterated.sh" >&2; exit 2 ;; esac
 mkdir -p "$SCR" "$RES"
 : > "$LOG"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
@@ -36,6 +40,7 @@ blocker() { say "BLOCKER: $*"; }
 
 [ -f "$LOCKSH" ] || { blocker "no lock helper at $LOCKSH"; exit 2; }
 dirty=$(git -C "$REPO" status --porcelain -- phase3-binary scripts/lab/parity-grid scripts/lab/ablit-perf scripts/lab/minimax \
+  scripts/lab/dsv4 scripts/lab/cb-studio/glm53_oracle_json.py \
   scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json)
 [ -z "$dirty" ] || { blocker "uncommitted changes in the built or copied paths; commit first: $(echo "$dirty" | head -n 3 | tr '\n' ' ')"; exit 2; }
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
@@ -55,13 +60,15 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
-say "ABLIT_START run=$RUN_ID commit=$COMMIT env:${ENVS:- (defaults)}"
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT env:${ENVS:- (defaults)}"
 
-"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
+"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
   || { blocker "mkdir failed"; exit 2; }
 rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/parity-grid/ >> "$LOG" 2>&1 \
   && rsync -a --delete "$REPO/scripts/lab/ablit-perf/" macstudio:lab-ablit-perf/job/ablit-perf/ >> "$LOG" 2>&1 \
+  && rsync -a --delete "$REPO/scripts/lab/dsv4/" macstudio:lab-ablit-perf/job/dsv4/ >> "$LOG" 2>&1 \
+  && rsync -a "$REPO/scripts/lab/cb-studio/glm53_oracle_json.py" macstudio:lab-ablit-perf/job/cb-studio/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/scripts/lab/minimax/minimax_ablate.py" "$REPO/scripts/lab/minimax/publish_abliterated.py" \
        macstudio:lab-ablit-perf/job/minimax/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/phase3-binary/catalog/autotune/continuous-batching-policy.json" macstudio:lab-ablit-perf/job/catalog/ >> "$LOG" 2>&1 \
@@ -100,7 +107,7 @@ say "LOCKS_ACQUIRED"
 PID=$("${SSH[@]}" "bash -s" <<REMOTE
 set -m
 cd ~/lab-ablit-perf
-env RUN_ID=$RUN_ID COMMIT=$COMMIT $ENVS nohup bash ./job/ablit-perf/job.sh > ./logs/job-$RUN_ID.log 2>&1 < /dev/null &
+env RUN_ID=$RUN_ID COMMIT=$COMMIT $ENVS nohup bash ./job/ablit-perf/$JOB_SCRIPT > ./logs/job-$RUN_ID.log 2>&1 < /dev/null &
 echo \$!
 REMOTE
 )
@@ -111,12 +118,12 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|STAGE|CLONE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|STAGE|CLONE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
   [ "$alive" = unknown ] && { say "ssh probe failed, retrying"; continue; }
-  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
+  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/venv-dsv4 ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
   if [ -z "$fresh" ]; then
     stalled=$((stalled + 1))
     [ $((stalled % STALL_MIN)) = 1 ] && blocker "no file progress for ${STALL_MIN}+ minutes; last job log lines: $("${SSH[@]}" "tail -n 2 ~/lab-ablit-perf/logs/job-$RUN_ID.log" | tr '\n' ' ')"
