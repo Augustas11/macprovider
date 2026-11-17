@@ -58,6 +58,21 @@ PR #2375 (`a8c2e6157`), epic #2355. Live in v1.8.290 (2026-11-15 14:17 WITA).
 
 Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (gateway source change, no schema change). Live probe: a relay-blind reservation for MiniMax M3.1-Flash against a provider that does not declare the family returns the retryable 503 with the new message.
 
+## Pearl runtime v1.8.293 (2026-11-17)
+
+**Live 2026-11-17 08:32 WITA** (tag `v1.8.293` at `047d3813d`, release run 43987129299, applied through `scripts/ops/pearl-runtime.sh`). It carries the coordinator half of PR 2407 (`0621e5dc7`, Related: #2404). The coordinator `/healthz` was unreachable for about 80 seconds during the apply; coordinator and gateway `/healthz` report `v1.8.293` with no buyer hold.
+
+A provider NAK whose `in_reply_to` is `native_mtp_canary_request_v1`, received
+while the provider's tuple has a canary in flight, ends that canary at once as
+a failure: event `native_mtp_canary_nak` (code, challenge id, request id), the
+exact tuple is disabled with reason `nak_<code>` (wire disable reason
+`mismatch`), and the 60 s timeout no longer runs. The `provider nak` line gains
+`in_reply_to`, and every canary result rejection path logs
+`native_mtp_canary_result_rejected` with a reason (SPEC-031 v0.3.10).
+
+Live probe, not yet observed: a NAKed canary shows `native_mtp_canary_nak` in the coordinator journal in the same
+second as `native_mtp_canary_challenge_sent`. No canary has been NAKed since the apply, and none is provoked for the record.
+
 ## Pearl runtime v1.8.292 (2026-11-16)
 
 **Live 2026-11-16 22:51 WITA** (tag `v1.8.292` at `c17feb3ec`, release run 43888372416, applied through `scripts/ops/pearl-runtime.sh`). It carries PR 2403 (a self-degraded provider returns to service while a chat is forwarded to it; `ade936f03`, issue 2399) and the coordinator half of PR 2405 (native-MTP canary challenge, result, timeout and disable are logged; `c17feb3ec`, Related: #2404). The apply held buyers with 503 for about two to three minutes; coordinator and gateway `/healthz` report `v1.8.292` with no buyer hold.
@@ -1114,20 +1129,6 @@ rows. The deferred billing startup scan also reached its designed 30 s timeout
 after listeners were already serving. Durable evidence and buyer serving stayed
 healthy, but the growing historical outbox remains open scaling work under
 #1793 rather than a quiet-rollout or backlog-closure claim.
-
-## Pending: PR 2407 coordinator half (Related: #2404)
-
-A provider NAK whose `in_reply_to` is `native_mtp_canary_request_v1`, received
-while the provider's tuple has a canary in flight, ends that canary at once as
-a failure: event `native_mtp_canary_nak` (code, challenge id, request id), the
-exact tuple is disabled with reason `nak_<code>` (wire disable reason
-`mismatch`), and the 60 s timeout no longer runs. The `provider nak` line gains
-`in_reply_to`, and every canary result rejection path logs
-`native_mtp_canary_result_rejected` with a reason (SPEC-031 v0.3.10). Live
-step: the next Pearl runtime release through `scripts/ops/pearl-runtime.sh
-status` then `next --run` (about 1-2 minutes of downtime). Live probe: a NAKed
-canary shows `native_mtp_canary_nak` in the coordinator journal in the same
-second as `native_mtp_canary_challenge_sent`.
 
 ## Open Pearl actions (not new code)
 
