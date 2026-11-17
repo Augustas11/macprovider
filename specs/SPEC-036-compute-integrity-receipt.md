@@ -2789,7 +2789,7 @@ outputs, and runs its own teacher-forced forward over the request and the
 served output.
 
 §5B is **draft, observe-only and default-off**. Its verdicts are logged and
-shown to operators and to the provider. They never change routing, a §5A
+shown to operators; the provider sees only what FR-32 lists for it. They never change routing, a §5A
 measurement or scorer statistic, settlement, rewards or a receipt. The
 coordinator switch `compute_integrity.trace_audit.enabled` (default `false`)
 and the provider switch `trace_audit.lab_enabled` (default `false`,
@@ -2940,8 +2940,11 @@ challenged like any other).
    the same for every committed response of the provider (FR-27). It never
    depends on anything the provider sent or on whether the response is
    audit-eligible. When `compute_integrity.trace_audit.max_inflight_openings`
-   (default 4) openings are already outstanding, the coordinator releases
-   instead of challenging; that choice too ignores eligibility. The coordinator
+   (default 4) openings **of that provider** are already outstanding, the
+   coordinator releases instead of challenging; that choice too ignores
+   eligibility, and it is counted per provider (`cap_released`, FR-32), so a
+   provider that holds its openings to the deadline to suppress challenges
+   shows up in the operator view. The coordinator
    verifies an opening's proofs while streaming it and buffers only what it
    forwards to a verifier.
 2. **Decision message.** Within 30 seconds of accepting the commitment the
@@ -3004,8 +3007,10 @@ about 1.87 GB.
 ### FR-31 Opening and checks (SPEC-036-R031)
 
 **Bounds and encoding.** The pilot challenges responses of at most 4,096
-positions (the FR-21 prompt bound); a longer response is released and counted
-`too_long`. `trace_opening_v1` is a binary WebSocket message: a JSON header
+positions (the FR-21 prompt bound) and whose worst-case opening,
+`(block_points + 1) * N * hidden_size * 2` bytes, is at most 150 MiB; any
+other response is released and counted `too_long`, a decision made from the
+commitment's own counts before the draw. `trace_opening_v1` is a binary WebSocket message: a JSON header
 (request, draws, leaf index list, proof node list) followed by the raw leaf
 payloads in index order. Each committed leaf appears once, however many points
 need it. The proof is one multiproof: the set of tree nodes, each given once
@@ -3056,7 +3061,9 @@ own forward, not through committed leaves: a provider can fit a final-residual
 leaf to any token, so a leaf alone binds nothing. For FR-20 requests check 6
 adds little to §5A, which scores every output position; it matters for runner
 accounts. The forward runs for every verified response; the argmax test of
-check 6 runs for greedy requests (`temperature: 0`) only. For a request with temperature it is
+check 6 runs for greedy requests only: `temperature: 0` with no repetition or frequency penalty, no
+logit bias and no constrained decoding (response format or tool grammar);
+any other request is `output_binding: skipped`. For a request with temperature it is
 skipped and the verdict records `output_binding: skipped`; binding sampled
 output needs a committed sampler seed and is a non-goal of the pilot (§9).
 Checks 1 to 5 run on every verified response.
@@ -3108,8 +3115,12 @@ verdict.
 **Verifier selection.** For an audit-eligible challenged response the
 coordinator picks one verifier with the FR-21 rules 1, 2 and 4 to 6, reading
 "scorer candidate" as a session that advertised
-`tier2_capabilities.trace_verify_v1: true`, and rule 3 (another operator)
-unless the verifier is listed in `lab_verifiers` (FR-27). Peers first; FR-26
+`tier2_capabilities.trace_verify_v1: true`, and rule 3 (another operator),
+except that a verifier listed in `lab_verifiers` may verify a response of an
+`audit_accounts` account (FR-27). FR-20 verification requests always keep
+rule 3. Pilot providers that are all the operator's own Macs therefore get
+`inconclusive:no_verifier` on FR-20 requests unless a verifier of another
+operator exists; their verified traffic is the runner accounts. Peers first; FR-26
 reference scorers fill only when no peer is eligible. With no verifier the
 verdict is `inconclusive:no_verifier`.
 
@@ -3125,14 +3136,15 @@ like an FR-21 scoring job, and a verifier runs one at a time.
 `<check>` in `merkle`, `block`, `internal`, `tokens`, `prompt_binding`,
 `output_binding`, `opening_missing`, and `inconclusive:<reason>` with
 `<reason>` in `no_verifier`, `verifier_timeout`, `verifier_invalid`,
-`unavailable`, `near_tie`. A `fail` from one verifier is re-verified by a second verifier
+`unavailable`, `near_tie`. A response's verdict is the worst over its checks
+and points, in the order `fail` before `inconclusive` before `pass`. A `fail` from one verifier is re-verified by a second verifier
 when one is eligible; the verdict is `fail_confirmed:<check>` when both fail
 it, otherwise `split`. Trace-audit splits are counted in §5B telemetry only
 and never feed FR-24 scorer statistics.
 
 **Visibility.** The operator view `GET /admin/compute-integrity/<provider_id>`
 gains a `trace_audit` section: counts per verdict and per marker over the last
-7 days, `duplicate_root` and `too_long` counts, and the last 20 verdicts (time,
+7 days, `duplicate_root`, `too_long` and `cap_released` counts, and the last 20 verdicts (time,
 model, verdict, calibration id), with no prompt, output or vector data. The
 provider status `GET /v1/provider/compute-integrity` shows only what the
 provider can already see and nothing that separates audit-eligible responses:
@@ -3142,7 +3154,8 @@ reach the provider, so neither a verdict nor a marker experiment reveals which
 requests were §5A probes.
 
 **Telemetry.** Counters `compute_integrity_trace_commitments_total{outcome}`
-(`root`, `unavailable`, `rejected`, `missing`, `duplicate_root`),
+(`root`, `unavailable`, `rejected`, `missing`, `duplicate_root`,
+`too_long`, `cap_released`),
 `compute_integrity_trace_unavailable_total{marker}`,
 `compute_integrity_trace_verdicts_total{verdict}` (the verdict class without
 the check), `compute_integrity_trace_failed_checks_total{check}`. Labels are
@@ -3225,6 +3238,12 @@ What these rates do not cover:
 - **Markers are partly self-declared.** A cheater can report `storage`,
   `prefix_cache` or `quantized_kv` for responses it cheated on. Those are
   counted per provider and visible (FR-32), not caught.
+- **Patched near-duplicate traces (C2 patched).** Caught only when the block-0
+  point lands on a patched position; check 7 records the inconsistency but
+  does not decide in the pilot.
+- **Held openings.** A provider that keeps its openings outstanding to the
+  deadline suppresses further challenges for itself; `cap_released` makes it
+  visible to operators, not caught.
 - **Repeated prompts.** A stored honest trace of an identical greedy request
   can be served again; its root repeats and is counted `duplicate_root`, and
   its output is the honest output.
@@ -3350,7 +3369,9 @@ of this section and its configuration, never an automatic step:
 1. **Lab:** this draft, the prototype behind the provider switch, and the
    round-3 measurements (sampling, long context, steering, prompt binding).
 2. **Observe on lab providers:** coordinator switch on for operators in
-   `lab_operators`, audit-eligible traffic only (FR-27), verdicts logged.
+   `lab_operators`, verdicts logged. With the operator's own Macs only, the
+   verified traffic is the runner accounts (FR-32); FR-20 requests are
+   `no_verifier` until a verifier of another operator joins.
 3. **Observe, wider:** more operators opt in; buyer traffic stays out until a
    later version settles FR-33 for it.
 4. **Enforce:** only through a later version that names its calibration
@@ -3560,11 +3581,11 @@ Before SPEC-036 can move toward LOCK:
    a naive reference implementation on unit tests, including trees whose leaf
    count is not a power of two.
 3. Under the continuous-batching scheduler with requests joining and leaving,
-   every committed leaf is attributed to its own request and position: for
-   each request the token-pair leaves match its own tokens, and its leaves
-   agree with the same request served alone within `tol_block` (L2 share per
-   position). Bit equality is not required; round 2 measured 1.1% to 3.0%
-   bit-identical values under a batch change.
+   every committed leaf is attributed to its own request and position: each
+   request's token-pair leaves equal its own tokens, and check 2 passes on
+   points drawn from the batched commitment. Bit equality with the request
+   served alone is not required (round 2: 1.1% to 3.0% bit-identical under a
+   batch change).
 4. The coordinator draws only after it has persisted an accepted commitment;
    draws are reproducible from root and nonce; a late, unsigned or mismatched
    commitment, or a false checkable marker, is rejected. Challenges fall at
@@ -3579,10 +3600,13 @@ Before SPEC-036 can move toward LOCK:
 6. Prompt-cache hits, native-MTP responses, quantized-KV responses and
    relay-blind or privacy-class requests produce the FR-27 marker and no
    stored residuals.
-7. No verdict changes an FR-23 state, routing, a SPEC-022 outcome or hold, a
+7. The provider status view carries only the FR-32 provider fields; no
+   verifier verdict reaches it. An FR-20 verification request never goes to
+   a verifier of the verified provider's operator.
+8. No verdict changes an FR-23 state, routing, a SPEC-022 outcome or hold, a
    SPEC-021 state, a receipt or a buyer response; logs and metrics carry no
    prompt, output or vector data.
-8. `docs/reports/trace-audit-prototype.md` reports decode and prefill overhead
+9. `docs/reports/trace-audit-prototype.md` reports decode and prefill overhead
    (capture on against off, batch 1 and concurrent), bytes stored per
    position, opening latency and size at positions 100, 1,000 and 4,000, and
    the honest pass rate, each from a result file, or says "not measured".
