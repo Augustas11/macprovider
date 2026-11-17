@@ -31,8 +31,13 @@ manifest files.
 **Store settings** (environment): `MACPROVIDER_TRACE_AUDIT_LAB_DIR` (default
 `~/Library/Caches/macprovider/trace-audit-lab`; refused if it lies inside the
 KV disk tier directory), `..._MAX_BYTES_PER_REQUEST` (default 2 GiB),
-`..._MAX_TOTAL_BYTES` (default 16 GiB; FR-30 says 8 GiB, to align),
-`..._RETENTION_SECONDS` (default 3600; FR-30 says 10 minutes, to align).
+`..._MAX_TOTAL_BYTES` (default 8 GiB, FR-30), `..._WINDOW_SECONDS` (default
+600, FR-30). A committed trace is deleted on release, after its opening, or
+when its window ends, 10 minutes after the commitment (a timer at commitment
+plus a sweep at every finalize). When a new write would pass the total cap,
+the store first deletes expired traces; if the cap is still exceeded, the
+request gets `storage` and serving continues. On start the store deletes
+every file in its directory.
 
 **Leaf, order, tree.** As FR-28: `"mp.trace.leaf.v1\0" || u32le kind ||
 u32le block || u32le position || payload`, leaf index `p * (L + 2) + j`,
@@ -177,10 +182,55 @@ MTP model served with its drafter (the GLM-5.3-Flash nextn head or a Qwen
 
 Quantized KV: the CB paged-KV path stores only 16-bit KV (`PagedKVDType` has
 `fp16` and `bf16`), so `quantized_kv` cannot occur on the captured path.
-`kv_bits` exists only on the serial route, which is not captured at all.
-**Open point for the spec:** serial-route requests of a pilot provider get
-neither a root nor a marker in this prototype, and no closed marker fits a
-serial-route request without quantized KV.
+`kv_bits` exists only on the serial route; a serial request whose iterator
+runs with `kvBits` or whose conversation cache the path quantizes is
+`quantized_kv`.
+
+## Serial route
+
+Serial requests commit like CB requests, through the same module swap.
+`ModelRuntime` creates a `TraceAuditLabSerialRequest` in each serial entry:
+`completeWithServedSnapshotMarked`, `streamPrepared`, and the draft-model
+speculative path `collectSpeculativeText`, which finds it through the
+request's `RequestTimeline`. The entry's `close()` finalizes it.
+
+The serial forwards run inside `TokenIterator` / `SpeculativeTokenIterator`
+(mlx-swift-lm), so the path cannot open and close each forward the way the
+CB backend does. Instead the request binds the threads that build its
+forwards:
+
+- the prefill thread, from before the local chunked prefill until the
+  iterator is built (its init runs the prefill and the first step);
+- the decode executor thread, for the whole decode loop.
+
+On a bound thread, the block-0 hook opens a one-row forward at the KV
+cache's `offset`, which is the committed length before the forward. A
+speculative trim rewinds that offset, so a rejected draft position is
+overwritten by the accepted one, and anything past the response is cut at
+finalize. The last block's down projection closes the forward.
+
+| Case | Result |
+|---|---|
+| A request the serial entry hands to the CB scheduler | Registered by the scheduler only. The serial request registers on its first `attach`. |
+| A reused conversation cache, or a recurrent/prompt-snapshot resume (prefill starts above 0) | `prefix_cache` |
+| `kvBits` on the iterator, or a quantized conversation cache | `quantized_kv` |
+| Vision (VLM model), DeepSeek V4 or another architecture | `uncalibrated` (the hook installs only on `Qwen2Model` / `LlamaModel`) |
+| Privacy class | `privacy_class` |
+| A speculative attempt that fails before output and falls back | The same request continues, and the fallback's forwards overwrite positions from 0. |
+| No response (error, cancel) | `close()` finalizes it as not completed (`discarded`) |
+
+The serial generate loop drops the stop token: mlx-swift-lm
+`runSynchronousGenerationLoop` breaks before appending it, and the
+speculative loop calls `discardGeneratedToken`. So on the serial route `n`
+counts the returned tokens, and the position whose logits chose the stop
+token is not committed. The CB route commits it.
+
+Lab-only change to the speculative path: when capture is on and the caller
+passed no main cache, the path creates one with
+`model.newCache(parameters:)` so the hook can read its offset.
+
+The measurement command drives the CB scheduler only. The serial route is
+covered by its code path but is not part of the measurement run.
 
 ## Measurement command
 
@@ -196,6 +246,11 @@ concurrency level, modes alternating off/on then on/off, 1024 prompt + 128
 generated tokens per request), then the verifier, and writes one JSON with
 the host facts. Residuals and openings are deleted at exit.
 
+The script prints the load average at start and refuses the timed part
+(exit 3) when the 1-minute value is above 4. The measure command checks
+the same bound again and records the load average before every cell
+(`load_average_by_mode`).
+
 ## Measurements
 
 | Item | Value |
@@ -206,6 +261,7 @@ the host facts. Residuals and openings are deleted at exit.
 | Prefill tok/s, 4 concurrent, off / on | not measured yet |
 | Decode tok/s, 8 concurrent, off / on | not measured yet |
 | Prefill tok/s, 8 concurrent, off / on | not measured yet |
+| Load average at start and per mode | not measured yet |
 | Bytes stored per position | not measured yet |
 | Root ready after response | not measured yet |
 | Opening latency and size, p = 100 | not measured yet |
@@ -233,5 +289,5 @@ the host facts. Residuals and openings are deleted at exit.
   opening `(block_points + 1) * N * hidden_size * 2` above 150 MiB) is a
   coordinator decision and is not built; at 7B and N = 4,096 the bound is
   about 88 MB, so every measured response qualifies.
-- Only the CB backend (`PagedKVSharedForwardBackend`) is instrumented; the
-  serial route, the DeepSeek V4 backend and shard groups are not.
+- The CB backend and the serial route are instrumented. DeepSeek V4 and shard
+  groups are not; they are not qwen2/llama, so they would be `uncalibrated`.

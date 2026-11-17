@@ -19,6 +19,10 @@
 #  2. trace-audit-lab-verify.py over the challenge openings (MLX float16).
 #  3. Writes OUT.json = {host, measure, verify}. Residual files and openings
 #     are deleted on exit (KEEP_TRACE_AUDIT_LAB=1 keeps them for debugging).
+#
+# Load: the script prints the load average at start and refuses to run the
+# timed part when the 1-minute value is above 4. The measure command records the load
+# average before every cell, per mode, and refuses its timed cells above 4.
 set -euo pipefail
 
 usage() { sed -n 4,9p "$0" >&2; exit 2; }
@@ -48,7 +52,14 @@ chmod 700 "$WORK"
 cleanup() { [ "${KEEP_TRACE_AUDIT_LAB:-0}" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 
+MAX_LOAD=4
 LOAD_START=$(sysctl -n vm.loadavg)
+echo "trace-audit-lab: load average at start: $LOAD_START" >&2
+ONE_MIN=$(echo "$LOAD_START" | tr -d '{}' | awk '{print $1}')
+if awk -v l="$ONE_MIN" -v m="$MAX_LOAD" 'BEGIN { exit !(l > m) }'; then
+  echo "trace-audit-lab: 1-minute load average $ONE_MIN is above $MAX_LOAD: timed part refused" >&2
+  exit 3
+fi
 MACPROVIDER_TRACE_AUDIT_LAB=1 \
 MACPROVIDER_TRACE_AUDIT_LAB_DIR="$WORK/store" \
   "$BIN" trace-audit-lab measure \
@@ -57,7 +68,7 @@ MACPROVIDER_TRACE_AUDIT_LAB_DIR="$WORK/store" \
     --openings-dir "$WORK/openings" \
     --concurrency 1,4,8 --rounds 4 \
     --prompt-tokens 1024 --decode-tokens 128 \
-    --long-prompt-tokens 4090 --points 50 \
+    --long-prompt-tokens 4090 --points 50 --max-load-average "$MAX_LOAD" \
     2> "$WORK/measure.log" || { tail -n 20 "$WORK/measure.log" >&2; exit 1; }
 
 set +e
@@ -79,5 +90,7 @@ doc = {"schema": "macprovider.trace-audit-lab.result.v1", "host": host, "model":
        "measure": json.load(open(f"{work}/measure.json")),
        "verify": json.load(open(f"{work}/verify.json")), "verify_exit_code": int(rc)}
 json.dump(doc, open(out, "w"), indent=1, sort_keys=True)
-print(json.dumps({"out": out, "verify": doc["verify"]["summary"]}))
+print(json.dumps({"out": out, "load_average_at_start": load.strip(),
+                  "load_average_by_mode": doc["measure"].get("load_average_by_mode"),
+                  "verify": doc["verify"]["summary"]}))
 PY

@@ -156,7 +156,7 @@ final class TraceAuditTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trace-audit-test-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return try TraceAuditStore(configuration: TraceAuditStoreConfiguration(
-            directory: dir, maxBytesPerRequest: maxBytesPerRequest, maxTotalBytes: 1 << 30, retentionSeconds: 3600))
+            directory: dir, maxBytesPerRequest: maxBytesPerRequest, maxTotalBytes: 1 << 30, windowSeconds: 600))
     }
 
     /// The residual every (request, position, slot) must end up with.
@@ -312,7 +312,25 @@ final class TraceAuditTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data([1, 2, 3]).write(to: dir.appendingPathComponent("old.resid"))
         _ = try TraceAuditStore(configuration: TraceAuditStoreConfiguration(
-            directory: dir, maxBytesPerRequest: 1, maxTotalBytes: 1, retentionSeconds: 1))
+            directory: dir, maxBytesPerRequest: 1, maxTotalBytes: 1, windowSeconds: 1))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
+    }
+
+    func testFR30DefaultsAndWindowEndDeletesTheTrace() async throws {
+        let defaults = try TraceAuditStoreConfiguration.fromEnvironment([:], kvDiskDirectory: "/tmp/kv")
+        XCTAssertEqual(defaults.maxTotalBytes, 8 << 30)
+        XCTAssertEqual(defaults.windowSeconds, 600)
+
+        let store = try tempStore()
+        store.register(requestID: "W", promptTokens: [1, 2])
+        forward(store, TraceAuditForwardRow.rows(requestIDs: ["W"], committedKVTokenCounts: [0], tokensPerRow: 2))
+        store.finalize(requestID: "W", generatedTokens: [5], completed: true)
+        let commitment = await store.awaitCommitment("W")
+        guard case .some(.root(_, _, _)) = commitment else { return XCTFail("no root: \(String(describing: commitment))") }
+        let resid = store.url(for: "W", suffix: "resid").path
+        store.purgeExpired(now: Date().addingTimeInterval(599))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: resid), "inside the window")
+        store.purgeExpired(now: Date().addingTimeInterval(601))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: resid), "window ended")
     }
 }

@@ -93,6 +93,14 @@ struct TraceAuditLabMeasureCommand: AsyncParsableCommand {
     var points: Int = 50
     @Option(help: "MLX freed-buffer cache limit in MiB.")
     var mlxCacheLimitMB: Int?
+    @Option(help: "Refuse the timed cells when the 1-minute load average is above this.")
+    var maxLoadAverage: Double = 4
+
+    /// 1-, 5- and 15-minute load averages (empty when unavailable).
+    static func loadAverages() -> [Double] {
+        var values = [Double](repeating: 0, count: 3)
+        return getloadavg(&values, 3) == 3 ? values : []
+    }
 
     struct Timing {
         var submitted = Date()
@@ -195,13 +203,21 @@ struct TraceAuditLabMeasureCommand: AsyncParsableCommand {
         try await setMode(false)
         _ = try await runCell(Array(prompts.prefix(1)), decode: 8, tag: "warm")
 
-        // 1. Overhead cells.
+        // 1. Overhead cells. A loaded Mac gives no timing.
+        let loadAtStart = Self.loadAverages()
+        FileHandle.standardError.write(Data("trace-audit-lab: load average at start \(loadAtStart)\n".utf8))
+        if let oneMinute = loadAtStart.first, oneMinute > maxLoadAverage {
+            throw ValidationError("load average \(oneMinute) is above \(maxLoadAverage): timed cells refused")
+        }
         var cells: [[String: Any]] = []
+        var loadByMode: [String: [[Double]]] = ["off": [], "on": []]
         var bytesPerPosition: [Double] = []
         for level in levels {
             for round in 0 ..< rounds {
                 for on in (round % 2 == 0 ? [false, true] : [true, false]) {
                     try await setMode(on)
+                    let load = Self.loadAverages()
+                    loadByMode[on ? "on" : "off", default: []].append(load)
                     let rows = try await runCell(Array(prompts.prefix(level)), decode: decodeTokens, tag: "c\(level)r\(round)\(on ? "on" : "off")")
                     let submitted = rows.map(\.2.submitted).min()!
                     let firsts = rows.compactMap(\.2.first)
@@ -211,7 +227,7 @@ struct TraceAuditLabMeasureCommand: AsyncParsableCommand {
                     let prefillTokens = rows.reduce(0) { $0 + $1.0.promptTokens.count }
                     let decodeTokensTotal = rows.reduce(0) { $0 + max(0, $1.1.generatedTokens.count - 1) }
                     var cell: [String: Any] = [
-                        "concurrency": level, "round": round, "capture": on,
+                        "concurrency": level, "round": round, "capture": on, "load_average_start": load,
                         "prefill_tok_s": Double(prefillTokens) / max(1e-9, firstMax.timeIntervalSince(submitted)),
                         "decode_tok_s": Double(decodeTokensTotal) / max(1e-9, doneMax.timeIntervalSince(firstMin)),
                         "ttft_s": firsts.map { $0.timeIntervalSince(submitted) },
@@ -331,6 +347,8 @@ struct TraceAuditLabMeasureCommand: AsyncParsableCommand {
             "model": model,
             "blocks": hookedBlocks,
             "prompt_tokens": promptTokens, "decode_tokens": decodeTokens, "rounds": rounds,
+            "load_average_at_start": loadAtStart,
+            "load_average_by_mode": loadByMode,
             "cells": cells,
             "bytes_per_position_measured": bytesPerPosition,
             "verification_set_commitments": verifyOutcomes,

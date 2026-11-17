@@ -388,21 +388,24 @@ public struct TraceAuditStoreConfiguration: Sendable, Equatable {
     public var directory: URL
     public var maxBytesPerRequest: Int
     public var maxTotalBytes: Int
-    /// Traces older than this are deleted at the next finalize (window end).
-    public var retentionSeconds: TimeInterval
+    /// FR-30 audit window: a committed trace is deleted this long after its
+    /// commitment (default 10 minutes), if release or its opening did not
+    /// delete it first.
+    public var windowSeconds: TimeInterval
 
-    public init(directory: URL, maxBytesPerRequest: Int, maxTotalBytes: Int, retentionSeconds: TimeInterval) {
+    public init(directory: URL, maxBytesPerRequest: Int, maxTotalBytes: Int, windowSeconds: TimeInterval) {
         self.directory = directory
         self.maxBytesPerRequest = maxBytesPerRequest
         self.maxTotalBytes = maxTotalBytes
-        self.retentionSeconds = retentionSeconds
+        self.windowSeconds = windowSeconds
     }
 
     public static let defaultDirectory = "~/Library/Caches/macprovider/trace-audit-lab"
 
     /// `MACPROVIDER_TRACE_AUDIT_LAB_DIR`, `..._MAX_BYTES_PER_REQUEST`,
-    /// `..._MAX_TOTAL_BYTES`, `..._RETENTION_SECONDS`. The directory must not
-    /// lie inside the KV disk tier directory.
+    /// `..._MAX_TOTAL_BYTES` (FR-30 default 8 GiB), `..._WINDOW_SECONDS`
+    /// (FR-30 default 600). The directory must not lie inside the KV disk
+    /// tier directory.
     public static func fromEnvironment(
         _ environment: [String: String] = ProcessInfo.processInfo.environment,
         kvDiskDirectory: String = KVDiskCacheConfig.defaultDirectory
@@ -419,8 +422,8 @@ public struct TraceAuditStoreConfiguration: Sendable, Equatable {
         return TraceAuditStoreConfiguration(
             directory: dir,
             maxBytesPerRequest: int("MACPROVIDER_TRACE_AUDIT_LAB_MAX_BYTES_PER_REQUEST", 2 << 30),
-            maxTotalBytes: int("MACPROVIDER_TRACE_AUDIT_LAB_MAX_TOTAL_BYTES", 16 << 30),
-            retentionSeconds: TimeInterval(int("MACPROVIDER_TRACE_AUDIT_LAB_RETENTION_SECONDS", 3600))
+            maxTotalBytes: int("MACPROVIDER_TRACE_AUDIT_LAB_MAX_TOTAL_BYTES", 8 << 30),
+            windowSeconds: TimeInterval(int("MACPROVIDER_TRACE_AUDIT_LAB_WINDOW_SECONDS", 600))
         )
     }
 }
@@ -471,6 +474,8 @@ public final class TraceAuditStore: @unchecked Sendable {
         let key: String
         let promptTokens: [Int]
         let createdAt: Date
+        /// When the root was resolved; the FR-30 window runs from here.
+        var committedAt: Date?
         var fd: Int32 = -1
         var blocks = 0
         var hidden = 0
@@ -580,6 +585,8 @@ public final class TraceAuditStore: @unchecked Sendable {
         let end = (startPosition + positionCount) * entry.stride
         if end > entry.bytesReserved {
             let grow = end - entry.bytesReserved
+            // FR-30: under pressure, expired traces go first.
+            if totalBytes + grow > configuration.maxTotalBytes { releaseExpiredLocked(now: Date()) }
             guard end <= configuration.maxBytesPerRequest,
                   totalBytes + grow <= configuration.maxTotalBytes else {
                 failLocked(entry, .storage)
@@ -697,7 +704,12 @@ public final class TraceAuditStore: @unchecked Sendable {
     /// Deletes a request's files (after its audit window or opening).
     public func release(_ requestID: String) {
         lock.lock(); defer { lock.unlock() }
-        guard let entry = entries.removeValue(forKey: requestID) else { return }
+        guard let entry = entries[requestID] else { return }
+        releaseLocked(entry)
+    }
+
+    private func releaseLocked(_ entry: Entry) {
+        entries[entry.requestID] = nil
         if entry.fd >= 0 { close(entry.fd); entry.fd = -1 }
         dropFilesLocked(entry)
         if case .pending = entry.commitment { resolveLocked(entry, .discarded) }
@@ -711,13 +723,20 @@ public final class TraceAuditStore: @unchecked Sendable {
         ids.forEach(release)
     }
 
+    /// Deletes every finalized trace whose window (from its commitment, or
+    /// from registration when it got no root) has ended.
     public func purgeExpired(now: Date = Date()) {
-        lock.lock()
-        let expired = entries.values.filter {
-            $0.finalized && now.timeIntervalSince($0.createdAt) > configuration.retentionSeconds
-        }.map(\.requestID)
-        lock.unlock()
-        expired.forEach(release)
+        lock.lock(); defer { lock.unlock() }
+        releaseExpiredLocked(now: now)
+    }
+
+    private func releaseExpiredLocked(now: Date) {
+        let expired = entries.values.filter { entry in
+            if case .pending = entry.commitment { return false }  // root still being built
+            return entry.finalized
+                && now.timeIntervalSince(entry.committedAt ?? entry.createdAt) >= configuration.windowSeconds
+        }
+        expired.forEach(releaseLocked)
     }
 
     /// Bytes of the residual file of a committed request (for measurement).
@@ -745,6 +764,13 @@ public final class TraceAuditStore: @unchecked Sendable {
 
     private func resolveLocked(_ entry: Entry, _ commitment: TraceAuditCommitment) {
         entry.commitment = commitment
+        if case .root = commitment {
+            entry.committedAt = Date()
+            // Window end deletes the trace even if nothing else touches the store.
+            rootQueue.asyncAfter(deadline: .now() + configuration.windowSeconds) { [weak self] in
+                self?.purgeExpired()
+            }
+        }
         let waiters = entry.waiters
         entry.waiters = []
         waiters.forEach { $0.resume(returning: commitment) }
