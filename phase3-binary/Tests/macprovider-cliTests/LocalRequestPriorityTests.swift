@@ -453,6 +453,17 @@ final class LocalRequestPriorityTests: XCTestCase {
         }
     }
 
+    func testLocalRequestWithoutInboundIDRunsUnderTheAuditID() {
+        let audit = UUID().uuidString
+        XCTAssertEqual(RouterHandler.effectiveRequestID(inbound: nil, audit: audit, origin: .local), audit)
+        XCTAssertFalse(RouterHandler.effectiveRequestID(inbound: nil, audit: audit, origin: .local)?.isEmpty ?? true)
+        // A network request without an id still has none; continuous batching refuses it.
+        XCTAssertNil(RouterHandler.effectiveRequestID(inbound: nil, audit: audit, origin: .network))
+        // An inbound id is preserved unchanged on both origins.
+        XCTAssertEqual(RouterHandler.effectiveRequestID(inbound: "req-1", audit: audit, origin: .local), "req-1")
+        XCTAssertEqual(RouterHandler.effectiveRequestID(inbound: "req-1", audit: audit, origin: .network), "req-1")
+    }
+
     func testOriginIsLocalOnlyWithTheExplicitLoopbackMarker() {
         func origin(_ headers: [(String, String)], loopback: Bool = true) -> RequestOrigin {
             RouterHandler.requestOrigin(

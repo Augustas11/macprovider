@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.64 (2026-11-16, member native-MTP admission after load and the pickup after a promotion)
+**Version:** 1.9.65 (2026-11-17, local requests without `X-Request-ID` run under a provider-generated id)
+
+**Change log v1.9.65 (2026-11-17, Related: #2420):** §SPEC-001-R011: a local
+request that carries no `X-Request-ID` runs under the provider-generated
+request id, so continuous batching serves it. A network request without one
+is unchanged, and an invalid `X-Request-ID` is still refused. No trust tier
+or attestation label changes.
 
 **Change log v1.9.64 (2026-11-16, Related: #2338):** §6.16 R019: a further
 member's native-MTP admission is resolved, when it loads, against the catalog
@@ -2817,7 +2823,7 @@ It MUST NOT produce a v0.4 settlement receipt, and it earns nothing. A
 SPEC-015 v0.3 provenance receipt on a local response is unchanged; it carries
 no coordinator settlement binding, cannot be settled, and is not billing,
 earnings or served-work evidence. Receipt-audit and KV-cache request log
-lines for local requests carry a `local:`-prefixed `request_id`. `GET /v1/status` MUST report local work only under a
+lines for local requests carry a `local:`-prefixed `request_id`. A local request without `X-Request-ID` runs under a provider-generated request id; a network request without one gets none. `GET /v1/status` MUST report local work only under a
 separate `local_usage` object with `billable:false`, `heartbeat_counted:false`,
 `priority:"customers_first"`, `requests_in_flight`, `requests_total`,
 `requests_completed`, `requests_failed`, `requests_preempted`,

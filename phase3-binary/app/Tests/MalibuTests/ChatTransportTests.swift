@@ -69,6 +69,14 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-MacProvider-Origin"), "local-app")
         XCTAssertNil(request.value(forHTTPHeaderField: "X-MacProvider-Settlement-Metadata"))
     }
+    func testCompletionRequestCarriesAFreshRequestID() throws {
+        let endpoint = try ChatEndpoint(port: 9042)
+        let first = LocalChatTransport.completionRequest(at: endpoint, body: Data("{}".utf8)).value(forHTTPHeaderField: "X-Request-ID")
+        let second = LocalChatTransport.completionRequest(at: endpoint, body: Data("{}".utf8)).value(forHTTPHeaderField: "X-Request-ID")
+        XCTAssertFalse(first?.isEmpty ?? true)
+        XCTAssertFalse(second?.isEmpty ?? true)
+        XCTAssertNotEqual(first, second)
+    }
     func testEndpointCannotBecomeRemoteOrInventDefaultPort() throws {
         XCTAssertEqual(try ChatEndpoint(port: 9042).url("/v1/capabilities").absoluteString,
                        "http://127.0.0.1:9042/v1/capabilities")
