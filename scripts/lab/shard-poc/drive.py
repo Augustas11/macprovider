@@ -6,7 +6,7 @@ OpenAI-compatible server, `concurrency` requests at once, `rounds` times per
 level, and writes JSON and a markdown table. Standard library only.
 
   python3 -I drive.py --url http://127.0.0.1:18190 --prompts prompts.json \
-      --levels 1,4,8 --max-tokens 128 --rounds 2 --label shard --out DIR
+      --levels 1,2,4 --max-tokens 128 --rounds 2 --label shard --out DIR
 """
 import argparse
 import http.client
@@ -104,7 +104,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--prompts", required=True)
-    ap.add_argument("--levels", default="1,4,8")
+    ap.add_argument("--levels", default="1,2,4")
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--label", default="run")
