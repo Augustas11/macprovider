@@ -15,12 +15,15 @@
 #  4. glm-parity of the same snapshot against both oracles (prefill chunk 2048, 256 steps);
 #  5. gates: first 16 top-1 exact and teacher-forced >= 240/256 on both prompts.
 #
-# The oracle loads the oQ checkpoint with mlx-lm's own Model and sanitize. Stock
-# mlx_lm.load cannot: the oQ config keys per-layer quantization by the mlx-vlm module
-# paths (`language_model.*`), and the checkpoint keeps the n-gram table's
-# `weight_scale`, which mlx-vlm drops once the table is in shards (fp8.py). So the
-# oracle reads each layer's bits and group size from its tensor shapes and drops that
-# one tensor; the model code is the reference's, unchanged.
+# The oracle (qwen4_oracle.py, shipped beside this script) loads the oQ checkpoint with
+# mlx-lm's own Model and sanitize. Stock mlx_lm.load cannot: its sanitize concatenates
+# each hyper-connection's block_inject_weight into input_mix_weight_down, and in this
+# mixed-precision build five of those pairs carry different bits (ORACLE_SPLIT lines);
+# the checkpoint also keeps the n-gram table's `weight_scale` (1.0). The oracle keeps a
+# mixed pair as two quantized matmuls, reads bits from tensor shapes and checks them
+# against the config (ORACLE_QUANT), and must pass the parity-grid sanity rule on short
+# greedy chat prompts before its logits count (ORACLE_SANE, else REFERENCE_SUSPECT).
+# The model code is the reference's, unchanged.
 #
 # Env: QWEN4_PATH (snapshot dir), QWEN4_REPO/QWEN4_REVISION (download source), FORK,
 # CONTEXTS (default 1024,8192), STEPS (256). Every failure prints `BLOCKER:`; the job ends
@@ -69,127 +72,14 @@ fi
 [ "$(ls "$QWEN4_PATH"/model-*.safetensors 2> /dev/null | wc -l | tr -d ' ')" = 21 ] || die "snapshot at $QWEN4_PATH is not 21 shards" 11
 
 # 2. Oracles, before the build so they never share memory with the CLI.
-cat > "$RES/qwen4_oracle.py" <<'PY'
-"""mlx-lm qwen4_exp greedy oracles (glm53_bench_vlm.py's prompts and .npz format)."""
-import glob, hashlib, importlib.metadata as md, json, os, sys, time
-import mlx.core as mx
-import mlx.nn as nn
-import numpy as np
-from mlx_lm.models import qwen4_exp
-from transformers import AutoTokenizer
-
-PREFILL_CHUNK, TOPK, ORACLE_STEPS = 2048, 16, 16
-
-
-def corpus_ids(tokenizer, n):
-    # Same text as scripts/lab/cb-studio/glm53_bench_vlm.py corpus_ids.
-    unit = (
-        "def fibonacci(n: int) -> int:\n"
-        "    a, b = 0, 1\n"
-        "    for _ in range(n):\n"
-        "        a, b = b, a + b\n"
-        "    return a\n\n"
-        "class Cache:\n"
-        "    def __init__(self, size):\n"
-        "        self.size = size\n"
-        "        self.store = {}\n\n"
-        "    def get(self, key, default=None):\n"
-        "        return self.store.get(key, default)\n\n"
-    )
-    ids, i = [], 0
-    while len(ids) < n:
-        ids.extend(tokenizer.encode(f"# block {i}\n" + unit, add_special_tokens=False))
-        i += 1
-    return ids[:n]
-
-
-def load(path):
-    config = json.load(open(os.path.join(path, "config.json")))
-    model = qwen4_exp.Model(qwen4_exp.ModelArgs.from_dict(config))
-    weights = {}
-    for f in sorted(glob.glob(os.path.join(path, "model*.safetensors"))):
-        weights.update(mx.load(f))
-    dropped = [k for k in weights if k.endswith(".ngram_embedding.weight_scale")]
-    for k in dropped:
-        del weights[k]
-    weights = model.sanitize(weights)
-
-    def predicate(p, m):
-        if f"{p}.scales" not in weights:
-            return False
-        in_dims = m.weight.shape[-1]
-        bits = weights[f"{p}.weight"].shape[-1] * 32 // in_dims
-        group = in_dims // weights[f"{p}.scales"].shape[-1]
-        return {"group_size": group, "bits": bits, "mode": "affine"}
-
-    nn.quantize(model, class_predicate=predicate)
-    model.load_weights(list(weights.items()), strict=True)
-    mx.eval(model.parameters())
-    return model, dropped
-
-
-def run(model, ids, decode):
-    cache = model.make_cache()
-    mx.synchronize()
-    mx.reset_peak_memory()
-    t0 = time.perf_counter()
-    for s in range(0, len(ids), PREFILL_CHUNK):
-        logits = model(mx.array([ids[s : s + PREFILL_CHUNK]]), cache=cache)[:, -1, :]
-        mx.eval(logits)
-    t1 = time.perf_counter()
-    greedy, tops = [], []
-    tok = mx.argmax(logits, axis=-1)
-    for step in range(decode):
-        t = int(tok.item())
-        greedy.append(t)
-        if step < ORACLE_STEPS:
-            row = logits[0].astype(mx.float32)
-            idx = mx.argsort(-row)[:TOPK]
-            tops.append((np.array(idx), np.array(row[idx])))
-        logits = model(mx.array([[t]]), cache=cache)[:, -1, :]
-        tok = mx.argmax(logits, axis=-1)
-        mx.eval(tok)
-    t2 = time.perf_counter()
-    return {
-        "prompt_tokens": len(ids), "decode_tokens": decode,
-        "prefill_tps": len(ids) / (t1 - t0), "decode_tps": decode / (t2 - t1),
-        "ttft_s": t1 - t0, "peak_memory_gb": mx.get_peak_memory() / 1e9,
-    }, greedy, tops
-
-
-def main():
-    path, out, contexts, decode = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-    os.makedirs(out, exist_ok=True)
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    mx.set_wired_limit(int(info["max_recommended_working_set_size"]))
-    t = time.perf_counter()
-    model, dropped = load(path)
-    print(f"ORACLE_LOAD s={time.perf_counter() - t:.1f} dropped={dropped}", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    run(model, corpus_ids(tokenizer, 256), 8)  # warm-up
-    results = []
-    for ctx in [int(x) for x in contexts.split(",")]:
-        ids = corpus_ids(tokenizer, ctx)
-        r, greedy, tops = run(model, ids, decode)
-        r["prompt_sha256"] = hashlib.sha256(np.array(ids, dtype=np.int32).tobytes()).hexdigest()
-        results.append(r)
-        np.savez(
-            os.path.join(out, f"oracle_{ctx}.npz"),
-            prompt=np.array(ids, dtype=np.int32), greedy=np.array(greedy, dtype=np.int32),
-            top_idx=np.stack([x[0] for x in tops]), top_logit=np.stack([x[1] for x in tops]),
-        )
-        print("ORACLE_CELL " + json.dumps(r), flush=True)
-    versions = {p: md.version(p) for p in ("mlx", "mlx-lm")}
-    json.dump({"versions": versions, "results": results}, open(os.path.join(out, "speed.json"), "w"), indent=2)
-    print("ORACLE_DONE " + json.dumps(versions), flush=True)
-
-
-main()
-PY
+cp "$JOB/ablit-perf/qwen4_oracle.py" "$RES/qwen4_oracle.py"  # the run record keeps the oracle it ran
 log "ORACLE start"
-"$VENV/bin/python" -I "$RES/qwen4_oracle.py" "$QWEN4_PATH" "$RES/oracles" "$CONTEXTS" "$STEPS" \
-  > "$RES/oracle.stdout" 2> "$RES/oracle.stderr" || die "oracle exit: $(tail -n 2 "$RES/oracle.stderr" | tr '\n' ' ')" 13
-grep -E '^ORACLE_' "$RES/oracle.stdout"
+"$VENV/bin/python" -I "$JOB/ablit-perf/qwen4_oracle.py" "$QWEN4_PATH" "$RES/oracles" "$CONTEXTS" "$STEPS" \
+  > "$RES/oracle.stdout" 2> "$RES/oracle.stderr"
+rc=$?
+grep -E '^(ORACLE_|REFERENCE_)' "$RES/oracle.stdout"
+[ "$rc" = 3 ] && die "oracle is degenerate, its logits are not a reference: $(grep '^REFERENCE_SUSPECT' "$RES/oracle.stdout" | cut -c1-300)" 13
+[ "$rc" = 0 ] || die "oracle exit $rc: $(tail -n 2 "$RES/oracle.stderr" | tr '\n' ' ')" 13
 for f in "$RES"/oracles/oracle_*.npz; do
   "$VENV/bin/python" -I "$JOB/cb-studio/glm53_oracle_json.py" "$f" || die "oracle json $f" 13
 done
