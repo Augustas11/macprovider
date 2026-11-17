@@ -1,9 +1,22 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.3.6-draft
-**Date:** 2026-11-16
+**Status:** v0.4.0-draft
+**Date:** 2026-11-17
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.4.0 (2026-11-17, Related: #2419 — trace audit pilot):**
+Adds §5B (FR-27 through FR-34, SPEC-036-R027 to R034), a lab-only,
+observe-only, default-off trace audit. The provider commits a signed Merkle
+root over its residual stream per response (`trace_commitment_v1`, a
+companion artifact keyed to the attempt and its receipt; the SPEC-015 receipt
+is unchanged). After the root is held, the coordinator audits a share of
+audit-eligible responses (verification requests and operator runner
+accounts only), the provider opens drawn blocks, and a §5A-selected verifier
+holding the weights recomputes them against a versioned calibration record.
+Verdicts are logged and shown; they change no routing, measurement, hold,
+reward or receipt. Adds §6.2 and §7B. Basis: `Augustas11/keryx-watch`
+`research/RESULTS-v2.md`.
 
 **Change log v0.3.6 (2026-11-16, Related: #2338 — keys on the resolved catalog row):**
 A verification key, its due time, its scorer pool, its tolerance key, the
@@ -2762,6 +2775,382 @@ provider, so it would be counted in buyer-serving capacity.
 Integrity. FR-24 applies to reference scorers without exception. A reference
 scorer that is scorer-excluded is never chosen until an operator clears it.
 
+## 5B. Trace audit (pilot, v0.4)
+
+§5A asks whether the claimed model is likely to have written an answer. It
+cannot see whether the provider ran the claimed weights on this request. §5B
+adds that check as a **lab pilot**: for each response the provider commits to
+its residual stream before it knows whether the response is audited; for an
+audited response a verifier that holds the weights recomputes a few drawn
+transformer blocks from the committed inputs and compares them with the
+committed outputs.
+
+§5B is **draft, observe-only and default-off**. Its verdicts are logged and
+shown to operators and to the provider. They never change routing, a
+measurement of §5A, settlement, rewards or a receipt. The coordinator switch
+`compute_integrity.trace_audit.enabled` (default `false`) and the provider
+switch `trace_audit.lab_enabled` (default `false`, environment
+`MACPROVIDER_TRACE_AUDIT_LAB=1`) must both be on for any part of §5B to run.
+With either off, no code path changes.
+
+Basis: round-2 measurements on MLX 0.32.4 / mlx-lm 0.32.2, float16, Apple M5
+and M3, Qwen2.5-0.5B/7B and Llama-3.2-1B at 4 bits
+(`Augustas11/keryx-watch` `research/RESULTS-v2.md`; numbers quoted in this
+section come from that file unless marked otherwise). Two findings shape the
+design. Bit-exact replay is not usable: a request served inside a batch of four
+and replayed alone reproduces 1.1% to 3.0% of the committed values, and
+continuous batching (SPEC-038) changes the batch during a request. Storing the
+residual stream and recomputing only the drawn block works: the honest worst
+error is 8.0e-3 of the block's update, and no cheat measured comes closer than
+4.2e-2.
+
+### FR-27 Pilot scope and switches (SPEC-036-R027)
+
+A provider in the pilot is a provider session whose operator key (FR-19) is
+listed in `compute_integrity.trace_audit.lab_operators` and that advertised
+`tier2_capabilities.trace_commit_v1: true`. The coordinator MUST NOT request,
+accept or audit a commitment from any other session.
+
+Audited traffic in the pilot is limited to requests whose prompt the
+coordinator already shares with a scorer under §5A: FR-20 verification
+requests and requests of operator-owned runner accounts listed in
+`compute_integrity.trace_audit.audit_accounts`. Buyer requests are committed
+(the provider cannot tell them apart, FR-20) but are never drawn for audit in
+the pilot, because an opening discloses prompt content to the verifier
+(FR-33). Auditing buyer traffic requires a later version of this section.
+
+Out of scope in the pilot, with the closed marker the provider reports
+instead of a root (FR-28):
+
+| Case | Marker | Why |
+|---|---|---|
+| relay-blind request (SPEC-041) or privacy-class binding (SPEC-049) | `privacy_class` | residuals of a protected prompt must not be stored or opened |
+| prefix-cache hit whose cached positions have no stored residuals (SPEC-024) | `prefix_cache` | the cached positions were not computed in this request |
+| native-MTP serving (SPEC-048) | `native_mtp` | capture of draft and verify forwards is not yet defined (FR-34) |
+| quantized KV cache on the serving path | `quantized_kv` | the recompute tolerance is calibrated for float16 K/V only |
+| storage cap reached | `storage` | FR-30 |
+
+A provider MAY keep the residuals of a cached prefix next to its cache entry
+and then commits the prefix positions as ordinary leaves. A provider that
+reports markers for a large share of its responses is visible in FR-32
+telemetry; the pilot does not treat a marker as a failure.
+
+### FR-28 Commitment (SPEC-036-R028)
+
+For every response in scope, the provider commits to one Merkle root over its
+residual stream.
+
+**Positions.** Position `p` runs over every token the model processed for the
+response: all prompt positions (after the chat template, SPEC-018/019
+formatting included) and every generated position, in order, starting at 0.
+Positions are request-relative and do not depend on batch rows, chunked
+prefill or the scheduler.
+
+**Leaves.** Each leaf is the byte string
+
+```text
+"mp.trace.leaf.v1\0" || u32le kind || u32le block || u32le position || payload
+```
+
+| kind | block | payload |
+|---|---|---|
+| 0, block input | `l` in `0 .. L-1` | input residual of block `l` at the position: `hidden_size` float16 values, little-endian, exactly the values the serving forward used |
+| 1, final residual | 0 | output of block `L-1`, before the final norm, same encoding |
+| 2, token pair | 0 | `u32le input_token_id || u32le served_token_id` |
+
+`served_token_id` is `0xFFFFFFFF` at every prompt position except the last;
+at the last prompt position and at each generated position it is the token
+emitted from that position's logits. The block-0 input is the embedding output
+(after any model-specific embedding scale).
+
+**Order and tree.** Leaves are ordered by position; within a position: block
+inputs 0 to `L-1`, the final residual, the token pair. The tree is the
+RFC 6962 Merkle tree over that list: leaf hash `SHA-256(0x00 || leaf)`, node
+hash `SHA-256(0x01 || left || right)`, and a list of `n > 1` leaves splits at
+the largest power of two strictly less than `n`. Inclusion proofs and the
+multi-leaf proofs of FR-31 follow RFC 6962 §2.1.
+
+SHA-256 because the provider already signs receipts over SHA-256 digests
+(SPEC-015), the Go coordinator verifies it with the standard library, Apple
+Silicon hashes it in hardware through CryptoKit, and hashing the residual stream
+with it during decode had no measurable cost (-4% to +4% against no capture on
+both Macs; Python hook).
+
+**Wire.** After the last frame of the response the provider sends, on its
+coordinator WebSocket session:
+
+```json
+{"type": "trace_commitment_v1", "version": 1,
+ "request_id": "...", "attempt_id": "...", "provider_id": "...",
+ "model_id": "...", "weights_manifest_sha256": "<64 hex>",
+ "receipt_sha256": "<64 hex>",
+ "root": "<64 hex>" | null, "unavailable": null | "<marker>",
+ "positions": 0, "prompt_positions": 0, "blocks": 0, "hidden_size": 0,
+ "leaf_count": 0, "calibration_class": "<hardware_runtime_class>",
+ "committed_at": "<RFC 3339>",
+ "signature": {"alg": "Ed25519", "value": "<base64url>"}}
+```
+
+`receipt_sha256` is the SHA-256 of the SPEC-015 receipt bytes the provider
+signed for this attempt, so the commitment is the separate audit artifact
+keyed to the request attempt and its receipt that the v0.1.1 decision
+reserves. The signature is the provider's SPEC-015 receipt key over
+`"macprovider.trace-commitment.v1\n"` plus the RFC 8785 canonical JSON of the
+frame without `signature`. **The SPEC-015 receipt, `usage` and the buyer
+response are unchanged.** Exactly one of `root` and `unavailable` is set.
+
+The coordinator rejects a commitment that arrives more than 10 seconds after
+the response completed, that does not match the attempt's session, model,
+manifest or receipt, whose signature does not verify, or whose
+`leaf_count` is not `positions * (blocks + 2)`. A response in scope with no
+accepted commitment counts as `commitment_missing` (FR-32).
+
+### FR-29 Audit decision and draws (SPEC-036-R029)
+
+1. **Root first.** The coordinator decides whether to audit only after it has
+   persisted an accepted commitment. The decision uses the coordinator's
+   CSPRNG and an audit rate `compute_integrity.trace_audit.rate` (default
+   0.25) over the audit-eligible requests of FR-27. It never depends on
+   anything the provider sent.
+2. **Decision message.** Within 30 seconds of accepting the commitment the
+   coordinator sends `trace_audit_decision_v1` with `request_id`,
+   `attempt_id` and either `release: true` (the provider deletes the stored
+   residuals) or a challenge carrying `nonce_1` (32 random bytes). A provider
+   that hears nothing for 60 seconds MAY release.
+3. **Draws from nonce 1.** Draw `i` is
+   `SHA-256("mp.trace.draw.v1\0" || root || nonce_1 || u32le i)`, read as a
+   big-endian integer and reduced by rejection sampling (no modulo bias) into
+   the draw's range. The provider can verify every draw.
+   - `block_points` (default 2, at most 5) block points `(l, p)` uniform over
+     all blocks and all positions, prompt included.
+   - `output_points` (default 2, at most 5) output points uniform over
+     generated positions only. Greedy requests only (FR-31 check 6).
+   - Every prompt position is bound (FR-31 check 5); it is not drawn.
+4. **Opening deadline.** The provider answers with `trace_opening_v1`
+   (FR-31) within `compute_integrity.trace_audit.open_deadline` (default
+   120 seconds). A late, missing or malformed opening is the verdict
+   `fail:opening_missing`.
+5. **Nonce 2.** After the coordinator holds the opening, it sends `nonce_2`
+   to the verifier with the opening. The verifier derives the element draws
+   inside the opened internal leaves from
+   `SHA-256("mp.trace.elem.v1\0" || root || nonce_2 || u32le i)` the same
+   way. The provider has already sent its internal leaves when `nonce_2` is
+   drawn, so it cannot fit them to the draws.
+
+### FR-30 Provider storage and audit window (SPEC-036-R030)
+
+The provider stores the committed residual stream of each response until it
+is released (FR-29 step 2), its verdict is recorded, or the audit window
+`trace_audit.window` (default 10 minutes after the commitment) ends,
+whichever comes first.
+
+Size per position is `(L + 1) * hidden_size * 2` bytes plus 8: 208 KB at 7B
+(Qwen2.5-7B: `L = 28`, `hidden_size = 3584`), 208 MB per 1,000 positions,
+prompt included. An 8,000-token prompt with a 1,000-token answer is 1.87 GB.
+
+- Storage is local, not in the KV disk tier, file mode 0600, and deleted at
+  release or window end. Residuals and their files are never logged, never
+  uploaded except inside an opening, and never kept after the window.
+- `trace_audit.storage_bytes` caps the total (default 8 GiB). Under pressure
+  the provider first deletes released and expired responses. If a new
+  response would still exceed the cap it reports `unavailable: "storage"` for
+  that response and keeps serving. Serving never waits on storage.
+- A provider that sent a root and later cannot open it gets
+  `fail:opening_missing`; the root binds it to have kept what it committed.
+
+### FR-31 Opening and checks (SPEC-036-R031)
+
+`trace_opening_v1` carries, as RFC 6962 inclusion or multi-leaf proofs against
+the root:
+
+1. for each block point `(l, p)`: the committed block-`l` inputs at positions
+   `0 .. p` (the verifier recomputes K and V from them), the committed output
+   at `p` (block `l+1` input, or the final residual when `l = L-1`), and the
+   provider's recomputed internal leaves of block `l` at `p` (both norm
+   outputs, the q, k, v, o, gate, up and down projections, the attention
+   output, the mid residual and the GLU output);
+2. for each output point `p`: the final residual and token-pair leaves at
+   `p`;
+3. the block-0 input and token-pair leaves of every prompt position.
+
+The verifier checks, in float32 or float64 from the committed float16 values
+and its own copy of the weights:
+
+| # | Check | Pass when |
+|---|---|---|
+| 1 | Merkle proofs | every opened leaf is in the tree under `root` |
+| 2 | Block recompute | `‖recomputed − committed_next‖ / ‖recomputed − committed_input‖ ≤ tol_block` (L2 over the hidden vector) |
+| 3 | Internal leaves at `nonce_2` elements | each element within the link tolerance of its kind against the verifier's own recompute |
+| 4 | Token ids | the token-pair input ids equal the request's tokens as the verifier builds them from the request body (FR-21 rule) |
+| 5 | Prompt binding | every prompt position's block-0 input equals the embedding row of its token within `tol_embedding` |
+| 6 | Output binding | at each output point, `argmax(lm_head(final_norm(final residual)))` equals the served token |
+
+Check 6 runs for greedy requests (`temperature: 0`). For a request with
+temperature it is skipped and the verdict records `output_binding: skipped`;
+binding sampled output needs a committed sampler seed and is a non-goal of the
+pilot (§9). Checks 1 to 5 run on every audited response.
+
+**Calibration record.** Tolerances live in a closed, versioned record keyed
+like FR-8 by `(model_id, cohort hash, hardware_runtime_class)`:
+
+```json
+{"type": "trace_audit_calibration_v1", "calibration_id": "trace-cal-r2-2026-11-17",
+ "model_id": "*", "cohort_hash": "*", "hardware_runtime_class": "*",
+ "tol_block": 2e-2, "tol_matmul": 2e-3, "tol_logits": 2e-3,
+ "tol_embedding": 1e-3, "tol_prefix_norm": 3e-3, "tol_norm": 5e-3,
+ "tol_glu": 5e-3, "tol_residual_add": 1e-3, "tol_attention": 5e-2,
+ "source": "keryx-watch research/RESULTS-v2.md"}
+```
+
+The pilot ships this one wildcard record. Its values are round 2's honest
+worst cases on two chips with a margin:
+
+| Check | Worst honest error (M5 or M3) | Tolerance |
+|---|---|---|
+| Matmul, normaliser `Σ|w·x| + |b|` | 7.0e-4 | 2e-3 |
+| Logits matmul | 2.9e-4 | 2e-3 |
+| Embedding row | 4.9e-4 | 1e-3 |
+| Prefix norm | 1.3e-3 | 3e-3 |
+| Norm link | 2.0e-3 (M3) | 5e-3 |
+| GLU link | 2.2e-3 | 5e-3 |
+| Residual add | 4.9e-4 | 1e-3 |
+| Attention head | 2.6e-2 | 5e-2 |
+| Block recompute, L2 share of the update | 8.0e-3 (M3) | 2e-2 |
+| Output binding | exact | exact |
+
+Every verdict records the `calibration_id` it used. A new record never
+changes an earlier verdict.
+
+### FR-32 Verifier, verdicts and visibility (SPEC-036-R032)
+
+**Verifier selection.** The coordinator picks one verifier per audit with the
+FR-21 rules 1 to 6, reading "scorer candidate" as a session that advertised
+`tier2_capabilities.trace_verify_v1: true`: same served `model_id` and cohort
+hash, another operator, not `suspect`/`failed`/`recovering`, not
+scorer-excluded (FR-24), connected, and no other verification job
+outstanding. Peers first; FR-26 reference scorers fill only when no peer
+operator is eligible. With no verifier the verdict is
+`inconclusive:no_verifier`.
+
+**Wire.** The coordinator sends `trace_verify_request_v1` (request body,
+served output, commitment, opening, `nonce_2`, calibration record) and
+receives `trace_verify_result_v1` with a verdict and per-check worst values.
+The provider never learns who verified it. The verifier MUST NOT retain or log
+the body, output or opened vectors (FR-21 rule). A verification job holds one
+serial inference permit, like an FR-21 scoring job.
+
+**Verdicts.** Closed set: `pass`, `fail:<check>` with `<check>` in
+`merkle`, `block`, `internal`, `token_ids`, `prompt_binding`,
+`output_binding`, `opening_missing`, and `inconclusive:<reason>` with
+`<reason>` in `no_verifier`, `verifier_timeout`, `verifier_invalid`. A `fail`
+from one verifier is re-verified by a second verifier of another operator;
+the verdict is `fail_confirmed:<check>` only when both fail it, otherwise
+`split`, which counts toward FR-24 split answers of both verifiers.
+
+**Visibility.** The provider status `GET /v1/provider/compute-integrity` and
+the operator view `GET /admin/compute-integrity/<provider_id>` gain a
+`trace_audit` section: counts per verdict and per marker over the last 7 days
+and the last 20 verdicts (time, model, verdict, calibration id), with no
+prompt, output or vector data.
+
+**Telemetry.** Counters `compute_integrity_trace_commitments_total{outcome}`
+(`root`, `unavailable`, `rejected`, `missing`),
+`compute_integrity_trace_unavailable_total{marker}`,
+`compute_integrity_trace_verdicts_total{verdict}` (the verdict class without
+the check), `compute_integrity_trace_failed_checks_total{check}`. Labels are
+closed sets; provider ids and model ids never appear as labels.
+
+**Consequences.** None in the pilot. A verdict MUST NOT change an FR-23 key
+state, routing, a SPEC-022 outcome or hold, a SPEC-021 reward state, a
+receipt, or the buyer response. The enforce path that a later version may
+enable is named here and is not enabled: a `fail_confirmed` verdict would be
+an out-of-band FR-23 measurement for its key, whose `failed` state already
+opens the SPEC-022 R-16 earnings hold and reports `compute_integrity_blocked`
+to SPEC-021.
+
+### FR-33 Privacy (SPEC-036-R033)
+
+An opening discloses prompt content. Block-0 inputs are embedding rows, which
+identify the prompt tokens exactly, and later residuals can be inverted to
+tokens. The verifier also receives the request body and output, as an FR-21
+scorer does. Therefore:
+
+- only the audit-eligible traffic of FR-27 is opened, whose prompts are
+  already shared with scorers under §5A or belong to the operator;
+- relay-blind (SPEC-041) and privacy-class (SPEC-049) requests are never
+  captured, stored, committed or opened (`unavailable: "privacy_class"`);
+- residuals at rest on the provider follow FR-30; the provider already holds
+  the plaintext of the request, so storage adds no new party;
+- the coordinator relays openings and does not persist opened vectors after
+  the verdict.
+
+### FR-34 Serving-path rules (SPEC-036-R034)
+
+The committed values are the values the serving forward produced, in the
+shape it actually ran:
+
+- **Continuous batching (SPEC-038).** Each batch row maps to one request and
+  its request-relative position, including when requests join, leave or are
+  chunk-prefilled between steps. A leaf is never attributed to another
+  request's row.
+- **Prefix cache (SPEC-024).** A cached prefix is committed from residuals
+  stored with the cache entry, or the response is `prefix_cache` (FR-27).
+- **Native MTP (SPEC-048).** Until the prototype report
+  (`docs/reports/trace-audit-prototype.md`) defines capture of the accepted
+  positions from the target model's verify forward, native-MTP responses are
+  `native_mtp`. Rejected draft positions are never committed.
+- **Quantized KV cache.** Responses served with a quantized KV cache are
+  `quantized_kv` until a calibration record covers them.
+
+### Threat model of §5B
+
+Catch rates are round-2 values per drawn point on Qwen 0.5B and Llama 1B
+(cheat scoring did not run at 7B), and per audited response at the default 2
+block points and 2 output points, `1 − (1 − share)^n`.
+
+| Cheat | Per point | Per audited response | Caught by |
+|---|---|---|---|
+| A1, other weights of the same shape run the request | 100% | 100% | matmuls, norms, embedding, block recompute |
+| A1, 8-bit weights claimed as 4-bit | 100% (full chain); block recompute alone: every vector ≥ 4.2e-2 | 100% | block recompute |
+| A2, another model writes the answer, real model teacher-forced over it (greedy) | 38% to 41% of generated positions (other family); 16% to 22% (8-bit) | 61% to 65%; 30% to 40% | output binding only |
+| B, every other block skipped | 50% | 75% | block recompute |
+| B, one block of 28 skipped | 3.6% | about 7% | block recompute |
+| C1, true matmul products of shuffled inputs | 100% | 100% | links, block recompute |
+| C2, honest trace of a near-duplicate prompt with its own answer | drawn points: 2.6% to 2.8% | all-prompt binding: every response whose prompt differs in a token (not measured) | prompt binding |
+
+Not caught, or not measured:
+
+- A2 on requests with temperature: output binding is skipped (FR-31).
+- A cheater who steers each block's output inside `tol_block` on purpose to
+  change tokens: not measured; round 3 measures it.
+- A single skipped block: about 7% per audited response, about 2% per
+  response at a 25% audit rate. Deterrence comes from many responses, not one.
+- A2 is not free for the cheater: the root precedes the draw, so it runs a
+  full forward pass of the real model for every response. §5A measures the
+  same cheat statistically; the two are complements.
+- Anything on a model, chip or runtime outside round 2 (three models, 72 to 78
+  positions, M5 and M3, Python mlx-lm): the mlx-swift serving path, long
+  contexts and a third chip are measured by the prototype and round 3 before
+  any enforce proposal.
+
+### §5B evidence
+
+All in `Augustas11/keryx-watch`, `research/`:
+
+- `RESULTS-v2.md`: the write-up quoted in §5B.
+- `Apple_M5.v2.q1.<model>.json`, `Apple_M3.v2.q1.<model>.json`: honest error
+  per check (FR-31 calibration table).
+- `Apple_M5.v2.cheats.<model>.json`, `eps.v2.json`: cheat catch rates
+  (threat model).
+- `Apple_M5.v2.q2.<model>.json`, `Apple_M3.v2.q2.<model>.json`: hashing cost
+  and bytes per position (FR-28, FR-30).
+- `Apple_M5.v2.q3.{replay,residual}.<model>.json` and the M3 equivalents:
+  replay reproducibility and the block-recompute error (FR-31 check 2).
+
+Round 3 (`RESULTS-v3.md`) and the prototype report
+(`docs/reports/trace-audit-prototype.md`) add the mlx-swift, sampling, long
+context and steering measurements.
+
 ## 6. Migration
 
 1. **Draft:** Land SPEC-036 and research memo. No code or existing spec edits.
@@ -2847,6 +3236,21 @@ set (FR-5/FR-17), and the disclosure surfaces (FR-15). Absent that ratification 
 key remains observe/warn-only. This keeps v0.1 lockable as a normative artifact while
 being honest that its money-affecting mode turns on only when supply and validation
 exist.
+
+### 6.2 §5B trace audit migration
+
+§5B does not use the §6 ladder above. It moves in four stages, each a change
+of this section and its configuration, never an automatic step:
+
+1. **Lab:** this draft, the prototype behind the provider switch, and the
+   round-3 measurements (sampling, long context, steering, prompt binding).
+2. **Observe on lab providers:** coordinator switch on for operators in
+   `lab_operators`, audit-eligible traffic only (FR-27), verdicts logged.
+3. **Observe, wider:** more operators opt in; buyer traffic stays out until a
+   later version settles FR-33 for it.
+4. **Enforce:** only through a later version that names its calibration
+   evidence per `hardware_runtime_class` and wires `fail_confirmed` into
+   FR-23 (FR-32). Nothing in this version reaches it.
 
 ## 7. Acceptance Criteria
 
@@ -3042,6 +3446,34 @@ Before SPEC-036 can move toward LOCK:
    an unconfigured scorer-only session is never chosen. A scorer-only session
    is never routable, never verified, and refuses buyer requests (FR-26).
 
+## 7B. Acceptance Criteria for §5B (pilot)
+
+1. With either switch of FR-27 off, the provider builds no leaf, stores
+   nothing and sends no frame, and the coordinator sends no §5B frame.
+2. Leaf encoding, the RFC 6962 tree and inclusion and multi-leaf proofs match
+   a naive reference implementation on unit tests, including trees whose leaf
+   count is not a power of two.
+3. Under the continuous-batching scheduler with requests joining and leaving,
+   each request's root equals the root of the same request's residual stream
+   captured alone (same leaves, same order); no leaf of one request lands in
+   another's tree.
+4. The coordinator draws only after it has persisted an accepted commitment;
+   draws are reproducible from root and nonce; a late, unsigned or mismatched
+   commitment is rejected.
+5. On a 7B 4-bit model on the mlx-swift serving path, honest audited responses
+   pass every FR-31 check at the calibration record's tolerances, and a block
+   recomputed with the 8-bit sibling's weights fails check 2.
+6. Prompt-cache hits, native-MTP responses, quantized-KV responses and
+   relay-blind or privacy-class requests produce the FR-27 marker and no
+   stored residuals.
+7. No verdict changes an FR-23 state, routing, a SPEC-022 outcome or hold, a
+   SPEC-021 state, a receipt or a buyer response; logs and metrics carry no
+   prompt, output or vector data.
+8. `docs/reports/trace-audit-prototype.md` reports decode and prefill overhead
+   (capture on against off, batch 1 and concurrent), bytes stored per
+   position, opening latency and size at positions 100, 1,000 and 4,000, and
+   the honest pass rate, each from a result file, or says "not measured".
+
 ## 8. Resolved v0.1 Decisions
 
 The five drafting open questions are resolved for v0.1 as follows. Each item
@@ -3114,3 +3546,6 @@ default holds unless maintainers record a stricter value in the LOCK PR or
 - Changing buyer inference, usage, receipt, or settlement request/response schema; additive buyer catalog disclosure fields remain owned by SPEC-006.
 - Changing SPEC-015 v0.4 receipt shape.
 - Changing SPEC-022 outcome enum in v0.1.
+- (§5B) Binding sampled output to a committed sampler seed, auditing buyer
+  traffic, a verifier that does not hold the weights, and any money-path
+  effect of a trace-audit verdict. Each needs a later version.

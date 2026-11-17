@@ -44,7 +44,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | draft | pending | conformant: 1, pending: 3 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
-| SPEC-036 | Compute-Integrity Receipt Companion | draft | complete | pending: 26 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
+| SPEC-036 | Compute-Integrity Receipt Companion | draft | complete | pending: 34 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | draft | complete | pending: 16 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
 | SPEC-038 | Continuous batching for concurrent provider inference | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
