@@ -30,7 +30,7 @@ The operator sends you the head Mac's Tailscale address (it starts with `100.`).
 ## The one command
 
 ```bash
-git clone https://github.com/Augustas11/macprovider.git
+git clone -b lab/2417-cross-owner-shard-poc https://github.com/Augustas11/macprovider.git
 bash macprovider/scripts/lab/shard-poc/member.sh --peer <head address>
 ```
 
@@ -40,7 +40,7 @@ Keep the Terminal window open until the operator says the test is done.
 
 1. Checks of your Mac (chip, macOS, memory, disk, Tailscale address).
 2. A download of the public `macprovider-cli` release from GitHub (about
-   115 MB). The script checks its signature and checksum the same way the
+   116 MB). The script checks its signature and checksum the same way the
    public installer does.
 3. A download of the test model, `mlx-community/Llama-3.2-3B-Instruct-4bit`
    from HuggingFace (1.8 GB). The script checks it against the signed catalog
@@ -70,8 +70,8 @@ stops, a copy with your Tailscale addresses and home folder path removed:
 
 ## What is shared and what is not
 
-- Your Mac only sees the fixed test prompts in `prompts.json` in this folder.
-  No other prompts are sent.
+- Your Mac only sees fixed prompts: the test prompts in `prompts.json` in this
+  folder and one short startup probe built into the CLI. No other prompts are sent.
 - Your Mac computes on the model's hidden states for those prompts. Someone who
   runs the member half can reconstruct the prompts from those hidden states.
   That is why only fixed, public test prompts are used.
