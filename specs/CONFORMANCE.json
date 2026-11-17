@@ -1563,6 +1563,7 @@
         "SPEC-022",
         "SPEC-023",
         "SPEC-027",
+        "SPEC-028",
         "SPEC-032",
         "SPEC-033",
         "SPEC-036",
@@ -1572,6 +1573,7 @@
         "SPEC-043",
         "SPEC-044",
         "SPEC-047",
+        "SPEC-048",
         "SPEC-049"
       ],
       "implementation_status": "partial",
@@ -15687,6 +15689,51 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
         "rationale": "SPEC-051 v0.2.0 (#2084) Pool disclosure of multi-Mac serving. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R031",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.3.0 (#2084) Decode before prefill at the head. Draft requirement with no implementation yet; it stays pending until the measure-first number it names is taken, it is implemented and tested, and its verification run shows the group's output tokens per second and TTFT against the same group without it, with identical output tokens."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R032",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.3.0 (#2084) Speculative decoding through the pipeline. Draft requirement with no implementation yet; it stays pending until the measure-first number it names is taken, it is implemented and tested, and its verification run shows the group's output tokens per second and TTFT against the same group without it, with identical output tokens."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R033",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.3.0 (#2084) One batch frame per batched step on each link. Draft requirement with no implementation yet; it stays pending until the measure-first number it names is taken, it is implemented and tested, and its verification run shows the group's output tokens per second and TTFT against the same group without it, with identical output tokens."
       }
     },
     {
