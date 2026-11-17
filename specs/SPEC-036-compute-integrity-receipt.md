@@ -2862,8 +2862,11 @@ root over its residual stream, or reports a marker.
 **Positions.** Position `p` runs over every token the model processed for the
 response, starting at 0: all prompt positions (after the chat template and
 SPEC-018/019 formatting), then one position per emitted token that was fed
-back. The last emitted token (an end-of-sequence token included) is never fed
-back, so a response with `n` emitted tokens has
+back. An emitted token is a token delivered in the response; a stop or
+end-of-sequence token that ends generation and is not delivered is not
+emitted, and the position whose logits chose it is not committed. The last
+emitted token is committed as the served token of its emitting position and
+its own position is not, so a response with `n` emitted tokens has
 `N = prompt_positions + n − 1` positions, and the `n` emitting positions are
 `prompt_positions − 1 .. N − 1`. Positions are request-relative and do not
 depend on batch rows, chunked prefill or the scheduler.
