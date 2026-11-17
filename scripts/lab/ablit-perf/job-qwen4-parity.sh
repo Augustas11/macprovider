@@ -54,7 +54,9 @@ log "JOB_START qwen4-parity run=$RUN_ID model=$QWEN4_PATH fork=$FORK contexts=$C
 log "FORK $(git -C "$FORK" rev-parse HEAD 2>/dev/null || echo no-git) $(git -C "$FORK" status --porcelain 2>/dev/null | wc -l | tr -d ' ') uncommitted"
 if ! "$VENV/bin/python" -I -c "import mlx_lm.models.qwen4_exp" > /dev/null 2>&1; then
   rm -rf "$VENV"
-  python3 -m venv "$VENV" && "$VENV/bin/pip" install -q "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@$MLX_LM_COMMIT" \
+  PY312=$(command -v python3.12 || echo /opt/homebrew/bin/python3.12)
+  [ -x "$PY312" ] || die "python3.12 not found (the mlx wheels need it)" 11
+  "$PY312" -m venv "$VENV" && "$VENV/bin/pip" install -q "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@$MLX_LM_COMMIT" \
     > "$RES/venv.log" 2>&1 || die "venv: $(tail -n 2 "$RES/venv.log" | tr '\n' ' ')" 11
 fi
 if [ ! -f "$QWEN4_PATH/config.json" ]; then
