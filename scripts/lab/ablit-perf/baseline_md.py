@@ -8,6 +8,8 @@ MODEL_DIR/noise/vs-main.json (compare.py --baseline: the short-context 1-row cel
 rerun on a fresh serve), MODEL_DIR/base/vs-main.json (the unmodified base in our
 runtime, 1 row) and MODEL_DIR/base/summary.json (base model: our provider vs the reference
 on the same base weights, 1 row; written when <K>_BASE_REFERENCE=1). Exits 2 when main/summary.json is missing or has no cells.
+A summary whose reference failed (compare.py --reference-failed) is still written, headed
+by the failure; its reference columns are empty.
 
 Columns: request tok/s = completion_tokens / (last token - request start), summed over
 the rows of a multi-row cell (the goal metric); decode tok/s and TTFT are its parts.
@@ -38,6 +40,8 @@ def text_identical(c):
         return "yes"
     if gate == "not_comparable":
         return "n/a (reasoning only)"
+    if gate == "no_reference":
+        return "n/a (no reference)"
     return f"no ({gate})"
 
 
@@ -54,6 +58,12 @@ TABLE_HEAD = [
     "| ref TTFT s | ours TTFT s | ref req tok/s | ours req tok/s | req ratio | text identical "
     "| ours noise | ref noise |",
     "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+
+
+def reference_failed(summary, label):
+    reason = summary.get("reference_failed")
+    return [f"**{label} reference FAILED**: `{reason}`. Reference columns are empty; "
+            "the provider columns are measured.", ""] if reason else []
 
 
 def cell_rows(cells):
@@ -130,6 +140,7 @@ def main(argv=None):
            f"Build `{a.build}` (commit `{a.commit}`), production route (no autotune flag, batching auto). "
            "Request tok/s = completion_tokens / (last token - request start), summed over concurrent rows; "
            "noise = (max - min) / median over the trials of one side.", ""]
+    out += reference_failed(main_summary, "Main")
     out += TABLE_HEAD + cell_rows(main_summary["cells"])
     mismatched = [c for c in main_summary["cells"] if c.get("prompt_ok") is False]
     if mismatched:
@@ -175,6 +186,7 @@ def main(argv=None):
         out += ["", "## Base model: our provider vs reference on the same base weights (1 row)", "",
                 "The unmodified base checkpoint, served by our provider and run by the reference "
                 "implementation in the same window; same columns as the main table.", ""]
+        out += reference_failed(base_ref, "Base")
         out += TABLE_HEAD + cell_rows(base_ref["cells"])
     out += mtp_section(a.model_dir)
     path =os.path.join(a.model_dir, "baseline.md")

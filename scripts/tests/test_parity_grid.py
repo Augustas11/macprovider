@@ -666,5 +666,177 @@ class ClientTests(unittest.TestCase):
         self.assertIsNotNone(client.row_record(res, {})["error"])
 
 
+class ReferenceFailedTests(unittest.TestCase):
+    REASON = "ValueError: [concatenate] shapes (8192,768), (8192,1024) (rc=1)"
+
+    def test_no_reference_rows_reports_every_provider_cell(self):
+        ours = our_lines(200, 128, 1, [127.0] * 3) + our_lines(200, 128, 2, [200.0] * 3)
+        s = compare.evaluate([], ours, reference_failed=self.REASON)
+        self.assertEqual(s["reference_failed"], self.REASON)
+        self.assertFalse(s["pass"])
+        cells = by_cell(s)
+        self.assertEqual(set(cells), {(200, 128, 1), (200, 128, 2)})
+        for c in cells.values():
+            self.assertEqual(c["text_gate"], "no_reference")
+            self.assertIsNone(c["ref_tps"])
+            self.assertIsNotNone(c["ours_tps"])
+        md = compare.markdown(s)
+        self.assertTrue(md.startswith("REFERENCE FAILED: " + self.REASON))
+        self.assertIn("| m | 200 | 128 | 1 | - | 127.00 |", md)
+
+    def test_partial_reference_still_compares_what_it_wrote(self):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        ours = our_lines(200, 128, 1, [127.0] * 3) + our_lines(200, 512, 1, [127.0] * 3)
+        cells = by_cell(compare.evaluate(ref, ours, reference_failed=self.REASON))
+        self.assertTrue(cells[(200, 128, 1)]["pass"])
+        self.assertEqual(cells[(200, 128, 1)]["text_gate"], "byte_identical")
+        self.assertEqual(cells[(200, 512, 1)]["text_gate"], "no_reference")
+
+    def test_passing_case_unchanged(self):
+        s = compare.evaluate([ref_line(200, 128, 126.0, i) for i in range(3)], our_lines(200, 128, 1, [127.0] * 3))
+        self.assertIsNone(s["reference_failed"])
+        self.assertFalse(compare.markdown(s).startswith("REFERENCE FAILED"))
+
+    def test_cli_missing_reference_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            refp, oursp, js = Path(d, "absent.jsonl"), Path(d, "ours.jsonl"), Path(d, "s.json")
+            oursp.write_text("".join(json.dumps(x) + "\n" for x in our_lines(200, 128, 1, [127.0] * 3)))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = compare.main(["--ref", str(refp), "--ours", str(oursp), "--json", str(js),
+                                   "--reference-failed", self.REASON])
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(js.read_text())["reference_failed"], self.REASON)
+            self.assertIn("REFERENCE FAILED", buf.getvalue())
+            # Without the flag an empty reference is still unusable input.
+            refp.write_text("")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(compare.main(["--ref", str(refp), "--ours", str(oursp)]), 2)
+
+    def test_baseline_md_with_failed_reference(self):
+        spec = importlib.util.spec_from_file_location(
+            "ablit_baseline_md", HARNESS.parent / "ablit-perf" / "baseline_md.py")
+        baseline_md = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(baseline_md)
+        s = compare.evaluate([], our_lines(200, 128, 1, [127.0] * 3), reference_failed=self.REASON)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "main"))
+            with open(os.path.join(d, "main", "summary.json"), "w") as f:
+                json.dump(s, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(baseline_md.main([d, "--model", "m"]), 0)
+            md = Path(d, "baseline.md").read_text()
+        self.assertIn("**Main reference FAILED**: `" + self.REASON + "`", md)
+        self.assertIn("| ctx200/out128/rows1 | 244 | 128 | - | 127.00 | - |", md)
+        self.assertIn("n/a (no reference)", md)
+
+
+_FAKE_SERVE = r'''
+import json, re, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+cfg = open(sys.argv[sys.argv.index("--config") + 1]).read()
+port = int(re.search(r"^port: (\d+)", cfg, re.M).group(1))
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{"model_loaded": true}')
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+        n = min(body["max_tokens"], 3)
+        for obj in ([{"choices": [{"index": 0, "delta": {"content": "ab"}, "finish_reason": None}]}] * n
+                    + [{"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": n}}]):
+            self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+'''
+
+
+class RunGridReferenceFailTests(unittest.TestCase):
+    """run-grid.sh with a fake serve and a reference that dies at load."""
+
+    def test_provider_cells_survive_a_failed_reference(self):
+        import subprocess
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "bin").mkdir()
+            (d / "fake").mkdir()
+            (d / "serve.py").write_text(_FAKE_SERVE)
+            cli = d / "bin" / "macprovider-cli"
+            cli.write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {d / "serve.py"} "$@"\n')
+            # Nothing else may listen on 8080 on a lab Mac; the test must not depend on it.
+            lsof = d / "fake" / "lsof"
+            lsof.write_text("#!/bin/bash\nexit 1\n")
+            ref_py = d / "fake" / "refpy"
+            ref_py.write_text('#!/bin/bash\necho "Traceback (most recent call last):" >&2\n'
+                              'echo "  File \\"x.py\\", line 1" >&2\n'
+                              'echo "ValueError: [concatenate] shapes differ" >&2\nexit 1\n')
+            for p in (cli, lsof, ref_py):
+                p.chmod(0o755)
+            out = d / "out"
+            env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin")
+            proc = subprocess.run(
+                ["bash", str(HARNESS / "run-grid.sh"), "--model-path", str(d), "--model-name", MODEL,
+                 "--bin-dir", str(d / "bin"), "--out-dir", str(out), "--python", str(ref_py),
+                 "--port", str(port), "--outputs", "4", "--contexts", "short", "--rows", "1", "--trials", "1"],
+                env=env, capture_output=True, text=True, timeout=120)
+            log = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 8, log)
+            self.assertIn(f"REFERENCE_FAIL {MODEL} ValueError: [concatenate] shapes differ (rc=1)", proc.stdout)
+            self.assertLess(log.index("== provider"), log.index("== reference"))
+            rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+            self.assertTrue(any(r["kind"] == "row" and r["completion_tokens"] == 3 for r in rows), rows)
+            summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["reference_failed"],
+                             "ValueError: [concatenate] shapes differ (rc=1)")
+            self.assertEqual([c["text_gate"] for c in summary["cells"]], ["no_reference"])
+            self.assertIn("REFERENCE FAILED", (out / "summary.md").read_text())
+
+
+class Glm5NextShimTests(unittest.TestCase):
+    """Pure parts of reference_mlxvlm's glm5_next loader shim (no mlx needed)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ref = module("reference_mlxvlm")
+
+    def test_quant_aliases(self):
+        a = self.ref.glm5_quant_aliases
+        L = "language_model.model.layers.20."
+        H = "model.language_model.layers.20."
+        self.assertEqual(a(L + "self_attn.o_proj"), (H + "self_attn.o_proj",))
+        self.assertEqual(a(L + "self_attn.qkv_proj"), (H + "self_attn.q_proj",))
+        self.assertEqual(a(L + "self_attn.qkv_proj.k_proj"), (H + "self_attn.k_proj",))
+        self.assertEqual(a(L + "self_attn.fbg_a_proj"), (H + "self_attn.f_a_proj",))
+        self.assertEqual(a(L + "self_attn.qkv_a_proj"), (H + "self_attn.q_a_proj",))
+        self.assertEqual(a(L + "self_attn.embed_q"), (H + "self_attn.kv_b_proj",))
+        self.assertEqual(a(L + "mlp.shared_experts.gate_up_proj"), (H + "mlp.shared_experts.gate_proj",))
+        self.assertEqual(a(L + "mlp.switch_mlp.gate_proj"), (H + "mlp.switch_mlp.gate_proj",))
+        self.assertEqual(a("language_model.model.embed_tokens"), ("model.language_model.embed_tokens",))
+        self.assertEqual(a("language_model.lm_head"), ())
+        self.assertEqual(a("vision_tower.blocks.0.attn.qkv"), ())
+
+    def test_mixed_fusions_from_checkpoint_shapes(self):
+        # Layer 20 of GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2: q/v 6-bit, k 8-bit (hidden 4096, group 64).
+        shapes = {}
+        for i, bits in ((19, (8, 8, 8)), (20, (6, 8, 6))):
+            for p, b in zip(("q_proj", "k_proj", "v_proj"), bits):
+                k = f"language_model.model.layers.{i}.self_attn.{p}"
+                shapes[k + ".weight"], shapes[k + ".scales"], shapes[k + ".biases"] = \
+                    (8192, 4096 * b // 32), (8192, 64), (8192, 64)
+        # Same width, different mode: an mxfp8 part has no affine biases.
+        for p in ("gate_proj", "up_proj"):
+            k = f"language_model.model.layers.1.mlp.{p}"
+            shapes[k + ".weight"], shapes[k + ".scales"] = (12288, 1024), (12288, 128)
+        shapes["language_model.model.layers.1.mlp.gate_proj.biases"] = (12288, 128)
+        got = self.ref.glm5_mixed_fusions(shapes, 45)
+        self.assertEqual(got, [(1, "mlp", "gate_up_proj", ("gate_proj", "up_proj")),
+                               (20, "self_attn", "qkv_proj", ("q_proj", "k_proj", "v_proj"))])
+
+
 if __name__ == "__main__":
     unittest.main()

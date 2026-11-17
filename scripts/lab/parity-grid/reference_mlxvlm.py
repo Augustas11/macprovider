@@ -30,7 +30,22 @@ published snapshot as a weight). The abliterated row's reference so computes
 the same function as our runtime on the published snapshot.
 
 The first output line is a `kind: meta` record: mlx / mlx-vlm / transformers
-versions, wired limit, and the ablation parameters and direction sha256.
+versions, wired limit, the ablation parameters and direction sha256, and the
+loader shims applied.
+
+glm5_next loader shim (patch_glm5_next): stock mlx-vlm (0.7.11 through 0.8.0)
+cannot load a per-tensor mixed-precision checkpoint in Hugging Face layout
+(oMLX oQ exports such as GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2). Its
+sanitize fuses q/k/v (and f_a/b/g_a, q_a/kv_a, gate/up) by concatenating the
+packed weights, which fails when the parts carry different bits; and its
+quantization lookup never maps module paths (`language_model.model.X`) to the
+checkpoint's `model.language_model.X` keys, so every module would get the
+default bits. The shim leaves a fusion as one matmul per part when the parts'
+packed widths differ (same weights, same per-part quantized matmul, outputs
+concatenated in the fused order) and adds the missing key aliases. It changes
+nothing where stock loading works. MTP layers are dropped by stock sanitize as
+before; the DFlash drafter is a separate GGUF that mlx-vlm never reads. Neither
+is part of the main forward pass.
 """
 import argparse
 import hashlib
@@ -83,6 +98,98 @@ def apply_ablation(model, abl):
     Ablation(type(layers[0]))
     for i in range(lo, hi + 1):
         layers[i]._ablate = (abl["alpha"], d)
+
+
+# Projections stock glm5_next sanitize fuses by concatenating weights:
+# (owner under a decoder layer, fused attribute, sources in fused order).
+GLM5_FUSIONS = (
+    ("self_attn", "qkv_proj", ("q_proj", "k_proj", "v_proj")),
+    ("self_attn", "fbg_a_proj", ("f_a_proj", "b_proj", "g_a_proj")),
+    ("self_attn", "qkv_a_proj", ("q_a_proj", "kv_a_proj_with_mqa")),
+    ("mlp", "gate_up_proj", ("gate_proj", "up_proj")),
+    ("mlp.shared_experts", "gate_up_proj", ("gate_proj", "up_proj")),
+)
+# Modules sanitize rebuilds from kv_b_proj at kv_b_proj's bits.
+GLM5_DERIVED = {"embed_q": "kv_b_proj", "unembed_out": "kv_b_proj"}
+
+
+def glm5_mixed_fusions(shapes, num_layers):
+    """(layer, owner, fused, sources) whose parts differ in packed width, scales
+    width or affine biases, i.e. in bits, group size or mode; `shapes` maps
+    sanitized-prefix keys (language_model.model.layers.N...) to shape tuples."""
+    out = []
+    for i in range(num_layers):
+        for owner, fused, sources in GLM5_FUSIONS:
+            base = f"language_model.model.layers.{i}.{owner}"
+            if not all(f"{base}.{s}.weight" in shapes for s in sources):
+                continue
+            sigs = {(shapes[f"{base}.{s}.weight"][-1], (shapes.get(f"{base}.{s}.scales") or (None,))[-1],
+                     f"{base}.{s}.biases" in shapes) for s in sources}
+            if len(sigs) > 1:
+                out.append((i, owner, fused, sources))
+    return out
+
+
+def glm5_quant_aliases(path):
+    """Checkpoint quantization keys for a glm5_next module path."""
+    head = "language_model.model."
+    if not path.startswith(head):
+        return ()
+    parts = ("model.language_model." + path[len(head):]).split(".")
+    fused = {f: s for _, f, s in GLM5_FUSIONS}
+    if parts[-1] in GLM5_DERIVED:
+        parts[-1] = GLM5_DERIVED[parts[-1]]
+    elif parts[-1] in fused:
+        # A fused module exists only when all its sources share one quantization.
+        parts[-1] = fused[parts[-1]][0]
+    elif len(parts) > 1 and parts[-2] in fused and parts[-1] in fused[parts[-2]]:
+        del parts[-2]  # one part of a split fusion
+    return (".".join(parts),)
+
+
+def patch_glm5_next():
+    """Install the glm5_next loader shim (module docstring); returns a log list
+    that the patched sanitize fills with the fusions it split."""
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_vlm.models.glm5_next import glm5_next, language
+
+    split_log = []
+
+    class SplitLinear(nn.Module):
+        def __init__(self, in_dims, parts):
+            super().__init__()
+            self.part_names = ",".join(name for name, _, _ in parts)  # a str stays out of the parameters
+            for name, out_dims, bias in parts:
+                setattr(self, name, nn.Linear(in_dims, out_dims, bias=bias))
+
+        def __call__(self, x):
+            return mx.concatenate([language.linear(getattr(self, n), x) for n in self.part_names.split(",")],
+                                  axis=-1)
+
+    stock_sanitize = language.LanguageModel.sanitize
+
+    def sanitize(self, weights):
+        shapes = {k: tuple(v.shape) for k, v in weights.items()}
+        for i, owner_path, fused, sources in glm5_mixed_fusions(shapes, len(self.layers)):
+            owner = self.layers[i]
+            for attr in owner_path.split("."):
+                owner = getattr(owner, attr)
+            base = f"language_model.model.layers.{i}.{owner_path}"
+            parts = []
+            for s in sources:
+                for suffix in ("weight", "scales", "biases", "bias"):
+                    if f"{base}.{s}.{suffix}" in weights:
+                        weights[f"{base}.{fused}.{s}.{suffix}"] = weights.pop(f"{base}.{s}.{suffix}")
+                parts.append((s, shapes[f"{base}.{s}.weight"][0], f"{base}.{s}.bias" in shapes))
+            setattr(owner, fused, SplitLinear(getattr(owner, fused).weight.shape[-1], parts))
+            split_log.append(f"layer {i} {owner_path}.{fused}: " + ", ".join(
+                f"{s} {shapes[f'{base}.{s}.weight']}" for s in sources))
+        return stock_sanitize(self, weights)
+
+    language.LanguageModel.sanitize = sanitize
+    glm5_next.Model.quantization_path_aliases = staticmethod(glm5_quant_aliases)
+    return split_log
 
 
 def run_one(model, processor, stream_generate, ids, max_tokens):
@@ -160,9 +267,14 @@ def main(argv=None):
     wired = int(info["max_recommended_working_set_size"])
     mx.set_wired_limit(wired)
 
+    with open(os.path.join(args.model_path, "config.json")) as f:
+        model_type = json.load(f).get("model_type")
+    split_log = patch_glm5_next() if model_type == "glm5_next" else None
     t = time.perf_counter()
     model, processor = load(args.model_path)
     load_s = round(time.perf_counter() - t, 2)
+    for line in split_log or ():
+        print(f"glm5_next shim: split {line}", file=sys.stderr)
     if ablation:
         apply_ablation(model, ablation)
     tokenizer = getattr(processor, "tokenizer", processor)
@@ -184,6 +296,7 @@ def main(argv=None):
             "model_path": args.model_path, "load_s": load_s, "wired_limit_bytes": wired,
             "versions": package_versions(("mlx", "mlx-vlm", "mlx-lm", "transformers")),
             "refusal_ablation": ablation,
+            "loader_shims": None if split_log is None else {"glm5_next": {"split_fusions": split_log}},
         }) + "\n")
         for (ctx, max_tokens, prow), n in reference_jobs(cells, trials, args.extra_row_trials):
             ids = encode(prompts.build_messages(ctx, prow))

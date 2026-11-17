@@ -4,6 +4,7 @@
 usage: compare.py --ref ref.jsonl --ours ours.jsonl [--floor 0.03] [--json summary.json]
                   [--text-fallback-reason "why byte identity cannot hold"]
                   [--margins margins.json] [--tie-steps 2]
+                  [--reference-failed "first error line"]
        compare.py --baseline main-provider.jsonl --ours candidate-provider.jsonl
                   [--subset] [--floor 0.03] [--json summary.json]
 
@@ -32,7 +33,11 @@ Rules (see README.md):
   slope      : per (model, ctx, rows), for consecutive output lengths a < b:
                FAIL when ours(b)/ours(a) < ref(b)/ref(a) * (1 - band(a, b))
 Reference cells the provider run never produced are listed as "not run" and
-excluded from pass/fail; provider cells without a reference still FAIL.
+excluded from pass/fail; provider cells without a reference still FAIL (text
+status `no_reference` when none of the cell's rows has one).
+--reference-failed REASON: the reference run failed; --ref may be missing or
+hold only the rows written before the failure. The table and JSON are still
+written for every provider cell, headed by the reason (JSON `reference_failed`).
 Multi-row cells score aggregate tok/s against the single-row reference
 (serial stock mlx-lm); per-row tok/s ratios are reported, not gated.
 
@@ -52,6 +57,7 @@ spread (noise), without gating on speed.
 """
 import argparse
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
@@ -228,7 +234,8 @@ def evaluate_turn2(ref_lines, our_lines):
     return {"cells": cells, "pass": all(c["pass"] for c in cells)}
 
 
-def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margins=None, tie_steps=2.0):
+def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margins=None, tie_steps=2.0,
+             reference_failed=None):
     turn2 = evaluate_turn2(ref_lines, our_lines)
     ref_lines = [r for r in ref_lines if not is_turn2(r)]
     our_lines = [r for r in our_lines if not is_turn2(r)]
@@ -304,6 +311,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         text_ok = tokens_ok = prompt_ok = True
         cell["first_text_diff"] = None
         ties, not_comparable = [], []
+        no_ref = 0
         for r in sorted(rows, key=lambda r: (r["trial"], r["row"])):
             where = f"trial {r['trial']} row {r['row']}"
             if r.get("error"):
@@ -314,6 +322,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
             if not rref:
                 cell["reasons"].append(f"{where}: missing single-row reference for prompt row {r['row']}")
                 text_ok = tokens_ok = False
+                no_ref += 1
                 continue
             want = rref[0]
             off = None
@@ -357,7 +366,9 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
                 cell["first_text_diff"] = {"trial": r["trial"], "row": r["row"], "byte_offset": off}
             if text_fallback_reason is None:
                 cell["reasons"].append(f"{where}: text differs from reference at byte {off}")
-        if not text_ok and text_fallback_reason is not None and cell["first_text_diff"]:
+        if no_ref and no_ref == sum(1 for r in rows if not r.get("error")):
+            cell["text_gate"] = "no_reference"
+        elif not text_ok and text_fallback_reason is not None and cell["first_text_diff"]:
             cell["text_gate"] = "fallback_token_count"
             cell["notes"].append(
                 f"text differs at byte {cell['first_text_diff']['byte_offset']}; "
@@ -427,6 +438,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
     return {
         **extra,
         "floor": floor,
+        "reference_failed": reference_failed,
         "text_fallback_reason": text_fallback_reason,
         "tie_steps": tie_steps,
         "cells": result_cells,
@@ -449,7 +461,11 @@ def text_label(c):
 
 
 def markdown(summary):
-    lines = [
+    lines = []
+    if summary.get("reference_failed"):
+        lines += [f"REFERENCE FAILED: {summary['reference_failed']}. Reference columns are empty where it "
+                  "wrote no rows; those cells fail for want of a reference.", ""]
+    lines += [
         "| model | ctx | out | rows | ref tok/s | ours tok/s | ratio | band "
         "| ref req tok/s | ours req tok/s | req ratio | ref ttft s | ours ttft s "
         "| text | tokens | slope | status |",
@@ -627,6 +643,8 @@ def main(argv=None):
     ap.add_argument("--margins", help="margin.py --json output; covered ties are not failures")
     ap.add_argument("--tie-steps", type=float, default=2.0,
                     help="largest margin (in float steps) still counted as a tie (default 2)")
+    ap.add_argument("--reference-failed", metavar="REASON",
+                    help="the reference run failed: report every provider cell with what reference rows exist")
     args = ap.parse_args(argv)
     if bool(args.ref) == bool(args.baseline):
         ap.error("give exactly one of --ref and --baseline")
@@ -641,13 +659,17 @@ def main(argv=None):
             with open(args.json, "w") as f:
                 f.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return 0 if summary["pass"] else 1
-    ref_lines = read_jsonl(args.ref)
+    if args.reference_failed and not os.path.exists(args.ref):
+        ref_lines = []
+    else:
+        ref_lines = read_jsonl(args.ref)
     our_lines = read_jsonl(args.ours)
-    if not ref_lines or not our_lines:
+    if not our_lines or not (ref_lines or args.reference_failed):
         print("empty input", file=sys.stderr)
         return 2
     margins = load_margins(args.margins) if args.margins else None
-    summary = evaluate(ref_lines, our_lines, args.floor, args.text_fallback_reason, margins, args.tie_steps)
+    summary = evaluate(ref_lines, our_lines, args.floor, args.text_fallback_reason, margins, args.tie_steps,
+                       args.reference_failed)
     print(markdown(summary))
     payload = json.dumps(summary, indent=2, sort_keys=True)
     if args.json:

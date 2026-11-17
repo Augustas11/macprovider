@@ -19,7 +19,7 @@ always given on the command line; `grid.json` holds placeholders only.
 | `provider_client.py` | stdlib python | streaming `/v1/chat/completions` client, N concurrent rows by threads |
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
 | `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
-| `run-grid.sh` | bash | one lab window for one model: reference, provider, client, compare |
+| `run-grid.sh` | bash | one lab window for one model: provider (serve + client), then reference, then compare |
 
 ## Running a window
 
@@ -118,6 +118,13 @@ snapshot, `--outputs` / `--contexts` cut the grid, `--model-id` with
 appends serve-config lines (e.g. a CB accepted tuple), `--skip-compare` stops
 after the client, and `--trials-by-rows 4=1` sets the provider's trial count
 for one row count (a serially served model's 4-row cells only queue).
+
+The provider side runs before the reference. A reference that fails prints
+`REFERENCE_FAIL <model> <error line> (rc=N)`; compare still writes the table
+and JSON for every provider cell (reference columns empty, `reference_failed`
+set) and the window exits 8. For `glm5_next` checkpoints, `reference_mlxvlm.py`
+installs a loader shim for per-tensor mixed-precision Hugging Face layouts that
+stock mlx-vlm cannot load (see its docstring); the meta line records it.
 
 ## Provider vs provider (`compare.py --baseline`)
 

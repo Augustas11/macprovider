@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Parity-grid lab window for one model: stock mlx-lm reference, then our
-# provider on a loopback port, then compare.py. Noninteractive.
+# Parity-grid lab window for one model: our provider on a loopback port, then
+# the stock mlx-lm reference, then compare.py. Noninteractive. The provider
+# runs first so a reference that cannot load cannot cost the provider cells.
 #
 # usage: run-grid.sh --model-path DIR --model-name NAME --bin-dir DIR --out-dir DIR
 #                    --python PY [--port 18340] [--cb off|on|canary|auto]
@@ -48,8 +49,12 @@
 # child, which always takes the row-invariant route.
 #
 # Exit code: compare's (0 all cells pass, 1 a cell fails, 2 unusable input),
-# or 7 when the client failed (after the compare table is printed); 3, 5, 6
-# and 64 before the client runs. Check
+# 7 when the client failed, or 8 when the reference failed (both after the
+# compare table is printed; 7 wins); 3, 5, 6 and 64 before the client runs.
+# A failed reference prints one `REFERENCE_FAIL <model> <error line> (rc=N)`
+# line; compare still runs with the reference rows it got (often none), so
+# provider.jsonl, summary.md and summary.json hold every provider cell with
+# empty reference columns. Check
 # serve/status.json continuous_batching.small_m_route to see which route ran.
 #
 # --python is an interpreter with mlx_lm installed (reference only); the client
@@ -165,20 +170,12 @@ COMMON=(--model-name "$MODEL_NAME" --grid "$GRID")
 [ -n "$MAX_CONTEXT" ] && COMMON+=(--max-context "$MAX_CONTEXT")
 [ "$TURNS" = 1 ] || COMMON+=(--turns "$TURNS")
 REF_COMMON=("${COMMON[@]}")
+# Turn 2 replays the provider's turn-1 text; the reference runs after the provider.
 [ "$TURNS" = 1 ] || REF_COMMON+=(--provider-jsonl "$OURS")
 CLIENT_ARGS=()
 if [ "$TURNS" = 2 ]; then
   [ "$TURN2_HEADER" = 0 ] || CLIENT_ARGS+=(--conversation-header)
   CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY")
-fi
-
-run_reference() {
-  echo "== reference $(date +%T) $REFERENCE"
-  "$PY" "$REF_SCRIPT" --model-path "$REF_MODEL_PATH" --out "$REF" "${REF_COMMON[@]}" ${REF_ARGS[@]+"${REF_ARGS[@]}"}
-}
-# Turn 2 replays the provider's turn-1 text, so its reference runs after the provider.
-if [ "$SKIP_REF" = 0 ] && [ "$TURNS" = 1 ]; then
-  run_reference
 fi
 
 if [ -z "$MAX_CONTEXT" ] && [ -f "$REF_MODEL_PATH/config.json" ]; then
@@ -252,17 +249,33 @@ fi
   "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} ${TRIALS_BY_ROWS:+--trials-by-rows "$TRIALS_BY_ROWS"} || client_rc=$?
 stop_serve
 trap - EXIT
-if [ "$SKIP_REF" = 0 ] && [ "$TURNS" = 2 ]; then
-  run_reference
+
+ref_rc=0 ref_err=""
+if [ "$SKIP_REF" = 0 ]; then
+  echo "== reference $(date +%T) $REFERENCE"
+  set +e
+  "$PY" "$REF_SCRIPT" --model-path "$REF_MODEL_PATH" --out "$REF" "${REF_COMMON[@]}" ${REF_ARGS[@]+"${REF_ARGS[@]}"} \
+    2>&1 | tee "$OUT_DIR/reference.log"
+  ref_rc="${PIPESTATUS[0]}"
+  set -e
+  if [ "$ref_rc" -ne 0 ]; then
+    # The exception line of a traceback, else the last line printed.
+    ref_err="$(grep -E '^[A-Za-z_][A-Za-z0-9_.]*(Error|Exception|Exit)\b' "$OUT_DIR/reference.log" | tail -n 1 || true)"
+    [ -n "$ref_err" ] || ref_err="$(grep -v '^[[:space:]]*$' "$OUT_DIR/reference.log" | tail -n 1 || true)"
+    ref_err="$(printf '%s' "${ref_err:-no output}" | cut -c1-400) (rc=$ref_rc)"
+    echo "REFERENCE_FAIL $MODEL_NAME $ref_err"
+  fi
 fi
 
 if [ "$SKIP_COMPARE" = 1 ]; then
-  echo "== compare skipped (client rc=$client_rc)"
+  echo "== compare skipped (client rc=$client_rc reference rc=$ref_rc)"
   [ "$client_rc" -eq 0 ] || exit 7
+  [ "$ref_rc" -eq 0 ] || exit 8
   exit 0
 fi
-echo "== compare $(date +%T) (client rc=$client_rc)"
+echo "== compare $(date +%T) (client rc=$client_rc reference rc=$ref_rc)"
 CMP=(--ref "$REF" --ours "$OURS" --floor "$FLOOR" --json "$OUT_DIR/summary.json")
+[ -n "$ref_err" ] && CMP+=(--reference-failed "$ref_err")
 [ -n "$FALLBACK" ] && CMP+=(--text-fallback-reason "$FALLBACK")
 [ -n "$MARGINS" ] && CMP+=(--margins "$MARGINS")
 [ -n "$TIE_STEPS" ] && CMP+=(--tie-steps "$TIE_STEPS")
@@ -276,5 +289,9 @@ set -e
 if [ "$client_rc" -ne 0 ]; then
   echo "client failed (rc=$client_rc; compare rc=$compare_rc)" >&2
   exit 7
+fi
+if [ "$ref_rc" -ne 0 ]; then
+  echo "reference failed (rc=$ref_rc; compare rc=$compare_rc): provider cells measured, reference columns empty" >&2
+  exit 8
 fi
 exit "$compare_rc"

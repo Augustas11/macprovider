@@ -11,9 +11,10 @@
 #     against the catalog snapshot-manifest hash, Hugging Face downloads checked per file,
 #     the reference venvs, and for <K>_MTP_BENCH=1 the native-mtp-bench policy, validated
 #     without MLX use;
-#  3. per model, the reference first (its first cell is the cheapest: short context,
-#     128 tokens), then scripts/lab/parity-grid/run-grid.sh on the production route
-#     (`stock` in window.sh: no autotune flag, batching auto), the snapshot served under
+#  3. per model, scripts/lab/parity-grid/run-grid.sh: our provider first, then the reference,
+#     on the production route (`stock` in window.sh: no autotune flag, batching auto). A
+#     reference that fails (REFERENCE_FAIL line, grid rc 8) leaves the provider cells, the
+#     CB check and the later passes intact and fails the job. The snapshot is served under
 #     its catalog id when it has one, else by path. A model with <K>_CB_FROM_POLICY=1 gets
 #     its signed CB policy tuple as the --no-join serve's accepted tuple and must show
 #     batched admissions; every other model is served serially, so its 4-row cells only
@@ -463,6 +464,14 @@ serve_args() {
   elif [ -n "$(v "$k" CONFIG_EXTRA)" ]; then SERVE+=(--config-extra "$(v "$k" CONFIG_EXTRA)"); fi
 }
 
+# reference_failed K DIR: the grid in DIR measured the provider but its reference failed.
+reference_failed() {
+  local line
+  line=$(grep -m1 '^REFERENCE_FAIL ' "$2/run.log" 2>/dev/null)
+  log "${line:-REFERENCE_FAIL $(v "$1" NAME) (no marker in $2/run.log)}"
+  blocker "model $1: the reference in $2 failed; provider cells are measured, reference columns are empty"
+}
+
 run_model() {
   local k=$1 name rows ref_path ref_args=() tbr
   name=$(v "$k" NAME)
@@ -478,14 +487,15 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
   [ -z "$(v "$k" REF_ARGS)" ] || for a in $(v "$k" REF_ARGS); do ref_args+=(--ref-arg "$a"); done
   serve_args "$k"
   log "GRID_START $name rows=$rows reference=$(v "$k" REF) served_as=$(v "$k" ID)${tbr:+ trials_by_rows=$tbr}"
-  # The reference runs first; its first cell is the cheapest (short context, 128 tokens).
   grid "$k" "$M/main" "${SERVE[@]}" --rows "$rows" --contexts "$CONTEXTS" --python "$(v "$k" REF_PY)" \
     --reference "$(v "$k" REF)" ${ref_path:+--ref-model-path "$ref_path"} ${ref_args[@]+"${ref_args[@]}"} \
     ${tbr:+--trials-by-rows "$tbr"}
   local rc=$? ok=0
-  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding)"
-  case $rc in 0|1) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
+  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 8 the reference failed)"
+  case $rc in 0|1|8) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
     *) blocker "model $k: grid rc=$rc: $(tail -n 3 "$M/main/run.log" | tr '\n' ' ')"; ok=1 ;; esac
+  # The provider side ran: report the reference loudly, keep going, fail the job at the end.
+  [ $rc != 8 ] || reference_failed "$k" "$M/main"
   if [ $ok = 0 ] && [ "$(v "$k" CB_FROM_POLICY)" = 1 ]; then
     local admitted
     admitted=$(grep -c 'event=batching_admitted' "$M/main/serve/serve.err" 2>/dev/null || true)
@@ -499,9 +509,10 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
     if [ "$(v "$k" BASE_REFERENCE)" = 1 ]; then
       base_ref=(--python "$(v "$k" REF_PY)" --reference "$(v "$k" REF)" --ref-model-path "$(v "$k" BASE_PATH)"
                 ${ref_args[@]+"${ref_args[@]}"})
-      base_rcs="0 1"
+      base_rcs="0 1 8"
     else
-      cp "$M/main/reference.jsonl" "$M/base/" && base_ref=(--skip-reference --skip-compare)
+      cp "$M/main/reference.jsonl" "$M/base/" 2>/dev/null
+      base_ref=(--skip-reference --skip-compare)
     fi
     TRIALS=$BASE_TRIALS grid "$k" "$M/base" --model-path "$(v "$k" BASE_PATH)" --model-id "$(v "$k" BASE_ID)" \
       --model-sha256 "$(v "$k" BASE_SHA256)" --rows 1 --contexts "$CONTEXTS" "${base_ref[@]}"
@@ -512,6 +523,7 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
         --subset --json "$M/base/vs-main.json" > "$M/base/vs-main.md"
       [ ! -f "$M/base/summary.md" ] || sed -n '/^| model/,/^$/p' "$M/base/summary.md"
       log "BASE_DONE $name"
+      [ $brc != 8 ] || reference_failed "$k" "$M/base"
     else
       blocker "model $k: base pass failed rc=$brc: $(tail -n 3 "$M/base/run.log" | tr '\n' ' ')"; ok=1
     fi
@@ -527,7 +539,7 @@ noise_pass() {
   [ -f "$M/main/provider.jsonl" ] || return 0
   serve_args "$k"
   log "NOISE_START $name"
-  mkdir -p "$M/noise" && cp "$M/main/reference.jsonl" "$M/noise/"
+  mkdir -p "$M/noise" && { cp "$M/main/reference.jsonl" "$M/noise/" 2>/dev/null || true; }
   grid "$k" "$M/noise" "${SERVE[@]}" --rows 1 --contexts short --skip-reference --skip-compare \
     || { blocker "model $k: noise pass rc=$?: $(tail -n 3 "$M/noise/run.log" | tr '\n' ' ')"; return 1; }
   /usr/bin/python3 -I "$GRID/compare.py" --baseline "$M/main/provider.jsonl" --ours "$M/noise/provider.jsonl" \
