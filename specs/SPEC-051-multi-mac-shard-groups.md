@@ -34,7 +34,7 @@ server and not yet implemented: the head runs waiting decode rows before each
 prefill chunk and computes at most one prefill chunk per scheduling turn
 (SPEC-051-R031); speculative decoding (native MTP or an external draft model)
 runs through the pipeline as one verify block per round, with every stage
-trimming its own KV to the accepted prefix (SPEC-051-R032); and a batched
+restoring its own request state to the accepted prefix (SPEC-051-R032); and a batched
 decode step crosses each link as one batch frame instead of one frame per
 request row, in stage-transport version 2, with per-request digests unchanged
 in meaning (SPEC-051-R033). Each one is measured before it is built and is
@@ -499,7 +499,8 @@ epoch, the per-link sequence number, the request ID, the micro-batch ID, the
 token step, source and destination stage, the layer range that produced the
 payload, payload dtype and shape, and payload length. Deadlines are the
 group's supervision values (§4), the same at every member, and are not carried
-per frame.
+per frame. In transport version 2, the request ID and token step of
+`activation` and `token` frames are carried in the SPEC-051-R033 row table.
 The frame MUST end with a CRC32C over header and payload, followed by the
 authentication tag when `frame_protection` requires one. A receiver MUST
 discard a frame and treat the link as failed when the magic, version or
@@ -1128,7 +1129,8 @@ Verification. Measure first, on the unmodified group: with one request
 decoding at concurrency 1, admit a second request whose prompt spans at least
 eight prefill chunks, and record the first request's largest gap between two
 delivered tokens and the second request's TTFT. The change is built only when
-that gap is larger than one head prefill chunk's compute plus one decode step.
+that gap is larger than one head prefill chunk's compute plus one decode pass
+of the chain.
 Once built, the same scenario MUST show the first request's largest gap at
 most one head prefill chunk's compute plus one decode pass of the chain, and
 the change is judged on the group's aggregate output tokens per second and
@@ -1142,15 +1144,24 @@ Not yet implemented. In v0.2 a group runs no speculation: every token costs
 one full pass of the chain, a stage never loads a model's multi-token
 prediction layers, and a stage's batched KV view cannot be trimmed.
 
-A group MAY serve speculative decoding for a sharded tuple. When it does:
+Once implemented, a group MUST serve speculation for every sharded tuple whose
+drafter qualifies under item 1. Speculation in a group follows these rules:
 
 1. it MUST use only a drafter the same model is admitted with for single-Mac
    serving, native multi-token prediction under SPEC-048 or an external draft
    model under SPEC-028, with the same draft artifact, the same draft length
-   bound and the same verification and acceptance rule (SPEC-048-R005);
+   bound and the same verification and acceptance rule: native MTP uses the
+   SPEC-048-R005 rule, so a sampled row emits seeded tokens identical to
+   ordinary decode. An external draft model (SPEC-028) serves only requests
+   that pass the SPEC-028 greedy and feature gate (SPEC-028 FR-5); all other
+   requests run without speculation;
 2. the drafter MUST sit where one round costs one pass of the chain: native
    multi-token prediction layers on the last stage, which holds the final
-   hidden state; an external draft model on the head or the last stage;
+   hidden state; an external draft model on the head or the last stage. The
+   stage that hosts the drafter loads its weights, including any embedding it
+   needs. Those weights count in that stage's memory fit proof
+   (SPEC-051-R006) and in the fit proof of any spare for that stage
+   (SPEC-051-R015);
 3. a round's verify block of `k` positions MUST cross each hop as one
    activation for that request, shaped `[1, k, hidden]`, whose token step is
    the step of the block's first position; the block is one decode row in a
@@ -1160,27 +1171,33 @@ A group MAY serve speculative decoding for a sharded tuple. When it does:
    return in one token frame the accepted tokens of the round (1 to `k`) and,
    when its drafter runs there, the next round's draft tokens; only token IDs
    travel back to the head;
-5. before it computes any frame of a request, every stage MUST trim that
-   request's KV to the frame's starting token step, so positions rejected in
-   the previous round are dropped. Each stage trims its own KV; no KV crosses
-   a link. A stage's batched KV view MUST support this trim;
+5. before it computes any frame of a request, every stage MUST restore that
+   request's own state (KV, MTP, recurrent and indexer state) to the frame's
+   starting token step under SPEC-048-R006, so positions rejected in the
+   previous round are dropped. Each stage restores its own state; no state
+   crosses a link. A stage's batched cache MUST support this restore;
 6. the head MUST give the accepted tokens of a round consecutive token steps
    and emit each `(request ID, token step)` at most once (SPEC-051-R012);
 7. the `sub_receipt` keys are unchanged (SPEC-051-R019). `decode_steps` counts
    the accepted token steps after the first, never positions computed and
    rejected, so SPEC-051-R019 item 7 coverage holds unchanged; the frame that
-   collects a request's sub-receipts MUST name the request's final token step
-   so every member's count agrees. The digest chain hashes the exact frame
-   bytes as today;
+   collects a request's sub-receipts MUST carry `step_end` (SPEC-051-R019
+   item 7) so every member's count agrees. The digest chain folds request ID,
+   token step and payload as today;
 8. single-Mac speculation and a group without speculation are unchanged
-   (SPEC-051-R024).
+   (SPEC-051-R024);
+9. native MTP in a group requires the model's SPEC-048-R013 admission, a group
+   self-test comparing native and ordinary output through the same group with
+   identical tokens, and the SPEC-031-R033 canary for the group's provider
+   identity.
 
 Correctness invariant: speculation changes no output. Greedy output token IDs
 and token count MUST be identical to the same group without speculation and to
-single-Mac serving (SPEC-051-R025 item 1); a sampled request follows the
-single-Mac acceptance rule (SPEC-048-R005), so its output distribution is that
-of decoding without speculation. Teacher-forced parity after a trim MUST hold
-at every stage. The receipt counts delivered tokens (SPEC-051-R018), not draft
+single-Mac serving (SPEC-051-R025 item 1). Native MTP uses the SPEC-048-R005
+rule, so a sampled row emits seeded tokens identical to ordinary decode. An
+external draft model (SPEC-028) serves only requests that pass the SPEC-028
+greedy and feature gate; all other requests run without speculation.
+Teacher-forced parity after a restore MUST hold at every stage. The receipt counts delivered tokens (SPEC-051-R018), not draft
 positions.
 
 Verification. Measure first, in this order: reuse the tuple's existing
@@ -1190,7 +1207,7 @@ and stage compute time per token at concurrency 1 on a wired link
 against one position. The change is not built when per-hop time is already a
 small share of per-token time (the only gain left is the one single-Mac
 speculation already gives), when a `k`-position stage forward costs close to
-`k` single steps, or when teacher-forced parity fails after a trim. Once
+`k` single steps, or when teacher-forced parity fails after a restore. Once
 built, it is judged on the group's output tokens per second and TTFT at
 concurrency 1, `S` and `2S` against the same group without speculation in the
 same measurement window, with the acceptance rate reported and identical
@@ -1217,17 +1234,19 @@ the link treated as failed, as for any SPEC-051-R010 check failure; a row for
 a request the receiver already aborted is dropped and the other rows are
 processed.
 
-Version 2 is a new transport version: the group record names it
-(SPEC-051-R005), a coordinator accepts it only once it implements this
-requirement (`supported_transport_versions`), and a member whose transport
-version differs from the record's refuses the epoch (SPEC-051-R027). One
-group never mixes versions 1 and 2.
+Version 2 is a new transport version, named in the group record
+(SPEC-051-R005). A build that implements version 2 MUST also speak version 1.
+Its member hello lists every transport version it supports. The head names in
+the record the highest version that every member and the coordinator support.
+Once implemented, the coordinator default becomes `[1, 2]`. One group never
+mixes versions.
 
 Correctness invariant: batching rows into one frame changes no row's payload
 bytes, so output token IDs and token counts MUST be identical to version 1
 framing and to single-Mac serving (SPEC-051-R025 item 1). Digests stay per
-request: for each row a member chains that row's table entry and payload
-slice into that request's `in_digest` or `out_digest`, in sequence order, so a
+request: for each row a member chains that row's request ID, token step and
+payload slice, exactly as version 1, into that request's `in_digest` or
+`out_digest`, in sequence order, so a
 request's digest never depends on which other requests shared a frame and the
 SPEC-051-R019 adjacent-stage checks and fault attribution are unchanged.
 Receipts are unchanged (SPEC-051-R018).
