@@ -42,15 +42,16 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.81 (#2328) on 3.32.3-macprovider.80: The three Gemma 4
-# commits of the campaign (packed assistant drafter, embedded assistant loader
-# and target state emission; cache-owned attention for row-safe batching; the
-# two K/V-read layers attend through the cache too), first carried by
-# 3.32.3-macprovider.65 on .63, cherry-picked onto 3.32.3-macprovider.80
-# without conflicts; other model families, the native-MTP read-column pruning
-# and the Swift, core and C rows are as in .80.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.81"
-SPEC048_MLX_SWIFT_LM_REVISION = "2639874f835134c94c069d1825afe44604110a58"
+# 3.32.3-macprovider.83 (#2373) on 3.32.3-macprovider.81: Three commits on
+# 3.32.3-macprovider.81 (tag .82 is the first two and was never pinned):
+# TokenIterator evaluates only the token for the K/V buffers of KVCacheSimple
+# and RotatingKVCache layers, as mlx-lm's generate_step does, instead of
+# naming them in every token's evaluation; a zero-width buffer of such a layer
+# (the DeepSeek V4 window values) and the state of every other cache stay in
+# the evaluation. It touches Evaluate.swift and its test only; the serial
+# route is the only serving path that uses TokenIterator.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.83"
+SPEC048_MLX_SWIFT_LM_REVISION = "a219eafe89323ac353b17f40e396e08cd10f9d7e"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"

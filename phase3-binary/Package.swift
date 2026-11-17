@@ -17,6 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.83 (#2373) on 3.32.3-macprovider.81: Three
+        // commits on 3.32.3-macprovider.81 (tag .82 is the first two and was
+        // never pinned): TokenIterator evaluates only the token for the K/V
+        // buffers of KVCacheSimple and RotatingKVCache layers, as mlx-lm's
+        // generate_step does, instead of naming them in every token's
+        // evaluation; a zero-width buffer of such a layer (the DeepSeek V4
+        // window values) and the state of every other cache stay in the
+        // evaluation. It touches Evaluate.swift and its test only; the serial
+        // route is the only serving path that uses TokenIterator.
         // Tag 3.32.3-macprovider.81 (#2328) on 3.32.3-macprovider.80: The
         // three Gemma 4 commits of the campaign (packed assistant drafter,
         // embedded assistant loader and target state emission; cache-owned
@@ -221,7 +230,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "2639874f835134c94c069d1825afe44604110a58"
+            revision: "a219eafe89323ac353b17f40e396e08cd10f9d7e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
