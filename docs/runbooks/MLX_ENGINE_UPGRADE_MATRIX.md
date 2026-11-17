@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.81` | `2639874f835134c94c069d1825afe44604110a58` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.83` | `a219eafe89323ac353b17f40e396e08cd10f9d7e` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,16 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-17 the LM row is `3.32.3-macprovider.83` (`a219eaf`), on
+`3.32.3-macprovider.81` (#2373): Three commits on 3.32.3-macprovider.81 (tag
+.82 is the first two and was never pinned): TokenIterator evaluates only the
+token for the K/V buffers of KVCacheSimple and RotatingKVCache layers, as
+mlx-lm's generate_step does, instead of naming them in every token's
+evaluation; a zero-width buffer of such a layer (the DeepSeek V4 window
+values) and the state of every other cache stay in the evaluation. It touches
+Evaluate.swift and its test only; the serial route is the only serving path
+that uses TokenIterator. No Swift, core or C pin changes.
 
 As of 2026-11-16 the LM row is `3.32.3-macprovider.81` (`2639874`), on
 `3.32.3-macprovider.80` (#2328): The three Gemma 4 commits of the campaign
