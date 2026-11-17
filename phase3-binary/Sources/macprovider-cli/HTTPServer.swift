@@ -1164,7 +1164,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             var request = try ChatCompletionRequest.parse(data: data)
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
-                .withRequestID(inboundRequestID)
+                .withRequestID(Self.effectiveRequestID(inbound: inboundRequestID, audit: auditRequestID, origin: origin))
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
             if request.topLevelKeys.contains("privacy_class") {
                 throw APIError(
@@ -2191,6 +2191,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
               markers == [localAppOriginValue]
         else { return .network }
         return .local
+    }
+
+    /// SPEC-001-R011: a local request without `X-Request-ID` runs under the
+    /// provider-generated audit id, so continuous batching (which refuses a
+    /// request with no id) serves local callers. Network requests keep only
+    /// the inbound id; their missing-id refusal is intentional.
+    static func effectiveRequestID(inbound: String?, audit: String, origin: RequestOrigin) -> String? {
+        inbound ?? (origin == .local ? audit : nil)
     }
 
     static func logRequestID(_ requestID: String, localLease: LocalPreemptionLease?) -> String {

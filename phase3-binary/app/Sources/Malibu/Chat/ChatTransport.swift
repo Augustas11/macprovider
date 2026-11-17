@@ -248,6 +248,8 @@ final class LocalChatTransport: ChatTransport {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue(localOrigin, forHTTPHeaderField: originHeader)
+        // Continuous batching refuses a request without an id.
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-ID")
         return request
     }
 
