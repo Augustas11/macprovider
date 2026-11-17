@@ -464,6 +464,36 @@ final class LocalRequestPriorityTests: XCTestCase {
         XCTAssertEqual(RouterHandler.effectiveRequestID(inbound: "req-1", audit: audit, origin: .network), "req-1")
     }
 
+    func testRequestIDThatReachesTheRuntimeOverHTTP() async throws {
+        let probe = SlotProbe()
+        let runtime = SlotFixtureRuntime(slots: 2, shape: .serial, probe: probe)
+        let status = makeStatus(slots: 2)
+        try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
+            let local = try await post(port: port, content: "local-no-id")
+            XCTAssertEqual(local.status, 200, local.body)
+            // The audit id is a provider-generated UUID string.
+            let minted = try XCTUnwrap(probe.requestID(for: "local-no-id") ?? nil)
+            XCTAssertNotNil(UUID(uuidString: minted), minted)
+
+            let kept = try await post(port: port, content: "local-with-id", headers: ["X-Request-ID": "req-local-1"])
+            XCTAssertEqual(kept.status, 200, kept.body)
+            XCTAssertEqual(probe.requestID(for: "local-with-id"), .some("req-local-1"))
+
+            let buyer = try await post(port: port, content: "buyer-no-id", network: true)
+            XCTAssertEqual(buyer.status, 200, buyer.body)
+            XCTAssertEqual(probe.requestID(for: "buyer-no-id"), .some(nil), "a network request without an id gets none")
+
+            let invalid = try await post(
+                port: port,
+                content: "local-invalid-id",
+                headers: ["X-Request-ID": String(repeating: "a", count: 513)]
+            )
+            XCTAssertEqual(invalid.status, 400, invalid.body)
+            XCTAssertEqual(invalid.errorCode, "invalid_request_id")
+            XCTAssertNil(probe.requestID(for: "local-invalid-id"), "an invalid id never reaches the runtime")
+        }
+    }
+
     func testOriginIsLocalOnlyWithTheExplicitLoopbackMarker() {
         func origin(_ headers: [(String, String)], loopback: Bool = true) -> RequestOrigin {
             RouterHandler.requestOrigin(
@@ -1057,6 +1087,7 @@ private final class NativeAdmissionRecorder: @unchecked Sendable {
 private final class SlotProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: UInt64] = [:]
+    private var requestIDs: [String: String?] = [:]
     private var cancelled = 0
     private var buyersReleased = false
 
@@ -1067,6 +1098,20 @@ private final class SlotProbe: @unchecked Sendable {
     }
 
     func entered(_ content: String) -> Bool { entryTime(content) != nil }
+
+    func recordRequestID(_ content: String, _ requestID: String?) {
+        lock.lock()
+        requestIDs[content] = requestID
+        lock.unlock()
+    }
+
+    /// The request id the runtime saw for `content`: nil if it never ran,
+    /// `.some(nil)` if it ran without one.
+    func requestID(for content: String) -> String?? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestIDs[content]
+    }
 
     func entryTime(_ content: String) -> UInt64? {
         lock.lock()
@@ -1163,6 +1208,7 @@ private actor SlotFixtureRuntime: ModelRuntimeServing {
         onChunk: (@Sendable (StreamChunk) -> Void)? = nil
     ) async throws -> CompletionResult {
         let content = Self.content(of: request)
+        probe.recordRequestID(content, request.requestID)
         let probe = probe
         let gate = gate
         let work: @Sendable () async throws -> CompletionResult = {
