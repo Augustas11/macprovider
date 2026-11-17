@@ -110,7 +110,9 @@ case "$MODE" in
     [ -n "$MEMBER_MEMORY_GB" ] || die "--member-memory-gb is required: member.sh prints it (\"tell the operator: ... --member-memory-gb N\")"
     [ "$MEMBER_MEMORY_GB" -ge 8 ] 2>/dev/null || die "--member-memory-gb must be a number of GB (8 or more)" ;;
   rehearse)
-    MEMBER="$(local_tailscale_addr)" || die "--rehearse links the two processes over this Mac's Tailscale address; Tailscale is not up here"
+    # Without Tailscale the two processes link over loopback, which no other
+    # machine can reach; member.sh accepts 127.0.0.1 only with this variable.
+    if MEMBER="$(local_tailscale_addr)"; then :; else MEMBER=127.0.0.1; export SHARD_POC_REHEARSE_LOOPBACK=1; fi
     MEMBER_MEMORY_GB="$MEMORY_GB" ;;
   baseline) ;;
 esac

@@ -83,11 +83,11 @@ log "log file: $LOG"
 # --- checks -------------------------------------------------------------------
 select_model "$MODEL"
 [ -n "$PEER" ] || die "--peer is required: the head Mac's Tailscale address (ask the operator)"
-is_tailscale_addr "$PEER" || die "--peer $PEER is not a Tailscale address (100.64.0.0/10)"
+{ [ "${SHARD_POC_REHEARSE_LOOPBACK:-0}" = 1 ] && [ "$PEER" = 127.0.0.1 ]; } || is_tailscale_addr "$PEER" || die "--peer $PEER is not a Tailscale address (100.64.0.0/10)"
 if [ -z "$LISTEN" ]; then
   LISTEN="$(local_tailscale_addr)" || die "no Tailscale address on this Mac. Install Tailscale, sign in, and run again"
 fi
-is_tailscale_addr "$LISTEN" || die "--listen $LISTEN is not a Tailscale address (100.64.0.0/10). This test refuses any other network"
+{ [ "${SHARD_POC_REHEARSE_LOOPBACK:-0}" = 1 ] && [ "$LISTEN" = 127.0.0.1 ]; } || is_tailscale_addr "$LISTEN" || die "--listen $LISTEN is not a Tailscale address (100.64.0.0/10). This test refuses any other network"
 is_local_addr "$LISTEN" || die "--listen $LISTEN is not an address of this Mac"
 log "SECURITY: the stage link between the two Macs is NOT encrypted by the CLI and, in this lab mode,"
 log "SECURITY: does not check which Mac connects. Only Tailscale (encrypted, limited to machines you"
