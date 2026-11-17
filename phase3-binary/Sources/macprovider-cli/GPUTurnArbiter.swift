@@ -132,6 +132,9 @@ struct GPUTurnParticipantState: Sendable, Equatable {
     var lastTurnBeganAt: UInt64?
     var lastTurnEndedAt: UInt64?
     var lastTurnKind: GPUWorkKind?
+    /// Turns this participant has begun since another participant last began
+    /// one (0 once another participant takes a turn).
+    var consecutiveTurns = 0
     /// GPU nanoseconds per prefill token, measured on drained (exclusive)
     /// prefill turns; nil until one was measured.
     var prefillNanosecondsPerToken: Double?
@@ -729,6 +732,10 @@ final class GPUTurnArbiter: @unchecked Sendable {
             participants[index].counters.prefillChunks += 1
             participants[index].counters.prefillTokens += tokens
         }
+        if lastTurnParticipantID != participant.id {
+            for other in participants.indices { participants[other].consecutiveTurns = 0 }
+        }
+        participants[index].consecutiveTurns += 1
         lastTurnParticipantID = participant.id
         return true
     }

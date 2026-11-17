@@ -15,7 +15,10 @@ import Foundation
 // while it is inside a work interval and less than `graceNanoseconds` have
 // passed since its last turn ended (or since this caller began waiting, if
 // later); a waiter sleeps until that grace runs out or a state change, never
-// re-polls. A peer with work open that never asks costs at most one grace.
+// re-polls. A peer with work open that does not ask costs one grace per gap:
+// once this participant has taken a turn past its burst because the peer did
+// not show, it keeps going without a grace until the peer takes a turn (a
+// peer that is waiting in `beginTurn` is always let in).
 // Turns are exclusive (the arbiter's rule); only a turn held past `stall_ms`
 // lets a waiter in beside it.
 
@@ -73,6 +76,11 @@ struct AlternateGPUTurnPolicy: GPUTurnPolicy {
             // Mid-burst: keep going. Burst complete: let the others in, if one
             // is about to take a turn.
             guard (me?.counters.turns ?? 0) % burst == 0 else { return .proceed }
+            // Already past the burst: the peer was given its grace and did
+            // not ask. Only a peer that is waiting now is let in.
+            if (me?.consecutiveTurns ?? 0) > burst {
+                return others.contains(where: \.isWaiting) ? .wait(maxNanoseconds: nil) : .proceed
+            }
             return pause(for: others, state: state, since: request.waitingSince) ?? .proceed
         }
 

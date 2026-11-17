@@ -330,6 +330,52 @@ final class GPUTurnArbiterTests: XCTestCase {
         XCTAssertEqual(GPUTurnArbiter().snapshot().policy, "alternate")
     }
 
+    /// A sibling with work open that does not ask for a turn (a scheduler
+    /// between rows, a request before its first forward) costs the running
+    /// model one grace, not one per turn; a sibling that is waiting is still
+    /// let in, and the grace is owed again after the sibling's next turn.
+    func testAlternateGraceIsSpentOncePerGap() {
+        let policy = AlternateGPUTurnPolicy(drain: .never)
+        var me = GPUTurnParticipantState(id: 1, modelID: "a")
+        me.pendingWork = 1
+        me.lastTurnBeganAt = 900
+        me.lastTurnEndedAt = 950
+        me.counters.turns = 5
+        me.consecutiveTurns = 1
+        var peer = GPUTurnParticipantState(id: 2, modelID: "b")
+        peer.pendingWork = 1
+        peer.lastTurnBeganAt = 500
+        peer.lastTurnEndedAt = 600
+        func decide() -> GPUTurnDecision {
+            policy.decide(
+                GPUTurnRequest(participantID: 1, kind: .decodeStep(rows: 1), waitingSince: 1_000),
+                state: GPUTurnArbiterState(now: 1_000, participants: [me, peer], lastTurnParticipantID: 1))
+        }
+        // Burst just completed: the peer gets its grace.
+        XCTAssertEqual(decide(), .wait(maxNanoseconds: AlternateGPUTurnPolicy.graceNanoseconds))
+        // One turn past the burst: no second grace for the same gap.
+        me.consecutiveTurns = 2
+        me.counters.turns = 6
+        XCTAssertEqual(decide(), .proceed)
+        // The peer asks: it is let in at once.
+        peer.waitingSince = 990
+        XCTAssertEqual(decide(), .wait(maxNanoseconds: nil))
+    }
+
+    func testConsecutiveTurnsResetWhenAnotherParticipantTakesATurn() {
+        let arbiter = GPUTurnArbiter(policy: PassthroughGPUTurnPolicy())
+        let a = arbiter.register(modelID: "a")
+        let b = arbiter.register(modelID: "b")
+        for _ in 0..<3 { a.withTurn(.decodeStep(rows: 1)) {} }
+        XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.consecutiveTurns, 3)
+        b.withTurn(.decodeStep(rows: 1)) {}
+        XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.consecutiveTurns, 0)
+        XCTAssertEqual(arbiter.stateForTest().participant(b.id)?.consecutiveTurns, 1)
+        a.withTurn(.decodeStep(rows: 1)) {}
+        XCTAssertEqual(arbiter.stateForTest().participant(a.id)?.consecutiveTurns, 1)
+        XCTAssertEqual(arbiter.stateForTest().participant(b.id)?.consecutiveTurns, 0)
+    }
+
     /// The default never makes a model wait for a sibling that has no work,
     /// and never drains: one model alone, or one busy model beside an idle
     /// one, runs as it does without an arbiter.
