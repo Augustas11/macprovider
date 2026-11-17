@@ -4,6 +4,8 @@
 usage: compare.py --ref ref.jsonl --ours ours.jsonl [--floor 0.03] [--json summary.json]
                   [--text-fallback-reason "why byte identity cannot hold"]
                   [--margins margins.json] [--tie-steps 2]
+       compare.py --baseline main-provider.jsonl --ours candidate-provider.jsonl
+                  [--subset] [--floor 0.03] [--json summary.json]
 
 Prints a markdown grid table, writes a JSON summary (stdout when --json is not
 given, after the table), and exits 1 when any cell fails, 2 on unusable input.
@@ -33,6 +35,20 @@ Reference cells the provider run never produced are listed as "not run" and
 excluded from pass/fail; provider cells without a reference still FAIL.
 Multi-row cells score aggregate tok/s against the single-row reference
 (serial stock mlx-lm); per-row tok/s ratios are reported, not gated.
+
+Reported, never gated: request-level output tok/s (request_tps =
+completion_tokens / (last token time - request start); a multi-row cell sums
+it over its concurrent rows) with its ratio to the reference, and median TTFT
+on both sides.
+
+--baseline mode compares two provider runs (a candidate build against the
+main build): every (cell, trial, row) of the candidate must equal the
+baseline's trial-0 row of the same cell and prompt row in text,
+reasoning_text and completion_tokens; any difference, error or missing cell
+exits 1 (--subset: baseline cells the candidate did not run are listed, not
+failed). It prints per cell the request tok/s, decode tok/s and TTFT
+medians, the request tok/s delta against the baseline and both runs' trial
+spread (noise), without gating on speed.
 """
 import argparse
 import json
@@ -103,6 +119,22 @@ def index_ours(lines):
         else:
             rows[key].append(r)
     return rows, aggs, meta
+
+
+def ours_request_scores(rows, aggs, nrows):
+    """Request-level output tok/s per trial: the row's, or the sum over concurrent rows."""
+    if nrows == 1:
+        return [r.get("request_tps") for r in sorted(rows, key=lambda r: r["trial"])]
+    by_trial = defaultdict(list)
+    for r in rows:
+        by_trial[r["trial"]].append(r.get("request_tps"))
+    sums = {a["trial"]: a.get("request_tps_sum") for a in aggs}
+    out = []
+    for trial in sorted(by_trial):
+        xs = by_trial[trial]
+        fallback = round(sum(xs), 3) if len(xs) == nrows and None not in xs else None
+        out.append(sums.get(trial) if sums.get(trial) is not None else fallback)
+    return out
 
 
 def ours_scores(rows, aggs, nrows):
@@ -220,6 +252,24 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         cell["ours_tps"] = median(scores)
         cell["ref_tps"] = median(ref_scores)
         cell["band"] = round(max(floor, noise(scores), noise(ref_scores)), 4)
+        # Reported only: request-level output tok/s and its two parts' TTFT.
+        cell["ours_request_trials"] = ours_request_scores(rows, ours_aggs.get(key, []), nrows)
+        cell["ref_request_trials"] = [r.get("request_tps") for r in base]
+        cell["ours_request_tps"] = median(cell["ours_request_trials"])
+        cell["ref_request_tps"] = median(cell["ref_request_trials"])
+        cell["request_ratio"] = (round(cell["ours_request_tps"] / cell["ref_request_tps"], 4)
+                                 if cell["ours_request_tps"] and cell["ref_request_tps"] else None)
+        cell["ours_ttft_s"] = median(r.get("ttft_s") for r in rows)
+        cell["ref_ttft_s"] = median(r.get("ttft_s") for r in base)
+        cell["ours_noise"] = round(noise(scores), 4)
+        cell["ref_noise"] = round(noise(ref_scores), 4)
+        cell["ours_request_noise"] = round(noise(cell["ours_request_trials"]), 4)
+        cell["ref_request_noise"] = round(noise(cell["ref_request_trials"]), 4)
+        first = min(rows, key=lambda r: (r["trial"], r["row"])) if rows else {}
+        cell["prompt_tokens"] = first.get("prompt_tokens")
+        cell["completion_tokens"] = first.get("completion_tokens")
+        cell["ref_prompt_tokens"] = base[0].get("prompt_tokens") if base else None
+        cell["ref_completion_tokens"] = base[0].get("completion_tokens") if base else None
         cell["ratio"] = None
         cell["ratio_ok"] = False
         if not base:
@@ -400,13 +450,18 @@ def text_label(c):
 
 def markdown(summary):
     lines = [
-        "| model | ctx | out | rows | ref tok/s | ours tok/s | ratio | band | text | tokens | slope | status |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
+        "| model | ctx | out | rows | ref tok/s | ours tok/s | ratio | band "
+        "| ref req tok/s | ours req tok/s | req ratio | ref ttft s | ours ttft s "
+        "| text | tokens | slope | status |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
     ]
     for c in summary["cells"]:
         lines.append(
             f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c['ref_tps'])} | "
             f"{fmt(c['ours_tps'])} | {fmt(c['ratio'], '.3f')} | {fmt(c['band'], '.3f')} | "
+            f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
+            f"{fmt(c.get('request_ratio'), '.3f')} | {fmt(c.get('ref_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('ours_ttft_s'), '.3f')} | "
             f"{text_label(c)} | {'ok' if c['tokens_ok'] else 'FAIL'} | "
             f"{'ok' if c['slope_ok'] else 'FAIL'} | {'PASS' if c['pass'] else 'FAIL'} |")
     if summary["not_run"]:
@@ -441,9 +496,130 @@ def markdown(summary):
     return "\n".join(lines)
 
 
+def evaluate_baseline(base_lines, cand_lines, floor=0.03, subset=False):
+    """Candidate provider run vs a baseline provider run: identity gate, speed deltas reported."""
+    def index(lines):
+        rows, aggs, _ = index_ours(lines)
+        out = {}
+        for key in set(rows) | set(aggs):
+            out[key[1:]] = (key[0], rows.get(key, []), aggs.get(key, []))
+        return out
+
+    base, cand = index(base_lines), index(cand_lines)
+    cells, not_run = [], []
+    for key in sorted(set(base) | set(cand)):
+        ctx, out, nrows = key
+        if key not in cand and subset:
+            not_run.append({"ctx": ctx, "out": out, "rows": nrows})
+            continue
+        c = {"ctx": ctx, "out": out, "rows": nrows, "reasons": [], "notes": []}
+        cells.append(c)
+        if key not in base or key not in cand:
+            c["reasons"].append("cell missing from " + ("baseline" if key not in base else "candidate"))
+            c["identical"] = False
+            c["pass"] = False
+            continue
+        bmodel, brows, baggs = base[key]
+        cmodel, crows, caggs = cand[key]
+        c["model"], c["baseline_model"] = cmodel, bmodel
+        sides = {}
+        for side, rows, aggs in (("base", brows, baggs), ("cand", crows, caggs)):
+            req = ours_request_scores(rows, aggs, nrows)
+            dec = ours_scores(rows, aggs, nrows)
+            sides[side] = req
+            c[f"{side}_request_tps"] = median(req)
+            c[f"{side}_decode_tps"] = median(dec)
+            c[f"{side}_ttft_s"] = median(r.get("ttft_s") for r in rows)
+            c[f"{side}_noise"] = round(noise(req), 4)
+            c[f"{side}_request_trials"] = req
+        c["band"] = round(max(floor, c["base_noise"], c["cand_noise"]), 4)
+        c["request_delta"] = (round(c["cand_request_tps"] / c["base_request_tps"] - 1, 4)
+                              if c["cand_request_tps"] and c["base_request_tps"] else None)
+        if c["request_delta"] is not None and abs(c["request_delta"]) <= c["band"]:
+            c["notes"].append(f"request tok/s delta {c['request_delta']:+.3f} within noise band {c['band']:.3f}")
+        want = {}
+        for r in sorted(brows, key=lambda r: r["trial"]):
+            if r.get("error"):
+                continue
+            sig = (r.get("text", ""), r.get("reasoning_text", ""), r.get("completion_tokens"))
+            if r["row"] not in want:
+                want[r["row"]] = sig
+            elif want[r["row"]] != sig:
+                c["notes"].append(f"baseline trial {r['trial']} row {r['row']} differs from its trial 0")
+        identical = True
+        for r in sorted(crows, key=lambda r: (r["trial"], r["row"])):
+            where = f"trial {r['trial']} row {r['row']}"
+            if r.get("error"):
+                identical = False
+                c["reasons"].append(f"{where}: error {r['error']}")
+                continue
+            ref = want.get(r["row"])
+            if ref is None:
+                identical = False
+                c["reasons"].append(f"{where}: no baseline row {r['row']}")
+                continue
+            text, reasoning, tokens = ref
+            if r.get("completion_tokens") != tokens:
+                identical = False
+                c["reasons"].append(f"{where}: completion_tokens {r.get('completion_tokens')} vs baseline {tokens}")
+            off = first_diff(r.get("text", ""), text)
+            if off is not None:
+                identical = False
+                c["reasons"].append(f"{where}: text differs from baseline at byte {off}")
+            roff = first_diff(r.get("reasoning_text", ""), reasoning)
+            if roff is not None:
+                identical = False
+                c["reasons"].append(f"{where}: reasoning_text differs from baseline at byte {roff}")
+        if not crows:
+            identical = False
+            c["reasons"].append("candidate has no rows")
+        c["identical"] = identical
+        c["pass"] = not c["reasons"]
+    failing = [c for c in cells if not c["pass"]]
+    return {"mode": "baseline", "floor": floor, "cells": cells, "not_run": not_run,
+            "failing": [{"cell": f"ctx{c['ctx']}|out{c['out']}|rows{c['rows']}", "reasons": c["reasons"]}
+                        for c in failing],
+            "pass": not failing}
+
+
+def markdown_baseline(summary):
+    lines = [
+        "| ctx | out | rows | base req tok/s | cand req tok/s | delta | base noise | cand noise "
+        "| base decode tok/s | cand decode tok/s | base ttft s | cand ttft s | identical |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for c in summary["cells"]:
+        delta = c.get("request_delta")
+        lines.append(
+            f"| {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c.get('base_request_tps'))} | "
+            f"{fmt(c.get('cand_request_tps'))} | {'-' if delta is None else format(delta, '+.3f')} | "
+            f"{fmt(c.get('base_noise'), '.3f')} | {fmt(c.get('cand_noise'), '.3f')} | "
+            f"{fmt(c.get('base_decode_tps'))} | {fmt(c.get('cand_decode_tps'))} | "
+            f"{fmt(c.get('base_ttft_s'), '.3f')} | {fmt(c.get('cand_ttft_s'), '.3f')} | "
+            f"{'yes' if c.get('identical') else 'NO'} |")
+    if summary["not_run"]:
+        lines.append("")
+        lines.append(f"Not run ({len(summary['not_run'])}, --subset): "
+                     + ", ".join(f"ctx{n['ctx']}/out{n['out']}/rows{n['rows']}" for n in summary["not_run"]))
+    if summary["failing"]:
+        lines.append("")
+        lines.append("Differences:")
+        for f in summary["failing"]:
+            lines.extend(f"- {f['cell']}: {reason}" for reason in f["reasons"])
+    notes = [(c, n) for c in summary["cells"] for n in c["notes"]]
+    if notes:
+        lines.append("")
+        lines.append("Notes:")
+        lines.extend(f"- ctx{c['ctx']}|out{c['out']}|rows{c['rows']}: {n}" for c, n in notes)
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ref", required=True)
+    ap.add_argument("--ref")
+    ap.add_argument("--baseline", help="baseline provider.jsonl: provider-vs-provider identity mode")
+    ap.add_argument("--subset", action="store_true",
+                    help="--baseline mode: baseline cells the candidate did not run are not failures")
     ap.add_argument("--ours", required=True)
     ap.add_argument("--floor", type=float, default=0.03)
     ap.add_argument("--json")
@@ -452,6 +628,19 @@ def main(argv=None):
     ap.add_argument("--tie-steps", type=float, default=2.0,
                     help="largest margin (in float steps) still counted as a tie (default 2)")
     args = ap.parse_args(argv)
+    if bool(args.ref) == bool(args.baseline):
+        ap.error("give exactly one of --ref and --baseline")
+    if args.baseline:
+        base_lines, cand_lines = read_jsonl(args.baseline), read_jsonl(args.ours)
+        if not base_lines or not cand_lines:
+            print("empty input", file=sys.stderr)
+            return 2
+        summary = evaluate_baseline(base_lines, cand_lines, args.floor, args.subset)
+        print(markdown_baseline(summary))
+        if args.json:
+            with open(args.json, "w") as f:
+                f.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        return 0 if summary["pass"] else 1
     ref_lines = read_jsonl(args.ref)
     our_lines = read_jsonl(args.ours)
     if not ref_lines or not our_lines:

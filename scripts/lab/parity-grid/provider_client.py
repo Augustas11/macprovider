@@ -34,6 +34,10 @@ keys its prefix cache only on that header. Every row record carries conversation
 --turn2-history verbatim re-sends the turn-1 assistant message with reasoning_content (the
 streamed reasoning text) next to content; content (default) sends content only. Turn-2 rows
 record turn2_history.
+
+request_tps = completion_tokens / (t_last - t0), t0 the request start: the
+request-level output tok/s (TTFT and decode tok/s are its two parts). The
+aggregate line sums it over the concurrent rows (request_tps_sum).
 """
 import argparse
 import hashlib
@@ -174,6 +178,7 @@ def row_record(res, base):
         "provider_generation_ms": usage.get("macprovider_generation_ms"),
         "decode_tps": round((ct - 1) / span, 3) if ct and ct > 1 and span > 0 else None,
         "ttft_s": round(t_first - t0, 4) if t_first is not None else None,
+        "request_tps": round(ct / (t_last - t0), 3) if ct and t_last is not None and t_last > t0 else None,
         "total_s": round(res["t_end"] - t0, 4),
         "chunks": res.get("chunks"),
         "finish": res.get("finish"),
@@ -198,11 +203,14 @@ def aggregate_record(records, base):
         tokens = sum(r["completion_tokens"] - 1 for r in ok)
         agg = round(tokens / span, 3) if span > 0 else None
     valid = [x for x in per_row if x is not None]
+    req = [r.get("request_tps") for r in records]
     return {
         **base,
         "kind": "aggregate",
         "aggregate_tps": agg,
         "per_row_tps": per_row,
+        "request_tps_sum": round(sum(req), 3) if req and None not in req and agg is not None else None,
+        "per_row_request_tps": req,
         "per_row_min_tps": min(valid) if valid else None,
         "per_row_median_tps": round(statistics.median(valid), 3) if valid else None,
         "completion_tokens_sum": sum(r["completion_tokens"] or 0 for r in records),

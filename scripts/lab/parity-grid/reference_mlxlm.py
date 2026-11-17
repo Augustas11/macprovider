@@ -10,9 +10,12 @@ For every grid cell it runs prompt row 0 `--trials` times. For a cell with
 N > 1 rows it also runs prompt rows 1..N-1 single-row (`--extra-row-trials`
 times) so compare.py has a single-row reference text for every concurrent row.
 Generation stops only on max_tokens ("length") or EOS ("stop"); no stop strings.
+request_tps = completion_tokens / (t_last - t0): request-level output tok/s.
+The first line of a run is a `kind: meta` record with the package versions.
 """
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import sys
@@ -33,6 +36,16 @@ def model_max_context(model_path):
             return cfg[key]
     text_cfg = cfg.get("text_config") or {}
     return text_cfg.get("max_position_embeddings")
+
+
+def package_versions(names):
+    out = {}
+    for name in names:
+        try:
+            out[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            out[name] = None
+    return out
 
 
 def reference_jobs(cells, trials, extra_row_trials):
@@ -68,6 +81,7 @@ def run_one(model, tokenizer, stream_generate, sampler, ids, max_tokens):
         "mlxlm_generation_tokens": raw_tokens,
         "decode_tps": round((completion - 1) / span, 3) if span > 0 and completion > 1 else None,
         "ttft_s": round(t_first - t0, 4),
+        "request_tps": round(completion / (t_last - t0), 3) if completion > 0 and t_last else None,
         "total_s": round(t_last - t0, 4),
         "mlxlm_generation_tps": round(last.generation_tps, 3),
         "mlxlm_prompt_tps": round(last.prompt_tps, 3),
@@ -126,12 +140,16 @@ def main(argv=None):
             encode(prompts.build_messages(200, 9999)), grid.get("warmup_tokens", 32))
 
     with open(args.out, "a") as out:
+        out.write(json.dumps({"side": "reference", "kind": "meta", "reference": "mlx-lm",
+                              "model": args.model_name, "model_path": args.model_path, "load_s": load_s,
+                              "versions": package_versions(("mlx", "mlx-lm", "transformers"))}) + "\n")
         for (ctx, max_tokens, prow), n in reference_jobs(cells, trials, args.extra_row_trials):
             ids = encode(prompts.build_messages(ctx, prow))
             for trial in range(n):
                 rec = run_one(model, tokenizer, stream_generate, sampler, ids, max_tokens)
                 line = {
                     "side": "reference",
+                    "reference": "mlx-lm",
                     "kind": "row",
                     "model": args.model_name,
                     "cell": prompts.cell_key(args.model_name, ctx, max_tokens, 1),

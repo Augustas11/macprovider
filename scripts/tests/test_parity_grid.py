@@ -331,6 +331,86 @@ class CompareTests(unittest.TestCase):
             self.assertEqual(rc, 1)
 
 
+class RequestMetricAndBaselineTests(unittest.TestCase):
+    @staticmethod
+    def with_request(lines, req, ttft=1.0):
+        for x in lines:
+            if x["kind"] == "row":
+                x["request_tps"], x["ttft_s"] = req, ttft
+        return lines
+
+    def test_request_metric_reported_not_gated(self):
+        ref = [dict(ref_line(200, 128, 126.0, i), request_tps=100.0, ttft_s=0.3) for i in range(3)]
+        ours = self.with_request(our_lines(200, 128, 1, [127.0] * 3), 50.0)
+        s = compare.evaluate(ref, ours)
+        cell = s["cells"][0]
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertEqual((cell["ref_request_tps"], cell["ours_request_tps"], cell["request_ratio"]), (100.0, 50.0, 0.5))
+        self.assertEqual((cell["ref_ttft_s"], cell["ours_ttft_s"]), (0.3, 1.0))
+        self.assertEqual((cell["prompt_tokens"], cell["completion_tokens"]), (244, 128))
+        self.assertIn("| 100.00 | 50.00 | 0.500 |", compare.markdown(s))
+
+    def test_multi_row_request_metric_sums_rows(self):
+        ours = self.with_request(our_lines(200, 128, 4, [200.0] * 3), 30.0)
+        cell = compare.evaluate([ref_line(200, 128, 126.0)], ours)["cells"][0]
+        self.assertEqual(cell["ours_request_tps"], 120.0)
+        for x in ours:
+            if x["kind"] == "aggregate":
+                x["request_tps_sum"] = 111.0
+        self.assertEqual(compare.evaluate([ref_line(200, 128, 126.0)], ours)["cells"][0]["ours_request_tps"], 111.0)
+
+    def test_client_request_tps(self):
+        res = {"text": "ab", "t_first": 2.0, "t_last": 4.0, "t0": 0.0, "t_end": 5.0,
+               "usage": {"completion_tokens": 8}}
+        rec = client.row_record(res, {})
+        self.assertEqual(rec["request_tps"], 2.0)
+        self.assertEqual(rec["ttft_s"], 2.0)
+        agg = client.aggregate_record([dict(rec, _t_first=2.0, _t_last=4.0)] * 2, {})
+        self.assertEqual(agg["request_tps_sum"], 4.0)
+
+    def test_baseline_identical_passes_and_reports_delta(self):
+        base = self.with_request(our_lines(200, 128, 1, [100.0, 101.0, 99.0]), 50.0)
+        cand = self.with_request(our_lines(200, 128, 1, [110.0] * 3), 55.0)
+        s = compare.evaluate_baseline(base, cand)
+        c = s["cells"][0]
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertTrue(c["identical"])
+        self.assertEqual(c["request_delta"], 0.1)
+        self.assertAlmostEqual(c["base_noise"], 0.0)
+        self.assertIn("+0.100", compare.markdown_baseline(s))
+
+    def test_baseline_any_difference_fails(self):
+        base = our_lines(200, 128, 1, [100.0] * 3)
+        self.assertFalse(compare.evaluate_baseline(base, our_lines(200, 128, 1, [100.0] * 3, texts={0: "x"}))["pass"])
+        self.assertFalse(compare.evaluate_baseline(base, our_lines(200, 128, 1, [100.0] * 3, tokens=127))["pass"])
+        cand = our_lines(200, 128, 1, [100.0] * 3)
+        cand[0]["reasoning_text"] = "hm"
+        self.assertFalse(compare.evaluate_baseline(base, cand)["pass"])
+
+    def test_baseline_missing_cells(self):
+        base = our_lines(200, 128, 1, [100.0] * 3) + our_lines(200, 512, 1, [100.0] * 3)
+        cand = our_lines(200, 128, 1, [100.0] * 3)
+        self.assertFalse(compare.evaluate_baseline(base, cand)["pass"])
+        s = compare.evaluate_baseline(base, cand, subset=True)
+        self.assertTrue(s["pass"], s["failing"])
+        self.assertEqual(s["not_run"], [{"ctx": 200, "out": 512, "rows": 1}])
+        self.assertFalse(compare.evaluate_baseline(cand, base, subset=True)["pass"])
+
+    def test_baseline_cli_exit_codes(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            bp, cp = Path(d, "b.jsonl"), Path(d, "c.jsonl")
+            bp.write_text("".join(json.dumps(x) + "\n" for x in our_lines(200, 128, 1, [100.0] * 3)))
+            cp.write_text("".join(json.dumps(x) + "\n" for x in our_lines(200, 128, 1, [90.0] * 3)))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(compare.main(["--baseline", str(bp), "--ours", str(cp)]), 0)
+            cp.write_text("".join(json.dumps(x) + "\n" for x in our_lines(200, 128, 1, [90.0] * 3, texts={0: "y"})))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(compare.main(["--baseline", str(bp), "--ours", str(cp)]), 1)
+
+
 class MarginTests(unittest.TestCase):
     def test_spacing_by_binade(self):
         self.assertEqual(margin.spacing(20.0, "float16"), 0.015625)

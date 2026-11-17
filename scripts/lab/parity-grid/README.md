@@ -15,6 +15,7 @@ always given on the command line; `grid.json` holds placeholders only.
 |---|---|---|
 | `prompts.py` | both sides | deterministic chat messages per (context, prompt row); cell keys; grid expansion |
 | `reference_mlxlm.py` | python with `mlx_lm` | `mlx_lm.load` + `stream_generate`, greedy (`temp=0`), chat template from the tokenizer |
+| `reference_mlxvlm.py` | python with `mlx_vlm` | the same with mlx-vlm's `stream_generate` (GLM-5.3-Flash, MiniMax M3.1-Flash); `--refusal-ablation SNAPSHOT_DIR` applies the runtime refusal-direction projection that snapshot's config names (`--model-path` = the unmodified base) |
 | `provider_client.py` | stdlib python | streaming `/v1/chat/completions` client, N concurrent rows by threads |
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
 | `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
@@ -102,6 +103,33 @@ Both sides write one JSON line per row per trial with `cell`, `prompt_tokens`,
 The reference runs prompt row 0 for every cell (`--trials` times) and, for a
 cell with N rows, prompt rows 1..N-1 single-row (`--extra-row-trials`, default
 1) so every concurrent row has its own single-row reference text.
+
+- `request_tps = completion_tokens / (t_last - t0)`, t0 the request start:
+  request-level output tok/s, whose two parts are TTFT and decode tok/s. A
+  provider aggregate line sums it over its concurrent rows
+  (`request_tps_sum`). compare.py reports it and its ratio, never gates on it.
+- Each reference run starts with a `kind: meta` line: package versions (and
+  for mlx-vlm the wired limit and ablation parameters).
+
+`run-grid.sh --reference mlx-vlm` runs `reference_mlxvlm.py`; `--ref-arg ARG`
+passes arguments to the reference, `--ref-model-path` points it at another
+snapshot, `--outputs` / `--contexts` cut the grid, `--model-id` with
+`--model-sha256` serves the snapshot under its catalog id, `--config-extra`
+appends serve-config lines (e.g. a CB accepted tuple), `--skip-compare` stops
+after the client.
+
+## Provider vs provider (`compare.py --baseline`)
+
+```bash
+python3 compare.py --baseline main/provider.jsonl --ours candidate/provider.jsonl [--subset]
+```
+
+Gate for a candidate build: every (cell, trial, row) equals the baseline's
+trial-0 row of that cell and prompt row in `text`, `reasoning_text` and
+`completion_tokens`; any difference, error or missing cell exits 1
+(`--subset`: baseline cells the candidate did not run are only listed). The
+table gives per cell the request tok/s delta against the baseline with both
+runs' trial spread, plus decode tok/s and TTFT; speed is not gated.
 
 ## Checks (compare.py)
 
