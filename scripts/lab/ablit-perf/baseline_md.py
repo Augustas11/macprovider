@@ -9,7 +9,9 @@ rerun on a fresh serve), MODEL_DIR/base/vs-main.json (the unmodified base in our
 runtime, 1 row) and MODEL_DIR/base/summary.json (base model: our provider vs the reference
 on the same base weights, 1 row; written when <K>_BASE_REFERENCE=1). Exits 2 when main/summary.json is missing or has no cells.
 A summary whose reference failed (compare.py --reference-failed) is still written, headed
-by the failure; its reference columns are empty.
+by the failure; its reference columns are empty. The reference's meta line
+(main/reference.jsonl, else main/reference.suspect.jsonl) names the reference under the table,
+with its `table_note` when it has one (oMLX: how its decode tok/s relates to ours).
 
 Columns: request tok/s = completion_tokens / (last token - request start), summed over
 the rows of a multi-row cell (the goal metric); decode tok/s and TTFT are its parts.
@@ -64,6 +66,37 @@ def reference_failed(summary, label):
     reason = summary.get("reference_failed")
     return [f"**{label} reference FAILED**: `{reason}`. Reference columns are empty; "
             "the provider columns are measured.", ""] if reason else []
+
+
+def reference_meta(run_dir):
+    """The `kind: meta` line of RUN_DIR's reference rows (kept or set aside as suspect), or None."""
+    for name in ("reference.jsonl", "reference.suspect.jsonl"):
+        try:
+            with open(os.path.join(run_dir, name)) as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("kind") == "meta":
+                        return r
+        except OSError:
+            continue
+    return None
+
+
+def reference_lines(meta):
+    if not meta:
+        return []
+    v = meta.get("versions") or {}
+    kind = meta.get("reference", "?")
+    ident = (f"oMLX {meta.get('omlx_version')} commit `{meta.get('omlx_commit')}`" if kind == "omlx"
+             else f"{kind} {v.get(kind)}")
+    deps = ", ".join(f"{k} {v[k]}" for k in ("mlx", "mlx-lm", "mlx-vlm") if v.get(k) and k != kind)
+    out = ["", f"Reference: {ident}" + (f" ({deps})" if deps else "") + "."]
+    if meta.get("table_note"):
+        out.append(meta["table_note"])
+    return out
 
 
 def cell_rows(cells):
@@ -142,6 +175,7 @@ def main(argv=None):
            "noise = (max - min) / median over the trials of one side.", ""]
     out += reference_failed(main_summary, "Main")
     out += TABLE_HEAD + cell_rows(main_summary["cells"])
+    out += reference_lines(reference_meta(os.path.join(a.model_dir, "main")))
     mismatched = [c for c in main_summary["cells"] if c.get("prompt_ok") is False]
     if mismatched:
         out += ["", "prompt_tokens differ from the reference in: "

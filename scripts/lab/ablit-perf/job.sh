@@ -35,7 +35,9 @@
 #
 # Models: MODELS="qwen27 glm minimax" (default). A model key K reads <K>_NAME, <K>_PATH,
 # <K>_ID, <K>_SHA256 (ID optional; without it the snapshot is served by path), <K>_REF
-# (mlx-lm|mlx-vlm), <K>_REF_PY, <K>_REF_PATH, <K>_REF_ARGS, <K>_ROWS, <K>_TRIALS_BY_ROWS,
+# (mlx-lm|mlx-vlm|omlx), <K>_REF_PY, <K>_REF_PATH, <K>_REF_ARGS, <K>_OMLX_DIR (REF=omlx: the
+# oMLX install dir holding omlx-venv/ and omlx-src/; the server's state goes under
+# ~/lab-ablit-perf/omlx-state), <K>_ROWS, <K>_TRIALS_BY_ROWS,
 # <K>_CB_FROM_POLICY, <K>_CONFIG_EXTRA, <K>_BASE_PATH/_BASE_ID/_BASE_SHA256/_BASE_REFERENCE and the
 # staging fields: <K>_CLONE_FROM (PATH = APFS clone of it, verified against SHA256),
 # <K>_BASE_CLONE_FROM (the same for BASE_PATH), <K>_HF_REPO/_HF_REVISION/_HF_SUBFOLDER
@@ -44,6 +46,15 @@
 # <K>_MTP_BENCH/_MTP_TEMPLATE. Built-in defaults exist for qwen27, glm, minimax and dsv4abl
 # (the abliterated DeepSeek V4-Flash that job-dsv4-abliterated.sh splices; not in MODELS by default).
 # Grid: OUTPUTS (128,512,2048), CONTEXTS (short,4k,16k), TRIALS (3), BASE_TRIALS (1).
+#
+# REFERENCE_ONLY=<run id>: add a reference to an already measured provider grid. No build, no
+# provider serve, no CB check, base pass, noise pass or MTP bench: per model, staging (the
+# snapshot clone is verified against the catalog hash as usual), then
+# results/<run id>/<name>/main/{provider.jsonl,grid.json} are copied into this run's
+# <name>/main, run-grid.sh --reference-only runs the reference over the same cells and
+# compares, and baseline.md is written with that run's noise/ and mtp/ results and build
+# identity. A reference whose output is degenerate prints REFERENCE_SUSPECT (grid rc 9) and
+# fails the job like REFERENCE_FAIL.
 #
 # Every failure prints a `BLOCKER:` line; the job ends with JOB_PASS (exit 0) or JOB_FAIL
 # (nonzero). Speed slower than the reference is a finding, not a failure.
@@ -62,6 +73,8 @@ CONTEXTS=${CONTEXTS:-short,4k,16k}
 TRIALS=${TRIALS:-3}
 BASE_TRIALS=${BASE_TRIALS:-1}
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
+REFERENCE_ONLY=${REFERENCE_ONLY:-}
+SRC_RES=${REFERENCE_ONLY:+$LAB/results/$REFERENCE_ONLY}
 BIN=$SRC/.build-lab-harness/release
 MTP_CELLS="s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512"
 FAILED=0
@@ -123,7 +136,11 @@ v() { local n; n=$(kname "$1" "$2"); echo "${!n:-}"; }
 setv() { printf -v "$(kname "$1" "$2")" '%s' "$3"; }
 under_models() { case $1 in "$LAB"/models/?*) return 0 ;; *) return 1 ;; esac; }
 
-log "JOB_START run=$RUN_ID commit=${COMMIT:-unknown} models=\"$MODELS\" outputs=$OUTPUTS contexts=$CONTEXTS trials=$TRIALS"
+log "JOB_START run=$RUN_ID commit=${COMMIT:-unknown} models=\"$MODELS\" outputs=$OUTPUTS contexts=$CONTEXTS trials=$TRIALS${REFERENCE_ONLY:+ reference_only=$REFERENCE_ONLY}"
+if [ -n "$REFERENCE_ONLY" ]; then
+  echo "$REFERENCE_ONLY" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "REFERENCE_ONLY=$REFERENCE_ONLY is not a run id" 64
+  [ -d "$SRC_RES" ] || die "REFERENCE_ONLY: no provider run at $SRC_RES" 11
+fi
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -132,7 +149,18 @@ pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli ser
 for k in $MODELS; do
   for f in NAME REF; do [ -n "$(v "$k" $f)" ] || die "model $k: <K>_$f unset" 64; done
   [ -z "$(v "$k" ID)" ] || [ -n "$(v "$k" SHA256)" ] || die "model $k: ID needs SHA256" 64
-  case "$(v "$k" REF)" in mlx-lm|mlx-vlm) ;; *) die "model $k: REF must be mlx-lm|mlx-vlm" 64 ;; esac
+  case "$(v "$k" REF)" in mlx-lm|mlx-vlm|omlx) ;; *) die "model $k: REF must be mlx-lm|mlx-vlm|omlx" 64 ;; esac
+  if [ "$(v "$k" REF)" = omlx ]; then
+    od=$(v "$k" OMLX_DIR)
+    [ -n "$od" ] || die "model $k: REF=omlx needs <K>_OMLX_DIR (the oMLX install dir)" 64
+    [ -x "$od/omlx-venv/bin/omlx" ] && [ -x "$od/omlx-venv/bin/python" ] \
+      || die "model $k: no oMLX venv at $od/omlx-venv (bin/omlx, bin/python)" 11
+    case "$od" in *[[:space:]]*) die "model $k: OMLX_DIR must not contain whitespace" 64 ;; esac
+  fi
+  if [ -n "$REFERENCE_ONLY" ]; then
+    [ -s "$SRC_RES/$(v "$k" NAME)/main/provider.jsonl" ] \
+      || die "model $k: REFERENCE_ONLY: no provider.jsonl at $SRC_RES/$(v "$k" NAME)/main" 11
+  fi
   if [ -n "$(v "$k" CLONE_FROM)" ]; then
     [ -f "$(v "$k" CLONE_FROM)/config.json" ] || die "model $k: no snapshot to clone at $(v "$k" CLONE_FROM)" 11
     [ -n "$(v "$k" SHA256)" ] || die "model $k: CLONE_FROM needs SHA256" 64
@@ -168,6 +196,7 @@ ref_python() {  # ref_python KIND: a pinned venv per reference kind, created onc
   case $kind in
     mlx-vlm) venv=$LAB/venv-vlm; pkgs="mlx-vlm==0.7.11 mlx==0.32.4" ;;
     mlx-lm) venv=$LAB/venv-lm; pkgs="mlx-lm==0.32.2 mlx==0.32.4" ;;
+    omlx) echo /usr/bin/python3; return 0 ;;  # the client is stdlib; oMLX runs from <K>_OMLX_DIR
   esac
   local mod=${kind//-/_}
   if ! "$venv/bin/python" -c "import $mod" >/dev/null 2>&1; then
@@ -178,7 +207,12 @@ ref_python() {  # ref_python KIND: a pinned venv per reference kind, created onc
   echo "$venv/bin/python"
 }
 
-# 1. Build.
+# 1. Build (a reference-only run reuses the provider run's build identity).
+if [ -n "$REFERENCE_ONLY" ]; then
+  cp "$SRC_RES/identity.sha256" "$RES/identity.sha256" 2>/dev/null || echo "unknown (provider run $REFERENCE_ONLY)" > "$RES/identity.sha256"
+  PROVIDER_COMMIT=$(sed -n 's/.*JOB_START run=[^ ]* commit=\([^ ]*\).*/\1/p' "$LAB/logs/job-$REFERENCE_ONLY.log" "$SRC_RES/job-$REFERENCE_ONLY.log" 2>/dev/null | head -n 1)
+  log "BUILD_SKIPPED reference-only: provider run $REFERENCE_ONLY build $(cut -c1-16 "$RES/identity.sha256" | head -n 1) commit=${PROVIDER_COMMIT:-unknown}"
+else
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   log "BUILD_START"
   (cd "$SRC" && nice -n 10 swift build -c release --product macprovider-cli --build-path .build-lab-harness \
@@ -190,6 +224,7 @@ cp "$METALLIB" "$BIN/mlx.metallib" || die "metallib copy failed" 14
 METALLIB_SHA=$(shasum -a 256 "$BIN/mlx.metallib" | cut -d' ' -f1)
 shasum -a 256 "$BIN/macprovider-cli" "$BIN/mlx.metallib" > "$RES/identity.sha256"
 log "BUILD_DONE $("$BIN/macprovider-cli" --version 2>&1 | head -n 1) cli_sha256=$(cut -c1-16 "$RES/identity.sha256" | head -n 1) metallib_sha256=$METALLIB_SHA"
+fi
 
 manifest() {  # macprovider.snapshot-manifest.v1 of DIR, the catalog's model_sha256
   /usr/bin/python3 -I -c 'import sys,pathlib; sys.path.insert(0, sys.argv[1])
@@ -426,6 +461,7 @@ stage_model() {
     py=$(ref_python "$(v "$k" REF)") || { blocker "model $k: reference venv failed"; return 1; }
     setv "$k" REF_PY "$py"
   fi
+  if [ -n "$REFERENCE_ONLY" ]; then log "STAGED $k (reference-only: no CB tuple, no MTP policy)"; return 0; fi
   if [ "$(v "$k" CB_FROM_POLICY)" = 1 ]; then
     mkdir -p "$RES/$(v "$k" NAME)"
     cb_extra "$k" "$RES/$(v "$k" NAME)/cb-tuple.yaml" 2> "$RES/$(v "$k" NAME)/cb-tuple.err" \
@@ -467,35 +503,45 @@ serve_args() {
 # reference_failed K DIR: the grid in DIR measured the provider but its reference failed.
 reference_failed() {
   local line
-  line=$(grep -m1 '^REFERENCE_FAIL ' "$2/run.log" 2>/dev/null)
+  line=$(grep -m1 -E '^REFERENCE_(FAIL|SUSPECT) ' "$2/run.log" 2>/dev/null)
   log "${line:-REFERENCE_FAIL $(v "$1" NAME) (no marker in $2/run.log)}"
-  blocker "model $1: the reference in $2 failed; provider cells are measured, reference columns are empty"
+  blocker "model $1: the reference in $2 failed or is suspect; provider cells are measured, reference columns are empty"
 }
 
 run_model() {
-  local k=$1 name rows ref_path ref_args=() tbr
+  local k=$1 name rows ref_path ref_args=() tbr vpy
   name=$(v "$k" NAME)
   local M=$RES/$name
   mkdir -p "$M"
-  "$(v "$k" REF_PY)" -c 'import importlib.metadata as m
-for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
+  vpy=$(v "$k" REF_PY)
+  [ "$(v "$k" REF)" != omlx ] || vpy="$(v "$k" OMLX_DIR)/omlx-venv/bin/python"
+  "$vpy" -c 'import importlib.metadata as m
+for p in ("omlx", "mlx", "mlx-vlm", "mlx-lm", "transformers"):
     try: print("REF_VERSION", p, m.version(p))
     except m.PackageNotFoundError: pass'
   rows=$(v "$k" ROWS); rows=${rows:-1,4}
   ref_path=$(v "$k" REF_PATH)
   tbr=$(v "$k" TRIALS_BY_ROWS)
   [ -z "$(v "$k" REF_ARGS)" ] || for a in $(v "$k" REF_ARGS); do ref_args+=(--ref-arg "$a"); done
+  if [ "$(v "$k" REF)" = omlx ]; then
+    ref_args+=(--ref-arg --omlx-dir --ref-arg "$(v "$k" OMLX_DIR)" --ref-arg --state-root --ref-arg "$LAB/omlx-state")
+  fi
+  if [ -n "$REFERENCE_ONLY" ]; then
+    reference_only "$k" "$M" "$rows" "$ref_path" ${ref_args[@]+"${ref_args[@]}"}
+    return
+  fi
   serve_args "$k"
   log "GRID_START $name rows=$rows reference=$(v "$k" REF) served_as=$(v "$k" ID)${tbr:+ trials_by_rows=$tbr}"
   grid "$k" "$M/main" "${SERVE[@]}" --rows "$rows" --contexts "$CONTEXTS" --python "$(v "$k" REF_PY)" \
     --reference "$(v "$k" REF)" ${ref_path:+--ref-model-path "$ref_path"} ${ref_args[@]+"${ref_args[@]}"} \
     ${tbr:+--trials-by-rows "$tbr"}
   local rc=$? ok=0
-  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 8 the reference failed)"
-  case $rc in 0|1|8) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
+  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 8 the reference failed, 9 it was suspect)"
+  grep -E '^(REFERENCE_SANE|REFERENCE_SUSPECT|REFERENCE_FAIL) ' "$M/main/run.log" | sed 's/^/GRID_SANITY /'
+  case $rc in 0|1|8|9) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
     *) blocker "model $k: grid rc=$rc: $(tail -n 3 "$M/main/run.log" | tr '\n' ' ')"; ok=1 ;; esac
   # The provider side ran: report the reference loudly, keep going, fail the job at the end.
-  [ $rc != 8 ] || reference_failed "$k" "$M/main"
+  case $rc in 8|9) reference_failed "$k" "$M/main" ;; esac
   if [ $ok = 0 ] && [ "$(v "$k" CB_FROM_POLICY)" = 1 ]; then
     local admitted
     admitted=$(grep -c 'event=batching_admitted' "$M/main/serve/serve.err" 2>/dev/null || true)
@@ -509,7 +555,7 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
     if [ "$(v "$k" BASE_REFERENCE)" = 1 ]; then
       base_ref=(--python "$(v "$k" REF_PY)" --reference "$(v "$k" REF)" --ref-model-path "$(v "$k" BASE_PATH)"
                 ${ref_args[@]+"${ref_args[@]}"})
-      base_rcs="0 1 8"
+      base_rcs="0 1 8 9"
     else
       cp "$M/main/reference.jsonl" "$M/base/" 2>/dev/null
       base_ref=(--skip-reference --skip-compare)
@@ -523,7 +569,7 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
         --subset --json "$M/base/vs-main.json" > "$M/base/vs-main.md"
       [ ! -f "$M/base/summary.md" ] || sed -n '/^| model/,/^$/p' "$M/base/summary.md"
       log "BASE_DONE $name"
-      [ $brc != 8 ] || reference_failed "$k" "$M/base"
+      case $brc in 8|9) reference_failed "$k" "$M/base" ;; esac
     else
       blocker "model $k: base pass failed rc=$brc: $(tail -n 3 "$M/base/run.log" | tr '\n' ' ')"; ok=1
     fi
@@ -532,8 +578,36 @@ for p in ("mlx", "mlx-vlm", "mlx-lm", "transformers"):
   return $ok
 }
 
+# reference_only K M ROWS REF_PATH [--ref-arg ARG]...: the reference over the stored provider
+# cells of run $REFERENCE_ONLY, then compare (REFERENCE_ONLY header).
+reference_only() {
+  local k=$1 M=$2 rows=$3 ref_path=$4; shift 4
+  local S=$SRC_RES/$(v "$k" NAME) name rc
+  name=$(v "$k" NAME)
+  mkdir -p "$M/main"
+  cp "$S/main/provider.jsonl" "$M/main/" || { blocker "model $k: provider.jsonl copy failed"; return 1; }
+  [ ! -f "$S/main/grid.json" ] || cp "$S/main/grid.json" "$M/main/"
+  [ ! -f "$S/main/serve/status.json" ] || { mkdir -p "$M/main/serve" && cp "$S/main/serve/status.json" "$M/main/serve/"; }
+  # The provider run's noise table and MTP bench (provider-only) for baseline.md.
+  [ ! -f "$S/noise/vs-main.json" ] || { mkdir -p "$M/noise" && cp "$S/noise"/vs-main.* "$M/noise/"; }
+  [ ! -d "$S/mtp" ] || cp -R "$S/mtp" "$M/"
+  log "GRID_START $name reference-only provider_run=$REFERENCE_ONLY rows=$rows reference=$(v "$k" REF)"
+  bash "$GRID/run-grid.sh" --reference-only --model-name "$name" --model-path "$(v "$k" PATH)" \
+    --out-dir "$M/main" --rows "$rows" --trials "$TRIALS" --python "$(v "$k" REF_PY)" --reference "$(v "$k" REF)" \
+    ${ref_path:+--ref-model-path "$ref_path"} "$@" > "$M/main/run.log" 2>&1
+  rc=$?
+  log "GRID_DONE $name rc=$rc (reference-only: 0/1 compare, 8 the reference failed, 9 it was suspect)"
+  grep -E '^(REFERENCE_SANE|REFERENCE_SUSPECT|REFERENCE_FAIL) ' "$M/main/run.log" | sed 's/^/GRID_SANITY /'
+  case $rc in
+    0|1) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
+    8|9) sed -n '/^| model/,/^$/p' "$M/main/summary.md"; reference_failed "$k" "$M/main"; return 1 ;;
+    *) blocker "model $k: reference-only grid rc=$rc: $(tail -n 3 "$M/main/run.log" | tr '\n' ' ')"; return 1 ;;
+  esac
+}
+
 noise_pass() {
   local k=$1 name
+  [ -z "$REFERENCE_ONLY" ] || return 0  # the provider run's noise/ was copied
   name=$(v "$k" NAME)
   local M=$RES/$name
   [ -f "$M/main/provider.jsonl" ] || return 0
@@ -556,7 +630,8 @@ for k in $STAGED; do
   name=$(v "$k" NAME)
   [ -f "$RES/$name/main/summary.json" ] || continue
   /usr/bin/python3 -I "$JOB/ablit-perf/baseline_md.py" "$RES/$name" --model "$name" \
-    --build "$(cut -c1-16 "$RES/identity.sha256" | head -n 1)" --commit "${COMMIT:-unknown}" \
+    --build "$(cut -c1-16 "$RES/identity.sha256" | head -n 1)" \
+    --commit "${REFERENCE_ONLY:+${PROVIDER_COMMIT:-unknown}; provider run $REFERENCE_ONLY, reference pass $RUN_ID at }${COMMIT:-unknown}" \
     || blocker "model $k: baseline.md failed"
   log "BASELINE_MD $RES/$name/baseline.md"
 done

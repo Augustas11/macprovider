@@ -128,14 +128,16 @@ def completion_tokens_of(usage):
 
 
 def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1",
-                headers=None):
-    """`headers` adds request headers."""
+                headers=None, extra=None):
+    """`headers` adds request headers; `extra` adds request fields (reference_omlx.py: explicit
+    neutral sampling knobs)."""
     body = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": True,
+        **(extra or {}),
     }
     if stream_options:
         body["stream_options"] = {"include_usage": True}
@@ -160,8 +162,13 @@ def run_request(port, model, messages, max_tokens, stream_options=True, timeout=
     return result
 
 
-def row_record(res, base):
-    """Turn a run_request result into a JSONL row record."""
+def row_record(res, base, first_chunk_tokens=1):
+    """Turn a run_request result into a JSONL row record.
+
+    decode_tps = (completion_tokens - first_chunk_tokens) / (t_last - t_first): the
+    tokens that arrived after the first delta over the time they took. Our provider
+    streams one token per delta (first_chunk_tokens = 1).
+    """
     usage = res.get("usage") or {}
     ct = completion_tokens_of(usage)
     t_first, t_last, t0 = res.get("t_first"), res.get("t_last"), res["t0"]
@@ -177,7 +184,8 @@ def row_record(res, base):
         "generated_completion_tokens": usage.get("macprovider_generated_completion_tokens"),
         "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
         "provider_generation_ms": usage.get("macprovider_generation_ms"),
-        "decode_tps": round((ct - 1) / span, 3) if ct and ct > 1 and span > 0 else None,
+        "decode_tps": (round((ct - first_chunk_tokens) / span, 3)
+                       if ct and ct > first_chunk_tokens and span > 0 else None),
         "ttft_s": round(t_first - t0, 4) if t_first is not None else None,
         "request_tps": round(ct / (t_last - t0), 3) if ct and t_last is not None and t_last > t0 else None,
         "total_s": round(res["t_end"] - t0, 4),

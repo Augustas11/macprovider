@@ -16,6 +16,8 @@ always given on the command line; `grid.json` holds placeholders only.
 | `prompts.py` | both sides | deterministic chat messages per (context, prompt row); cell keys; grid expansion |
 | `reference_mlxlm.py` | python with `mlx_lm` | `mlx_lm.load` + `stream_generate`, greedy (`temp=0`), chat template from the tokenizer |
 | `reference_mlxvlm.py` | python with `mlx_vlm` | the same with mlx-vlm's `stream_generate` (GLM-5.3-Flash, MiniMax M3.1-Flash); `--refusal-ablation SNAPSHOT_DIR` applies the runtime refusal-direction projection that snapshot's config names (`--model-path` = the unmodified base) |
+| `reference_omlx.py` | stdlib python + an oMLX install | starts an oMLX server (loopback port, MTP/DFlash off), drives the reference jobs through `provider_client.run_request`, stops it; for builds no stock Python runtime decodes (GLM-5.3-Flash oQ) |
+| `sanity.py` | stdlib python | sanity gate: flags a reference whose output is degenerate (`REFERENCE_SUSPECT`) |
 | `provider_client.py` | stdlib python | streaming `/v1/chat/completions` client, N concurrent rows by threads |
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
 | `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
@@ -119,6 +121,63 @@ appends serve-config lines (e.g. a CB accepted tuple), `--skip-compare` stops
 after the client, and `--trials-by-rows 4=1` sets the provider's trial count
 for one row count (a serially served model's 4-row cells only queue).
 
+### oMLX reference (`--reference omlx`)
+
+Stock mlx-vlm 0.7.11 loads the GLM-5.3-Flash oQ4e DFlash2 build but decodes
+garbage, so it is no reference for it. `--reference omlx` runs
+`reference_omlx.py` under `/usr/bin/python3` (default `--python`) against an
+existing oMLX install: `--ref-arg --omlx-dir --ref-arg DIR`, where DIR holds
+`omlx-venv/bin/{python,omlx}` and `omlx-src/` (`OMLX_COMMIT` or a git checkout).
+It refuses when 8080 or its `--port` (default 18350) listens or another
+`omlx serve` runs, checks `omlx serve --help` for every flag it uses, writes a
+fresh state dir (HOME, caches and the oMLX base path, so nothing lands in the
+real home), pins the one model with MTP, VLM MTP, DFlash, SpecPrefill,
+TurboQuant KV and expert offload off, starts `omlx serve --headless --no-cache
+--no-hf-cache --memory-guard off --max-concurrent-requests 1
+--sse-keepalive-mode off` in its own process group, waits for `/health`
+`healthy` with 1 model loaded (bounded; failures print the server log tail),
+checks `/v1/models` and the saved model settings, runs the same jobs as the
+other references one request at a time, then stops its process group and
+checks the port closed. Requests are the provider client's (same messages,
+`temperature 0`, `stream_options.include_usage`) plus explicit neutral
+`top_p`/`top_k`/`min_p`/penalties. `--chat-template-kwargs JSON` adds
+template kwargs (none by default; for a template with an `enable_thinking`
+switch pass `{"enable_thinking":false}`, which is how our provider renders
+it). Every failure ends with one `OmlxReferenceError: ...` line, which
+run-grid.sh reports as `REFERENCE_FAIL`.
+
+Formulas: token counts come from the usage frame, never from chunk counts.
+`ttft_s` = first content/reasoning chunk - request start, as for our provider.
+oMLX streams bursts of several tokens per chunk, so `decode_tps =
+(completion_tokens - F) / (last chunk - first chunk)` with F =
+`--first-chunk-tokens`, default 1: at the pinned oMLX commit the decode burst
+ends at a request's first output, so the first chunk carries one token and
+the formula equals our provider's `(completion_tokens - 1) / (last token -
+first token)`. Each row also records oMLX's own `time_to_first_token`,
+`time_to_first_visible_token` and `generation_tokens_per_second`, `chunks`
+and `tokens_per_chunk`; a visible TTFT above the model TTFT means a first
+chunk of several tokens (decode_tps then reads slightly high). The meta line
+states the formula, and baseline.md prints its note under the table.
+
+### Sanity gate
+
+After any reference that exits 0, `sanity.py` checks its text (reasoning +
+content) row by row: whitespace fraction > 0.40, characters per token < 2.5,
+share of non-space characters in letter runs of 2+ < 0.50. Two of the three
+make a row degenerate; more than half degenerate rows in any context make the
+reference suspect: `REFERENCE_SUSPECT <model> <reason>`, rows moved to
+`reference.suspect.jsonl`, compare runs as for a failed reference, exit 9.
+Calibrated on the 2026-11-17 runs (garbage mlx-vlm GLM reference: every row
+fires two signals; our GLM provider and the mlx-lm Qwen3.8-27B reference: no
+row fires any).
+
+### Reference only
+
+`--reference-only` (no `--bin-dir`) runs only the reference into an OUT that
+already holds a provider run's `provider.jsonl` (and `grid.json`, reused when
+neither `--outputs` nor `--contexts` is given), then compares. `job.sh`
+wraps it as `REFERENCE_ONLY=<run id>`.
+
 The provider side runs before the reference. A reference that fails prints
 `REFERENCE_FAIL <model> <error line> (rc=N)`; compare still writes the table
 and JSON for every provider cell (reference columns empty, `reference_failed`
@@ -218,7 +277,9 @@ ours ended), `top_ids`, `top_logits`, `margin`, `dtype`, `margin_steps`,
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_parity_grid
 ```
 
-The unit tests cover compare.py on synthetic JSONL, the prompt builder, and the
-client's SSE parsing against an in-process fake server. `reference_mlxlm.py`
-and `run-grid.sh` need a model and a provider build and are only exercised in
-a lab window.
+The unit tests cover compare.py on synthetic JSONL, the prompt builder, the
+client's SSE parsing against an in-process fake server, the sanity gate,
+reference_omlx.py's record mapping and server lifecycle against a fake oMLX
+install, and run-grid.sh's failed-reference and reference-only paths with
+fake references. Real model loads (`reference_mlxlm.py`, a real oMLX) run only
+in a lab window.

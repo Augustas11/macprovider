@@ -20,8 +20,12 @@
 #          #2409 qwen4_exp token parity; FORK_DIR is the clean mlx-swift-lm worktree
 #          (campaign/2409-qwen4-exp) with Libraries/MLXLLM/Models/Qwen4Exp.swift committed, rsynced
 #          to ~/lab-ablit-perf/mlx-swift-lm-2409 on the Studio (.git, .build*, .swiftpm excluded)
+#        REFERENCE_ONLY=<run id> MODELS=glm GLM_REF=omlx GLM_OMLX_DIR=<studio dir> studio-ablit-perf.sh
+#          add a reference to an already measured provider grid (job.sh header); the run's
+#          provider.jsonl / grid.json / identity / noise / job log are pushed from
+#          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has them
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB
-# SKIP_BUILD and every <KEY>_<FIELD> model variable job.sh reads (see its header).
+# SKIP_BUILD REFERENCE_ONLY and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -73,7 +77,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -89,6 +93,16 @@ rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/
        macstudio:lab-ablit-perf/job/mtp/ >> "$LOG" 2>&1 \
   && rsync -a --delete --exclude '.build*' --exclude '.swiftpm' "$REPO/phase3-binary/" macstudio:lab-ablit-perf/src/phase3-binary/ >> "$LOG" 2>&1 \
   || { blocker "copy to the Studio failed"; exit 2; }
+if [ -n "${REFERENCE_ONLY:-}" ]; then
+  [ "$JOB_SCRIPT" = job.sh ] || { blocker "REFERENCE_ONLY needs JOB_SCRIPT=job.sh"; exit 2; }
+  [ -d "$RES/$REFERENCE_ONLY" ] || { blocker "no local results at $RES/$REFERENCE_ONLY"; exit 2; }
+  # Only what the reference-only pass reads; files the Studio still has are never overwritten.
+  rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='provider.jsonl' --include='grid.json' \
+      --include='status.json' --include='identity.sha256' --include='vs-main.json' --include='vs-main.md' \
+      --include="job-$REFERENCE_ONLY.log" --exclude='*' \
+      "$RES/$REFERENCE_ONLY/" "macstudio:lab-ablit-perf/results/$REFERENCE_ONLY/" >> "$LOG" 2>&1 \
+    || { blocker "push of the provider run $REFERENCE_ONLY to the Studio failed"; exit 2; }
+fi
 if [ -n "$FORK_HEAD" ]; then
   rsync -a --delete --exclude '.build*' --exclude '.swiftpm' --exclude '.git' "$FORK_DIR/" macstudio:lab-ablit-perf/mlx-swift-lm-2409/ >> "$LOG" 2>&1 \
     || { blocker "fork copy to the Studio failed"; exit 2; }
@@ -135,12 +149,12 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
   [ "$alive" = unknown ] && { say "ssh probe failed, retrying"; continue; }
-  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/venv-dsv4 ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
+  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/venv-dsv4 ~/lab-ablit-perf/omlx-state ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
   if [ -z "$fresh" ]; then
     stalled=$((stalled + 1))
     [ $((stalled % STALL_MIN)) = 1 ] && blocker "no file progress for ${STALL_MIN}+ minutes; last job log lines: $("${SSH[@]}" "tail -n 2 ~/lab-ablit-perf/logs/job-$RUN_ID.log" | tr '\n' ' ')"

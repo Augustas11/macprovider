@@ -838,5 +838,385 @@ class Glm5NextShimTests(unittest.TestCase):
                                (20, "self_attn", "qkv_proj", ("q_proj", "k_proj", "v_proj"))])
 
 
+sanity = module("sanity")
+omlx = module("reference_omlx")
+
+PROSE = ("The keeper climbed the tower stairs before dawn, trimmed the wick and wrote the weather "
+         "into the log while the supply boat rounded the northern point. ")
+# Shapes of the garbage stock mlx-vlm 0.7.11 decoded on GLM-5.3-Flash DFlash2 (2026-11-17 window).
+GARBAGE_SHORT = "y\n\n,\n\n\n\nw\n\n#, a\n\nworktexty1y4\n\nn\n\ntext\n\n\n\n\n\nh\n\n\n\ntext\n\n\n\n"
+GARBAGE_LONG = ", ````##k the````0 `,`,`````,`` `, ##`,```,``,```m`,`,`, ```,`, ```, ```,`````,`"
+CJK = "灯塔守护者在黎明前爬上楼梯，修剪灯芯，并把天气写进日志。"
+
+
+def sane_row(ctx, text, cpt, row=0, out=128, reasoning=False, error=None):
+    n = max(1, round(len(text) / cpt))
+    return {"kind": "row", "model": MODEL, "ctx_target": ctx, "max_tokens": out, "row": row, "trial": 0,
+            "completion_tokens": n, "text": "" if reasoning else text,
+            "reasoning_text": text if reasoning else "", "error": error}
+
+
+class SanityTests(unittest.TestCase):
+    def test_signals_on_real_shapes(self):
+        good = sanity.row_signals(PROSE * 4, round(len(PROSE * 4) / 4.3))
+        self.assertEqual(good[3], [])
+        short = sanity.row_signals(GARBAGE_SHORT * 6, round(len(GARBAGE_SHORT * 6) / 1.8))
+        self.assertEqual(len(short[3]), 2, short)  # whitespace + chars/token
+        long = sanity.row_signals(GARBAGE_LONG * 6, round(len(GARBAGE_LONG * 6) / 1.7))
+        self.assertEqual(len(long[3]), 2, long)  # chars/token + words
+
+    def test_one_signal_is_not_degenerate(self):
+        # CJK prose has few characters per token but is words, not whitespace.
+        r = sanity.check_reference([sane_row(200, CJK * 8, 1.2, row=i) for i in range(4)])
+        self.assertFalse(r["suspect"], r)
+        self.assertEqual(r["rows"][0]["signals"], ["chars/token 1.20 < 2.5"])
+
+    def test_garbage_reference_is_suspect_and_good_ones_pass(self):
+        bad = ([sane_row(200, GARBAGE_SHORT * 6, 1.8, row=i) for i in range(4)]
+               + [sane_row(4000, GARBAGE_LONG * 6, 1.7, row=i) for i in range(4)])
+        r = sanity.check_reference(bad)
+        self.assertTrue(r["suspect"])
+        self.assertIn("ctx200: 4/4 rows degenerate", r["reason"])
+        self.assertIn("ctx4000: 4/4 rows degenerate", r["reason"])
+        good = [sane_row(c, PROSE * 4, 4.3, row=i) for c in (200, 4000) for i in range(4)]
+        self.assertFalse(sanity.check_reference(good)["suspect"])
+        # Our GLM provider streams everything as reasoning_text with empty text.
+        self.assertFalse(sanity.check_reference(
+            [sane_row(200, PROSE * 4, 3.8, row=i, reasoning=True) for i in range(4)])["suspect"])
+
+    def test_majority_rule_per_context_and_skips(self):
+        rows = ([sane_row(200, GARBAGE_SHORT * 6, 1.8, row=0)]
+                + [sane_row(200, PROSE * 4, 4.3, row=i) for i in (1, 2)]
+                + [sane_row(200, GARBAGE_SHORT * 6, 1.8, row=3, error="http 500")]
+                + [sane_row(200, "y\n\n", 1.0, row=4)])  # under MIN_TOKENS: not checked
+        r = sanity.check_reference(rows)
+        self.assertFalse(r["suspect"], r)
+        self.assertEqual(r["contexts"], {"200": {"checked": 3, "degenerate": 1}})
+        self.assertTrue(sanity.check_reference(rows[:1] + rows[3:])["suspect"])
+        self.assertIn("no reference row", sanity.check_reference([{"kind": "meta"}])["reason"])
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            ref = Path(d, "ref.jsonl")
+            ref.write_text("".join(json.dumps(x) + "\n" for x in
+                                   [{"kind": "meta"}] + [sane_row(200, GARBAGE_SHORT * 6, 1.8, row=i) for i in range(2)]))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(sanity.main(["--ref", str(ref), "--model-name", "glm", "--json", str(Path(d, "s.json"))]), 3)
+            self.assertTrue(buf.getvalue().startswith("REFERENCE_SUSPECT glm ctx200: 2/2 rows degenerate"))
+            self.assertTrue(json.loads(Path(d, "s.json").read_text())["suspect"])
+            ref.write_text(json.dumps(sane_row(200, PROSE * 4, 4.3)) + "\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(sanity.main(["--ref", str(ref), "--model-name", "glm"]), 0)
+
+
+class OmlxRecordTests(unittest.TestCase):
+    def result(self):
+        ticks = iter([0.0, 2.0, 2.5, 3.0, 3.05])
+        lines = [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+                 b'data: {"choices":[{"delta":{"reasoning_content":"The"}}]}\n',
+                 b'data: {"choices":[{"delta":{"reasoning_content":" user wants a"}}]}\n',
+                 b'data: {"choices":[{"delta":{"reasoning_content":" story"},"finish_reason":"length"}]}\n',
+                 b'data: {"choices":[],"usage":{"prompt_tokens":718,"completion_tokens":11,'
+                 b'"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":11},'
+                 b'"time_to_first_token":1.8,"time_to_first_visible_token":1.8,'
+                 b'"generation_tokens_per_second":44.2}}\n', b"data: [DONE]\n"]
+        res = client.consume_stream(lines, clock=lambda: next(ticks))
+        res["t0"], res["t_end"] = 0.0, 3.1
+        return res
+
+    def test_mapping_uses_usage_not_chunk_counts(self):
+        rec = omlx.omlx_record(self.result(), {"side": "reference", "reference": "omlx", "kind": "row"})
+        self.assertEqual((rec["completion_tokens"], rec["prompt_tokens"], rec["chunks"]), (11, 718, 3))
+        self.assertEqual(rec["decode_tps"], 10.0)        # (11 - 1) / (3.0 - 2.0)
+        self.assertEqual(rec["ttft_s"], 2.0)
+        self.assertEqual(rec["request_tps"], round(11 / 3.0, 3))
+        self.assertEqual((rec["text"], rec["reasoning_text"]), ("", "The user wants a story"))
+        self.assertEqual(rec["finish"], "length")
+        self.assertEqual((rec["cached_prompt_tokens"], rec["reasoning_tokens"]), (0, 11))
+        self.assertEqual((rec["omlx_server_ttft_s"], rec["omlx_server_visible_ttft_s"], rec["omlx_generation_tps"]),
+                         (1.8, 1.8, 44.2))
+        self.assertEqual(rec["tokens_per_chunk"], 3.67)
+        for gone in ("generated_completion_tokens", "provider_generation_ms", "_t_first", "_t_last"):
+            self.assertNotIn(gone, rec)
+        self.assertIsNone(rec["error"])
+        self.assertEqual(omlx.omlx_record(self.result(), {}, first_chunk_tokens=3)["decode_tps"], 8.0)
+
+    def test_settings_helpers(self):
+        doc = omlx.model_settings_doc("glm")
+        self.assertEqual(omlx.settings_violations(doc, "glm"), [])
+        doc["models"]["glm"]["mtp_enabled"] = True
+        self.assertEqual(omlx.settings_violations(doc, "glm"), ["mtp_enabled=True"])
+        self.assertEqual(omlx.settings_violations({"models": {}}, "glm"), ["model glm missing from model_settings.json"])
+        self.assertEqual(omlx.model_id_of("glm53-flash-uncensored"), "glm53-flash-uncensored")
+        self.assertEqual(omlx.model_id_of("zai-org/glm 5"), "zai-org-glm-5")
+        self.assertEqual(omlx.missing_flags(" ".join(omlx.SERVE_FLAGS)), [])
+        self.assertEqual(omlx.missing_flags("--port --host"), [f for f in omlx.SERVE_FLAGS if f not in ("--port", "--host")])
+        self.assertEqual(omlx.health_state({"status": "healthy", "engine_pool": {"model_count": 1, "loaded_count": 0}}),
+                         ("healthy", 1, 0))
+
+
+_FAKE_OMLX = r"""
+import json, os, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+here = os.path.dirname(os.path.abspath(__file__))
+mode = open(os.path.join(here, "mode")).read().strip()
+args = sys.argv[1:]
+FLAGS = "--base-path --model-dir --host --port --headless --no-cache --no-hf-cache --memory-guard " \
+        "--max-concurrent-requests --sse-keepalive-mode --log-level"
+if args[:1] != ["serve"]:
+    sys.exit(2)
+if "--help" in args:
+    print(FLAGS); sys.exit(0)
+opt = lambda n: args[args.index(n) + 1]
+port, models, base = int(opt("--port")), opt("--model-dir"), opt("--base-path")
+if mode == "die":
+    print("Traceback (most recent call last):\nRuntimeError: glm5_next weights do not load", flush=True)
+    sys.exit(1)
+if mode == "mtp":
+    p = os.path.join(base, "model_settings.json"); d = json.load(open(p))
+    for m in d["models"].values(): m["mtp_enabled"] = True
+    json.dump(d, open(p, "w"))
+ids = sorted(os.listdir(models))
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, obj):
+        b = json.dumps(obj).encode(); self.send_response(200); self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        if self.path == "/health":
+            self.reply({"status": "healthy", "engine_pool": {"model_count": len(ids), "loaded_count": len(ids)}})
+        elif self.path == "/v1/models":
+            self.reply({"object": "list", "data": [{"id": i} for i in ids]})
+        else:
+            self.reply({"models": []})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        with open(os.path.join(here, "requests.jsonl"), "a") as f:
+            f.write(json.dumps(body) + "\n")
+        self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+        n = body["max_tokens"]
+        def send(o):
+            self.wfile.write(("data: " + (o if isinstance(o, str) else json.dumps(o)) + "\n\n").encode()); self.wfile.flush()
+        send({"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+        send({"choices": [{"index": 0, "delta": {"reasoning_content": "Lamp"}}]})  # first chunk: one token
+        left = n - 1
+        while left > 0:  # later chunks: bursts of three tokens
+            k = min(3, left); left -= k; time.sleep(0.02)
+            send({"choices": [{"index": 0, "delta": {"reasoning_content": " keeper" * k}}]})
+        send({"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]})
+        send({"choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": n,
+              "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": n},
+              "time_to_first_token": 0.01, "time_to_first_visible_token": 0.01, "generation_tokens_per_second": 99.0}})
+        send("[DONE]")
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class OmlxServerLifecycleTests(unittest.TestCase):
+    """reference_omlx.py against a fake oMLX install: start, ready, drive, stop, port closed."""
+    SHA = "c74f1b18558842e6b10fcfa6e2e901bb382129d4"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.d = Path(self.tmp.name)
+        venv = d / "omlx" / "omlx-venv" / "bin"
+        venv.mkdir(parents=True)
+        (d / "omlx" / "omlx-src").mkdir()
+        (d / "omlx" / "omlx-src" / "OMLX_COMMIT").write_text(self.SHA + "\n")
+        (venv / "fake_omlx.py").write_text(_FAKE_OMLX)
+        (venv / "omlx").write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {venv / "fake_omlx.py"} "$@"\n')
+        (venv / "python").write_text('#!/bin/bash\necho \'{"python": "3.12", "omlx": "0.8.0rc1", "mlx": "0.32.4", '
+                                     '"mlx-lm": "0.32.3.dev8", "mlx-vlm": "0.7.11", "transformers": null, '
+                                     '"lightning_mtp_supported": true}\'\n')
+        for f in ("omlx", "python"):
+            (venv / f).chmod(0o755)
+        self.venv = venv
+        (d / "model").mkdir()
+        (d / "model" / "config.json").write_text('{"model_type": "glm5_next", "max_position_embeddings": 4096}')
+        self.grid = d / "grid.json"
+        self.grid.write_text(json.dumps({"outputs": [8], "contexts": [{"name": "short", "tokens": 200}],
+                                         "rows": [1, 2], "trials": 2, "warmup_tokens": 2}))
+        self.port = free_port()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_ref(self, mode):
+        (self.venv / "mode").write_text(mode)
+        out = self.d / "res" / "reference.jsonl"
+        out.parent.mkdir(exist_ok=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = omlx.main(["--omlx-dir", str(self.d / "omlx"), "--model-path", str(self.d / "model"),
+                            "--model-name", "glm53-flash-uncensored", "--out", str(out), "--grid", str(self.grid),
+                            "--port", str(self.port), "--live-port", str(free_port()), "--load-timeout", "30",
+                            "--poll-seconds", "0.2", "--state-root", str(self.d / "state"),
+                            "--expect-commit", self.SHA])
+        self.assertFalse(omlx.listening(self.port), "the oMLX port must be closed after the run")
+        return rc, out, err.getvalue()
+
+    def test_clean_run(self):
+        rc, out, err = self.run_ref("ok")
+        self.assertEqual(rc, 0, err)
+        lines = [json.loads(x) for x in out.read_text().splitlines()]
+        meta, rows = lines[0], lines[1:]
+        self.assertEqual((meta["kind"], meta["reference"], meta["omlx_commit"], meta["omlx_version"]),
+                         ("meta", "omlx", self.SHA, "0.8.0rc1"))
+        self.assertFalse(meta["model_settings"]["mtp_enabled"])
+        self.assertIn("(usage.completion_tokens - 1) / (t_last - t_first)", meta["decode_formula"])
+        self.assertIn("--max-concurrent-requests", meta["serve_command"])
+        # Prompt row 0 twice (trials), row 1 once (the 2-row cell), all single-row.
+        self.assertEqual(sorted((r["row"], r["trial"]) for r in rows), [(0, 0), (0, 1), (1, 0)])
+        for r in rows:
+            self.assertEqual((r["side"], r["kind"], r["rows"], r["completion_tokens"], r["prompt_tokens"]),
+                             ("reference", "row", 1, 8, 50))
+            self.assertEqual(r["chunks"], 4)  # 1 + ceil(7 / 3)
+            self.assertIsNone(r["error"])
+            self.assertEqual(r["text"], "")
+            self.assertTrue(r["reasoning_text"].startswith("Lamp keeper"))
+            self.assertGreater(r["decode_tps"], 0)
+        bodies = [json.loads(x) for x in (self.venv / "requests.jsonl").read_text().splitlines()]
+        self.assertEqual(len(bodies), 4)  # warmup + 3
+        for b in bodies:
+            self.assertEqual(b["model"], "glm53-flash-uncensored")
+            self.assertEqual((b["temperature"], b["top_p"], b["top_k"], b["repetition_penalty"]), (0, 1.0, 0, 1.0))
+            self.assertNotIn("chat_template_kwargs", b)
+        self.assertEqual(bodies[1]["messages"], prompts.build_messages(200, 0))
+        self.assertEqual(list((self.d / "state").iterdir()), [], "a clean run removes its state dir")
+        self.assertTrue((out.parent / "omlx-server.log").exists())
+        eff = json.loads((out.parent / "omlx-effective" / "model_settings.after-load.json").read_text())
+        self.assertFalse(eff["models"]["glm53-flash-uncensored"]["dflash_enabled"])
+
+    def test_server_that_dies_fails_loudly(self):
+        rc, out, err = self.run_ref("die")
+        self.assertEqual(rc, 1)
+        last = err.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("OmlxReferenceError: oMLX server exited during load (rc=1)"), err)
+        self.assertIn("RuntimeError: glm5_next weights do not load", err)  # the log tail
+        self.assertFalse(out.exists())
+
+    def test_speculative_setting_turned_on_fails(self):
+        rc, out, err = self.run_ref("mtp")
+        self.assertEqual(rc, 1)
+        self.assertIn("OmlxReferenceError: oMLX turned on what the reference needs off: mtp_enabled=True", err)
+
+    def test_refuses_live_port(self):
+        (self.venv / "mode").write_text("ok")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = omlx.main(["--omlx-dir", str(self.d / "omlx"), "--model-path", str(self.d / "model"),
+                            "--model-name", "m", "--out", str(self.d / "r.jsonl"), "--port", "8080"])
+        self.assertEqual(rc, 1)
+        self.assertIn("8080", err.getvalue())
+
+
+_FAKE_REF = r"""#!/bin/bash
+# Stands in for "$PY reference_x.py --out FILE ...": writes reference rows of the kind in ./kind.
+while [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done
+exec /usr/bin/python3 -I - "$out" "$(cat "$(dirname "$0")/kind")" <<'PY'
+import json, sys
+out, kind = sys.argv[1:3]
+prose = ("The keeper climbed the tower stairs before dawn, trimmed the wick and wrote the weather "
+         "into the log while the supply boat rounded the northern point. ")
+garbage = "y\n\n,\n\n\n\nw\n\n#, a\n\nworktexty1y4\n\nn\n\ntext\n\n\n\n\n\nh\n\n\n\ntext\n\n\n\n" * 2
+text = prose if kind == "good" else garbage
+with open(out, "a") as f:
+    f.write(json.dumps({"side": "reference", "kind": "meta", "reference": "fake"}) + "\n")
+    for t in range(3):
+        f.write(json.dumps({"side": "reference", "kind": "row", "model": "m", "ctx_target": 200, "max_tokens": 64,
+                            "rows": 1, "row": 0, "trial": t, "decode_tps": 50.0, "text": text,
+                            "completion_tokens": 64, "prompt_tokens": 244, "finish": "length"}) + "\n")
+PY
+"""
+
+
+class RunGridReferenceOnlyTests(unittest.TestCase):
+    """run-grid.sh --reference-only over a stored provider run, with the sanity gate."""
+
+    def run_grid(self, kind):
+        import subprocess
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "fake").mkdir()
+        (d / "fake" / "lsof").write_text("#!/bin/bash\nexit 1\n")
+        (d / "fake" / "refpy").write_text(_FAKE_REF)
+        (d / "fake" / "kind").write_text(kind)
+        for f in ("lsof", "refpy"):
+            (d / "fake" / f).chmod(0o755)
+        out = d / "out"
+        out.mkdir()
+        (out / "provider.jsonl").write_text("".join(
+            json.dumps(x) + "\n" for x in our_lines(200, 64, 1, [52.0] * 3, texts={0: PROSE})))
+        (out / "grid.json").write_text(json.dumps({"outputs": [64], "contexts": [{"name": "short", "tokens": 200}],
+                                                   "rows": [1], "trials": 3, "warmup_tokens": 2}))
+        env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin")
+        proc = subprocess.run(
+            ["bash", str(HARNESS / "run-grid.sh"), "--reference-only", "--model-path", str(d), "--model-name", MODEL,
+             "--out-dir", str(out), "--python", str(d / "fake" / "refpy"), "--rows", "1", "--trials", "3"],
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc, out
+
+    def test_suspect_reference_is_handled_as_failed(self):
+        proc, out = self.run_grid("garbage")
+        log = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 9, log)
+        self.assertIn("== provider skipped (--reference-only)", proc.stdout)
+        self.assertIn(f"REFERENCE_SUSPECT {MODEL} ctx200: 3/3 rows degenerate", proc.stdout)
+        self.assertFalse((out / "reference.jsonl").exists())
+        self.assertTrue((out / "reference.suspect.jsonl").exists())
+        summary = json.loads((out / "summary.json").read_text())
+        self.assertTrue(summary["reference_failed"].startswith(f"REFERENCE_SUSPECT {MODEL} ctx200"))
+        self.assertEqual([c["text_gate"] for c in summary["cells"]], ["no_reference"])
+        self.assertIsNotNone(summary["cells"][0]["ours_tps"])
+        self.assertIn("REFERENCE FAILED: REFERENCE_SUSPECT", (out / "summary.md").read_text())
+
+    def test_sane_reference_compares_stored_provider_cells(self):
+        proc, out = self.run_grid("good")
+        log = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, log)
+        self.assertIn(f"REFERENCE_SANE {MODEL} ctx200=0/3", proc.stdout)
+        summary = json.loads((out / "summary.json").read_text())
+        self.assertIsNone(summary["reference_failed"])
+        self.assertEqual(summary["cells"][0]["ref_tps"], 50.0)
+        self.assertEqual(summary["cells"][0]["text_gate"], "byte_identical")
+
+    def test_reference_only_refuses_without_provider_run(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            proc = subprocess.run(["bash", str(HARNESS / "run-grid.sh"), "--reference-only", "--model-path", d,
+                                   "--model-name", MODEL, "--out-dir", d, "--python", "/usr/bin/true"],
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("needs a provider run", proc.stderr)
+
+
+class BaselineMdReferenceNoteTests(unittest.TestCase):
+    def test_omlx_meta_names_reference_and_formula(self):
+        spec = importlib.util.spec_from_file_location(
+            "ablit_baseline_md2", HARNESS.parent / "ablit-perf" / "baseline_md.py")
+        baseline_md = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(baseline_md)
+        s = compare.evaluate([ref_line(200, 128, 30.0, i) for i in range(3)], our_lines(200, 128, 1, [42.0] * 3))
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "main"))
+            Path(d, "main", "summary.json").write_text(json.dumps(s))
+            Path(d, "main", "reference.jsonl").write_text(json.dumps({
+                "kind": "meta", "reference": "omlx", "omlx_version": "0.8.0rc1", "omlx_commit": "c74f1b1",
+                "versions": {"mlx": "0.32.4", "mlx-vlm": "0.7.11"}, "table_note": omlx.table_note(1)}) + "\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(baseline_md.main([d, "--model", "m"]), 0)
+            md = Path(d, "baseline.md").read_text()
+        self.assertIn("Reference: oMLX 0.8.0rc1 commit `c74f1b1` (mlx 0.32.4, mlx-vlm 0.7.11).", md)
+        self.assertIn("our provider's = (completion_tokens - 1) / (last token - first token)", md)
+
+
 if __name__ == "__main__":
     unittest.main()
