@@ -2983,6 +2983,77 @@ final class AutoUpdateTests: XCTestCase {
         )
     }
 
+    func testSignedRailFailureAfterTargetResolvesBacksOffNextRun() async throws {
+        // A signed-rail failure after the head names a target (for example too
+        // little disk for the update) must cool down under that target, so the
+        // next run is skipped instead of retrying at the fixed rail interval.
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+
+        DiscoveryCooldownGuardMockURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DiscoveryCooldownGuardMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        var updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            releasesAPIURL: "https://example.invalid/releases",
+            markerStore: store,
+            session: session,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.4",
+            targetCompatibilitySetID: "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            targetArtifactIndexSHA256: String(repeating: "a", count: 64),
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        updater.signedDiscoveryHeadForTest = { head }
+
+        await updater.handleSignedReleaseDiscovery()
+
+        let failed = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(failed?["outcome"] as? String, AutoUpdateOutcome.failure.rawValue)
+        XCTAssertEqual(failed?["target_version"] as? String, "1.8.4")
+        XCTAssertNotNil(store.activeCooldown(target: "1.8.4"))
+        XCTAssertNil(store.activeCooldown(target: "<unknown>"))
+        let requestsAfterFirstRun = DiscoveryCooldownGuardMockURLProtocol.requestCount
+
+        await updater.handleSignedReleaseDiscovery()
+
+        let skipped = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(skipped?["phase"] as? String, AutoUpdatePhase.cooldown.rawValue)
+        XCTAssertEqual(skipped?["outcome"] as? String, AutoUpdateOutcome.skipped.rawValue)
+        XCTAssertEqual(skipped?["target_version"] as? String, "1.8.4")
+        XCTAssertEqual(DiscoveryCooldownGuardMockURLProtocol.requestCount, requestsAfterFirstRun)
+    }
+
     func testRateLimitedDiscoveryIsASkippedDeferralWithoutCooldown() async throws {
         // #2036: a spent anonymous GitHub budget defers the periodic signed
         // discovery; it is neither a failure nor a cooldown.
