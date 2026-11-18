@@ -377,9 +377,19 @@ Then:
 1. Prove the check on unmodified `main` before any fix is written. It fails
    where we are known to be slow and passes where we are not. A check that
    cannot run fails loudly.
+   For a speed goal, record the ceiling next to the baseline: decode =
+   measured memory bandwidth / bytes read per output token (active weights,
+   output layer, KV at the working context); prefill = about half the
+   measured matmul peak / compute per token. Measure both on the box, not
+   from the spec sheet. Report progress as a share of the ceiling, and report
+   a target above it early, with the arithmetic.
 2. Profile before ideas. Each idea states the share of the metric it can
    touch; ideas without that number are not built.
 3. Keep or revert is automatic against a baseline from the same window.
+   For a noisy metric (speed, memory, TTFT), run each candidate between two
+   controls (control, candidate, control; medians of at least 6 samples).
+   Keep it only if it beats both neighbouring controls and costs no other
+   metric more than about 3%. Repeat any surprising single win.
 4. The judge is never an author of what it judges and has a veto. Disprovers
    attack every kept change on inputs the builder did not use.
 5. Log every rejected candidate with its measured number. Scouts read the log
