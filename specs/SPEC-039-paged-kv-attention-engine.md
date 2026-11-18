@@ -1,7 +1,12 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.35
-Status: draft (normative design). v0.1.35 defines the `gemma4` mixed cache
+Version: v0.1.36
+Status: draft (normative design). v0.1.36 adds the `qwen4_exp` paged
+family: a `pagedQwen4ExpKV` cache kind that pages each Qwen4-Exp QSA
+attention layer's keys, values and indexer keys on one block table, a
+four-slot recurrent state for its PLE layers whose fourth slot holds integer
+token ids, and a provisional FR-PKV12 entry for the exact
+`latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp` identity. v0.1.35 defines the `gemma4` mixed cache
 class (keep=0 sliding-window layers and full-attention layers from
 `text_config`, both paged on one block table, decode keys in ring order) and
 adds the provisional FR-PKV12 `google/gemma-4-12b-it` identity so its attach
@@ -105,6 +110,18 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.36 (2026-11-18): adds the `qwen4_exp` family
+(Qwen3.8-Flash-Next, Related: #2409). FR-PKV4 defines the `pagedQwen4ExpKV`
+layout and its three gathers per layer per forward; FR-PKV12 adds the
+provisional `latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp` entry
+(`Qwen4ExpForConditionalGeneration`, `pagedQwen4ExpKV` at every
+`full_attention` index, the recurrent path at every `linear_attention` index,
+the four-slot PLE state on exactly the `ple_layer_ids` layers, the
+8-flattened-token forward bound, runtime cache identity `mixed`,
+first-turn/cache-miss only) and its attach-probe span. The parity label is
+`qwen4-exp-qsa-indexed-kv-parity-v1`. Refines SPEC-039-R004 and
+SPEC-039-R012.
+
 Change log v0.1.35 (2026-11-14): defines the `gemma4` mixed cache class
 (#2154). FR-PKV12 adds a provisional, SPEC-first `google/gemma-4-12b-it`
 entry with `architectures == ["Gemma4UnifiedForConditionalGeneration"]` and
@@ -465,6 +482,7 @@ invariant.
 | Broader prefix sharing | Any reuse beyond the same conversation's own blocks: cross-conversation, cross-buyer, cross-account, global content-addressed, or salted-prefix sharing. Not in v0.1. |
 | Paged MLA layout (`pagedMLA(kpool:)`) | The `glm5_next` sparse-attention layer layout (v0.1.17): one paged MLA latent buffer (`[B, 1, T, kv_lora_rank]`, token stride `kv_lora_rank`) plus one paged pooled-indexer-key buffer (one key of `index_head_dim` per `kpool` tokens), both addressed by the sequence's single block table. The not-yet-complete pool window (fewer than `kpool` tokens of indexer keys and gate scores) is row-local auxiliary state, not paged. |
 | Paged indexed-KV layout (`pagedIndexedKV`) | The `minimax_m3` block-sparse attention layer layout (v0.1.28): paged keys and values (`[B, kv_heads, T, head_dim]`) plus one paged single-head lightning-indexer key buffer (`[B, 1, T, sparse_index_dim]`, one key per token), all three addressed by the sequence's single block table. |
+| Paged Qwen4-Exp layout (`pagedQwen4ExpKV`) | The `qwen4_exp` QSA attention layer layout (v0.1.36): paged keys and values (`[B, kv_heads, T, head_dim]`) plus one paged single-head QSA indexer raw-key buffer (`[B, 1, T, indexer_head_dim]`, one key per token), all three addressed by the sequence's single block table. |
 | Sparse-attention family | A family whose attention layers select a top-`index_topk` subset of prior positions through an indexer once the context exceeds `index_topk`, and attend densely below it (v0.1.17: `glm5_next`). |
 | KV offload | Moving KV blocks outside the resident unified-memory pool (SSD, remote memory, or another process). Not in v0.1. |
 
@@ -620,6 +638,22 @@ of a shared forward selects blocks and attends against its own cache, as its
 serial run does; the shared forward batches only the projections and MoE. The
 runtime parity label for a `minimax_m3` tuple is
 `minimax-m3-indexed-kv-parity-v1`.
+
+**`pagedQwen4ExpKV` (v0.1.36).** The `qwen4_exp` keys, values and QSA
+indexer raw keys use the same registered kernel,
+`macprovider_paged_kv_gather_v1`, with no new kernel and no new kernel
+identifier. All three gathers run with `block_size_tokens` (one indexer key
+per token, token stride `indexer_head_dim`) and read the same physical block
+IDs in the same logical order, so the attach-time gather count for a
+`pagedQwen4ExpKV` layer is three per forward. The model writes a forward's
+attention keys before its indexer keys; the indexer keeps its own token count
+between the two writes, as the serial `Qwen4ExpAttentionCache` does. The
+gathered arrays feed the model's own QSA path, which owns block pooling,
+block scores, top-k, the own partial block, masking and softmax. Each row of
+a shared forward selects blocks and attends against its own cache, as its
+serial run does; the shared forward batches only the projections and MoE.
+The runtime parity label for a `qwen4_exp` tuple is
+`qwen4-exp-qsa-indexed-kv-parity-v1`.
 
 **Production-throughput boundary.** A gather-every-step path MAY satisfy
 correctness, descriptor, allocator, and fail-safe proof obligations, but it is
@@ -1154,6 +1188,39 @@ parity label, ring order and fail-closed cases are the `gpt_oss` class's.
   attach-time parity and isolation probes and the automatic FR-CB10
   self-check; it is not parity evidence, a signed grant or production
   qualification, and attach fails closed until those gates pass.
+- (v0.1.36, provisional, SPEC-first) the Qwen3.8-Flash-Next identity
+  `latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp`, with
+  `architectures == ["Qwen4ExpForConditionalGeneration"]` and top-level
+  `model_type` `qwen4_exp` in the artifact's `config.json` (QSA/gated-delta
+  MoE hybrid decoder, served on its text path; the paged path MUST
+  additionally pass cross-row MoE expert-dispatch isolation). `text_config`
+  MUST have `model_type` `qwen4_exp_text`, a `layer_types` array of
+  `num_hidden_layers` entries with `full_attention` exactly at every
+  `full_attention_interval`-th layer and `linear_attention` elsewhere, a
+  non-empty duplicate-free `ple_layer_ids` (counted from 1) naming only
+  `linear_attention` layers, a positive `indexer_budget` of at least
+  `indexer_compress_ratio`, and `indexer_kv_heads` 1. The code entry keys on
+  the exact `architectures` array plus the model id; a path-only alias,
+  another artifact id or any other layout fails closed. The runtime topology
+  is exactly one cache per decoder layer in layer order: `pagedQwen4ExpKV` at
+  every `full_attention` index (12 for the admitted 48-layer layout) and the
+  recurrent path at every `linear_attention` index; the runtime recognizes a
+  `Qwen4ExpSparseCache` as `pagedQwen4ExpKV`. Recurrent layers keep
+  `MambaCache`'s two floating-point slots, except the `ple_layer_ids` layers
+  (one, decoder index 1, for the admitted artifact), whose four-slot cache
+  adds the PLE short-convolution state (floating point) and, in the fourth
+  slot, the n-gram token history (integer token ids XOR `eos_token_id`). Row
+  packing, row sync and recurrent checkpoints carry that slot exactly, as an
+  integer tensor; a floating-point fourth slot, an integer slot elsewhere, a
+  PLE layer with two slots or a two-slot layer with four fails closed. A
+  joining row's absent state packs as zeros, which the model reads as a
+  prompt start. Every shared forward over a `pagedQwen4ExpKV` topology carries
+  at most 8 flattened tokens, as for `pagedIndexedKV`, and its rows prefill in
+  the serial path's chunk stride. The runtime cache identity is `mixed`. This
+  exception permits evaluation by the real attach-time parity and isolation
+  probes and the automatic FR-CB10 self-check; it is not parity evidence, a
+  signed grant or production qualification, and attach fails closed until
+  those gates pass. It authorizes ordinary CB only, never native MTP.
 
 
 - (v0.1.25, provisional, SPEC-first) only
@@ -1215,7 +1282,9 @@ proves nothing about sparse selection over paged pooled keys. For
 `minimax_m3` (v0.1.28) the span is
 `max(513, sparse_block_size × sparse_topk_blocks + 2 × block_size_tokens)`
 (2560 at block 256): selection starts only past the 2048 keys the top-k
-blocks cover.
+blocks cover. For `qwen4_exp` (v0.1.36) the span is
+`max(513, indexer_budget + 2 × block_size_tokens)` (2560 at block 256): the
+QSA indexer selects blocks only once the context exceeds `indexer_budget`.
 
 Each allowlisted identity requires the exact runtime cache topology measured
 for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
