@@ -13,10 +13,15 @@ by the failure; its reference columns are empty. The reference's meta line
 (main/reference.jsonl, else main/reference.suspect.jsonl) names the reference under the table,
 with its `table_note` when it has one (oMLX: how its decode tok/s relates to ours).
 
-Columns: request tok/s = completion_tokens / (last token - request start), summed over
-the rows of a multi-row cell (the goal metric); decode tok/s and TTFT are its parts.
-Multi-row cells compare against the single-row reference. `text identical` is against
-the reference and is reported only.
+Columns: req tok/s is the goal metric: for one row, request tok/s = completion_tokens /
+(last token - request start); for a multi-row cell, aggregate tok/s = total completion
+tokens / (last token of the last row - first request start), against the single-row
+reference's request tok/s. Per-request tok/s (median over rows and trials), decode tok/s,
+TTFT, TTFT excluding the provider's queue wait and the largest queue wait
+(usage.macprovider_queue_ms) are its parts. `service` is SERIAL (queued) for a multi-row
+cell whose rows never decoded at the same instant: it measures queueing, not batching.
+`text identical` is against the reference and is reported only. When main/grid.json
+records the serve's route (run-grid.sh ROUTE lines), it is printed above the table.
 """
 import argparse
 import json
@@ -56,10 +61,25 @@ def median(xs):
 
 
 TABLE_HEAD = [
-    "| cell | prompt_tokens | completion_tokens | ref decode tok/s | ours decode tok/s | ratio "
-    "| ref TTFT s | ours TTFT s | ref req tok/s | ours req tok/s | req ratio | text identical "
+    "| cell | service | prompt_tokens | completion_tokens | ref req tok/s | ours req tok/s (rows>1: aggregate) "
+    "| req ratio | ours per-request tok/s | ref decode tok/s | ours decode tok/s | decode ratio "
+    "| ref TTFT s | ours TTFT s | ours TTFT excl queue s | ours queue max s | text identical "
     "| ours noise | ref noise |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+
+
+def service(c):
+    if c.get("rows", 1) == 1:
+        return "-"
+    if c.get("service") == "batched":
+        return f"batched ({c.get('decode_overlap_rows')})"
+    if c.get("service") in ("serial", "mixed"):
+        return f"{c['service'].upper()} (queued)"
+    return "unknown"
+
+
+def ratio(a, b):
+    return a / b if a and b else None
 
 
 def reference_failed(summary, label):
@@ -102,14 +122,32 @@ def reference_lines(meta):
 def cell_rows(cells):
     out = []
     for c in cells:
+        goal = c.get("ours_goal_tps")
+        ours_decode, ref_decode = c.get("ours_decode_tps"), c.get("ref_decode_tps")
         out.append(
-            f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {c.get('prompt_tokens', '-')} | "
-            f"{c.get('completion_tokens', '-')} | {fmt(c.get('ref_tps'))} | {fmt(c.get('ours_tps'))} | "
-            f"{fmt(c.get('ratio'), '.3f')} | {fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
-            f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
-            f"{fmt(c.get('request_ratio'), '.3f')} | {text_identical(c)} | "
-            f"{fmt(c.get('ours_request_noise'), '.3f')} | {fmt(c.get('ref_request_noise'), '.3f')} |")
+            f"| ctx{c['ctx']}/out{c['out']}/rows{c['rows']} | {service(c)} | {c.get('prompt_tokens', '-')} | "
+            f"{c.get('completion_tokens', '-')} | {fmt(c.get('ref_request_tps'))} | {fmt(goal)} | "
+            f"{fmt(c.get('goal_ratio'), '.3f')} | {fmt(c.get('ours_request_tps'))} | "
+            f"{fmt(ref_decode)} | {fmt(ours_decode)} | {fmt(ratio(ours_decode, ref_decode), '.3f')} | "
+            f"{fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('ours_ttft_excl_queue_s'), '.3f')} | {fmt(c.get('ours_queue_s_max'), '.3f')} | "
+            f"{text_identical(c)} | "
+            f"{fmt(c.get('ours_goal_noise'), '.3f')} | {fmt(c.get('ref_request_noise'), '.3f')} |")
     return out
+
+
+def route_lines(run_dir):
+    """The serve's batching route at the grid start and end (run-grid.sh), from RUN_DIR/grid.json."""
+    grid = load(os.path.join(run_dir, "grid.json")) or {}
+    out = []
+    for phase in ("start", "end"):
+        r = (grid.get("route") or {}).get(phase)
+        if r:
+            out.append(f"Route at grid {phase}: batching **{r.get('batching')}**, {r.get('slots')} served slots, "
+                       f"reason `{r.get('reason')}`, mode `{r.get('mode')}`, self-check `{r.get('self_check')}` "
+                       f"(verified k {r.get('verified_k')}), max observed batch depth "
+                       f"{r.get('max_observed_batch_depth')}.")
+    return out + [""] if out else []
 
 
 def mtp_section(model_dir):
@@ -171,8 +209,12 @@ def main(argv=None):
     name = a.model or os.path.basename(os.path.normpath(a.model_dir))
     out = [f"# Baseline: {name}", "",
            f"Build `{a.build}` (commit `{a.commit}`), production route (no autotune flag, batching auto). "
-           "Request tok/s = completion_tokens / (last token - request start), summed over concurrent rows; "
-           "noise = (max - min) / median over the trials of one side.", ""]
+           "Req tok/s: one row, completion_tokens / (last token - request start); several rows, aggregate "
+           "tok/s = total completion tokens / (last token of the last row - first request start). "
+           "Per-request tok/s is the median over rows and trials. Queue = usage.macprovider_queue_ms. "
+           "SERIAL (queued) = the rows never decoded together: queueing, not batching. "
+           "Noise = (max - min) / median over the trials of one side.", ""]
+    out += route_lines(os.path.join(a.model_dir, "main"))
     out += reference_failed(main_summary, "Main")
     out += TABLE_HEAD + cell_rows(main_summary["cells"])
     out += reference_lines(reference_meta(os.path.join(a.model_dir, "main")))
@@ -223,7 +265,7 @@ def main(argv=None):
         out += reference_failed(base_ref, "Base")
         out += TABLE_HEAD + cell_rows(base_ref["cells"])
     out += mtp_section(a.model_dir)
-    path =os.path.join(a.model_dir, "baseline.md")
+    path = os.path.join(a.model_dir, "baseline.md")
     with open(path, "w") as f:
         f.write("\n".join(out) + "\n")
     print(path)

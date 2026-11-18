@@ -14,11 +14,18 @@
 #  3. per model, scripts/lab/parity-grid/run-grid.sh: our provider first, then the reference,
 #     on the production route (`stock` in window.sh: no autotune flag, batching auto). A
 #     reference that fails (REFERENCE_FAIL line, grid rc 8) leaves the provider cells, the
-#     CB check and the later passes intact and fails the job. The snapshot is served under
-#     its catalog id when it has one, else by path. A model with <K>_CB_FROM_POLICY=1 gets
-#     its signed CB policy tuple as the --no-join serve's accepted tuple and must show
-#     batched admissions; every other model is served serially, so its 4-row cells only
-#     queue and run 1 trial (<K>_TRIALS_BY_ROWS, default 4=1);
+#     route check and the later passes intact and fails the job. The snapshot is served under
+#     its catalog id when it has one, else by path. Every serve first waits, idle, for the
+#     continuous-batching self-check verdict (run-grid.sh batching warm-up: a --no-join serve
+#     never loads the signed CB policy, so that verdict is what turns batching on, as on a
+#     live provider after its provisional grant) and prints one ROUTE line at the grid start
+#     and one at its end (batching=active|serial, served slots, reason).
+#     A model with <K>_CB_FROM_POLICY=1 has a signed CB policy entry, so production batches
+#     it: the serve config carries the entry's tuple (cached-turns grant) and its
+#     max_served_slots as continuous_batch_queue_limit, which bounds the self-check ladder
+#     as the signed ceiling does on a live provider, and a serial ROUTE is a ROUTE_FAIL
+#     (cells still measured, job fails at the end). Other models run 1 trial of their
+#     4-row cells by default (<K>_TRIALS_BY_ROWS, default 4=1);
 #  4. <K>_BASE_PATH set: one 1-row pass of the unmodified base in our runtime. With
 #     <K>_BASE_REFERENCE=1 (default for qwen27) the same reference kind, venv and flags
 #     also run on the BASE weights over those 1-row cells (BASE_TRIALS trials), and the base
@@ -46,6 +53,10 @@
 # <K>_MTP_BENCH/_MTP_TEMPLATE. Built-in defaults exist for qwen27, glm, minimax and dsv4abl
 # (the abliterated DeepSeek V4-Flash that job-dsv4-abliterated.sh splices; not in MODELS by default).
 # Grid: OUTPUTS (128,512,2048), CONTEXTS (short,4k,16k), TRIALS (3), BASE_TRIALS (1).
+# REUSE_REFERENCE=<run id>: a provider-only rerun. Per model, the reference rows of that run
+# (results/<run id>/<name>/main/reference.jsonl, same weights and reference) are copied in
+# and the reference is not run again; compare scores the new provider cells against them.
+# The noise pass needs 1-row cells in the main pass and is skipped without them (<K>_ROWS=4).
 #
 # REFERENCE_ONLY=<run id>: add a reference to an already measured provider grid. No build, no
 # provider serve, no CB check, base pass, noise pass or MTP bench: per model, staging (the
@@ -74,6 +85,7 @@ TRIALS=${TRIALS:-3}
 BASE_TRIALS=${BASE_TRIALS:-1}
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
 REFERENCE_ONLY=${REFERENCE_ONLY:-}
+REUSE_REFERENCE=${REUSE_REFERENCE:-}
 SRC_RES=${REFERENCE_ONLY:+$LAB/results/$REFERENCE_ONLY}
 BIN=$SRC/.build-lab-harness/release
 MTP_CELLS="s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512"
@@ -141,6 +153,10 @@ if [ -n "$REFERENCE_ONLY" ]; then
   echo "$REFERENCE_ONLY" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "REFERENCE_ONLY=$REFERENCE_ONLY is not a run id" 64
   [ -d "$SRC_RES" ] || die "REFERENCE_ONLY: no provider run at $SRC_RES" 11
 fi
+if [ -n "$REUSE_REFERENCE" ]; then
+  [ -z "$REFERENCE_ONLY" ] || die "REUSE_REFERENCE and REFERENCE_ONLY exclude each other" 64
+  echo "$REUSE_REFERENCE" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "REUSE_REFERENCE=$REUSE_REFERENCE is not a run id" 64
+fi
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -160,6 +176,10 @@ for k in $MODELS; do
   if [ -n "$REFERENCE_ONLY" ]; then
     [ -s "$SRC_RES/$(v "$k" NAME)/main/provider.jsonl" ] \
       || die "model $k: REFERENCE_ONLY: no provider.jsonl at $SRC_RES/$(v "$k" NAME)/main" 11
+  fi
+  if [ -n "$REUSE_REFERENCE" ]; then
+    [ -s "$LAB/results/$REUSE_REFERENCE/$(v "$k" NAME)/main/reference.jsonl" ] \
+      || die "model $k: REUSE_REFERENCE: no reference.jsonl at $LAB/results/$REUSE_REFERENCE/$(v "$k" NAME)/main" 11
   fi
   if [ -n "$(v "$k" CLONE_FROM)" ]; then
     [ -f "$(v "$k" CLONE_FROM)/config.json" ] || die "model $k: no snapshot to clone at $(v "$k" CLONE_FROM)" 11
@@ -422,7 +442,10 @@ mtp_run() {
   [ $ok = 1 ]
 }
 
-# cb_extra K FILE: the signed CB policy entry of <K>_ID as a --no-join accepted tuple.
+# cb_extra K FILE: the serve config lines that put a --no-join serve on <K>'s production CB
+# route: the signed entry's tuple as an accepted tuple (its cached-turns grant) and the
+# entry's max_served_slots as the queue limit, which bounds the self-check ladder as the
+# signed ceiling does on a live provider. Batching itself still waits for the self-check.
 cb_extra() {
   /usr/bin/python3 -I - "$JOB/catalog/continuous-batching-policy.json" "$(v "$1" ID)" "$METALLIB_SHA" > "$2" <<'PY'
 import json, sys
@@ -437,7 +460,7 @@ keys = ("model_id", "model_sha256", "tokenizer_sha256", "chat_template_sha256", 
         "requires_moe", "hardware_class", "metallib_sha256", "kernel_identifier", "cached_turns_accepted")
 print("continuous_batching: canary")
 print("continuous_batching_cached_turns: true")
-print(f"max_concurrency_override: {e.get('max_served_slots', 4)}")
+print(f"continuous_batch_queue_limit: {e.get('max_served_slots', 4)}")
 print("continuous_batching_accepted_tuples:")
 print("  - {" + ", ".join(f"{k}: {json.dumps(e[k])}" for k in keys) + "}")
 PY
@@ -474,7 +497,8 @@ for k in $MODELS; do
   if stage_model "$k"; then STAGED="$STAGED $k"; else blocker "model $k: not staged; its grid is not run"; fi
 done
 
-# grid K OUT [run-grid args...]: one run-grid.sh invocation on the production route.
+# grid K OUT [run-grid args...]: one run-grid.sh invocation on the production route. Prints
+# the batching warm-up outcome and both ROUTE lines.
 grid() {
   local k=$1 out=$2; shift 2
   local args=(--model-name "$(v "$k" NAME)" --bin-dir "$BIN" --out-dir "$out" --cb auto
@@ -482,14 +506,21 @@ grid() {
   mkdir -p "$out"
   bash "$GRID/run-grid.sh" "${args[@]}" > "$out/run.log" 2>&1
   local rc=$?
+  grep -E '^(CB_WARMUP_DONE|CB_WARMUP_STALL|CB_WARMUP_FAIL|ROUTE|ROUTE_FAIL) ' "$out/run.log" \
+    | sed "s/^/GRID_$(basename "$out" | tr 'a-z' 'A-Z') $(v "$k" NAME) /"
   /usr/bin/python3 -I -c 'import json,sys
 try: s=json.load(open(sys.argv[1]))
 except Exception as e: print("status: unreadable", e); sys.exit()
-cb=s.get("continuous_batching") or {}
-print("small_m_route:", cb.get("small_m_route"), "| native_mtp:", {k: v for k, v in s.items() if "native_mtp" in k})' \
+print("native_mtp:", {k: v for k, v in s.items() if "native_mtp" in k})' \
     "$out/serve/status.json" 2>/dev/null | sed "s/^/GRID_STATUS $(v "$k" NAME) /"
   return $rc
 }
+
+# expect_route K: run-grid's --expect-route for <K>: batched when production batches it.
+expect_route() { if [ "$(v "$1" CB_FROM_POLICY)" = 1 ]; then echo batched; else echo any; fi; }
+
+# route_failed DIR: the grid in DIR printed a ROUTE_FAIL line.
+route_failed() { grep -q '^ROUTE_FAIL ' "$1/run.log" 2>/dev/null; }
 
 # serve_args K: the snapshot under its catalog id when it has one, else by path.
 serve_args() {
@@ -531,23 +562,27 @@ for p in ("omlx", "mlx", "mlx-vlm", "mlx-lm", "transformers"):
     return
   fi
   serve_args "$k"
-  log "GRID_START $name rows=$rows reference=$(v "$k" REF) served_as=$(v "$k" ID)${tbr:+ trials_by_rows=$tbr}"
+  local reuse=()
+  if [ -n "$REUSE_REFERENCE" ]; then
+    mkdir -p "$M/main"
+    cp "$LAB/results/$REUSE_REFERENCE/$name/main/reference.jsonl" "$M/main/" \
+      || { blocker "model $k: reference copy from run $REUSE_REFERENCE failed"; return 1; }
+    reuse=(--skip-reference)
+    log "REFERENCE_REUSED $name from run $REUSE_REFERENCE ($(grep -c '"kind": "row"' "$M/main/reference.jsonl") rows)"
+  fi
+  log "GRID_START $name rows=$rows reference=$(v "$k" REF)${REUSE_REFERENCE:+ (reused from $REUSE_REFERENCE)} served_as=$(v "$k" ID) expect_route=$(expect_route "$k")${tbr:+ trials_by_rows=$tbr}"
   grid "$k" "$M/main" "${SERVE[@]}" --rows "$rows" --contexts "$CONTEXTS" --python "$(v "$k" REF_PY)" \
     --reference "$(v "$k" REF)" ${ref_path:+--ref-model-path "$ref_path"} ${ref_args[@]+"${ref_args[@]}"} \
-    ${tbr:+--trials-by-rows "$tbr"}
+    ${tbr:+--trials-by-rows "$tbr"} --expect-route "$(expect_route "$k")" ${reuse[@]+"${reuse[@]}"}
   local rc=$? ok=0
-  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 8 the reference failed, 9 it was suspect)"
+  log "GRID_DONE $name rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 8 the reference failed, 9 it was suspect, 10 the route was serial where production batches)"
   grep -E '^(REFERENCE_SANE|REFERENCE_SUSPECT|REFERENCE_FAIL) ' "$M/main/run.log" | sed 's/^/GRID_SANITY /'
-  case $rc in 0|1|8|9) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
+  case $rc in 0|1|8|9|10) sed -n '/^| model/,/^$/p' "$M/main/summary.md" ;;
     *) blocker "model $k: grid rc=$rc: $(tail -n 3 "$M/main/run.log" | tr '\n' ' ')"; ok=1 ;; esac
   # The provider side ran: report the reference loudly, keep going, fail the job at the end.
   case $rc in 8|9) reference_failed "$k" "$M/main" ;; esac
-  if [ $ok = 0 ] && [ "$(v "$k" CB_FROM_POLICY)" = 1 ]; then
-    local admitted
-    admitted=$(grep -c 'event=batching_admitted' "$M/main/serve/serve.err" 2>/dev/null || true)
-    log "CB_CHECK $name batching_admitted=$admitted $(grep -m1 'runtime-identity model=' "$M/main/serve/serve.err" | cut -c1-300)"
-    [ "${admitted:-0}" -gt 0 ] || { blocker "model $k: continuous batching never admitted a row; the grid is not the production route"; ok=1; }
-  fi
+  # A serial route where production batches: the cells are kept, the job fails at the end.
+  route_failed "$M/main" && blocker "model $k: ROUTE_FAIL: the serve was serial but production batches this model; its multi-row cells are not the production route ($(grep -m1 '^ROUTE_FAIL ' "$M/main/run.log" | cut -c1-300))"
   if [ $ok = 0 ] && [ -n "$(v "$k" BASE_PATH)" ]; then
     log "BASE_START $name base=$(v "$k" BASE_ID)"
     mkdir -p "$M/base"
@@ -606,15 +641,21 @@ reference_only() {
 }
 
 noise_pass() {
-  local k=$1 name
+  local k=$1 name seed=()
   [ -z "$REFERENCE_ONLY" ] || return 0  # the provider run's noise/ was copied
   name=$(v "$k" NAME)
   local M=$RES/$name
   [ -f "$M/main/provider.jsonl" ] || return 0
+  if ! grep -q '"rows": 1,' "$M/main/provider.jsonl"; then
+    log "NOISE_SKIPPED $name: the main pass has no 1-row cells"; return 0
+  fi
   serve_args "$k"
+  # The main serve's stored self-check verdict applies at startup, as after a restart.
+  [ ! -f "$M/main/serve/cb-self-check.json" ] || seed=(--seed-self-check "$M/main/serve/cb-self-check.json")
   log "NOISE_START $name"
   mkdir -p "$M/noise" && { cp "$M/main/reference.jsonl" "$M/noise/" 2>/dev/null || true; }
   grid "$k" "$M/noise" "${SERVE[@]}" --rows 1 --contexts short --skip-reference --skip-compare \
+    --expect-route "$(expect_route "$k")" ${seed[@]+"${seed[@]}"} \
     || { blocker "model $k: noise pass rc=$?: $(tail -n 3 "$M/noise/run.log" | tr '\n' ' ')"; return 1; }
   /usr/bin/python3 -I "$GRID/compare.py" --baseline "$M/main/provider.jsonl" --ours "$M/noise/provider.jsonl" \
     --subset --json "$M/noise/vs-main.json" > "$M/noise/vs-main.md"

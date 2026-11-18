@@ -32,13 +32,17 @@ TEXT = "The keeper lit the lamp."
 
 def ref_line(ctx, out, tps, trial=0, row=0, text=TEXT, tokens=None, prompt_tokens=244):
     return {"side": "reference", "kind": "row", "model": MODEL, "ctx_target": ctx, "max_tokens": out,
-            "rows": 1, "row": row, "trial": trial, "decode_tps": tps, "text": text,
+            "rows": 1, "row": row, "trial": trial, "decode_tps": tps, "request_tps": tps, "text": text,
             "completion_tokens": out if tokens is None else tokens, "prompt_tokens": prompt_tokens,
             "finish": "length"}
 
 
 def our_lines(ctx, out, rows, trial_tps, texts=None, tokens=None, prompt_tokens=244, row_tps=None):
-    """One trial per entry of trial_tps; each trial has `rows` row lines and one aggregate line."""
+    """One trial per entry of trial_tps; each trial has `rows` row lines and one aggregate line.
+
+    Every row starts together and finishes at the same time with request_tps = tps / rows,
+    so a trial's aggregate tok/s (total tokens / wall time) is its entry of trial_tps.
+    """
     lines = []
     for trial, agg in enumerate(trial_tps):
         base = {"side": "provider", "model": MODEL, "ctx_target": ctx, "max_tokens": out, "rows": rows,
@@ -46,6 +50,7 @@ def our_lines(ctx, out, rows, trial_tps, texts=None, tokens=None, prompt_tokens=
         for r in range(rows):
             lines.append({**base, "kind": "row", "row": r,
                           "decode_tps": row_tps if row_tps is not None else agg / rows,
+                          "request_tps": agg / rows,
                           "text": (texts or {}).get(r, TEXT),
                           "completion_tokens": out if tokens is None else tokens,
                           "prompt_tokens": prompt_tokens, "error": None})
@@ -354,23 +359,35 @@ class RequestMetricAndBaselineTests(unittest.TestCase):
         self.assertEqual((cell["prompt_tokens"], cell["completion_tokens"]), (244, 128))
         self.assertIn("| 100.00 | 50.00 | 0.500 |", compare.markdown(s))
 
-    def test_multi_row_request_metric_sums_rows(self):
+    def test_multi_row_goal_is_aggregate_not_a_sum(self):
+        # Four rows that start together and all finish at 128 / 30 s: 4 * 128 tokens over that wall.
         ours = self.with_request(our_lines(200, 128, 4, [200.0] * 3), 30.0)
         cell = compare.evaluate([ref_line(200, 128, 126.0)], ours)["cells"][0]
-        self.assertEqual(cell["ours_request_tps"], 120.0)
+        self.assertEqual(cell["tps_metric"], "aggregate_tps")
+        self.assertEqual(cell["ours_goal_tps"], 120.0)
+        self.assertEqual(cell["ours_tps"], 120.0)
+        self.assertEqual(cell["ours_request_tps"], 30.0)  # per request, a secondary column
+        self.assertEqual(cell["ref_tps"], 126.0)          # the reference's request tok/s
+        # An aggregate line's old fields never feed the score.
         for x in ours:
             if x["kind"] == "aggregate":
-                x["request_tps_sum"] = 111.0
-        self.assertEqual(compare.evaluate([ref_line(200, 128, 126.0)], ours)["cells"][0]["ours_request_tps"], 111.0)
+                x["request_tps_sum"], x["aggregate_tps"] = 999.0, 999.0
+        self.assertEqual(compare.evaluate([ref_line(200, 128, 126.0)], ours)["cells"][0]["ours_tps"], 120.0)
 
     def test_client_request_tps(self):
         res = {"text": "ab", "t_first": 2.0, "t_last": 4.0, "t0": 0.0, "t_end": 5.0,
-               "usage": {"completion_tokens": 8}}
-        rec = client.row_record(res, {})
+               "usage": {"completion_tokens": 8, "macprovider_queue_ms": 1500}}
+        rec = client.row_record(res, {}, cell_t0=0.0)
         self.assertEqual(rec["request_tps"], 2.0)
         self.assertEqual(rec["ttft_s"], 2.0)
-        agg = client.aggregate_record([dict(rec, _t_first=2.0, _t_last=4.0)] * 2, {})
-        self.assertEqual(agg["request_tps_sum"], 4.0)
+        self.assertEqual((rec["start_offset_s"], rec["t_last_offset_s"], rec["queue_ms"]), (0.0, 4.0, 1500))
+        later = dict(rec, start_offset_s=0.0, ttft_s=4.5, t_last_offset_s=6.5, request_tps=round(8 / 6.5, 3))
+        agg = client.aggregate_record([dict(rec, _t_first=2.0, _t_last=4.0), dict(later, _t_first=4.5, _t_last=6.5)], {})
+        # 16 tokens over 6.5 s from the common start; the second row decoded after the first.
+        self.assertEqual(agg["aggregate_tps"], round(16 / 6.5, 3))
+        self.assertEqual((agg["decode_overlap_rows"], agg["serial_service"]), (1, True))
+        self.assertEqual(agg["queue_s_max"], 1.5)
+        self.assertNotIn("request_tps_sum", agg)
 
     def test_baseline_identical_passes_and_reports_delta(self):
         base = self.with_request(our_lines(200, 128, 1, [100.0, 101.0, 99.0]), 50.0)
@@ -682,7 +699,7 @@ class ReferenceFailedTests(unittest.TestCase):
             self.assertIsNotNone(c["ours_tps"])
         md = compare.markdown(s)
         self.assertTrue(md.startswith("REFERENCE FAILED: " + self.REASON))
-        self.assertIn("| m | 200 | 128 | 1 | - | 127.00 |", md)
+        self.assertIn("| m | 200 | 128 | 1 | - | decode | - | 127.00 |", md)
 
     def test_partial_reference_still_compares_what_it_wrote(self):
         ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
@@ -727,7 +744,7 @@ class ReferenceFailedTests(unittest.TestCase):
                 self.assertEqual(baseline_md.main([d, "--model", "m"]), 0)
             md = Path(d, "baseline.md").read_text()
         self.assertIn("**Main reference FAILED**: `" + self.REASON + "`", md)
-        self.assertIn("| ctx200/out128/rows1 | 244 | 128 | - | 127.00 | - |", md)
+        self.assertIn("| ctx200/out128/rows1 | - | 244 | 128 | - | 127.00 | - | 127.00 | - | 127.00 | - |", md)
         self.assertIn("n/a (no reference)", md)
 
 
@@ -1135,6 +1152,275 @@ with open(out, "a") as f:
                             "completion_tokens": 64, "prompt_tokens": 244, "finish": "length"}) + "\n")
 PY
 """
+
+
+route_status = module("route_status")
+
+
+def timed_rows(ctx, out, rows, spans, trial=0, queue_ms=None):
+    """Row lines from (start_offset_s, ttft_s, t_last_offset_s) per row, no texts."""
+    lines = []
+    for r, (start, ttft, last) in enumerate(spans):
+        lines.append({"side": "provider", "model": MODEL, "ctx_target": ctx, "max_tokens": out, "rows": rows,
+                      "trial": trial, "cell": prompts.cell_key(MODEL, ctx, out, rows), "kind": "row", "row": r,
+                      "completion_tokens": out, "prompt_tokens": 244, "text": TEXT, "error": None,
+                      "start_offset_s": start, "ttft_s": ttft, "t_last_offset_s": last,
+                      "request_tps": round(out / (last - start), 3), "decode_tps": round((out - 1) / (last - start - ttft), 3),
+                      "queue_ms": (queue_ms or [None] * len(spans))[r]})
+    return lines
+
+
+# One trial of a measured 4-row cell served one request at a time (GLM, ctx 200, out 512,
+# the earlier lab serve): per row completion_tokens, request_tps, ttft_s and
+# usage.macprovider_queue_ms, all rows released together. Its single-row request tok/s
+# median was 39.231. Only these timing numbers are kept.
+QUEUED_GLM_ROWS = [(512, 13.058, 27.3425, 26156), (512, 39.196, 1.1941, 7),
+                   (512, 9.793, 40.4215, 39223), (512, 19.582, 14.2744, 13072)]
+
+
+class AggregateMetricTests(unittest.TestCase):
+    def queued_rows(self):
+        return [{"side": "provider", "model": MODEL, "ctx_target": 200, "max_tokens": 512, "rows": 4,
+                 "trial": 0, "cell": prompts.cell_key(MODEL, 200, 512, 4), "kind": "row", "row": r,
+                 "completion_tokens": ct, "request_tps": req, "ttft_s": ttft, "error": None, "text": TEXT,
+                 "prompt_tokens": 244, "decode_tps": 40.0, "usage": {"macprovider_queue_ms": q}}
+                for r, (ct, req, ttft, q) in enumerate(QUEUED_GLM_ROWS)]
+
+    def test_queued_rows_aggregate_to_one_row_and_are_serial(self):
+        m = compare.trial_metrics(self.queued_rows())
+        # The summed request tok/s of these rows reads ~2.1x one row; the aggregate does not.
+        self.assertAlmostEqual(sum(r[1] for r in QUEUED_GLM_ROWS) / 39.231, 2.08, places=2)
+        self.assertGreaterEqual(m["aggregate_tps"] / 39.231, 0.90)
+        self.assertLessEqual(m["aggregate_tps"] / 39.231, 1.02)
+        self.assertEqual((m["decode_overlap_rows"], m["serial_service"]), (1, True))
+        self.assertEqual(m["queue_s_max"], 39.223)
+        self.assertAlmostEqual(statistics_median(m["ttft_excl_queue_s"]), 1.19, places=1)
+
+    def test_serial_cell_is_labelled(self):
+        ref = [ref_line(200, 512, 40.0, 0, row=r, text=TEXT) for r in range(4)]
+        s = compare.evaluate(ref, self.queued_rows())
+        c = s["cells"][0]
+        self.assertEqual(c["service"], "serial")
+        self.assertTrue(any("serial service" in n for n in c["notes"]))
+        self.assertIn("| SERIAL (queued) | aggregate vs ref request |", compare.markdown(s))
+
+    def test_batched_rows(self):
+        # Four rows decoding together after a staggered prefill: overlap 4, aggregate over the wall.
+        lines = timed_rows(200, 128, 4, [(0.0, 1.0, 5.0), (0.0, 1.5, 5.2), (0.0, 2.0, 5.4), (0.0, 2.5, 5.6)])
+        m = compare.trial_metrics(lines)
+        self.assertEqual((m["decode_overlap_rows"], m["serial_service"]), (4, False))
+        self.assertEqual(m["aggregate_tps"], round(4 * 128 / 5.6, 3))
+        cell = compare.evaluate([ref_line(200, 128, 40.0, 0, row=r) for r in range(4)], lines)["cells"][0]
+        self.assertEqual(cell["service"], "batched")
+        self.assertEqual(compare.service_label(cell), "batched (4)")
+
+    def test_start_offsets_count_from_the_first_request(self):
+        lines = timed_rows(200, 128, 2, [(0.5, 1.0, 4.0), (0.0, 1.0, 3.0)])
+        self.assertEqual(compare.trial_metrics(lines)["wall_s"], 4.0)
+
+    def test_error_row_gives_no_aggregate(self):
+        lines = timed_rows(200, 128, 2, [(0.0, 1.0, 4.0), (0.0, 1.0, 3.0)])
+        lines[1]["error"] = "http 500"
+        self.assertIsNone(compare.trial_metrics(lines)["aggregate_tps"])
+
+    def test_one_row_queue_wait_is_visible(self):
+        lines = our_lines(200, 128, 1, [127.0] * 3)
+        lines[0]["queue_ms"], lines[0]["ttft_s"] = 30000, 31.0
+        cell = compare.evaluate([ref_line(200, 128, 126.0, i) for i in range(3)], lines)["cells"][0]
+        self.assertEqual(cell["ours_queue_s_max"], 30.0)
+        self.assertEqual(cell["ours_ttft_excl_queue_s"], 1.0)
+        self.assertEqual(cell["service"], None)
+
+    def test_baseline_mode_uses_aggregate_for_multi_row(self):
+        a = self.queued_rows()
+        s = compare.evaluate_baseline(a, a)
+        self.assertEqual(s["cells"][0]["base_request_tps"], compare.trial_metrics(a)["aggregate_tps"])
+
+
+def statistics_median(xs):
+    import statistics
+    return statistics.median(xs)
+
+
+def cb_status(decision=None, slots=1, active=False, served=None, route="stock_order", loaded=True):
+    sc = None if decision is None else {"decision": decision, "served_slots": served if served is not None else slots,
+                                       "verified_k": 4}
+    return {"model_loaded": loaded, "capacity": {"max_concurrency": slots},
+            "continuous_batching": {"mode": "canary" if active else "off", "active": active, "self_check": sc,
+                                    "small_m_route": route, "scheduler": {"max_observed_batch_depth": 0},
+                                    "policy": {"decision_reason": "absent_empty_off_fallback"}}}
+
+
+PLANNED = "event=served_slots action=planned rows=22 served=1 reason=self_check_pending configured=4 source=autotune\n"
+APPLIED = "event=served_slots action=applied slots=1 rows=22 reason=self_check_pending\n"
+
+
+class RouteStatusTests(unittest.TestCase):
+    def test_states(self):
+        st = route_status.self_check_state
+        self.assertEqual(st(cb_status(), PLANNED + APPLIED), ("pending", "self_check_pending"))
+        self.assertEqual(st(cb_status("deferred"), PLANNED + APPLIED)[0], "pending")
+        self.assertEqual(st(cb_status("prior_grant_pending_recheck", 3), PLANNED)[0], "pending")
+        self.assertEqual(st(cb_status("granted", 3, True), PLANNED), ("decided", "granted"))
+        self.assertEqual(st(cb_status("granted", 1, False, served=3), PLANNED)[0], "applying")
+        self.assertEqual(st(cb_status("no_net_gain", 1), PLANNED), ("decided", "no_net_gain"))
+        unavailable = PLANNED + "event=served_slots action=applied slots=1 rows=8 reason=cb_unavailable_for_loaded_tuple\n"
+        self.assertEqual(st(cb_status(), unavailable), ("none", "cb_unavailable_for_loaded_tuple"))
+        self.assertEqual(st(cb_status(route="serial_only"), PLANNED), ("none", "small_m_route_serial_only"))
+        self.assertEqual(st(cb_status(), ""), ("none", "no_served_slots_plan"))
+
+    def test_route_and_line(self):
+        r = route_status.route(cb_status("granted", 3, True), PLANNED)
+        self.assertEqual((r["batching"], r["slots"], r["reason"]), ("active", 3, "self_check_granted"))
+        self.assertTrue(route_status.route_line(r, "start").startswith(
+            "ROUTE batching=active slots=3 reason=self_check_granted phase=start"))
+        r = route_status.route(cb_status(), PLANNED + APPLIED)
+        self.assertEqual((r["batching"], r["reason"]), ("serial", "absent_empty_off_fallback"))
+        unavailable = PLANNED + "event=served_slots action=applied slots=1 rows=8 reason=cb_unavailable_for_loaded_tuple\n"
+        self.assertEqual(route_status.route(cb_status(), unavailable)["reason"], "cb_unavailable_for_loaded_tuple")
+
+    def test_record_writes_grid_and_fails_a_serial_expected_batched_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            st, err, grid = Path(d, "s.json"), Path(d, "serve.err"), Path(d, "grid.json")
+            grid.write_text(json.dumps({"rows": [1, 4]}))
+            err.write_text(PLANNED)
+            st.write_text(json.dumps(cb_status("granted", 3, True)))
+            out = []
+            self.assertEqual(route_status.record(st, err, grid, "start", "batched", out=out.append), 0)
+            st.write_text(json.dumps(cb_status("no_net_gain", 1)))
+            self.assertEqual(route_status.record(st, err, grid, "end", "batched", out=out.append), 10)
+            self.assertTrue(out[-1].startswith("ROUTE_FAIL phase=end"))
+            g = json.loads(grid.read_text())
+            self.assertEqual((g["rows"], g["route"]["start"]["batching"], g["route"]["end"]["batching"]),
+                             ([1, 4], "active", "serial"))
+            self.assertEqual(route_status.record(st, err, grid, "end", "any", out=out.append), 0)
+
+    def gate(self, statuses, err=PLANNED + APPLIED, stall_s=60.0):
+        now = [0.0]
+        seq = iter(statuses)
+        last = [None]
+
+        def fetch(_port):
+            last[0] = next(seq, last[0])
+            return last[0]
+        out = []
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, "serve.err")
+            p.write_text(err)
+            rc = route_status.gate(1, str(p), None, stall_s, 10.0, fetch=fetch, clock=lambda: now[0],
+                                   sleep=lambda s: now.__setitem__(0, now[0] + s), out=out.append)
+        return rc, out, now[0]
+
+    def test_gate_waits_for_the_verdict(self):
+        rc, out, t = self.gate([cb_status()] * 3 + [cb_status("pending")] * 2 + [cb_status("granted", 3, True)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out[-1].startswith("CB_WARMUP_DONE state=decided reason=granted waited_s=50"), out)
+        self.assertEqual(len([x for x in out if x.startswith("CB_WARMUP ")]), 2)  # one line per change
+
+    def test_gate_stall_is_the_only_bound(self):
+        rc, out, t = self.gate([cb_status("pending")], stall_s=60.0)
+        self.assertEqual(rc, 4)
+        self.assertTrue(out[-1].startswith("CB_WARMUP_STALL"), out)
+        self.assertEqual(t, 60.0)
+
+    def test_gate_ends_at_once_when_no_check_can_run(self):
+        err = PLANNED + "event=served_slots action=applied slots=1 rows=8 reason=cb_unavailable_for_loaded_tuple\n"
+        rc, out, t = self.gate([cb_status()], err=err)
+        self.assertEqual((rc, t), (0, 0.0))
+        self.assertIn("state=none reason=cb_unavailable_for_loaded_tuple", out[-1])
+
+    def test_gate_applying_grace(self):
+        rc, out, t = self.gate([cb_status("granted", 1, False, served=3)], stall_s=10000.0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t, route_status.APPLY_GRACE_S)
+
+
+_FAKE_CB_SERVE = r"""
+import json, os, re, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+cfg = open(sys.argv[sys.argv.index("--config") + 1]).read()
+port = int(re.search(r"^port: (\d+)", cfg, re.M).group(1))
+decision = os.environ["FAKE_DECISION"]
+t0 = time.time()
+sys.stderr.write("event=served_slots action=planned rows=22 served=1 reason=self_check_pending configured=4\n")
+sys.stderr.write("event=served_slots action=applied slots=1 rows=22 reason=self_check_pending\n")
+sys.stderr.flush()
+def decided():
+    return time.time() - t0 > 1.5
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        granted = decided() and decision == "granted"
+        sc = {"decision": decision if decided() else "pending", "served_slots": 3 if granted else 1, "verified_k": 4}
+        body = {"model_loaded": True, "capacity": {"max_concurrency": 3 if granted else 1},
+                "continuous_batching": {"mode": "canary" if granted else "off", "active": granted,
+                                        "self_check": sc, "small_m_route": "stock_order"}}
+        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode())
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if not decided():
+            self.send_response(500); self.end_headers(); self.wfile.write(b"request before the verdict"); return
+        self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+        n = min(body["max_tokens"], 3)
+        for obj in ([{"choices": [{"index": 0, "delta": {"content": "ab"}, "finish_reason": None}]}] * n
+                    + [{"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": n, "macprovider_queue_ms": 4}}]):
+            self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+
+class RunGridWarmupTests(unittest.TestCase):
+    """run-grid.sh waits, idle, for the self-check verdict, then records the route."""
+
+    def run_grid(self, decision, expect):
+        import socket
+        import subprocess
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        (d / "bin").mkdir()
+        (d / "fake").mkdir()
+        (d / "serve.py").write_text(_FAKE_CB_SERVE)
+        cli = d / "bin" / "macprovider-cli"
+        cli.write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {d / "serve.py"} "$@"\n')
+        lsof = d / "fake" / "lsof"
+        lsof.write_text("#!/bin/bash\nexit 1\n")
+        for p in (cli, lsof):
+            p.chmod(0o755)
+        out = d / "out"
+        env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin", FAKE_DECISION=decision)
+        proc = subprocess.run(
+            ["bash", str(HARNESS / "run-grid.sh"), "--model-path", str(d), "--model-name", MODEL,
+             "--bin-dir", str(d / "bin"), "--out-dir", str(out), "--skip-reference", "--skip-compare",
+             "--port", str(port), "--outputs", "4", "--contexts", "short", "--rows", "1", "--trials", "1",
+             "--warmup-poll-s", "0.5", "--expect-route", expect],
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc, out
+
+    def test_granted_route_is_active_and_recorded(self):
+        proc, out = self.run_grid("granted", "batched")
+        log = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, log)
+        self.assertIn("CB_WARMUP_DONE state=decided reason=granted", proc.stdout)
+        self.assertIn("ROUTE batching=active slots=3 reason=self_check_granted phase=start", proc.stdout)
+        self.assertIn("ROUTE batching=active slots=3 reason=self_check_granted phase=end", proc.stdout)
+        grid = json.loads((out / "grid.json").read_text())
+        self.assertEqual((grid["route"]["start"]["batching"], grid["route"]["end"]["slots"]), ("active", 3))
+        for name in ("status-ready.json", "status.json", "status-end.json"):
+            self.assertTrue((out / "serve" / name).is_file(), name)
+        rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        self.assertTrue(all(not r.get("errors") for r in rows if r["kind"] == "aggregate"), rows)
+
+    def test_serial_route_where_batching_is_expected_fails_loudly(self):
+        proc, out = self.run_grid("no_net_gain", "batched")
+        log = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 10, log)
+        self.assertIn("ROUTE_FAIL phase=start", proc.stdout)
+        self.assertIn("ROUTE_FAIL phase=end", proc.stdout)
+        self.assertTrue((out / "provider.jsonl").read_text())  # the cells were still measured
 
 
 class RunGridReferenceOnlyTests(unittest.TestCase):

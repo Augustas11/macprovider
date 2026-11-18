@@ -24,8 +24,12 @@
 #          add a reference to an already measured provider grid (job.sh header); the run's
 #          provider.jsonl / grid.json / identity / noise / job log are pushed from
 #          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has them
+#        REUSE_REFERENCE=<run id> MODELS=glm GLM_ROWS=4 GLM_MTP_BENCH=0 studio-ablit-perf.sh
+#          a provider-only rerun scored against that run's reference rows (job.sh header); its
+#          reference.jsonl is pushed from $POC/scratchpad/ablit-perf/results/<run id> when the
+#          Studio no longer has it
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB
-# SKIP_BUILD REFERENCE_ONLY and every <KEY>_<FIELD> model variable job.sh reads (see its header).
+# SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -77,7 +81,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -102,6 +106,13 @@ if [ -n "${REFERENCE_ONLY:-}" ]; then
       --include="job-$REFERENCE_ONLY.log" --exclude='*' \
       "$RES/$REFERENCE_ONLY/" "macstudio:lab-ablit-perf/results/$REFERENCE_ONLY/" >> "$LOG" 2>&1 \
     || { blocker "push of the provider run $REFERENCE_ONLY to the Studio failed"; exit 2; }
+fi
+if [ -n "${REUSE_REFERENCE:-}" ]; then
+  [ -d "$RES/$REUSE_REFERENCE" ] || { blocker "no local results at $RES/$REUSE_REFERENCE"; exit 2; }
+  # Only the reference rows; files the Studio still has are never overwritten.
+  rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='reference.jsonl' --exclude='*' \
+      "$RES/$REUSE_REFERENCE/" "macstudio:lab-ablit-perf/results/$REUSE_REFERENCE/" >> "$LOG" 2>&1 \
+    || { blocker "push of the reference rows of $REUSE_REFERENCE to the Studio failed"; exit 2; }
 fi
 if [ -n "$FORK_HEAD" ]; then
   rsync -a --delete --exclude '.build*' --exclude '.swiftpm' --exclude '.git' "$FORK_DIR/" macstudio:lab-ablit-perf/mlx-swift-lm-2409/ >> "$LOG" 2>&1 \
@@ -149,7 +160,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|CB_CHECK|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break

@@ -38,21 +38,30 @@ status `no_reference` when none of the cell's rows has one).
 --reference-failed REASON: the reference run failed; --ref may be missing or
 hold only the rows written before the failure. The table and JSON are still
 written for every provider cell, headed by the reason (JSON `reference_failed`).
-Multi-row cells score aggregate tok/s against the single-row reference
-(serial stock mlx-lm); per-row tok/s ratios are reported, not gated.
+The ratio and slope use decode tok/s for a one-row cell. A multi-row cell
+uses aggregate tok/s = total completion tokens / (last token of the last row -
+first request start), per trial, against the single-row reference's request
+tok/s (both count prefill); per-row tok/s ratios are reported, not gated.
+Request starts and last-token times come from the rows (start_offset_s,
+t_last_offset_s; older rows: a common start and completion_tokens /
+request_tps). A multi-row cell whose rows never decoded at the same instant in
+any trial is service `serial` (queued one after another), noted and labelled
+SERIAL in the table: it measures queueing, not batching.
 
-Reported, never gated: request-level output tok/s (request_tps =
-completion_tokens / (last token time - request start); a multi-row cell sums
-it over its concurrent rows) with its ratio to the reference, and median TTFT
-on both sides.
+Reported, never gated: the goal metric (ours_goal_tps: request tok/s for one
+row, aggregate tok/s for several) and its ratio to the reference's request
+tok/s; per-request output tok/s (request_tps = completion_tokens / (last
+token time - request start), median over rows and trials) with its ratio;
+median TTFT on both sides; our queue wait (usage.macprovider_queue_ms: max over
+the cell and median) and TTFT excluding it.
 
 --baseline mode compares two provider runs (a candidate build against the
 main build): every (cell, trial, row) of the candidate must equal the
 baseline's trial-0 row of the same cell and prompt row in text,
 reasoning_text and completion_tokens; any difference, error or missing cell
 exits 1 (--subset: baseline cells the candidate did not run are listed, not
-failed). It prints per cell the request tok/s, decode tok/s and TTFT
-medians, the request tok/s delta against the baseline and both runs' trial
+failed). It prints per cell the goal-metric tok/s (request tok/s for one
+row, aggregate tok/s for several), decode tok/s and TTFT medians, the request tok/s delta against the baseline and both runs' trial
 spread (noise), without gating on speed.
 """
 import argparse
@@ -127,29 +136,98 @@ def index_ours(lines):
     return rows, aggs, meta
 
 
-def ours_request_scores(rows, aggs, nrows):
-    """Request-level output tok/s per trial: the row's, or the sum over concurrent rows."""
-    if nrows == 1:
-        return [r.get("request_tps") for r in sorted(rows, key=lambda r: r["trial"])]
-    by_trial = defaultdict(list)
-    for r in rows:
-        by_trial[r["trial"]].append(r.get("request_tps"))
-    sums = {a["trial"]: a.get("request_tps_sum") for a in aggs}
-    out = []
-    for trial in sorted(by_trial):
-        xs = by_trial[trial]
-        fallback = round(sum(xs), 3) if len(xs) == nrows and None not in xs else None
-        out.append(sums.get(trial) if sums.get(trial) is not None else fallback)
+# Decode spans closer than this are not counted as overlapping (stream timing jitter).
+OVERLAP_EPS_S = 0.05
+
+
+def queue_s(r):
+    """The provider's queue wait for one row in seconds (usage.macprovider_queue_ms), or None."""
+    q = r.get("queue_ms")
+    if q is None:
+        q = (r.get("usage") or {}).get("macprovider_queue_ms")
+    return q / 1000 if isinstance(q, (int, float)) else None
+
+
+def row_times(r):
+    """(start, first token, last token) of one row in seconds from its trial's start, or None.
+
+    The client writes start_offset_s and t_last_offset_s. Rows written before those fields
+    existed were released together from one barrier, so their start is 0 and their last
+    token is at completion_tokens / request_tps.
+    """
+    start = r.get("start_offset_s") or 0.0
+    last = r.get("t_last_offset_s")
+    if last is None:
+        ct, req = r.get("completion_tokens"), r.get("request_tps")
+        if not ct or not req:
+            return None
+        last = start + ct / req
+    ttft = r.get("ttft_s")
+    return start, (start + ttft if ttft is not None else None), last
+
+
+def max_overlap(spans, eps=OVERLAP_EPS_S):
+    """Most (first, last) decode spans in progress at one instant; at least 1 for any span."""
+    events = []
+    for first, last in spans:
+        if last - first > 2 * eps:
+            events += [(first + eps, 1), (last - eps, -1)]
+    events.sort(key=lambda e: (e[0], e[1]))
+    depth = best = 0
+    for _, step in events:
+        depth += step
+        best = max(best, depth)
+    return max(best, 1) if spans else 0
+
+
+def trial_metrics(rows):
+    """Timing of one trial of one cell (its rows sent at once).
+
+    aggregate_tps = total completion tokens / (last token of the last row - first request
+    start): the honest tok/s of a multi-row trial, whether its rows were batched or queued.
+    decode_overlap_rows = the most rows decoding at one instant; 1 means the rows were served
+    one after another (serial service). Queue wait is usage.macprovider_queue_ms; TTFT
+    excluding queue = ttft_s - queue wait.
+    """
+    out = {"aggregate_tps": None, "wall_s": None, "decode_overlap_rows": None, "serial_service": None}
+    queues = [queue_s(r) for r in rows]
+    qs = [q for q in queues if q is not None]
+    out["queue_s_max"] = round(max(qs), 3) if qs else None
+    out["queue_s_median"] = round(statistics.median(qs), 3) if qs else None
+    ttft_ex = [r["ttft_s"] - q for r, q in zip(rows, queues) if r.get("ttft_s") is not None and q is not None]
+    out["ttft_excl_queue_s"] = ttft_ex
+    times = [row_times(r) for r in rows]
+    if not rows or any(r.get("error") for r in rows) or None in times:
+        return out
+    wall = max(t[2] for t in times) - min(t[0] for t in times)
+    if wall > 0:
+        out["aggregate_tps"] = round(sum(r["completion_tokens"] for r in rows) / wall, 3)
+        out["wall_s"] = round(wall, 4)
+    if all(t[1] is not None for t in times):
+        out["decode_overlap_rows"] = max_overlap([(t[1], t[2]) for t in times])
+        out["serial_service"] = len(rows) > 1 and out["decode_overlap_rows"] <= 1
     return out
 
 
-def ours_scores(rows, aggs, nrows):
-    """Aggregate tok/s per trial."""
-    if aggs:
-        return [a.get("aggregate_tps") for a in sorted(aggs, key=lambda a: a["trial"])]
+def by_trial(rows):
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r["trial"]].append(r)
+    return [groups[t] for t in sorted(groups)]
+
+
+def ours_goal_scores(rows, nrows):
+    """The goal metric per trial: request tok/s for one row, aggregate tok/s for several."""
+    if nrows == 1:
+        return [r.get("request_tps") for r in sorted(rows, key=lambda r: r["trial"])]
+    return [trial_metrics(rs)["aggregate_tps"] for rs in by_trial(rows)]
+
+
+def ours_scores(rows, nrows):
+    """The gated tok/s per trial: decode tok/s for one row, aggregate tok/s for several."""
     if nrows == 1:
         return [r.get("decode_tps") for r in sorted(rows, key=lambda r: r["trial"])]
-    return []
+    return ours_goal_scores(rows, nrows)
 
 
 def load_margins(path):
@@ -252,26 +330,52 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         }
         cells[key] = cell
         base = [r for r in ref.get((model, ctx, out, 0), []) if not r.get("error")]
-        scores = ours_scores(rows, ours_aggs.get(key, []), nrows)
-        ref_scores = [r.get("decode_tps") for r in base]
+        # One row: decode tok/s against the reference's. Several rows: aggregate tok/s
+        # (total tokens / wall time from the first request start) against the single-row
+        # reference's request tok/s, which also counts its prefill.
+        cell["tps_metric"] = "decode_tps" if nrows == 1 else "aggregate_tps"
+        scores = ours_scores(rows, nrows)
+        ref_scores = [r.get("decode_tps" if nrows == 1 else "request_tps") for r in base]
         cell["ours_trials"] = scores
         cell["ref_trials"] = ref_scores
         cell["ours_tps"] = median(scores)
         cell["ref_tps"] = median(ref_scores)
         cell["band"] = round(max(floor, noise(scores), noise(ref_scores)), 4)
-        # Reported only: request-level output tok/s and its two parts' TTFT.
-        cell["ours_request_trials"] = ours_request_scores(rows, ours_aggs.get(key, []), nrows)
+        # Reported only. Goal metric: request tok/s for one row, aggregate tok/s for
+        # several; per-request tok/s (median over rows and trials) and decode tok/s are parts.
+        cell["ours_goal_trials"] = ours_goal_scores(rows, nrows)
         cell["ref_request_trials"] = [r.get("request_tps") for r in base]
-        cell["ours_request_tps"] = median(cell["ours_request_trials"])
+        cell["ours_goal_tps"] = median(cell["ours_goal_trials"])
         cell["ref_request_tps"] = median(cell["ref_request_trials"])
+        cell["goal_ratio"] = (round(cell["ours_goal_tps"] / cell["ref_request_tps"], 4)
+                              if cell["ours_goal_tps"] and cell["ref_request_tps"] else None)
+        cell["ours_request_tps"] = median(r.get("request_tps") for r in rows)
         cell["request_ratio"] = (round(cell["ours_request_tps"] / cell["ref_request_tps"], 4)
                                  if cell["ours_request_tps"] and cell["ref_request_tps"] else None)
+        cell["ours_decode_tps"] = median(r.get("decode_tps") for r in rows)
+        cell["ref_decode_tps"] = median(r.get("decode_tps") for r in base)
         cell["ours_ttft_s"] = median(r.get("ttft_s") for r in rows)
         cell["ref_ttft_s"] = median(r.get("ttft_s") for r in base)
         cell["ours_noise"] = round(noise(scores), 4)
         cell["ref_noise"] = round(noise(ref_scores), 4)
-        cell["ours_request_noise"] = round(noise(cell["ours_request_trials"]), 4)
+        cell["ours_goal_noise"] = round(noise(cell["ours_goal_trials"]), 4)
         cell["ref_request_noise"] = round(noise(cell["ref_request_trials"]), 4)
+        timing = [trial_metrics(rs) for rs in by_trial(rows)]
+        qmax = [t["queue_s_max"] for t in timing if t["queue_s_max"] is not None]
+        cell["ours_queue_s_max"] = max(qmax) if qmax else None
+        cell["ours_queue_s_median"] = median(t["queue_s_median"] for t in timing)
+        cell["ours_ttft_excl_queue_s"] = median(x for t in timing for x in t["ttft_excl_queue_s"])
+        cell["service"] = None
+        if nrows > 1:
+            overlap = [t["decode_overlap_rows"] for t in timing if t["decode_overlap_rows"] is not None]
+            cell["decode_overlap_rows"] = max(overlap) if overlap else None
+            serial = [t["serial_service"] for t in timing if t["serial_service"] is not None]
+            if serial:
+                cell["service"] = "serial" if all(serial) else "batched" if not any(serial) else "mixed"
+            if cell["service"] in ("serial", "mixed"):
+                cell["notes"].append(
+                    f"{cell['service']} service: in {sum(serial)} of {len(serial)} trials the rows never "
+                    "decoded together (queued one after another), so this cell measures queueing, not batching")
         first = min(rows, key=lambda r: (r["trial"], r["row"])) if rows else {}
         cell["prompt_tokens"] = first.get("prompt_tokens")
         cell["completion_tokens"] = first.get("completion_tokens")
@@ -460,24 +564,44 @@ def text_label(c):
     return c["text_gate"]
 
 
+def service_label(c):
+    """`-` for one row; for several: batched (most rows decoding together) or SERIAL (queued)."""
+    if c["rows"] == 1:
+        return "-"
+    if c.get("service") == "batched":
+        return f"batched ({c.get('decode_overlap_rows')})"
+    if c.get("service") in ("serial", "mixed"):
+        return f"{c['service'].upper()} (queued)"
+    return "unknown"
+
+
+METRIC_LABEL = {"decode_tps": "decode", "aggregate_tps": "aggregate vs ref request"}
+
+
 def markdown(summary):
     lines = []
     if summary.get("reference_failed"):
         lines += [f"REFERENCE FAILED: {summary['reference_failed']}. Reference columns are empty where it "
                   "wrote no rows; those cells fail for want of a reference.", ""]
     lines += [
-        "| model | ctx | out | rows | ref tok/s | ours tok/s | ratio | band "
-        "| ref req tok/s | ours req tok/s | req ratio | ref ttft s | ours ttft s "
-        "| text | tokens | slope | status |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
+        "Gated tok/s: one row, decode tok/s vs the reference's; several rows, aggregate tok/s (total "
+        "tokens / (last token of the last row - first request start)) vs the single-row reference's "
+        "request tok/s. Per-request tok/s is the median over rows and trials; queue = macprovider_queue_ms.",
+        "",
+        "| model | ctx | out | rows | service | gated metric | ref tok/s | ours tok/s | ratio | band "
+        "| ref req tok/s | ours per-request tok/s | per-request ratio | ours queue max s "
+        "| ref ttft s | ours ttft s | ours ttft excl queue s | text | tokens | slope | status |",
+        "|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
     ]
     for c in summary["cells"]:
         lines.append(
-            f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c['ref_tps'])} | "
+            f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {service_label(c)} | "
+            f"{METRIC_LABEL.get(c.get('tps_metric'), '-')} | {fmt(c['ref_tps'])} | "
             f"{fmt(c['ours_tps'])} | {fmt(c['ratio'], '.3f')} | {fmt(c['band'], '.3f')} | "
             f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
-            f"{fmt(c.get('request_ratio'), '.3f')} | {fmt(c.get('ref_ttft_s'), '.3f')} | "
-            f"{fmt(c.get('ours_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('request_ratio'), '.3f')} | {fmt(c.get('ours_queue_s_max'), '.3f')} | "
+            f"{fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('ours_ttft_excl_queue_s'), '.3f')} | "
             f"{text_label(c)} | {'ok' if c['tokens_ok'] else 'FAIL'} | "
             f"{'ok' if c['slope_ok'] else 'FAIL'} | {'PASS' if c['pass'] else 'FAIL'} |")
     if summary["not_run"]:
@@ -535,16 +659,16 @@ def evaluate_baseline(base_lines, cand_lines, floor=0.03, subset=False):
             c["identical"] = False
             c["pass"] = False
             continue
-        bmodel, brows, baggs = base[key]
-        cmodel, crows, caggs = cand[key]
+        bmodel, brows, _ = base[key]
+        cmodel, crows, _ = cand[key]
         c["model"], c["baseline_model"] = cmodel, bmodel
         sides = {}
-        for side, rows, aggs in (("base", brows, baggs), ("cand", crows, caggs)):
-            req = ours_request_scores(rows, aggs, nrows)
-            dec = ours_scores(rows, aggs, nrows)
+        for side, rows in (("base", brows), ("cand", crows)):
+            # The goal metric: request tok/s for one row, aggregate tok/s for several.
+            req = ours_goal_scores(rows, nrows)
             sides[side] = req
             c[f"{side}_request_tps"] = median(req)
-            c[f"{side}_decode_tps"] = median(dec)
+            c[f"{side}_decode_tps"] = median(r.get("decode_tps") for r in rows)
             c[f"{side}_ttft_s"] = median(r.get("ttft_s") for r in rows)
             c[f"{side}_noise"] = round(noise(req), 4)
             c[f"{side}_request_trials"] = req

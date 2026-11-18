@@ -14,6 +14,8 @@
 #                    [--outputs 128,512] [--contexts short,4k|200,4000]
 #                    [--model-id ID --model-sha256 SHA] [--config-extra FILE]
 #                    [--skip-compare] [--trials-by-rows 4=1] [--reference-only]
+#                    [--expect-route batched|any] [--warmup-stall-s 1200] [--warmup-poll-s 10]
+#                    [--seed-self-check FILE]
 #
 # --reference picks the reference script: reference_mlxlm.py (default) or
 # reference_mlxvlm.py for families mlx-lm cannot load, or reference_omlx.py (an
@@ -28,7 +30,8 @@
 # `model_artifact_path`, `model_artifact_sha256` = --model-sha256, verified by
 # the serve) and sends that id as the request model; --config-extra appends
 # raw YAML lines to the serve config (e.g. a continuous_batching accepted
-# tuple, which a --no-join serve takes as its CB authority). --skip-compare
+# tuple: in a --no-join serve it adds the cached-turns grant, never the
+# authorization to batch). --skip-compare
 # stops after the client (exit 7 if it failed, else 0). --trials-by-rows sets
 # the provider's trial count per row count (e.g. 4=1 for serial-served models,
 # whose 4-row cells only queue); the reference is unaffected.
@@ -37,6 +40,25 @@
 # --contexts is given, is reused as the grid), OUT/reference.jsonl must not
 # exist; the reference then runs and compare scores the stored provider cells.
 # --bin-dir is not needed.
+#
+# Batching warm-up (route_status.py gate): after the serve is ready and before
+# the client's first request, the window sends no inference request and polls
+# /v1/status until the continuous-batching self-check has a verdict and the
+# served slots reflect it, or until no self-check can run for this serve. A
+# --no-join serve never loads the signed CB policy, so the self-check verdict is
+# the only thing that turns batching on, and it runs only while the serve is
+# idle. Progress lines start with CB_WARMUP; the status is polled every
+# --warmup-poll-s seconds and the only bound is --warmup-stall-s seconds
+# without self-check progress (then CB_WARMUP_STALL and the grid runs on
+# whatever route serves). --seed-self-check FILE copies a
+# cb-self-check.json from an earlier serve of the same binary and model next to
+# the config, so the stored verdict applies at startup (as after a restart).
+# /v1/status is saved at ready (serve/status-ready.json), at the grid start
+# (serve/status.json) and at the grid end (serve/status-end.json); each of the
+# last two prints one `ROUTE batching=<active|serial> slots=<n> reason=<...>`
+# line and is stored under route.start / route.end in OUT/grid.json. With
+# --expect-route batched a serial route prints ROUTE_FAIL and the window exits
+# 10 (when compare exited 0 or 1); the cells are still measured.
 #
 # Sanity gate: after a reference run that exited 0, sanity.py checks its text
 # (see its docstring). A degenerate reference prints one
@@ -62,14 +84,15 @@
 # child, which always takes the row-invariant route.
 #
 # Exit code: compare's (0 all cells pass, 1 a cell fails, 2 unusable input),
-# 7 when the client failed, 8 when the reference failed, 9 when it was suspect
-# (all after the compare table is printed; 7 wins); 3, 5, 6 and 64 before the
-# client runs.
+# 7 when the client failed, 8 when the reference failed, 9 when it was suspect,
+# 10 when --expect-route batched found a serial route and compare exited 0 or 1
+# (all after the compare table is printed; 7 wins; with 8 or 9 a ROUTE_FAIL
+# line is the signal); 3, 5, 6 and 64 before the client runs.
 # A failed reference prints one `REFERENCE_FAIL <model> <error line> (rc=N)`
 # line; compare still runs with the reference rows it got (often none), so
 # provider.jsonl, summary.md and summary.json hold every provider cell with
 # empty reference columns. Check
-# serve/status.json continuous_batching.small_m_route to see which route ran.
+# the ROUTE lines (or serve/status.json continuous_batching) to see which route ran.
 #
 # --python is an interpreter with mlx_lm installed (reference only); the client
 # and compare run under the system python3 -I. The script refuses to start when
@@ -103,6 +126,10 @@ MODEL_ID="" MODEL_SHA="" CONFIG_EXTRA=""
 SKIP_COMPARE=0
 REF_ONLY=0
 TRIALS_BY_ROWS=""
+EXPECT_ROUTE=any
+WARMUP_STALL_S=1200
+WARMUP_POLL_S=10
+SEED_SELF_CHECK=""
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -138,6 +165,10 @@ while [ $# -gt 0 ]; do
     --skip-compare) SKIP_COMPARE=1; shift ;;
     --trials-by-rows) TRIALS_BY_ROWS="$2"; shift 2 ;;
     --reference-only) REF_ONLY=1; shift ;;
+    --expect-route) EXPECT_ROUTE="$2"; shift 2 ;;
+    --warmup-stall-s) WARMUP_STALL_S="$2"; shift 2 ;;
+    --warmup-poll-s) WARMUP_POLL_S="$2"; shift 2 ;;
+    --seed-self-check) SEED_SELF_CHECK="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -166,6 +197,8 @@ case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >
 case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
 case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
 case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
+case "$EXPECT_ROUTE" in batched|any) ;; *) echo "--expect-route must be batched|any" >&2; exit 64 ;; esac
+[ -z "$SEED_SELF_CHECK" ] || [ -f "$SEED_SELF_CHECK" ] || { echo "no --seed-self-check file $SEED_SELF_CHECK" >&2; exit 64; }
 [ "$REF_ONLY" = 1 ] || [ -x "$BIN_DIR/macprovider-cli" ] || { echo "no macprovider-cli in $BIN_DIR" >&2; exit 64; }
 
 listening() { [ -n "$(lsof -nP -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true)" ]; }
@@ -178,7 +211,8 @@ OURS="$OUT_DIR/provider.jsonl"
 GRID="$HERE/grid.json"
 if [ "$REF_ONLY" = 1 ] && [ -z "$OUTPUTS$CONTEXTS" ] && [ -f "$OUT_DIR/grid.json" ]; then
   GRID="$OUT_DIR/grid.json"  # the stored provider run's grid
-elif [ -n "$OUTPUTS" ] || [ -n "$CONTEXTS" ]; then
+else
+  # OUT/grid.json is this window's own copy: it also records the route.
   GRID="$OUT_DIR/grid.json"
   /usr/bin/python3 -I -c 'import json,sys
 g=json.load(open(sys.argv[1])); outs, ctxs = sys.argv[3], sys.argv[4]
@@ -235,6 +269,10 @@ ctl_socket_path: "$D/ctl.sock"
 credential_store: protected_file
 EOF
 [ -z "$CONFIG_EXTRA" ] || cat "$CONFIG_EXTRA" >> "$D/config.yaml"
+if [ -n "$SEED_SELF_CHECK" ]; then
+  # The store is private (0600, owner only, no symlink); serve reads it next to its config.
+  cp "$SEED_SELF_CHECK" "$D/cb-self-check.json" && chmod 600 "$D/cb-self-check.json"
+fi
 shasum -a 256 "$BIN_DIR/macprovider-cli" > "$D/identity.sha256"
 
 CB_ARGS=()
@@ -266,7 +304,22 @@ for _ in $(seq 1 240); do
   sleep 5
 done
 [ "$ready" = 1 ] || { echo "serve not ready" >&2; tail -20 "$D/serve.err" >&2; exit 6; }
+curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status-ready.json"
+
+echo "== batching warm-up $(date +%T) (no requests until the self-check decides)"
+warm_rc=0
+/usr/bin/python3 -I "$HERE/route_status.py" gate --port "$PORT" --serve-err "$D/serve.err" --pid "$SP" \
+  --stall-s "$WARMUP_STALL_S" --poll-s "$WARMUP_POLL_S" || warm_rc=$?
+case $warm_rc in
+  0) ;;
+  4) echo "batching warm-up stalled; measuring the route that serves (see the ROUTE line)" >&2 ;;
+  5) echo "serve exited during the batching warm-up" >&2; tail -20 "$D/serve.err" >&2; exit 5 ;;
+  *) echo "batching warm-up failed rc=$warm_rc; measuring the route that serves" >&2 ;;
+esac
+route_rc=0
 curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status.json"
+/usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status.json" --serve-err "$D/serve.err" \
+  --grid "$GRID" --phase start --expect "$EXPECT_ROUTE" || route_rc=$?
 
 echo "== client $(date +%T)"
 if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
@@ -276,6 +329,12 @@ if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
 fi
 /usr/bin/python3 -I "$HERE/provider_client.py" --port "$PORT" --model "$REQUEST_MODEL" --out "$OURS" \
   "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} ${TRIALS_BY_ROWS:+--trials-by-rows "$TRIALS_BY_ROWS"} || client_rc=$?
+if curl -s --max-time 10 "http://127.0.0.1:$PORT/v1/status" > "$D/status-end.json"; then
+  /usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status-end.json" --serve-err "$D/serve.err" \
+    --grid "$GRID" --phase end --expect "$EXPECT_ROUTE" || route_rc=$?
+else
+  echo "ROUTE_FAIL phase=end no /v1/status at the grid end"; route_rc=10
+fi
 stop_serve
 trap - EXIT
 fi
@@ -311,10 +370,11 @@ if [ "$SKIP_REF" = 0 ]; then
 fi
 
 if [ "$SKIP_COMPARE" = 1 ]; then
-  echo "== compare skipped (client rc=$client_rc reference rc=$ref_rc)"
+  echo "== compare skipped (client rc=$client_rc reference rc=$ref_rc route rc=${route_rc:-0})"
   [ "$client_rc" -eq 0 ] || exit 7
   [ "$ref_rc" -ne 9 ] || exit 9
   [ "$ref_rc" -eq 0 ] || exit 8
+  [ "${route_rc:-0}" -eq 0 ] || exit 10
   exit 0
 fi
 echo "== compare $(date +%T) (client rc=$client_rc reference rc=$ref_rc)"
@@ -341,5 +401,9 @@ fi
 if [ "$ref_rc" -ne 0 ]; then
   echo "reference failed (rc=$ref_rc; compare rc=$compare_rc): provider cells measured, reference columns empty" >&2
   exit 8
+fi
+if [ "${route_rc:-0}" -ne 0 ] && [ "$compare_rc" -le 1 ]; then
+  echo "route not the expected one (compare rc=$compare_rc): see the ROUTE_FAIL line" >&2
+  exit 10
 fi
 exit "$compare_rc"

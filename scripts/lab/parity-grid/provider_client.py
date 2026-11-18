@@ -37,8 +37,13 @@ streamed reasoning text) next to content; content (default) sends content only. 
 record turn2_history.
 
 request_tps = completion_tokens / (t_last - t0), t0 the request start: the
-request-level output tok/s (TTFT and decode tok/s are its two parts). The
-aggregate line sums it over the concurrent rows (request_tps_sum).
+request-level output tok/s (TTFT and decode tok/s are its two parts). Each row
+also records queue_ms (usage.macprovider_queue_ms) and its start and last-token
+times relative to the trial's first request start (start_offset_s,
+t_last_offset_s). The aggregate line holds aggregate_tps = total completion
+tokens / (last token of the last row - first request start), the trial's
+honest throughput whether its rows were batched or queued, and
+decode_overlap_rows (1: the rows were served one after another).
 """
 import argparse
 import hashlib
@@ -52,6 +57,7 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compare  # noqa: E402
 import prompts  # noqa: E402
 
 
@@ -162,12 +168,14 @@ def run_request(port, model, messages, max_tokens, stream_options=True, timeout=
     return result
 
 
-def row_record(res, base, first_chunk_tokens=1):
+def row_record(res, base, first_chunk_tokens=1, cell_t0=None):
     """Turn a run_request result into a JSONL row record.
 
     decode_tps = (completion_tokens - first_chunk_tokens) / (t_last - t_first): the
     tokens that arrived after the first delta over the time they took. Our provider
-    streams one token per delta (first_chunk_tokens = 1).
+    streams one token per delta (first_chunk_tokens = 1). With cell_t0 (the earliest
+    request start of the trial) the record carries start_offset_s and t_last_offset_s,
+    from which compare.py computes a multi-row trial's aggregate tok/s and overlap.
     """
     usage = res.get("usage") or {}
     ct = completion_tokens_of(usage)
@@ -177,8 +185,14 @@ def row_record(res, base, first_chunk_tokens=1):
     error = res.get("error")
     if error is None and not usage:
         error = "no usage frame (server may not honor stream_options)"
+    offsets = {}
+    if cell_t0 is not None:
+        offsets = {"start_offset_s": round(t0 - cell_t0, 4),
+                   "t_last_offset_s": round(t_last - cell_t0, 4) if t_last is not None else None}
     return {
         **base,
+        **offsets,
+        "queue_ms": usage.get("macprovider_queue_ms"),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": ct,
         "generated_completion_tokens": usage.get("macprovider_generated_completion_tokens"),
@@ -203,23 +217,36 @@ def row_record(res, base, first_chunk_tokens=1):
 
 
 def aggregate_record(records, base):
-    """Aggregate tok/s across concurrent rows: sum(ct - 1) / (max t_last - min t_first)."""
+    """One trial's summary line (compare.trial_metrics over its row records).
+
+    aggregate_tps = total completion tokens / (last token of the last row - first request
+    start); decode_span_tps = sum(ct - 1) / (max t_last - min t_first), the earlier
+    aggregate, kept for reference; decode_overlap_rows = the most rows decoding at one
+    instant (1: served one after another).
+    """
     ok = [r for r in records if r["error"] is None and r["_t_first"] is not None and r["completion_tokens"]]
     per_row = [r["decode_tps"] for r in records]
-    agg = None
+    span_tps = None
     if len(ok) == len(records) and ok:
         span = max(r["_t_last"] for r in ok) - min(r["_t_first"] for r in ok)
         tokens = sum(r["completion_tokens"] - 1 for r in ok)
-        agg = round(tokens / span, 3) if span > 0 else None
+        span_tps = round(tokens / span, 3) if span > 0 else None
     valid = [x for x in per_row if x is not None]
     req = [r.get("request_tps") for r in records]
+    timing = compare.trial_metrics(records)
     return {
         **base,
         "kind": "aggregate",
-        "aggregate_tps": agg,
+        "aggregate_tps": timing["aggregate_tps"],
+        "wall_s": timing["wall_s"],
+        "decode_span_tps": span_tps,
+        "decode_overlap_rows": timing["decode_overlap_rows"],
+        "serial_service": timing["serial_service"],
+        "queue_s_max": timing["queue_s_max"],
+        "queue_s_median": timing["queue_s_median"],
         "per_row_tps": per_row,
-        "request_tps_sum": round(sum(req), 3) if req and None not in req and agg is not None else None,
         "per_row_request_tps": req,
+        "per_row_queue_ms": [r.get("queue_ms") for r in records],
         "per_row_min_tps": min(valid) if valid else None,
         "per_row_median_tps": round(statistics.median(valid), 3) if valid else None,
         "completion_tokens_sum": sum(r["completion_tokens"] or 0 for r in records),
@@ -306,7 +333,8 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         **({"turn": 1} if turns == 2 else {}),
         "conversation_key_sent": conversation_header,
     }
-    records = [row_record(res, {**base, "kind": "row", "row": r}) for r, res in enumerate(results)]
+    cell_t0 = min(res["t0"] for res in results)
+    records = [row_record(res, {**base, "kind": "row", "row": r}, cell_t0=cell_t0) for r, res in enumerate(results)]
     agg = aggregate_record(records, base)
     for rec in records:
         rec.pop("_t_first")
@@ -366,7 +394,8 @@ def main(argv=None):
                 out.flush()
                 failures += len(agg["errors"]) + sum(1 for r in records if r.get("turn") == 2 and r["error"])
                 print(f"ours ctx={ctx} out={max_tokens} rows={rows} trial={trial} "
-                      f"agg={agg['aggregate_tps']} per_row={agg['per_row_tps']} errors={agg['errors']}",
+                      f"agg={agg['aggregate_tps']} overlap={agg['decode_overlap_rows']} queue_max_s={agg['queue_s_max']} "
+                      f"per_row={agg['per_row_tps']} errors={agg['errors']}",
                       file=sys.stderr)
     return 1 if failures else 0
 
