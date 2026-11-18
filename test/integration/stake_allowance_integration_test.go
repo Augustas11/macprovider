@@ -25,7 +25,34 @@ const (
 	stakePGWriterPass  = "stake-writer-pw"
 	stakeGitHubUserID  = 4242
 	stakeCreditsPerTok = 100 // credits per staked MALIBU per day
+	// allowanceScenarioBudget is how long the scenario may run after the
+	// coordinator's first refresh. A start inside this window of 00:00 UTC
+	// would record the grant on one day and admit a later request on the
+	// next, which has no grant yet (the refresh checks at most once a minute).
+	allowanceScenarioBudget = 5 * time.Minute
 )
+
+// allowanceScenarioStart moves a start that falls inside budget of the next
+// 00:00 UTC to one second after that midnight, so the startup refresh and
+// the requests that follow name the same UTC day.
+func allowanceScenarioStart(now time.Time, budget time.Duration) time.Time {
+	now = now.UTC()
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
+	if nextMidnight.Sub(now) < budget {
+		return nextMidnight.Add(time.Second)
+	}
+	return now
+}
+
+func waitForAllowanceScenario(t *testing.T) {
+	t.Helper()
+	now := time.Now()
+	start := allowanceScenarioStart(now, allowanceScenarioBudget)
+	if d := start.Sub(now); d > 0 {
+		t.Logf("waiting %s so the allowance refresh and the requests share one UTC day", d.Round(time.Second))
+		time.Sleep(d)
+	}
+}
 
 type stakePostgres struct {
 	t         *testing.T
@@ -219,7 +246,29 @@ func (s *scenario) stakeView() map[string]any {
 	return view
 }
 
+func TestStakeAllowanceForcedMidnightSharesOneUTCDay(t *testing.T) {
+	start := time.Date(2026, 11, 17, 23, 59, 59, 0, time.UTC)
+	request := start.Add(2 * time.Second)
+	if day := start.Format("2006-01-02"); day == request.Format("2006-01-02") {
+		t.Fatal("23:59:59Z plus 2s did not cross midnight")
+	}
+	fixed := allowanceScenarioStart(start, allowanceScenarioBudget)
+	if !fixed.After(start) {
+		t.Fatalf("forced midnight stayed at %s", fixed.Format(time.RFC3339))
+	}
+	refreshDay := fixed.Format("2006-01-02")
+	requestDay := fixed.Add(2 * time.Second).Format("2006-01-02")
+	if refreshDay != requestDay {
+		t.Fatalf("refresh day %s, request day %s", refreshDay, requestDay)
+	}
+	noon := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	if got := allowanceScenarioStart(noon, allowanceScenarioBudget); !got.Equal(noon) {
+		t.Fatalf("noon moved to %s", got.Format(time.RFC3339))
+	}
+}
+
 func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
+	waitForAllowanceScenario(t)
 	requireBins(t)
 	pg := startStakePostgres(t)
 	providerID := "prov-stake-" + randHex(t, 4)
@@ -323,6 +372,7 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 }
 
 func TestStakeAllowancePrivateRequestSpendsAllowanceFirst(t *testing.T) {
+	waitForAllowanceScenario(t)
 	requireBins(t)
 	if runtime.GOOS != "darwin" {
 		t.Skip("real Swift InferenceRelay fixture requires macOS")
