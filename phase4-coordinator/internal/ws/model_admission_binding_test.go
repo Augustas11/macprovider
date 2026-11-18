@@ -692,7 +692,7 @@ func TestCatalogSessionRoutesThroughReleasePublicationHold(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	var armed atomic.Bool
-	s.artifactIdentitySets.afterPublishHook = func() {
+	s.afterPublishHook = func() {
 		if !armed.Load() {
 			return
 		}

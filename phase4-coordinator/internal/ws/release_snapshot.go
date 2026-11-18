@@ -27,11 +27,6 @@ type releaseSnapshotState struct {
 	// onReadLocked, when set (tests only), runs right after a reader took
 	// mu — the point at which a publisher may queue behind it.
 	onReadLocked func()
-	// afterPublishHook, when set (tests only), runs at the start of
-	// afterReleasePublished: the write lock is already dropped, and session
-	// refresh plus the survivor sweep have not run. Set the func once and
-	// gate it; a later write races the publisher under -race (#1996).
-	afterPublishHook func()
 	// staged parts of the next release, set by the reload before publication
 	stagedCatalog    *autotune.Catalog
 	stagedCompatible []*autotune.Catalog

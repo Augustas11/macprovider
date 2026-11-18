@@ -1028,7 +1028,7 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 // drifted candidates revoked with the matching code, survivors' bindings
 // stamped with the new generation. Never called under the release write lock.
 func (s *Server) afterReleasePublished() {
-	if hook := s.artifactIdentitySets.afterPublishHook; hook != nil {
+	if hook := s.afterPublishHook; hook != nil {
 		hook()
 	}
 	// Publish → re-verify every session against the new release → evaluate
