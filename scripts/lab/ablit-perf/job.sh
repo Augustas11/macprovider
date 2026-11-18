@@ -529,6 +529,8 @@ serve_args() {
   [ -z "$(v "$k" ID)" ] || SERVE+=(--model-id "$(v "$k" ID)" --model-sha256 "$(v "$k" SHA256)")
   if [ -f "$RES/$(v "$k" NAME)/cb-tuple.yaml" ]; then SERVE+=(--config-extra "$RES/$(v "$k" NAME)/cb-tuple.yaml")
   elif [ -n "$(v "$k" CONFIG_EXTRA)" ]; then SERVE+=(--config-extra "$(v "$k" CONFIG_EXTRA)"); fi
+  # SERVE_ENV="K=V ...": extra serve environment, e.g. MACPROVIDER_CB_TRACE=1 for prefill-group timings.
+  [ -z "${SERVE_ENV:-}" ] || SERVE+=(--serve-env "$SERVE_ENV")
 }
 
 # reference_failed K DIR: the grid in DIR measured the provider but its reference failed.
