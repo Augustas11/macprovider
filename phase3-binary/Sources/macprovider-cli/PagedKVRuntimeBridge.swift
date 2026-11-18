@@ -661,10 +661,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// lightning indexer's keys of the same tokens, all paged on the
         /// row's one block table (`PagedMiniMaxM3SparseCache`).
         case pagedIndexedKV
+        /// Qwen4-Exp (`qwen4_exp`) QSA full-attention layer: attention K/V
+        /// plus the QSA indexer's raw keys of the same tokens, all paged on
+        /// the row's one block table (`PagedQwen4ExpSparseCache`).
+        case pagedQwen4ExpKV
 
         var usesPagedKVCache: Bool {
             switch self {
-            case .pagedAttention, .slidingWindow, .pagedMLA, .pagedIndexedKV: true
+            case .pagedAttention, .slidingWindow, .pagedMLA, .pagedIndexedKV, .pagedQwen4ExpKV: true
             case .recurrentMamba, .deepseekV4Pool: false
             }
         }
@@ -679,7 +683,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return false
         }
 
-        var isPagedIndexedKV: Bool { self == .pagedIndexedKV }
+        /// A per-row sparse layer whose attention K/V and indexer keys page
+        /// together (MiniMax M3, Qwen4-Exp): three gathers per forward, the
+        /// serial prefill stride, first-turn/cache-miss rows only.
+        var isPagedIndexedKV: Bool { self == .pagedIndexedKV || self == .pagedQwen4ExpKV }
 
         var hasSlidingWindow: Bool {
             if case .slidingWindow = self { return true }
@@ -707,6 +714,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 return .pagedMLA(kpool: latent.kpool)
             }
             if cache is any MiniMaxM3SparseCache { return .pagedIndexedKV }
+            if cache is any Qwen4ExpSparseCache { return .pagedQwen4ExpKV }
             if cache is KVCacheSimple { return .pagedAttention }
             if cache is MambaCache { return .recurrentMamba }
             if cache is RotatingKVCache {
@@ -2270,7 +2278,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             case .pagedAttention, .slidingWindow:
                 guard let cache = attention.next() else { throw unavailable }
                 caches.append(cache)
-            case .pagedMLA, .deepseekV4Pool, .pagedIndexedKV:
+            case .pagedMLA, .deepseekV4Pool, .pagedIndexedKV, .pagedQwen4ExpKV:
                 throw unavailable
             case .recurrentMamba:
                 guard let state = recurrentCheckpoint.states[index], !state.isEmpty else { throw unavailable }
@@ -2491,7 +2499,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cache.state = serial.state
                 guard cache.offset == snapshot.tokenCount else { throw unavailable }
                 caches.append(cache)
-            case .pagedAttention, .slidingWindow, .deepseekV4Pool, .pagedIndexedKV:
+            case .pagedAttention, .slidingWindow, .deepseekV4Pool, .pagedIndexedKV, .pagedQwen4ExpKV:
                 throw unavailable
             }
         }
@@ -2546,7 +2554,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                     }
                     layers.append(cache)
-                case .pagedMLA, .deepseekV4Pool, .pagedIndexedKV:
+                case .pagedMLA, .deepseekV4Pool, .pagedIndexedKV, .pagedQwen4ExpKV:
                     throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                 case .recurrentMamba:
                     let cache = MambaCache()
@@ -2679,6 +2687,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 case .pagedIndexedKV:
                     PagedMiniMaxM3SparseCache(
+                        blockSizeTokens: blockSizeTokens,
+                        maxPhysicalBlocks: maxPhysicalBlocks,
+                        poolEpoch: poolEpoch,
+                        binding: binding,
+                        initialOffset: initialOffset,
+                        reconstructViaGather: false
+                    )
+                case .pagedQwen4ExpKV:
+                    PagedQwen4ExpSparseCache(
                         blockSizeTokens: blockSizeTokens,
                         maxPhysicalBlocks: maxPhysicalBlocks,
                         poolEpoch: poolEpoch,
@@ -5241,6 +5258,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_missing_staged_state")
                     }
                 )
+            case .pagedQwen4ExpKV:
+                let rows = rowCaches.compactMap { $0[layerIndex] as? PagedQwen4ExpSparseCache }
+                guard rows.count == rowCaches.count, !nativeMTP else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                // Rows keep their own state; the batch only routes each row of
+                // the forward to its cache, so there is nothing to sync.
+                let cache = PagedQwen4ExpBatchLayerCache(rowCaches: rows)
+                return PagedKVSharedLayerBatch(
+                    cache: cache,
+                    validateBatchStateClosure: {},
+                    syncRowsFromBatchClosure: {},
+                    writebackCompiledInnerStateClosure: { _, _ in
+                        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                    },
+                    pendingMTPResolutionsClosure: {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_missing_staged_state")
+                    }
+                )
             case .deepseekV4Pool:
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_backend_required")
             case .recurrentMamba:
@@ -5325,7 +5361,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private static func storageHandle(in caches: [KVCache]) -> PagedKVBlockTableHandle? {
         if let paged = pagedAttentionCaches(in: caches).first { return paged.binding.handle }
         if let latent = caches.lazy.compactMap({ ($0 as? PagedMLALatentCache)?.binding.handle }).first { return latent }
-        return caches.lazy.compactMap { ($0 as? PagedMiniMaxM3SparseCache)?.binding.handle }.first
+        if let indexed = caches.lazy.compactMap({ ($0 as? PagedMiniMaxM3SparseCache)?.binding.handle }).first {
+            return indexed
+        }
+        return caches.lazy.compactMap { ($0 as? PagedQwen4ExpSparseCache)?.binding.handle }.first
     }
 
     static func packMambaRows(

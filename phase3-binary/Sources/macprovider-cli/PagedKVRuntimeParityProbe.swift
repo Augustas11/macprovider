@@ -226,6 +226,15 @@ enum PagedKVRuntimeParityProbe {
                                 reconstructViaGather: true
                             ) as KVCache
                         }
+                        if case .pagedQwen4ExpKV = kind {
+                            return PagedQwen4ExpSparseCache(
+                                blockSizeTokens: blockSizeTokens,
+                                maxPhysicalBlocks: maxPhysicalBlocks,
+                                poolEpoch: 1,
+                                binding: binding,
+                                reconstructViaGather: true
+                            ) as KVCache
+                        }
                         if case .pagedMLA(let kpool) = kind {
                             return PagedMLALatentCache(
                                 kpool: kpool,
@@ -266,7 +275,7 @@ enum PagedKVRuntimeParityProbe {
                     nLayers: nLayers,
                     nNew: nNew,
                     nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
-                    gathersPerLayerForward: kinds.contains(.pagedIndexedKV) ? 3 : 2,
+                    gathersPerLayerForward: kinds.contains(where: \.isPagedIndexedKV) ? 3 : 2,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
                     nonIdentityPermutation: nonIdentity,
@@ -1307,7 +1316,7 @@ enum PagedKVRuntimeParityProbe {
     /// equal that token for token, without the recompute's near-tie tolerance.
     static func usesProductionIteratorReference(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Bool {
         guard let cacheKinds else { return false }
-        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(.pagedIndexedKV)
+        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(where: \.isPagedIndexedKV)
     }
 
     private static func serialContinuationReferences(

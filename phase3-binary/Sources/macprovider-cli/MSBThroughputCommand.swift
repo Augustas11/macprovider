@@ -618,7 +618,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
-        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(.pagedIndexedKV) { return "mixed" }
+        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(where: \.isPagedIndexedKV) { return "mixed" }
         if cacheKinds.contains(.recurrentMamba) { return "mixed" }
         let sliding = cacheKinds.filter(\.hasSlidingWindow)
         guard !sliding.isEmpty else { return "KVCacheSimple" }
@@ -947,7 +947,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
-                serialPrefillStride: cacheKinds.contains(.pagedIndexedKV),
+                serialPrefillStride: cacheKinds.contains(where: \.isPagedIndexedKV),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
