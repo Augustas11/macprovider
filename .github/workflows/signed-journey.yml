@@ -88,48 +88,13 @@ on:
         description: "Idempotency key for the on-call upsert"
         required: false
         type: string
-      launch_environment_id:
-        description: "Launch environment id (e.g. production)"
+      # GitHub accepts at most 25 workflow_dispatch inputs and rejects the
+      # file, including on push, above that. The on-call fields share one JSON
+      # object so this workflow stays under the cap.
+      oncall_record:
+        description: "JSON object for journey=oncall-readiness. Fields: launch_environment_id, record_version, primary_operator_contact, secondary_operator_contact, break_glass_escalation_path, compromise_notification_channel, creator_agreement_notification_commitment_ack, creator_emergency_notification_mechanism, confirmation_ttl_seconds (decimal, default 7776000, max 7776000), signing_confirmed (JSON boolean)."
         required: false
         type: string
-      record_version:
-        description: "On-call record version label"
-        required: false
-        type: string
-      primary_operator_contact:
-        description: "Primary on-call operator contact"
-        required: false
-        type: string
-      secondary_operator_contact:
-        description: "Secondary on-call operator contact"
-        required: false
-        type: string
-      break_glass_escalation_path:
-        description: "Break-glass escalation path"
-        required: false
-        type: string
-      compromise_notification_channel:
-        description: "Compromise notification channel"
-        required: false
-        type: string
-      creator_agreement_notification_commitment_ack:
-        description: "Creator-agreement notification commitment acknowledgement"
-        required: false
-        type: string
-      creator_emergency_notification_mechanism:
-        description: "Creator emergency notification mechanism"
-        required: false
-        type: string
-      confirmation_ttl_seconds:
-        description: "TTL in seconds, 0 < ttl <= 7776000 (90 days)"
-        required: false
-        default: "7776000"
-        type: string
-      signing_confirmed:
-        description: "Confirm an on-call readiness record should be signed"
-        required: false
-        default: false
-        type: boolean
 permissions:
   contents: read
 
@@ -2023,14 +1988,16 @@ jobs:
         shell: bash
         env:
           OPERATION_ID_INPUT: ${{ github.event.inputs.operation_id }}
-          LAUNCH_ENV_INPUT: ${{ github.event.inputs.launch_environment_id }}
-          RECORD_VERSION_INPUT: ${{ github.event.inputs.record_version }}
-          TTL_INPUT: ${{ github.event.inputs.confirmation_ttl_seconds }}
-          SIGNING_CONFIRMED_INPUT: ${{ github.event.inputs.signing_confirmed || 'false' }}
+          ONCALL_RECORD: ${{ github.event.inputs.oncall_record }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          decoded="$RUNNER_TEMP/oncall-decoded.sh"
+          python3 scripts/signed-journeys/oncall/decode-record.py --shell "$decoded" --github-env "$GITHUB_ENV"
+          # decode-record.py rejects newlines, so the generated assignments are single line.
+          # shellcheck disable=SC1090
+          source "$decoded"
           [[ "$SIGNING_CONFIRMED_INPUT" == true ]] || { echo "::error::signing confirmation is required" >&2; exit 1; }
           [[ "$OPERATION_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid operation id" >&2; exit 1; }
           [[ "$LAUNCH_ENV_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid launch environment id" >&2; exit 1; }
@@ -2050,15 +2017,6 @@ jobs:
         shell: bash
         env:
           OPERATION_ID: ${{ github.event.inputs.operation_id }}
-          LAUNCH_ENV: ${{ github.event.inputs.launch_environment_id }}
-          RECORD_VERSION: ${{ github.event.inputs.record_version }}
-          PRIMARY: ${{ github.event.inputs.primary_operator_contact }}
-          SECONDARY: ${{ github.event.inputs.secondary_operator_contact }}
-          BREAK_GLASS: ${{ github.event.inputs.break_glass_escalation_path }}
-          COMPROMISE: ${{ github.event.inputs.compromise_notification_channel }}
-          AGREEMENT_ACK: ${{ github.event.inputs.creator_agreement_notification_commitment_ack }}
-          EMERGENCY: ${{ github.event.inputs.creator_emergency_notification_mechanism }}
-          TTL: ${{ github.event.inputs.confirmation_ttl_seconds }}
         run: |
           set -euo pipefail
           unsigned="$RUNNER_TEMP/oncall-unsigned.json"
