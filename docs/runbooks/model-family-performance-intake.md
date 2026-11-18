@@ -173,6 +173,35 @@ Each cell links the thread that holds the measurement. Numbers are not copied he
 
 Open issues for families without a row here: #2328 (Gemma-4-12B native MTP).
 
+## Known levers
+
+Ideas with a measured result somewhere. Scouts read this list before
+proposing a candidate, and every measured result (kept or rejected) is added
+here with its issue. "Theirs" means a result outside this repo, on other
+hardware and runtimes; it sets a prior, not an expectation. A lever that
+changes output is excluded: every speed cell is gated by identical output.
+
+| Lever | What it can touch | Theirs | Ours | Issue |
+|---|---|---|---|---|
+| Measure the ceiling first: decode = measured bandwidth / bytes read per output token; prefill = about half the measured matmul peak / compute per token | Where the headroom is; whether a target is possible | Method [1] (`references/ceilings.md`) | Not yet measured on the box | |
+| Prune the speculative draft's output vocabulary; the target still verifies on the full vocabulary | Native-MTP draft step time | +14% and +27% decode [1] | Not yet measured | #2428 |
+| Draft length by row count and context length | Native-MTP decode at many rows and long context | Best was 4 drafts at 1 row, 3 at 4 rows, 2 at 16 rows (B70); at 128k context 1 draft beat 3 by about 1.9x (B390) [1] | Qwen tuples stop at a 4,096-token prompt cap; not yet measured above it | #2429 |
+| Verify speculative steps on the decode attention path, not the prefill kernel | Native-MTP step time at long context | Verification through the prefill kernel lost 3.5 ms per step per 1k tokens of context [1] | Not yet checked | |
+| Speculation on low-bandwidth Macs | Whether native MTP pays at all on small Macs | 6.35 to 3.25 tok/s on an Apple M4 with 3 MTP drafts [1] | Not yet measured (our tuples run 1 draft) | |
+| Prefix cache hits on second and later turns | Turn-2 TTFT, the TTFT most agent and chat buyers see | 66k-token turn 2 went from 36 s to 0.45 s once the cache hit [1] | Not yet measured | #2430 |
+| Recurrent-state slots and page size for linear-attention models | Multi-row aggregate | State slots and page size capped concurrency; a page-size fix took 10 to 14 streams, +17% aggregate [1] | Not yet measured | |
+| Batching width tie band in the self-check | Multi-row aggregate | | GLM-5.3-Flash self-check verified 4 rows but granted 3, because of its 15% tie band; 3 vs 4 under measurement | #2409 |
+| Start-up time against its floor (weight bytes / disk read speed) | Downtime per provider restart; lab window time | The floor holds only when compile caches persist [1] | GLM-5.3-Flash lab start 388.6 s mean on main, 117.5 s with weights hashed once in parallel (PR open) | #2431, #2434 |
+| Larger M-block in grouped MoE matmuls (reuses dequantized weights across rows) | MoE prefill | +7% prefill, identical output [1] | Not yet microbenchmarked | |
+| Merge small kernels | Decode | Rarely paid under CUDA/XPU graph capture, where launch overhead is already gone [1]; MLX on Apple GPUs has no comparable graph capture, so this prior is weak here | Not yet measured | |
+| Larger prefill chunks | Prefill speed, at the cost of other rows' decode stalls | Trade-off, not a win [1] | Not yet measured | |
+
+Excluded: int8 prefill (changes output). Not evaluated: CUDA/XPU graph
+capture, the source's first decode lever; MLX on Apple GPUs has no direct
+equivalent (`mx.compile` is the closest).
+
+[1] [sybil-solutions/inference-optimisation-skill](https://github.com/sybil-solutions/inference-optimisation-skill), read 2026-11-18. Results mostly on Intel Arc and NVIDIA GPUs (vLLM, SGLang, ExLlama); one Apple M4 result, runtime not stated.
+
 ## How to report a cell
 
 ```text

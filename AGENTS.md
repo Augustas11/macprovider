@@ -393,7 +393,9 @@ Then:
 4. The judge is never an author of what it judges and has a veto. Disprovers
    attack every kept change on inputs the builder did not use.
 5. Log every rejected candidate with its measured number. Scouts read the log
-   before proposing.
+   and the "Known levers" table in
+   `docs/runbooks/model-family-performance-intake.md` before proposing; every
+   measured lever result, kept or rejected, is added to that table.
 6. Stop after two rounds with nothing promoted.
 7. Report once, at the end: baseline and final metric, candidates tried, kept
    and vetoed, cost, and any new reusable check with its command.
