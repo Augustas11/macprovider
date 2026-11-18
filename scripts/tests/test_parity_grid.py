@@ -25,6 +25,8 @@ prompts = module("prompts")
 client = module("provider_client")
 margin = module("margin")
 cb_margin = module("cb_margin")
+reference_mlxlm = module("reference_mlxlm")
+JOB_QWEN4_CB = Path(__file__).resolve().parents[1] / "lab" / "ablit-perf" / "job-qwen4-cb.sh"
 
 MODEL = "m"
 TEXT = "The keeper lit the lamp."
@@ -544,6 +546,196 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn(16000, {c[0] for c in small})
         self.assertNotIn((4000, 4096, 1), small)
         self.assertIn((4000, 2048, 1), small)
+
+
+def batched_ref_lines(ctx, out, rows, trial_aggs, texts=None, tokens=None, prompt_tokens=244):
+    """What reference_mlxlm.py --batched writes: per trial `rows` row lines and one aggregate line."""
+    lines = []
+    for trial, agg in enumerate(trial_aggs):
+        base = {"side": "reference", "reference": "mlx-lm", "model": MODEL, "ctx_target": ctx, "max_tokens": out,
+                "rows": rows, "trial": trial, "batched": True}
+        for r in range(rows):
+            lines.append({**base, "kind": "row", "row": r, "decode_tps": agg / rows, "request_tps": agg / rows,
+                          "text": (texts or {}).get(r, TEXT), "completion_tokens": out if tokens is None else tokens,
+                          "prompt_tokens": prompt_tokens, "finish": "length"})
+        lines.append({**base, "kind": "aggregate", "aggregate_tps": agg})
+    return lines
+
+
+class BatchedReferenceTests(unittest.TestCase):
+    def test_summarize_batch_aggregate_is_total_tokens_over_wall(self):
+        rows = [
+            {"prompt_tokens": 200, "tokens": 100, "t_first": 10.5, "t_last": 12.0, "finish": "length", "text": "a"},
+            {"prompt_tokens": 201, "tokens": 50, "t_first": 11.0, "t_last": 14.0, "finish": "stop", "text": "b"},
+        ]
+        recs, agg = reference_mlxlm.summarize_batch(rows, 10.0)
+        # (100 + 50) tokens over the 4 s from the common start to the last response.
+        self.assertEqual(agg["aggregate_tps"], 37.5)
+        self.assertEqual(agg["wall_s"], 4.0)
+        self.assertEqual(agg["completion_tokens_sum"], 150)
+        self.assertEqual(recs[0]["ttft_s"], 0.5)
+        self.assertEqual(recs[1]["ttft_s"], 1.0)
+        self.assertEqual(recs[0]["decode_tps"], round(99 / 1.5, 3))
+        self.assertEqual(recs[0]["request_tps"], 50.0)
+        self.assertEqual(recs[1]["t_last_offset_s"], 4.0)
+        self.assertEqual(agg["ttft_s_max"], 1.0)
+
+    def test_run_batch_drives_the_generator_and_drops_stop_tokens(self):
+        import sys
+        import types
+        from dataclasses import dataclass
+
+        @dataclass
+        class Resp:
+            uid: int
+            token: int
+            finish_reason: object = None
+
+        steps = [[Resp(0, 1), Resp(1, 7)], [Resp(0, 2, "length"), Resp(1, 99, "stop")], []]
+        made = {}
+
+        class FakeGen:
+            def __init__(self, model, **kwargs):
+                made.update(kwargs)
+
+            def insert(self, prompts, max_tokens):
+                made["inserted"] = (prompts, max_tokens)
+                return [10, 11]
+
+            def next_generated(self):
+                r = steps.pop(0)
+                return [type(x)(x.uid + 10, x.token, x.finish_reason) for x in r]
+
+            def close(self):
+                made["closed"] = True
+
+        class Tok:
+            eos_token_ids = {99}
+
+            def decode(self, ids):
+                return "|".join(map(str, ids))
+
+        fake = types.ModuleType("mlx_lm.generate")
+        fake.BatchGenerator = FakeGen
+        saved = {k: sys.modules.get(k) for k in ("mlx_lm", "mlx_lm.generate")}
+        sys.modules["mlx_lm"], sys.modules["mlx_lm.generate"] = types.ModuleType("mlx_lm"), fake
+        try:
+            recs, agg = reference_mlxlm.run_batch(object(), Tok(), [[1, 2, 3], [4, 5]], 2, "greedy", 4)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.assertEqual(made["completion_batch_size"], 2)
+        self.assertEqual(made["prefill_batch_size"], 4)
+        self.assertEqual(made["stop_tokens"], [[99]])
+        self.assertEqual(made["inserted"], ([[1, 2, 3], [4, 5]], [2, 2]))
+        self.assertTrue(made["closed"])
+        self.assertEqual([r["text"] for r in recs], ["1|2", "7"])
+        self.assertEqual([r["completion_tokens"] for r in recs], [2, 1])
+        self.assertEqual([r["finish"] for r in recs], ["length", "stop"])
+        self.assertEqual([r["prompt_tokens"] for r in recs], [3, 2])
+        self.assertEqual(agg["completion_tokens_sum"], 3)
+
+    def test_summarize_batch_is_the_providers_definition(self):
+        # The same trial through compare.trial_metrics (the provider side) gives the same aggregate.
+        rows = [{"prompt_tokens": 9, "tokens": n, "t_first": 1.0, "t_last": last, "finish": "length", "text": "x"}
+                for n, last in ((64, 5.0), (64, 9.0), (32, 6.0))]
+        recs, agg = reference_mlxlm.summarize_batch(rows, 0.0)
+        trial = [{**r, "trial": 0, "row": i, "completion_tokens": r["completion_tokens"]} for i, r in enumerate(recs)]
+        self.assertEqual(compare.trial_metrics(trial)["aggregate_tps"], agg["aggregate_tps"])
+
+    def test_summarize_batch_empty_row_has_no_rates(self):
+        rows = [{"prompt_tokens": 9, "tokens": 0, "t_first": None, "t_last": 2.0, "finish": "stop", "text": ""}]
+        recs, agg = reference_mlxlm.summarize_batch(rows, 1.0)
+        self.assertIsNone(recs[0]["ttft_s"])
+        self.assertIsNone(recs[0]["request_tps"])
+        self.assertIsNone(agg["aggregate_tps"])
+
+    def test_batched_jobs_are_the_multi_row_cells_only(self):
+        cells = [(200, 512, 1), (200, 512, 4), (4000, 512, 4), (4000, 512, 16), (200, 512, 16)]
+        self.assertEqual(reference_mlxlm.batched_jobs(cells, 3),
+                         [((200, 512, 4), 3), ((200, 512, 16), 3), ((4000, 512, 4), 3), ((4000, 512, 16), 3)])
+        self.assertEqual(reference_mlxlm.batched_jobs([(200, 512, 1)], 3), [])
+
+    def test_single_row_reference_ignores_batched_lines(self):
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)] + batched_ref_lines(200, 128, 4, [300.0])
+        self.assertEqual(sorted(k[3] for k in compare.index_reference(ref)), [0])
+        rows, aggs = compare.index_batched_reference(ref)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(aggs[(MODEL, 200, 128, 4)][0]["aggregate_tps"], 300.0)
+
+    def test_multi_row_cell_is_scored_against_the_batched_reference(self):
+        texts = {0: TEXT, 1: "row 1 text", 2: "row 2 text", 3: "row 3 text"}
+        ref = [ref_line(200, 128, 126.0, i) for i in range(3)]
+        ref += batched_ref_lines(200, 128, 4, [310.0, 300.0, 305.0], texts=texts)
+        ours = our_lines(200, 128, 1, [127.0] * 3) + our_lines(200, 128, 4, [330.0, 332.0, 331.0], texts=texts)
+        s = compare.evaluate(ref, ours)
+        self.assertTrue(s["pass"], s["failing"])
+        cell = by_cell(s)[(200, 128, 4)]
+        self.assertEqual(cell["reference"], "mlx-lm batched")
+        self.assertEqual(cell["ref_tps"], 305.0)
+        self.assertEqual(cell["ours_tps"], 331.0)
+        self.assertAlmostEqual(cell["goal_ratio"], 331.0 / 305.0, places=3)
+        self.assertEqual(by_cell(s)[(200, 128, 1)]["reference"], "single-row")
+        # Slower than the batched reference's aggregate fails, though above the single-row reference.
+        ours = our_lines(200, 128, 1, [127.0] * 3) + our_lines(200, 128, 4, [200.0] * 3, texts=texts)
+        cell = by_cell(compare.evaluate(ref, ours))[(200, 128, 4)]
+        self.assertFalse(cell["ratio_ok"])
+        # Row texts and token counts come from the batched rows (no single-row reference for rows 1..3 here).
+        ours = our_lines(200, 128, 4, [330.0] * 3, texts={**texts, 2: "row 2 TEXT"})
+        cell = by_cell(compare.evaluate(ref, ours))[(200, 128, 4)]
+        self.assertEqual(cell["first_text_diff"]["row"], 2)
+        ours = our_lines(200, 128, 4, [330.0] * 3, texts=texts, tokens=100)
+        self.assertFalse(by_cell(compare.evaluate(ref, ours))[(200, 128, 4)]["tokens_ok"])
+
+    def test_markdown_labels_a_batched_cell(self):
+        ref = batched_ref_lines(200, 128, 4, [300.0] * 3) + [ref_line(200, 128, 126.0, i) for i in range(3)]
+        md = compare.markdown(compare.evaluate(ref, our_lines(200, 128, 4, [310.0] * 3)))
+        self.assertIn("aggregate vs batched ref", md)
+
+
+class Qwen4CbJobTests(unittest.TestCase):
+    """job-qwen4-cb.sh with CB_JOB_CHECK=1: knob validation and the run-grid argv, nothing touched."""
+
+    def run_job(self, **env):
+        import subprocess
+        e = {"PATH": os.environ["PATH"], "HOME": tempfile.gettempdir(), "CB_JOB_CHECK": "1", "RUN_ID": "20261118T000000Z", **env}
+        r = subprocess.run(["bash", str(JOB_QWEN4_CB)], env=e, capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout
+
+    def test_defaults_are_the_requested_grid(self):
+        rc, out = self.run_job()
+        self.assertEqual(rc, 0, out)
+        argv = next(l for l in out.splitlines() if l.startswith("GRID_ARGS")).split()
+        for want in (["--rows", "1,4,8,16"], ["--contexts", "200,4000"], ["--outputs", "512"], ["--trials", "3"],
+                     ["--expect-route", "batched"], ["--cb", "auto"], ["--reference", "mlx-lm"],
+                     ["--ref-arg", "--loader", "--ref-arg", "qwen4", "--ref-arg", "--batched"]):
+            self.assertIn(" ".join(want), " ".join(argv))
+        self.assertIn("--no-autotune-candidate", argv)
+        self.assertNotIn("--prefill-batch-size", argv)
+        self.assertNotIn("--seed-self-check", argv)
+        self.assertIn("max_concurrency_override=16 max_concurrency_source=owner", out)
+
+    def test_knobs_reach_the_argv(self):
+        rc, out = self.run_job(CB_ROWS="1,2", CB_SLOTS="4", CONTEXTS="200", OUTPUTS="128,512", TRIALS="1",
+                               REF_PREFILL_BATCH_SIZE="4", SEED_SELF_CHECK_RUN="20261117T010203Z")
+        self.assertEqual(rc, 0, out)
+        argv = " ".join(next(l for l in out.splitlines() if l.startswith("GRID_ARGS")).split())
+        for want in ("--rows 1,2", "--outputs 128,512", "--trials 1", "--ref-arg --prefill-batch-size --ref-arg 4",
+                     "--seed-self-check", "20261117T010203Z/qwen4-flash-next-cb/main/serve/cb-self-check.json"):
+            self.assertIn(want, argv)
+        self.assertIn("continuous_batch_queue_limit=4", out)
+
+    def test_bad_knobs_are_refused_before_anything_runs(self):
+        for env in ({"CB_ROWS": "1,,4"}, {"CB_ROWS": "0"}, {"CB_ROWS": "1,40"}, {"CB_ROWS": "a"},
+                    {"CB_SLOTS": "8"}, {"CB_SLOTS": "0"}, {"CB_SLOTS": "33"}, {"TRIALS": "0"}, {"OUTPUTS": "x"},
+                    {"CONTEXTS": "a/b"}, {"REF_PREFILL_BATCH_SIZE": "0"}, {"SEED_SELF_CHECK_RUN": "latest"}):
+            rc, out = self.run_job(**env)
+            self.assertEqual(rc, 64, (env, out))
+            self.assertIn("BLOCKER:", out)
+            self.assertIn("JOB_FAIL", out)
 
 
 class _FakeServer(BaseHTTPRequestHandler):

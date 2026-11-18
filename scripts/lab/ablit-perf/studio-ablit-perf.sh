@@ -27,6 +27,18 @@
 #        JOB_SCRIPT=job-glm-prefill-step-gate.sh studio-ablit-perf.sh
 #          #2409 gate for the glm5_next 2048 serial prefill step (job header): every greedy token
 #          at step 512 vs 2048, TTFT per step. Knobs: PROMPT_TOKENS PROFILE_RUNS GENERATE_TOKENS GLM_PATH
+#        FORK_DIR=$HOME/mlx-swift-lm-2409 JOB_SCRIPT=job-qwen4-cb.sh studio-ablit-perf.sh
+#          #2409 Qwen3.8-Flash-Next (qwen4_exp) continuous batching at rows 1,4,8,16, ours vs mlx-lm
+#          batched generation (BatchGenerator, the qwen4_oracle loader shim), contexts 200 and 4000,
+#          output 512, 3 trials, served slots owner-pinned to 16, `--expect-route batched`; FORK_DIR is
+#          the clean mlx-swift-lm worktree on campaign/2409-qwen4-exp-batch (batched Qwen4Exp
+#          committed), rsynced like the parity job's. Knobs by name: CB_ROWS (1,4,8,16) CB_SLOTS (16)
+#          CONTEXTS (200,4000) OUTPUTS (512) TRIALS (3) REF_PREFILL_BATCH_SIZE QWEN4_PATH QWEN4_REPO
+#          QWEN4_REVISION SEED_SELF_CHECK_RUN (job-qwen4-cb.sh header). Estimated duration: about 1 h 30
+#          cold (build ~20 min, idle CB self-check up to ~15 min at 16 slots, provider grid ~15 min,
+#          mlx-lm reference ~25 min, model load ~3 min each side), about 1 h when the build and the
+#          self-check verdict are reused (SKIP_BUILD=1, SEED_SELF_CHECK_RUN=<run>); plus the 106 GB
+#          snapshot download if ~/lab-ablit-perf/models lacks it. Estimates, not measured.
 #        REFERENCE_ONLY=<run id> MODELS=glm GLM_REF=omlx GLM_OMLX_DIR=<studio dir> studio-ablit-perf.sh
 #          add a reference to an already measured provider grid (job.sh header); the run's
 #          provider.jsonl / grid.json / identity / noise / job log are pushed from
@@ -63,7 +75,7 @@ OWNER=ablit-perf
 STALL_MIN=30
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 JOB_SCRIPT=${JOB_SCRIPT:-job.sh}
-case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-glm-prefill-profile.sh or job-glm-prefill-step-gate.sh" >&2; exit 2 ;; esac
+case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-glm-prefill-profile.sh or job-glm-prefill-step-gate.sh" >&2; exit 2 ;; esac
 mkdir -p "$SCR" "$RES"
 : > "$LOG"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
@@ -78,11 +90,11 @@ COMMIT=$(git -C "$REPO" rev-parse HEAD)
 FORK_HEAD=""
 FORK_FILE=""
 case "$JOB_SCRIPT" in
-  job-qwen4-parity.sh) FORK_FILE=Libraries/MLXLLM/Models/Qwen4Exp.swift ;;
+  job-qwen4-parity.sh|job-qwen4-cb.sh) FORK_FILE=Libraries/MLXLLM/Models/Qwen4Exp.swift ;;
   job-glm-prefill-profile.sh) FORK_FILE=Libraries/MLXLMCommon/LabSectionTimer.swift ;;
 esac
 if [ -n "$FORK_FILE" ]; then
-  [ -n "${FORK_DIR:-}" ] || { blocker "FORK_DIR is unset; set it to the mlx-swift-lm worktree on campaign/2409-qwen4-exp"; exit 2; }
+  [ -n "${FORK_DIR:-}" ] || { blocker "FORK_DIR is unset; set it to the mlx-swift-lm worktree on campaign/2409-qwen4-exp (parity) or campaign/2409-qwen4-exp-batch (CB)"; exit 2; }
   git -C "$FORK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { blocker "FORK_DIR=$FORK_DIR is not a git work tree"; exit 2; }
   [ -z "$(git -C "$FORK_DIR" status --porcelain)" ] || { blocker "FORK_DIR=$FORK_DIR has uncommitted changes; commit first"; exit 2; }
   git -C "$FORK_DIR" cat-file -e "HEAD:$FORK_FILE" 2>/dev/null \
@@ -105,7 +117,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \

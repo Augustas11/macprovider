@@ -42,6 +42,10 @@ The ratio and slope use decode tok/s for a one-row cell. A multi-row cell
 uses aggregate tok/s = total completion tokens / (last token of the last row -
 first request start), per trial, against the single-row reference's request
 tok/s (both count prefill); per-row tok/s ratios are reported, not gated.
+A reference file that also holds rows > 1 (reference_mlxlm.py --batched: kind row lines with
+rows N and one kind aggregate line per trial) scores each multi-row cell against that batched run:
+aggregate tok/s against the reference's aggregate tok/s, and every row's text and token count
+against the batched row of the same prompt. Cells without such lines use the single-row reference.
 Request starts and last-token times come from the rows (start_offset_s,
 t_last_offset_s; older rows: a common start and completion_tokens /
 request_tps). A multi-row cell whose rows never decoded at the same instant in
@@ -116,10 +120,29 @@ def first_diff(a, b):
 def index_reference(lines):
     ref = defaultdict(list)
     for r in lines:
-        if r.get("kind", "row") != "row":
+        if r.get("kind", "row") != "row" or (r.get("rows") or 1) > 1:
             continue
         ref[(r["model"], r["ctx_target"], r["max_tokens"], r["row"])].append(r)
     return ref
+
+
+def index_batched_reference(lines):
+    """Reference lines of a batched run (reference_mlxlm.py --batched): rows > 1.
+
+    Returns ({(model, ctx, out, rows, row): [row records]}, {(model, ctx, out, rows): [aggregate
+    records, one per trial]}). Each aggregate holds aggregate_tps, the same definition as the
+    provider's: total completion tokens / (last token of the last row - first request start).
+    """
+    rows, aggs = defaultdict(list), defaultdict(list)
+    for r in lines:
+        n = r.get("rows") or 1
+        if n <= 1:
+            continue
+        if r.get("kind") == "aggregate":
+            aggs[(r["model"], r["ctx_target"], r["max_tokens"], n)].append(r)
+        elif r.get("kind", "row") == "row":
+            rows[(r["model"], r["ctx_target"], r["max_tokens"], n, r["row"])].append(r)
+    return rows, aggs
 
 
 def index_ours(lines):
@@ -318,6 +341,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
     ref_lines = [r for r in ref_lines if not is_turn2(r)]
     our_lines = [r for r in our_lines if not is_turn2(r)]
     ref = index_reference(ref_lines)
+    bref, baggs = index_batched_reference(ref_lines)
     ours_rows, ours_aggs, cells_meta = index_ours(our_lines)
     cells = {}
 
@@ -329,13 +353,25 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
             "reasons": [], "notes": [],
         }
         cells[key] = cell
-        base = [r for r in ref.get((model, ctx, out, 0), []) if not r.get("error")]
+        # A multi-row cell with a batched reference (rows > 1 in the reference file) is scored
+        # against that: its aggregate tok/s and its per-row texts. Without one, the single-row
+        # reference stands in as before.
+        batched = nrows > 1 and key in baggs
+
+        def ref_of(prow):
+            return bref.get((model, ctx, out, nrows, prow), []) if batched else ref.get((model, ctx, out, prow), [])
+
+        cell["reference"] = "mlx-lm batched" if batched else "single-row"
+        base = [r for r in ref_of(0) if not r.get("error")]
         # One row: decode tok/s against the reference's. Several rows: aggregate tok/s
         # (total tokens / wall time from the first request start) against the single-row
         # reference's request tok/s, which also counts its prefill.
         cell["tps_metric"] = "decode_tps" if nrows == 1 else "aggregate_tps"
         scores = ours_scores(rows, nrows)
-        ref_scores = [r.get("decode_tps" if nrows == 1 else "request_tps") for r in base]
+        if batched:
+            ref_scores = [a.get("aggregate_tps") for a in baggs[key]]
+        else:
+            ref_scores = [r.get("decode_tps" if nrows == 1 else "request_tps") for r in base]
         cell["ours_trials"] = scores
         cell["ref_trials"] = ref_scores
         cell["ours_tps"] = median(scores)
@@ -347,8 +383,9 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         cell["ref_request_trials"] = [r.get("request_tps") for r in base]
         cell["ours_goal_tps"] = median(cell["ours_goal_trials"])
         cell["ref_request_tps"] = median(cell["ref_request_trials"])
-        cell["goal_ratio"] = (round(cell["ours_goal_tps"] / cell["ref_request_tps"], 4)
-                              if cell["ours_goal_tps"] and cell["ref_request_tps"] else None)
+        ref_goal = cell["ref_tps"] if batched else cell["ref_request_tps"]  # batched reference: its aggregate
+        cell["goal_ratio"] = (round(cell["ours_goal_tps"] / ref_goal, 4)
+                              if cell["ours_goal_tps"] and ref_goal else None)
         cell["ours_request_tps"] = median(r.get("request_tps") for r in rows)
         cell["request_ratio"] = (round(cell["ours_request_tps"] / cell["ref_request_tps"], 4)
                                  if cell["ours_request_tps"] and cell["ref_request_tps"] else None)
@@ -405,7 +442,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
             per_row.setdefault(r["row"], []).append(r.get("decode_tps"))
         cell["per_row_ratio"] = {}
         for prow, xs in sorted(per_row.items()):
-            rref = median(x.get("decode_tps") for x in ref.get((model, ctx, out, prow), []))
+            rref = median(x.get("decode_tps") for x in ref_of(prow))
             m = median(xs)
             cell["per_row_ratio"][str(prow)] = round(m / rref, 4) if m and rref else None
         if nrows > 1:
@@ -422,7 +459,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
                 cell["reasons"].append(f"{where}: error {r['error']}")
                 tokens_ok = False
                 continue
-            rref = [x for x in ref.get((model, ctx, out, r["row"]), []) if not x.get("error")]
+            rref = [x for x in ref_of(r["row"]) if not x.get("error")]
             if not rref:
                 cell["reasons"].append(f"{where}: missing single-row reference for prompt row {r['row']}")
                 text_ok = tokens_ok = False
@@ -586,7 +623,8 @@ def markdown(summary):
     lines += [
         "Gated tok/s: one row, decode tok/s vs the reference's; several rows, aggregate tok/s (total "
         "tokens / (last token of the last row - first request start)) vs the single-row reference's "
-        "request tok/s. Per-request tok/s is the median over rows and trials; queue = macprovider_queue_ms.",
+        "request tok/s (a cell with a batched reference, reference_mlxlm.py --batched: vs that run's aggregate "
+        "tok/s, same definition). Per-request tok/s is the median over rows and trials; queue = macprovider_queue_ms.",
         "",
         "| model | ctx | out | rows | service | gated metric | ref tok/s | ours tok/s | ratio | band "
         "| ref req tok/s | ours per-request tok/s | per-request ratio | ours queue max s "
@@ -596,7 +634,7 @@ def markdown(summary):
     for c in summary["cells"]:
         lines.append(
             f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {service_label(c)} | "
-            f"{METRIC_LABEL.get(c.get('tps_metric'), '-')} | {fmt(c['ref_tps'])} | "
+            f"{'aggregate vs batched ref' if c.get('reference') == 'mlx-lm batched' else METRIC_LABEL.get(c.get('tps_metric'), '-')} | {fmt(c['ref_tps'])} | "
             f"{fmt(c['ours_tps'])} | {fmt(c['ratio'], '.3f')} | {fmt(c['band'], '.3f')} | "
             f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
             f"{fmt(c.get('request_ratio'), '.3f')} | {fmt(c.get('ours_queue_s_max'), '.3f')} | "
