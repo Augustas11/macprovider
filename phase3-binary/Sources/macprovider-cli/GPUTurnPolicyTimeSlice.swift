@@ -18,28 +18,37 @@ struct TimeSliceGPUTurnPolicy: GPUTurnPolicy {
 
     static let factory = GPUTurnPolicyFactory(
         name: name,
-        summary: "Round-robin wall-time slices among participants that want turns, exclusive turns, wake at the slice boundary (quantum_ms=100, stall_ms=10000)."
+        summary: "Round-robin wall-time slices among participants that want turns, exclusive turns, wake at the slice boundary (quantum_ms=100, stall_ms=10000, drain=always|handoff|never: when a turn drains its queued GPU work, default always)."
     ) { parameters in
         var rest = parameters
         let quantum = try GPUTurnPolicyParameters.milliseconds(&rest, "quantum_ms", policy: name, default: defaultQuantumMilliseconds)
         let stall = try GPUTurnPolicyParameters.milliseconds(&rest, "stall_ms", policy: name, default: defaultStallMilliseconds)
+        let drain = try GPUTurnPolicyParameters.enumerated(&rest, "drain", policy: name, default: GPUTurnDrain.always)
         guard rest.isEmpty else {
             throw GPUTurnPolicyError.unknownParameters(policy: name, names: rest.keys.sorted())
         }
-        return TimeSliceGPUTurnPolicy(quantumMilliseconds: quantum, stallMilliseconds: stall)
+        return TimeSliceGPUTurnPolicy(quantumMilliseconds: quantum, stallMilliseconds: stall, drain: drain)
     }
 
     let quantumMilliseconds: UInt64
     let stallMilliseconds: UInt64
+    let drain: GPUTurnDrain
 
-    init(quantumMilliseconds: UInt64 = defaultQuantumMilliseconds, stallMilliseconds: UInt64 = defaultStallMilliseconds) {
+    init(
+        quantumMilliseconds: UInt64 = defaultQuantumMilliseconds, stallMilliseconds: UInt64 = defaultStallMilliseconds,
+        drain: GPUTurnDrain = .always
+    ) {
         self.quantumMilliseconds = quantumMilliseconds
         self.stallMilliseconds = stallMilliseconds
+        self.drain = drain
     }
 
     var name: String { Self.name }
     var parameters: [String: String] {
-        ["quantum_ms": String(quantumMilliseconds), "stall_ms": String(stallMilliseconds)]
+        var values = ["quantum_ms": String(quantumMilliseconds), "stall_ms": String(stallMilliseconds)]
+        // The default drain is left out, so existing results read the same.
+        if drain != .always { values["drain"] = drain.rawValue }
+        return values
     }
     var stallNanoseconds: UInt64 { stallMilliseconds &* 1_000_000 }
 

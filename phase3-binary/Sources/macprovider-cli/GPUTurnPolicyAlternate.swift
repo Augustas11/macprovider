@@ -15,7 +15,10 @@ import Foundation
 // while it is inside a work interval and less than `graceNanoseconds` have
 // passed since its last turn ended (or since this caller began waiting, if
 // later); a waiter sleeps until that grace runs out or a state change, never
-// re-polls. A peer with work open that never asks costs at most one grace.
+// re-polls. A peer with work open that does not ask costs one grace per gap:
+// once this participant has taken a turn past its burst because the peer did
+// not show, it keeps going without a grace until the peer takes a turn (a
+// peer that is waiting in `beginTurn` is always let in).
 // Turns are exclusive (the arbiter's rule); only a turn held past `stall_ms`
 // lets a waiter in beside it.
 
@@ -28,28 +31,34 @@ struct AlternateGPUTurnPolicy: GPUTurnPolicy {
 
     static let factory = GPUTurnPolicyFactory(
         name: name,
-        summary: "Alternate turns between participants: at most `burst` (default 1) consecutive turns while another is about to take one; exclusive turns; `stall_ms` (default 10000) is the stalled-peer bound."
+        summary: "Alternate turns between participants: at most `burst` (default 1) consecutive turns while another is about to take one; exclusive turns; `stall_ms` (default 10000) is the stalled-peer bound; `drain` (always|handoff|never, default always) is when a turn drains its queued GPU work."
     ) { parameters in
         var rest = parameters
         let burst = try GPUTurnPolicyParameters.integer(&rest, "burst", policy: name, default: defaultBurst)
         let stall = try GPUTurnPolicyParameters.milliseconds(&rest, "stall_ms", policy: name, default: defaultStallMilliseconds)
+        let drain = try GPUTurnPolicyParameters.enumerated(&rest, "drain", policy: name, default: GPUTurnDrain.always)
         guard rest.isEmpty else {
             throw GPUTurnPolicyError.unknownParameters(policy: name, names: rest.keys.sorted())
         }
-        return AlternateGPUTurnPolicy(burst: burst, stallMilliseconds: stall)
+        return AlternateGPUTurnPolicy(burst: burst, stallMilliseconds: stall, drain: drain)
     }
 
     let burst: Int
     let stallMilliseconds: UInt64
+    let drain: GPUTurnDrain
 
-    init(burst: Int = defaultBurst, stallMilliseconds: UInt64 = defaultStallMilliseconds) {
+    init(burst: Int = defaultBurst, stallMilliseconds: UInt64 = defaultStallMilliseconds, drain: GPUTurnDrain = .always) {
         self.burst = burst
         self.stallMilliseconds = stallMilliseconds
+        self.drain = drain
     }
 
     var name: String { Self.name }
     var parameters: [String: String] {
-        ["burst": String(burst), "stall_ms": String(stallMilliseconds)]
+        var values = ["burst": String(burst), "stall_ms": String(stallMilliseconds)]
+        // The default drain is left out, so existing results read the same.
+        if drain != .always { values["drain"] = drain.rawValue }
+        return values
     }
     var stallNanoseconds: UInt64 { stallMilliseconds &* 1_000_000 }
 
@@ -67,6 +76,11 @@ struct AlternateGPUTurnPolicy: GPUTurnPolicy {
             // Mid-burst: keep going. Burst complete: let the others in, if one
             // is about to take a turn.
             guard (me?.counters.turns ?? 0) % burst == 0 else { return .proceed }
+            // Already past the burst: the peer was given its grace and did
+            // not ask. Only a peer that is waiting now is let in.
+            if (me?.consecutiveTurns ?? 0) > burst {
+                return others.contains(where: \.isWaiting) ? .wait(maxNanoseconds: nil) : .proceed
+            }
             return pause(for: others, state: state, since: request.waitingSince) ?? .proceed
         }
 

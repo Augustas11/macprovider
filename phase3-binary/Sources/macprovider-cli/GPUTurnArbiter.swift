@@ -11,16 +11,26 @@ import MLX
 // Under a sharing policy (anything but passthrough, with two or more
 // participants registered) turns are exclusive: nobody starts while another
 // participant holds a turn, unless that turn has run past the policy's stall
-// bound (a hung peer never deadlocks its sibling). A turn there also ends only
-// once the GPU work it queued has been realised (`drainQueuedWork`), so work a
-// loop pipelined with `asyncEval` is charged to the loop that queued it, not
-// absorbed by the peer's next turn. With one participant, or under
-// passthrough, every call proceeds at once, nothing drains and prefill chunks
-// keep their full size: asyncEval pipelining is untouched.
+// bound (a hung peer never deadlocks its sibling). The policy's drain mode
+// decides whether a turn there ends only once the GPU work it queued has been
+// realised (`drainQueuedWork`), so work a loop pipelined with `asyncEval` is
+// charged to the loop that queued it, not absorbed by the peer's next turn.
+// With `always` (the default) every turn drains. With `handoff` a turn drains
+// only when a waiting participant would be admitted the moment it ends, so a
+// participant that keeps the GPU keeps its asyncEval overlap. With `never` no
+// turn drains. With one participant, or under passthrough, every call proceeds
+// at once, nothing drains and prefill chunks keep their full size: asyncEval
+// pipelining is untouched.
 //
-// The compiled-in policy is `PassthroughGPUTurnPolicy` (always proceed), so
-// serving behaviour is unchanged. Lab builds (`DEBUG || MACPROVIDER_LAB_HARNESS`)
-// may select another registered policy by name to compare candidates.
+// The compiled-in policy is `alternate` with `drain=never` (#2397): while two
+// models are busy they take single turns in alternation and no turn drains.
+// Measured on an M3 Ultra, GLM-5.3-Flash beside a 27B model on one serial row:
+// under passthrough the main model kept 0.21 of its solo rate and the second
+// 0.87; alternating gives 0.44 and 0.67 (0.61 and 0.46 with the main model at
+// three rows, the same rate per stream), with identical tokens. A provider
+// with one model, or with one busy model, never waits. Lab builds
+// (`DEBUG || MACPROVIDER_LAB_HARNESS`) may select another registered policy by
+// name to compare candidates.
 
 /// One unit of GPU work a participant asks a turn for.
 enum GPUWorkKind: Sendable, Equatable {
@@ -122,6 +132,9 @@ struct GPUTurnParticipantState: Sendable, Equatable {
     var lastTurnBeganAt: UInt64?
     var lastTurnEndedAt: UInt64?
     var lastTurnKind: GPUWorkKind?
+    /// Turns this participant has begun since another participant last began
+    /// one (0 once another participant takes a turn).
+    var consecutiveTurns = 0
     /// GPU nanoseconds per prefill token, measured on drained (exclusive)
     /// prefill turns; nil until one was measured.
     var prefillNanosecondsPerToken: Double?
@@ -198,11 +211,25 @@ protocol GPUTurnPolicy: Sendable {
     var prefillChunkTargetNanoseconds: UInt64? { get }
     /// Smallest hinted prefill chunk, so prefill throughput survives the split.
     var prefillChunkMinimumTokens: Int { get }
+    /// When a sharing turn realises its queued GPU work before it ends.
+    var drain: GPUTurnDrain { get }
     func decide(_ request: GPUTurnRequest, state: GPUTurnArbiterState) -> GPUTurnDecision
+}
+
+/// When a turn under a sharing policy drains the GPU work it queued.
+enum GPUTurnDrain: String, Sendable, Equatable, CaseIterable {
+    /// Every turn drains before it ends.
+    case always
+    /// A turn drains only if another participant waiting in `beginTurn` would
+    /// be admitted as soon as it ends (the GPU actually changes hands).
+    case handoff
+    /// No turn drains; the next turn may start on a busy GPU.
+    case never
 }
 
 extension GPUTurnPolicy {
     var alwaysProceeds: Bool { false }
+    var drain: GPUTurnDrain { .always }
     var parameters: [String: String] { [:] }
     var stallNanoseconds: UInt64 { GPUTurnPolicyDefaults.stallMilliseconds * 1_000_000 }
     var prefillChunkTargetNanoseconds: UInt64? { nil }
@@ -242,6 +269,17 @@ enum GPUTurnPolicyParameters {
     ) throws -> Int {
         guard let raw = rest.removeValue(forKey: key) else { return fallback }
         guard let value = Int(raw), value >= minimum, value <= maximum else {
+            throw GPUTurnPolicyError.invalidParameter(policy: policy, name: key, value: raw)
+        }
+        return value
+    }
+
+    /// Removes `key` from `rest`; one of `T`'s raw values.
+    static func enumerated<T: RawRepresentable>(
+        _ rest: inout [String: String], _ key: String, policy: String, default fallback: T
+    ) throws -> T where T.RawValue == String {
+        guard let raw = rest.removeValue(forKey: key) else { return fallback }
+        guard let value = T(rawValue: raw) else {
             throw GPUTurnPolicyError.invalidParameter(policy: policy, name: key, value: raw)
         }
         return value
@@ -305,8 +343,9 @@ enum GPUTurnPolicyRegistry {
         FairShareGPUTurnPolicy.factory,
     ]
 
-    /// The policy every build serves with.
-    static let compiledDefault: any GPUTurnPolicy = PassthroughGPUTurnPolicy()
+    /// The policy every build serves with: single turns in alternation while
+    /// two or more models are busy, no per-turn drain (#2397).
+    static let compiledDefault: any GPUTurnPolicy = AlternateGPUTurnPolicy(drain: .never)
 
     static var names: [String] { factories.map(\.name) }
 
@@ -693,6 +732,10 @@ final class GPUTurnArbiter: @unchecked Sendable {
             participants[index].counters.prefillChunks += 1
             participants[index].counters.prefillTokens += tokens
         }
+        if lastTurnParticipantID != participant.id {
+            for other in participants.indices { participants[other].consecutiveTurns = 0 }
+        }
+        participants[index].consecutiveTurns += 1
         lastTurnParticipantID = participant.id
         return true
     }
@@ -703,11 +746,22 @@ final class GPUTurnArbiter: @unchecked Sendable {
             condition.unlock()
             return
         }
-        // Under a sharing policy the last turn held realises its queued GPU
-        // work before it ends: the drain is busy time of the participant that
-        // queued it, and the next turn starts on an idle GPU. It runs outside
-        // the lock, with the turn still held, so nobody starts beside it.
-        let drains = participants[first].turnsHeld == 1 && sharingLocked
+        // Under a sharing policy the last turn held may realise its queued
+        // GPU work before it ends: the drain is busy time of the participant
+        // that queued it, and the next turn starts on an idle GPU. The
+        // policy's drain mode decides: `always` drains every such turn,
+        // `never` none, and `handoff` only when another participant waiting
+        // in `beginTurn` would be admitted once this turn ends. The decision
+        // is taken here, under the lock; the drain runs outside it, with the
+        // turn still held, so nobody starts beside it.
+        var drains = participants[first].turnsHeld == 1 && sharingLocked
+        if drains {
+            switch policy.drain {
+            case .always: break
+            case .never: drains = false
+            case .handoff: drains = handoffLocked(after: first)
+            }
+        }
         condition.unlock()
         if drains { drainQueuedWork() }
         condition.lock()
@@ -719,6 +773,7 @@ final class GPUTurnArbiter: @unchecked Sendable {
             if let started = participants[index].turnStartedAt {
                 let held = now &- started
                 participants[index].counters.busyNanoseconds &+= held
+                // Only a drained turn's held time includes its GPU work.
                 if drains, let tokens = participants[index].lastTurnKind?.prefillTokens {
                     participants[index].prefillNanosecondsPerToken = Self.updatedPrefillRate(
                         participants[index].prefillNanosecondsPerToken, tokens: tokens, nanoseconds: held)
@@ -765,6 +820,22 @@ final class GPUTurnArbiter: @unchecked Sendable {
     func stateForTest() -> GPUTurnArbiterState {
         condition.lock(); defer { condition.unlock() }
         return GPUTurnArbiterState(now: clock(), participants: participants, lastTurnParticipantID: lastTurnParticipantID)
+    }
+
+    /// True when a participant other than the one at `holder` waits in
+    /// `beginTurn` and would be admitted once `holder`'s last turn ends.
+    private func handoffLocked(after holder: Int) -> Bool {
+        var after = participants
+        after[holder].turnsHeld = 0
+        after[holder].turnStartedAt = nil
+        let state = GPUTurnArbiterState(now: clock(), participants: after, lastTurnParticipantID: lastTurnParticipantID)
+        for other in after where other.id != after[holder].id {
+            guard let since = other.waitingSince, let kind = other.waitingKind else { continue }
+            let request = GPUTurnRequest(participantID: other.id, kind: kind, waitingSince: since)
+            if case .wait = Self.admit(request, state: state, policy: policy) { continue }
+            return true
+        }
+        return false
     }
 
     /// Two or more participants under a policy that may wait.
