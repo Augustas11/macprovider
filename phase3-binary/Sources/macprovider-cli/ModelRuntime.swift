@@ -1683,7 +1683,15 @@ struct GenerationConfigStopStringFilter: Sendable {
 }
 
 actor ModelRuntime: ModelRuntimeServing {
-    static func verifyLoadedArtifact(directory: URL, expectedSHA256: String) throws {
+    /// Returns "identity" when every file still matches the identity recorded
+    /// when the preflight hashed it (the preflight hash then stands), else
+    /// "rehash" after a full re-hash of the directory.
+    @discardableResult
+    static func verifyLoadedArtifact(directory: URL, expectedSHA256: String) throws -> String {
+        if let recorded = ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: directory),
+           ModelArtifactVerifier.canonicalHash(of: recorded) == expectedSHA256 {
+            return "identity"
+        }
         let loadedArtifactHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         guard loadedArtifactHash == expectedSHA256 else {
             let observedArtifactHash = loadedArtifactHash ?? "unavailable"
@@ -1692,6 +1700,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 reason: "verified model artifact changed during load: expected \(expectedSHA256), observed \(observedArtifactHash)"
             )
         }
+        return "rehash"
     }
 
     // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
@@ -4338,6 +4347,7 @@ maxTokens: 1,
         // the weights load; re-applied once they are resident.
         MLXMemoryLimit.apply(stage: "startup", kvBytesPerToken: nil)
         let targetLoadPath = modelLoadPath ?? modelID
+        let modelLoadStart = ContinuousClock.now
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
         if normalizedDraftModelID == nil,
@@ -4411,8 +4421,11 @@ maxTokens: 1,
                 : Self.pagedKVUnavailableCacheClass
             modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
         }
+        ModelArtifactVerifier.logStartupPhase("model_load", since: modelLoadStart)
         if let expectedArtifactHash = verifiedModelLoadSHA256 ?? verifiedModelArtifactSHA256 {
-            try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
+            let verifyStart = ContinuousClock.now
+            let mode = try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
+            ModelArtifactVerifier.logStartupPhase("post_load_verify", since: verifyStart, detail: " mode=\(mode)")
         }
         self.currentContainer = container
         // SPEC-001-R017: the shared budget records the weights and owns the
@@ -4434,7 +4447,9 @@ maxTokens: 1,
         self.currentModelHashAlgorithm = verifiedModelArtifactSHA256 == nil
             ? nil
             : ModelArtifactIdentity.snapshotManifestV1
+        let manifestStart = ContinuousClock.now
         self.currentWeightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: directory)
+        ModelArtifactVerifier.logStartupPhase("weights_manifest", since: manifestStart)
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
@@ -14971,7 +14986,14 @@ maxTokens: maxTokens,
 
         guard !fileURLs.isEmpty else { return nil }
 
+        // Reuse the preflight's per-file hashes when every file of the
+        // directory still has the identity it had when it was hashed.
+        let recorded = ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: directory)
+            .map { Dictionary($0.map { ($0.relativePath, $0) }, uniquingKeysWith: { first, _ in first }) }
         let files = try fileURLs.map { url in
+            if let record = recorded?[url.lastPathComponent] {
+                return ModelWeightManifestFile(name: url.lastPathComponent, sha256: record.sha256, size: record.size)
+            }
             let contentURL = url.resolvingSymlinksInPath()
             let attributes = try FileManager.default.attributesOfItem(atPath: contentURL.path)
             let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0

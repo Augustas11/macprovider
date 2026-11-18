@@ -1363,23 +1363,20 @@ struct ServeCommand: AsyncParsableCommand {
         let authorityPath: String
         let privateRuntime = usesBuild1PrivateRuntimeVariant(resolved)
         do {
+            // The one content hash of this start: the path check, the
+            // runtime scope, the post-load check and the weights manifest all
+            // use this inspection's per-file records.
             let resolvedLoad = try resolveVerifiedLoadPath(
                 configuredPath: configuredPath,
                 expectedSHA256: expected,
                 resolved: resolved,
-                artifactResolver: artifactResolver
+                artifactResolver: artifactResolver,
+                scopedSubdirectory: privateRuntime ? Build1PrivatePrepareProfile.runtimeVariantDirectory : nil
             )
             persistFrom = resolvedLoad.persistFrom
             authorityPath = resolvedLoad.path
-            let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(
-                directory: URL(fileURLWithPath: resolvedLoad.path),
-                scopedSubdirectory: privateRuntime ? Build1PrivatePrepareProfile.runtimeVariantDirectory : nil
-            )
+            let inspection = resolvedLoad.inspection
             actual = inspection.sha256
-            guard actual == expected else {
-                FileHandle.standardError.write(Data("model artifact hash mismatch for \(resolvedLoad.path)\n".utf8))
-                throw ExitCode(2)
-            }
             loadPath = try runtimeModelLoadPath(
                 verifiedArtifactPath: resolvedLoad.path,
                 config: resolved,
@@ -1796,8 +1793,19 @@ struct ServeCommand: AsyncParsableCommand {
         configuredPath: String,
         expectedSHA256: String,
         resolved: AppConfig,
-        artifactResolver: CachedModelArtifactResolver
-    ) throws -> (path: String, persistFrom: String?) {
+        artifactResolver: CachedModelArtifactResolver,
+        scopedSubdirectory: String?
+    ) throws -> (path: String, persistFrom: String?, inspection: ModelArtifactVerifier.CanonicalArtifactInspection) {
+        func inspect(_ path: String) throws -> ModelArtifactVerifier.CanonicalArtifactInspection {
+            let start = ContinuousClock.now
+            let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(
+                directory: URL(fileURLWithPath: path),
+                scopedSubdirectory: scopedSubdirectory,
+                recordForReuse: true
+            )
+            ModelArtifactVerifier.logStartupPhase("preflight_hash", since: start)
+            return inspection
+        }
         let durablePath: String
         switch pinnedArtifactLoadCandidate(
             configuredPath: configuredPath,
@@ -1808,14 +1816,12 @@ struct ServeCommand: AsyncParsableCommand {
         ) {
         case .configured:
             try requireContainedDurablePathIfOwned(configuredPath, artifactResolver: artifactResolver)
-            let actual = try ModelArtifactVerifier.canonicalArtifactHash(
-                directory: URL(fileURLWithPath: configuredPath)
-            )
-            guard actual == expectedSHA256 else {
+            let inspection = try inspect(configuredPath)
+            guard inspection.sha256 == expectedSHA256 else {
                 FileHandle.standardError.write(Data("model artifact hash mismatch for \(configuredPath)\n".utf8))
                 throw ExitCode(2)
             }
-            return (configuredPath, nil)
+            return (configuredPath, nil, inspection)
         case .missingPin:
             FileHandle.standardError.write(
                 Data("model artifact verification failed for \(configuredPath): missing pinned snapshot\n".utf8)
@@ -1834,10 +1840,8 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         try requireContainedDurablePathIfOwned(durablePath, artifactResolver: artifactResolver)
-        let actual = try ModelArtifactVerifier.canonicalArtifactHash(
-            directory: URL(fileURLWithPath: durablePath)
-        )
-        guard actual == expectedSHA256 else {
+        let inspection = try inspect(durablePath)
+        guard inspection.sha256 == expectedSHA256 else {
             FileHandle.standardError.write(Data("model artifact hash mismatch for \(durablePath)\n".utf8))
             throw ExitCode(2)
         }
@@ -1846,7 +1850,7 @@ struct ServeCommand: AsyncParsableCommand {
                 Data("\(DurableModelArtifactStore.cacheBackedWarning)\n".utf8)
             )
         }
-        return (durablePath, configuredPath)
+        return (durablePath, configuredPath, inspection)
     }
 
     private static func runModelCatalogPreflight(

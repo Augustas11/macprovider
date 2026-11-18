@@ -6032,22 +6032,153 @@ enum ModelArtifactVerifier {
         var sizeBytes: Int
         var configJSONData: Data?
         var configSHA256: String?
+        /// Every hashed file, sorted by relative path (the manifest order).
+        var files: [CanonicalFileRecord] = []
+    }
+
+    /// The open file's identity, taken by fstat on the fd that was hashed.
+    /// ctime is kept as well: resetting mtime with utimes moves ctime.
+    struct FileIdentity: Equatable, Sendable {
+        var device: Int64
+        var inode: UInt64
+        var size: Int64
+        var mtimeNanoseconds: Int64
+        var ctimeNanoseconds: Int64
+
+        init(_ st: stat) {
+            device = Int64(st.st_dev)
+            inode = UInt64(st.st_ino)
+            size = Int64(st.st_size)
+            mtimeNanoseconds = Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec)
+            ctimeNanoseconds = Int64(st.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(st.st_ctimespec.tv_nsec)
+        }
+    }
+
+    struct CanonicalFileRecord: Equatable, Sendable {
+        var relativePath: String
+        var size: UInt64
+        var sha256: String
+        var identity: FileIdentity
     }
 
     private struct FileHashResult {
         var size: UInt64
         var sha256: String
         var capturedData: Data?
+        var identity: FileIdentity
     }
+
+    /// Per-file records of inspections made with `recordForReuse`, keyed by
+    /// the resolved root path. Later start-up steps reuse them only after a
+    /// fresh stat of every file matches the recorded identity.
+    private final class InspectionRecordStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var records: [String: [CanonicalFileRecord]] = [:]
+
+        func set(_ files: [CanonicalFileRecord], for root: String) {
+            lock.lock(); defer { lock.unlock() }
+            records[root] = files
+        }
+
+        func snapshot() -> [String: [CanonicalFileRecord]] {
+            lock.lock(); defer { lock.unlock() }
+            return records
+        }
+    }
+
+    private static let recordStore = InspectionRecordStore()
+
+    static let defaultHashConcurrency = max(1, min(4, ProcessInfo.processInfo.activeProcessorCount))
 
     static func canonicalArtifactHash(directory: URL, deadline: Date? = nil) throws -> String {
         try inspectCanonicalArtifact(directory: directory, deadline: deadline).sha256
     }
 
+    /// The canonical manifest digest over `files` (paths relative to the root
+    /// being hashed). The single place the manifest text is formed.
+    static func canonicalHash(of files: [CanonicalFileRecord]) -> String {
+        let manifest = files.sorted { $0.relativePath < $1.relativePath }
+            .map { "\($0.relativePath)\n\($0.size)\n\($0.sha256)\n" }
+            .joined()
+        return Data(SHA256.hash(data: Data(manifest.utf8))).hexLower
+    }
+
+    static func logStartupPhase(_ phase: String, since start: ContinuousClock.Instant, detail: String = "") {
+        let elapsed = (ContinuousClock.now - start).components
+        let ms = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+        FileHandle.standardError.write(Data("event=startup_phase phase=\(phase) ms=\(ms)\(detail)\n".utf8))
+    }
+
+    /// Recorded files for `directory`: the record of that root, or the
+    /// subtree of the nearest recorded ancestor with paths made relative to
+    /// `directory`. Nil when nothing was recorded or the subtree is empty.
+    static func recordedFiles(forDirectory directory: URL) -> [CanonicalFileRecord]? {
+        let path = directory.resolvingSymlinksInPath().path
+        let records = recordStore.snapshot()
+        if let exact = records[path] { return exact }
+        guard let root = records.keys.filter({ path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }),
+              let all = records[root]
+        else { return nil }
+        let prefix = String(path.dropFirst(root.count + 1)) + "/"
+        let scoped = all.compactMap { record -> CanonicalFileRecord? in
+            guard record.relativePath.hasPrefix(prefix) else { return nil }
+            var copy = record
+            copy.relativePath = String(record.relativePath.dropFirst(prefix.count))
+            return copy
+        }
+        return scoped.isEmpty ? nil : scoped
+    }
+
+    /// The recorded files for `directory` if a fresh lstat of its whole tree
+    /// shows exactly the recorded files with unchanged identities; nil (the
+    /// caller re-hashes) on any missing, extra or changed file.
+    static func identityVerifiedRecordedFiles(directory: URL) -> [CanonicalFileRecord]? {
+        guard let recorded = recordedFiles(forDirectory: directory),
+              let current = try? currentFileIdentities(directory: directory),
+              current.count == recorded.count
+        else { return nil }
+        for record in recorded where current[record.relativePath] != record.identity {
+            return nil
+        }
+        return recorded
+    }
+
+    private static func currentFileIdentities(directory: URL) throws -> [String: FileIdentity] {
+        var root = stat()
+        guard lstat(directory.path, &root) == 0, (root.st_mode & S_IFMT) == S_IFDIR,
+              let enumerator = FileManager.default.enumerator(
+                at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey], options: [])
+        else {
+            throw AutotuneRecommendError.invalidArtifact("cannot enumerate")
+        }
+        let basePath = directory.resolvingSymlinksInPath().path
+        var identities: [String: FileIdentity] = [:]
+        for case let url as URL in enumerator {
+            let path = url.resolvingSymlinksInPath().path
+            guard path.hasPrefix(basePath + "/") else {
+                throw AutotuneRecommendError.invalidArtifact("path escape")
+            }
+            let rel = String(path.dropFirst(basePath.count + 1))
+            try ModelArtifactRelativePathPolicy.validate(rel)
+            var statbuf = stat()
+            guard lstat(url.path, &statbuf) == 0 else {
+                throw AutotuneRecommendError.invalidArtifact("lstat")
+            }
+            if (statbuf.st_mode & S_IFMT) == S_IFDIR { continue }
+            guard (statbuf.st_mode & S_IFMT) == S_IFREG, statbuf.st_nlink <= 1 else {
+                throw AutotuneRecommendError.invalidArtifact("non-regular")
+            }
+            identities[rel] = FileIdentity(statbuf)
+        }
+        return identities
+    }
+
     static func inspectCanonicalArtifact(
         directory: URL,
         deadline: Date? = nil,
-        scopedSubdirectory: String? = nil
+        scopedSubdirectory: String? = nil,
+        recordForReuse: Bool = false,
+        hashConcurrency: Int = defaultHashConcurrency
     ) throws -> CanonicalArtifactInspection {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         let fm = FileManager.default
@@ -6061,10 +6192,7 @@ enum ModelArtifactVerifier {
             throw AutotuneRecommendError.invalidArtifact("cannot enumerate")
         }
         let basePath = directory.resolvingSymlinksInPath().path
-        var entries: [(path: String, size: UInt64, sha: String)] = []
-        var totalSize: UInt64 = 0
-        var configJSONData: Data?
-        var configSHA256: String?
+        var candidates: [(url: URL, rel: String)] = []
         for case let url as URL in enumerator {
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let path = url.resolvingSymlinksInPath().path
@@ -6089,8 +6217,15 @@ enum ModelArtifactVerifier {
             guard statbuf.st_nlink <= 1 else {
                 throw AutotuneRecommendError.invalidArtifact("hardlink \(rel)")
             }
-            let fileHash = try hashFile(at: url, captureData: rel == "config.json", deadline: deadline)
-            if rel == "config.json" {
+            candidates.append((url, rel))
+        }
+        let hashes = try hashFilesConcurrently(candidates, deadline: deadline, concurrency: hashConcurrency)
+        var records: [CanonicalFileRecord] = []
+        var totalSize: UInt64 = 0
+        var configJSONData: Data?
+        var configSHA256: String?
+        for (candidate, fileHash) in zip(candidates, hashes) {
+            if candidate.rel == "config.json" {
                 configJSONData = fileHash.capturedData
                 configSHA256 = fileHash.sha256
             }
@@ -6099,32 +6234,83 @@ enum ModelArtifactVerifier {
                 throw AutotuneRecommendError.invalidArtifact("artifact size exceeds supported range")
             }
             totalSize = summed.partialValue
-            entries.append((rel, fileHash.size, fileHash.sha256))
+            records.append(CanonicalFileRecord(
+                relativePath: candidate.rel, size: fileHash.size, sha256: fileHash.sha256, identity: fileHash.identity))
         }
         guard totalSize <= UInt64(Int.max) else {
             throw AutotuneRecommendError.invalidArtifact("artifact size exceeds supported range")
         }
-        let manifest = entries.sorted { $0.path < $1.path }
-            .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
-            .joined()
+        records.sort { $0.relativePath < $1.relativePath }
         let scopedSHA256 = scopedSubdirectory.map { scope in
             let prefix = scope + "/"
-            let scopedManifest = entries.compactMap { entry -> (path: String, size: UInt64, sha: String)? in
-                guard entry.path.hasPrefix(prefix) else { return nil }
-                return (String(entry.path.dropFirst(prefix.count)), entry.size, entry.sha)
-            }
-            .sorted { $0.path < $1.path }
-            .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
-            .joined()
-            return Data(SHA256.hash(data: Data(scopedManifest.utf8))).hexLower
+            return canonicalHash(of: records.compactMap { record -> CanonicalFileRecord? in
+                guard record.relativePath.hasPrefix(prefix) else { return nil }
+                var copy = record
+                copy.relativePath = String(record.relativePath.dropFirst(prefix.count))
+                return copy
+            })
+        }
+        if recordForReuse {
+            recordStore.set(records, for: basePath)
         }
         return CanonicalArtifactInspection(
-            sha256: Data(SHA256.hash(data: Data(manifest.utf8))).hexLower,
+            sha256: canonicalHash(of: records),
             scopedSHA256: scopedSHA256,
             sizeBytes: Int(totalSize),
             configJSONData: configJSONData,
-            configSHA256: configSHA256
+            configSHA256: configSHA256,
+            files: records
         )
+    }
+
+    /// Hashes `candidates` on up to `concurrency` threads and returns the
+    /// results in input order. Work is handed out in index order, so when a
+    /// file fails every lower-indexed file has already started; the error
+    /// thrown is the lowest-indexed one, the same file a serial pass would
+    /// have stopped on.
+    private static func hashFilesConcurrently(
+        _ candidates: [(url: URL, rel: String)],
+        deadline: Date?,
+        concurrency: Int
+    ) throws -> [FileHashResult] {
+        final class State: @unchecked Sendable {
+            let lock = NSLock()
+            var next = 0
+            var results: [FileHashResult?]
+            var firstError: (index: Int, error: Error)?
+            init(count: Int) { results = Array(repeating: nil, count: count) }
+        }
+        let state = State(count: candidates.count)
+        let workers = max(1, min(concurrency, candidates.count))
+        DispatchQueue.concurrentPerform(iterations: workers) { _ in
+            while true {
+                state.lock.lock()
+                guard state.firstError == nil, state.next < candidates.count else {
+                    state.lock.unlock()
+                    return
+                }
+                let index = state.next
+                state.next += 1
+                state.lock.unlock()
+                let candidate = candidates[index]
+                do {
+                    let result = try hashFile(at: candidate.url, captureData: candidate.rel == "config.json", deadline: deadline)
+                    state.lock.lock()
+                    state.results[index] = result
+                    state.lock.unlock()
+                } catch {
+                    state.lock.lock()
+                    if state.firstError.map({ index < $0.index }) ?? true {
+                        state.firstError = (index, error)
+                    }
+                    state.lock.unlock()
+                }
+            }
+        }
+        if let firstError = state.firstError {
+            throw firstError.error
+        }
+        return state.results.map { $0! }
     }
 
     private static func hashFile(at url: URL, captureData: Bool, deadline: Date?) throws -> FileHashResult {
@@ -6166,14 +6352,16 @@ enum ModelArtifactVerifier {
               closed.st_dev == opened.st_dev,
               closed.st_ino == opened.st_ino,
               closed.st_size == opened.st_size,
-              UInt64(closed.st_size) == size
+              UInt64(closed.st_size) == size,
+              FileIdentity(closed) == FileIdentity(opened)
         else {
             throw AutotuneRecommendError.invalidArtifact("file changed while hashing \(url.lastPathComponent)")
         }
         return FileHashResult(
             size: size,
             sha256: Data(hasher.finalize()).hexLower,
-            capturedData: capturedData
+            capturedData: capturedData,
+            identity: FileIdentity(closed)
         )
     }
 }
