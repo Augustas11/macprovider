@@ -5390,6 +5390,126 @@
       }
     },
     {
+      "requirement_id": "SPEC-036-R027",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-27 (Pilot scope and switches), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R028",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-28 (Commitment), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R029",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-29 (Audit decision and draws), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R030",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-30 (Provider storage and audit window), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R031",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-31 (Opening and checks), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R032",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-32 (Verifier, verdicts and visibility), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R033",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-33 (Privacy), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R034",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2419",
+        "rationale": "SPEC-036 v0.4.0 FR-34 (Serving-path rules), §5B trace audit pilot, draft, observe-only, default-off. Pending: the lab prototype in the #2419 campaign PR and its measurements; no coordinator implementation yet."
+      }
+    },
+    {
       "requirement_id": "SPEC-038-R001",
       "spec_id": "SPEC-038",
       "state": "pending",

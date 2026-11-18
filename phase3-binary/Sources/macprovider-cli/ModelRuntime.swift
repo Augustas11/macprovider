@@ -11010,6 +11010,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
                             maxContextTokens: maxContextTokens))
                     defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let traceSerial = TraceAuditLab.active?.serialRequest(
+                        requestID: request.requestID, promptTokens: promptTokenIds,
+                        privacy: request.ingestProvenance == .privacy, timeline: timeline)
+                    defer { traceSerial?.close() }
+                    #endif
                     if Self.speculativeRoute(
                         for: request,
                         draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
@@ -11149,6 +11155,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // #965: a quantized conversation cache prefills its prompt at fp16 up
                             // to the last token, then this path quantizes it (as the iterator would).
                             let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            traceSerial?.attach(
+                                model: generationContext.model, cache: kvCache, quantizedKV: ownsQuantizedConversationCache,
+                                prefixReused: iteratorInput.text.tokens.size != promptTokenIds.count)
+                            // A throw before the unbind below must not leave this thread bound.
+                            defer { traceSerial?.unbindThread() }
+                            #endif
                             if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
@@ -11196,11 +11209,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // step run in the turn taken here.
                             generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
                             gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            traceSerial?.attach(
+                                model: generationContext.model, cache: kvCache,
+                                quantizedKV: ownsQuantizedConversationCache || generation.parameters.kvBits != nil, prefixReused: false)
+                            #endif
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            traceSerial?.unbindThread()
+                            #endif
                             gpuTurn.end()
                             Self.clearMLXBufferCacheAfterPrefill()
                             try prefillScope.markPrefillDone()
@@ -11244,6 +11265,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             )
                             var serialToolStopText = IncrementalToolStopText(observer: serialToolObserver)
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
+                                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                                traceSerial?.bindThread()
+                                defer { traceSerial?.unbindThread() }
+                                #endif
                                 // One turn per token step: `next()` builds and queues step N+1 and
                                 // reads step N; the callback (detokenize, stream) runs outside it.
                                 // Under a sharing policy the turn's end realises step N+1, so the
@@ -11348,6 +11373,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             try grammarConstraint?.validate()
                             let resultTokenIDs = result.tokenIds
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            traceSerial?.finish(generatedTokens: resultTokenIDs)
+                            #endif
                             let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
                                 stoppedByCallback: stoppedByDecodeCallback,
                                 generatedTokenCount: resultTokenIDs.count,
@@ -11621,8 +11649,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         blockingInferenceExecutor: BlockingInferenceExecutor,
         gpuTurnParticipant: GPUTurnParticipant? = nil
     ) async throws -> SpeculativeTextResult {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // Trace audit lab: the serial request of this timeline; capture needs the
+        // main cache the iterator uses (its offset is the forward position).
+        let traceSerial = TraceAuditLab.active?.serialRequest(for: timeline)
+        let mainCache = traceSerial != nil && cache == nil
+            ? (try? targetContext.model.newCache(parameters: parameters)) : cache
+        #else
+        let mainCache = cache
+        #endif
         do {
-            return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
+            return try await draft.perform(nonSendable: (input, targetContext, mainCache)) { draftContext, values in
                 let (input, targetContext, cache) = values
                 // SPEC-001-R018: the whole prompt prefill (target and draft) is
                 // one turn; each `next()` (one draft-and-verify round, or a
@@ -11635,6 +11672,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 // request task, where the model's chunked prefill sees a buyer
                 // cancel through task cancellation; the executor thread cannot.
                 let draftCache = try draftContext.model.newCache(parameters: parameters)
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                if let cache {
+                    traceSerial?.attach(
+                        model: targetContext.model, cache: cache, quantizedKV: parameters.kvBits != nil, prefixReused: false)
+                }
+                // A throw before the unbind below must not leave this thread bound.
+                defer { traceSerial?.unbindThread() }
+                #endif
                 var iterator = try SpeculativeTokenIterator(
                     input: input,
                     mainModel: targetContext.model,
@@ -11644,10 +11689,17 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     parameters: parameters,
                     numDraftTokens: numDraftTokens
                 )
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                traceSerial?.unbindThread()
+                #endif
                 gpuTurn?.end()
                 Self.clearMLXBufferCacheAfterPrefill()
                 try prefillScope.markPrefillDone()
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    traceSerial?.bindThread()
+                    defer { traceSerial?.unbindThread() }
+                    #endif
                     defer { gpuTurn?.end() }
                     let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
                     var tokenIDs: [Int] = []
@@ -11689,6 +11741,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     }
                     Stream().synchronize()
                     let telemetry = iterator.speculativeDecodingTelemetry
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    traceSerial?.finish(generatedTokens: tokenIDs)
+                    #endif
                     return SpeculativeTextResult(
                         output: output,
                         generationTokenCount: tokenIDs.count,
@@ -12056,6 +12111,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             promptTokens: promptTokenIds.count, maxOutputTokens: servedRequestMaxTokens,
                             maxContextTokens: maxContextTokens))
                     defer { SharedModelMemoryBudget.shared.releaseSerialRow(serialKVCharge) }
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let traceSerial = TraceAuditLab.active?.serialRequest(
+                        requestID: request.requestID, promptTokens: promptTokenIds,
+                        privacy: request.ingestProvenance == .privacy, timeline: timeline)
+                    defer { traceSerial?.close() }
+                    #endif
                     // Autotune throughput probe: measure warm-decode
                     // wall-time on the provider so the client can derive an
                     // honest decode rate even for reasoning models whose
@@ -12259,6 +12320,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // #965: a quantized conversation cache prefills its prompt at fp16 up
                         // to the last token, then this path quantizes it (as the iterator would).
                         let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        traceSerial?.attach(
+                            model: generationContext.model, cache: kvCache, quantizedKV: ownsQuantizedConversationCache,
+                            prefixReused: iteratorInput.text.tokens.size != promptTokenIds.count)
+                        // A throw before the unbind below must not leave this thread bound.
+                        defer { traceSerial?.unbindThread() }
+                        #endif
                         if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a
                             // preemption check before each, so a buyer never waits on a
@@ -12337,11 +12405,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // step run in the turn taken here.
                         generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
                         gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        traceSerial?.attach(
+                            model: generationContext.model, cache: kvCache,
+                            quantizedKV: ownsQuantizedConversationCache || generation.parameters.kvBits != nil, prefixReused: false)
+                        #endif
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        traceSerial?.unbindThread()
+                        #endif
                         gpuTurn.end()
                         Self.clearMLXBufferCacheAfterPrefill()
                         try prefillScope.markPrefillDone()
@@ -12358,6 +12434,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let labFilter = IncrementalStreamFilter(
                             stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            traceSerial?.bindThread()
+                            defer { traceSerial?.unbindThread() }
+                            #endif
                             // One turn per token step: `next()` builds and queues step N+1 and
                             // reads step N; the callback (detokenize, stream) runs outside it.
                             // Under a sharing policy the turn's end realises step N+1, so the
@@ -12499,6 +12579,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         try grammarConstraint?.validate()
                         let resultTokenIDs = result.tokenIds
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        traceSerial?.finish(generatedTokens: resultTokenIDs)
+                        #endif
                         let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
                             stoppedByCallback: stoppedByDecodeCallback,
                             generatedTokenCount: resultTokenIDs.count,
