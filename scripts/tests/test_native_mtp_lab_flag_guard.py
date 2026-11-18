@@ -23,6 +23,8 @@ LAB_BUILD_SURFACES = {
     # static-feed lab override (#2364); never a release or signing path.
     ROOT / "scripts" / "lab" / "1690-m6" / "rig.sh",
     ROOT / "scripts" / "lab" / "minimax" / "job-2376-parity.sh",
+    # Start-up timing rig (#2431): builds the lab binary to time `serve --no-join`.
+    ROOT / "scripts" / "lab" / "startup-timing" / "run-from-mac.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
