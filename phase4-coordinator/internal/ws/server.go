@@ -82,7 +82,12 @@ type Server struct {
 	// catalogRecheckPendingHook, when set by an internal test, runs after a
 	// catalog-bound session is registered and before its catalog re-check.
 	catalogRecheckPendingHook func()
-	cfg                       config.Config
+	// afterPublishHook, when set (tests only), runs at the start of
+	// afterReleasePublished: the write lock is already dropped, and session
+	// refresh plus the survivor sweep have not run. Set the func once and
+	// gate it; a later write races the publisher under -race (#1996).
+	afterPublishHook func()
+	cfg              config.Config
 	// recommendedBinaryVersion is the live latest_binary_version. A SIGHUP
 	// stores a new value only after every fallible reload step has succeeded,
 	// so a rejected reload keeps advertising the previous release.
