@@ -99,6 +99,8 @@ struct AutoUpdater: Sendable {
     /// tests can drive a full swap without a signed release. Compiled out of
     /// release builds; production always resolves and verifies the release.
     var preparedReleaseForTest: (@Sendable (_ target: String) async throws -> PreparedSelfUpdate)?
+    /// Test-only stand-in for fetching and verifying the signed discovery head.
+    var signedDiscoveryHeadForTest: (@Sendable () async throws -> SignedReleaseDiscoveryHead)?
     #endif
     /// The coordinator session generation this updater was built for. A
     /// downgrade proceeds only while the live session is still that one.
@@ -603,6 +605,9 @@ struct AutoUpdater: Sendable {
             return
         }
         let commitTracker = AutoUpdateCommitTracker()
+        // Failures after the target is known cool down under that target, so the
+        // activeCooldown(target:) check below backs off the next run.
+        var cooldownTarget = "<unknown>"
         var maintenanceLease: ProviderLifecycleLeaseRecord?
         var startupHandoffPrepared = false
         defer {
@@ -628,7 +633,15 @@ struct AutoUpdater: Sendable {
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
             let head: SignedReleaseDiscoveryHead
             do {
+                #if DEBUG
+                if let signedDiscoveryHeadForTest {
+                    head = try await signedDiscoveryHeadForTest()
+                } else {
+                    head = try await update.discoverSignedReleaseHead()
+                }
+                #else
                 head = try await update.discoverSignedReleaseHead()
+                #endif
                 try await markerStore.updateSignedPolicy(
                     minimum: head.signedPolicyMinimum,
                     revoked: head.signedPolicyRevoked
@@ -644,6 +657,7 @@ struct AutoUpdater: Sendable {
                 return
             }
             let target = head.targetVersion
+            cooldownTarget = target
             await recordR005(target: target, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected")
             let canonicalBinary = currentBinaryURL()
             let installedReleaseVersion = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
@@ -769,7 +783,7 @@ struct AutoUpdater: Sendable {
             await recordR005(target: "<discovery>", phase: .eligibility, outcome: .skipped, reason: "github_rate_limited_deferred_until_\(until)")
         } catch {
             let failure = Self.failureClass(for: error)
-            await failR005(target: "<unknown>", phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
+            await failR005(target: cooldownTarget, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
         }
     }
 
