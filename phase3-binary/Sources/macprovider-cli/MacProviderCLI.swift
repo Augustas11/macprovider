@@ -1285,7 +1285,8 @@ struct ServeCommand: AsyncParsableCommand {
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false,
-        shardStage: ShardStageScope? = nil
+        shardStage: ShardStageScope? = nil,
+        resolveNativeMTP: ((_ config: AppConfig, _ trust: CatalogRuntimeTrust, _ authorityPath: String, _ authoritySHA256: String) async -> NativeMTPAdmissionResolution)? = nil
     ) async throws -> ModelArtifactPreflightOutcome {
         // #1816: a configured pool_model_id must be well formed and never
         // pinned beside a catalog identity, for every runtime.
@@ -1395,66 +1396,92 @@ struct ServeCommand: AsyncParsableCommand {
         // coordinator matches that hash against the pool manifest and is the
         // only authority that admits it, so the catalog preflight is skipped
         // for that join alone. Donor mode keeps its catalog gate.
-        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !skipsCatalogPreflightForLabJoin(
+        let joinedCatalogPreflight = resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !skipsCatalogPreflightForLabJoin(
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
-        )) {
-            // Catalog admission verifies and canonicalizes the authority-bound
-            // artifact root. The private Build 1 runtime loads only its 4-bit
-            // member, whose scoped digest intentionally differs from the full
-            // signed revision digest, so never feed that member path back into
-            // full-artifact catalog verification. Keep the canonical authority
-            // root in config and carry the scoped member only in the verified
-            // runtime binding used by the model loader.
-            let catalogArtifactSHA256 = privateRuntime
-                ? runtimeLoadSHA256
-                : actual
-            let catalogTrust = try await runModelCatalogPreflight(
-                &resolved,
-                modelPath: authorityPath,
-                actualArtifactSHA256: actual,
-                catalogArtifactSHA256: catalogArtifactSHA256,
-                requireRecommendable: !resolved.donorMode,
-                staticInputs: staticInputs,
-                artifactResolver: artifactResolver,
-                persistConfigMigration: persistConfigMigration,
-                persistFrom: persistFrom
-            )
-            let canonicalAuthorityPath = resolved.modelArtifactPath ?? authorityPath
-            let canonicalLoadPath = try runtimeModelLoadPath(
-                verifiedArtifactPath: canonicalAuthorityPath,
-                config: resolved,
-                artifactResolver: artifactResolver
-            )
-            let nativeMTPResolution = await resolveNativeMTPAdmission(
-                config: resolved,
-                releaseID: catalogTrust.releaseID,
-                catalogDigest: catalogTrust.digest,
-                authorityPath: canonicalAuthorityPath,
-                authoritySHA256: actual,
-                staticInputs: staticInputs,
-                artifactResolver: artifactResolver
-            )
-            var nativeMTPResolvedAdmission: NativeMTPResolvedAdmission?
-            var nativeMTPAdmissionUnresolved = false
-            switch nativeMTPResolution {
-            case .admitted(let admission): nativeMTPResolvedAdmission = admission
-            case .noEntry: break
-            case .unavailable: nativeMTPAdmissionUnresolved = true
-            }
-            return ModelArtifactPreflightOutcome(
-                catalogTrust: catalogTrust,
-                runtimeBinding: VerifiedModelRuntimeBinding(
-                    authorityPath: canonicalAuthorityPath,
-                    authoritySHA256: actual,
-                    loadPath: canonicalLoadPath,
-                    loadSHA256: runtimeLoadSHA256,
-                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedAdmission?.authority,
-                    nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath,
-                    nativeMTPAdmissionArtifactRoot: nativeMTPResolvedAdmission?.artifactRoot,
-                    nativeMTPAdmissionUnresolved: nativeMTPAdmissionUnresolved
+        ))
+        // A `--no-join` serve with native MTP `auto` and a catalog key runs the
+        // same catalog preflight and signed admission resolve as a join, so a
+        // lab serve gets the release's admission set with every check kept.
+        // It never persists a config migration, mints no catalog trust (no
+        // coordinator, CB policy or hello changes), and on any failure or a
+        // non-admitted answer keeps the plain no-join binding below.
+        let noJoinNativeMTPPreflight = !joinedCatalogPreflight && !joiningCoordinator && !servesPoolModelEntry
+            && resolved.nativeMTPMode == .auto
+            && !(resolved.modelCatalogKey ?? "").isEmpty
+        if joinedCatalogPreflight || noJoinNativeMTPPreflight {
+            var candidate = resolved
+            do {
+                // Catalog admission verifies and canonicalizes the authority-bound
+                // artifact root. The private Build 1 runtime loads only its 4-bit
+                // member, whose scoped digest intentionally differs from the full
+                // signed revision digest, so never feed that member path back into
+                // full-artifact catalog verification. Keep the canonical authority
+                // root in config and carry the scoped member only in the verified
+                // runtime binding used by the model loader.
+                let catalogArtifactSHA256 = privateRuntime
+                    ? runtimeLoadSHA256
+                    : actual
+                let catalogTrust = try await runModelCatalogPreflight(
+                    &candidate,
+                    modelPath: authorityPath,
+                    actualArtifactSHA256: actual,
+                    catalogArtifactSHA256: catalogArtifactSHA256,
+                    requireRecommendable: !candidate.donorMode,
+                    staticInputs: staticInputs,
+                    artifactResolver: artifactResolver,
+                    persistConfigMigration: persistConfigMigration && joinedCatalogPreflight,
+                    persistFrom: persistFrom
                 )
-            )
+                let canonicalAuthorityPath = candidate.modelArtifactPath ?? authorityPath
+                let canonicalLoadPath = try runtimeModelLoadPath(
+                    verifiedArtifactPath: canonicalAuthorityPath,
+                    config: candidate,
+                    artifactResolver: artifactResolver
+                )
+                let nativeMTPResolution: NativeMTPAdmissionResolution
+                if let resolveNativeMTP {
+                    nativeMTPResolution = await resolveNativeMTP(candidate, catalogTrust, canonicalAuthorityPath, actual)
+                } else {
+                    nativeMTPResolution = await resolveNativeMTPAdmission(
+                        config: candidate,
+                        releaseID: catalogTrust.releaseID,
+                        catalogDigest: catalogTrust.digest,
+                        authorityPath: canonicalAuthorityPath,
+                        authoritySHA256: actual,
+                        staticInputs: staticInputs,
+                        artifactResolver: artifactResolver
+                    )
+                }
+                var nativeMTPResolvedAdmission: NativeMTPResolvedAdmission?
+                var nativeMTPAdmissionUnresolved = false
+                switch nativeMTPResolution {
+                case .admitted(let admission): nativeMTPResolvedAdmission = admission
+                case .noEntry: break
+                case .unavailable: nativeMTPAdmissionUnresolved = true
+                }
+                if noJoinNativeMTPPreflight && nativeMTPResolvedAdmission == nil {
+                    let reason = nativeMTPAdmissionUnresolved ? "admission_unavailable" : "no_admission_entry"
+                    FileHandle.standardError.write(Data("native_mtp no-join: \(reason); serving with native MTP off\n".utf8))
+                } else {
+                    resolved = candidate
+                    return ModelArtifactPreflightOutcome(
+                        catalogTrust: noJoinNativeMTPPreflight ? nil : catalogTrust,
+                        runtimeBinding: VerifiedModelRuntimeBinding(
+                            authorityPath: canonicalAuthorityPath,
+                            authoritySHA256: actual,
+                            loadPath: canonicalLoadPath,
+                            loadSHA256: runtimeLoadSHA256,
+                            nativeMTPResolvedArtifactAuthority: nativeMTPResolvedAdmission?.authority,
+                            nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath,
+                            nativeMTPAdmissionArtifactRoot: nativeMTPResolvedAdmission?.artifactRoot,
+                            nativeMTPAdmissionUnresolved: nativeMTPAdmissionUnresolved
+                        )
+                    )
+                }
+            } catch where noJoinNativeMTPPreflight {
+                FileHandle.standardError.write(Data("native_mtp no-join: catalog preflight failed (\(error)); serving with native MTP off\n".utf8))
+            }
         }
         return ModelArtifactPreflightOutcome(
             catalogTrust: nil,

@@ -1565,6 +1565,94 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
     }
 
+    /// A `--no-join` serve with native MTP `auto` and a catalog key resolves
+    /// the signed admission set like a join, without persisting config or
+    /// minting catalog trust; off, no key, or a failed preflight keeps the
+    /// plain no-join binding with native MTP off.
+    func testNoJoinNativeMTPAutoResolvesAdmissionAndFallsBackOff() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        let yamlText = "model: \(fixture.config.model ?? "")\nmodel_artifact_path: \(fixture.snapshot.path)\n"
+        try yamlText.write(to: yaml, atomically: true, encoding: .utf8)
+        let sha = try XCTUnwrap(fixture.config.modelArtifactSHA256)
+        let admission = ServeCommand.NativeMTPResolvedAdmission(
+            authority: NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
+                releaseID: "test-catalog", signerKeyID: AutotuneStaticInputs.keyID, feedSHA256: String(repeating: "f", count: 64),
+                modelKey: "test-model", artifactID: "artifact", hashAlgorithm: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
+                hash: sha, verificationStatus: "verified", targetURLPath: fixture.durablePath, targetSHA256: sha
+            ),
+            sidecarPath: "/tmp/native-mtp-admission.json",
+            artifactRoot: "/tmp/native-mtp-store"
+        )
+        let calls = LockedBox(0)
+        func run(
+            _ mutate: (inout AppConfig) -> Void,
+            staticInputs: AutotuneStaticInputs? = nil,
+            resolution: ServeCommand.NativeMTPAdmissionResolution = .noEntry
+        ) async throws -> (ServeCommand.ModelArtifactPreflightOutcome, AppConfig) {
+            var config = fixture.config
+            config.configPath = yaml.path
+            config.nativeMTPMode = .auto
+            mutate(&config)
+            let outcome = try await ServeCommand.runModelArtifactPreflightOutcome(
+                &config,
+                joiningCoordinator: false,
+                staticInputs: staticInputs ?? fixture.staticInputs,
+                artifactResolver: fixture.resolver,
+                persistConfigMigration: true,
+                resolveNativeMTP: { candidate, trust, path, authoritySHA in
+                    calls.update { $0 += 1 }
+                    XCTAssertEqual(trust.releaseID, "test-catalog")
+                    XCTAssertEqual(candidate.modelCatalogKey, "test-model")
+                    XCTAssertEqual(path, fixture.durablePath)
+                    XCTAssertEqual(authoritySHA, sha)
+                    return resolution
+                }
+            )
+            return (outcome, config)
+        }
+
+        // (a) auto + catalog key reaches admission resolution and binds it.
+        let (admitted, admittedConfig) = try await run({ _ in }, resolution: .admitted(admission))
+        XCTAssertEqual(calls.get(), 1)
+        XCTAssertNil(admitted.catalogTrust, "no-join never mints catalog trust")
+        XCTAssertEqual(admitted.runtimeBinding?.nativeMTPResolvedArtifactAuthority?.targetURLPath, fixture.durablePath)
+        XCTAssertEqual(admitted.runtimeBinding?.nativeMTPAdmissionSidecarPath, "/tmp/native-mtp-admission.json")
+        XCTAssertEqual(admitted.runtimeBinding?.nativeMTPAdmissionArtifactRoot, "/tmp/native-mtp-store")
+        XCTAssertEqual(admittedConfig.modelArtifactPath, fixture.durablePath)
+        XCTAssertEqual(try String(contentsOf: yaml, encoding: .utf8), yamlText, "no-join persists no config migration")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: yaml.path + ".pre-durable-artifact.bak"))
+
+        // A resolve with no admission keeps the plain no-join binding.
+        let (unresolved, _) = try await run({ _ in }, resolution: .unavailable)
+        XCTAssertEqual(calls.get(), 2)
+        XCTAssertNil(unresolved.runtimeBinding?.nativeMTPResolvedArtifactAuthority)
+        XCTAssertNil(unresolved.runtimeBinding?.nativeMTPAdmissionSidecarPath)
+
+        // (b) mode off, or no catalog key, stays on the old path: no resolve.
+        for mutate: (inout AppConfig) -> Void in [{ $0.nativeMTPMode = .off }, { $0.modelCatalogKey = nil }] {
+            let (outcome, config) = try await run(mutate, resolution: .admitted(admission))
+            XCTAssertNil(outcome.catalogTrust)
+            XCTAssertNil(outcome.runtimeBinding?.nativeMTPResolvedArtifactAuthority)
+            XCTAssertEqual(outcome.runtimeBinding?.authoritySHA256, sha)
+            XCTAssertEqual(config.modelArtifactPath, fixture.snapshot.path)
+        }
+        XCTAssertEqual(calls.get(), 2)
+
+        // (c) a failed catalog preflight falls back to native MTP off; the serve continues.
+        let untrusted = AutotuneStaticInputs(
+            fetch: { _ in throw URLError(.cannotConnectToHost) },
+            verifySignature: { _, _ in false }
+        )
+        let (failed, failedConfig) = try await run({ _ in }, staticInputs: untrusted, resolution: .admitted(admission))
+        XCTAssertEqual(calls.get(), 2, "admission is never resolved without a passing catalog preflight")
+        XCTAssertNil(failed.catalogTrust)
+        XCTAssertNil(failed.runtimeBinding?.nativeMTPResolvedArtifactAuthority)
+        XCTAssertEqual(failed.runtimeBinding?.authoritySHA256, sha)
+        XCTAssertEqual(failedConfig.modelArtifactPath, fixture.snapshot.path)
+        XCTAssertEqual(try String(contentsOf: yaml, encoding: .utf8), yamlText)
+    }
+
     // Regression (both-sides sweep): the durable-store migration writer must
     // also keep forward slashes literal. A migrated path under
     // ".../Application Support/..." contains a space → quoted → must NOT be
