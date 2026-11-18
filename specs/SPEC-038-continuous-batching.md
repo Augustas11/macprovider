@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.59
+Version: v0.3.60
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.60 (2026-11-18, FR-CB14 width selection uses a 3% noise band instead of the calibrator's 15% tie band, Related: #2409):**
+The self-check prefers the lowest k within 3% of the best gain, not 15%.
+Candidate widths are already memory-bounded and verified exact, so the band
+only absorbs measurement noise (about 0.3% same-window); the 15% band hid real
+gains (1.349/1.513/1.660 at 2/3/4 now selects 4). The calibrator's own 15%
+is unchanged for its other uses.
+
 **Change log v0.3.59 (2026-11-16, FR-CB2 hybrid Qwen MoE family prefills in chunks of up to 2048 tokens, Related: #2402):**
 FR-CB2: the hybrid Qwen MoE family (paged-KV family `qwen`, MoE dispatch and
 recurrent gated-delta layers: Qwen3.6-35B-A3B and Qwen3.5-35B-A3B) takes the
@@ -2225,7 +2232,8 @@ buyer traffic. No extra runtime enable flag is introduced.
    but no row decodes while another prefills, so the number no longer
    credits prefill overlapping decode and can read lower than the same
    width measured without a cohort; it is not adjusted for that. It grants the rung with the highest gain, preferring the lowest k
-   within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
+   within 3% of it (a noise band only: widths reaching selection are already
+   memory-bounded by the auto-served-slots cap and verified exact), only when that gain is at least 1.2x; otherwise a fresh
    Mac serves serially. The highest k whose rows all passed is recorded as
    `verified_k`.
    **Throughput noise never switches batching off.** On a Mac that already

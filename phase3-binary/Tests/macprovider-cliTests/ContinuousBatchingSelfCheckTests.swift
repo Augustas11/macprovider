@@ -42,6 +42,21 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(decision.state, .granted(slots: 4))
     }
 
+    func testWidthSelectionUsesATightNoiseBandNotTheCalibratorTieBand() {
+        // serial 100: gains 1.349/1.513/1.660 at 2/3/4 differ by >3% per step.
+        let gains = [m(2, tps: 134.9), m(3, tps: 151.3), m(4, tps: 166.0)]
+        XCTAssertEqual(ContinuousBatchingSelfCheck.decide(serialTPS: 100, measurements: gains).slots, 4)
+        // Within 3% of the best: the smaller width wins.
+        let tied = [m(2, tps: 160), m(3, tps: 162)]
+        XCTAssertEqual(ContinuousBatchingSelfCheck.decide(serialTPS: 100, measurements: tied).slots, 2)
+        // A prior grant never exceeds what the isolation check verified.
+        let result = ContinuousBatchingSelfCheck.reconcile(
+            fresh: ContinuousBatchingSelfCheck.decide(serialTPS: 100, measurements: gains),
+            priorGrant: 8, serialTPS: 100, measurements: gains, previousStreak: 0
+        )
+        XCTAssertLessThanOrEqual(result.decision.slots, 4)
+    }
+
     func testRowDivergenceAtTwoServesSerially() {
         let decision = ContinuousBatchingSelfCheck.decide(
             serialTPS: 50,
@@ -450,7 +465,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     func testTiesGoToTheLowerSlotCount() {
         let decision = ContinuousBatchingSelfCheck.decide(
             serialTPS: 50,
-            measurements: [m(2, tps: 90), m(3, tps: 120), m(4, tps: 130)]
+            measurements: [m(2, tps: 90), m(3, tps: 126), m(4, tps: 129)]
         )
         XCTAssertEqual(decision.slots, 3)
     }
