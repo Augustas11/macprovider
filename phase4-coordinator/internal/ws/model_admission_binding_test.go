@@ -660,6 +660,125 @@ func (s *flakyLatestModelAdmissionStore) LatestModelAdmissionStatusesForProvider
 	}
 }
 
+// A pricing reload publishes the new release generation before
+// afterReleasePublished restamps survivors. Hold that gap. An unbound
+// catalog session (no candidate, no artifact) is the pricing-lane shape:
+// its compare does not read the release generation, so it must still
+// insert. A candidate-bound session is stale until the sweep restamps it.
+func TestCatalogSessionRoutesThroughReleasePublicationHold(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "catalog", "s-catalog", "model-a", true)
+	f.registerSession(t, "byom", "s-byom", "model-a", true)
+	// Registration stages the receipt key. A ready update publishes it, which
+	// is the point a live session becomes RoutingEligible.
+	slots := 1
+	for _, id := range [][2]string{{"catalog", "s-catalog"}, {"byom", "s-byom"}} {
+		if _, ok := s.pool.ApplyStateUpdate(id[0], id[1], pool.StateUpdate{State: pool.StateReady, SlotsFree: &slots, SlotsTotal: &slots, At: f.now}); !ok {
+			t.Fatalf("ready update %s", id[0])
+		}
+	}
+	if registered, ok := s.pool.Resolve("catalog", ""); !ok || !registered.RoutingEligible() || len(registered.PendingReceiptPubkey) != 0 {
+		t.Fatalf("catalog session before publish: ok=%v eligible=%v pendingKey=%d", ok, registered.RoutingEligible(), len(registered.PendingReceiptPubkey))
+	}
+	offer := f.offer(t, "byom", "b", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	settled := f.decide(t, f.decide(t, offer, "catalog_priced"), "settlement_capable")
+	byomBefore, ok := s.pool.Resolve("byom", "")
+	if !ok || byomBefore.ModelAdmissionCandidateID != settled.CandidateID || byomBefore.ModelAdmissionValidatedReleaseGeneration == 0 || byomBefore.ModelAdmissionValidatedReleaseGeneration != s.ReleaseGeneration() {
+		t.Fatalf("bound session before publish: ok=%v gen=%d release=%d candidate=%q", ok, byomBefore.ModelAdmissionValidatedReleaseGeneration, s.ReleaseGeneration(), byomBefore.ModelAdmissionCandidateID)
+	}
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var armed atomic.Bool
+	s.artifactIdentitySets.afterPublishHook = func() {
+		if !armed.Load() {
+			return
+		}
+		once.Do(func() {
+			close(held)
+			<-release
+		})
+	}
+
+	generationStore := s.modelAdmissions.(interface {
+		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+	})
+	catalogProvider, _ := s.pool.Resolve("catalog", "")
+	catalogRouteGen, err := generationStore.ModelAdmissionProviderRouteGeneration(context.Background(), "catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogExpect := ModelAdmissionRouteExpectation{
+		ProviderID:              catalogProvider.ProviderID,
+		BindingGeneration:       catalogProvider.ModelAdmissionBindingGeneration,
+		ProviderRouteGeneration: catalogRouteGen,
+		SessionEpoch:            catalogProvider.ModelAdmissionSessionEpoch,
+	}
+	byomExpect := ModelAdmissionRouteExpectation{
+		ProviderID:         byomBefore.ProviderID,
+		CandidateID:        settled.CandidateID,
+		CoordinatorEventID: settled.CoordinatorEventID,
+		BindingGeneration:  byomBefore.ModelAdmissionBindingGeneration,
+		SessionEpoch:       byomBefore.ModelAdmissionSessionEpoch,
+	}
+
+	restamped := bindingCatalog(t, "release-2", "recommendable", bindingRowHash)
+	armed.Store(true)
+	published := make(chan struct{})
+	go func() {
+		f.publish(restamped, map[string]*artifactidentity.Index{
+			restamped.SHA256: bindingIndex(t, restamped, strings.Repeat("e", 64), f.now, bindingMembers(f.gguf, strings.Repeat("b", 64))),
+			f.catalog.SHA256: f.index,
+		}, f.catalog)
+		close(published)
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publish did not stop between the generation bump and the survivor restamp")
+	}
+	if s.ReleaseGeneration() <= byomBefore.ModelAdmissionValidatedReleaseGeneration {
+		t.Fatalf("hold is before the generation bump: release=%d bound=%d", s.ReleaseGeneration(), byomBefore.ModelAdmissionValidatedReleaseGeneration)
+	}
+	during, _ := s.pool.Resolve("byom", "")
+	if during.ModelAdmissionValidatedReleaseGeneration == s.ReleaseGeneration() {
+		t.Fatal("hold is after the survivor restamp")
+	}
+	catalogDuring, _ := s.pool.Resolve("catalog", "")
+	if !catalogDuring.RoutingEligible() || catalogDuring.ModelAdmissionCandidateID != "" || catalogDuring.ArtifactIdentity != nil {
+		t.Fatalf("catalog session changed during the hold: eligible=%v state=%q slots=%d/%d mode=%q pendingKey=%d candidate=%q artifact=%v",
+			catalogDuring.RoutingEligible(), catalogDuring.State, catalogDuring.SlotsFree, catalogDuring.SlotsTotal, catalogDuring.CatalogAdmissionMode,
+			len(catalogDuring.PendingReceiptPubkey), catalogDuring.ModelAdmissionCandidateID, catalogDuring.ArtifactIdentity != nil)
+	}
+
+	catalogInserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), catalogExpect, func() error { catalogInserted++; return nil }); err != nil || catalogInserted != 1 {
+		t.Fatalf("unbound catalog session during the hold: err=%v inserted=%d", err, catalogInserted)
+	}
+	byomInserted := 0
+	err = s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), byomExpect, func() error { byomInserted++; return nil })
+	if !errors.Is(err, ErrModelAdmissionRouteDrift) || byomInserted != 0 {
+		t.Fatalf("bound session during the hold: err=%v inserted=%d", err, byomInserted)
+	}
+
+	close(release)
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publish did not finish after the hold")
+	}
+	after, _ := s.pool.Resolve("byom", "")
+	if after.ModelAdmissionValidatedReleaseGeneration != s.ReleaseGeneration() || after.ModelAdmissionCandidateID != settled.CandidateID {
+		t.Fatalf("survivor was not restamped after the hold: gen=%d release=%d candidate=%q", after.ModelAdmissionValidatedReleaseGeneration, s.ReleaseGeneration(), after.ModelAdmissionCandidateID)
+	}
+	catalogAfter, _ := s.pool.Resolve("catalog", "")
+	if !catalogAfter.RoutingEligible() {
+		t.Fatal("catalog session is ineligible after the restamp")
+	}
+}
+
 // SPEC-047-R006(b)(c) v0.1.5 / R008: a release RE-STAMP (new release id,
 // digest, feed signature; unchanged rows and members) changes nothing —
 // no revocation, bindings re-validated under the new generation — while a
