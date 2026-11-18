@@ -175,7 +175,7 @@ Sign a record (dispatch the workflow — the private key never leaves the
 `production-release` environment):
 
 - `.github/workflows/signed-journey.yml (journey=oncall-readiness)` (manual dispatch from
-  `main`) builds an unsigned record from the record fields, signs it with the
+  `main`) builds an unsigned record from the `oncall_record` JSON input, signs it with the
   environment secret via `coordinator-cli trust-pool-oncall sign`, verifies the
   signed record binds the registered key digest, and uploads the signed JSON as a
   workflow artifact.

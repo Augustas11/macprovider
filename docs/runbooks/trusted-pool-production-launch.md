@@ -75,10 +75,15 @@ fail-closed.
 Signing happens in CI so the private key never reaches an operator shell.
 
 1. Dispatch `.github/workflows/signed-journey.yml (journey=oncall-readiness)` from `main`
-   (manual dispatch, `production-release` environment) with the launch
-   environment id, record version, operator contacts, break-glass path,
-   compromise channel, agreement-notification ack, creator emergency mechanism,
-   and `confirmation_ttl_seconds` (≤ 7776000 / 90 days). The workflow runs the
+   (manual dispatch, `production-release` environment) with `operation_id` and
+   `oncall_record`. `oncall_record` is one JSON object. Its fields are
+   `launch_environment_id`, `record_version`, `primary_operator_contact`,
+   `secondary_operator_contact`, `break_glass_escalation_path`,
+   `compromise_notification_channel`,
+   `creator_agreement_notification_commitment_ack`,
+   `creator_emergency_notification_mechanism`, `confirmation_ttl_seconds`
+   (integer, at most 7776000 / 90 days; omitted means 7776000) and
+   `signing_confirmed` (JSON boolean `true`). The workflow runs the
    keyring `--check`, `verify-github-release-posture.sh`, signs with the env
    secret, verifies the signed record binds the registered key digest, and
    uploads `oncall-readiness.signed.json`.
