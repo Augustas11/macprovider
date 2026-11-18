@@ -27,6 +27,8 @@ final class StartupHashReuseTests: XCTestCase {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url)
         }
+        // Keep the files out of the racy-clean window of the first hash.
+        Thread.sleep(forTimeInterval: 0.02)
         return root
     }
 
@@ -83,6 +85,24 @@ final class StartupHashReuseTests: XCTestCase {
         XCTAssertEqual(try ModelRuntime.modelWeightArtifactManifestHash(in: root), rehashed)
         XCTAssertNotNil(ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: variant))
         XCTAssertEqual(variantRehashed, try ModelRuntime.modelWeightArtifactManifestHash(in: variant))
+    }
+
+    func testNonLocalOrNonAPFSVolumeNeverReusesRecord() throws {
+        let root = try fixture()
+        _ = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: root, recordForReuse: true)
+        XCTAssertNotNil(ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: root))
+        ModelArtifactVerifier.localAPFSCheckOverride = { _ in false }
+        defer { ModelArtifactVerifier.localAPFSCheckOverride = nil }
+        XCTAssertNil(ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: root))
+    }
+
+    func testRacyCleanFileIsNotRecorded() throws {
+        let root = try fixture()
+        // An mtime after the hash close time is inside the racy window.
+        try bumpMtime(root.appendingPathComponent("tokenizer.json"))
+        _ = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: root, recordForReuse: true)
+        XCTAssertNil(ModelArtifactVerifier.recordedFiles(forDirectory: root))
+        XCTAssertNil(ModelArtifactVerifier.identityVerifiedRecordedFiles(directory: root))
     }
 
     func testWeightsManifestIgnoresRecordAfterChange() throws {

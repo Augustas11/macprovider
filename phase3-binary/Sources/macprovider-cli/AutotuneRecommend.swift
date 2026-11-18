@@ -6066,6 +6066,9 @@ enum ModelArtifactVerifier {
         var sha256: String
         var capturedData: Data?
         var identity: FileIdentity
+        /// True when mtime or ctime lies within 1 ms of (or after) the wall
+        /// time the hash finished: a later write could keep the same stamps.
+        var racyClean: Bool
     }
 
     /// Per-file records of inspections made with `recordForReuse`, keyed by
@@ -6133,7 +6136,8 @@ enum ModelArtifactVerifier {
     /// shows exactly the recorded files with unchanged identities; nil (the
     /// caller re-hashes) on any missing, extra or changed file.
     static func identityVerifiedRecordedFiles(directory: URL) -> [CanonicalFileRecord]? {
-        guard let recorded = recordedFiles(forDirectory: directory),
+        guard isLocalAPFS(directory),
+              let recorded = recordedFiles(forDirectory: directory),
               let current = try? currentFileIdentities(directory: directory),
               current.count == recorded.count
         else { return nil }
@@ -6141,6 +6145,20 @@ enum ModelArtifactVerifier {
             return nil
         }
         return recorded
+    }
+
+    /// Test seam: replaces the filesystem check so tests can force a refusal.
+    nonisolated(unsafe) static var localAPFSCheckOverride: ((URL) -> Bool)?
+
+    /// Identity reuse is sound only on a local APFS volume (fine timestamps,
+    /// no remote or network-mapped files).
+    private static func isLocalAPFS(_ directory: URL) -> Bool {
+        if let override = localAPFSCheckOverride { return override(directory) }
+        var fs = statfs()
+        guard statfs(directory.path, &fs) == 0, fs.f_flags & UInt32(MNT_LOCAL) != 0 else { return false }
+        return withUnsafePointer(to: &fs.f_fstypename) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+        } == "apfs"
     }
 
     private static func currentFileIdentities(directory: URL) throws -> [String: FileIdentity] {
@@ -6220,6 +6238,7 @@ enum ModelArtifactVerifier {
             candidates.append((url, rel))
         }
         let hashes = try hashFilesConcurrently(candidates, deadline: deadline, concurrency: hashConcurrency)
+        let fileHashes = hashes
         var records: [CanonicalFileRecord] = []
         var totalSize: UInt64 = 0
         var configJSONData: Data?
@@ -6250,7 +6269,7 @@ enum ModelArtifactVerifier {
                 return copy
             })
         }
-        if recordForReuse {
+        if recordForReuse, !fileHashes.contains(where: \.racyClean) {
             recordStore.set(records, for: basePath)
         }
         return CanonicalArtifactInspection(
@@ -6357,11 +6376,15 @@ enum ModelArtifactVerifier {
         else {
             throw AutotuneRecommendError.invalidArtifact("file changed while hashing \(url.lastPathComponent)")
         }
+        var closeTime = timespec()
+        clock_gettime(CLOCK_REALTIME, &closeTime)
+        let closeNanoseconds = Int64(closeTime.tv_sec) * 1_000_000_000 + Int64(closeTime.tv_nsec)
         return FileHashResult(
             size: size,
             sha256: Data(hasher.finalize()).hexLower,
             capturedData: capturedData,
-            identity: FileIdentity(closed)
+            identity: FileIdentity(closed),
+            racyClean: closeNanoseconds - max(FileIdentity(closed).mtimeNanoseconds, FileIdentity(closed).ctimeNanoseconds) <= 1_000_000
         )
     }
 }
