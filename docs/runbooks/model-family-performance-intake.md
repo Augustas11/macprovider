@@ -195,6 +195,7 @@ changes output is excluded: every speed cell is gated by identical output.
 | Larger M-block in grouped MoE matmuls (reuses dequantized weights across rows) | MoE prefill | +7% prefill, identical output [1] | Not yet microbenchmarked | |
 | Merge small kernels | Decode | Rarely paid under CUDA/XPU graph capture, where launch overhead is already gone [1]; MLX on Apple GPUs has no comparable graph capture, so this prior is weak here | Not yet measured | |
 | Larger prefill chunks | Prefill speed, at the cost of other rows' decode stalls | Trade-off, not a win [1] | Not yet measured | |
+| One gated-delta pass that also returns the state checkpoint, instead of two calls (prefix, then suffix) on every native-hybrid MTP verify step | Native-MTP step time on Qwen3.5/3.6 (linear-attention layers) | mlx-vlm already does this (`gated_delta_update_with_states`) | Kernel only, base M5, mlx 0.32.4, Qwen3.6-35B-A3B shapes (30 layers): the split costs 1.0-1.65 ms more per verify step than one call (verify length 2-4), bit-identical. Each extra call re-reads and re-writes the 2 MiB fp32 state per layer. End-to-end tok/s not yet measured. Needs a checkpoint output in mlx core `fast::gated_delta_update`, then mlx-c, mlx-swift, mlx-swift-lm | upstream ml-explore/mlx-swift-lm 753 |
 
 Excluded: int8 prefill (changes output). Not evaluated: CUDA/XPU graph
 capture, the source's first decode lever; MLX on Apple GPUs has no direct
