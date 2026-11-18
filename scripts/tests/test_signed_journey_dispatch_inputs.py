@@ -115,6 +115,12 @@ class SignedJourneyDispatchInputsTest(unittest.TestCase):
             decoder.decode("[]")
         with self.assertRaises(SystemExit):
             decoder.decode("")
+        with self.assertRaises(SystemExit):
+            decoder.decode(
+                '{"signing_confirmed": false, "signing_confirmed": true}'
+            )
+        with self.assertRaises(SystemExit):
+            decoder.decode('{"x\\n::add-mask::sekrit": "y"}')
 
     def test_cli_writes_a_sourceable_shell_file(self) -> None:
         record = {

@@ -35,22 +35,36 @@ ALLOWED = set(STRING_FIELDS) | {"confirmation_ttl_seconds", "signing_confirmed"}
 
 
 def fail(message: str) -> None:
-    print(f"::error::{message}", file=sys.stderr)
+    # The runner treats each log line as a workflow command. Keep the
+    # annotation on one line and do not echo caller-controlled text.
+    safe = message.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+    print(f"::error::{safe}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    seen: set[str] = set()
+    obj: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            fail("oncall_record repeats a field")
+        seen.add(key)
+        obj[key] = value
+    return obj
 
 
 def decode(raw: str) -> dict[str, str]:
     if raw.strip() == "":
         fail("oncall_record is empty")
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
     except json.JSONDecodeError:
         fail("oncall_record is not JSON")
     if not isinstance(data, dict):
         fail("oncall_record must be a JSON object")
-    unknown = sorted(set(data) - ALLOWED)
+    unknown = set(data) - ALLOWED
     if unknown:
-        fail("oncall_record has unknown fields: " + ", ".join(unknown))
+        fail("oncall_record has unknown fields")
 
     values: dict[str, str] = {}
     for key, env_name in STRING_FIELDS.items():
