@@ -215,8 +215,10 @@ enum PagedKVRuntimeParityProbe {
                 PagedKVCache.resetGatherDiagnostics()
                 var probeCaches: [KVCache] = []
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
-                    probeCaches = zip(stockLayout, kinds).map { _, kind in
-                        if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                    probeCaches = zip(stockLayout, kinds).map { stock, kind in
+                        // A fresh recurrent cache of the class the model built
+                        // (Qwen4-Exp PLE layers: a four-slot `ArraysCache`).
+                        if case .recurrentMamba = kind { return stock.copy() }
                         if case .pagedIndexedKV = kind {
                             return PagedMiniMaxM3SparseCache(
                                 blockSizeTokens: blockSizeTokens,

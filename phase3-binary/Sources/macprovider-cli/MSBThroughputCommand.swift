@@ -592,10 +592,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private static func msbCacheTopology(
         model: any LanguageModel
     ) throws -> (cacheKinds: [PagedKVSharedForwardBackend.CacheKind], recurrentStateLayout: PagedKVRecurrentStateLayout)? {
-        guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(
-            from: try model.newCache(parameters: nil)
-        ), !cacheKinds.isEmpty else {
+        let caches = try model.newCache(parameters: nil)
+        guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(from: caches), !cacheKinds.isEmpty else {
             return nil
+        }
+        // Qwen4-Exp: the PLE layers are the ones the loaded model gives a
+        // four-slot `ArraysCache` (every other recurrent layer a `MambaCache`).
+        if model is Qwen4ExpModel || model is Qwen4ExpTextModel {
+            let pleLayers = caches.indices.filter { type(of: caches[$0]) == ArraysCache.self }
+            return (cacheKinds, .qwen4ExpPLEFourSlot(pleLayers: pleLayers))
         }
         return (cacheKinds, labRecurrentStateLayout(model: model, cacheKinds: cacheKinds))
     }
