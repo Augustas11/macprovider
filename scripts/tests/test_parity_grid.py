@@ -1345,6 +1345,7 @@ t0 = time.time()
 sys.stderr.write("event=served_slots action=planned rows=22 served=1 reason=self_check_pending configured=4\n")
 sys.stderr.write("event=served_slots action=applied slots=1 rows=22 reason=self_check_pending\n")
 sys.stderr.flush()
+COUNT = [0]
 def decided():
     return time.time() - t0 > 1.5
 class H(BaseHTTPRequestHandler):
@@ -1355,8 +1356,15 @@ class H(BaseHTTPRequestHandler):
         body = {"model_loaded": True, "capacity": {"max_concurrency": 3 if granted else 1},
                 "continuous_batching": {"mode": "canary" if granted else "off", "active": granted,
                                         "self_check": sc, "small_m_route": "stock_order"}}
+        if os.environ.get("FAKE_MTP"):
+            on = os.environ["FAKE_MTP"] == "on"
+            body["native_mtp"] = {"enabled": on, "mode": "eligible" if on else "off", "family": "f",
+                                  "proposal_depth": 3, "proposed_tokens": COUNT[0] * 6,
+                                  "accepted_tokens": COUNT[0] * 4, "mtp_forwards": COUNT[0] * 2,
+                                  "reset_generation": 1, "last_reason": "active"}
         self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode())
     def do_POST(self):
+        COUNT[0] += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if not decided():
             self.send_response(500); self.end_headers(); self.wfile.write(b"request before the verdict"); return
@@ -1421,6 +1429,56 @@ class RunGridWarmupTests(unittest.TestCase):
         self.assertIn("ROUTE_FAIL phase=start", proc.stdout)
         self.assertIn("ROUTE_FAIL phase=end", proc.stdout)
         self.assertTrue((out / "provider.jsonl").read_text())  # the cells were still measured
+
+
+class RunGridNativeMtpTests(unittest.TestCase):
+    """run-grid.sh --expect-native-mtp on: the serve's native_mtp status gates and is recorded."""
+
+    def run_grid(self, mtp):
+        import socket
+        import subprocess
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        (d / "bin").mkdir()
+        (d / "fake").mkdir()
+        (d / "serve.py").write_text(_FAKE_CB_SERVE)
+        cli = d / "bin" / "macprovider-cli"
+        cli.write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {d / "serve.py"} "$@"\n')
+        lsof = d / "fake" / "lsof"
+        lsof.write_text("#!/bin/bash\nexit 1\n")
+        for p in (cli, lsof):
+            p.chmod(0o755)
+        out = d / "out"
+        env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin", FAKE_DECISION="granted", FAKE_MTP=mtp)
+        proc = subprocess.run(
+            ["bash", str(HARNESS / "run-grid.sh"), "--model-path", str(d), "--model-name", MODEL,
+             "--bin-dir", str(d / "bin"), "--out-dir", str(out), "--skip-reference", "--skip-compare",
+             "--port", str(port), "--outputs", "4", "--contexts", "short", "--rows", "1", "--trials", "2",
+             "--warmup-poll-s", "0.5", "--expect-native-mtp", "on"],
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc, out
+
+    def test_native_mtp_on_records_acceptance_per_trial(self):
+        proc, out = self.run_grid("on")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NATIVE_MTP phase=start enabled=True mode=eligible", proc.stdout)
+        self.assertIn("NATIVE_MTP phase=end", proc.stdout)
+        aggs = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        aggs = [r for r in aggs if r["kind"] == "aggregate"]
+        self.assertEqual(len(aggs), 2)
+        for r in aggs:
+            nm = r["native_mtp"]
+            self.assertEqual((nm["proposed_tokens"], nm["accepted_tokens"], nm["acceptance"]), (6, 4, 0.6667))
+        self.assertTrue(json.loads((out / "grid.json").read_text())["native_mtp"]["end"]["enabled"])
+
+    def test_native_mtp_off_fails_with_11_before_any_cell(self):
+        proc, out = self.run_grid("off")
+        self.assertEqual(proc.returncode, 11, proc.stdout + proc.stderr)
+        self.assertIn("NATIVE_MTP_FAIL phase=start", proc.stdout)
+        self.assertFalse((out / "provider.jsonl").exists())
 
 
 class RunGridReferenceOnlyTests(unittest.TestCase):
@@ -1502,6 +1560,46 @@ class BaselineMdReferenceNoteTests(unittest.TestCase):
             md = Path(d, "baseline.md").read_text()
         self.assertIn("Reference: oMLX 0.8.0rc1 commit `c74f1b1` (mlx 0.32.4, mlx-vlm 0.7.11).", md)
         self.assertIn("our provider's = (completion_tokens - 1) / (last token - first token)", md)
+
+
+class NativeMtpRecordTests(unittest.TestCase):
+    NM = {"enabled": True, "mode": "eligible", "family": "glm5_next", "proposal_depth": 3, "proposed_tokens": 30,
+          "accepted_tokens": 20, "last_reason": "active", "reset_generation": 1}
+
+    def record(self, nm, phase, expect="on"):
+        with tempfile.TemporaryDirectory() as d:
+            st, grid = os.path.join(d, "s.json"), os.path.join(d, "g.json")
+            Path(st).write_text(json.dumps({"native_mtp": nm} if nm is not None else {}))
+            Path(grid).write_text("{}")
+            out = []
+            rc = route_status.record_native_mtp(st, grid, phase, expect, out=out.append)
+            return rc, out, json.loads(Path(grid).read_text())
+
+    def test_on_passes_and_is_stored_in_the_grid(self):
+        rc, out, grid = self.record(self.NM, "start")
+        self.assertEqual(rc, 0)
+        self.assertEqual(grid["native_mtp"]["start"]["accepted_tokens"], 20)
+        self.assertTrue(out[0].startswith("NATIVE_MTP phase=start enabled=True mode=eligible"))
+
+    def test_off_disabled_or_missing_fails_with_11(self):
+        for nm in (dict(self.NM, enabled=False, mode="off"), dict(self.NM, mode="off"), dict(self.NM, enabled=False), None):
+            rc, out, _ = self.record(nm, "start")
+            self.assertEqual(rc, 11)
+            self.assertTrue(any(x.startswith("NATIVE_MTP_FAIL phase=start") for x in out))
+
+    def test_end_needs_proposed_tokens_and_any_never_fails(self):
+        self.assertEqual(self.record(dict(self.NM, proposed_tokens=0), "end")[0], 11)
+        self.assertEqual(self.record(dict(self.NM, proposed_tokens=0), "start")[0], 0)
+        self.assertEqual(self.record(None, "end", "any")[0], 0)
+
+    def test_client_delta_is_per_trial_and_invalid_after_a_reset(self):
+        before = dict(self.NM, mtp_forwards=5)
+        after = dict(self.NM, proposed_tokens=90, accepted_tokens=50, mtp_forwards=35)
+        d = client.native_mtp_delta(before, after)
+        self.assertEqual((d["proposed_tokens"], d["accepted_tokens"], d["acceptance"]), (60, 30, 0.5))
+        self.assertEqual(d["mean_accepted_length"], 1.0)
+        self.assertFalse(client.native_mtp_delta(before, dict(after, reset_generation=2))["acceptance_valid"])
+        self.assertFalse(client.native_mtp_delta(None, after)["acceptance_valid"])
 
 
 if __name__ == "__main__":

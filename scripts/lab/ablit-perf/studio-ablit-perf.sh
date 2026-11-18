@@ -28,8 +28,20 @@
 #          a provider-only rerun scored against that run's reference rows (job.sh header); its
 #          reference.jsonl is pushed from $POC/scratchpad/ablit-perf/results/<run id> when the
 #          Studio no longer has it
+#        MODELS=glm GLM_MTP_BENCH=0 REUSE_REFERENCE=20261117T195837Z SEED_SELF_CHECK_RUN=20261118T004127Z \
+#          CONTEXTS=200,4000,16000 OUTPUTS=512,2048 TRIALS=3 \
+#          GLM_PASSES='mtp rows=1 native_mtp=auto; slots4 rows=4 slots=4' studio-ablit-perf.sh
+#          #2409 abliterated GLM, provider side only, one job: pass `mtp` (1 row, native MTP auto at the
+#          signed admission set, run-grid.sh fails it with exit 11 when native MTP is off; per-cell
+#          proposed/accepted tokens in provider.jsonl and PASS_MTP lines) then pass `slots4` (4 rows, the
+#          served slots owner-pinned to 4; BLOCKER when the ROUTE shows other slots), each its own serve,
+#          scored against that run's oMLX reference rows, no noise pass, no baseline.md. Both seed the
+#          stored self-check verdict of SEED_SELF_CHECK_RUN (its cb-self-check.json is pushed from
+#          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has it); one serve
+#          cannot do both (native MTP admits one active row, the 4-slot pass needs the pin), so two loads.
+#          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB
-# SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SERVE_ENV and every <KEY>_<FIELD> model variable job.sh reads (see its header).
+# SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SEED_SELF_CHECK_RUN SERVE_ENV and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -81,7 +93,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SERVE_ENV|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -92,7 +104,8 @@ rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/
   && rsync -a "$REPO/scripts/lab/cb-studio/glm53_oracle_json.py" macstudio:lab-ablit-perf/job/cb-studio/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/scripts/lab/minimax/minimax_ablate.py" "$REPO/scripts/lab/minimax/publish_abliterated.py" \
        macstudio:lab-ablit-perf/job/minimax/ >> "$LOG" 2>&1 \
-  && rsync -a "$REPO/phase3-binary/catalog/autotune/continuous-batching-policy.json" macstudio:lab-ablit-perf/job/catalog/ >> "$LOG" 2>&1 \
+  && rsync -a "$REPO/phase3-binary/catalog/autotune/continuous-batching-policy.json" \
+       "$REPO/phase3-binary/catalog/autotune/autotune-candidates.json" macstudio:lab-ablit-perf/job/catalog/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/scripts/native_mtp_r015_analyze.py" "$REPO/scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json" \
        macstudio:lab-ablit-perf/job/mtp/ >> "$LOG" 2>&1 \
   && rsync -a --delete --exclude '.build*' --exclude '.swiftpm' "$REPO/phase3-binary/" macstudio:lab-ablit-perf/src/phase3-binary/ >> "$LOG" 2>&1 \
@@ -113,6 +126,13 @@ if [ -n "${REUSE_REFERENCE:-}" ]; then
   rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='reference.jsonl' --exclude='*' \
       "$RES/$REUSE_REFERENCE/" "macstudio:lab-ablit-perf/results/$REUSE_REFERENCE/" >> "$LOG" 2>&1 \
     || { blocker "push of the reference rows of $REUSE_REFERENCE to the Studio failed"; exit 2; }
+fi
+if [ -n "${SEED_SELF_CHECK_RUN:-}" ]; then
+  [ -d "$RES/$SEED_SELF_CHECK_RUN" ] || { blocker "no local results at $RES/$SEED_SELF_CHECK_RUN"; exit 2; }
+  # Only the stored verdicts of the main passes; files the Studio still has are never overwritten.
+  rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='main/serve/cb-self-check.json' --exclude='*' \
+      "$RES/$SEED_SELF_CHECK_RUN/" "macstudio:lab-ablit-perf/results/$SEED_SELF_CHECK_RUN/" >> "$LOG" 2>&1 \
+    || { blocker "push of the self-check verdict of $SEED_SELF_CHECK_RUN to the Studio failed"; exit 2; }
 fi
 if [ -n "$FORK_HEAD" ]; then
   rsync -a --delete --exclude '.build*' --exclude '.swiftpm' --exclude '.git' "$FORK_DIR/" macstudio:lab-ablit-perf/mlx-swift-lm-2409/ >> "$LOG" 2>&1 \
@@ -160,7 +180,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break

@@ -5,7 +5,7 @@ usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
                           [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
-                          [--trials-by-rows 4=1]
+                          [--trials-by-rows 4=1] [--native-mtp-counters]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
 http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
@@ -44,6 +44,12 @@ t_last_offset_s). The aggregate line holds aggregate_tps = total completion
 tokens / (last token of the last row - first request start), the trial's
 honest throughput whether its rows were batched or queued, and
 decode_overlap_rows (1: the rows were served one after another).
+
+--native-mtp-counters: the aggregate line also carries `native_mtp`, the change of the
+serve's /v1/status native_mtp counters over that trial (proposed/accepted/rejected tokens,
+target and MTP forwards, fallbacks, acceptance = accepted / proposed) and the mode,
+enabled flag and last_reason after it. `acceptance_valid` is false when the counters were
+reset during the trial (reset_generation changed) or the status was unreadable.
 """
 import argparse
 import hashlib
@@ -59,6 +65,11 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compare  # noqa: E402
 import prompts  # noqa: E402
+import route_status  # noqa: E402
+
+NATIVE_MTP_COUNTERS = ("proposed_tokens", "accepted_tokens", "rejected_tokens", "bonus_tokens", "committed_tokens",
+                       "target_forwards", "mtp_forwards", "preoutput_fallbacks", "postoutput_failures",
+                       "capacity_rejections", "requests_since_reset")
 
 
 def iter_sse_data(lines):
@@ -254,6 +265,30 @@ def aggregate_record(records, base):
     }
 
 
+def native_mtp_of(status):
+    """The native_mtp object of a /v1/status snapshot, or None."""
+    nm = (status or {}).get("native_mtp")
+    return nm if isinstance(nm, dict) else None
+
+
+def native_mtp_delta(before, after):
+    """Counter change of one trial from two native_mtp status objects (either may be None)."""
+    if not before or not after:
+        return {"acceptance_valid": False, "reason": "status_unreadable"}
+    out = {"acceptance_valid": before.get("reset_generation") == after.get("reset_generation"),
+           "enabled": after.get("enabled"), "mode": after.get("mode"), "family": after.get("family"),
+           "proposal_depth": after.get("proposal_depth"), "last_reason": after.get("last_reason")}
+    if not out["acceptance_valid"]:
+        out["reason"] = "counters_reset_during_trial"
+        return out
+    for k in NATIVE_MTP_COUNTERS:
+        out[k] = (after.get(k) or 0) - (before.get(k) or 0)
+    out["acceptance"] = round(out["accepted_tokens"] / out["proposed_tokens"], 4) if out["proposed_tokens"] > 0 else None
+    out["mean_accepted_length"] = (round(out["accepted_tokens"] / out["mtp_forwards"], 4)
+                                   if out["mtp_forwards"] > 0 else None)
+    return out
+
+
 CONVERSATION_HEADER = "X-MacProvider-Provider-Conversation"
 
 
@@ -365,6 +400,8 @@ def main(argv=None):
                     help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
     ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
+    ap.add_argument("--native-mtp-counters", action="store_true",
+                    help="record the change of the serve's native_mtp status counters per trial")
     ap.add_argument("--trials-by-rows", default="",
                     help="comma list ROWS=TRIALS overriding --trials for cells of that row count, e.g. 4=1")
     args = ap.parse_args(argv)
@@ -386,16 +423,22 @@ def main(argv=None):
     with open(args.out, "a") as out:
         for ctx, max_tokens, rows in prompts.expand_cells(grid, args.max_context):
             for trial in range(trials_by_rows.get(rows, trials)):
+                mtp_before = native_mtp_of(route_status.fetch_status(args.port)) if args.native_mtp_counters else None
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
                                         rows, trial, stream_options, args.label, args.turns,
                                         args.conversation_header, args.turn2_history)
+                if args.native_mtp_counters:
+                    agg["native_mtp"] = native_mtp_delta(mtp_before, native_mtp_of(route_status.fetch_status(args.port)))
                 for rec in records + [agg]:
                     out.write(json.dumps(rec) + "\n")
                 out.flush()
                 failures += len(agg["errors"]) + sum(1 for r in records if r.get("turn") == 2 and r["error"])
                 print(f"ours ctx={ctx} out={max_tokens} rows={rows} trial={trial} "
                       f"agg={agg['aggregate_tps']} overlap={agg['decode_overlap_rows']} queue_max_s={agg['queue_s_max']} "
-                      f"per_row={agg['per_row_tps']} errors={agg['errors']}",
+                      f"per_row={agg['per_row_tps']} errors={agg['errors']}"
+                      + (f" mtp_proposed={agg['native_mtp'].get('proposed_tokens')} "
+                         f"mtp_accepted={agg['native_mtp'].get('accepted_tokens')} "
+                         f"acceptance={agg['native_mtp'].get('acceptance')}" if "native_mtp" in agg else ""),
                       file=sys.stderr)
     return 1 if failures else 0
 

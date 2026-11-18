@@ -15,7 +15,7 @@
 #                    [--model-id ID --model-sha256 SHA] [--config-extra FILE]
 #                    [--skip-compare] [--trials-by-rows 4=1] [--reference-only]
 #                    [--expect-route batched|any] [--warmup-stall-s 1200] [--warmup-poll-s 10]
-#                    [--seed-self-check FILE]
+#                    [--seed-self-check FILE] [--expect-native-mtp on|any]
 #
 # --reference picks the reference script: reference_mlxlm.py (default) or
 # reference_mlxvlm.py for families mlx-lm cannot load, or reference_omlx.py (an
@@ -60,6 +60,18 @@
 # --expect-route batched a serial route prints ROUTE_FAIL and the window exits
 # 10 (when compare exited 0 or 1); the cells are still measured.
 #
+# --expect-native-mtp on: the serve must run native MTP. After the batching warm-up
+# the saved /v1/status must show native_mtp.enabled true and a mode other than off
+# (route_status.py native-mtp), else the window prints `NATIVE_MTP_FAIL ...`, stops
+# the serve before any cell and exits 11; after the grid the end status must also
+# show proposed tokens, else the window exits 11 after compare. The client then also
+# stores the per-trial change of the native_mtp counters (proposed/accepted tokens,
+# acceptance) on each aggregate line of provider.jsonl, and OUT/grid.json holds the
+# native_mtp object under native_mtp.start / native_mtp.end. Native MTP is
+# admitted at one active row: grids for it use --rows 1. A `--no-join` serve gets the
+# signed admission set only with native_mtp_mode auto and a model_catalog_* config
+# (the job's <K>_NATIVE_MTP=auto writes it) and the model at its durable store path.
+#
 # Sanity gate: after a reference run that exited 0, sanity.py checks its text
 # (see its docstring). A degenerate reference prints one
 # `REFERENCE_SUSPECT <model> <reason>` line, its rows move to
@@ -87,7 +99,9 @@
 # 7 when the client failed, 8 when the reference failed, 9 when it was suspect,
 # 10 when --expect-route batched found a serial route and compare exited 0 or 1
 # (all after the compare table is printed; 7 wins; with 8 or 9 a ROUTE_FAIL
-# line is the signal); 3, 5, 6 and 64 before the client runs.
+# line is the signal), 11 when --expect-native-mtp on found native MTP off (before the
+# client, or after compare when the end status shows no proposed token; the same
+# precedence as 10, after it); 3, 5, 6 and 64 before the client runs.
 # A failed reference prints one `REFERENCE_FAIL <model> <error line> (rc=N)`
 # line; compare still runs with the reference rows it got (often none), so
 # provider.jsonl, summary.md and summary.json hold every provider cell with
@@ -130,6 +144,7 @@ EXPECT_ROUTE=any
 WARMUP_STALL_S=1200
 WARMUP_POLL_S=10
 SEED_SELF_CHECK=""
+EXPECT_MTP=any
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -169,6 +184,7 @@ while [ $# -gt 0 ]; do
     --warmup-stall-s) WARMUP_STALL_S="$2"; shift 2 ;;
     --warmup-poll-s) WARMUP_POLL_S="$2"; shift 2 ;;
     --seed-self-check) SEED_SELF_CHECK="$2"; shift 2 ;;
+    --expect-native-mtp) EXPECT_MTP="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -197,6 +213,7 @@ case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >
 case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
 case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
 case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
+case "$EXPECT_MTP" in on|any) ;; *) echo "--expect-native-mtp must be on|any" >&2; exit 64 ;; esac
 case "$EXPECT_ROUTE" in batched|any) ;; *) echo "--expect-route must be batched|any" >&2; exit 64 ;; esac
 [ -z "$SEED_SELF_CHECK" ] || [ -f "$SEED_SELF_CHECK" ] || { echo "no --seed-self-check file $SEED_SELF_CHECK" >&2; exit 64; }
 [ "$REF_ONLY" = 1 ] || [ -x "$BIN_DIR/macprovider-cli" ] || { echo "no macprovider-cli in $BIN_DIR" >&2; exit 64; }
@@ -321,6 +338,19 @@ curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status.json"
 /usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status.json" --serve-err "$D/serve.err" \
   --grid "$GRID" --phase start --expect "$EXPECT_ROUTE" || route_rc=$?
 
+mtp_rc=0
+if [ "$EXPECT_MTP" = on ]; then
+  /usr/bin/python3 -I "$HERE/route_status.py" native-mtp --status "$D/status.json" --grid "$GRID" --phase start \
+    --expect on || mtp_rc=$?
+  if [ "$mtp_rc" -ne 0 ]; then
+    echo "serve.err native-MTP lines:" >&2
+    grep -i "native_mtp\|native mtp\|admission" "$D/serve.err" | tail -20 >&2 || true
+    exit 11
+  fi
+fi
+
+MTP_CLIENT_ARGS=()
+[ "$EXPECT_MTP" != on ] || MTP_CLIENT_ARGS=(--native-mtp-counters)
 echo "== client $(date +%T)"
 if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
   # One stack sample of the serve process while the client runs, to split
@@ -328,12 +358,21 @@ if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
   (sleep 8; sample "$SP" "$SAMPLE_SECS" -file "$OUT_DIR/serve-sample.txt" >/dev/null 2>&1 || true) &
 fi
 /usr/bin/python3 -I "$HERE/provider_client.py" --port "$PORT" --model "$REQUEST_MODEL" --out "$OURS" \
-  "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} ${TRIALS_BY_ROWS:+--trials-by-rows "$TRIALS_BY_ROWS"} || client_rc=$?
+  "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} ${TRIALS_BY_ROWS:+--trials-by-rows "$TRIALS_BY_ROWS"} \
+  ${MTP_CLIENT_ARGS[@]+"${MTP_CLIENT_ARGS[@]}"} || client_rc=$?
 if curl -s --max-time 10 "http://127.0.0.1:$PORT/v1/status" > "$D/status-end.json"; then
   /usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status-end.json" --serve-err "$D/serve.err" \
     --grid "$GRID" --phase end --expect "$EXPECT_ROUTE" || route_rc=$?
 else
   echo "ROUTE_FAIL phase=end no /v1/status at the grid end"; route_rc=10
+fi
+if [ "$EXPECT_MTP" = on ]; then
+  if [ -s "$D/status-end.json" ]; then
+    /usr/bin/python3 -I "$HERE/route_status.py" native-mtp --status "$D/status-end.json" --grid "$GRID" --phase end \
+      --expect on || mtp_rc=$?
+  else
+    echo "NATIVE_MTP_FAIL phase=end no /v1/status at the grid end"; mtp_rc=11
+  fi
 fi
 stop_serve
 trap - EXIT
@@ -375,6 +414,7 @@ if [ "$SKIP_COMPARE" = 1 ]; then
   [ "$ref_rc" -ne 9 ] || exit 9
   [ "$ref_rc" -eq 0 ] || exit 8
   [ "${route_rc:-0}" -eq 0 ] || exit 10
+  [ "${mtp_rc:-0}" -eq 0 ] || exit 11
   exit 0
 fi
 echo "== compare $(date +%T) (client rc=$client_rc reference rc=$ref_rc)"
@@ -405,5 +445,9 @@ fi
 if [ "${route_rc:-0}" -ne 0 ] && [ "$compare_rc" -le 1 ]; then
   echo "route not the expected one (compare rc=$compare_rc): see the ROUTE_FAIL line" >&2
   exit 10
+fi
+if [ "${mtp_rc:-0}" -ne 0 ] && [ "$compare_rc" -le 1 ]; then
+  echo "native MTP not on (compare rc=$compare_rc): see the NATIVE_MTP_FAIL line" >&2
+  exit 11
 fi
 exit "$compare_rc"

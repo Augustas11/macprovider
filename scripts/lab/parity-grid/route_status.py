@@ -4,6 +4,8 @@
 usage: route_status.py gate --port PORT --serve-err FILE [--pid PID] [--stall-s 1200] [--poll-s 10]
        route_status.py record --status STATUS.json --serve-err FILE --grid GRID.json
                               --phase start|end [--expect batched|any]
+       route_status.py native-mtp --status STATUS.json --grid GRID.json
+                              --phase start|end [--expect on|any]
 
 Why a gate. A `serve --no-join` lab serve has no catalog trust, so it never loads the
 signed continuous-batching policy (serve.err `event=continuous_batching_policy
@@ -32,6 +34,11 @@ self-check report, served slots or the serve's self-check log lines. Exit 0 when
 record: prints `ROUTE batching=<active|serial> slots=<n> reason=<...> ...` for a status
 snapshot and stores the same fields in GRID.json under route.<phase>. With --expect
 batched a serial route prints `ROUTE_FAIL ...` and exits 10.
+
+native-mtp: prints `NATIVE_MTP enabled=<bool> mode=<...> ...` for a status snapshot and stores
+the native_mtp object in GRID.json under native_mtp.<phase>. With --expect on, a serve whose
+native_mtp is not enabled, is in mode off or (phase end) never proposed a token prints
+`NATIVE_MTP_FAIL ...` and exits 11: the cells are not native-MTP cells.
 """
 import argparse
 import http.client
@@ -201,6 +208,32 @@ def record(status_path, err_path, grid_path, phase, expect="any", out=print):
     return 0
 
 
+def record_native_mtp(status_path, grid_path, phase, expect="any", out=print):
+    with open(status_path) as f:
+        nm = json.load(f).get("native_mtp")
+    nm = nm if isinstance(nm, dict) else {}
+    with open(grid_path) as f:
+        grid = json.load(f)
+    grid.setdefault("native_mtp", {})[phase] = nm
+    with open(grid_path, "w") as f:
+        json.dump(grid, f, indent=2)
+        f.write("\n")
+    out(f"NATIVE_MTP phase={phase} enabled={nm.get('enabled')} mode={nm.get('mode')} family={nm.get('family')} "
+        f"proposal_depth={nm.get('proposal_depth')} proposed_tokens={nm.get('proposed_tokens')} "
+        f"accepted_tokens={nm.get('accepted_tokens')} last_reason={nm.get('last_reason')}")
+    if expect != "on":
+        return 0
+    why = None
+    if nm.get("enabled") is not True or nm.get("mode") in (None, "off"):
+        why = f"native MTP is not on (enabled={nm.get('enabled')} mode={nm.get('mode')} last_reason={nm.get('last_reason')})"
+    elif phase == "end" and not (nm.get("proposed_tokens") or 0) > 0:
+        why = f"native MTP proposed no token during the grid (last_reason={nm.get('last_reason')})"
+    if why:
+        out(f"NATIVE_MTP_FAIL phase={phase} {why}: its cells are not native-MTP cells")
+        return 11
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -216,7 +249,14 @@ def main(argv=None):
     r.add_argument("--grid", required=True)
     r.add_argument("--phase", required=True, choices=("start", "end"))
     r.add_argument("--expect", default="any", choices=("batched", "any"))
+    m = sub.add_parser("native-mtp")
+    m.add_argument("--status", required=True)
+    m.add_argument("--grid", required=True)
+    m.add_argument("--phase", required=True, choices=("start", "end"))
+    m.add_argument("--expect", default="any", choices=("on", "any"))
     a = ap.parse_args(argv)
+    if a.cmd == "native-mtp":
+        return record_native_mtp(a.status, a.grid, a.phase, a.expect)
     if a.cmd == "gate":
         return gate(a.port, a.serve_err, a.pid, a.stall_s, a.poll_s, out=lambda s: print(s, flush=True))
     return record(a.status, a.serve_err, a.grid, a.phase, a.expect)
