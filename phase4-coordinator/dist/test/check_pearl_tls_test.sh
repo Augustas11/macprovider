@@ -334,20 +334,57 @@ _assert_eq "T19 empty-array under set -u" "0" "$rc"
 _probe_fixture_dir=$(mktemp -d -t pearl_tls_test.XXXXXXXX)
 trap 'rm -rf "$_probe_fixture_dir"' EXIT
 
+# _sign_expired_cert <dir> <csr>
+#   Used when `x509 -not_after` is unavailable or did not produce an
+#   already-expired cert. `openssl ca -selfsign -enddate` sets that expiry.
+_sign_expired_cert() {
+  local dir="$1" csr="$2"
+  local ca_dir="$dir/ca"
+  mkdir -p "$ca_dir/newcerts"
+  : > "$ca_dir/index.txt"
+  echo 01 > "$ca_dir/serial"
+  # The section names the key and a cert signed by it so `openssl ca`
+  # can load it. -enddate is the issued cert's expiry.
+  openssl req -x509 -new -key "$dir/privkey.pem" -out "$ca_dir/cacert.pem" \
+    -days 1 -subj "/CN=test" >/dev/null 2>&1
+  cat > "$ca_dir/ca.cnf" <<EOF
+[ca]
+default_ca = CA_default
+[CA_default]
+database = $ca_dir/index.txt
+new_certs_dir = $ca_dir/newcerts
+serial = $ca_dir/serial
+private_key = $dir/privkey.pem
+certificate = $ca_dir/cacert.pem
+default_md = sha256
+policy = policy_any
+[policy_any]
+commonName = supplied
+EOF
+  openssl ca -selfsign -batch -notext -config "$ca_dir/ca.cnf" \
+    -in "$csr" -keyfile "$dir/privkey.pem" \
+    -startdate 20200101000000Z -enddate 20200102000000Z \
+    -out "$dir/fullchain.pem" >/dev/null 2>&1
+}
+
 _gen_cert() {
   # Args: <days_valid> <out_dir> — writes fullchain.pem + privkey.pem.
-  # For expired fixtures, pass a negative-or-zero days value; the
-  # helper signs via `openssl x509 -req -days 0` so notAfter equals
-  # notBefore = now, making the cert immediately expired.
+  # days <= 0 must already be expired. `openssl x509 -req -days 0` sets
+  # notAfter equal to now, and OpenSSL 4.0.3's `x509 -checkend 0` still
+  # succeeds for that cert, so the probe reports RENEW.
   local days="$1" dir="$2"
   mkdir -p "$dir"
   if [ "$days" -le 0 ]; then
-    # Two-step: CSR + sign with -days 0 (notAfter=now → -checkend 0 fails)
     local csr="$dir/csr.pem"
     openssl req -newkey rsa:2048 -keyout "$dir/privkey.pem" -out "$csr" \
       -nodes -subj "/CN=test" >/dev/null 2>&1
-    openssl x509 -req -in "$csr" -signkey "$dir/privkey.pem" -days 0 \
-      -out "$dir/fullchain.pem" >/dev/null 2>&1
+    if ! openssl x509 -req -in "$csr" -signkey "$dir/privkey.pem" \
+        -not_before 20200101000000Z -not_after 20200102000000Z \
+        -out "$dir/fullchain.pem" >/dev/null 2>&1 \
+      || ! openssl x509 -in "$dir/fullchain.pem" -noout >/dev/null 2>&1 \
+      || openssl x509 -checkend 0 -noout -in "$dir/fullchain.pem" >/dev/null 2>&1; then
+      _sign_expired_cert "$dir" "$csr"
+    fi
     rm -f "$csr"
   else
     openssl req -x509 -newkey rsa:2048 -keyout "$dir/privkey.pem" \
@@ -371,7 +408,7 @@ _gen_cert 90 "$_probe_fixture_dir/live/have.example"
 out=$(_run_probe "$_probe_fixture_dir" "have.example" 2>&1)
 _assert_eq "T20 HAVE" "HAVE have.example" "$out"
 
-# T21 EXPIRED fixture: cert issued with -days 0 is invalid now (past yesterday)
+# T21 EXPIRED fixture: notAfter is 2020-01-02, so -checkend 0 fails.
 _gen_cert -1 "$_probe_fixture_dir/live/expired.example"
 out=$(_run_probe "$_probe_fixture_dir" "expired.example" 2>&1)
 _assert_eq "T21 EXPIRED" "EXPIRED expired.example" "$out"
