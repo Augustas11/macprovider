@@ -764,6 +764,9 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// The verified sliding-window/full-attention layout of an allowlisted
     /// `gpt_oss` identity, read from its `config.json`.
     let slidingWindowAttention: PagedKVSlidingWindowAttentionLayout?
+    /// The verified QSA/gated-delta layout of an allowlisted `qwen4_exp`
+    /// identity, read from its `config.json`.
+    let qwen4ExpAttention: PagedKVQwen4ExpLayout?
     /// Observed on this load; ordinary shared-forward parity is independent.
     var supportsContiguousCacheMaterialization: Bool
 
@@ -777,6 +780,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         deepseekV4Pool: DeepseekV4PoolLayout? = nil,
         blockSparseAttention: PagedKVBlockSparseAttentionLayout? = nil,
         slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = nil,
+        qwen4ExpAttention: PagedKVQwen4ExpLayout? = nil,
         supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
@@ -788,13 +792,14 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.deepseekV4Pool = deepseekV4Pool
         self.blockSparseAttention = blockSparseAttention
         self.slidingWindowAttention = slidingWindowAttention
+        self.qwen4ExpAttention = qwen4ExpAttention
         self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
     }
 
     /// Whether the attach probes need a prompt past the indexer's selection
     /// span (`attachProbePromptTokens`).
     var hasIndexedSparseAttention: Bool {
-        sparseAttention != nil || blockSparseAttention != nil
+        sparseAttention != nil || blockSparseAttention != nil || qwen4ExpAttention != nil
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -806,9 +811,12 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// `index_topk`, so the indexer selects over paged indexer keys. A
     /// sliding-window class uses its window, so decode starts past it
     /// (gemma-4-12b's 1024-token window; gpt-oss's 128 stays at 513).
+    /// Qwen4-Exp uses its QSA `indexer_budget`, past which the indexer
+    /// selects blocks over paged indexer keys.
     func attachProbePromptTokens(blockSizeTokens: Int) -> Int {
         let base = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
         guard let selected = sparseAttention?.indexTopk ?? blockSparseAttention?.selectedTokens
+            ?? qwen4ExpAttention?.indexerBudget
             ?? slidingWindowAttention?.windowTokens else { return base }
         let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
         let (span, spanOverflow) = selected.addingReportingOverflow(twoBlocks)
@@ -918,6 +926,57 @@ struct PagedKVSlidingWindowAttentionLayout: Equatable, Sendable {
               config["layer_types"] is [String]
         else { return nil }
         self.init(config: config)
+    }
+}
+
+/// `qwen4_exp` text layout from `text_config` (SPEC-039 FR-PKV12 v0.1.36):
+/// `full_attention` layers (QSA sparse attention) on `pagedQwen4ExpKV`,
+/// every fourth layer from `full_attention_interval`; `linear_attention`
+/// (gated-delta) layers on the recurrent path, the `ple_layer_ids` ones with
+/// the four-slot PLE state (`PagedKVRecurrentStateLayout.qwen4ExpPLEFourSlot`).
+struct PagedKVQwen4ExpLayout: Equatable, Sendable {
+    static let fullLayerType = "full_attention"
+    static let linearLayerType = "linear_attention"
+
+    let layerTypes: [String]
+    /// 0-based decoder indices of the PLE layers (`ple_layer_ids` counts from 1).
+    let pleLayers: [Int]
+    let indexerBudget: Int
+
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        layerTypes.map { $0 == Self.fullLayerType ? .pagedQwen4ExpKV : .recurrentMamba }
+    }
+
+    var recurrentStateLayout: PagedKVRecurrentStateLayout { .qwen4ExpPLEFourSlot(pleLayers: pleLayers) }
+
+    init?(textConfig: [String: Any]) {
+        func integer(_ key: String) -> Int? {
+            guard let number = textConfig[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue == Double(number.intValue)
+            else { return nil }
+            return number.intValue
+        }
+        guard textConfig["model_type"] as? String == "qwen4_exp_text",
+              let layers = integer("num_hidden_layers"), layers > 0,
+              let interval = integer("full_attention_interval"), interval > 1,
+              let layerTypes = textConfig["layer_types"] as? [String],
+              layerTypes.count == layers,
+              layerTypes.enumerated().allSatisfy({ index, type in
+                  type == ((index + 1).isMultiple(of: interval) ? Self.fullLayerType : Self.linearLayerType)
+              }),
+              layerTypes.contains(Self.fullLayerType),
+              let pleIDs = (textConfig["ple_layer_ids"] as? [NSNumber])?.map(\.intValue),
+              !pleIDs.isEmpty,
+              Set(pleIDs).count == pleIDs.count,
+              pleIDs.allSatisfy({ (1...layers).contains($0) && layerTypes[$0 - 1] == Self.linearLayerType }),
+              let budget = integer("indexer_budget"), budget > 0,
+              let ratio = integer("indexer_compress_ratio"), ratio > 0, budget >= ratio,
+              integer("indexer_kv_heads") == 1
+        else { return nil }
+        self.layerTypes = layerTypes
+        self.pleLayers = pleIDs.map { $0 - 1 }.sorted()
+        self.indexerBudget = budget
     }
 }
 
@@ -2884,6 +2943,7 @@ actor ModelRuntime: ModelRuntimeServing {
         case "deepseek_v4": "deepseek-v4-row-pool-parity-v1"
         case "glm5_next": "glm5-next-mla-parity-v1"
         case "minimax_m3": "minimax-m3-indexed-kv-parity-v1"
+        case "qwen4_exp": "qwen4-exp-qsa-indexed-kv-parity-v1"
         default: "sdpa-parity-v1"
         }
     }
@@ -2974,12 +3034,13 @@ actor ModelRuntime: ModelRuntimeServing {
             else { return nil }
         } else {
             // K/V (or GLM latent/pooled keys) gather twice per layer per
-            // forward; MiniMax M3 also gathers its indexer keys.
+            // forward; MiniMax M3 and Qwen4-Exp also gather their indexer keys.
             guard parity.rowPoolProof == nil,
                   parity.nLayers > 0,
                   parity.nNew > 0,
                   parity.nForwards >= parity.nNew,
-                  parity.gathersPerLayerForward == (modelCapabilities.modelFamily == "minimax_m3" ? 3 : 2),
+                  parity.gathersPerLayerForward
+                    == (["minimax_m3", "qwen4_exp"].contains(modelCapabilities.modelFamily) ? 3 : 2),
                   parity.gatherKernelCalls == parity.nLayers * parity.nForwards * parity.gathersPerLayerForward,
                   parity.maxLogicalBlocks >= 3,
                   parity.nonIdentityPermutation
@@ -3318,6 +3379,15 @@ actor ModelRuntime: ModelRuntimeServing {
         if modelCapabilities.modelFamily == "minimax_m3" {
             // One `pagedIndexedKV` cache per decoder layer.
             guard let layout = modelCapabilities.blockSparseAttention else { return false }
+            return cacheKinds == layout.expectedCacheKinds
+        }
+        if modelCapabilities.modelFamily == "qwen4_exp" {
+            // One cache per decoder layer in `layer_types` order:
+            // `pagedQwen4ExpKV` at full attention, recurrent elsewhere, with
+            // the four-slot state on exactly the PLE layers.
+            guard let layout = modelCapabilities.qwen4ExpAttention,
+                  modelCapabilities.recurrentStateLayout == layout.recurrentStateLayout
+            else { return false }
             return cacheKinds == layout.expectedCacheKinds
         }
         if modelCapabilities.modelFamily == "gpt_oss" || modelCapabilities.modelFamily == "gemma4" {
@@ -3696,9 +3766,9 @@ maxTokens: 1,
         }
         // Qwen3.8-Flash-Next (`qwen4_exp`, text model `qwen4_exp_text`, #2409):
         // QSA sparse attention, hyper-connections and an n-gram embedding on
-        // a non-stock cache. Not a paged-KV family, so attach fails closed on
-        // identity and the model serves serial. Checked before the generic
-        // `qwen` label, whose hybrid paths assume the Qwen3.5 layout.
+        // a non-stock cache. Only the allowlisted identity carries a verified
+        // layout (`PagedKVQwen4ExpLayout`). Checked before the generic `qwen`
+        // label, whose hybrid paths assume the Qwen3.5 layout.
         if normalizedLabels.contains(where: { $0 == "qwen4exp" || $0 == "qwen4expforconditionalgeneration" }) {
             return "qwen4_exp"
         }
@@ -3780,6 +3850,7 @@ maxTokens: 1,
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
             "minimaxai/minimax-m3.1-flash-abliterated": "MiniMaxM3SparseForConditionalGeneration",
+            "latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "Qwen4ExpForConditionalGeneration",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -3810,6 +3881,19 @@ maxTokens: 1,
                   let textConfig = configObject["text_config"] as? [String: Any]
             else { return nil }
             return PagedKVBlockSparseAttentionLayout(textConfig: textConfig)
+        }()
+        // `qwen4_exp` keys on the exact `architectures` array and model type
+        // and carries its verified QSA/gated-delta/PLE layout.
+        let qwen4ExpAttention: PagedKVQwen4ExpLayout? = {
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
+                  expectedArchitecture == "Qwen4ExpForConditionalGeneration",
+                  let configObject,
+                  configObject["architectures"] as? [String] == [expectedArchitecture],
+                  configObject["model_type"] as? String == "qwen4_exp",
+                  let textConfig = configObject["text_config"] as? [String: Any]
+            else { return nil }
+            return PagedKVQwen4ExpLayout(textConfig: textConfig)
         }()
         // `gpt_oss` and `gemma4` key on the exact `architectures` array and
         // model type and carry their verified sliding-window/full-attention
@@ -3849,6 +3933,7 @@ maxTokens: 1,
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             if expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration" { return blockSparseAttention != nil }
+            if expectedArchitecture == "Qwen4ExpForConditionalGeneration" { return qwen4ExpAttention != nil }
             if expectedArchitecture == "GptOssForCausalLM" || expectedArchitecture == "Gemma4UnifiedForConditionalGeneration" {
                 return slidingWindowAttention != nil
             }
@@ -3861,7 +3946,7 @@ maxTokens: 1,
             modelID: modelID, configObject: configObject
         ) || lfm25HybridVerified
         let recurrentStateLayout: PagedKVRecurrentStateLayout = lfm25HybridVerified
-            ? .lfm25ShortConvOneSlot : .mambaTwoSlot
+            ? .lfm25ShortConvOneSlot : qwen4ExpAttention?.recurrentStateLayout ?? .mambaTwoSlot
         let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
@@ -3877,7 +3962,8 @@ maxTokens: 1,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool,
             blockSparseAttention: blockSparseAttention,
-            slidingWindowAttention: slidingWindowAttention
+            slidingWindowAttention: slidingWindowAttention,
+            qwen4ExpAttention: qwen4ExpAttention
         )
     }
 
