@@ -154,7 +154,11 @@ The exploratory goal matrix does not constitute admission qualification.
 
 ## Next CLI release — net changes vs 1.8.294 (tracked 2026-11-18)
 
-No provider-side commit on `main` since tag `v1.8.294` (`git log v1.8.294..origin/main` is empty on 2026-11-18).
+### Merged, rides the next CLI cut
+
+| Change | What it is |
+| --- | --- |
+| [PR 2424](https://github.com/Augustas11/macprovider/pull/2424): two busy models in one provider process alternate GPU turns by default (Related: #2397) | Merged 2026-11-18 as `80f5b4bde`. The compiled GPU turn policy changes from `passthrough` to `alternate` with `drain=never`: while two warm models are busy they take single exclusive turns and no turn waits for its queued GPU work. Measured on the lab Studio, GLM-5.3-Flash beside Qwen 3.8 27B on one serial row: the main model keeps 0.44 of its solo decode rate instead of 0.21 and the second model 0.67 instead of 0.87, with identical tokens; with the main model at 3 rows every stream gets 11.8 tok/s. A provider with one warm model is unchanged. Live step: the next provider CLI cut; no catalog, continuous-batching or native-MTP policy change. Not measured: the split with native MTP active. |
 
 ## CLI release — 1.8.294 (published 2026-11-18 07:31 WITA; tracked from 2026-11-15)
 
