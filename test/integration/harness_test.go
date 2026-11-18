@@ -1599,12 +1599,14 @@ func (b *logBuffer) awaitContains(deadline time.Time, substrs ...string) string 
 }
 
 // waitForHealth polls until the /healthz endpoint returns 200, or
-// times out after 10s. Determinism contract: the test reads the SAME
-// healthz both services already expose for nginx/load-balancer probes,
-// so this exercises real wire shape.
+// times out after 60s. A -race coordinator on a loaded runner takes about
+// 10s to start, so a 10s deadline failed 14 of 50 J2 runs (issue 2410).
+// Determinism contract: the test reads the SAME healthz both services
+// already expose for nginx/load-balancer probes, so this exercises real
+// wire shape.
 func (s *scenario) waitForHealth(url string) {
 	s.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
