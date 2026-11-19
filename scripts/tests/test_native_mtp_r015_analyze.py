@@ -1240,6 +1240,37 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 self.assertEqual(cell["excluded_single_token_blocks"], [])
                 self.assertNotEqual(cell["hard_failures"], [])
 
+    def test_excluded_blocks_still_feed_the_hard_gates(self):
+        def set_fields(**fields):
+            return lambda record: record.update(fields)
+
+        cases = {
+            "non_native_admissions": set_fields(non_native_admissions=1),
+            "no_native_admissions": set_fields(native_admissions=0),
+            "no_proposed_tokens": set_fields(mtp_proposed_tokens=0),
+            "no_target_forwards": set_fields(target_forwards=0),
+            "low_available_memory": set_fields(min_available_memory_fraction=0.0001),
+        }
+        for name, native in cases.items():
+            with self.subTest(case=name):
+                result = self._single_token_case(native=native)
+                self.assertEqual(result["overall_status"], "FAIL")
+                cell = self._cell(result, self.SINGLE_CELL)
+                self.assertEqual(cell["excluded_single_token_blocks"], [3])
+                self.assertEqual(cell["status"], "FAIL")
+
+    def test_none_policy_runs_fail_digest_under_rule_enabled_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(
+                Path(tmp), blocks_written=11, policy_overrides={"blocks": 11, "exclusion_rules": "none"},
+            )
+            policy = json.loads(policy_path.read_text("utf-8"))
+            policy["exclusion_rules"] = "single_token_identical_pair"
+            policy_path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
+            result = analyze(jsonl_path, policy_path)
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "policy_digest_mismatch")
+
     def test_exclusion_rules_are_a_closed_preregistered_set(self):
         for value in ("none", "single_token_identical_pair"):
             with self.subTest(value=value):
