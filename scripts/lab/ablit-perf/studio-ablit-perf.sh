@@ -41,7 +41,8 @@
 #          snapshot download if ~/lab-ablit-perf/models lacks it. Estimates, not measured.
 #          Decode profile (#2409 per-row cost by section, provider only): CB_ROWS=1,4,8,11 CONTEXTS=200
 #          OUTPUTS=256 TRIALS=1 SKIP_REFERENCE=1 SERVE_ENV='MLX_LM_SECTION_TIMING=1'; FORK_DIR HEAD must
-#          then hold Libraries/MLXLMCommon/LabSectionTimer.swift.
+#          then hold Libraries/MLXLMCommon/LabSectionTimer.swift (fork branch
+#          campaign/2409-qwen4-exp-batch-labtimer; the pinned engine has no timer).
 #        REFERENCE_ONLY=<run id> MODELS=glm GLM_REF=omlx GLM_OMLX_DIR=<studio dir> studio-ablit-perf.sh
 #          add a reference to an already measured provider grid (job.sh header); the run's
 #          provider.jsonl / grid.json / identity / noise / job log are pushed from

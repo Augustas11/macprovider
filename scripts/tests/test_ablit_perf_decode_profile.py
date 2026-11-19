@@ -125,7 +125,7 @@ class LauncherTests(unittest.TestCase):
         text = LAUNCHER.read_text()
         self.assertIn("SERVE_ENV|SKIP_REFERENCE|", text)
         self.assertIn("HEAD:Libraries/MLXLMCommon/LabSectionTimer.swift", text)
-        self.assertIn("INFERENCE_ERROR|DECODE_PROFILE)", text)
+        self.assertIn("|DECODE_PROFILE|", text)
 
 
 if __name__ == "__main__":
