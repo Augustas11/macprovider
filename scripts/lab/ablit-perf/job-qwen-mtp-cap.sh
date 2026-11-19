@@ -16,7 +16,10 @@
 #
 # Models (QMTP_MODELS, default "qwen36-35b qwen36-27b qwen38-27b"): the three signed Qwen
 # native-MTP tuples. QMTP_PROBE=1: the first model only, one cell (first prompt, first output),
-# 2 blocks: the preflight probe through the exact path.
+# 2 blocks: the preflight probe through the exact path. QMTP_SHAPE (default tools_history_reasoning):
+# the bench request_shape. With plain_text the synthetic long prompts make Qwen stop after ~29 tokens
+# at 16K and 32K (run 20261119T144620Z), so decode is not measured; the reasoning shape (a tool
+# history turn, reasoning_effort high) decodes to the output budget.
 # Results: ~/lab-ablit-perf/results/<run>/qwen-mtp-cap/<model>/{policy.json,bench.jsonl,
 # analysis.json,analysis.md,identity.sha256,<cell>.log}. Every failure prints `BLOCKER:`; the job
 # ends with JOB_PASS or JOB_FAIL. A slower native path is a finding, not a failure.
@@ -34,6 +37,7 @@ QMTP_PROMPTS=${QMTP_PROMPTS:-8192,16384,32768}
 QMTP_OUTPUTS=${QMTP_OUTPUTS:-512}
 QMTP_BLOCKS=${QMTP_BLOCKS:-5}
 QMTP_PROBE=${QMTP_PROBE:-0}
+QMTP_SHAPE=${QMTP_SHAPE:-tools_history_reasoning}
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
 BUILD=.build-lab-harness
 BIN=$SRC/$BUILD/release
@@ -77,6 +81,7 @@ model() {
 
 case "$QMTP_PROMPTS" in ""|*[!0-9,]*|,*|*,|*,,*) die "QMTP_PROMPTS must be a comma list" 64 ;; esac
 case "$QMTP_OUTPUTS" in ""|*[!0-9,]*|,*|*,|*,,*) die "QMTP_OUTPUTS must be a comma list" 64 ;; esac
+case "$QMTP_SHAPE" in plain_text|tools_history_reasoning) ;; *) die "QMTP_SHAPE must be plain_text or tools_history_reasoning" 64 ;; esac
 case "$QMTP_BLOCKS" in [2-9]|10) ;; *) die "QMTP_BLOCKS must be 2..10" 64 ;; esac
 echo "${COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$' || die "COMMIT (40-hex provider commit) is unset" 64
 if [ "$QMTP_PROBE" = 1 ]; then
@@ -89,7 +94,7 @@ for k in $QMTP_MODELS; do
 done
 
 mkdir -p "$RES"
-log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS probe=$QMTP_PROBE"
+log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS shape=$QMTP_SHAPE probe=$QMTP_PROBE"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -123,9 +128,9 @@ run_model() {
   fork=$(sed -n 's/.*static let mlxSwiftLMRevision = "\([0-9a-f]*\)".*/\1/p' "$SRC/Sources/macprovider-cli/KVConversationColdTierAdapter.swift")
   /usr/bin/python3 -I - "$DIR/policy.json" "$ID" "$TSHA" "$MSHA" "$TOK" "$QSLOTS" "$QMTP_PROMPTS" "$QMTP_OUTPUTS" \
     "$QMTP_BLOCKS" "$(sysctl -n hw.model)" "$(sysctl -n kern.osversion)" "${xcode:-unknown}" "${swift:-unknown}" \
-    "$COMMIT" "$fork" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
+    "$COMMIT" "$fork" "$QMTP_SHAPE" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
 import json, sys
-out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork = sys.argv[1:16]
+out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork, shape = sys.argv[1:17]
 if len(fork) != 40:
     sys.exit("mlxSwiftLMRevision not found in the source tree")
 prompts = [int(x) for x in prompts.split(",")]
@@ -139,7 +144,7 @@ p = {
     "exclusion_rules": "none", "confidence_method": "paired_block_bootstrap_holm_v1",
     "qualified_slots": int(qs), "max_native_active_rows": 1, "arrival_interval_ms": 250, "slots": [1],
     "maximum_prompt_tokens": max(prompts), "prompt_tokens": prompts, "max_tokens": outputs,
-    "gated_cells": [], "warmup_runs": 1, "blocks": int(blocks), "seed": 20261119, "sustained_seconds": 0,
+    "gated_cells": [], "request_shape": shape, "warmup_runs": 1, "blocks": int(blocks), "seed": 20261119, "sustained_seconds": 0,
     "sustained_cell_id": f"s1-p{max(prompts)}-o{max(outputs)}", "memory_safety_margin_bytes": 8589934592,
     # SPEC-048 0.1.71 gate set (FROZEN_THRESHOLDS in scripts/native_mtp_r015_analyze.py).
     "thresholds": {"throughput_lower_bound_min": 0.0, "ttft_p95_upper_bound_max": 0.1,
