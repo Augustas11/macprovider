@@ -20,6 +20,11 @@
 # the bench request_shape. With plain_text the synthetic long prompts make Qwen stop after ~29 tokens
 # at 16K and 32K (run 20261119T144620Z), so decode is not measured; the reasoning shape (a tool
 # history turn, reasoning_effort high) decodes to the output budget.
+# QMTP_FORMAL=1 QMTP_CAP=<C>: the formal SPEC-048 R015 admission matrix at signed cap C instead
+# (the full-matrix path for a cap raise when no cap extension applies): schema
+# macprovider.native-mtp-r015-policy.v1, prompts 1536/4096/C, outputs 128/512, 10 blocks, the gated
+# cells s2 and s<qualified_slots> at p1536-o512, then the 1800 s sustained window on
+# s<qualified_slots>-p1536-o512, plain_text, the current gate set; the analyzer gives the verdict.
 # Results: ~/lab-ablit-perf/results/<run>/qwen-mtp-cap/<model>/{policy.json,bench.jsonl,
 # analysis.json,analysis.md,identity.sha256,<cell>.log}. Every failure prints `BLOCKER:`; the job
 # ends with JOB_PASS or JOB_FAIL. A slower native path is a finding, not a failure.
@@ -38,6 +43,8 @@ QMTP_OUTPUTS=${QMTP_OUTPUTS:-512}
 QMTP_BLOCKS=${QMTP_BLOCKS:-5}
 QMTP_PROBE=${QMTP_PROBE:-0}
 QMTP_SHAPE=${QMTP_SHAPE:-tools_history_reasoning}
+QMTP_FORMAL=${QMTP_FORMAL:-0}
+QMTP_CAP=${QMTP_CAP:-}
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
 BUILD=.build-lab-harness
 BIN=$SRC/$BUILD/release
@@ -84,6 +91,12 @@ case "$QMTP_OUTPUTS" in ""|*[!0-9,]*|,*|*,|*,,*) die "QMTP_OUTPUTS must be a com
 case "$QMTP_SHAPE" in plain_text|tools_history_reasoning) ;; *) die "QMTP_SHAPE must be plain_text or tools_history_reasoning" 64 ;; esac
 case "$QMTP_BLOCKS" in [2-9]|10) ;; *) die "QMTP_BLOCKS must be 2..10" 64 ;; esac
 echo "${COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$' || die "COMMIT (40-hex provider commit) is unset" 64
+if [ "$QMTP_FORMAL" = 1 ]; then
+  case "$QMTP_CAP" in ""|*[!0-9]*) die "QMTP_FORMAL needs QMTP_CAP (the signed prompt cap to qualify)" 64 ;; esac
+  [ "$QMTP_CAP" -gt 4096 ] || die "QMTP_CAP must exceed 4096" 64
+  [ "$QMTP_PROBE" = 1 ] && die "QMTP_FORMAL and QMTP_PROBE exclude each other" 64
+  QMTP_PROMPTS=1536,4096,$QMTP_CAP; QMTP_OUTPUTS=128,512; QMTP_BLOCKS=10; QMTP_SHAPE=plain_text
+fi
 if [ "$QMTP_PROBE" = 1 ]; then
   QMTP_MODELS=${QMTP_MODELS%% *}; QMTP_PROMPTS=${QMTP_PROMPTS%%,*}; QMTP_OUTPUTS=${QMTP_OUTPUTS%%,*}; QMTP_BLOCKS=2
 fi
@@ -94,7 +107,7 @@ for k in $QMTP_MODELS; do
 done
 
 mkdir -p "$RES"
-log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS shape=$QMTP_SHAPE probe=$QMTP_PROBE"
+log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS shape=$QMTP_SHAPE probe=$QMTP_PROBE formal=$QMTP_FORMAL${QMTP_CAP:+ cap=$QMTP_CAP}"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -128,9 +141,9 @@ run_model() {
   fork=$(sed -n 's/.*static let mlxSwiftLMRevision = "\([0-9a-f]*\)".*/\1/p' "$SRC/Sources/macprovider-cli/KVConversationColdTierAdapter.swift")
   /usr/bin/python3 -I - "$DIR/policy.json" "$ID" "$TSHA" "$MSHA" "$TOK" "$QSLOTS" "$QMTP_PROMPTS" "$QMTP_OUTPUTS" \
     "$QMTP_BLOCKS" "$(sysctl -n hw.model)" "$(sysctl -n kern.osversion)" "${xcode:-unknown}" "${swift:-unknown}" \
-    "$COMMIT" "$fork" "$QMTP_SHAPE" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
+    "$COMMIT" "$fork" "$QMTP_SHAPE" "$QMTP_FORMAL" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
 import json, sys
-out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork, shape = sys.argv[1:17]
+out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork, shape, formal = sys.argv[1:18]
 if len(fork) != 40:
     sys.exit("mlxSwiftLMRevision not found in the source tree")
 prompts = [int(x) for x in prompts.split(",")]
@@ -153,6 +166,12 @@ p = {
         "alpha": 0.05, "gated_throughput_lower_bound_min": -0.05, "gated_ttft_p95_upper_bound_max": 0.05,
         "gated_tpot_p95_upper_bound_max": 0.05},
 }
+if formal == "1":
+    # SPEC-048-R015 mandatory matrix at cap max(prompts): gated cells at bound + 1 and
+    # qualified_slots, the 1800 s sustained window at qualified_slots (p1536-o512).
+    qsn = int(qs)
+    p.update({"schema": "macprovider.native-mtp-r015-policy.v1", "gated_cells": [f"s{n}-p1536-o512" for n in sorted({2, qsn})],
+              "sustained_seconds": 1800, "sustained_cell_id": f"s{qsn}-p1536-o512"})
 json.dump(p, open(out, "w"), indent=2, sort_keys=True)
 PY
   for i in 1 2 3 4 5 6 7 8; do
@@ -187,6 +206,22 @@ PY
       [ $rc = 0 ] || { blocker "model $k: $cell rc=$rc: $(tail -n 2 "$DIR/$cell.log" | tr '\n' ' ' | cut -c1-300)"; ok=0; }
     done
   done
+  if [ "$QMTP_FORMAL" = 1 ] && [ $ok = 1 ]; then
+    for cell in $(/usr/bin/python3 -I -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["gated_cells"]))' "$DIR/policy.json"); do
+      log "MTP_CELL_START $k $cell"
+      bench --out "$DIR/bench.jsonl" --only-cell "$cell" --phase matrix > "$DIR/$cell.out" 2> "$DIR/$cell.log"
+      rc=$?
+      log "MTP_CELL_DONE $k $cell rc=$rc records=$(wc -l < "$DIR/bench.jsonl" 2>/dev/null | tr -d ' ')"
+      [ $rc = 0 ] || { blocker "model $k: $cell rc=$rc: $(tail -n 2 "$DIR/$cell.log" | tr '\n' ' ' | cut -c1-300)"; ok=0; break; }
+    done
+    if [ $ok = 1 ]; then
+      log "MTP_CELL_START $k sustained"
+      bench --out "$DIR/bench.jsonl" --phase sustained > "$DIR/sustained.out" 2> "$DIR/sustained.log"
+      rc=$?
+      log "MTP_CELL_DONE $k sustained rc=$rc records=$(wc -l < "$DIR/bench.jsonl" 2>/dev/null | tr -d ' ')"
+      [ $rc = 0 ] || { blocker "model $k: sustained rc=$rc: $(tail -n 2 "$DIR/sustained.log" | tr '\n' ' ' | cut -c1-300)"; ok=0; }
+    fi
+  fi
   /usr/bin/python3 -I "$JOB/mtp/native_mtp_r015_analyze.py" "$DIR/bench.jsonl" "$DIR/policy.json" > "$DIR/analysis.json" 2> "$DIR/analysis.err"
   /usr/bin/python3 -I "$JOB/mtp/native_mtp_r015_analyze.py" "$DIR/bench.jsonl" "$DIR/policy.json" --format markdown > "$DIR/analysis.md" 2>> "$DIR/analysis.err"
   log "MTP_DONE $k analyzer=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overall_status"))' "$DIR/analysis.json" 2>/dev/null)"
