@@ -106,7 +106,7 @@ class JobTests(unittest.TestCase):
 class LauncherTests(unittest.TestCase):
     def test_launcher_admits_the_job_and_its_knob(self):
         text = LAUNCHER.read_text()
-        self.assertIn("|job-glm-prefill-step-gate.sh) ;;", text)
+        self.assertIn("|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh) ;;", text)
         self.assertIn("|PROFILE_RUNS|GENERATE_TOKENS|", text)
         self.assertIn("PARITY_|", text)
 
