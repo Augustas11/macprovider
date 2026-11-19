@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.113
+**Version:** 0.1.114
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.113",
+  "version": "0.1.114",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -644,12 +644,22 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.83` | `a219eafe89323ac353b17f40e396e08cd10f9d7e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.84` | `ddc6f974355982773e1440957f16e998835408d0` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.83` is on `3.32.3-macprovider.81`
+The mlx-swift-lm row `3.32.3-macprovider.84` is on `3.32.3-macprovider.83`
+(`a219eafe89323ac353b17f40e396e08cd10f9d7e`) (#2409), at
+`ddc6f974355982773e1440957f16e998835408d0`: Six commits on
+3.32.3-macprovider.83 add the native qwen4_exp / qwen4_exp_text text model
+(Qwen3.8-Flash-Next: QSA indexer, hyper-connections, PLE n-gram) and its
+batched decode, each row bit for bit its serial forward, with the rows' q/k
+norms, RoPE (one offset per row) and output gate run once across the rows. New
+model files, the two registry entries and their tests only; other model
+families are unchanged. The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.83` is on `3.32.3-macprovider.81`
 (`2639874f835134c94c069d1825afe44604110a58`) (#2373), at
 `a219eafe89323ac353b17f40e396e08cd10f9d7e`: Three commits on
 3.32.3-macprovider.81 (tag .82 is the first two and was never pinned):
@@ -2863,6 +2873,15 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.114 (2026-11-19)** — R003 names mlx-swift-lm `3.32.3-macprovider.84`
+  (`ddc6f974355982773e1440957f16e998835408d0`) on `3.32.3-macprovider.83`
+  (#2409): Six commits on 3.32.3-macprovider.83 add the native qwen4_exp /
+  qwen4_exp_text text model (Qwen3.8-Flash-Next: QSA indexer,
+  hyper-connections, PLE n-gram) and its batched decode, each row bit for bit its
+  serial forward, with the rows' q/k norms, RoPE (one offset per row) and
+  output gate run once across the rows. New model files, the two registry
+  entries and their tests only; other model families are unchanged. The Swift,
+  core and C rows are unchanged.
 - **0.1.113 (2026-11-17)** — R003 names mlx-swift-lm `3.32.3-macprovider.83`
   (`a219eafe89323ac353b17f40e396e08cd10f9d7e`) on `3.32.3-macprovider.81`
   (#2373): Three commits on 3.32.3-macprovider.81 (tag .82 is the first two

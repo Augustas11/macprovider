@@ -42,16 +42,15 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.83 (#2373) on 3.32.3-macprovider.81: Three commits on
-# 3.32.3-macprovider.81 (tag .82 is the first two and was never pinned):
-# TokenIterator evaluates only the token for the K/V buffers of KVCacheSimple
-# and RotatingKVCache layers, as mlx-lm's generate_step does, instead of
-# naming them in every token's evaluation; a zero-width buffer of such a layer
-# (the DeepSeek V4 window values) and the state of every other cache stay in
-# the evaluation. It touches Evaluate.swift and its test only; the serial
-# route is the only serving path that uses TokenIterator.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.83"
-SPEC048_MLX_SWIFT_LM_REVISION = "a219eafe89323ac353b17f40e396e08cd10f9d7e"
+# 3.32.3-macprovider.84 (#2409) on 3.32.3-macprovider.83: Six commits on
+# 3.32.3-macprovider.83 add the native qwen4_exp / qwen4_exp_text text model
+# (Qwen3.8-Flash-Next: QSA indexer, hyper-connections, PLE n-gram) and its
+# batched decode, each row bit for bit its serial forward, with the rows' q/k
+# norms, RoPE (one offset per row) and output gate run once across the rows.
+# New model files, the two registry entries and their tests only; other model
+# families are unchanged.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.84"
+SPEC048_MLX_SWIFT_LM_REVISION = "ddc6f974355982773e1440957f16e998835408d0"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
