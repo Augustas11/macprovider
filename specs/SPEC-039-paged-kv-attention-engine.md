@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.36
-Status: draft (normative design). v0.1.36 adds the `qwen4_exp` paged
+Version: v0.1.37
+Status: draft (normative design). v0.1.37 lifts the 8-flattened-token cap
+from `qwen4_exp` decode: a decode forward over a `pagedQwen4ExpKV` topology
+takes the device decode-row bound (11 rows on the M3 Ultra), while its prefill
+keeps the 8-token cap. v0.1.36 adds the `qwen4_exp` paged
 family: a `pagedQwen4ExpKV` cache kind that pages each Qwen4-Exp QSA
 attention layer's keys, values and indexer keys on one block table, a
 four-slot recurrent state for its PLE layers whose fourth slot holds integer
@@ -110,6 +113,18 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.37 (2026-11-19): the FR-PKV12 `qwen4_exp` entry
+(Related: #2409) drops the 8-flattened-token bound from its decode forwards.
+Qwen4-Exp decodes through its own fork kernels, not the GLM-5-Next fused
+ones, and its batched decode is bit-identical to each row decoded alone up
+to the device bound, so a decode forward over a `pagedQwen4ExpKV` topology
+carries up to the device decode-row bound (11 rows on the M3 Ultra). Its
+prefill keeps the 8-flattened-token cap, so each row still prefills in its
+own forward in the serial chunk stride. `pagedIndexedKV` (MiniMax M3),
+`pagedMLA` (GLM-5-Next) and the DeepSeek V4 pool keep 8. The FR-CB10
+self-check key changes with the bound, so no grant measured at the 8-row
+bound is reused. Refines SPEC-039-R012.
+
 Change log v0.1.36 (2026-11-18): adds the `qwen4_exp` family
 (Qwen3.8-Flash-Next, Related: #2409). FR-PKV4 defines the `pagedQwen4ExpKV`
 layout and its three gathers per layer per forward; FR-PKV12 adds the
@@ -1214,9 +1229,11 @@ parity label, ring order and fail-closed cases are the `gpt_oss` class's.
   integer tensor; a floating-point fourth slot, an integer slot elsewhere, a
   PLE layer with two slots or a two-slot layer with four fails closed. A
   joining row's absent state packs as zeros, which the model reads as a
-  prompt start. Every shared forward over a `pagedQwen4ExpKV` topology carries
-  at most 8 flattened tokens, as for `pagedIndexedKV`, and its rows prefill in
-  the serial path's chunk stride. The runtime cache identity is `mixed`. This
+  prompt start. Every shared prefill forward over a `pagedQwen4ExpKV`
+  topology carries at most 8 flattened tokens, as for `pagedIndexedKV`, and
+  its rows prefill in the serial path's chunk stride. (v0.1.37) A decode
+  forward over that topology has no flattened-token cap: it carries up to the
+  device decode-row bound (11 rows on the M3 Ultra). The runtime cache identity is `mixed`. This
   exception permits evaluation by the real attach-time parity and isolation
   probes and the automatic FR-CB10 self-check; it is not parity evidence, a
   signed grant or production qualification, and attach fails closed until

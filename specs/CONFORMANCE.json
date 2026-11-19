@@ -6196,7 +6196,12 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testMeasuredTopologyRequiresTheExactGemma4LayerLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testAttachProofPromptPassesTheSlidingWindow",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testTinyGemma4ConfigYieldsTheAdmittedTopology",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testBatchedRowsMatchEachRowAloneAndTheSerialCaches"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGemma4MixedClassTests.swift:testBatchedRowsMatchEachRowAloneAndTheSerialCaches",
+        "phase3-binary/Tests/macprovider-cliTests/PagedQwen4ExpCacheTests.swift:testAllowlistedIdentityCarriesTheVerifiedLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedQwen4ExpCacheTests.swift:testOtherIdentitiesAndLayoutsFailClosed",
+        "phase3-binary/Tests/macprovider-cliTests/PagedQwen4ExpCacheTests.swift:testAttachGateAdmitsOnlyTheVerifiedLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedQwen4ExpCacheTests.swift:testDecodeTakesTheDeviceBoundWithoutTheFlattenedCap",
+        "phase3-binary/Tests/macprovider-cliTests/PagedQwen4ExpCacheTests.swift:testBatchedRowsMatchEachRowAloneAndTheSerialCaches"
       ],
       "journeys": [],
       "evidence": [
