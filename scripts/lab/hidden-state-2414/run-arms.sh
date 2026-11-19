@@ -22,7 +22,7 @@
 #   m3u: self-injection of default/4bit at every full layer (plumbing check).
 #   m5:  self-injection of default/4bit, then for every arm, every claimed
 #        variant c and full layer k, the M3 Ultra default/c layer-k output
-#        injected into each M5 variant.
+#        injected into each M5 variant with the same activation dtype.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -110,10 +110,22 @@ for k in $FULL_LAYERS; do
 done
 
 if [[ "$HOST" == m5 ]]; then
+  # Injection across activation dtypes (fp16 quantized vs bf16) would round
+  # the injected tensor, so only same-dtype pairs run; dtypes come from the
+  # M3 Ultra metas of the same weights.
+  dtype_of() {
+    "$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["activation_dtype"])' \
+      "$REF/base/default/$1/rep0/meta.json"
+  }
   for arm in "${ARMS[@]}"; do
     for c in "${VARIANTS[@]}"; do
       for k in $FULL_LAYERS; do
         for v in "${VARIANTS[@]}"; do
+          if [[ "$(dtype_of "$c")" != "$(dtype_of "$v")" ]]; then
+            [[ "$arm" == default && "$k" == "${FULL_LAYERS%% *}" ]] &&
+              echo "run-arms: skip injection $c -> $v (activation dtype differs)"
+            continue
+          fi
           dump "$arm" --model "$MODELS/$v" --variant "$v" \
             --inject "$REF/base/default/$c/rep0" --inject-layer "$k" \
             --out "$OUT/inject/from-m3u-$c/$arm/$v/L$k"
