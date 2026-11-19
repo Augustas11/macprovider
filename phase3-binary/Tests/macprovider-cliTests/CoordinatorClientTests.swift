@@ -7439,8 +7439,10 @@ final class CoordinatorClientTests: XCTestCase {
             receiveResults: [],
             receiveOverrideIgnoresCancellation: true,
             receiveOverride: { socket in
+                // Outlasts the 1.5 s bound below: the rotation must return at
+                // its timeout, not when this uncancellable receive finishes.
                 let sleeper = Task.detached {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
                 await sleeper.value
                 return try await candidateResponder.receive(from: socket)
@@ -7460,7 +7462,10 @@ final class CoordinatorClientTests: XCTestCase {
             modelRuntime: runtime,
             providerStatus: status,
             reconnectGraceNanoseconds: 1_000_000,
-            receiptKeyRotationTimeoutNanoseconds: 20_000_000,
+            // The restore handshake runs under this same timeout and must
+            // finish inside it to send `state_update`; 20 ms timed out on a
+            // loaded CI runner (#2410).
+            receiptKeyRotationTimeoutNanoseconds: 250_000_000,
             attestationGenerator: StaticAttestationGenerator(token: nil),
             webSocketFactory: { factory.makeSocket(for: $0) },
             sleepAssertionFactory: { nil },
@@ -7475,12 +7480,12 @@ final class CoordinatorClientTests: XCTestCase {
             }
             XCTFail("rotation should time out")
         } catch let error as CoordinatorReceiptRotationTimeout {
-            XCTAssertLessThanOrEqual(error.timeoutSeconds, 0.02)
+            XCTAssertLessThanOrEqual(error.timeoutSeconds, 0.25)
         } catch {
             XCTFail("unexpected error: \(error)")
         }
 
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
         XCTAssertFalse(committed.get())
         XCTAssertGreaterThan(candidateSocket.cancelCountSnapshot(), 0)
         XCTAssertTrue(restoreSocket.sentFrames().contains { frame in

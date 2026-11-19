@@ -1676,21 +1676,30 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
         let serialRows = serialRuns.map(\.generatedTokens)
+        // The serial leg stops on these; the scheduler legs decode past them.
+        let stopTokenIDs = await container.perform { context in
+            ModelRuntime.generationStopTokenIDs(for: context)
+        }
         let standaloneMatches = zip(standaloneRows, serialRows).map { standalone, serial in
             msbTemp0ParityMatch(
                 serial: serial,
                 batched: standalone.tokensByRow[0],
-                comparedTokens: compared
+                comparedTokens: compared,
+                serialStopTokenIDs: stopTokenIDs
             )
         }
         let oneMatch = standaloneMatches[0]
         let batchedMatches = zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens)).map { batched, serial in
-            msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).match
+            msbTemp0ParityMatch(
+                serial: serial, batched: batched, comparedTokens: compared, serialStopTokenIDs: stopTokenIDs
+            ).match
         }
         let firstDivergence = standaloneMatches.compactMap(\.firstDivergence).first
             ?? zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens))
             .compactMap { batched, serial in
-                msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).firstDivergence
+                msbTemp0ParityMatch(
+                    serial: serial, batched: batched, comparedTokens: compared, serialStopTokenIDs: stopTokenIDs
+                ).firstDivergence
             }
             .first
         let parity = MSBParityEvidence(

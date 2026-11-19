@@ -148,6 +148,36 @@ final class MSBParityComparisonTests: XCTestCase {
         }
     }
 
+    /// #2410: the serial leg omits a model stop token and ends there, while
+    /// the scheduler legs decode a fixed length past it.
+    func testSerialStopOnAModelStopTokenMatchesTheFixedLengthBatchedLeg() {
+        let stops: Set<Int> = [7]
+        let stopped = msbTemp0ParityMatch(
+            serial: [1, 2], batched: [1, 2, 7, 5], comparedTokens: 4, serialStopTokenIDs: stops
+        )
+        XCTAssertTrue(stopped.match)
+        XCTAssertNil(stopped.firstDivergence)
+        // Without the stop set, or with another token at the stop position,
+        // the short serial run still cannot prove the window.
+        XCTAssertEqual(
+            msbTemp0ParityMatch(serial: [1, 2], batched: [1, 2, 7, 5], comparedTokens: 4).firstDivergence, 2
+        )
+        let other = msbTemp0ParityMatch(
+            serial: [1, 2], batched: [1, 2, 3, 7], comparedTokens: 4, serialStopTokenIDs: stops
+        )
+        XCTAssertFalse(other.match)
+        XCTAssertEqual(other.firstDivergence, 2)
+        // A mismatch before the stop is still a mismatch.
+        let early = msbTemp0ParityMatch(
+            serial: [1, 9], batched: [1, 2, 7, 5], comparedTokens: 4, serialStopTokenIDs: stops
+        )
+        XCTAssertEqual(early.firstDivergence, 1)
+        // A batched leg that ends at the serial stop has no stop token to show.
+        XCTAssertFalse(msbTemp0ParityMatch(
+            serial: [1, 2], batched: [1, 2], comparedTokens: 4, serialStopTokenIDs: stops
+        ).match)
+    }
+
     func testMismatchPrecedesAnyLaterMissingToken() {
         for (serial, batched) in [([1, 9], [1, 2, 3]), ([1, 2, 3], [1, 9]), ([1, 9, 3], [1, 2, 3])] {
             let result = msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: 3)
