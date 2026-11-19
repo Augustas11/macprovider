@@ -1409,18 +1409,20 @@ final class ConversationCacheTests: XCTestCase {
     /// Issue 2430: a serial hybrid turn that ended on the model's own stop
     /// publishes its prompt checkpoints only. A later turn that extends past
     /// the whole stored history (lcp = 1,500) still resumes from the prompt
-    /// checkpoint, never from the live recurrent state that saw EOS.
+    /// checkpoint (1,100), never from the live recurrent state that saw EOS.
+    /// Empty checkpoint states keep the test free of MLX allocations, so it
+    /// runs on hosts without a metallib; `testHybridCheckpointHitRestoresRecurrentState`
+    /// covers restoring the checkpoint's tensors.
     func testSerialHybridModelStopEntryResumesFromPromptCheckpoint() async throws {
         let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<1500)
-        let seed = await cache.begin(conversationKey: "conv:hybrid-eos", incomingTokens: int32Range(0..<1200), modelID: "hybrid", kvBits: nil)
+        let seedValue = await cache.begin(
+            conversationKey: "conv:hybrid-eos", incomingTokens: int32Range(0..<1200), modelID: "hybrid", kvBits: nil)
+        let seed = try XCTUnwrap(seedValue)
         let attention = trimmableCache(offset: stored.count)
         let recurrent = MambaCache()
-        let postStopState = [MLXArray([Float(9)]), MLXArray([Float(9)])]
-        recurrent.state = postStopState
-        let checkpointState = [MLXArray([Float(1)]), MLXArray([Float(2)])]
         guard case .commit(let checkpoints) = ModelRuntime.serialConversationCacheCheckpoints(
-            promptCheckpoints: [RecurrentStateCheckpoint(tokenCount: 1100, states: [1: checkpointState])],
+            promptCheckpoints: [RecurrentStateCheckpoint(tokenCount: 1100, states: [1: []])],
             cache: [attention, recurrent],
             tokenCount: stored.count,
             terminalModelStopStripped: true,
@@ -1428,19 +1430,21 @@ final class ConversationCacheTests: XCTestCase {
         ) else {
             return XCTFail("prompt checkpoint must be committed")
         }
+        XCTAssertEqual(checkpoints.map(\.tokenCount), [1100], "no terminal checkpoint at 1500")
         await cache.commit(
-            seed!, cache: ConversationCacheLayers([attention, recurrent], recurrentCheckpoints: checkpoints),
+            seed, cache: ConversationCacheLayers([attention, recurrent], recurrentCheckpoints: checkpoints),
             fullTokens: stored)
 
-        let hit = await cache.begin(
+        let hitValue = await cache.begin(
             conversationKey: "conv:hybrid-eos", incomingTokens: stored + int32Range(5000..<5040), modelID: "hybrid", kvBits: nil)
-        XCTAssertEqual(hit?.cachedPromptTokens, 1100)
+        let hit = try XCTUnwrap(hitValue)
+        XCTAssertEqual(hit.cachedPromptTokens, 1100, "resume at the prompt checkpoint, not the post-stop live state")
+        XCTAssertEqual(hit.lcp, 1100)
+        XCTAssertEqual(hit.trimBy, 400)
         XCTAssertEqual(attention.offset, 1100, "attention trimmed onto the checkpoint")
-        XCTAssertEqual(recurrent.state.count, 2)
-        XCTAssertTrue(recurrent.state[0] === checkpointState[0], "restored state is the checkpoint's")
-        XCTAssertTrue(recurrent.state[1] === checkpointState[1])
-        XCTAssertFalse(recurrent.state[0] === postStopState[0], "the post-stop live state is never resumed")
-        await cache.abort(hit!)
+        XCTAssertEqual(hit.reusableCanonicalPromptTokens, int32Range(0..<1100))
+        XCTAssertEqual(hit.reusableCache?.recurrentCheckpoints.map(\.tokenCount), [1100])
+        await cache.abort(hit)
     }
 
     func testAbortWithReasonLogsOneLine() async throws {

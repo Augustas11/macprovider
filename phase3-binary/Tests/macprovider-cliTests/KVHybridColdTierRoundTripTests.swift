@@ -171,6 +171,13 @@ final class KVHybridColdTierRoundTripTests: XCTestCase {
     /// a disk round trip and `begin`, the hit resumes at the checkpoint with the
     /// checkpoint's recurrent state, never the live one.
     func testEntryWithLastCheckpointBelowTokenCountResumesAtCheckpointAfterRestore() async throws {
+        // The codec round trip needs real tensor bytes, and creating any MLX
+        // array aborts the process on a host without a metallib (the CI
+        // runners). The test-bundle check also finds the metallib SwiftPM
+        // embeds in the test bundle, so this runs wherever MLX can load.
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX metallib is unavailable in this test host")
+        }
         let fixture = HybridFixture(tokenCount: 80, checkpointTokenCounts: [40])
         let checkpoint = try XCTUnwrap(fixture.checkpoints.first)
         for index in 0..<3 {
