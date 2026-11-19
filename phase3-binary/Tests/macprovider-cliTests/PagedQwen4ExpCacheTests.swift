@@ -338,12 +338,37 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         XCTAssertEqual(PagedKVCache.gatherKernelCalls, 3)
         XCTAssertEqual(PagedKVCache.maxLogicalBlocksObserved, 3)
         XCTAssertTrue(PagedKVCache.observedNonIdentityPermutation)
-        XCTAssertEqual(paged.capacityTokens, 24)
+        // One 256-token growth step (`amortizedGrownCapacity`).
+        XCTAssertEqual(paged.capacityTokens, 256)
         XCTAssertEqual(paged.trim(14), 14)
         XCTAssertEqual(paged.offset, 7)
         XCTAssertEqual(paged.indexerOffset, 7)
         XCTAssertEqual(paged.capacityTokens, 8)
         XCTAssertEqual(paged.state.map { $0.dim(2) }, [7, 7, 7, 7])
+    }
+
+    /// Growth copies the stored history; it grows by whole 256-token steps
+    /// (`amortizedGrownCapacity`), so 4096 tokens on 16-token blocks
+    /// reallocate 16 times, not once per block (256).
+    func testGrowthOverFourThousandTokensIsAmortized() throws {
+        try requireMetal()
+        var rng = SplitMix(seed: 21)
+        let paged = makeCache(blockSizeTokens: 16, maxPhysicalBlocks: 256)
+        var reallocations = 0
+        var capacity = paged.capacityTokens
+        for _ in 0 ..< 4096 / 16 {
+            step(paged, nil, length: 16, rng: &rng)
+            if paged.capacityTokens != capacity {
+                reallocations += 1
+                capacity = paged.capacityTokens
+            }
+            XCTAssertTrue(capacity.isMultiple(of: 16))
+        }
+        eval(paged.innerState())
+        XCTAssertEqual(paged.offset, 4096)
+        XCTAssertEqual(paged.indexerOffset, 4096)
+        XCTAssertEqual(capacity, 4096)
+        XCTAssertLessThanOrEqual(reallocations, 16)
     }
 
     func testBatchRoutesRowsAndTracksRaggedLengths() throws {
@@ -633,7 +658,12 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         XCTAssertTrue(equal(pik, oik), "index keys \(label)")
     }
 
-    private func makeCache(reconstructViaGather: Bool = false) -> PagedQwen4ExpSparseCache {
+    private func makeCache(
+        reconstructViaGather: Bool = false,
+        blockSizeTokens: Int? = nil,
+        maxPhysicalBlocks: Int = 64
+    ) -> PagedQwen4ExpSparseCache {
+        let blockSize = blockSizeTokens ?? self.blockSize
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "paged-qwen4-exp-test", poolEpoch: 1)
         let binding = PagedKVStorageBinding(
             handle: handle,
@@ -651,7 +681,7 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         )
         return PagedQwen4ExpSparseCache(
             blockSizeTokens: blockSize,
-            maxPhysicalBlocks: 64,
+            maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
             binding: binding,
             reconstructViaGather: reconstructViaGather

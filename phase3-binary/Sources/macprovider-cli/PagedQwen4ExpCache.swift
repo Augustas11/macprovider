@@ -65,11 +65,12 @@ final class PagedQwen4ExpSparseCache: Qwen4ExpSparseCache, CustomDebugStringConv
     /// Allocated capacity in tokens (whole blocks), shared by all three buffers.
     var capacityTokens: Int { keyBuffer?.dim(2) ?? 0 }
 
-    /// `buffer` grown to hold `needed` tokens in whole blocks, keeping its
-    /// first `kept` tokens.
+    /// `buffer` grown to hold `needed` tokens in whole growth steps
+    /// (`amortizedGrownCapacity`, whole blocks), keeping its first `kept`
+    /// tokens.
     private func reserve(_ buffer: MLXArray?, like new: MLXArray, kept: Int, needed: Int) -> MLXArray {
         if let buffer, needed <= buffer.dim(2) { return buffer }
-        let capacity = PagedKVBlockLayout.grownCapacity(
+        let capacity = PagedKVBlockLayout.amortizedGrownCapacity(
             needed: needed,
             maxTokens: maxResidentTokens,
             blockSizeTokens: blockSizeTokens
