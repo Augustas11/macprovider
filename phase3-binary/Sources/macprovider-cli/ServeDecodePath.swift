@@ -88,7 +88,10 @@ extension ModelRuntime {
     /// prefill alone (8-token shared-forward cap), and a 512-token chunk
     /// starves the MoE matmuls: Studio M3 Ultra, GLM-5.3-Flash, 8k prompt,
     /// 224.0 prefill tok/s at 512 vs 308.7 at 2048 with 16/16 top-1 parity
-    /// and 189 GB peak (#2100).
+    /// and 189 GB peak (#2100). Also the serial path's `glm5_next` prefill
+    /// step (`servedSerialPrefillStepSize`): one row, GLM-5.3-Flash, TTFT
+    /// 11.21 s at 512 vs 9.71 s at 2048 with 3,673 prompt tokens, 43.66 vs
+    /// 37.17 s with 14,126 (#2409).
     static let pagedMLAPromptChunkTokens = 2_048
 
     /// CB prompt chunk ceiling of a hybrid Qwen MoE backend. M3 Ultra,

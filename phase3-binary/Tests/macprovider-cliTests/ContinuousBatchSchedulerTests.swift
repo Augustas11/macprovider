@@ -6549,6 +6549,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
+    /// #2409 / SPEC-038 FR-CB2 v0.3.61: the serial path prefills `glm5_next`
+    /// in steps of its batching ceiling (2048); an operator
+    /// `prefill_step_size` only lowers it. Image requests keep the vision
+    /// step and every other family keeps the configured step.
+    func testSerialPrefillStepFollowsTheGLMCeilingAndTheOperatorOnlyLowersIt() {
+        let glm = ModelRuntime.pagedMLAPromptChunkTokens
+        XCTAssertEqual(glm, 2_048)
+        // (glm5_next, configured step, operator-set step, image, step)
+        let cases: [(Bool, Int, Int?, Bool, Int)] = [
+            (true, 512, nil, false, 2_048), (true, 4_096, 4_096, false, 2_048),
+            (true, 2_048, 2_048, false, 2_048), (true, 1_024, 1_024, false, 1_024),
+            (true, 512, 512, false, 512), (true, 256, 256, false, 256),
+            (true, 512, nil, true, 512), (true, 4_096, 4_096, true, 512),
+            (false, 512, nil, false, 512), (false, 4_096, 4_096, false, 4_096),
+            (false, 256, 256, false, 256), (false, 4_096, 4_096, true, 512),
+        ]
+        for (glm5Next, configured, operatorSet, image, step) in cases {
+            let label = "glm5_next \(glm5Next), configured \(configured), operator \(String(describing: operatorSet)), image \(image)"
+            XCTAssertEqual(
+                ModelRuntime.servedSerialPrefillStepSize(
+                    glm5Next: glm5Next, configured: configured, operatorSet: operatorSet, containsImage: image),
+                step,
+                label
+            )
+        }
+        // The operator override the serial path reads is the CB one: set only
+        // when `prefill_step_size` was configured.
+        XCTAssertNil(ModelRuntime.resolvedContinuousBatchPromptChunkOverride(prefillStepSize: 512, explicitlyConfigured: false))
+        XCTAssertEqual(ModelRuntime.resolvedContinuousBatchPromptChunkOverride(prefillStepSize: 512, explicitlyConfigured: true), 512)
+    }
+
     /// #2100: at the 2048-token `glm5_next` chunk an active row still takes a
     /// full lockstep window (16 steps) between the chunks of a long prompt
     /// (6,144 tokens: three full chunks).
