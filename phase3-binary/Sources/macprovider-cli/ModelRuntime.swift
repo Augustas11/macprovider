@@ -2099,21 +2099,6 @@ actor ModelRuntime: ModelRuntimeServing {
         containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
-    /// The serial path's prefill step for one request (SPEC-038 FR-CB2
-    /// v0.3.61): a `glm5_next` model (`GLM5NextModel`, `GLM5NextTextModel`)
-    /// prefills in chunks of up to its CB ceiling (`pagedMLAPromptChunkTokens`,
-    /// 2048), which an operator-set `prefill_step_size` (`operatorSet`) may
-    /// only lower; every other family keeps the configured step. An image
-    /// request keeps the vision step.
-    nonisolated static func servedSerialPrefillStepSize(
-        glm5Next: Bool, configured: Int, operatorSet: Int?, containsImage: Bool
-    ) -> Int {
-        guard glm5Next, !containsImage else {
-            return effectivePrefillStepSize(configured: configured, containsImage: containsImage)
-        }
-        return min(max(1, operatorSet ?? pagedMLAPromptChunkTokens), pagedMLAPromptChunkTokens)
-    }
-
     struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
         let base: any MLXLMCommon.Tokenizer
 
@@ -2349,8 +2334,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
     private let prefillStepSize: Int
     /// The CB prompt chunk the operator set through `prefill_step_size`; nil
-    /// keeps the backend family's ceiling (SPEC-038 FR-CB2). The serial path
-    /// reads it the same way for `glm5_next` (`servedSerialPrefillStepSize`).
+    /// keeps the backend family's ceiling (SPEC-038 FR-CB2).
     private let continuousBatchPromptChunkOverride: Int?
 
     /// Both initializers resolve the CB chunk override here, so serve, test
@@ -10959,8 +10943,8 @@ maxTokens: boundedMaxTokens,
 
         let maxContextTokens = maxContextTokens
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let configuredPrefillStepSize = prefillStepSize
-        let operatorPrefillStepSize = continuousBatchPromptChunkOverride
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
@@ -10999,10 +10983,6 @@ maxTokens: boundedMaxTokens,
                     timeline.markStarted()
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let prefillStepSize = Self.servedSerialPrefillStepSize(
-                        glm5Next: context.model is GLM5NextModel || context.model is GLM5NextTextModel,
-                        configured: configuredPrefillStepSize,
-                        operatorSet: operatorPrefillStepSize, containsImage: request.containsNonTextMessageContentPart)
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                         for: request,
                         context: context,
@@ -12001,8 +11981,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
 
         let maxContextTokens = maxContextTokens
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let configuredPrefillStepSize = prefillStepSize
-        let operatorPrefillStepSize = continuousBatchPromptChunkOverride
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
@@ -12046,10 +12026,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     timeline.markStarted()
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let prefillStepSize = Self.servedSerialPrefillStepSize(
-                        glm5Next: context.model is GLM5NextModel || context.model is GLM5NextTextModel,
-                        configured: configuredPrefillStepSize,
-                        operatorSet: operatorPrefillStepSize, containsImage: request.containsNonTextMessageContentPart)
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                         for: request,
                         context: context,

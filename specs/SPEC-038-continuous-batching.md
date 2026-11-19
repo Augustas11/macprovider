@@ -1,36 +1,11 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.61
+Version: v0.3.60
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.61 (2026-11-19, FR-CB2 `glm5_next` serial path prefills in chunks of up to 2048 tokens, Related: #2409):**
-FR-CB2: the serial path takes the `glm5_next` prompt chunk ceiling (2048)
-that its batching path has had since v0.3.28. A `glm5_next` serial request
-prefills in steps of 2048 tokens (`.legacyRemainder`: full steps, then the
-remainder in the first forward); an operator-set `prefill_step_size` may
-only lower the step, as on the batching path. Image requests keep the vision
-step (512), and every other family keeps the configured `prefill_step_size`
-(default 512) on the serial path. The batching path is unchanged: its
-`glm5_next` ceiling is already 2048, so no other row's decode wait changes.
-The 512 serial default was the mlx-swift-lm `GenerateParameters` default
-inherited when `prefill_step_size` was wired (2026-07-07); no `glm5_next`
-measurement chose it. The model's own prefill kernels have no 2048-token
-bound: the sparse indexer scores at most 512 queries (and about 2^26 score
-elements) per tile and sparse attention runs 64-query tiles at any chunk
-length. Measured on one lab build, M3 Ultra, uncensored GLM-5.3-Flash, one
-row, serial path (`prefill-profile`, medians of 3): time to first token
-11.21 s at 512 vs 9.71 s at 2048 with 3,673 prompt tokens, and 43.66 vs
-37.17 s with 14,126; the mlx-lm reference prefills in 2048-token steps.
-Only the first token was compared across chunk sizes in that run; the full
-512-token greedy comparison is the campaign's lab gate. A `glm5_next`
-serial prompt snapshot keeps whole-step boundaries, so a snapshot taken at a
-512-token boundary that is not a 2048 multiple is skipped, not resumed. The
-change sits in the decode-path manifest (`ModelRuntime.swift`,
-`ServeDecodePath.swift`), so the decode-path digest changes (SPEC-048 R013).
-
 **Change log v0.3.60 (2026-11-18, FR-CB14 width selection uses a 3% noise band instead of the calibrator's 15% tie band, Related: #2409):**
 The self-check prefers the lowest k within 3% of the best gain, not 15%.
 Candidate widths are already memory-bounded and verified exact, so the band
@@ -1363,10 +1338,6 @@ the default (8) at a 512-token chunk, proportionally more at a larger chunk,
 never below the default, and never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
-(v0.3.61) The serial path MUST prefill a `glm5_next` request in steps of the
-`glm5_next` ceiling (2048), lowered by an operator-set `prefill_step_size`
-and never raised by it; an image request keeps the vision step, and every
-other family keeps the configured `prefill_step_size`.
 
 **MiniMax M3 serial prefill stride (v0.3.35).** A `minimax_m3` row MUST
 prefill in chunks of exactly the prompt chunk limit from its cursor, the
