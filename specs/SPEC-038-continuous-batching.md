@@ -9,7 +9,7 @@ Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032
 **Change log v0.3.60 (2026-11-18, FR-CB14 width selection uses a 3% noise band instead of the calibrator's 15% tie band, Related: #2409):**
 The self-check prefers the lowest k within 3% of the best gain, not 15%.
 Candidate widths are already memory-bounded and verified exact, so the band
-only absorbs measurement noise (about 0.3% same-window); the 15% band hid real
+only absorbs measurement noise (repeated same-window one-row runs spread 0.4-0.6%); the 15% band hid real
 gains (1.349/1.513/1.660 at 2/3/4 now selects 4). The calibrator's own 15%
 is unchanged for its other uses.
 
