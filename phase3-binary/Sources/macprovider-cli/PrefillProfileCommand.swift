@@ -113,11 +113,7 @@ struct PrefillProfileCommand: AsyncParsableCommand {
         let (prompts, inventory) = prepared.value as! ([[Int32]], [[String: Any]])
         // Serve's serial step for this model with `prefill_step_size` unset
         // (configured default 512).
-        let serveDefaultStep = await container.perform { context in
-            ModelRuntime.servedSerialPrefillStepSize(
-                glm5Next: context.model is GLM5NextModel || context.model is GLM5NextTextModel,
-                configured: 512, operatorSet: nil, containsImage: false)
-        }
+        let serveDefaultStep = ModelRuntime.effectivePrefillStepSize(configured: 512, containsImage: false)
         Self.say("serve_default_step=\(serveDefaultStep)")
 
         let generate = generateTokens
