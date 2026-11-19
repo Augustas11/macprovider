@@ -25,6 +25,13 @@
 # macprovider.native-mtp-r015-policy.v1, prompts 1536/4096/C, outputs 128/512, 10 blocks, the gated
 # cells s2 and s<qualified_slots> at p1536-o512, then the 1800 s sustained window on
 # s<qualified_slots>-p1536-o512, plain_text, the current gate set; the analyzer gives the verdict.
+# QMTP_FORMAL_BLOCKS (default 10, 10..20): the formal matrix's preregistered block count.
+# QMTP_EXCLUSION (default none): the policy's preregistered SPEC-048 MTP-15 exclusion_rules, none
+# or single_token_identical_pair (a block whose two paths each emit the same single token feeds
+# the hard gates, not the decode statistics; the cell still needs ten measurable blocks). The
+# Qwen3.8-27B s1-p32768-o128 block 9 prompt stops after one identical token on both paths (run
+# 20261119T164215Z); prompts do not depend on the seed, so its formal rerun freezes the rule and
+# 11 blocks.
 # Results: ~/lab-ablit-perf/results/<run>/qwen-mtp-cap/<model>/{policy.json,bench.jsonl,
 # analysis.json,analysis.md,identity.sha256,<cell>.log}. Every failure prints `BLOCKER:`; the job
 # ends with JOB_PASS or JOB_FAIL. A slower native path is a finding, not a failure.
@@ -45,6 +52,8 @@ QMTP_PROBE=${QMTP_PROBE:-0}
 QMTP_SHAPE=${QMTP_SHAPE:-tools_history_reasoning}
 QMTP_FORMAL=${QMTP_FORMAL:-0}
 QMTP_CAP=${QMTP_CAP:-}
+QMTP_FORMAL_BLOCKS=${QMTP_FORMAL_BLOCKS:-10}
+QMTP_EXCLUSION=${QMTP_EXCLUSION:-none}
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
 BUILD=.build-lab-harness
 BIN=$SRC/$BUILD/release
@@ -90,12 +99,14 @@ case "$QMTP_PROMPTS" in ""|*[!0-9,]*|,*|*,|*,,*) die "QMTP_PROMPTS must be a com
 case "$QMTP_OUTPUTS" in ""|*[!0-9,]*|,*|*,|*,,*) die "QMTP_OUTPUTS must be a comma list" 64 ;; esac
 case "$QMTP_SHAPE" in plain_text|tools_history_reasoning) ;; *) die "QMTP_SHAPE must be plain_text or tools_history_reasoning" 64 ;; esac
 case "$QMTP_BLOCKS" in [2-9]|10) ;; *) die "QMTP_BLOCKS must be 2..10" 64 ;; esac
+case "$QMTP_FORMAL_BLOCKS" in 1[0-9]|20) ;; *) die "QMTP_FORMAL_BLOCKS must be 10..20" 64 ;; esac
+case "$QMTP_EXCLUSION" in none|single_token_identical_pair) ;; *) die "QMTP_EXCLUSION must be none or single_token_identical_pair" 64 ;; esac
 echo "${COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$' || die "COMMIT (40-hex provider commit) is unset" 64
 if [ "$QMTP_FORMAL" = 1 ]; then
   case "$QMTP_CAP" in ""|*[!0-9]*) die "QMTP_FORMAL needs QMTP_CAP (the signed prompt cap to qualify)" 64 ;; esac
   [ "$QMTP_CAP" -gt 4096 ] || die "QMTP_CAP must exceed 4096" 64
   [ "$QMTP_PROBE" = 1 ] && die "QMTP_FORMAL and QMTP_PROBE exclude each other" 64
-  QMTP_PROMPTS=1536,4096,$QMTP_CAP; QMTP_OUTPUTS=128,512; QMTP_BLOCKS=10; QMTP_SHAPE=plain_text
+  QMTP_PROMPTS=1536,4096,$QMTP_CAP; QMTP_OUTPUTS=128,512; QMTP_BLOCKS=$QMTP_FORMAL_BLOCKS; QMTP_SHAPE=plain_text
 fi
 if [ "$QMTP_PROBE" = 1 ]; then
   QMTP_MODELS=${QMTP_MODELS%% *}; QMTP_PROMPTS=${QMTP_PROMPTS%%,*}; QMTP_OUTPUTS=${QMTP_OUTPUTS%%,*}; QMTP_BLOCKS=2
@@ -107,7 +118,7 @@ for k in $QMTP_MODELS; do
 done
 
 mkdir -p "$RES"
-log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS shape=$QMTP_SHAPE probe=$QMTP_PROBE formal=$QMTP_FORMAL${QMTP_CAP:+ cap=$QMTP_CAP}"
+log "JOB_START qwen-mtp-cap run=$RUN_ID commit=$COMMIT models=\"$QMTP_MODELS\" prompts=$QMTP_PROMPTS outputs=$QMTP_OUTPUTS blocks=$QMTP_BLOCKS shape=$QMTP_SHAPE probe=$QMTP_PROBE formal=$QMTP_FORMAL${QMTP_CAP:+ cap=$QMTP_CAP} exclusion=$QMTP_EXCLUSION"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -141,9 +152,9 @@ run_model() {
   fork=$(sed -n 's/.*static let mlxSwiftLMRevision = "\([0-9a-f]*\)".*/\1/p' "$SRC/Sources/macprovider-cli/KVConversationColdTierAdapter.swift")
   /usr/bin/python3 -I - "$DIR/policy.json" "$ID" "$TSHA" "$MSHA" "$TOK" "$QSLOTS" "$QMTP_PROMPTS" "$QMTP_OUTPUTS" \
     "$QMTP_BLOCKS" "$(sysctl -n hw.model)" "$(sysctl -n kern.osversion)" "${xcode:-unknown}" "${swift:-unknown}" \
-    "$COMMIT" "$fork" "$QMTP_SHAPE" "$QMTP_FORMAL" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
+    "$COMMIT" "$fork" "$QMTP_SHAPE" "$QMTP_FORMAL" "$QMTP_EXCLUSION" <<'PY' || { blocker "model $k: policy generation failed"; return 1; }
 import json, sys
-out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork, shape, formal = sys.argv[1:18]
+out, mid, tsha, msha, tok, qs, prompts, outputs, blocks, hw, osb, xcode, swift, commit, fork, shape, formal, exclusion = sys.argv[1:19]
 if len(fork) != 40:
     sys.exit("mlxSwiftLMRevision not found in the source tree")
 prompts = [int(x) for x in prompts.split(",")]
@@ -154,7 +165,7 @@ p = {
     "os_build": osb, "xcode_build_version": xcode, "swift_version": swift, "provider_commit": commit,
     "mlx_fork_revision": fork, "quantization": "4bit", "cache_mode": "paged_kv_mixed", "proposal_depth": 1,
     "run_order": "seeded_random_counterbalanced", "prompt_corpus": "deterministic_synthetic_unique_v2",
-    "exclusion_rules": "none", "confidence_method": "paired_block_bootstrap_holm_v1",
+    "exclusion_rules": exclusion, "confidence_method": "paired_block_bootstrap_holm_v1",
     "qualified_slots": int(qs), "max_native_active_rows": 1, "arrival_interval_ms": 250, "slots": [1],
     "maximum_prompt_tokens": max(prompts), "prompt_tokens": prompts, "max_tokens": outputs,
     "gated_cells": [], "request_shape": shape, "warmup_runs": 1, "blocks": int(blocks), "seed": 20261119, "sustained_seconds": 0,
