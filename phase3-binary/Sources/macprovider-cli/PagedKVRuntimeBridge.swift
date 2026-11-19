@@ -954,10 +954,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     static let pagedMLAMaxFlattenedTokensPerForward = 8
 
     /// The flattened-token cap of a shared forward over these layers, or nil
-    /// when only the device route bound applies.
+    /// when only the device route bound applies. Qwen4-Exp
+    /// (`pagedQwen4ExpKV`) decodes through its own fork kernels, not the
+    /// GLM-5-Next fused ones, and its decode rows are verified bitwise up to
+    /// the device bound, so its decode takes only the device bound.
     static func maxFlattenedTokensPerForward(cacheKinds: [CacheKind]) -> Int? {
-        cacheKinds.contains(where: { $0.isPagedMLA || $0.isDeepseekV4Pool || $0.isPagedIndexedKV })
+        cacheKinds.contains(where: { $0.isPagedMLA || $0.isDeepseekV4Pool || $0 == .pagedIndexedKV })
             ? pagedMLAMaxFlattenedTokensPerForward : nil
+    }
+
+    /// The flattened-token cap of a shared prefill forward. Qwen4-Exp keeps
+    /// the 8-token cap here, so each of its rows still prefills in its own
+    /// forward (the path its CB parity is proven on); only its decode drops
+    /// the cap.
+    static func maxFlattenedPrefillTokensPerForward(cacheKinds: [CacheKind]) -> Int? {
+        maxFlattenedTokensPerForward(cacheKinds: cacheKinds)
+            ?? (cacheKinds.contains(.pagedQwen4ExpKV) ? pagedMLAMaxFlattenedTokensPerForward : nil)
     }
 
     /// Whether every row of a prefill group prefills in its own forward: no
@@ -967,7 +979,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// may join a ragged group (SPEC-038 v0.3.24 FR-CB2): it still prefills
     /// alone, on the serial path its drafter seeding is proven on.
     static func prefillsGroupedRowsAlone(cacheKinds: [CacheKind], minimumGroupedChunkTokens: Int) -> Bool {
-        guard let cap = maxFlattenedTokensPerForward(cacheKinds: cacheKinds) else { return false }
+        guard let cap = maxFlattenedPrefillTokensPerForward(cacheKinds: cacheKinds) else { return false }
         let (tokens, overflow) = max(1, minimumGroupedChunkTokens).multipliedReportingOverflow(by: 2)
         return overflow || tokens > cap
     }
@@ -1008,12 +1020,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     /// The flattened-token cap `sharedForwardFits` applies to a prefill group.
-    var prefillForwardTokenCap: Int? { maxDecodeRowsPerForward }
+    let prefillForwardTokenCap: Int?
 
-    /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
-    /// forward under this backend's flattened-token cap.
-    func sharedForwardFits(rows: Int, tokensPerRow: Int) -> Bool {
-        guard let cap = maxDecodeRowsPerForward else { return true }
+    /// Whether `rows` chunks of `tokensPerRow` tokens fit one shared forward
+    /// under `cap` (`prefillForwardTokenCap` or `maxDecodeRowsPerForward`).
+    func sharedForwardFits(rows: Int, tokensPerRow: Int, cap: Int?) -> Bool {
+        guard let cap else { return true }
         let (tokens, overflow) = rows.multipliedReportingOverflow(by: tokensPerRow)
         return !overflow && tokens <= cap
     }
@@ -1116,6 +1128,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             flattenedCap ?? Int.max
         )
         self.maxDecodeRowsPerForward = flattenedCap
+        self.prefillForwardTokenCap = Self.maxFlattenedPrefillTokensPerForward(cacheKinds: resolvedKinds)
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
@@ -1185,7 +1198,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 inputs,
                 nativeMTPPromptRowsJoinRaggedPrefill: self.nativeMTPPromptRowsJoinRaggedPrefill
             ),
-               self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
+               self.sharedForwardFits(
+                   rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count, cap: self.prefillForwardTokenCap
+               ),
                !raggedOffsets || self.supportsRaggedPrefillOffsets {
                 gpuTurn?.begin(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count }))
                 let rowStates = inputs.map {
@@ -2822,7 +2837,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let decodeSteps = max(1, steps)
         // A capped backend (`pagedMLA`) never forms a wider forward; the
         // scheduler splits decode steps to fit.
-        guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
+        guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1, cap: maxDecodeRowsPerForward) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_forward_token_cap")
         }
         #if DEBUG || MACPROVIDER_LAB_HARNESS

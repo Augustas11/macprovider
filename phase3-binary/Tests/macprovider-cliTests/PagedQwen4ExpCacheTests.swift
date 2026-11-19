@@ -175,7 +175,45 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
             CacheKind.kinds(from: [MambaCache(), ArraysCache(size: 4), MambaCache(), Qwen4ExpAttentionCache()]),
             [.recurrentMamba, .recurrentMamba, .recurrentMamba, .pagedQwen4ExpKV]
         )
-        XCTAssertEqual(PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: Self.kinds48), 8)
+    }
+
+    /// Qwen4-Exp decode runs its own fork kernels, not the GLM-5-Next fused
+    /// ones: it takes the device quantized-matmul bound (11 rows on M3
+    /// Ultra) with no flattened-token cap, while its prefill keeps the
+    /// 8-token cap (each row prefills alone) and the serial stride. GLM-5-Next
+    /// and MiniMax M3 keep 8. The self-check key moves off the 8-row key, so
+    /// no grant measured under it is reused.
+    func testDecodeTakesTheDeviceBoundWithoutTheFlattenedCap() {
+        typealias Backend = PagedKVSharedForwardBackend
+        XCTAssertNil(Backend.maxFlattenedTokensPerForward(cacheKinds: Self.kinds48))
+        XCTAssertEqual(Backend.maxFlattenedPrefillTokensPerForward(cacheKinds: Self.kinds48), 8)
+        XCTAssertTrue(Backend.prefillsGroupedRowsAlone(cacheKinds: Self.kinds48, minimumGroupedChunkTokens: 205))
+        let ultra = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: "applegpu_g15d")
+        XCTAssertEqual(ultra, 11)
+        for device in [5, 6, ultra, 12] {
+            XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: device, cacheKinds: Self.kinds48), device)
+        }
+
+        let glm: [CacheKind] = [.recurrentMamba, .pagedMLA(kpool: 4)]
+        XCTAssertEqual(Backend.maxFlattenedTokensPerForward(cacheKinds: glm), 8)
+        XCTAssertEqual(Backend.maxFlattenedPrefillTokensPerForward(cacheKinds: glm), 8)
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: ultra, cacheKinds: glm), 8)
+        XCTAssertEqual(Backend.maxFlattenedTokensPerForward(cacheKinds: [.recurrentMamba, .pagedIndexedKV]), 8)
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: ultra, cacheKinds: [.pagedIndexedKV]), 8)
+        XCTAssertNil(Backend.maxFlattenedPrefillTokensPerForward(cacheKinds: [.recurrentMamba, .pagedAttention]))
+
+        let qwen4Key = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+            forwardBound: ultra,
+            routeKeyBoundary: 1024,
+            forwardTokenCap: Backend.maxFlattenedTokensPerForward(cacheKinds: Self.kinds48)
+        )
+        let eightRowKey = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+            forwardBound: ultra, routeKeyBoundary: 1024, forwardTokenCap: 8
+        )
+        XCTAssertTrue(qwen4Key.contains("/decode11/verify11+"), qwen4Key)
+        XCTAssertFalse(qwen4Key.contains("+flat"), qwen4Key)
+        XCTAssertTrue(eightRowKey.contains("/decode8/verify8+") && eightRowKey.hasSuffix("+flat8"), eightRowKey)
+        XCTAssertNotEqual(qwen4Key, eightRowKey)
     }
 
     // MARK: - Scheduler rules (no Metal)
@@ -477,13 +515,13 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
     }
 
     /// Rows on both sides of the indexer budget, prefilled alone and decoded
-    /// together for several lockstep windows at 2 and 8 rows, emit bitwise
+    /// together for several lockstep windows at 2, 8 and 16 rows, emit bitwise
     /// the greedy tokens of each row decoded alone on the paged backend and
     /// of the stock serial caches.
     func testBatchedRowsMatchEachRowAloneAndTheSerialCaches() async throws {
         try requireMetal()
         let model = try Self.tinyModel()
-        let lengths = [3, 21, 9, 30, 14, 5, 26, 17]
+        let lengths = [3, 21, 9, 30, 14, 5, 26, 17, 11, 2, 24, 7, 19, 28, 6, 13]
         let prompts = lengths.enumerated().map { Self.tinyPrompt(length: $1, salt: $0) }
         let decodeTokens = 2 * Self.lockstepWindow + 5
 
@@ -495,7 +533,8 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
             XCTAssertEqual(paged, serial, "row \(row): paged alone differs from the serial caches")
             alone.append(paged)
         }
-        for rows in [2, 8] {
+        // 16 rows: one decode forward past the old 8-row flattened cap.
+        for rows in [2, 8, 16] {
             let batched = try await Self.runPaged(model: model, prompts: Array(prompts.prefix(rows)), decodeTokens: decodeTokens)
             for row in 0 ..< rows {
                 XCTAssertEqual(batched[row], alone[row], "B=\(rows) row \(row): batched differs from alone")
@@ -566,7 +605,9 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
             recurrentStateLayout: tinyLayout
         )
         XCTAssertTrue(ModelRuntime.schedulerFollowsSerialPrefillStride(backend: backend))
-        XCTAssertEqual(backend.maxDecodeRowsPerForward, 8)
+        XCTAssertNil(backend.maxDecodeRowsPerForward)
+        XCTAssertEqual(backend.prefillForwardTokenCap, 8)
+        XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: backend), 11)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: tinyBlockSizeTokens, maxPhysicalBlocks: tinyMaxPhysicalBlocks)
         func id(_ row: Int) -> String { "qwen4-exp-cb-\(row)" }
         var handles: [PagedKVBlockTableHandle] = []
