@@ -854,7 +854,12 @@ actor ConversationCache {
         await coldTier?.drainPendingPersists(timeoutSeconds: timeoutSeconds)
     }
 
-    func abort(_ lease: ConversationCacheLease) async {
+    /// `reason` names why a turn that held a lease publishes nothing; the
+    /// line it logs is the only trace of an otherwise silent abort.
+    func abort(_ lease: ConversationCacheLease, reason: String? = nil) async {
+        if let reason {
+            log("event=conv_cache action=abort key_hash=\(lease.keyHash) reason=\(reason)")
+        }
         await lease.reusableCache?.discardRetainedPagedKV(conversationKey: lease.key)
         releaseTurn(lease.key)
     }

@@ -11475,30 +11475,28 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         isCancelled: shouldCancel
                                     )
                                 } else {
-                                    await conversationCache.abort(lease)
+                                    await conversationCache.abort(lease, reason: "prompt_snapshot_missing")
                                 }
                                 return completion
                             }
-                            guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
+                            let recurrentCheckpoints: [RecurrentStateCheckpoint]
+                            switch Self.serialConversationCacheCheckpoints(
+                                promptCheckpoints: recurrent.checkpoints,
                                 cache: kvCache,
+                                tokenCount: fullTokens.count,
                                 terminalModelStopStripped: terminalModelStopStripped
-                            ) else {
-                                await conversationCache.abort(lease)
+                            ) {
+                            case .commit(let checkpoints):
+                                recurrentCheckpoints = checkpoints
+                            case .abort(let reason):
+                                await conversationCache.abort(lease, reason: reason)
                                 return completion
                             }
                             guard Self.reconcileConversationCacheLedger(
                                 kvCache, ledgerTokenCount: fullTokens.count,
                                 unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
-                                await conversationCache.abort(lease)
-                                return completion
-                            }
-                            guard let recurrentCheckpoints = Self.serialTerminalRecurrentCheckpoints(
-                                promptCheckpoints: recurrent.checkpoints,
-                                cache: kvCache,
-                                tokenCount: fullTokens.count
-                            ) else {
-                                await conversationCache.abort(lease)
+                                await conversationCache.abort(lease, reason: "ledger_mismatch")
                                 return completion
                             }
                             await conversationCache.commit(
@@ -11516,7 +11514,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // released, so the next request does not queue behind it.
                         Stream().synchronize()
                         if let lease {
-                            await conversationCache.abort(lease)
+                            await conversationCache.abort(lease, reason: "error")
                         }
                         throw error
                     }
@@ -12637,30 +12635,28 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         isCancelled: shouldCancel
                                     )
                                 } else {
-                                    await conversationCache.abort(lease)
+                                    await conversationCache.abort(lease, reason: "prompt_snapshot_missing")
                                 }
                                 return validated
                             }
-                            guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
+                            let recurrentCheckpoints: [RecurrentStateCheckpoint]
+                            switch Self.serialConversationCacheCheckpoints(
+                                promptCheckpoints: recurrent.checkpoints,
                                 cache: kvCache,
+                                tokenCount: fullTokens.count,
                                 terminalModelStopStripped: terminalModelStopStripped
-                            ) else {
-                                await conversationCache.abort(lease)
+                            ) {
+                            case .commit(let checkpoints):
+                                recurrentCheckpoints = checkpoints
+                            case .abort(let reason):
+                                await conversationCache.abort(lease, reason: reason)
                                 return validated
                             }
                             guard Self.reconcileConversationCacheLedger(
                                 kvCache, ledgerTokenCount: fullTokens.count,
                                 unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
-                                await conversationCache.abort(lease)
-                                return validated
-                            }
-                            guard let recurrentCheckpoints = Self.serialTerminalRecurrentCheckpoints(
-                                promptCheckpoints: recurrent.checkpoints,
-                                cache: kvCache,
-                                tokenCount: fullTokens.count
-                            ) else {
-                                await conversationCache.abort(lease)
+                                await conversationCache.abort(lease, reason: "ledger_mismatch")
                                 return validated
                             }
                             await conversationCache.commit(
@@ -12678,7 +12674,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // released, so the next request does not queue behind it.
                         Stream().synchronize()
                         if let lease {
-                            await conversationCache.abort(lease)
+                            await conversationCache.abort(lease, reason: "error")
                         }
                         throw error
                     }
@@ -15777,12 +15773,36 @@ maxTokens: maxTokens,
         return RecurrentStateCheckpoint(tokenCount: tokenCount, states: states)
     }
 
-    static func serialHybridCacheCanPublishTerminalCheckpoint(
+    enum SerialConversationCacheCheckpoints {
+        case commit([RecurrentStateCheckpoint])
+        case abort(reason: String)
+    }
+
+    /// The recurrent checkpoints a serial turn publishes with its entry.
+    /// When the turn ended on the model's own stop, MLX already advanced the
+    /// live recurrent state through that token, but the token ledger dropped
+    /// it, so no terminal checkpoint is taken. The prompt checkpoints are
+    /// still exact; publishing only them makes every later hit restore one of
+    /// them (`ConversationCache.selectRecurrentCheckpoint` never picks a length
+    /// above the largest checkpoint), so the post-stop live state is never
+    /// resumed.
+    static func serialConversationCacheCheckpoints(
+        promptCheckpoints: [RecurrentStateCheckpoint],
         cache: [KVCache],
+        tokenCount: Int,
         terminalModelStopStripped: Bool
-    ) -> Bool {
-        guard ConversationCacheLayers.hasRecurrentLayers(cache) else { return true }
-        return !terminalModelStopStripped
+    ) -> SerialConversationCacheCheckpoints {
+        if terminalModelStopStripped, ConversationCacheLayers.hasRecurrentLayers(cache) {
+            return promptCheckpoints.isEmpty
+                ? .abort(reason: "hybrid_terminal_stop_stripped")
+                : .commit(promptCheckpoints)
+        }
+        guard let checkpoints = serialTerminalRecurrentCheckpoints(
+            promptCheckpoints: promptCheckpoints, cache: cache, tokenCount: tokenCount
+        ) else {
+            return .abort(reason: "terminal_checkpoint_capture_failed")
+        }
+        return .commit(checkpoints)
     }
 
     static func serialTerminalModelStopStripped(

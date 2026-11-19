@@ -1,8 +1,18 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.17 (2026-11-01, quantized reusable serial conversation KV)
+**Version:** 0.2.18 (2026-11-19, serial hybrid model-stop keeps prefill checkpoints)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.18 (2026-11-19, Related: #2430):**
+- **FR-CI2 hybrid models.** A serial natural-EOS/model-stop completion on a
+  hybrid model still never publishes a reply-end checkpoint or its live
+  recurrent state, because the stripped stop token already advanced that state.
+  It now publishes its prefill checkpoints instead of discarding the whole
+  entry, so the next turn resumes from the largest prefill checkpoint
+  `C <= LCP`. The entry is discarded only when no prefill checkpoint exists.
+  Every serial abort that publishes nothing logs
+  `event=conv_cache action=abort key_hash=<hash> reason=<reason>`.
 
 **Change log v0.2.17 (2026-11-01, Related: #965):**
 - **SPEC-024-R006 / FR-CI2.** A conversation-keyed serial request honours the
@@ -490,9 +500,11 @@ entry, after excluding any trailing model-stop token the response parser removes
 conversation history. If an entry would carry a recurrent checkpoint beyond its canonical token
 list, or would require a missing reply-end checkpoint for the terminal hybrid handoff, it MUST be
 discarded instead of stored. The reply-end checkpoint MAY be the only stored checkpoint for a
-prompt with no eligible prefill checkpoint. Serial natural-EOS/model-stop completions MUST fail
-closed for hybrid cache publication unless they capture the reply-end recurrent state before the
-stripped stop token mutates recurrent state. At most three checkpoints per entry are stored, each ≥ the LCP minimum for reuse. A hit
+prompt with no eligible prefill checkpoint. Serial natural-EOS/model-stop completions MUST NOT
+publish a reply-end checkpoint unless they capture the reply-end recurrent state before the
+stripped stop token mutates recurrent state. **(v0.2.18)** Without one, such a completion
+publishes only its prefill checkpoints, so a hit always restores one of them and never the live
+post-stop recurrent state; with no prefill checkpoint it publishes nothing. At most three checkpoints per entry are stored, each ≥ the LCP minimum for reuse. A hit
 restores the largest checkpoint `C ≤ LCP`, trims every attention layer to exactly
 `C` tokens, and reports `C` as the reused length (so `cached_prompt_tokens = C`). When LCP
 reaches no checkpoint the request is a **miss** (`recurrent_checkpoint_diverged`); a hybrid
