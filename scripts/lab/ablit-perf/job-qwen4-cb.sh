@@ -43,7 +43,12 @@
 # default its own 8) QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 (the snapshot-manifest
 # hash; computed from QWEN4_PATH when unset, and the serve refuses a wrong one) FORK METALLIB SKIP_BUILD
 # SEED_SELF_CHECK_RUN (a run id whose .../qwen4-flash-next-cb/main/serve/cb-self-check.json seeds
-# the serve, so the ~5+ min idle self-check is skipped when its key matches). CB_JOB_CHECK=1:
+# the serve, so the ~5+ min idle self-check is skipped when its key matches), SERVE_ENV ("K=V ...":
+# extra serve environment, run-grid.sh --serve-env), SKIP_REFERENCE=1 (provider cells only: no
+# reference, no compare). SERVE_ENV with MLX_LM_SECTION_TIMING=1 (the #2409 fork's LabSectionTimer,
+# one stderr line per forward) adds section_timing_report.py over the serve's stderr:
+# <run>/qwen4-flash-next-cb/decode-profile.{md,json}, the per-row decode cost by section at the
+# CB_ROWS row counts (its header has the definitions). CB_JOB_CHECK=1:
 # validate the knobs, print the run-grid argv and exit 0 before touching anything (the unit test).
 # Every failure prints `BLOCKER:`; the job ends with JOB_PASS (exit 0) or JOB_FAIL (nonzero). A cell
 # slower than the reference, or a text/token difference run-grid.sh reports as rc 1, is a finding:
@@ -71,6 +76,8 @@ OUTPUTS=${OUTPUTS:-512}
 TRIALS=${TRIALS:-3}
 REF_PREFILL_BATCH_SIZE=${REF_PREFILL_BATCH_SIZE:-}
 SEED_SELF_CHECK_RUN=${SEED_SELF_CHECK_RUN:-}
+SERVE_ENV=${SERVE_ENV:-}
+SKIP_REFERENCE=${SKIP_REFERENCE:-0}
 MLX_LM_COMMIT=c4c9c762cc797fd979fc98645f5db5112753bbe9
 VENV=$LAB/venv-lm-qwen4
 METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
@@ -96,6 +103,8 @@ case "$TRIALS" in ""|*[!0-9]*|0) die "TRIALS=$TRIALS must be a positive number" 
 case "$REF_PREFILL_BATCH_SIZE" in ""|[1-9]|[1-9][0-9]) ;; *) die "REF_PREFILL_BATCH_SIZE=$REF_PREFILL_BATCH_SIZE must be 1..99" 64 ;; esac
 [ -z "$SEED_SELF_CHECK_RUN" ] || echo "$SEED_SELF_CHECK_RUN" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "SEED_SELF_CHECK_RUN=$SEED_SELF_CHECK_RUN is not a run id" 64
 [ -z "$QWEN4_SHA256" ] || echo "$QWEN4_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "QWEN4_SHA256=$QWEN4_SHA256 is not a lowercase sha256" 64
+case "$SKIP_REFERENCE" in 0|1) ;; *) die "SKIP_REFERENCE=$SKIP_REFERENCE must be 0 or 1" 64 ;; esac
+echo "$SERVE_ENV" | grep -Eq '^([A-Za-z_][A-Za-z0-9_]*=[^ ]*( |$))*$' || die "SERVE_ENV=$SERVE_ENV must be space-separated K=V pairs" 64
 echo "$QWEN4_ID" | grep -Eq '^[a-z0-9._-]+/[a-z0-9._-]+$' || die "QWEN4_ID=$QWEN4_ID is not a lowercase org/name id" 64
 
 # The run-grid.sh argv (serve flags, reference flags, grid cut). The config extra file is written by the caller.
@@ -103,9 +112,14 @@ grid_args() {
   GARGS=(--model-path "$QWEN4_PATH" --model-id "$QWEN4_ID" --model-sha256 "${QWEN4_SHA256:-<snapshot-manifest>}"
          --model-name "$NAME" --bin-dir "$BIN" --out-dir "$OUT" --cb auto
          --no-autotune-candidate --rows "$CB_ROWS" --contexts "$CONTEXTS" --outputs "$OUTPUTS" --trials "$TRIALS"
-         --config-extra "$RES/$NAME/serve-extra.yaml" --expect-route batched
-         --python "$VENV/bin/python" --reference mlx-lm --ref-arg --loader --ref-arg qwen4 --ref-arg --batched)
-  [ -z "$REF_PREFILL_BATCH_SIZE" ] || GARGS+=(--ref-arg --prefill-batch-size --ref-arg "$REF_PREFILL_BATCH_SIZE")
+         --config-extra "$RES/$NAME/serve-extra.yaml" --expect-route batched)
+  if [ "$SKIP_REFERENCE" = 1 ]; then
+    GARGS+=(--skip-reference --skip-compare)
+  else
+    GARGS+=(--python "$VENV/bin/python" --reference mlx-lm --ref-arg --loader --ref-arg qwen4 --ref-arg --batched)
+    [ -z "$REF_PREFILL_BATCH_SIZE" ] || GARGS+=(--ref-arg --prefill-batch-size --ref-arg "$REF_PREFILL_BATCH_SIZE")
+  fi
+  [ -z "$SERVE_ENV" ] || GARGS+=(--serve-env "$SERVE_ENV")
   [ -z "$SEED_SELF_CHECK_RUN" ] || GARGS+=(--seed-self-check "$LAB/results/$SEED_SELF_CHECK_RUN/$NAME/main/serve/cb-self-check.json")
 }
 if [ "${CB_JOB_CHECK:-0}" = 1 ]; then
@@ -116,7 +130,7 @@ if [ "${CB_JOB_CHECK:-0}" = 1 ]; then
 fi
 
 mkdir -p "$OUT/serve"
-log "JOB_START qwen4-cb run=$RUN_ID commit=${COMMIT:-unknown} model=$QWEN4_PATH fork=$FORK rows=$CB_ROWS slots=$CB_SLOTS contexts=$CONTEXTS outputs=$OUTPUTS trials=$TRIALS${SEED_SELF_CHECK_RUN:+ seed=$SEED_SELF_CHECK_RUN}"
+log "JOB_START qwen4-cb run=$RUN_ID commit=${COMMIT:-unknown} model=$QWEN4_PATH fork=$FORK rows=$CB_ROWS slots=$CB_SLOTS contexts=$CONTEXTS outputs=$OUTPUTS trials=$TRIALS${SEED_SELF_CHECK_RUN:+ seed=$SEED_SELF_CHECK_RUN}${SERVE_ENV:+ serve_env=$SERVE_ENV} skip_reference=$SKIP_REFERENCE"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -199,7 +213,7 @@ grep -E '^(CB_WARMUP_DONE|CB_WARMUP_STALL|CB_WARMUP_FAIL|ROUTE|ROUTE_FAIL|REFERE
 FAILED=0
 blocker() { log "BLOCKER: $*"; FAILED=1; }
 case $rc in
-  0|1) sed -n '/^| model/,/^$/p' "$OUT/summary.md" ;;
+  0|1) [ "$SKIP_REFERENCE" = 1 ] || sed -n '/^| model/,/^$/p' "$OUT/summary.md" ;;
   8|9) sed -n '/^| model/,/^$/p' "$OUT/summary.md" 2> /dev/null
        blocker "the reference failed or is suspect; provider cells are measured, reference columns are empty ($(grep -m1 -E '^REFERENCE_(FAIL|SUSPECT) ' "$OUT/run.log" | cut -c1-300))" ;;
   10) sed -n '/^| model/,/^$/p' "$OUT/summary.md" 2> /dev/null
@@ -236,7 +250,18 @@ sys.exit(0 if all(v==want for v in got.values()) else 1)' "$OUT/grid.json" "$CB_
 else
   blocker "no grid.json in $OUT"
 fi
-[ -s "$OUT/provider.jsonl" ] && [ -s "$OUT/reference.jsonl" ] || blocker "provider.jsonl or reference.jsonl missing or empty in $OUT"
+[ -s "$OUT/provider.jsonl" ] || blocker "provider.jsonl missing or empty in $OUT"
+[ "$SKIP_REFERENCE" = 1 ] || [ -s "$OUT/reference.jsonl" ] || blocker "reference.jsonl missing or empty in $OUT"
+
+# 5. Section timing: the per-row decode cost by section.
+case " $SERVE_ENV " in
+  *" MLX_LM_SECTION_TIMING=1 "*)
+    /usr/bin/python3 -I "$JOB/ablit-perf/section_timing_report.py" --serve-err "$OUT/serve/serve.err" --rows "$CB_ROWS" \
+      --out-md "$RES/$NAME/decode-profile.md" --out-json "$RES/$NAME/decode-profile.json" \
+      > "$RES/$NAME/decode-profile.stdout" 2> "$RES/$NAME/decode-profile.stderr" \
+      && sed 's/^/DECODE_PROFILE /' "$RES/$NAME/decode-profile.md" \
+      || blocker "section timing report: $(tail -n 2 "$RES/$NAME/decode-profile.stderr" | tr '\n' ' ')" ;;
+esac
 
 [ "$FAILED" = 0 ] || { log "JOB_FAIL"; exit 1; }
 log "JOB_PASS"

@@ -39,6 +39,9 @@
 #          mlx-lm reference ~25 min, model load ~3 min each side), about 1 h when the build and the
 #          self-check verdict are reused (SKIP_BUILD=1, SEED_SELF_CHECK_RUN=<run>); plus the 106 GB
 #          snapshot download if ~/lab-ablit-perf/models lacks it. Estimates, not measured.
+#          Decode profile (#2409 per-row cost by section, provider only): CB_ROWS=1,4,8,11 CONTEXTS=200
+#          OUTPUTS=256 TRIALS=1 SKIP_REFERENCE=1 SERVE_ENV='MLX_LM_SECTION_TIMING=1'; FORK_DIR HEAD must
+#          then hold Libraries/MLXLMCommon/LabSectionTimer.swift.
 #        REFERENCE_ONLY=<run id> MODELS=glm GLM_REF=omlx GLM_OMLX_DIR=<studio dir> studio-ablit-perf.sh
 #          add a reference to an already measured provider grid (job.sh header); the run's
 #          provider.jsonl / grid.json / identity / noise / job log are pushed from
@@ -99,6 +102,10 @@ if [ -n "$FORK_FILE" ]; then
   [ -z "$(git -C "$FORK_DIR" status --porcelain)" ] || { blocker "FORK_DIR=$FORK_DIR has uncommitted changes; commit first"; exit 2; }
   git -C "$FORK_DIR" cat-file -e "HEAD:$FORK_FILE" 2>/dev/null \
     || { blocker "FORK_DIR=$FORK_DIR HEAD does not contain $FORK_FILE"; exit 2; }
+  case " ${SERVE_ENV:-} " in *" MLX_LM_SECTION_TIMING=1 "*)
+    git -C "$FORK_DIR" cat-file -e HEAD:Libraries/MLXLMCommon/LabSectionTimer.swift 2>/dev/null \
+      || { blocker "SERVE_ENV sets MLX_LM_SECTION_TIMING=1 but FORK_DIR=$FORK_DIR HEAD has no Libraries/MLXLMCommon/LabSectionTimer.swift"; exit 2; } ;;
+  esac
   FORK_HEAD=$(git -C "$FORK_DIR" rev-parse HEAD)
 fi
 
@@ -117,7 +124,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -204,7 +211,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|PEAK |PROFILE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|PEAK |PROFILE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
