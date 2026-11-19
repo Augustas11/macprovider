@@ -12238,6 +12238,7 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:func validateMatrix",
         "scripts/native_mtp_r015_analyze.py:analyze",
         "scripts/native_mtp_r015_analyze.py:_pair_runs",
+        "scripts/native_mtp_r015_analyze.py:_single_token_identical_pair",
         "scripts/native_mtp_r015_analyze.py:_matrix_violations",
         "scripts/native_mtp_r015_analyze.py:_gated_hold_failures",
         "scripts/native_mtp_r015_analyze.py:analyze_cap_extension"
@@ -12247,6 +12248,7 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testAdmissionPolicyPromptStrataAndOutputBudgetsAreExact",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testGatedCellsRequireStaggeredArrivals",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testPreregisteredRunOrderMatchesAnalyzerGoldenVectors",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testPolicyAcceptsOnlyPreregisteredExclusionRules",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLoadGateRecorderCountsHeldRoundsAndRestoration",
         "scripts/tests/test_native_mtp_r015_analyze.py:class NativeMTPR015AnalyzeTests"
       ],

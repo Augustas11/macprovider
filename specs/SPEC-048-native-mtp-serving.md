@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.114
+**Version:** 0.1.115
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.114",
+  "version": "0.1.115",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -2349,6 +2349,27 @@ record, an order that differs from the preregistered one, or a cell whose
 blocks are not counterbalanced, and it fails an admission policy with fewer
 than ten blocks, independent of the bench's own checks.
 
+**Exclusion rules (0.1.115).** The policy's `exclusion_rules` is `none` or
+`single_token_identical_pair`; the bench and the analyzer refuse any other
+value. Under `none` every measured block feeds every gate, and a record with no
+decode interval fails its cell. Under `single_token_identical_pair` a measured
+block is *excluded* when its ordinary and native records each committed
+exactly one token per request, with the same request ids, token ids and
+content digests on both paths; zero errors, fallbacks and parity mismatches;
+every field other than the decode-only ones (decode throughput, inter-token
+gaps, per-request decode rates and gap series) valid; and those decode-only
+fields empty. One token has no decode interval, so an excluded block feeds
+every hard gate (parity, errors, fallbacks, admissions, native counters,
+memory) and is left out of every bootstrap statistic. Anything else (different
+tokens or content, one path with one token, zero tokens, a decode value on a
+one-token request, an error, a fallback, a parity mismatch, an invalid other
+field) is not excluded and fails the cell as before. The cell still needs at
+least ten measured blocks after exclusions (the policy's block count when an
+exploratory policy runs fewer), so exclusions never shrink the sample below
+the minimum above; the analysis lists each cell's excluded blocks and
+measurable count. The rule is preregistered like every other methodology
+field: an analysis never applies it to runs whose policy froze `none`.
+
 **Mandatory matrix.** The frozen admission policy MUST name the tuple's
 advertised `qualified_slots` (2...8), its `max_native_active_rows`
 (`1..qualified_slots`, written *bound* below), and its signed SPEC-023-R024
@@ -2872,6 +2893,15 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.115 (2026-11-20, Related: #2429)** — MTP-15 adds the preregistered
+  `exclusion_rules` value `single_token_identical_pair`: a measured block whose
+  ordinary and native records each committed exactly one identical token per
+  request, cleanly, feeds the hard gates but not the decode statistics, and the
+  cell still needs ten measurable blocks. `none` policies analyze unchanged,
+  byte for byte. Qwen3.8-27B s1-p32768-o128 block 9 (2026-11-19) emitted one
+  identical token on both paths; its policy froze `none`, so that run stays
+  FAIL.
 
 - **0.1.114 (2026-11-19)** — R003 names mlx-swift-lm `3.32.3-macprovider.84`
   (`ddc6f974355982773e1440957f16e998835408d0`) on `3.32.3-macprovider.83`
