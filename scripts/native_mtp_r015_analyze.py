@@ -148,9 +148,19 @@ FIXED_METHODOLOGY = {
     "cache_mode": "paged_kv_mixed",
     "run_order": "seeded_random_counterbalanced",
     "prompt_corpus": "deterministic_synthetic_unique_v2",
-    "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
+# SPEC-048 MTP-15 preregistered exclusion rules (mirrors
+# NativeMTPBenchPolicy.allowedExclusionRules). Under
+# `single_token_identical_pair` a block whose ordinary and native records each
+# committed exactly one token per request, the same token, with no error,
+# fallback or parity mismatch, is judged by every hard gate but has no decode
+# interval, so it is left out of the gated statistics. The cell still needs
+# MIN_MEASURABLE_BLOCKS measured blocks.
+EXCLUSION_RULE_NONE = "none"
+EXCLUSION_RULE_SINGLE_TOKEN = "single_token_identical_pair"
+EXCLUSION_RULES = (EXCLUSION_RULE_NONE, EXCLUSION_RULE_SINGLE_TOKEN)
+MIN_MEASURABLE_BLOCKS = 10
 ADMITTED_QUANTIZATIONS = ("4bit", "8bit")
 # SPEC-048 0.1.71 gate set, the only one the bench accepts for new runs. The
 # decode-throughput gate passes when the corrected lower bound is strictly
@@ -246,6 +256,8 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     for key, expected in FIXED_METHODOLOGY.items():
         if policy.get(key) != expected or isinstance(policy.get(key), bool):
             violations.append(f"methodology_not_frozen:{key}")
+    if not isinstance(policy.get("exclusion_rules"), str) or policy["exclusion_rules"] not in EXCLUSION_RULES:
+        violations.append("methodology_not_frozen:exclusion_rules")
     # Match the implemented tuple families without widening the existing
     # affine GLM/Qwen depth-one contract. DSpark's mixed-MX tuple supports
     # depths 1...5; all numerical thresholds remain frozen below. The affine
@@ -667,6 +679,74 @@ def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str
             invalid.append("raw_inter_token_gaps_seconds")
         invalid += _per_request_misalignment(run)
     return sorted(set(invalid))
+
+
+# The fields a record with no decode interval cannot carry. Under the
+# single-token rule they must be absent (null or empty), never a value.
+_DECODE_ONLY_FIELDS = frozenset({
+    "aggregate_decode_tps",
+    "inter_token_gap_p50_seconds",
+    "inter_token_gap_p95_seconds",
+    "per_request_decode_tps",
+    "raw_inter_token_gaps_seconds",
+    "request_metrics",
+})
+
+
+def _single_token_outputs(run: dict, require_chunk_gaps: bool) -> dict[str, tuple[list, str]] | None:
+    """Per request id, the one committed token id and content digest of a
+    clean record with no decode interval, or None when the record is anything
+    else. Every field outside the decode-only set must pass the ordinary
+    validation; the decode-only fields must be empty."""
+    if set(_invalid_run_fields(run, require_chunk_gaps)) - _DECODE_ONLY_FIELDS:
+        return None
+    requests = run.get("requests")
+    metrics = run.get("request_metrics")
+    if not (_is_count(requests) and requests >= 1 and isinstance(metrics, list) and len(metrics) == requests):
+        return None
+    if (
+        run.get("parity_mismatch") is not False
+        or run.get("errors") != 0
+        or run.get("fallbacks") != 0
+        or run.get("committed_completion_tokens") != requests
+        or run.get("aggregate_decode_tps") is not None
+        or run.get("inter_token_gap_p50_seconds") is not None
+        or run.get("inter_token_gap_p95_seconds") is not None
+        or run.get("per_request_decode_tps") != [None] * requests
+        or run.get("raw_inter_token_gaps_seconds") != [[] for _ in range(requests)]
+    ):
+        return None
+    outputs: dict[str, tuple[list, str]] = {}
+    for item in metrics:
+        if not isinstance(item, dict):
+            return None
+        request_id = item.get("request_id")
+        token_ids = item.get("output_token_ids")
+        digest = item.get("content_sha256")
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or request_id in outputs
+            or item.get("completion_tokens") != 1
+            or item.get("decode_tps") is not None
+            or item.get("inter_token_gaps_seconds") != []
+            or not (isinstance(token_ids, list) and len(token_ids) == 1 and _is_count(token_ids[0]))
+            or not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))
+        ):
+            return None
+        outputs[request_id] = (token_ids, digest)
+    return outputs
+
+
+def _single_token_identical_pair(pair: tuple[dict, dict], require_chunk_gaps: bool) -> bool:
+    """SPEC-048 MTP-15 `single_token_identical_pair`: both paths committed
+    exactly one token per request, the same token id and content, cleanly."""
+    ordinary, native = pair
+    if ordinary.get("path") != "ordinary" or native.get("path") != "native_mtp":
+        return False
+    ordinary_outputs = _single_token_outputs(ordinary, require_chunk_gaps)
+    native_outputs = _single_token_outputs(native, require_chunk_gaps)
+    return ordinary_outputs is not None and ordinary_outputs == native_outputs
 
 
 # Header run_metrics_version 2 and later: every run record carries decode
@@ -1108,6 +1188,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         }
         gate_set = GATE_SET_AMENDED
     require_chunk_gaps = gate_set in TPOT_GATE_SETS
+    single_token_rule = policy.get("exclusion_rules") == EXCLUSION_RULE_SINGLE_TOKEN
 
     def invalid_fields(run: dict) -> list[str]:
         return _invalid_run_fields(run, require_chunk_gaps)
@@ -1142,6 +1223,10 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         hard_failures = list(issues)
         if len(pairs) < required_blocks:
             hard_failures.append(f"incomplete: {len(pairs)}/{required_blocks} paired blocks")
+        excluded_pairs: list[tuple[dict, dict]] = []
+        if single_token_rule:
+            excluded_pairs = [pair for pair in pairs if _single_token_identical_pair(pair, require_chunk_gaps)]
+            pairs = [pair for pair in pairs if not _single_token_identical_pair(pair, require_chunk_gaps)]
         sustained_runs = [
             run for run in runs
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
@@ -1164,7 +1249,12 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         # already failed the cell above.
         pairs = [pair for pair in pairs if not invalid_fields(pair[0]) and not invalid_fields(pair[1])]
         sustained_runs = [run for run in sustained_runs if not invalid_fields(run)]
-        hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
+        excluded_runs = [run for pair in excluded_pairs for run in pair]
+        hard_gate_runs = [run for pair in pairs for run in pair] + excluded_runs + sustained_runs
+        if single_token_rule and len(pairs) < min(MIN_MEASURABLE_BLOCKS, required_blocks):
+            hard_failures.append(
+                f"insufficient_measurable_blocks: {len(pairs)}/{min(MIN_MEASURABLE_BLOCKS, required_blocks)}"
+            )
         parity_mismatches = sum(int(r["parity_mismatch"]) for r in hard_gate_runs)
         non_native_admissions = sum(r["non_native_admissions"] for r in hard_gate_runs)
         # A load-gate downgrade is a recorded admission decision, not a
@@ -1307,7 +1397,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         cell = {
             "cell_id": cell_id,
             "cell_class": "gated" if gated else "native_eligible",
-            "paired_blocks": len(pairs),
+            "paired_blocks": len(pairs) + len(excluded_pairs),
             "required_blocks": required_blocks,
             "load_gate_downgrades": load_gate_downgrades,
             "hard_failures": hard_failures,
@@ -1333,6 +1423,10 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
             "thermal_start_states": sorted({str(r.get("thermal_state_start")) for r in hard_gate_runs}),
             "thermal_end_states": sorted({str(r.get("thermal_state_end")) for r in hard_gate_runs}),
         }
+        # Reported only under the rule, so a `none` analysis stays byte-identical.
+        if single_token_rule:
+            cell["measurable_blocks"] = len(pairs)
+            cell["excluded_single_token_blocks"] = sorted(int(native["block_index"]) for _, native in excluded_pairs)
         cell_results.append(cell)
         for metric_name, metric in metrics.items():
             draws_for_metric = metric["draws"]
@@ -1426,6 +1520,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         "overall_status": overall,
         "gate_set": gate_set,
         **({"exploratory_reanalysis_of_gate_set": reanalysis_of} if reanalysis_of else {}),
+        **({"exclusion_rules": EXCLUSION_RULE_SINGLE_TOKEN} if single_token_rule else {}),
         "policy_sha256": policy_sha,
         "provider_commit": header.get("provider_commit"),
         "unavailable_metrics": header.get("unavailable_metrics", []),
@@ -1616,7 +1711,9 @@ def markdown_table(result: dict) -> str:
             "| {cell} | {status} | {blocks}/{required} | {ratio} | {thr} | {ttft} | {itl} | {rej} | {e2e} | {hard} |".format(
                 cell=cell["cell_id"],
                 status=cell["status"],
-                blocks=cell["paired_blocks"],
+                blocks=cell["paired_blocks"]
+                if "excluded_single_token_blocks" not in cell
+                else f"{cell['paired_blocks']} ({len(cell['excluded_single_token_blocks'])} excl)",
                 required=cell["required_blocks"],
                 ratio=_fmt_ratio(metrics["throughput"].get("median")),
                 thr=_fmt(metrics["throughput"].get("corrected_lower_bound")),
