@@ -40,26 +40,41 @@ final class ContinuousBatchStopTokenTests: XCTestCase {
         )
     }
 
-    func testSerialHybridCacheIsNotPublishedAfterNaturalModelStop() {
-        XCTAssertFalse(
-            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
-                cache: [MambaCache()],
-                terminalModelStopStripped: true
-            ),
-            "MLX advances recurrent state through EOS before returning; the canonical cache drops EOS"
-        )
-        XCTAssertTrue(
-            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
-                cache: [MambaCache()],
-                terminalModelStopStripped: false
-            )
-        )
-        XCTAssertTrue(
-            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
-                cache: [KVCacheSimple()],
-                terminalModelStopStripped: true
-            )
-        )
+    /// MLX advances recurrent state through EOS before returning, while the
+    /// canonical cache drops EOS: a hybrid turn that ended on the model's own
+    /// stop publishes only its prompt checkpoints, never a terminal one.
+    func testSerialHybridModelStopCommitsOnlyPromptCheckpoints() {
+        let prompt = [RecurrentStateCheckpoint(tokenCount: 1024, states: [0: []])]
+        guard case .commit(let kept) = ModelRuntime.serialConversationCacheCheckpoints(
+            promptCheckpoints: prompt, cache: [MambaCache()], tokenCount: 1500, terminalModelStopStripped: true, unreturnedTokenCount: 0
+        ) else {
+            return XCTFail("prompt checkpoints survive a stripped model stop")
+        }
+        XCTAssertEqual(kept.map(\.tokenCount), [1024], "no terminal checkpoint at 1500")
+
+        guard case .abort(let reason) = ModelRuntime.serialConversationCacheCheckpoints(
+            promptCheckpoints: [], cache: [MambaCache()], tokenCount: 1500, terminalModelStopStripped: true, unreturnedTokenCount: 0
+        ) else {
+            return XCTFail("a hybrid turn with nothing exact to publish aborts")
+        }
+        XCTAssertEqual(reason, "hybrid_terminal_stop_stripped")
+
+        guard case .commit(let attentionOnly) = ModelRuntime.serialConversationCacheCheckpoints(
+            promptCheckpoints: [], cache: [KVCacheSimple()], tokenCount: 1500, terminalModelStopStripped: true, unreturnedTokenCount: 0
+        ) else {
+            return XCTFail("an attention-only cache is unaffected by the stripped stop")
+        }
+        XCTAssertTrue(attentionOnly.isEmpty)
+
+        guard case .commit(let unreturned) = ModelRuntime.serialConversationCacheCheckpoints(
+            promptCheckpoints: prompt, cache: [MambaCache()], tokenCount: 1500,
+            terminalModelStopStripped: false, unreturnedTokenCount: 1
+        ) else {
+            return XCTFail("an unreturned decode token keeps the prompt checkpoints")
+        }
+        XCTAssertEqual(
+            unreturned.map(\.tokenCount), [1024],
+            "a token fed to the recurrent state but not returned is never captured as a terminal checkpoint")
     }
 
     func testSerialTerminalModelStopIgnoresBuyerFinishReasonRewrites() {

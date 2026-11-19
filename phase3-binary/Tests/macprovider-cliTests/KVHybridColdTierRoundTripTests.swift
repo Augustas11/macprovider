@@ -165,6 +165,59 @@ final class KVHybridColdTierRoundTripTests: XCTestCase {
         }
     }
 
+    /// Issue 2430: a serial hybrid turn that ended on the model stop commits
+    /// its prompt checkpoints only, so its last checkpoint (40) sits below the
+    /// token count (80) and its live recurrent state saw the stop token. After
+    /// a disk round trip and `begin`, the hit resumes at the checkpoint with the
+    /// checkpoint's recurrent state, never the live one.
+    func testEntryWithLastCheckpointBelowTokenCountResumesAtCheckpointAfterRestore() async throws {
+        // The codec round trip needs real tensor bytes, and creating any MLX
+        // array aborts the process on a host without a metallib (the CI
+        // runners). The test-bundle check also finds the metallib SwiftPM
+        // embeds in the test bundle, so this runs wherever MLX can load.
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX metallib is unavailable in this test host")
+        }
+        let fixture = HybridFixture(tokenCount: 80, checkpointTokenCounts: [40])
+        let checkpoint = try XCTUnwrap(fixture.checkpoints.first)
+        for index in 0..<3 {
+            (fixture.layers[index] as? ArraysCache)?.state = [
+                MLXArray((0..<(3 * 8)).map { _ in Float(-7) }, [1, 3, 8]).asType(.bfloat16),
+                MLXArray((0..<(2 * 4 * 4)).map { _ in Float(-7) }, [1, 2, 4, 4]),
+            ]
+        }
+        let (store, adapter, root) = try await makeStoreAndAdapter(maxEntryBytes: 16 << 20, stagingMaxBytes: 16 << 20)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = "conv:kvs-synth:hybrid-model-stop"
+        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
+        let snapshot = try XCTUnwrap(adapter.captureSnapshot(
+            conversationKey: key,
+            layers: ConversationCacheLayers(fixture.layers, recurrentCheckpoints: fixture.checkpoints),
+            fullTokens: fixture.tokens, sampledPurgeGeneration: 0, identity: hybridIdentity(), nowMillis: nowMillis))
+        let write = try await commit(snapshot, to: store, nowMillis: nowMillis)
+        adapter.releaseWriteLive(snapshot.reservedWriteBytes)
+        guard case .committed = write else {
+            await store.deactivate()
+            return XCTFail("fixture must commit, got \(write)")
+        }
+
+        let cache = makeConversationCacheForTest(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900), coldTier: adapter)
+        let leaseValue = await cache.begin(
+            conversationKey: key, incomingTokens: fixture.tokens + [900, 901, 902], modelID: "hybrid", kvBits: nil,
+            cold: ConversationColdContext(eligible: true, identity: hybridIdentity()))
+        let lease = try XCTUnwrap(leaseValue)
+        XCTAssertEqual(lease.cachedPromptTokens, 40, "resume at the checkpoint, not the 80-token live state")
+        let layers = try XCTUnwrap(lease.reusableCache, "the promoted entry must be a hit")
+        XCTAssertEqual(layers.layers[3].offset, 40, "attention trimmed onto the checkpoint")
+        for index in 0..<3 {
+            XCTAssertEqual(bytes(layers.layers[index].state), bytes(checkpoint.states[index] ?? []),
+                           "layer \(index) recurrent state is the checkpoint's")
+        }
+        await cache.abort(lease)
+        await store.deactivate()
+    }
+
     /// The adapter applies the store's on-disk size (decoded + framing + manifest)
     /// before copying, so an entry the store would reject is never copied.
     func testCaptureSkipsEntryWhoseDiskSizeExceedsMaxEntryBytes() async throws {

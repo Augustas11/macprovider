@@ -8,7 +8,18 @@
 #                    [--max-context N] [--floor 0.03] [--skip-reference]
 #                    [--text-fallback-reason TEXT] [--no-autotune-candidate]
 #                    [--margins FILE] [--tie-steps N]
-#                    [--serve-arg ARG]... [--sample-seconds N]
+#                    [--serve-arg ARG]... [--sample-seconds N] [--turns 1|2]
+#
+# --turns 2 adds the two-turn cell: after each turn-1 trial the provider client sends turn 2
+# ([user1, assistant1 = its own turn-1 text, short follow-up]) and records TTFT and
+# cached_prompt_tokens (turn=2 rows in provider.jsonl). The reference then runs after the
+# provider and replays that assistant1 text (--provider-jsonl OUT/provider.jsonl). compare.py
+# adds a turn-2 section and fails a cell whose provider reports 0 cached tokens. Default 1:
+# nothing changes. With --turns 2, env TURN2_HEADER=1 makes the provider client send
+# X-MacProvider-Provider-Conversation (one id per trial and row, on both turns; a --no-join
+# serve keys its prefix cache only on it) and TURN2_HISTORY=verbatim re-sends the turn-1
+# reasoning as reasoning_content in the turn-2 history (default content: content only). Both
+# are provider-client only; the reference is unchanged.
 #
 # --no-autotune-candidate drops the lab autotune flag from the serve command;
 # with --cb off (and native MTP off for a model that has an admission entry)
@@ -42,6 +53,9 @@ TIE_STEPS=""
 AUTOTUNE=1
 SAMPLE_SECS=0
 SERVE_ARGS=()
+TURNS=1
+TURN2_HEADER=${TURN2_HEADER:-0}
+TURN2_HISTORY=${TURN2_HISTORY:-content}
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -65,6 +79,7 @@ while [ $# -gt 0 ]; do
     --text-fallback-reason) FALLBACK="$2"; shift 2 ;;
     --margins) MARGINS="$2"; shift 2 ;;
     --tie-steps) TIE_STEPS="$2"; shift 2 ;;
+    --turns) TURNS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -74,6 +89,9 @@ for v in MODEL_PATH MODEL_NAME BIN_DIR OUT_DIR; do
 done
 [ "$SKIP_REF" = 1 ] || [ -n "$PY" ] || { echo "missing --python (mlx_lm interpreter)" >&2; exit 64; }
 case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >&2; exit 64 ;; esac
+case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
+case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
+case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
 [ -x "$BIN_DIR/macprovider-cli" ] || { echo "no macprovider-cli in $BIN_DIR" >&2; exit 64; }
 
 listening() { [ -n "$(lsof -nP -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true)" ]; }
@@ -87,10 +105,22 @@ COMMON=(--model-name "$MODEL_NAME" --grid "$HERE/grid.json")
 [ -n "$ROWS" ] && COMMON+=(--rows "$ROWS")
 [ -n "$TRIALS" ] && COMMON+=(--trials "$TRIALS")
 [ -n "$MAX_CONTEXT" ] && COMMON+=(--max-context "$MAX_CONTEXT")
+[ "$TURNS" = 1 ] || COMMON+=(--turns "$TURNS")
+REF_COMMON=("${COMMON[@]}")
+[ "$TURNS" = 1 ] || REF_COMMON+=(--provider-jsonl "$OURS")
+CLIENT_ARGS=()
+if [ "$TURNS" = 2 ]; then
+  [ "$TURN2_HEADER" = 0 ] || CLIENT_ARGS+=(--conversation-header)
+  CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY")
+fi
 
-if [ "$SKIP_REF" = 0 ]; then
+run_reference() {
   echo "== reference $(date +%T)"
-  "$PY" "$HERE/reference_mlxlm.py" --model-path "$MODEL_PATH" --out "$REF" "${COMMON[@]}"
+  "$PY" "$HERE/reference_mlxlm.py" --model-path "$MODEL_PATH" --out "$REF" "${REF_COMMON[@]}"
+}
+# Turn 2 replays the provider's turn-1 text, so its reference runs after the provider.
+if [ "$SKIP_REF" = 0 ] && [ "$TURNS" = 1 ]; then
+  run_reference
 fi
 
 if [ -z "$MAX_CONTEXT" ] && [ -f "$MODEL_PATH/config.json" ]; then
@@ -150,9 +180,12 @@ if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
   (sleep 8; sample "$SP" "$SAMPLE_SECS" -file "$OUT_DIR/serve-sample.txt" >/dev/null 2>&1 || true) &
 fi
 /usr/bin/python3 -I "$HERE/provider_client.py" --port "$PORT" --model "$MODEL_PATH" --out "$OURS" \
-  "${COMMON[@]}" || client_rc=$?
+  "${COMMON[@]}" ${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"} || client_rc=$?
 stop_serve
 trap - EXIT
+if [ "$SKIP_REF" = 0 ] && [ "$TURNS" = 2 ]; then
+  run_reference
+fi
 
 echo "== compare $(date +%T) (client rc=$client_rc)"
 CMP=(--ref "$REF" --ours "$OURS" --floor "$FLOOR" --json "$OUT_DIR/summary.json")

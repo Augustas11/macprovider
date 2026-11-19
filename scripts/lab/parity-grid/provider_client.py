@@ -4,6 +4,7 @@
 usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours.jsonl
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
+                          [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
 http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
@@ -17,6 +18,22 @@ reasoning_content: a model that streams its output as reasoning is timed the
 same way) and completion_tokens is the usage frame's
 macprovider_generated_completion_tokens when present, else completion_tokens.
 `text` is content only; reasoning deltas are kept in `reasoning_text`.
+
+--turns 2 adds, after each turn-1 trial, one turn-2 row per prompt row: the messages are
+[user1 (the same long prompt), assistant1 (this provider's turn-1 text), user2 (prompts.FOLLOWUP)].
+Turn-1 rows then carry turn=1, turn-2 rows turn=2 plus `assistant1` (the history the reference
+replays, see prompts.load_assistant1) and cached_prompt_tokens; every row record (both turns, and
+--turns 1 too) also gains `conversation_key_sent`. Turn-2 ttft_s times the turn-2
+request only. Turn 2 has no aggregate line. --turns 1 writes the records it always did.
+A turn-2 request goes out when turn 1 succeeded with any output; a reasoning-only turn 1 gives
+assistant1 "" (content mode), which is what a client that drops reasoning sends.
+
+--conversation-header sends `X-MacProvider-Provider-Conversation: <id>` on both turns of a
+(trial, row) conversation, one random id per conversation: a direct-HTTP `serve --no-join`
+keys its prefix cache only on that header. Every row record carries conversation_key_sent.
+--turn2-history verbatim re-sends the turn-1 assistant message with reasoning_content (the
+streamed reasoning text) next to content; content (default) sends content only. Turn-2 rows
+record turn2_history.
 """
 import argparse
 import hashlib
@@ -105,7 +122,9 @@ def completion_tokens_of(usage):
     return generated if generated is not None else usage.get("completion_tokens")
 
 
-def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1"):
+def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1",
+                headers=None):
+    """`headers` adds request headers."""
     body = {
         "model": model,
         "messages": messages,
@@ -121,7 +140,7 @@ def run_request(port, model, messages, max_tokens, stream_options=True, timeout=
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
                      # The provider batches only requests that carry a stable id.
                      headers={"Content-Type": "application/json", "Accept": "text/event-stream",
-                              "X-Request-ID": uuid.uuid4().hex})
+                              "X-Request-ID": uuid.uuid4().hex, **(headers or {})})
         resp = conn.getresponse()
         if resp.status != 200:
             detail = resp.read(2000).decode("utf-8", "replace")
@@ -191,20 +210,73 @@ def aggregate_record(records, base):
     }
 
 
-def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label):
-    results = [None] * rows
-    barrier = threading.Barrier(rows)
+CONVERSATION_HEADER = "X-MacProvider-Provider-Conversation"
+
+
+def conversation_headers(conversation_ids, r):
+    return {CONVERSATION_HEADER: conversation_ids[r]} if conversation_ids else None
+
+
+def run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids=None):
+    """One request per builder at once (one thread each); builders[r]() returns row r's messages or None.
+
+    With conversation_ids row r sends the conversation header with conversation_ids[r]."""
+    results = [None] * len(builders)
+    barrier = threading.Barrier(len(builders))
 
     def worker(r):
-        messages = prompts.build_messages(ctx, r)
+        messages = builders[r]()
         barrier.wait()
-        results[r] = run_request(port, model, messages, max_tokens, stream_options)
+        results[r] = (run_request(port, model, messages, max_tokens, stream_options,
+                                  headers=conversation_headers(conversation_ids, r))
+                      if messages is not None else None)
 
-    threads = [threading.Thread(target=worker, args=(r,)) for r in range(rows)]
+    threads = [threading.Thread(target=worker, args=(r,)) for r in range(len(builders))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    return results
+
+
+def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turn1_records,
+              conversation_ids=None, history="content"):
+    """Turn-2 rows for one trial: [user1, assistant1 = our turn-1 text, follow-up], sent after turn 1.
+
+    Only the turn-2 request is timed. A row whose turn 1 failed or gave no output is recorded as an
+    error. history "verbatim" adds the turn-1 reasoning as reasoning_content to assistant1.
+    """
+    texts = [(r.get("text") or "") if r["error"] is None and (r.get("text") or r.get("reasoning_text")) else None
+             for r in turn1_records]
+    reasoning = [(r.get("reasoning_text") or "") if history == "verbatim" else None for r in turn1_records]
+    builders = [(lambda r=r: prompts.build_turn2_messages(ctx, r, texts[r], reasoning[r])
+                 if texts[r] is not None else None)
+                for r in range(rows)]
+    results = run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids)
+    base = {
+        "side": "provider", "label": label, "model": model_name,
+        "cell": prompts.cell_key(model_name, ctx, max_tokens, rows), "ctx_target": ctx,
+        "max_tokens": max_tokens, "rows": rows, "trial": trial, "turn": 2,
+        "conversation_key_sent": bool(conversation_ids), "turn2_history": history,
+    }
+    records = []
+    for r, res in enumerate(results):
+        if res is None:
+            res = {"error": "turn 1 produced no output; no turn-2 request", "t0": 0.0, "t_end": 0.0}
+        rec = row_record(res, {**base, "kind": "row", "row": r})
+        rec["assistant1"] = texts[r]
+        rec.pop("_t_first")
+        rec.pop("_t_last")
+        records.append(rec)
+    return records
+
+
+def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turns=1,
+             conversation_header=False, turn2_history="content"):
+    # One id per (trial, row) conversation, shared by its turn 1 and turn 2.
+    conversation_ids = ["conv:" + uuid.uuid4().hex for _ in range(rows)] if conversation_header else None
+    results = run_concurrent(port, model, [(lambda r=r: prompts.build_messages(ctx, r)) for r in range(rows)],
+                             max_tokens, stream_options, conversation_ids)
     base = {
         "side": "provider",
         "label": label,
@@ -214,12 +286,17 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         "max_tokens": max_tokens,
         "rows": rows,
         "trial": trial,
+        **({"turn": 1} if turns == 2 else {}),
+        "conversation_key_sent": conversation_header,
     }
     records = [row_record(res, {**base, "kind": "row", "row": r}) for r, res in enumerate(results)]
     agg = aggregate_record(records, base)
     for rec in records:
         rec.pop("_t_first")
         rec.pop("_t_last")
+    if turns == 2:
+        records += run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label,
+                             records[:rows], conversation_ids, turn2_history)
     return records, agg
 
 
@@ -236,6 +313,13 @@ def main(argv=None):
     ap.add_argument("--max-context", type=int)
     ap.add_argument("--no-stream-options", action="store_true")
     ap.add_argument("--label", default="provider")
+    ap.add_argument("--turns", type=int, choices=(1, 2), default=1,
+                    help="2: after each turn-1 trial send turn 2 (turn-1 text as assistant history + a "
+                         "short follow-up) and record it with turn=2 (TTFT, cached_prompt_tokens)")
+    ap.add_argument("--conversation-header", action="store_true",
+                    help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
+    ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
+                    help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
     args = ap.parse_args(argv)
 
     grid = prompts.load_grid(args.grid)
@@ -255,11 +339,12 @@ def main(argv=None):
         for ctx, max_tokens, rows in prompts.expand_cells(grid, args.max_context):
             for trial in range(trials):
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
-                                        rows, trial, stream_options, args.label)
+                                        rows, trial, stream_options, args.label, args.turns,
+                                        args.conversation_header, args.turn2_history)
                 for rec in records + [agg]:
                     out.write(json.dumps(rec) + "\n")
                 out.flush()
-                failures += len(agg["errors"])
+                failures += len(agg["errors"]) + sum(1 for r in records if r.get("turn") == 2 and r["error"])
                 print(f"ours ctx={ctx} out={max_tokens} rows={rows} trial={trial} "
                       f"agg={agg['aggregate_tps']} per_row={agg['per_row_tps']} errors={agg['errors']}",
                       file=sys.stderr)

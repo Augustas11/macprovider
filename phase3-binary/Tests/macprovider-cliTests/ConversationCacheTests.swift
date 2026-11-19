@@ -1406,6 +1406,81 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(hit!)
     }
 
+    /// Issue 2430: a serial hybrid turn that ended on the model's own stop
+    /// publishes its prompt checkpoints only. A later turn that extends past
+    /// the whole stored history (lcp = 1,500) still resumes from the prompt
+    /// checkpoint (1,100), never from the live recurrent state that saw EOS.
+    /// Empty checkpoint states keep the test free of MLX allocations, so it
+    /// runs on hosts without a metallib; `testHybridCheckpointHitRestoresRecurrentState`
+    /// covers restoring the checkpoint's tensors.
+    func testSerialHybridModelStopEntryResumesFromPromptCheckpoint() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<1500)
+        let seedValue = await cache.begin(
+            conversationKey: "conv:hybrid-eos", incomingTokens: int32Range(0..<1200), modelID: "hybrid", kvBits: nil)
+        let seed = try XCTUnwrap(seedValue)
+        let attention = trimmableCache(offset: stored.count)
+        let recurrent = MambaCache()
+        guard case .commit(let checkpoints) = ModelRuntime.serialConversationCacheCheckpoints(
+            promptCheckpoints: [RecurrentStateCheckpoint(tokenCount: 1100, states: [1: []])],
+            cache: [attention, recurrent],
+            tokenCount: stored.count,
+            terminalModelStopStripped: true,
+            unreturnedTokenCount: 1
+        ) else {
+            return XCTFail("prompt checkpoint must be committed")
+        }
+        XCTAssertEqual(checkpoints.map(\.tokenCount), [1100], "no terminal checkpoint at 1500")
+        await cache.commit(
+            seed, cache: ConversationCacheLayers([attention, recurrent], recurrentCheckpoints: checkpoints),
+            fullTokens: stored)
+
+        let hitValue = await cache.begin(
+            conversationKey: "conv:hybrid-eos", incomingTokens: stored + int32Range(5000..<5040), modelID: "hybrid", kvBits: nil)
+        let hit = try XCTUnwrap(hitValue)
+        XCTAssertEqual(hit.cachedPromptTokens, 1100, "resume at the prompt checkpoint, not the post-stop live state")
+        XCTAssertEqual(hit.lcp, 1100)
+        XCTAssertEqual(hit.trimBy, 400)
+        XCTAssertEqual(attention.offset, 1100, "attention trimmed onto the checkpoint")
+        XCTAssertEqual(hit.reusableCanonicalPromptTokens, int32Range(0..<1100))
+        XCTAssertEqual(hit.reusableCache?.recurrentCheckpoints.map(\.tokenCount), [1100])
+        await cache.abort(hit)
+    }
+
+    func testAbortWithReasonLogsOneLine() async throws {
+        let cache = makeConversationCacheForTest()
+        let leaseValue = await cache.begin(
+            conversationKey: "conv:abort-reason", incomingTokens: int32Range(0..<64), modelID: "m", kvBits: nil)
+        let lease = try XCTUnwrap(leaseValue)
+        let logged = try await captureStderr {
+            await cache.abort(lease, reason: "hybrid_terminal_stop_stripped")
+        }
+        XCTAssertTrue(
+            logged.contains("event=conv_cache action=abort key_hash=\(lease.keyHash) reason=hybrid_terminal_stop_stripped"),
+            logged)
+        let silentValue = await cache.begin(
+            conversationKey: "conv:abort-reason", incomingTokens: int32Range(0..<64), modelID: "m", kvBits: nil)
+        let silent = try XCTUnwrap(silentValue)
+        let none = try await captureStderr { await cache.abort(silent) }
+        XCTAssertFalse(none.contains("action=abort"), "an abort without a reason stays silent")
+    }
+
+    private func captureStderr(_ operation: () async -> Void) async throws -> String {
+        let pipe = Pipe()
+        let savedStderr = dup(STDERR_FILENO)
+        guard savedStderr >= 0 else { throw POSIXError(.EBADF) }
+        defer {
+            _ = dup2(savedStderr, STDERR_FILENO)
+            close(savedStderr)
+            pipe.fileHandleForReading.closeFile()
+        }
+        guard dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else { throw POSIXError(.EBADF) }
+        await operation()
+        guard dup2(savedStderr, STDERR_FILENO) >= 0 else { throw POSIXError(.EBADF) }
+        pipe.fileHandleForWriting.closeFile()
+        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
     func testSerialConversationCacheCommitTokensCutToCoveredLength() {
         let canonical = int32Range(0..<90)
         XCTAssertEqual(ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 89), int32Range(0..<89))
