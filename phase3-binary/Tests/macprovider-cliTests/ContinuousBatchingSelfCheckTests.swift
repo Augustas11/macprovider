@@ -57,6 +57,11 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.decision.slots, 4)
     }
 
+    func testASingleVerifiedWidthIsGrantedWhenItClearsTheGainBar() {
+        let decision = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: [m(2, tps: 70)])
+        XCTAssertEqual(decision, .init(slots: 2, reason: "granted", verifiedSlots: 2))
+    }
+
     func testRowDivergenceAtTwoServesSerially() {
         let decision = ContinuousBatchingSelfCheck.decide(
             serialTPS: 50,

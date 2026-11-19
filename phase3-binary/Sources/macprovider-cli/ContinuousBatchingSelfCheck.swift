@@ -254,7 +254,9 @@ enum ContinuousBatchingSelfCheck {
     static let minimumAggregateGain = 1.2
     /// Lowest slot count within this fraction of the best aggregate wins. Widths
     /// reaching selection are already memory-bounded (AutoServedSlots) and verified
-    /// exact, so the band only absorbs measurement noise (~0.3% same-window); the
+    /// exact, so the band only absorbs measurement noise. Repeated same-window
+    /// one-row decode runs on an M3 Ultra (GLM-5.3-Flash, 512 tokens) spread
+    /// 0.4-0.6%, and the measured 2/3/4-row steps differ by 9-12%; the
     /// calibrator's own 0.15 tie band is unchanged for its other uses.
     static let widthSelectionNoiseBand = 0.03
     static let maxOutputTokens = 48
