@@ -11484,7 +11484,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 promptCheckpoints: recurrent.checkpoints,
                                 cache: kvCache,
                                 tokenCount: fullTokens.count,
-                                terminalModelStopStripped: terminalModelStopStripped
+                                terminalModelStopStripped: terminalModelStopStripped,
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) {
                             case .commit(let checkpoints):
                                 recurrentCheckpoints = checkpoints
@@ -12644,7 +12645,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 promptCheckpoints: recurrent.checkpoints,
                                 cache: kvCache,
                                 tokenCount: fullTokens.count,
-                                terminalModelStopStripped: terminalModelStopStripped
+                                terminalModelStopStripped: terminalModelStopStripped,
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) {
                             case .commit(let checkpoints):
                                 recurrentCheckpoints = checkpoints
@@ -15785,14 +15787,18 @@ maxTokens: maxTokens,
     /// still exact; publishing only them makes every later hit restore one of
     /// them (`ConversationCache.selectRecurrentCheckpoint` never picks a length
     /// above the largest checkpoint), so the post-stop live state is never
-    /// resumed.
+    /// resumed. A token decode fed but did not return
+    /// (`serialDecodeUnreturnedTokenCount`) has also advanced the live
+    /// recurrent state, so it counts as stripped whatever the finish flags say.
     static func serialConversationCacheCheckpoints(
         promptCheckpoints: [RecurrentStateCheckpoint],
         cache: [KVCache],
         tokenCount: Int,
-        terminalModelStopStripped: Bool
+        terminalModelStopStripped: Bool,
+        unreturnedTokenCount: Int
     ) -> SerialConversationCacheCheckpoints {
-        if terminalModelStopStripped, ConversationCacheLayers.hasRecurrentLayers(cache) {
+        if terminalModelStopStripped || unreturnedTokenCount > 0,
+           ConversationCacheLayers.hasRecurrentLayers(cache) {
             return promptCheckpoints.isEmpty
                 ? .abort(reason: "hybrid_terminal_stop_stripped")
                 : .commit(promptCheckpoints)

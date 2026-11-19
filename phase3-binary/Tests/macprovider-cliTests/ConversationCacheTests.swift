@@ -1423,7 +1423,8 @@ final class ConversationCacheTests: XCTestCase {
             promptCheckpoints: [RecurrentStateCheckpoint(tokenCount: 1100, states: [1: checkpointState])],
             cache: [attention, recurrent],
             tokenCount: stored.count,
-            terminalModelStopStripped: true
+            terminalModelStopStripped: true,
+            unreturnedTokenCount: 1
         ) else {
             return XCTFail("prompt checkpoint must be committed")
         }

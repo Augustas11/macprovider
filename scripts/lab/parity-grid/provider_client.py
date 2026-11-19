@@ -22,7 +22,8 @@ macprovider_generated_completion_tokens when present, else completion_tokens.
 --turns 2 adds, after each turn-1 trial, one turn-2 row per prompt row: the messages are
 [user1 (the same long prompt), assistant1 (this provider's turn-1 text), user2 (prompts.FOLLOWUP)].
 Turn-1 rows then carry turn=1, turn-2 rows turn=2 plus `assistant1` (the history the reference
-replays, see prompts.load_assistant1) and cached_prompt_tokens; turn-2 ttft_s times the turn-2
+replays, see prompts.load_assistant1) and cached_prompt_tokens; every row record (both turns, and
+--turns 1 too) also gains `conversation_key_sent`. Turn-2 ttft_s times the turn-2
 request only. Turn 2 has no aggregate line. --turns 1 writes the records it always did.
 A turn-2 request goes out when turn 1 succeeded with any output; a reasoning-only turn 1 gives
 assistant1 "" (content mode), which is what a client that drops reasoning sends.

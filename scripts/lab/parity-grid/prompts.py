@@ -78,7 +78,9 @@ def build_turn2_messages(ctx_tokens, row, assistant1, reasoning=None):
 def load_assistant1(provider_jsonl):
     """Map (ctx, max_tokens, row) -> the provider's turn-2 assistant1 text, first record wins.
 
-    The reference replays exactly the history the provider's turn-2 request carried.
+    The reference replays the content history the provider's turn-2 request carried. Records
+    keep no reasoning text for turn 2, so a provider run with --turn2-history verbatim is replayed
+    without reasoning_content: its reference history differs from what the provider received.
     """
     out = {}
     with open(provider_jsonl) as f:
