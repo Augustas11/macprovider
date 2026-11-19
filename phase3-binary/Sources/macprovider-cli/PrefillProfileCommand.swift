@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MacProviderCore
@@ -29,6 +30,11 @@ import MacProviderCore
 ///    `-DMACPROVIDER_SECTION_TIMING` against an mlx-swift-lm that has the
 ///    timer (the #2409 fork); otherwise the pass records `unavailable`.
 /// Greedy token ids of every mode are recorded; they must agree.
+/// `--generate-tokens N` keeps each timed served run decoding greedily to N
+/// tokens (the first included) and records them, so runs at different step
+/// sizes can be compared token for token; `--served-only` skips the synced
+/// and section passes. The report also records the step serve resolves for
+/// this model with `prefill_step_size` unset (`serve_default_step`).
 ///
 /// It also writes the model's leaf-module weight inventory (path, kind,
 /// weight shape, quantization bits) for the compute-per-token ceiling.
@@ -55,6 +61,15 @@ struct PrefillProfileCommand: AsyncParsableCommand {
     var runs: Int = 3
 
     @Option(
+        name: .customLong("generate-tokens"),
+        help: "Greedy tokens each timed served run decodes and records, the first included. Default 1."
+    )
+    var generateTokens: Int = 1
+
+    @Flag(name: .customLong("served-only"), help: "Skip the synced and section passes.")
+    var servedOnly = false
+
+    @Option(
         name: .customLong("mlx-cache-limit-mb"),
         help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Default: serve's default."
     )
@@ -66,8 +81,8 @@ struct PrefillProfileCommand: AsyncParsableCommand {
     func run() async throws {
         let lengths = Self.parseList(promptTokens)
         let steps = Self.parseList(stepSizes)
-        guard !lengths.isEmpty, !steps.isEmpty, runs > 0 else {
-            FileHandle.standardError.write(Data("prefill-profile: --prompt-tokens, --step-sizes need positive integers; --runs > 0\n".utf8))
+        guard !lengths.isEmpty, !steps.isEmpty, runs > 0, generateTokens > 0 else {
+            FileHandle.standardError.write(Data("prefill-profile: --prompt-tokens, --step-sizes need positive integers; --runs, --generate-tokens > 0\n".utf8))
             throw ExitCode(2)
         }
         let text = try String(contentsOfFile: promptText, encoding: .utf8)
@@ -96,7 +111,16 @@ struct PrefillProfileCommand: AsyncParsableCommand {
             return Unchecked(value: (lengths.map { Array(repeated[0 ..< $0]) }, Self.inventory(context.model)))
         }
         let (prompts, inventory) = prepared.value as! ([[Int32]], [[String: Any]])
+        // Serve's serial step for this model with `prefill_step_size` unset
+        // (configured default 512).
+        let serveDefaultStep = await container.perform { context in
+            ModelRuntime.servedSerialPrefillStepSize(
+                glm5Next: context.model is GLM5NextModel || context.model is GLM5NextTextModel,
+                configured: 512, operatorSet: nil, containsImage: false)
+        }
+        Self.say("serve_default_step=\(serveDefaultStep)")
 
+        let generate = generateTokens
         var results: [[String: Any]] = []
         for tokens in prompts {
             let n = tokens.count
@@ -106,16 +130,20 @@ struct PrefillProfileCommand: AsyncParsableCommand {
             var served: [[String: Any]] = []
             for step in steps {
                 var stepRuns: [[String: Any]] = []
+                Memory.clearCache()
+                Memory.peakMemory = 0
                 for _ in 0 ..< runs {
                     stepRuns.append(try await container.perform {
-                        Unchecked(value: try Self.served($0.model, tokens: tokens, step: step))
+                        Unchecked(value: try Self.served($0.model, tokens: tokens, step: step, generate: generate))
                     }.value as! [String: Any])
                 }
                 Self.say("prompt \(n) served step=\(step) ttft_ms=\(stepRuns.map { $0["ttft_ms"] as! Double })")
-                served.append(["step": step, "runs": stepRuns])
+                served.append(["step": step, "runs": stepRuns, "mlx_peak_bytes": Memory.peakMemory])
             }
             record["served"] = served
-            for (key, clear, sections) in [("synced", true, false), ("synced_no_clear", false, false), ("sections", true, true)] {
+            let passes: [(String, Bool, Bool)] = servedOnly
+                ? [] : [("synced", true, false), ("synced_no_clear", false, false), ("sections", true, true)]
+            for (key, clear, sections) in passes {
                 record[key] = try await container.perform {
                     Unchecked(value: try Self.synced($0.model, tokens: tokens, step: steps[0], clear: clear, sections: sections))
                 }.value
@@ -134,6 +162,9 @@ struct PrefillProfileCommand: AsyncParsableCommand {
             "load_seconds": loadSeconds,
             "step_sizes": steps,
             "runs": runs,
+            "generate_tokens": generateTokens,
+            "served_only": servedOnly,
+            "serve_default_step": serveDefaultStep,
             "inventory": inventory,
             "prompts": results,
             "timestamp": ISO8601DateFormatter().string(from: Date()),
@@ -182,16 +213,19 @@ struct PrefillProfileCommand: AsyncParsableCommand {
         }
     }
 
-    private static func serveParameters(_ model: any LanguageModel, tokens: Int, step: Int) throws -> GenerateParameters {
+    private static func serveParameters(
+        _ model: any LanguageModel, tokens: Int, step: Int, maxTokens: Int = 2
+    ) throws -> GenerateParameters {
         try ModelRuntime.makeServeGenerateParameters(
-            model: model, maxTokens: 2, promptTokens: tokens,
+            model: model, maxTokens: maxTokens, promptTokens: tokens,
             maxContextTokens: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).maxContextTokens,
             kvBitsOverride: nil, prefillStepSize: step, temperature: 0, topP: 1)
     }
 
-    /// The serve's keyless network serial path to the first token.
-    static func served(_ model: any LanguageModel, tokens: [Int32], step: Int) throws -> [String: Any] {
-        let parameters = try serveParameters(model, tokens: tokens.count, step: step)
+    /// The serve's keyless network serial path to the first token, then
+    /// greedy decoding to `generate` tokens (the first included).
+    static func served(_ model: any LanguageModel, tokens: [Int32], step: Int, generate: Int = 1) throws -> [String: Any] {
+        let parameters = try serveParameters(model, tokens: tokens.count, step: step, maxTokens: max(2, generate + 1))
         let cache = try ModelRuntime.serveCache(model: model, baseParameters: parameters, forceSimpleKV: false)
         var iteratorParameters = ModelRuntime.serveIteratorParameters(
             parameters, forceSimpleKV: false, reusedCache: false, cache: cache)
@@ -205,13 +239,23 @@ struct PrefillProfileCommand: AsyncParsableCommand {
         ModelRuntime.clearMLXBufferCacheAfterPrefill()
         let first = iterator.next()
         let firstAt = now()
+        var generated = first.map { [$0] } ?? []
+        while generated.count < generate, let token = iterator.next() {
+            generated.append(token)
+        }
+        let lastAt = now()
         Stream().synchronize()
         let (chunks, remainder) = legacyChunks(total: tokens.count, step: step)
-        return [
+        var record: [String: Any] = [
             "step": step, "chunks": chunks.count, "remainder_tokens": remainder,
             "ttft_ms": ms(start, firstAt), "prepare_ms": ms(start, prepared),
             "progress_ms": stamps.values, "first_token": first ?? -1,
         ]
+        if generate > 1 {
+            record["tokens"] = generated
+            record["decode_ms"] = ms(firstAt, lastAt)
+        }
+        return record
     }
 
     /// The same chunk boundaries, one synchronized forward at a time.

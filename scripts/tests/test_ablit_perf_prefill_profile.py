@@ -183,7 +183,7 @@ class LauncherTests(unittest.TestCase):
     def test_launcher_admits_the_job_its_fork_file_and_knobs(self):
         text = LAUNCHER.read_text()
         self.assertIn("job-glm-prefill-profile.sh) FORK_FILE=Libraries/MLXLMCommon/LabSectionTimer.swift", text)
-        self.assertIn("|job-glm-prefill-profile.sh) ;;", text)
+        self.assertIn("|job-glm-prefill-profile.sh|", text)
         self.assertIn("PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|", text)
         self.assertIn("PEAK |PROFILE_)", text)
 
