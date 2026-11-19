@@ -25,6 +25,11 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "minimax" / "job-2376-parity.sh",
     # Start-up timing rig (#2431): builds the lab binary to time `serve --no-join`.
     ROOT / "scripts" / "lab" / "startup-timing" / "run-from-mac.sh",
+    # Abliterated-perf lab window (#2409): each job builds the lab binary on the
+    # Studio for loopback parity/throughput cells; never a release or signing path.
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job.sh",
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job-dsv4-abliterated.sh",
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-parity.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
