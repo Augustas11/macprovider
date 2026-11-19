@@ -4,6 +4,7 @@
 usage: reference_mlxlm.py --model-path DIR --model-name NAME --out ref.jsonl
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--extra-row-trials 1] [--max-context N]
+                          [--turns 2 --provider-jsonl provider.jsonl]
 
 For every grid cell it runs prompt row 0 `--trials` times. For a cell with
 N > 1 rows it also runs prompt rows 1..N-1 single-row (`--extra-row-trials`
@@ -87,7 +88,13 @@ def main(argv=None):
     ap.add_argument("--rows", help="comma list overriding grid rows, e.g. 1,4")
     ap.add_argument("--extra-row-trials", type=int, default=1)
     ap.add_argument("--max-context", type=int)
+    ap.add_argument("--turns", type=int, choices=(1, 2), default=1,
+                    help="2: also run turn 2 (turn=2 rows) on the assistant1 text in --provider-jsonl")
+    ap.add_argument("--provider-jsonl", help="provider.jsonl of a --turns 2 provider run (needed with --turns 2)")
     args = ap.parse_args(argv)
+    if args.turns == 2 and not args.provider_jsonl:
+        ap.error("--turns 2 needs --provider-jsonl")
+    assistant1 = prompts.load_assistant1(args.provider_jsonl) if args.turns == 2 else {}
 
     grid = prompts.load_grid(args.grid)
     if args.rows:
@@ -134,6 +141,7 @@ def main(argv=None):
                     "row": prow,
                     "trial": trial,
                     "load_s": load_s,
+                    **({"turn": 1} if args.turns == 2 else {}),
                     **rec,
                     "sha256": hashlib.sha256(rec["text"].encode()).hexdigest(),
                 }
@@ -142,6 +150,26 @@ def main(argv=None):
                 print(f"ref ctx={ctx} out={max_tokens} row={prow} trial={trial} "
                       f"tps={rec['decode_tps']} n={rec['completion_tokens']} finish={rec['finish']}",
                       file=sys.stderr)
+        # Turn 2 replays the provider's turn-1 text. This reference keeps no prefix cache between
+        # requests, so cached_prompt_tokens is None (compare reports it as unknown).
+        for (ctx, max_tokens, prow), n in reference_jobs(cells, trials, args.extra_row_trials):
+            if (ctx, max_tokens, prow) not in assistant1 or args.turns != 2:
+                continue
+            a1 = assistant1[(ctx, max_tokens, prow)]
+            ids = encode(prompts.build_turn2_messages(ctx, prow, a1))
+            for trial in range(n):
+                rec = run_one(model, tokenizer, stream_generate, sampler, ids, max_tokens)
+                line = {
+                    "side": "reference", "reference": "mlx-lm", "kind": "row", "model": args.model_name,
+                    "cell": prompts.cell_key(args.model_name, ctx, max_tokens, 1), "ctx_target": ctx,
+                    "max_tokens": max_tokens, "rows": 1, "row": prow, "trial": trial, "load_s": load_s,
+                    "turn": 2, "cached_prompt_tokens": None, "assistant1": a1, **rec,
+                    "sha256": hashlib.sha256(rec["text"].encode()).hexdigest(),
+                }
+                out.write(json.dumps(line) + "\n")
+                out.flush()
+                print(f"ref turn2 ctx={ctx} out={max_tokens} row={prow} trial={trial} "
+                      f"ttft={rec['ttft_s']} n={rec['completion_tokens']}", file=sys.stderr)
     return 0
 
 

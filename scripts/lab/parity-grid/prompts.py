@@ -59,6 +59,40 @@ def build_messages(ctx_tokens, row):
     return [{"role": "user", "content": header + body + _INSTRUCTION}]
 
 
+# Turn 2 of the two-turn cell: a short fixed follow-up (about 20 tokens).
+FOLLOWUP = "Thanks. Now restate your answer in one sentence, then name one thing I should check next."
+
+
+def build_turn2_messages(ctx_tokens, row, assistant1, reasoning=None):
+    """Turn-2 chat: the turn-1 prompt, the assistant's turn-1 text, the fixed follow-up.
+
+    With `reasoning` (not None) the assistant message also carries it as reasoning_content,
+    as an OpenAI client that keeps the reasoning re-sends it.
+    """
+    assistant = {"role": "assistant", "content": assistant1}
+    if reasoning is not None:
+        assistant["reasoning_content"] = reasoning
+    return build_messages(ctx_tokens, row) + [assistant, {"role": "user", "content": FOLLOWUP}]
+
+
+def load_assistant1(provider_jsonl):
+    """Map (ctx, max_tokens, row) -> the provider's turn-2 assistant1 text, first record wins.
+
+    The reference replays exactly the history the provider's turn-2 request carried.
+    """
+    out = {}
+    with open(provider_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r.get("kind", "row") != "row" or r.get("turn") != 2 or not r.get("assistant1"):
+                continue
+            out.setdefault((r["ctx_target"], r["max_tokens"], r["row"]), r["assistant1"])
+    return out
+
+
 def cell_key(model, ctx, out, rows):
     return f"{model}|ctx{ctx}|out{out}|rows{rows}"
 

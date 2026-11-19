@@ -145,7 +145,61 @@ def match_margin(margins, ctx, offset):
     return best
 
 
+def is_turn2(r):
+    return r.get("turn") == 2
+
+
+def evaluate_turn2(ref_lines, our_lines):
+    """Turn-2 section: TTFT and cached prompt tokens of the turn-2 requests, ours vs reference.
+
+    Per (model, ctx, out, rows) cell with turn-2 rows from the provider: median TTFT of its rows
+    and trials, the median reference TTFT of the same prompt rows, their ratio (ours / ref), and
+    the median and minimum cached_prompt_tokens on each side. The cell FAILS when ours reports
+    no cached tokens (0 or missing) on any turn-2 row or a turn-2 request errored. A reference
+    that reports no cached tokens (None: in-process mlx-lm keeps no prefix cache) is "unknown",
+    never a failure. TTFT is reported, not gated.
+    """
+    ours = defaultdict(list)
+    for r in our_lines:
+        if r.get("kind", "row") == "row" and is_turn2(r):
+            ours[(r["model"], r["ctx_target"], r["max_tokens"], r["rows"])].append(r)
+    ref = defaultdict(list)
+    for r in ref_lines:
+        if r.get("kind", "row") == "row" and is_turn2(r) and not r.get("error"):
+            ref[(r["model"], r["ctx_target"], r["max_tokens"])].append(r)
+    cells = []
+    for key in sorted(ours):
+        model, ctx, out, nrows = key
+        rows = ours[key]
+        ref_rows = [r for r in ref.get((model, ctx, out), []) if r["row"] < nrows]
+        ours_cached = [r.get("cached_prompt_tokens") for r in rows]
+        ref_cached = [r.get("cached_prompt_tokens") for r in ref_rows if r.get("cached_prompt_tokens") is not None]
+        errors = [r["error"] for r in rows if r.get("error")]
+        reasons = []
+        if errors:
+            reasons.append(f"turn2: {len(errors)} request(s) failed: {str(errors[0])[:120]}")
+        if any(not c for c in ours_cached):
+            reasons.append("turn2: ours reports 0 cached prompt tokens "
+                           f"(cached_prompt_tokens per row: {ours_cached})")
+        ours_ttft = median([r.get("ttft_s") for r in rows if not r.get("error")])
+        ref_ttft = median([r.get("ttft_s") for r in ref_rows])
+        known = [c for c in ours_cached if c is not None]
+        cells.append({
+            "cell": f"{model}|ctx{ctx}|out{out}|rows{nrows}", "model": model, "ctx": ctx, "out": out,
+            "rows": nrows, "ours_ttft_s": ours_ttft, "ref_ttft_s": ref_ttft,
+            "ttft_ratio": round(ours_ttft / ref_ttft, 4) if ours_ttft is not None and ref_ttft else None,
+            "ours_cached_median": median(known), "ours_cached_min": min(known) if known else None,
+            "ref_cached": "known" if ref_cached else "unknown",
+            "ref_cached_median": median(ref_cached), "ref_cached_min": min(ref_cached) if ref_cached else None,
+            "reasons": reasons, "pass": not reasons,
+        })
+    return {"cells": cells, "pass": all(c["pass"] for c in cells)}
+
+
 def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margins=None, tie_steps=2.0):
+    turn2 = evaluate_turn2(ref_lines, our_lines)
+    ref_lines = [r for r in ref_lines if not is_turn2(r)]
+    our_lines = [r for r in our_lines if not is_turn2(r)]
     ref = index_reference(ref_lines)
     ours_rows, ours_aggs, cells_meta = index_ours(our_lines)
     cells = {}
@@ -318,7 +372,10 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         c["pass"] = not c["reasons"]
         result_cells.append(c)
     failing = [c for c in result_cells if not c["pass"]]
+    failing_turn2 = [c for c in turn2["cells"] if not c["pass"]]
+    extra = {"turn2": turn2} if turn2["cells"] else {}
     return {
+        **extra,
         "floor": floor,
         "text_fallback_reason": text_fallback_reason,
         "tie_steps": tie_steps,
@@ -326,8 +383,8 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         "not_run": not_run,
         "ties": [{"cell": c["cell"], "margin_steps": c["tie_margin_steps"]} for c in result_cells if c["text_gate"] == "tie"],
         "slopes": slopes,
-        "failing": [{"cell": c["cell"], "reasons": c["reasons"]} for c in failing],
-        "pass": not failing,
+        "failing": [{"cell": c["cell"], "reasons": c["reasons"]} for c in failing + failing_turn2],
+        "pass": not failing and not failing_turn2,
     }
 
 
@@ -367,6 +424,20 @@ def markdown(summary):
         lines.append("")
         lines.append("Notes:")
         lines.extend(f"- {cell}: {n}" for cell, n in notes)
+    if summary.get("turn2"):
+        lines += ["", "Turn 2 (turn-2 request only; TTFT reported, a cell FAILS when ours reports 0 cached "
+                  "prompt tokens; a reference without cached tokens is unknown):", "",
+                  "| model | ctx | out | rows | ref ttft s | ours ttft s | ratio ours/ref "
+                  "| ours cached median | ours cached min | ref cached median | ref cached min | status |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+        for c in summary["turn2"]["cells"]:
+            ref_med = fmt(c["ref_cached_median"], ".0f") if c["ref_cached"] == "known" else "unknown"
+            ref_min = fmt(c["ref_cached_min"], ".0f") if c["ref_cached"] == "known" else "unknown"
+            lines.append(
+                f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c['ref_ttft_s'], '.3f')} | "
+                f"{fmt(c['ours_ttft_s'], '.3f')} | {fmt(c['ttft_ratio'], '.3f')} | "
+                f"{fmt(c['ours_cached_median'], '.0f')} | {fmt(c['ours_cached_min'], '.0f')} | "
+                f"{ref_med} | {ref_min} | {'PASS' if c['pass'] else 'FAIL'} |")
     return "\n".join(lines)
 
 
