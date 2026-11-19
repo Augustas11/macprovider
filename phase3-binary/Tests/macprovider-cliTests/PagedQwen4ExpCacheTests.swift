@@ -465,6 +465,7 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         let capabilities = Self.capabilities(data)
         XCTAssertEqual(capabilities.qwen4ExpAttention?.expectedCacheKinds, Self.tinyKinds)
         XCTAssertEqual(capabilities.recurrentStateLayout, Self.tinyLayout)
+        try requireMetal()
         let model = try Self.tinyModel()
         let caches = try model.newCache(parameters: nil)
         XCTAssertEqual(CacheKind.kinds(from: caches), Self.tinyKinds)
@@ -482,6 +483,7 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
     /// Serve parameters must leave the cache uncapped, and one serial
     /// `TokenIterator` step must run on them.
     func testSerialServeParametersLeaveTheSelfSizedCacheUncapped() throws {
+        try requireMetal()
         let model = try Self.tinyModel()
         let cache = try model.newCache(parameters: nil)
         let capped = KVCacheConfiguration(capacity: try KVCacheConfiguration.Capacity(maxTokens: 65_536))
@@ -504,7 +506,6 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         )
         XCTAssertNil(serve.maxKVSize)
 
-        try requireMetal()
         let iteratorCache = try model.newCache(parameters: serve)
         var iterator = try TokenIterator(
             input: LMInput(tokens: MLXArray(prompt.map(Int32.init))), model: model, cache: iteratorCache,
