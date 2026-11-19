@@ -280,6 +280,25 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertThrowsError(try load(boolThreshold))
     }
 
+    /// SPEC-048 MTP-15 (0.1.115): an admission policy may preregister the
+    /// single-token identical-pair exclusion; any other value is refused.
+    func testPolicyAcceptsOnlyPreregisteredExclusionRules() throws {
+        let base = try template()
+        for value in ["none", "single_token_identical_pair"] {
+            var object = base
+            object["exclusion_rules"] = value
+            XCTAssertNoThrow(try load(object), "exclusion_rules=\(value)")
+        }
+        for value in ["", "single_token", "None", 1, true] as [Any] {
+            var object = base
+            object["exclusion_rules"] = value
+            XCTAssertThrowsError(try load(object), "exclusion_rules=\(value)")
+        }
+        var object = base
+        object.removeValue(forKey: "exclusion_rules")
+        XCTAssertThrowsError(try load(object))
+    }
+
     private func loadText(_ text: String) throws -> NativeMTPBenchPolicy {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-mtp-policy-\(UUID().uuidString).json")
