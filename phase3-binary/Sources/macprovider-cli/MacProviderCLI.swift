@@ -1406,9 +1406,24 @@ struct ServeCommand: AsyncParsableCommand {
         // It never persists a config migration, mints no catalog trust (no
         // coordinator, CB policy or hello changes), and on any failure or a
         // non-admitted answer keeps the plain no-join binding below.
-        let noJoinNativeMTPPreflight = !joinedCatalogPreflight && !joiningCoordinator && !servesPoolModelEntry
+        var noJoinNativeMTPPreflight = !joinedCatalogPreflight && !joiningCoordinator && !servesPoolModelEntry
             && resolved.nativeMTPMode == .auto
             && !(resolved.modelCatalogKey ?? "").isEmpty
+        // The catalog preflight adopts a cache-backed or non-canonical path
+        // into the durable store (a full snapshot copy). A no-join serve must
+        // never copy, so it runs the preflight only when the model path is
+        // already the durable canonical artifact that adoption would produce.
+        if noJoinNativeMTPPreflight {
+            let durablePath = try? artifactResolver.durableStore.artifactURL(
+                modelID: resolved.modelCatalogModelID ?? "",
+                revision: resolved.modelCatalogRevision ?? "",
+                sha256: actual
+            ).standardizedFileURL.path
+            if durablePath != URL(fileURLWithPath: authorityPath).standardizedFileURL.path {
+                FileHandle.standardError.write(Data("native_mtp no-join: skipped (model path is not the durable provider artifact)\n".utf8))
+                noJoinNativeMTPPreflight = false
+            }
+        }
         if joinedCatalogPreflight || noJoinNativeMTPPreflight {
             var candidate = resolved
             do {
@@ -1431,7 +1446,8 @@ struct ServeCommand: AsyncParsableCommand {
                     staticInputs: staticInputs,
                     artifactResolver: artifactResolver,
                     persistConfigMigration: persistConfigMigration && joinedCatalogPreflight,
-                    persistFrom: persistFrom
+                    persistFrom: persistFrom,
+                    refusalSubject: joinedCatalogPreflight ? "coordinator join" : "native_mtp no-join admission"
                 )
                 let canonicalAuthorityPath = candidate.modelArtifactPath ?? authorityPath
                 let canonicalLoadPath = try runtimeModelLoadPath(
@@ -1889,7 +1905,8 @@ struct ServeCommand: AsyncParsableCommand {
         staticInputs: AutotuneStaticInputs,
         artifactResolver: CachedModelArtifactResolver,
         persistConfigMigration: Bool,
-        persistFrom: String?
+        persistFrom: String?,
+        refusalSubject: String = "coordinator join"
     ) async throws -> CatalogRuntimeTrust {
         let actual = actualArtifactSHA256
         let catalogActual = catalogArtifactSHA256 ?? actualArtifactSHA256
@@ -1924,7 +1941,7 @@ struct ServeCommand: AsyncParsableCommand {
                 let state = rateCard.warnings.contains(.rateCardIntegrityFailure)
                     ? "rate_card_integrity_failure"
                     : "rate_card_update_required"
-                FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible rate-card release\n".utf8))
+                FileHandle.standardError.write(Data("\(state): refusing \(refusalSubject) with an untrusted or incompatible rate-card release\n".utf8))
                 throw ExitCode(2)
             }
             guard let match = rateCard.value.rowForRecommendation(modelKey: key) else {
@@ -2049,7 +2066,7 @@ struct ServeCommand: AsyncParsableCommand {
             let state = catalog.warnings.contains(.candidateCatalogIntegrityFailure)
                 ? "catalog_integrity_failure"
                 : "catalog_update_required"
-            FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible catalog release\n".utf8))
+            FileHandle.standardError.write(Data("\(state): refusing \(refusalSubject) with an untrusted or incompatible catalog release\n".utf8))
             throw ExitCode(2)
         }
         // Row admission against the *current* signed catalog is the security gate.
