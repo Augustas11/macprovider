@@ -1460,6 +1460,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    // Once the request was admitted the model was loaded; a
 	                    // template/tools failure (e.g. historical NSNull→Jinja)
 	                    // is an inference/request problem, not a missing model.
+	                    Self.logUnexpectedInferenceError(error, path: "nonstream")
 	                    let apiError = Self.unexpectedInferenceAPIError(error: error)
                     do {
                         let receipt = try Self.errorReceiptHeaderResult(
@@ -1965,6 +1966,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease, warmMember: warmMember)
                 }
+                Self.logUnexpectedInferenceError(error, path: "stream")
                 let apiError = Self.unexpectedInferenceAPIError(
                     error: error,
                     sseStarted: sseStarted
@@ -2116,6 +2118,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "code": "swap_drain_timeout",
             ]
         ]
+    }
+
+    /// The catch-all maps an unexpected error to a generic API error; this one
+    /// stderr line keeps the cause. The error only, never request content.
+    static func logUnexpectedInferenceError(_ error: Error, path: String) {
+        let detail = String(describing: error).replacingOccurrences(of: "\n", with: " ")
+        try? FileHandle.standardError.write(contentsOf: Data("event=inference_error path=\(path) error=\(detail)\n".utf8))
     }
 
     /// Maps unexpected non-APIError throws into a buyer-visible envelope.

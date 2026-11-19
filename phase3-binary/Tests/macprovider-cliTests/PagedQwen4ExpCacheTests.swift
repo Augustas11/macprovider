@@ -412,6 +412,45 @@ final class PagedQwen4ExpCacheTests: XCTestCase {
         }
     }
 
+    /// The model builds its own attention caches and ignores `maxKVSize`, so the
+    /// serve cap reached the iterator's explicit-cache check, which counts the
+    /// `Qwen4ExpAttentionCache` layer as not realizing it: the first serial
+    /// request of a Flash-Next serve failed with "Inference engine error".
+    /// Serve parameters must leave the cache uncapped, and one serial
+    /// `TokenIterator` step must run on them.
+    func testSerialServeParametersLeaveTheSelfSizedCacheUncapped() throws {
+        let model = try Self.tinyModel()
+        let cache = try model.newCache(parameters: nil)
+        let capped = KVCacheConfiguration(capacity: try KVCacheConfiguration.Capacity(maxTokens: 65_536))
+        XCTAssertThrowsError(try validateKVCacheCompatibility(cache, configuration: capped)) { error in
+            XCTAssertEqual(error as? KVCacheConfigurationError, .incompatibleCapacity(expected: 65_536, count: 1))
+        }
+        XCTAssertTrue(ModelRuntime.modelSizesItsOwnKVCache(model))
+        XCTAssertTrue(ModelRuntime.modelSizesItsOwnKVCache(Qwen4ExpModel(
+            try JSONDecoder().decode(Qwen4ExpConfiguration.self, from: Data(Self.tinyTextConfiguration.utf8))
+        )))
+        let base = GenerateParameters(maxTokens: 8, maxKVSize: 65_536)
+        XCTAssertNil(ModelRuntime.explicitCacheIteratorParameters(base, cache: cache).maxKVSize)
+        XCTAssertNil(ModelRuntime.serveIteratorParameters(
+            base, forceSimpleKV: false, reusedCache: false, cache: cache
+        ).maxKVSize)
+        let prompt = Self.tinyPrompt(length: 9, salt: 0)
+        let serve = try ModelRuntime.makeServeGenerateParameters(
+            model: model, maxTokens: 4, promptTokens: prompt.count, maxContextTokens: 65_536,
+            kvBitsOverride: nil, prefillStepSize: 512, temperature: 0, topP: 1
+        )
+        XCTAssertNil(serve.maxKVSize)
+
+        try requireMetal()
+        let iteratorCache = try model.newCache(parameters: serve)
+        var iterator = try TokenIterator(
+            input: LMInput(tokens: MLXArray(prompt.map(Int32.init))), model: model, cache: iteratorCache,
+            parameters: ModelRuntime.explicitCacheIteratorParameters(serve, cache: iteratorCache)
+        )
+        let first = try XCTUnwrap(iterator.next())
+        XCTAssertEqual(first, try Self.runSerial(model: model, prompt: prompt, decodeTokens: 0)[0])
+    }
+
     /// Rows on both sides of the indexer budget, prefilled alone and decoded
     /// together for several lockstep windows at 2 and 8 rows, emit bitwise
     /// the greedy tokens of each row decoded alone on the paged backend and

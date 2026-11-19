@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -717,6 +718,15 @@ class Qwen4CbJobTests(unittest.TestCase):
         self.assertNotIn("--prefill-batch-size", argv)
         self.assertNotIn("--seed-self-check", argv)
         self.assertIn("max_concurrency_override=16 max_concurrency_source=owner", out)
+        # CB needs the allowlisted id and a verified model hash (else no requested tuple, no self-check).
+        self.assertIn("--model-id latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp", " ".join(argv))
+        self.assertIn("--model-sha256", argv)
+        self.assertIn("continuous_batching=canary accepted_tuple=computed", out)
+
+    def test_model_sha_knob_reaches_the_argv(self):
+        rc, out = self.run_job(QWEN4_SHA256="a" * 64)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--model-sha256 " + "a" * 64, out)
 
     def test_knobs_reach_the_argv(self):
         rc, out = self.run_job(CB_ROWS="1,2", CB_SLOTS="4", CONTEXTS="200", OUTPUTS="128,512", TRIALS="1",
@@ -731,11 +741,69 @@ class Qwen4CbJobTests(unittest.TestCase):
     def test_bad_knobs_are_refused_before_anything_runs(self):
         for env in ({"CB_ROWS": "1,,4"}, {"CB_ROWS": "0"}, {"CB_ROWS": "1,40"}, {"CB_ROWS": "a"},
                     {"CB_SLOTS": "8"}, {"CB_SLOTS": "0"}, {"CB_SLOTS": "33"}, {"TRIALS": "0"}, {"OUTPUTS": "x"},
-                    {"CONTEXTS": "a/b"}, {"REF_PREFILL_BATCH_SIZE": "0"}, {"SEED_SELF_CHECK_RUN": "latest"}):
+                    {"CONTEXTS": "a/b"}, {"REF_PREFILL_BATCH_SIZE": "0"}, {"SEED_SELF_CHECK_RUN": "latest"},
+                    {"QWEN4_SHA256": "ABC"}, {"QWEN4_SHA256": "A" * 64}, {"QWEN4_ID": "Latent/Qwen"}):
             rc, out = self.run_job(**env)
             self.assertEqual(rc, 64, (env, out))
             self.assertIn("BLOCKER:", out)
             self.assertIn("JOB_FAIL", out)
+
+
+class Qwen4CbTupleTests(unittest.TestCase):
+    """qwen4_cb_tuple.py: the provider's tuple fields for a snapshot with no signed CB entry."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("qwen4_cb_tuple", JOB_QWEN4_CB.parent / "qwen4_cb_tuple.py")
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+
+    def snapshot(self, tokenizer_config, template_file=None):
+        (self.dir / "config.json").write_text(json.dumps({
+            "model_type": "qwen4_exp", "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "text_config": {"num_experts": 512, "num_experts_per_tok": 10}}))
+        (self.dir / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
+        (self.dir / "tokenizer.json").write_text("{}")
+        if template_file:
+            (self.dir / template_file[0]).write_text(template_file[1])
+        (self.dir / "mlx.metallib").write_bytes(b"lib")
+        return self.m.build(self.dir, "latent-variable/x", "b" * 64, self.dir / "mlx.metallib", "apple-silicon:Apple M3 Ultra:ram-256gb")
+
+    def test_fields_follow_the_provider_formulas(self):
+        import hashlib
+        cfg = {"chat_template": "{{ x }}"}
+        t = self.snapshot(cfg)
+        tok = (b"tokenizer_config.json\0" + json.dumps(cfg).encode() + b"tokenizer.json\0{}")
+        self.assertEqual(t["tokenizer_sha256"], hashlib.sha256(tok).hexdigest())
+        self.assertEqual(t["chat_template_sha256"], hashlib.sha256(b"chat_template\0{{ x }}").hexdigest())
+        self.assertEqual(t["metallib_sha256"], hashlib.sha256(b"lib").hexdigest())
+        self.assertTrue(t["requires_moe"])
+        self.assertEqual((t["cache_class"], t["kv_dtype"], t["kernel_identifier"]),
+                         ("mixed", "fp16", "macprovider_paged_kv_gather_v1"))
+        self.assertTrue(t["cached_turns_accepted"])
+        # A template file wins over the tokenizer_config string.
+        t = self.snapshot(cfg, ("chat_template.jinja", "J"))
+        self.assertEqual(t["chat_template_sha256"], hashlib.sha256(b"chat_template.jinja\0J").hexdigest())
+        yaml = self.m.yaml_lines(t)
+        self.assertTrue(yaml.startswith("continuous_batching: canary\ncontinuous_batching_accepted_tuples:\n  - {model_id: "))
+        self.assertIn('hardware_class: "apple-silicon:Apple M3 Ultra:ram-256gb"', yaml)
+
+    def test_moe_rule(self):
+        self.assertFalse(self.m.requires_moe({"model_type": "llama", "num_experts": 1}))
+        self.assertTrue(self.m.requires_moe({"model_type": "x_moe"}))
+        self.assertFalse(self.m.requires_moe({"text_config": {"num_experts": True}}))
+
+    def test_check_compares_the_runtime_identity_line(self):
+        t = self.snapshot({})
+        line = ("[paged-kv] runtime-identity model=latent-variable/x model_sha256=%s hardware_class=%s "
+                "metallib_sha256=%s kernel_identifier=macprovider_paged_kv_gather_v1"
+                % (t["model_sha256"], t["hardware_class"], t["metallib_sha256"]))
+        self.assertEqual(self.m.check(t, "noise\n" + line + "\n"), [])
+        self.assertIsNone(self.m.check(t, "no identity here\n"))
+        diff = self.m.check(t, line.replace("ram-256gb", "ram-192gb"))
+        self.assertEqual([d[0] for d in diff], ["hardware_class"])
 
 
 class _FakeServer(BaseHTTPRequestHandler):

@@ -34,7 +34,7 @@
 #          the clean mlx-swift-lm worktree on campaign/2409-qwen4-exp-batch (batched Qwen4Exp
 #          committed), rsynced like the parity job's. Knobs by name: CB_ROWS (1,4,8,16) CB_SLOTS (16)
 #          CONTEXTS (200,4000) OUTPUTS (512) TRIALS (3) REF_PREFILL_BATCH_SIZE QWEN4_PATH QWEN4_REPO
-#          QWEN4_REVISION SEED_SELF_CHECK_RUN (job-qwen4-cb.sh header). Estimated duration: about 1 h 30
+#          QWEN4_REVISION QWEN4_ID QWEN4_SHA256 SEED_SELF_CHECK_RUN (job-qwen4-cb.sh header). Estimated duration: about 1 h 30
 #          cold (build ~20 min, idle CB self-check up to ~15 min at 16 slots, provider grid ~15 min,
 #          mlx-lm reference ~25 min, model load ~3 min each side), about 1 h when the build and the
 #          self-check verdict are reused (SKIP_BUILD=1, SEED_SELF_CHECK_RUN=<run>); plus the 106 GB
@@ -117,7 +117,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -204,7 +204,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|PEAK |PROFILE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|PEAK |PROFILE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break

@@ -2767,10 +2767,13 @@ actor ModelRuntime: ModelRuntimeServing {
     /// (`DeepseekV4PoolCache`, never sized by `maxKVSize`). MiniMax M3's
     /// sparse layers keep the whole context for the indexer
     /// (`MiniMaxM3SparseCache`; `incompatibleCapacity(expected: 65536,
-    /// count: 60)` on M3.1-Flash, whose layers are all sparse).
+    /// count: 60)` on M3.1-Flash, whose layers are all sparse). Qwen4-Exp's
+    /// full-attention layers build their own `Qwen4ExpAttentionCache`
+    /// (`Qwen4ExpSparseCache`), whose indexer also keeps the whole context.
     nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
         model is GLM5NextModel || model is GLM5NextTextModel || model is DeepseekV4Model
             || model is MiniMaxM3Model || model is MiniMaxM3TextModel
+            || model is Qwen4ExpModel || model is Qwen4ExpTextModel
     }
 
     /// Parameters for a `TokenIterator` over an explicit cache the model sized
@@ -2782,12 +2785,15 @@ actor ModelRuntime: ModelRuntimeServing {
     /// serve cap failed. The iterator gets the uncapped parameters, as for
     /// `KVCacheSimple` (#1998); prompt length is still bounded by
     /// `validatePromptTokenCount` before allocation. Exactly the caches that
-    /// carry a `GLM5NextLatentCache` or a `MiniMaxM3SparseCache` are affected.
+    /// carry a `GLM5NextLatentCache`, a `MiniMaxM3SparseCache` or a
+    /// `Qwen4ExpSparseCache` are affected.
     nonisolated static func explicitCacheIteratorParameters(
         _ parameters: GenerateParameters, cache: [KVCache]
     ) -> GenerateParameters {
         guard parameters.maxKVSize != nil,
-              cache.contains(where: { $0 is any GLM5NextLatentCache || $0 is any MiniMaxM3SparseCache })
+              cache.contains(where: {
+                  $0 is any GLM5NextLatentCache || $0 is any MiniMaxM3SparseCache || $0 is any Qwen4ExpSparseCache
+              })
         else {
             return parameters
         }

@@ -14,8 +14,16 @@
 #     its own build path with the mlx-swift-lm dependency replaced by FORK (`swift package edit`, this
 #     build path only), the release metallib beside the binary;
 #  3. scripts/lab/parity-grid/run-grid.sh, one invocation: our provider first, then the reference, then
-#     compare.py. The provider serves the snapshot by path (no catalog entry) with `--no-join`, the
-#     production route (`--cb auto`, no autotune flag) and the served slots owner-pinned to CB_SLOTS
+#     compare.py. The provider serves the snapshot under QWEN4_ID with its snapshot-manifest hash
+#     (run-grid --model-id/--model-sha256; the serve verifies the hash; no catalog entry or CB policy
+#     entry is needed with `--no-join`). Both are required for batching: the paged engine attaches
+#     Qwen4-Exp only under the allowlisted id, and with no verified model hash the provider requests
+#     no CB tuple, so the self-check never runs and the serve stays serial. The serve config carries
+#     `continuous_batching: canary` and the accepted tuple qwen4_cb_tuple.py computes the way the
+#     provider does (job.sh cb_extra takes it from a signed entry instead); it grants cached turns, and
+#     after the grid `check` compares it with the serve's `[paged-kv] runtime-identity` line
+#     (TUPLE_MATCH, else a BLOCKER). The serve runs the production route (`--cb auto`, no autotune
+#     flag) with the served slots owner-pinned to CB_SLOTS
 #     (16: config max_concurrency_override + max_concurrency_source owner; the self-check only lowers
 #     the pin to the width it verifies), the cached-turns grant and a queue limit of CB_SLOTS. A
 #     `--no-join` serve never loads a signed CB policy, so the serve first waits, idle, for the CB
@@ -32,7 +40,8 @@
 # Results: ~/lab-ablit-perf/results/<run>/qwen4-flash-next-cb/main/{provider.jsonl,reference.jsonl,
 # summary.md,summary.json,grid.json,run.log,serve/} and .../cb-self-check.json.
 # Env: CB_ROWS CB_SLOTS CONTEXTS OUTPUTS TRIALS REF_PREFILL_BATCH_SIZE (mlx-lm prefill_batch_size,
-# default its own 8) QWEN4_PATH QWEN4_REPO QWEN4_REVISION FORK METALLIB SKIP_BUILD
+# default its own 8) QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 (the snapshot-manifest
+# hash; computed from QWEN4_PATH when unset, and the serve refuses a wrong one) FORK METALLIB SKIP_BUILD
 # SEED_SELF_CHECK_RUN (a run id whose .../qwen4-flash-next-cb/main/serve/cb-self-check.json seeds
 # the serve, so the ~5+ min idle self-check is skipped when its key matches). CB_JOB_CHECK=1:
 # validate the knobs, print the run-grid argv and exit 0 before touching anything (the unit test).
@@ -52,6 +61,8 @@ OUT=$RES/$NAME/main
 QWEN4_REPO=${QWEN4_REPO:-latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp}
 QWEN4_REVISION=${QWEN4_REVISION:-65b0cd66046e41b63fb565466c5a52a6295a7592}
 QWEN4_PATH=${QWEN4_PATH:-$LAB/models/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp}
+QWEN4_ID=${QWEN4_ID:-latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp}
+QWEN4_SHA256=${QWEN4_SHA256:-}
 FORK=${FORK:-$LAB/mlx-swift-lm-2409}
 CB_ROWS=${CB_ROWS:-1,4,8,16}
 CB_SLOTS=${CB_SLOTS:-16}
@@ -84,10 +95,13 @@ case "$OUTPUTS" in ""|*[!0-9,]*) die "OUTPUTS=$OUTPUTS must be a comma list of t
 case "$TRIALS" in ""|*[!0-9]*|0) die "TRIALS=$TRIALS must be a positive number" 64 ;; esac
 case "$REF_PREFILL_BATCH_SIZE" in ""|[1-9]|[1-9][0-9]) ;; *) die "REF_PREFILL_BATCH_SIZE=$REF_PREFILL_BATCH_SIZE must be 1..99" 64 ;; esac
 [ -z "$SEED_SELF_CHECK_RUN" ] || echo "$SEED_SELF_CHECK_RUN" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "SEED_SELF_CHECK_RUN=$SEED_SELF_CHECK_RUN is not a run id" 64
+[ -z "$QWEN4_SHA256" ] || echo "$QWEN4_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "QWEN4_SHA256=$QWEN4_SHA256 is not a lowercase sha256" 64
+echo "$QWEN4_ID" | grep -Eq '^[a-z0-9._-]+/[a-z0-9._-]+$' || die "QWEN4_ID=$QWEN4_ID is not a lowercase org/name id" 64
 
 # The run-grid.sh argv (serve flags, reference flags, grid cut). The config extra file is written by the caller.
 grid_args() {
-  GARGS=(--model-path "$QWEN4_PATH" --model-name "$NAME" --bin-dir "$BIN" --out-dir "$OUT" --cb auto
+  GARGS=(--model-path "$QWEN4_PATH" --model-id "$QWEN4_ID" --model-sha256 "${QWEN4_SHA256:-<snapshot-manifest>}"
+         --model-name "$NAME" --bin-dir "$BIN" --out-dir "$OUT" --cb auto
          --no-autotune-candidate --rows "$CB_ROWS" --contexts "$CONTEXTS" --outputs "$OUTPUTS" --trials "$TRIALS"
          --config-extra "$RES/$NAME/serve-extra.yaml" --expect-route batched
          --python "$VENV/bin/python" --reference mlx-lm --ref-arg --loader --ref-arg qwen4 --ref-arg --batched)
@@ -97,7 +111,7 @@ grid_args() {
 if [ "${CB_JOB_CHECK:-0}" = 1 ]; then
   grid_args
   printf 'GRID_ARGS'; printf ' %s' "${GARGS[@]}"; echo
-  printf 'SERVE_EXTRA max_concurrency_override=%s max_concurrency_source=owner continuous_batch_queue_limit=%s\n' "$CB_SLOTS" "$CB_SLOTS"
+  printf 'SERVE_EXTRA continuous_batching=canary accepted_tuple=computed max_concurrency_override=%s max_concurrency_source=owner continuous_batch_queue_limit=%s\n' "$CB_SLOTS" "$CB_SLOTS"
   exit 0
 fi
 
@@ -136,15 +150,14 @@ fi
 [ -f "$JOB/ablit-perf/qwen4_oracle.py" ] || die "no qwen4_oracle.py at $JOB/ablit-perf (the reference loader)" 11
 cp "$JOB/ablit-perf/qwen4_oracle.py" "$RES/qwen4_oracle.py"  # the run record keeps the loader it ran
 cp "$GRID/reference_mlxlm.py" "$RES/reference_mlxlm.py"
-
-# Serve config extra: owner-pinned served slots, the cached-turns grant, the queue limit that bounds
-# the self-check ladder (job.sh cb_extra / <K>_SERVED_SLOTS).
-cat > "$RES/$NAME/serve-extra.yaml" <<EOF
-continuous_batching_cached_turns: true
-continuous_batch_queue_limit: $CB_SLOTS
-max_concurrency_override: $CB_SLOTS
-max_concurrency_source: owner
-EOF
+[ -f "$JOB/minimax/publish_abliterated.py" ] || die "no publish_abliterated.py at $JOB/minimax (the snapshot-manifest hash)" 11
+if [ -z "$QWEN4_SHA256" ]; then
+  # macprovider.snapshot-manifest.v1, as job.sh manifest(): what the serve verifies as model_artifact_sha256.
+  QWEN4_SHA256=$(/usr/bin/python3 -I -c 'import sys,pathlib; sys.path.insert(0, sys.argv[1])
+from publish_abliterated import snapshot_manifest_sha256 as m; print(m(pathlib.Path(sys.argv[2])))' "$JOB/minimax" "$QWEN4_PATH") \
+    && echo "$QWEN4_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "snapshot manifest of $QWEN4_PATH failed: $QWEN4_SHA256" 11
+fi
+log "MODEL $QWEN4_ID model_sha256=$QWEN4_SHA256"
 
 # 2. Lab-harness build against the fork (own build path: job.sh's build stays on the pin).
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
@@ -159,6 +172,22 @@ fi
 cp "$METALLIB" "$BIN/mlx.metallib" || die "metallib copy failed" 14
 shasum -a 256 "$BIN/macprovider-cli" "$BIN/mlx.metallib" > "$RES/identity.sha256"
 log "BUILD done $("$BIN/macprovider-cli" --version 2>&1 | head -n 1) cli_sha256=$(cut -c1-16 "$RES/identity.sha256" | head -n 1)"
+
+# Serve config extra (job.sh cb_extra / <K>_SERVED_SLOTS): canary mode and the accepted tuple with its
+# cached-turns grant (computed: no signed entry exists), owner-pinned served slots and the queue limit
+# that bounds the self-check ladder. The tuple binds the metallib beside the binary, so it follows the build.
+/usr/bin/python3 -I "$JOB/ablit-perf/qwen4_cb_tuple.py" tuple --model-path "$QWEN4_PATH" --model-id "$QWEN4_ID" \
+  --model-sha256 "$QWEN4_SHA256" --metallib "$BIN/mlx.metallib" --yaml-out "$RES/$NAME/cb-tuple.yaml" \
+  --json-out "$RES/$NAME/cb-tuple.json" > "$RES/$NAME/cb-tuple.out" 2>&1 \
+  || die "CB tuple: $(tail -n 2 "$RES/$NAME/cb-tuple.out" | tr '\n' ' ')" 11
+log "CB_TUPLE $(cat "$RES/$NAME/cb-tuple.out")"
+{ cat "$RES/$NAME/cb-tuple.yaml"; cat <<EOF
+continuous_batching_cached_turns: true
+continuous_batch_queue_limit: $CB_SLOTS
+max_concurrency_override: $CB_SLOTS
+max_concurrency_source: owner
+EOF
+} > "$RES/$NAME/serve-extra.yaml"
 
 # 3. Provider grid, batched reference, compare: one run-grid.sh.
 grid_args
@@ -179,7 +208,11 @@ case $rc in
 esac
 grep -q '^ROUTE_FAIL ' "$OUT/run.log" && [ $rc != 10 ] && blocker "ROUTE_FAIL: $(grep -m1 '^ROUTE_FAIL ' "$OUT/run.log" | cut -c1-300)"
 
-# 4. Self-check ladder and the served slots.
+# 4. The computed tuple against the identity the serve measured, the self-check ladder and the served slots.
+/usr/bin/python3 -I "$JOB/ablit-perf/qwen4_cb_tuple.py" check --tuple-json "$RES/$NAME/cb-tuple.json" \
+  --serve-err "$OUT/serve/serve.err" | tee "$RES/$NAME/cb-tuple-check.txt"
+[ "${PIPESTATUS[0]}" = 0 ] || blocker "the computed CB tuple does not match the serve's runtime identity: $(cut -c1-400 "$RES/$NAME/cb-tuple-check.txt")"
+grep -m1 'event=inference_error' "$OUT/serve/serve.err" | cut -c1-400 | sed 's/^/INFERENCE_ERROR /'
 if [ -s "$OUT/serve/cb-self-check.json" ]; then
   cp "$OUT/serve/cb-self-check.json" "$RES/$NAME/cb-self-check.json"
   /usr/bin/python3 -I - "$RES/$NAME/cb-self-check.json" <<'PY' | sed 's/^/CB_SELF_CHECK /'
