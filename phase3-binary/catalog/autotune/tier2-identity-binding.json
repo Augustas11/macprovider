@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "dfe0e3ac46565861a8dd48de34958447c9fe3fac2b960a37c327d0aa33b33cf8",
-  "generated_at": "2026-11-16T20:00:00Z",
+  "autotune_candidates_sha256": "704d85de2a49fb18233d60d656ecba2224ad3310c0bf99aef7fde447286291c5",
+  "generated_at": "2026-11-19T22:00:00Z",
   "models": [
     {
       "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
@@ -200,6 +200,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-17-glm53-uncensored-short-challenge-id-v289",
+  "release_id": "published-2026-11-20-qwen36-27b-mtp-cap-32k-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
