@@ -30,6 +30,7 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "ablit-perf" / "job.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-dsv4-abliterated.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-parity.sh",
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-profile.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
