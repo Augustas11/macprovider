@@ -188,6 +188,9 @@ def main():
             with np.load(Path(args.inject) / f"seq{si}.npz") as src:
                 tap.inject = (args.inject_layer, mx.array(src[f"full_{args.inject_layer}"])[None])
         logits = model(ids)
+        if src_meta is not None and str(tap.outputs[0].dtype) != src_meta["activation_dtype"]:
+            raise SystemExit(f"activation dtype {tap.outputs[0].dtype} != source {src_meta['activation_dtype']}: "
+                             "injection would round")
         if len(tap.outputs) != len(layers):
             raise SystemExit(f"captured {len(tap.outputs)} of {len(layers)} layers")
         logits = logits[0].astype(mx.float32)

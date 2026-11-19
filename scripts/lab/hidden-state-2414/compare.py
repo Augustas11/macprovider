@@ -23,8 +23,8 @@ and prints / writes:
    gap at each disagreement, and max |delta| of the teacher token logprob.
 
 Statistics per hidden-state vector (one layer, one position): max_abs
-(max |a-b|), rel_l2 (|a-b| / |a|), one_minus_cos, one_minus_top128 (1 minus
-the overlap of the 128 largest-|x| indices). Larger is always "more different".
+(max |a-b|), rel_l2 (|a-b| / |a|), one_minus_cos, one_minus_topk (1 minus
+the overlap of the --top largest-|x| indices, default 128). Larger is always "more different".
 
 Exit 0 when every check ran (whatever the separation), 1 on a failed gate,
 2 on unusable input.
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import numpy as np
 
-STATS = ("max_abs", "rel_l2", "one_minus_cos", "one_minus_top128")
+STATS = ("max_abs", "rel_l2", "one_minus_cos", "one_minus_topk")
 INJECT_NS = (1, 4, 8)
 
 
@@ -70,8 +70,8 @@ def vec_stats(a, b, top):
     return {
         "max_abs": np.max(np.abs(d), axis=-1),
         "rel_l2": rel,
-        "one_minus_cos": np.clip(1.0 - cos, 0.0, None),
-        "one_minus_top128": 1.0 - overlap,
+        "one_minus_cos": np.where(nd == 0, 0.0, np.clip(1.0 - cos, 0.0, None)),
+        "one_minus_topk": 1.0 - overlap,
     }
 
 
@@ -106,6 +106,8 @@ class Run:
     def key(self):
         m = self.meta
         inj = m["inject"]
+        if inj is not None and inj["source_rep"] != 0:
+            raise Unusable(f"{self.path}: injection source must be rep0, got rep{inj['source_rep']}")
         tag = None if inj is None else (inj["source_host"], inj["source_arm"], inj["source_variant"], inj["layer"])
         return (m["host"], m["arm"], m["variant"], m["rep"], tag)
 
@@ -268,6 +270,11 @@ def run(args):
         if d is not None:
             arms.append({"host": h, "arm": a, "variant": v, "identical_to_default": bit_identical(r, d),
                          "gpu_architecture": r.meta.get("gpu_architecture")})
+    for x in arms:
+        if x["host"] == R and x["arm"] == "tf32off" and not x["identical_to_default"]:
+            gate_ok = False
+            gate.append({"run": f"{R}/tf32off/{x['variant']}",
+                         "status": "DIFFERS from default (the flag must be inert before generation 17)"})
     report["arm_checks"] = arms
     lines.append("\n## Arms vs default on the same Mac\n")
     lines += [f"- {x['host']}/{x['arm']}/{x['variant']} (arch {x['gpu_architecture']}): "
@@ -289,6 +296,13 @@ def run(args):
             plumbing.append({"run": f"{h}/{a}/{v} L{k}", "bit_identical_to_base": ok})
             if not ok:
                 raise Unusable(f"self-injection {r.path} differs from its base run: injection is not exact")
+    for (h, a, v, rep, (sh, sa, sv, k)), r in inj.items():
+        src = base.get((sh, sa, sv, 0))
+        if src is None:
+            raise Unusable(f"injection {r.path}: source run {sh}/{sa}/{sv} rep0 not found")
+        for i, (x, y) in enumerate(zip(r.seqs(), src.seqs())):
+            if not (np.array_equal(x[f"full_{k}"], y[f"full_{k}"]) and np.array_equal(x["layers"][k], y["layers"][k])):
+                raise Unusable(f"injection {r.path} seq{i}: layer {k} does not equal the source; injection did not apply")
     report["injection_plumbing"] = plumbing
 
     # 5. separation per claimed variant and test arm

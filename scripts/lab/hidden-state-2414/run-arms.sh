@@ -70,8 +70,11 @@ done
 if [[ "$HOST" == m3u ]]; then
   ARMS=(default tf32off)
 else
-  ARCH="$("$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_architecture"])' \
-    "$REF/base/default/4bit/rep0/meta.json")"
+  for v in "${VARIANTS[@]}"; do
+    [[ -f "$REF/base/default/$v/rep0/meta.json" ]] || { echo "run-arms: missing $REF/base/default/$v/rep0" >&2; exit 2; }
+  done
+  ARCH="$("$PY" -I -c 'import json,sys; a=json.load(open(sys.argv[1])).get("gpu_architecture"); sys.exit(1) if not a else print(a)' \
+    "$REF/base/default/4bit/rep0/meta.json")" || { echo "run-arms: no gpu_architecture in --ref-runs" >&2; exit 2; }
   [[ -n "$ARCH" ]] || { echo "run-arms: no gpu_architecture in --ref-runs" >&2; exit 2; }
   echo "run-arms: arch-m3u arm forces MLX_METAL_GPU_ARCH=$ARCH"
   ARMS=(default tf32off arch-m3u)

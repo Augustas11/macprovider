@@ -74,7 +74,7 @@ python3 -m venv "$VENV" && "$VENV/bin/pip" install -r scripts/lab/hidden-state-2
 ## Reading the result
 
 Statistics per hidden-state vector: `max_abs`, `rel_l2`, `one_minus_cos`,
-`one_minus_top128` (1 minus the overlap of the 128 largest-magnitude
+`one_minus_topk` (1 minus the overlap of the 128 largest-magnitude
 indices). Layers are grouped into four ranges.
 
 - Honest: M3 Ultra `default` vs one M5 arm, same variant.
