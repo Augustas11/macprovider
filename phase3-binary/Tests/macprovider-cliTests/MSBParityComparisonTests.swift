@@ -176,6 +176,14 @@ final class MSBParityComparisonTests: XCTestCase {
         XCTAssertFalse(msbTemp0ParityMatch(
             serial: [1, 2], batched: [1, 2], comparedTokens: 4, serialStopTokenIDs: stops
         ).match)
+        // A stop on the first token.
+        XCTAssertTrue(msbTemp0ParityMatch(
+            serial: [], batched: [7, 1, 2, 3], comparedTokens: 4, serialStopTokenIDs: stops
+        ).match)
+        // A serial run longer than a short batched leg is still missing tokens.
+        XCTAssertEqual(msbTemp0ParityMatch(
+            serial: [1, 2, 3, 4], batched: [1, 2], comparedTokens: 4, serialStopTokenIDs: stops
+        ).firstDivergence, 2)
     }
 
     func testMismatchPrecedesAnyLaterMissingToken() {

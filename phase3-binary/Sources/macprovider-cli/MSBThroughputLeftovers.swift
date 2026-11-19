@@ -264,7 +264,9 @@ func msb03ShortRequestTTFTPass(ratio: Double) -> Bool {
 /// `serialStopTokenIDs`: the serial reference stops on (and omits) these
 /// model stop tokens, while the scheduler legs decode a fixed length past
 /// them. A serial run that ended early matches when the batched leg agrees up
-/// to that point and samples one of these tokens there (#2410).
+/// to that point and samples one of these tokens there (#2410). The serial
+/// run omits the token it stopped on, so a batched leg that samples a
+/// different token from the set at that position also matches.
 func msbTemp0ParityMatch(
     serial: [Int],
     batched: [Int],

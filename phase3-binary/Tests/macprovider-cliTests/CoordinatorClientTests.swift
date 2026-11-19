@@ -7435,6 +7435,7 @@ final class CoordinatorClientTests: XCTestCase {
         let newKey = Curve25519.Signing.PrivateKey()
         let candidatePublicKey = Data(newKey.publicKey.rawRepresentation).base64EncodedString()
         let candidateResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let candidateResumed = LockedBox(false)
         let candidateSocket = FakeProviderWebSocketTask(
             receiveResults: [],
             receiveOverrideIgnoresCancellation: true,
@@ -7445,6 +7446,7 @@ final class CoordinatorClientTests: XCTestCase {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
                 await sleeper.value
+                candidateResumed.set(true)
                 return try await candidateResponder.receive(from: socket)
             }
         )
@@ -7500,6 +7502,21 @@ final class CoordinatorClientTests: XCTestCase {
             frame["provider_receipt_public_key"] as? String == candidatePublicKey
         })
         XCTAssertTrue(candidateSocket.sentFrames().contains { frame in
+            frame["provider_receipt_public_key"] as? String == candidatePublicKey
+        })
+
+        // The timed-out handshake resumes once the receive returns; it must
+        // stop there, never committing the key or answering the challenge.
+        let candidateFramesBeforeResume = candidateSocket.sentFrames().count
+        let resumeDeadline = Date().addingTimeInterval(3)
+        while !candidateResumed.get() && Date() < resumeDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(candidateResumed.get(), "the candidate receive never returned")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(committed.get())
+        XCTAssertEqual(candidateSocket.sentFrames().count, candidateFramesBeforeResume)
+        XCTAssertFalse(restoreSocket.sentFrames().contains { frame in
             frame["provider_receipt_public_key"] as? String == candidatePublicKey
         })
         await client.stop()

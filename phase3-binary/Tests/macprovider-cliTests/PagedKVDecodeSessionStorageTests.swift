@@ -857,9 +857,11 @@ final class PagedKVDecodeSessionFinishTests: XCTestCase {
             ))
         }
         // Let the commit queue on the container ahead of `finish`'s release.
-        try await Task.sleep(nanoseconds: 200_000_000)
-        backend.finish(requestID: "a")
-        release.signal()
+        do {
+            defer { release.signal() }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            backend.finish(requestID: "a")
+        }
         try await holder.value
         try await commit.value
 
