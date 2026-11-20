@@ -1,6 +1,8 @@
 #!/bin/bash
 # Runs ON THE STUDIO from ~/lab-ablit-perf/job/ablit-perf/. Campaign #2409 gate for the GLM serial
-# prefill step (SPEC-038 FR-CB2 v0.3.61: glm5_next serial prefill in steps of 2048, was 512):
+# prefill step candidate (glm5_next serial prefill in steps of 2048 instead of 512). The candidate
+# FAILED this gate (greedy tokens diverge, results/20261119T131711Z) and was reverted in 4e04553b6,
+# so on this tree the default-step check fails by design; rerun only against a tree that sets 2048:
 # one lab-harness build of this tree against the pinned mlx-swift-lm (no fork), one model load, then
 #  - gate: one row, keyless serial path, prompts PROMPT_TOKENS (default 3673,14126), each run greedy-
 #    decodes GENERATE_TOKENS (default 512) tokens at step 512 and at step 2048; every token of every
