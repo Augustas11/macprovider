@@ -185,6 +185,10 @@ What this means for the SPEC-036-R022 statement, "a logit or less":
   KV cache, chunking or batching.
 - **Speed not measured:** the throughput cost of forcing `applegpu_g15d` on the
   M5 (no NAX kernels) was not measured.
-- **Unsupported setting:** `MLX_METAL_GPU_ARCH` is an internal override, not a
-  documented API. A future mlx version may remove it, or may change which
-  kernels the string selects.
+- **Override caveat:** `MLX_METAL_GPU_ARCH` is a documented MLX environment
+  variable (`docs/src/usage/environment_variables.rst`, present at v0.32.4).
+  The docs warn that forcing an architecture that does not match the GPU "can
+  select incompatible kernels and produce incorrect results". Here the forced
+  M5 output equalled the real M3 Ultra output bit for bit, so it was correct
+  for this model, but that is no guarantee for other models or versions. A
+  future mlx version may also change which kernels the string selects.
