@@ -381,6 +381,16 @@ It names the first tap where ours-to-cached relative L2 exceeds
 cached-to-forward. A tap's input is the previous layer's output, so
 `layers.0` is the scaled embedding and `model.norm` the last layer's output.
 
+To split one layer, add `MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER=N` to the serve
+and `--sublayer N` to `layer_trace.py`. Every other RMSNorm inside layer N is
+tapped as well. The tool compares those that ran on both sides; for Gemma 4
+these are `pre_feedforward_layernorm` (the post-attention state),
+`post_feedforward_layernorm_1` (the dense MLP output) and
+`post_feedforward_layernorm_2` (the weighted expert sum). When the layer has a
+MoE router, the tool also feeds each path's post-attention state through
+mlx-lm's router. It prints the chosen experts, their weights and the score
+margin to the next expert.
+
 ## Tests
 
 ```bash

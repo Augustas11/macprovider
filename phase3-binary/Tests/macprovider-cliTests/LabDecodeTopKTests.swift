@@ -110,6 +110,20 @@ final class LabDecodeTopKTests: XCTestCase {
         }
         XCTAssertTrue(try LabDecodeTopK.installTaps(in: root) === sink, "a second request reuses the taps")
         XCTAssertNil(sink.snapshot(), "no forward ran yet")
+        XCTAssertEqual(sink.extraNames, [])
+
+        let withSublayer = try LabDecodeTopK.installTaps(in: ToyRoot(layers: 2), sublayer: 1)
+        XCTAssertEqual(withSublayer.extraNames,
+            ["model.layers.1.post_attention_layernorm", "model.layers.1.pre_feedforward_layernorm"])
+        XCTAssertThrowsError(try LabDecodeTopK.installTaps(in: ToyRoot(layers: 2), sublayer: 2))
+        XCTAssertThrowsError(try LabDecodeTopK.configuration(environment: [
+            LabDecodeTopK.pathKey: "/private/tmp/x.jsonl", LabDecodeTopK.indicesKey: "0",
+            LabDecodeTopK.sublayerKey: "1",
+        ]), "a sub-layer needs the layer taps")
+        XCTAssertEqual(try LabDecodeTopK.configuration(environment: [
+            LabDecodeTopK.pathKey: "/private/tmp/x.jsonl", LabDecodeTopK.indicesKey: "0",
+            LabDecodeTopK.layersKey: "1", LabDecodeTopK.sublayerKey: "18",
+        ])?.sublayer, 18)
 
         let noFinal = ToyInner(layers: 1)
         XCTAssertThrowsError(try LabDecodeTopK.tapPaths(in: noFinal))
@@ -130,7 +144,7 @@ final class LabDecodeTopKTests: XCTestCase {
         let root = ToyRoot(layers: 2)
         let x = MLXArray((0 ..< 12).map { Float($0) * 0.25 - 1 }).asType(.bfloat16).reshaped([1, 3, 4])
         let before = root(x)
-        let sink = try LabDecodeTopK.installTaps(in: root)
+        let sink = try LabDecodeTopK.installTaps(in: root, sublayer: 1)
         let after = root(x)
         XCTAssertEqual(before.asType(.float32).asArray(Float.self), after.asType(.float32).asArray(Float.self))
 
@@ -151,6 +165,12 @@ final class LabDecodeTopKTests: XCTestCase {
             XCTAssertEqual(entry["values"] as? [Double], expected.asType(.float32).asArray(Float.self).map(Double.init))
             XCTAssertEqual(entry["dtype"] as? String, String(describing: expected.dtype))
         }
+        // Only the sub-layer norm that ran is reported: its input is layer 1's
+        // post-attention state.
+        let sublayer = try XCTUnwrap(record["sublayer"] as? [[String: Any]])
+        XCTAssertEqual(sublayer.map { $0["tap"] as? String }, ["model.layers.1.pre_feedforward_layernorm"])
+        let attended = root.model.layers[1].attention(root.model.layers[0](x))[0, -1]
+        XCTAssertEqual(sublayer[0]["values"] as? [Double], attended.asType(.float32).asArray(Float.self).map { Double($0) })
     }
 }
 
@@ -158,14 +178,24 @@ final class LabDecodeTopKTests: XCTestCase {
 /// and `model.norm`.
 private final class ToyLayer: Module {
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforward: RMSNorm
+    /// Never called, like a norm a model fuses into a kernel.
+    @ModuleInfo(key: "post_attention_layernorm") var postAttention: RMSNorm
     let scale: Float
 
     init(scale: Float) {
         self.scale = scale
         self._inputLayernorm.wrappedValue = RMSNorm(dimensions: 4, eps: 1e-6)
+        self._preFeedforward.wrappedValue = RMSNorm(dimensions: 4, eps: 1e-6)
+        self._postAttention.wrappedValue = RMSNorm(dimensions: 4, eps: 1e-6)
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray { x + inputLayernorm(x) * scale }
+    func attention(_ x: MLXArray) -> MLXArray { x + inputLayernorm(x) * scale }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let h = attention(x)
+        return h + preFeedforward(h) * 0.5
+    }
 }
 
 private final class ToyInner: Module {

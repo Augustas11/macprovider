@@ -19,6 +19,11 @@ import MLXNN
 ///   `layer_trace.py` can find the first layer that leaves mlx-lm's spread.
 ///   Installs `Tap` norms into the loaded model; they compute exactly what the
 ///   norms they replace compute.
+/// - `MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER=N` (with LAYERS=1): also tap every
+///   other RMSNorm inside layer N (`self_attn.q_norm`, `pre_feedforward_layernorm`,
+///   `post_feedforward_layernorm_1`, ...). The record's `sublayer` list holds
+///   the last-position input of each one that ran in that forward, so the
+///   attention output and each feed-forward branch can be compared on their own.
 ///
 /// The processor passes logits through unchanged. A recorded index evaluates
 /// its logits once; other steps add no evaluation.
@@ -27,6 +32,7 @@ enum LabDecodeTopK {
     static let indicesKey = "MACPROVIDER_LAB_DECODE_TOPK_INDICES"
     static let kKey = "MACPROVIDER_LAB_DECODE_TOPK_K"
     static let layersKey = "MACPROVIDER_LAB_DECODE_TOPK_LAYERS"
+    static let sublayerKey = "MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER"
     static let schema = "macprovider.lab-decode-topk.v1"
 
     struct Configuration: Sendable, Equatable {
@@ -34,6 +40,7 @@ enum LabDecodeTopK {
         let indices: Set<Int>
         let k: Int
         var layers = false
+        var sublayer: Int? = nil
     }
 
     struct ConfigurationError: Error, CustomStringConvertible {
@@ -65,7 +72,14 @@ enum LabDecodeTopK {
             }
             layers = rawLayers == "1"
         }
-        return Configuration(path: path, indices: Set(indices), k: k, layers: layers)
+        var sublayer: Int?
+        if let rawSublayer = environment[sublayerKey], !rawSublayer.isEmpty {
+            guard layers, let parsed = Int(rawSublayer), (0...4096).contains(parsed) else {
+                throw ConfigurationError(description: "\(sublayerKey) must be a layer index and needs \(layersKey)=1")
+            }
+            sublayer = parsed
+        }
+        return Configuration(path: path, indices: Set(indices), k: k, layers: layers, sublayer: sublayer)
     }
 
     /// `components` with the recorder appended when the hook is configured;
@@ -83,7 +97,7 @@ enum LabDecodeTopK {
             guard let root = model as? Module else {
                 throw ConfigurationError(description: "\(layersKey)=1 needs the loaded model")
             }
-            taps = try installTaps(in: root)
+            taps = try installTaps(in: root, sublayer: configuration.sublayer)
         } else {
             taps = nil
         }
@@ -95,23 +109,37 @@ enum LabDecodeTopK {
     // MARK: - Layer taps
 
     /// The latest forward's last-position input to each tapped norm.
+    /// `names` are the per-layer taps, all required; `extraNames` are the
+    /// sub-layer taps, reported when they ran.
     final class TapSink: @unchecked Sendable {
         let names: [String]
+        let extraNames: [String]
         private let lock = NSLock()
         private var latest: [Int: MLXArray] = [:]
 
-        init(names: [String]) { self.names = names }
+        init(names: [String], extraNames: [String] = []) {
+            self.names = names
+            self.extraNames = extraNames
+        }
 
+        /// Keeps the last position of `x` (`[B, L, ...]`), flattened.
         func store(_ x: MLXArray, ordinal: Int) {
-            let last = x.reshaped([-1, x.dim(-1)])[-1]
+            let last = x.ndim >= 3 ? x[x.dim(0) - 1, x.dim(1) - 1].reshaped([-1]) : x.reshaped([-1, x.dim(-1)])[-1]
             lock.withLock { latest[ordinal] = last }
         }
 
-        /// Ordinal-ordered vectors, nil unless every tap fired.
+        /// Ordinal-ordered vectors, nil unless every per-layer tap fired.
         func snapshot() -> [MLXArray]? {
             lock.withLock {
                 let out = names.indices.compactMap { latest[$0] }
                 return out.count == names.count ? out : nil
+            }
+        }
+
+        /// The sub-layer taps that fired, in install order.
+        func extras() -> [(String, MLXArray)] {
+            lock.withLock {
+                extraNames.enumerated().compactMap { i, name in latest[names.count + i].map { (name, $0) } }
             }
         }
     }
@@ -159,15 +187,32 @@ enum LabDecodeTopK {
         return layerPaths.map(\.1) + finals
     }
 
+    /// Every other RMSNorm under `layers.<sublayer>.`, in path order.
+    static func sublayerPaths(in root: Module, layerInput: String) -> [String] {
+        let prefix = String(layerInput.dropLast("input_layernorm".count))
+        return root.namedModules()
+            .filter { $0.1 is RMSNorm && $0.0.hasPrefix(prefix) && $0.0 != layerInput }
+            .map(\.0).sorted()
+    }
+
     /// Replaces each tapped norm with a `Tap` once per loaded model and
-    /// returns the shared sink; later requests reuse the installed taps.
-    static func installTaps(in root: Module) throws -> TapSink {
-        let paths = try tapPaths(in: root)
+    /// returns the shared sink; later requests reuse the installed taps (and
+    /// their sub-layer choice).
+    static func installTaps(in root: Module, sublayer: Int? = nil) throws -> TapSink {
+        let main = try tapPaths(in: root)
         let modules = Dictionary(root.namedModules(), uniquingKeysWith: { first, _ in first })
-        if let first = modules[paths[0]] as? Tap {
+        if let first = modules[main[0]] as? Tap {
             return first.sink
         }
-        let sink = TapSink(names: paths)
+        var extra: [String] = []
+        if let sublayer {
+            guard sublayer < main.count - 1 else {
+                throw ConfigurationError(description: "\(sublayerKey)=\(sublayer) is past the last layer")
+            }
+            extra = sublayerPaths(in: root, layerInput: main[sublayer])
+        }
+        let sink = TapSink(names: main, extraNames: extra)
+        let paths = main + extra
         for (ordinal, path) in paths.enumerated() {
             guard let norm = modules[path] as? RMSNorm else {
                 throw ConfigurationError(description: "\(path) is not an RMSNorm")
@@ -253,6 +298,17 @@ enum LabDecodeTopK {
                     }
                 } else {
                     out["layers_error"] = "not every tap fired before this step"
+                }
+                let extras = taps.extras()
+                if !taps.extraNames.isEmpty {
+                    let values = extras.map { $0.1.asType(.float32) }
+                    eval(values)
+                    out["sublayer"] = zip(extras, values).map { pair, value in
+                        [
+                            "tap": pair.0, "dtype": String(describing: pair.1.dtype),
+                            "values": value.asArray(Float.self).map { Double($0) },
+                        ] as [String: Any]
+                    }
                 }
             }
             return out

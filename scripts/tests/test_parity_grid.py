@@ -1984,6 +1984,7 @@ class LayerTraceTests(unittest.TestCase):
 
             def __call__(self, x):
                 return (self.tag, x)
+        Nn.RMSNorm = Norm
 
         class Vec:
             def __init__(self, rows):
@@ -1995,6 +1996,8 @@ class LayerTraceTests(unittest.TestCase):
         def layer(i):
             obj = Module()
             obj.input_layernorm = Norm(i)
+            obj.pre_feedforward_layernorm = Norm(f"pre{i}")
+            obj.mlp = Module()
             return obj
 
         inner = Module()
@@ -2010,6 +2013,70 @@ class LayerTraceTests(unittest.TestCase):
         out = root.m.model.layers[1].input_layernorm(Vec([[1, 2], [3, 4]]))
         self.assertEqual(out[0], 1)
         self.assertEqual(sink.latest["m.model.layers.1.input_layernorm"], [3, 4])
+        self.assertEqual(sink.extra_names, [])
+
+        root2 = Module()
+        root2.m = Module()
+        root2.m.model = Module()
+        root2.m.model.layers = [layer(0), layer(1), layer(2)]
+        root2.m.model.norm = Norm("final")
+        sink2 = layer_trace.install_taps(root2, Nn, None, sublayer=1)
+        self.assertEqual(sink2.extra_names, ["m.model.layers.1.pre_feedforward_layernorm"])
+        self.assertEqual(sink2.extras(), {})
+        root2.m.model.layers[1].pre_feedforward_layernorm(Vec([[5, 6]]))
+        self.assertEqual(sink2.extras(), {"m.model.layers.1.pre_feedforward_layernorm": [5, 6]})
+        with self.assertRaises(ValueError):
+            layer_trace.install_taps(root2, Nn, None, sublayer=3)
+
+    def test_sublayer_paths_and_compare(self):
+        pairs = [("a.layers.1.input_layernorm", "n"), ("a.layers.1.self_attn.q_norm", "n"),
+                 ("a.layers.1.pre_feedforward_layernorm", "n"), ("a.layers.1.mlp", "m"),
+                 ("a.layers.10.pre_feedforward_layernorm", "n"), ("a.layers.2.input_layernorm", "n")]
+        self.assertEqual(layer_trace.sublayer_paths(pairs, "a.layers.1.input_layernorm", lambda m: m == "n"),
+                         ["a.layers.1.pre_feedforward_layernorm", "a.layers.1.self_attn.q_norm"])
+        rows = layer_trace.compare_sublayer({"x": [1.0, 2.0], "only_ours": [0.0]},
+                                            {"x": [1.0, 2.5], "only_ours": [0.0]}, {"x": [1.0, 2.5]})
+        self.assertEqual([r["tap"] for r in rows], ["x"])
+        self.assertEqual(rows[0]["ours_vs_cached"]["n_diff"], 1)
+        self.assertEqual(rows[0]["cached_vs_forward"]["n_diff"], 0)
+
+    def test_last_position_keeps_every_head(self):
+        try:
+            import mlx.core as mx
+        except ImportError:
+            self.skipTest("no mlx on this host")
+        q = mx.arange(2 * 3 * 2 * 4).reshape(2, 3, 2, 4)
+        self.assertEqual(layer_trace.last_position(q).tolist(), list(range(40, 48)))
+        h = mx.arange(2 * 3 * 4).reshape(2, 3, 4)
+        self.assertEqual(layer_trace.last_position(h).tolist(), [20, 21, 22, 23])
+
+    def test_router_picks_ranks_ids_and_margin(self):
+        try:
+            import mlx.core as mx
+            import mlx.nn as nn
+        except ImportError:
+            self.skipTest("no mlx on this host")
+
+        class Router:
+            eps = 1e-6
+            _root_size = 0.5
+
+            def __init__(self):
+                self.proj = nn.Linear(4, 5, bias=False)
+                self.proj.weight = mx.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1, 1, 0, 0]],
+                                            dtype=mx.bfloat16)
+                self.scale = mx.ones((4,), dtype=mx.bfloat16)
+
+            def __call__(self, x):
+                s = self.proj(mx.fast.rms_norm(x, self.scale * self._root_size, self.eps))
+                ids = mx.argpartition(s, kth=-2, axis=-1)[..., -2:]
+                return ids, mx.softmax(mx.take_along_axis(s, ids, axis=-1).astype(mx.float32), axis=-1)
+
+        r = layer_trace.router_picks(mx, Router(), [4.0, 3.0, 1.0, 0.0], 2)
+        self.assertEqual(r["ids"], [4, 0])
+        self.assertEqual(r["next_id"], 1)
+        self.assertGreater(r["margin"], 0)
+        self.assertAlmostEqual(sum(r["weights"]), 1.0, places=5)
 
 
 if __name__ == "__main__":

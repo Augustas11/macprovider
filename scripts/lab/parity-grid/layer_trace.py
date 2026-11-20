@@ -21,7 +21,16 @@ For each tap it prints the distance ours-to-cached and cached-to-forward
 (max |diff|, relative L2, elements that differ) and names the first tap where
 ours-to-cached exceeds cached-to-forward on relative L2.
 
-usage: layer_trace.py --model-path DIR --ours-topk FILE --ctx 4000 --index 15 [--json OUT]
+With --sublayer N (serve run with MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER=N), it
+also compares the other norms inside layer N that ran on both sides: for
+Gemma 4, `pre_feedforward_layernorm` (the post-attention residual state),
+`post_feedforward_layernorm_1` (the dense MLP output) and
+`post_feedforward_layernorm_2` (the weighted expert sum). When layer N has a
+MoE router, it feeds each path's post-attention state through mlx-lm's router
+and prints the top-k experts, their weights and the score margin between the
+k-th and the next expert.
+
+usage: layer_trace.py --model-path DIR --ours-topk FILE --ctx 4000 --index 15 [--sublayer 18] [--json OUT]
 Run under an interpreter that has mlx_lm.
 """
 import argparse
@@ -70,9 +79,14 @@ def compare(names, ours, cached, forward):
 
 
 class TapSink:
-    def __init__(self, names):
+    def __init__(self, names, extra_names=()):
         self.names = list(names)
+        self.extra_names = list(extra_names)
         self.latest = {}
+
+    def extras(self):
+        """{name: vector} for the sub-layer taps that fired."""
+        return {n: self.latest[n] for n in self.extra_names if n in self.latest}
 
     def snapshot(self):
         missing = [n for n in self.names if n not in self.latest]
@@ -97,10 +111,29 @@ def tap_paths(named_modules):
     return [p for _, p in layers] + finals
 
 
-def install_taps(model, nn, mx):
+def sublayer_paths(named_modules, layer_input, is_norm):
+    """Every other norm under layer_input's layer, sorted by path."""
+    prefix = layer_input[: -len("input_layernorm")]
+    return sorted(p for p, m in named_modules if is_norm(m) and p.startswith(prefix) and p != layer_input)
+
+
+def last_position(x):
+    """The last position of x ([B, L, ...]) flattened; [.., H] keeps the last row."""
+    if getattr(x, "ndim", 2) >= 3:
+        return x[-1, -1].flatten()
+    return x.reshape(-1, x.shape[-1])[-1]
+
+
+def install_taps(model, nn, mx, sublayer=None):
     """Wrap each tap norm so it records its last-position input; returns the sink."""
-    names = tap_paths(model.named_modules())
-    sink = TapSink(names)
+    pairs = model.named_modules()
+    names = tap_paths(pairs)
+    extra = []
+    if sublayer is not None:
+        if not 0 <= sublayer < len(names) - 1:
+            raise ValueError(f"sub-layer {sublayer} is outside 0..{len(names) - 2}")
+        extra = sublayer_paths(pairs, names[sublayer], lambda m: isinstance(m, nn.RMSNorm))
+    sink = TapSink(names, extra)
 
     class Tap(nn.Module):
         def __init__(self, inner, name):
@@ -109,17 +142,41 @@ def install_taps(model, nn, mx):
             self._tap_name = name
 
         def __call__(self, x):
-            last = x.reshape(-1, x.shape[-1])[-1]
-            sink.latest[self._tap_name] = last
+            sink.latest[self._tap_name] = last_position(x)
             return self.inner(x)
 
-    for name in names:
+    for name in names + extra:
         parts = name.split(".")
         parent = model
         for p in parts[:-1]:
             parent = parent[int(p)] if p.isdigit() else getattr(parent, p)
         setattr(parent, parts[-1], Tap(getattr(parent, parts[-1]), name))
     return sink
+
+
+def compare_sublayer(ours, cached, forward):
+    """Rows for the sub-layer taps present on all three paths, in path order."""
+    rows = []
+    for name in sorted(set(ours) & set(cached) & set(forward)):
+        rows.append({"tap": name, "ours_vs_cached": distance(ours[name], cached[name]),
+                     "cached_vs_forward": distance(cached[name], forward[name]),
+                     "ours_vs_forward": distance(ours[name], forward[name])})
+    return rows
+
+
+def router_picks(mx, router, h, top_k):
+    """mlx-lm's router on one bf16 hidden vector: top-k ids (by score), weights, margin."""
+    x = mx.array(h, dtype=mx.bfloat16)[None, None]
+    scores = router.proj(mx.fast.rms_norm(x, router.scale * router._root_size, router.eps))[0, 0]
+    ids, weights = router(x)
+    order = mx.argsort(-scores.astype(mx.float32))
+    mx.eval(scores, ids, weights, order)
+    ranked = order.tolist()
+    s = scores.astype(mx.float32).tolist()
+    picked = sorted(zip(ids[0, 0].tolist(), weights[0, 0].astype(mx.float32).tolist()), key=lambda t: -s[t[0]])
+    return {"ids": [i for i, _ in picked], "weights": [w for _, w in picked],
+            "kth_score": s[ranked[top_k - 1]], "next_id": ranked[top_k], "next_score": s[ranked[top_k]],
+            "margin": s[ranked[top_k - 1]] - s[ranked[top_k]]}
 
 
 def to_lists(mx, arrays):
@@ -134,6 +191,7 @@ def main(argv=None):
     ap.add_argument("--ours-topk", required=True, help="JSONL from a serve with MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1")
     ap.add_argument("--ctx", type=int, required=True)
     ap.add_argument("--index", type=int, required=True)
+    ap.add_argument("--sublayer", type=int, help="also compare the norms inside this layer (serve needs SUBLAYER=N)")
     ap.add_argument("--json", help="write the per-tap table here")
     args = ap.parse_args(argv)
 
@@ -151,7 +209,13 @@ def main(argv=None):
         raise SystemExit(f"record has no layers ({rec.get('layers_error', 'serve ran without MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1')})")
     generated = rec["generated_token_ids"]
 
-    sink = install_taps(model, nn, mx)
+    sink = install_taps(model, nn, mx, args.sublayer)
+    ours_extra = {e["tap"]: e["values"] for e in rec.get("sublayer", [])}
+    if args.sublayer is not None and not ours_extra:
+        raise SystemExit("record has no sublayer taps (serve ran without MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER)")
+    unknown = sorted(set(ours_extra) - set(sink.extra_names))
+    if unknown:
+        raise SystemExit(f"sub-layer taps differ: ours has {unknown}")
     our_names = [e["tap"] for e in rec["layers"]]
     if our_names != sink.names:
         raise SystemExit(f"tap names differ: ours {our_names[:2]}... vs mlx-lm {sink.names[:2]}...")
@@ -161,11 +225,13 @@ def main(argv=None):
     # right after the forward that produced step N's logits.
     forced = decode_topk.ForcedDecode(mx, generated, args.index)
     cached_arrays = []
+    cached_extra = {}
     base = forced.processor
 
     def processor(tokens, logits):
         if forced.process_calls == args.index:
             cached_arrays.extend(sink.snapshot())
+            cached_extra.update(sink.extras())
         return base(tokens, logits)
 
     sink.latest.clear()
@@ -176,10 +242,13 @@ def main(argv=None):
     if not cached_arrays:
         raise SystemExit(f"generate_step never reached decode index {args.index}")
     cached = to_lists(mx, cached_arrays)
+    cached_extra = dict(zip(cached_extra, to_lists(mx, list(cached_extra.values()))))
 
     sink.latest.clear()
     mx.eval(model(mx.array(prompt_ids + generated)[None]))
     forward = to_lists(mx, sink.snapshot())
+    forward_extra = sink.extras()
+    forward_extra = dict(zip(forward_extra, to_lists(mx, list(forward_extra.values()))))
 
     rows, first = compare(sink.names, ours, cached, forward)
     print(f"ctx={args.ctx} decode index {args.index}: {len(prompt_ids)} prompt ids + {len(generated)} generated, "
@@ -194,10 +263,38 @@ def main(argv=None):
         print("  no tap is beyond mlx-lm's own cached-vs-forward spread")
     else:
         print(f"  first beyond spread: {rows[first]['what']} ({rows[first]['tap']})")
+    sub_rows, routing = [], None
+    if args.sublayer is not None:
+        sub_rows = compare_sublayer(ours_extra, cached_extra, forward_extra)
+        layer_in = sink.names[args.sublayer]
+        print(f"\n  inside layer {args.sublayer} (input: {layer_in}); ours / cached / forward ran: "
+              f"{len(ours_extra)} / {len(cached_extra)} / {len(forward_extra)} of {len(sink.extra_names)} norms")
+        rows_in = [("layer input", rows[args.sublayer]), ("layer output", rows[args.sublayer + 1])]
+        for label, r in rows_in[:1] + [(x["tap"][len(layer_in) - len("input_layernorm"):], x) for x in sub_rows] + rows_in[1:]:
+            oc, cf = r["ours_vs_cached"], r["cached_vs_forward"]
+            print(f"  {label:<36} {oc['rel_l2']:11.3e} {oc['max_abs']:9.4f} {oc['n_diff']:6d}"
+                  f"   {cf['rel_l2']:11.3e} {cf['max_abs']:9.4f} {cf['n_diff']:6d}"
+                  f"{'  <' if oc['rel_l2'] > cf['rel_l2'] else ''}")
+        parent = model
+        for p in layer_in.split(".")[:-1]:
+            parent = parent[int(p)] if p.isdigit() else getattr(parent, p)
+        router = getattr(parent, "router", None)
+        h_name = layer_in[: -len("input_layernorm")] + "pre_feedforward_layernorm"
+        if router is not None and all(h_name in d for d in (ours_extra, cached_extra, forward_extra)):
+            top_k = router.config.top_k_experts
+            routing = {name: router_picks(mx, router, d[h_name], top_k)
+                       for name, d in (("ours", ours_extra), ("cached", cached_extra), ("forward", forward_extra))}
+            print(f"  router (mlx-lm's) on each path's post-attention state, top-{top_k}:")
+            for name, r in routing.items():
+                print(f"    {name:<8} ids {r['ids']}  weights {[round(w, 4) for w in r['weights']]}"
+                      f"  k-th vs next ({r['next_id']}) margin {r['margin']:+.4f}")
+            same = len({tuple(sorted(r["ids"])) for r in routing.values()}) == 1
+            print(f"  expert set {'identical' if same else 'DIFFERS'} across paths")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"ctx_target": args.ctx, "decode_index": args.index, "prompt_tokens": len(prompt_ids),
-                       "first_beyond_spread": None if first is None else rows[first]["tap"], "rows": rows}, f, indent=2)
+                       "first_beyond_spread": None if first is None else rows[first]["tap"], "rows": rows,
+                       "sublayer": args.sublayer, "sublayer_rows": sub_rows, "routing": routing}, f, indent=2)
             f.write("\n")
 
 
