@@ -135,9 +135,15 @@ if [ "$SKIP_FORK_TESTS" = 0 ]; then
   log "FORK_TEST build"
   (cd "$FORK" && nice -n 10 swift build --build-tests --build-system native) > "$RES/fork-build.log" 2>&1 \
     || die "fork test build failed: $(grep -m3 'error:' "$RES/fork-build.log" | tr '\n' ' ')" 12
+  # MLX loads mlx.metallib from beside the test binary; without it no test runs (run 20261120T155553Z).
+  bundle=$(ls -d "$FORK"/.build/debug/*PackageTests.xctest "$FORK"/.build/debug/MLXLMTests.xctest 2>/dev/null | head -n 1)
+  [ -n "$bundle" ] || die "no test bundle under $FORK/.build/debug for the metallib" 12
+  cp "$METALLIB" "$bundle/Contents/MacOS/mlx.metallib" || die "metallib copy into $bundle failed" 12
   (cd "$FORK" && swift test --build-system native --skip-build --filter 'GLM5NextTests/testWidePrefill') \
     > "$RES/fork-tests.log" 2>&1
   rc=$?
+  grep -q "Failed to load the default metallib" "$RES/fork-tests.log" \
+    && die "fork tests could not load the metallib (no test ran; not an exactness result)" 12
   grep -E "Test Case .*(passed|failed)|Executed .* tests" "$RES/fork-tests.log" | sed 's/^/FORK_TEST /'
   grep -q "Executed 2 tests, with 0 failures" "$RES/fork-tests.log" && [ "$rc" = 0 ] \
     || die "fork wide-prefill tests did not pass (rc=$rc, fork-tests.log): the sliced forward is not proven exact" 12
