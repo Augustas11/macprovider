@@ -31,7 +31,7 @@ activations are fp16 (quantized) or bf16, never fp32.
 
 ## Setup
 
-| | M3 Ultra (lab Mac) | M5 (MacBook) |
+| | M3 Ultra (Mac Studio) | M5 (MacBook) |
 |---|---|---|
 | macOS | 27.0.1 (26A434) | 27.0.1 (26A434) |
 | mlx / mlx-lm / numpy | 0.32.4 / 0.32.2 / 2.5.5 | same |
@@ -119,11 +119,11 @@ pairs are skipped.
 Top-1 covers 3 × 512 = 1536 positions; the teacher-logprob delta covers
 3 × 511 = 1533.
 
-| variant | M5 arm | top-1 agree | max abs Δ teacher logprob | top-2 gap at disagreements |
+| variant | M5 arm | top-1 agree | max abs Δ teacher logprob | M3 Ultra top-2 logprob gap at each disagreement |
 |---|---|---|---|---|
 | 4bit | default | 1536/1536 | 0.0387 | none |
 | 8bit | default | 1534/1536 | 0.0341 | 0, 0.0078 |
-| bf16 | default | 1524/1536 | 0.225 | ≤ 0.125 (12 positions) |
+| bf16 | default | 1524/1536 | 0.225 | 0, 0.0625, 0.0625, 0, 0.0625, 0.0625, 0, 0, 0.125, 0.125, 0, 0 |
 | all | arch-m3u | 1536/1536 | 0 | none |
 
 The quantization swaps, each on one Mac:
@@ -146,10 +146,10 @@ What this means for the SPEC-036-R022 statement, "a logit or less":
 ## What it decides
 
 1. **Per-stage audit (SPEC-051).**
-   - *Exact audit:* feasible on this pair, in one direction. An M5 verifier
-     that sets `MLX_METAL_GPU_ARCH` to the M3 Ultra prover's architecture
-     string, on the same macOS build and mlx version, reproduced the prover's
-     activations exactly. The reverse (an M3 Ultra forcing `applegpu_g17g`)
+   - *Exact audit:* feasible on this pair, in one direction. An M5 that sets
+     `MLX_METAL_GPU_ARCH` to the M3 Ultra's architecture string, on the same
+     macOS build and mlx version, reproduced the M3 Ultra's activations
+     exactly. The reverse (an M3 Ultra forcing `applegpu_g17g`)
      was not run.
      The audit is then an exact comparison, which also catches deviations that
      a tolerance audit would miss.
@@ -161,7 +161,7 @@ What this means for the SPEC-036-R022 statement, "a logit or less":
    - *Before building on the exact path,* show that the exact match holds:
      - in the other direction (older chip forcing the newer string);
      - on another chip pair (for example M1/M2 vs M5, or M4 vs M3 Ultra);
-     - for a larger model and the model families we serve;
+     - for larger models and other model families (MoE, hybrid attention);
      - under the real serving path (KV cache, chunked prefill, batched CB rows)
        rather than one uncached forward pass.
 
@@ -175,7 +175,6 @@ What this means for the SPEC-036-R022 statement, "a logit or less":
      reporter's model or a greedy fork.
    - The architecture override reproduces M3 Ultra output on an M5 exactly.
      That makes it a usable debugging aid for cross-chip divergence reports.
-   - Posting needs operator approval of the exact text.
 
 ## Limits
 
