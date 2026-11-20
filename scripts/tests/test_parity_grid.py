@@ -26,6 +26,7 @@ prompts = module("prompts")
 client = module("provider_client")
 margin = module("margin")
 cb_margin = module("cb_margin")
+decode_topk = module("decode_topk")
 reference_mlxlm = module("reference_mlxlm")
 JOB_QWEN4_CB = Path(__file__).resolve().parents[1] / "lab" / "ablit-perf" / "job-qwen4-cb.sh"
 
@@ -1860,6 +1861,59 @@ class NativeMtpRecordTests(unittest.TestCase):
         self.assertEqual(d["mean_accepted_length"], 1.0)
         self.assertFalse(client.native_mtp_delta(before, dict(after, reset_generation=2))["acceptance_valid"])
         self.assertFalse(client.native_mtp_delta(None, after)["acceptance_valid"])
+
+
+class _FakeMx:
+    """Enough of mlx.core for ForcedDecode: arrays are plain lists."""
+    uint32 = "uint32"
+
+    @staticmethod
+    def array(values, dtype=None):
+        return list(values)
+
+    @staticmethod
+    def argmax(values, axis=-1):
+        return [max(range(len(values)), key=values.__getitem__)]
+
+
+class DecodeTopKTests(unittest.TestCase):
+    def _rec(self, index, prompt, generated, top_ids=(5, 6), top_logits=(23.875, 23.375)):
+        return {"schema": decode_topk.SCHEMA, "decode_index": index, "prompt_token_ids": list(prompt),
+                "generated_token_ids": list(generated), "top_ids": list(top_ids),
+                "top_logits": list(top_logits), "dtype": "bfloat16"}
+
+    def test_select_record_matches_prompt_ids_and_index(self):
+        warmup = self._rec(2, [9, 9], [1, 2])
+        cell = self._rec(2, [1, 2, 3], [4, 5])
+        other_index = self._rec(1, [1, 2, 3], [4])
+        self.assertIs(decode_topk.select_record([warmup, cell, other_index], [1, 2, 3], 2), cell)
+        with self.assertRaisesRegex(ValueError, "no record at decode index 2"):
+            decode_topk.select_record([warmup], [1, 2, 3], 2)
+        with self.assertRaisesRegex(ValueError, "generated ids"):
+            decode_topk.select_record([self._rec(2, [1], [4])], [1], 2)
+
+    def test_load_records_skips_other_schemas(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "topk.jsonl")
+            with open(path, "w") as f:
+                f.write(json.dumps({"schema": "macprovider.lab-output-tokens.v1"}) + "\n\n")
+                f.write(json.dumps(self._rec(0, [1], [])) + "\n")
+            self.assertEqual([r["decode_index"] for r in decode_topk.load_records(path)], [0])
+
+    def test_forced_decode_forces_then_captures_the_index(self):
+        forced = decode_topk.ForcedDecode(_FakeMx, [7, 8], capture=2)
+        seen = []
+        for step in range(3):
+            logits = [step, 10 + step]
+            self.assertIs(forced.processor(None, logits), logits)
+            seen.append(forced.sampler(logits))
+        self.assertEqual(seen, [[7], [8], [1]])
+        self.assertEqual(forced.captured, [2, 12])
+
+    def test_gap_steps_in_bf16(self):
+        # 23.875 vs 23.375 in bf16 (spacing 0.125 at 16..32): 4 steps.
+        self.assertEqual(decode_topk.gap_steps(23.875, 23.375, "bfloat16"), 4.0)
+        self.assertEqual(decode_topk.gap_steps(21.75, 21.875, "bfloat16"), -1.0)
 
 
 if __name__ == "__main__":

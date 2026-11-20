@@ -11375,6 +11375,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                     cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            #if MACPROVIDER_LAB_HARNESS
+                            generation.components = try LabDecodeTopK.appending(
+                                to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init))
+                            #endif
                             // SPEC-001-R018: beside an active sibling a keyless text prompt on a
                             // model with no fixed prefill plan takes the arbiter's short chunk;
                             // alone or under passthrough the hint is the full step (unchanged).
@@ -12522,6 +12526,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
                                 cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                        #if MACPROVIDER_LAB_HARNESS
+                        generation.components = try LabDecodeTopK.appending(
+                            to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init))
+                        #endif
                         // SPEC-001-R018: beside an active sibling a keyless text prompt on a
                         // model with no fixed prefill plan takes the arbiter's short chunk;
                         // alone or under passthrough the hint is the full step (unchanged).
