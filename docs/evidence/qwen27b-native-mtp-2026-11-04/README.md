@@ -50,9 +50,16 @@ the commitments:
   - Qwen3.8 decode ratios: 1.444, 1.375, 1.383, 1.282, 1.131, 1.056.
   - The cells are s1-p1536-o128, s1-p1536-o512, s1-p4096-o128,
     s1-p4096-o512, s2-p1536-o512 and s4-p1536-o512.
-  - At the tuple's 4 slots (s4-p1536-o512), the throughput median is
-    +6.36% for Qwen3.6 and +5.64% for Qwen3.8. The ordinary aggregate is
-    40.01 and 39.01 tok/s.
+  - At the tuple's 4 slots (s4-p1536-o512), the gated decode-throughput
+    median is +6.36% for Qwen3.6 and +5.64% for Qwen3.8. These are not
+    end-to-end gains. No native round ran in the s2 and s4 gated cells
+    (`mtp_proposed_tokens` 0; the one native row was held at depth zero), and
+    the decode ratio follows which arm's first token arrived first (#2442).
+    End to end, the same cells were -0.62% (Qwen3.6) and -0.20% (Qwen3.8) at
+    s4, and +0.47% and +0.79% at s2. From SPEC-048 0.1.116 the gated cells are
+    judged on that end-to-end rate; see
+    `docs/evidence/r015-gated-end-to-end-reanalysis-2026-11-20/`. The ordinary
+    aggregate is 40.01 and 39.01 tok/s.
 - **R005** (harness `b609a589d`, same decode-path digest). Both models
   passed 200/200 cases with no failed checks.
   - Qwen3.6 accepted 7953 and rejected 4353.
