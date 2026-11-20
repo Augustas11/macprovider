@@ -4,7 +4,7 @@
 Issue #2443. margin.py reads mlx-lm's logits from one uncached forward over the
 reference text re-tokenized. This tool compares the two decode paths instead:
 
-- ours: the record a MACPROVIDER_LAB_HARNESS serve wrote with
+- ours: the record a lab-harness serve wrote with
   MACPROVIDER_LAB_DECODE_TOPK=FILE and MACPROVIDER_LAB_DECODE_TOPK_INDICES=N
   (LabDecodeTopK.swift). It carries the exact prompt ids and the generated ids
   before index N on our serial route, and the top-k logits our sampler saw.

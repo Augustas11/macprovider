@@ -50,6 +50,8 @@ final class LabDecodeTopKTests: XCTestCase {
     /// didSample) and checks it records exactly the chosen indices, with the
     /// ids before each, passes logits through unchanged and keeps bf16 values.
     func testRecordsChosenIndicesWithPrefixIdsAndUnchangedLogits() throws {
+        // Evaluating MLX arrays loads the metallib; CI runners have none.
+        try XCTSkipUnless(MLXTestDevice.metallibAvailable, "no mlx.metallib on this host")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
