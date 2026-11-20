@@ -156,7 +156,12 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual(v["verdict"], "CLOSE_CALL")  # 0.25 < 2 x 0.2
         self.assertAlmostEqual(v["ref_gap"], 0.25)
         self.assertAlmostEqual(v["our_margin"], 0.25)  # ours: 20 vs 19.75 + 0.5
-        self.assertEqual(div.step_view(self.o, cmp_, 2)["verdict"], "REAL_DIVERGENCE")
+        # Step 2: a 2.0 gap with matching tokens is a clear margin, not a divergence.
+        self.assertEqual(div.step_view(self.o, cmp_, 2)["verdict"], "CLEAR_MARGIN")
+        flipped = list(self.greedy)
+        flipped[2] = 301
+        far = comparison(self.o, flipped, [0.1] * 6, shift=2.5)
+        self.assertEqual(div.step_view(self.o, far, 2)["verdict"], "REAL_DIVERGENCE")
         self.assertIsNone(div.step_view(self.o, cmp_, 99))
 
     def test_report_names_a_near_tie_at_the_served_step(self):

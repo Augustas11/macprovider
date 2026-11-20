@@ -21,7 +21,8 @@ Per step on the reference's history:
             reference top-16 id.
   verdict   CLOSE_CALL when ref_gap < 2 * max_diff: the measured logit error at that
             step is large enough to flip the reference's choice, so rounding can explain
-            a different token; else REAL_DIVERGENCE.
+            a different token; else REAL_DIVERGENCE when our argmax differs from the
+            reference's token, and CLEAR_MARGIN when it agrees.
 
 report: for each served prompt, the first token where the served text leaves the reference
 (and where the port's free run leaves it, per prefill step), that step and the three
@@ -105,7 +106,8 @@ def step_view(oracle, comparison, step):
         "step": step, "ref_token": oracle["greedy"][step], "ref_top2": ids[:2], "ref_logits_top2": ref[:2],
         "ref_gap": ref_gap, "our_token": our_token, "our_logits_at_ref_top2": ours[:2],
         "our_margin": our_margin, "max_diff": max_diff,
-        "verdict": "CLOSE_CALL" if is_close_call(ref_gap, max_diff) else "REAL_DIVERGENCE",
+        "verdict": ("CLOSE_CALL" if is_close_call(ref_gap, max_diff)
+                    else "REAL_DIVERGENCE" if our_token != oracle["greedy"][step] else "CLEAR_MARGIN"),
     }
 
 

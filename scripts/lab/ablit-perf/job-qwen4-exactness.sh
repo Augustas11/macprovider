@@ -32,7 +32,7 @@
 #    context; each other SERVED_CONTEXTS entry gets one more 1-row, 1-trial pass (served-<ctx>, seeded,
 #    no rebuild). job-qwen4-parity.sh (SKIP_BUILD=1, SERVED_JSONL = those provider.jsonl files) then
 #    runs the code-prompt oracles, the served-prompt oracles, glm-parity at prefill 2048 (all) and 512
-#    (served), the DIVERGENCE_VERDICT report per served prompt (CLOSE_CALL / REAL_DIVERGENCE and a
+#    (served), the DIVERGENCE_VERDICT report per served prompt (CLOSE_CALL / CLEAR_MARGIN / REAL_DIVERGENCE and a
 #    cause) and the parity gate with the served (low-margin) prompts in its set.
 #
 # Knobs: DET_ROWS (1,4,8,11) DET_CONTEXTS (200) OUTPUTS (512) TRIALS (3) CB_SLOTS (16)
