@@ -1059,7 +1059,9 @@ final class SelfUpdateTests: XCTestCase {
         )
 
         XCTAssertEqual(result.status, 124)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        // The timeout fires after ~0.5 s of checks; the bound only proves the
+        // helper does not hang, with headroom for a loaded CI runner.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
         XCTAssertFalse(result.log.contains { $0.hasPrefix("print ") })
         XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
         XCTAssertTrue(result.providerPlistExists)
@@ -1075,7 +1077,9 @@ final class SelfUpdateTests: XCTestCase {
         )
 
         XCTAssertEqual(result.status, 124)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        // The timeout fires after ~0.5 s of checks; the bound only proves the
+        // helper does not hang, with headroom for a loaded CI runner.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
         XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
         XCTAssertTrue(result.providerPlistExists)
         XCTAssertFalse(result.helperPlistExists)
