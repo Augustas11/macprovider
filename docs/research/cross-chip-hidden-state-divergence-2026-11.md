@@ -170,8 +170,9 @@ What this means for the SPEC-036-R022 statement, "a logit or less":
 2. **SPEC-036 tolerance rationale.** Supported for this model, as covered under
    "Final logits" above. The cold-start prior needs no change.
 3. **Upstream (ml-explore/mlx-lm#1280).**
-   - The per-layer and top-2-gap data here add to the thread, which so far
-     has token counts only. They are teacher-forced Llama-3B numbers, not the
+   - The per-layer and cross-chip top-2-gap data here add to the thread. The
+     report there has token counts; the two comments give top-2 gaps measured
+     on a single chip. These are teacher-forced Llama-3B numbers, not the
      reporter's model or a greedy fork.
    - The architecture override reproduces M3 Ultra output on an M5 exactly.
      That makes it a usable debugging aid for cross-chip divergence reports.
