@@ -1786,11 +1786,13 @@ struct NativeMTPBenchDecodeTiming: Sendable, Equatable {
     let endOffset: TimeInterval
 }
 
-/// SPEC-048-R015 decode-only throughput. Prefill (time to first token) is the
-/// same work on both paths, so it is excluded here and gated separately as
-/// TTFT; end-to-end throughput stays reported as `aggregate_committed_tps`.
-/// Every undefined case returns nil so the analyzer fails the record closed
-/// instead of reading a defaulted value.
+/// SPEC-048-R015 decode-only throughput, the throughput gate of
+/// native-eligible cells. Prefill (time to first token) is excluded here and
+/// gated separately as TTFT. Gated cells (SPEC-048 0.1.116) gate end-to-end
+/// `aggregate_committed_tps` instead: their rows are staggered, and prefill is
+/// not scheduled the same way on both paths, so this window's start moves with
+/// which arm's first token arrives first. Every undefined case returns nil so
+/// the analyzer fails the record closed instead of reading a defaulted value.
 enum NativeMTPBenchDecodeThroughput {
     /// (completion tokens - 1) / (request wall - TTFT).
     static func perRequest(completionTokens: Int, ttftSeconds: TimeInterval?, wallSeconds: TimeInterval) -> Double? {
@@ -1802,8 +1804,10 @@ enum NativeMTPBenchDecodeThroughput {
 
     /// Sum of every request's tokens after its first, over the run's decode
     /// window: earliest first token to latest completion. With concurrent or
-    /// staggered rows this window also covers other rows' prefills, which is
-    /// the same overlap on both paths. One slot reduces to `perRequest`.
+    /// staggered rows this window also covers other rows' prefills, and its
+    /// start depends on when each path's first prefill finishes, so it is not
+    /// a like-for-like decode comparison across rows (#2442). One slot reduces
+    /// to `perRequest`.
     static func aggregate(_ timings: [NativeMTPBenchDecodeTiming]) -> Double? {
         guard !timings.isEmpty else { return nil }
         var firstToken = TimeInterval.infinity

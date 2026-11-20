@@ -3030,19 +3030,32 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var collected: [[Int]] = supportedInputs.map { _ in [] }
             let checkpointStops = decodeSteps > 1 && cacheKinds.contains(.recurrentMamba)
             var stopStepByRow: [Int: Int] = [:]
-            // Ordinary rows keep each step's sampled tokens on the device as
-            // the next step's input and queue that step before the host reads
-            // the previous one, so the GPU never waits on the host inside a
+            // Rows keep each step's sampled tokens on the device as the next
+            // step's input and queue that step before the host reads the
+            // previous one, so the GPU never waits on the host inside a
             // window; the window end is its one draining sync. Rows that need
-            // host tokens before the next forward (recurrent stop
-            // checkpoints, drafter hidden capture, batched model state) read
-            // each step before queuing the next.
-            let pipelined = !checkpointStops && captureIndices.isEmpty && !hasBatchedState
+            // host tokens before the next forward (drafter hidden capture,
+            // batched model state) read each step before queuing the next.
+            // Hybrid rows pipeline too (#2444: a lone Qwen3.8-27B row went
+            // from 28.2 to 25.9 ms/token): a stop checkpoint is cut from the
+            // recurrent state arrays the step itself produced, kept with the
+            // step, not from the cache, which already holds the next step.
+            var pipelined = captureIndices.isEmpty && !hasBatchedState
+            #if MACPROVIDER_LAB_HARNESS
+            // Lab A/B only (#2444): the pre-fix unpipelined hybrid window.
+            if checkpointStops, Self.labHybridPipelineOff { pipelined = false }
+            #endif
             var deviceTokens: MLXArray?
-            var pendingStep: (index: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?)?
+            var pendingStep: (
+                index: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?,
+                recurrent: [Int: [MLXArray]]
+            )?
             /// Host side of one step. False ends the window early.
+            /// `recurrent`: the batch's recurrent state after this step (empty
+            /// unless `checkpointStops`).
             func readStep(
-                _ stepIndex: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?
+                _ stepIndex: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?,
+                recurrent: [Int: [MLXArray]]
             ) throws -> Bool {
                 // Read in the sampler's own dtype (uint32). `asArray(Int.self)`
                 // converts on the device: a new op queued behind the step
@@ -3106,7 +3119,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         // which step k + 1 feeds.
                         guard let stopStep = stopStepByRow[index], stepIndex - stopStep <= 1 else { continue }
                         windowCheckpoints[index, default: []].append(recurrentRowCheckpoint(
-                            batchedCaches,
+                            recurrent,
                             row: index,
                             tokenCount: input.committedKVTokenCount + stepIndex + 1
                         ))
@@ -3147,8 +3160,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     emit[mtpEmitFlagKey] = true
                     stepState = emit
                 }
+                let stateBefore = checkpointStops && pipelined && stepIndex == 0
+                    ? recurrentBatchStates(batchedCaches) : [:]
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
+                }
+                let stepRecurrent = checkpointStops ? recurrentBatchStates(batchedCaches) : [:]
+                if !stateBefore.isEmpty, Self.recurrentStateReused(before: stateBefore, after: stepRecurrent) {
+                    // A layer that updates its state array in place leaves no
+                    // per-step arrays to cut a checkpoint from: read each step
+                    // before queuing the next, as before #2444.
+                    pipelined = false
                 }
                 if hasBatchedState, let invariantStateModel, let stepState {
                     do {
@@ -3183,26 +3205,31 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                 }
                 if pipelined {
-                    let next = sampled.reshaped([supportedInputs.count, 1])
+                    let next = Self.pipelinedTokenInput(sampled, rows: supportedInputs.count)
                     asyncEval(next)
                     deviceTokens = next
                     if let previous = pendingStep {
                         guard try readStep(
-                            previous.index, sampled: previous.sampled, logits: previous.logits, state: previous.state
+                            previous.index, sampled: previous.sampled, logits: previous.logits, state: previous.state,
+                            recurrent: previous.recurrent
                         ) else {
                             stopped = true
                             break
                         }
                     }
-                    pendingStep = (stepIndex, sampled, logits, output.state)
-                } else if try !readStep(stepIndex, sampled: sampled, logits: logits, state: output.state) {
+                    pendingStep = (stepIndex, sampled, logits, output.state, stepRecurrent)
+                } else if try !readStep(
+                    stepIndex, sampled: sampled, logits: logits, state: output.state, recurrent: stepRecurrent
+                ) {
                     stopped = true
                     break
                 }
                 gpuTurn?.end()
             }
             if !stopped, let last = pendingStep {
-                _ = try readStep(last.index, sampled: last.sampled, logits: last.logits, state: last.state)
+                _ = try readStep(
+                    last.index, sampled: last.sampled, logits: last.logits, state: last.state, recurrent: last.recurrent
+                )
             }
             sampledByRow = collected
             batchedCaches.forEach { $0.syncRowsFromBatch() }
@@ -3294,22 +3321,59 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    /// One row's recurrent state in the packed window batch, as a checkpoint.
-    /// A gather allocates its own output, so evaluating it detaches the
-    /// checkpoint from this step's packed state.
+    /// `row`'s recurrent state from `batchStates` (`recurrentBatchStates`
+    /// taken right after the step it covers), as a checkpoint. A gather
+    /// allocates its own output, so evaluating it detaches the checkpoint
+    /// from the packed state.
     private func recurrentRowCheckpoint(
-        _ batchedCaches: [PagedKVSharedLayerBatch],
+        _ batchStates: [Int: [MLXArray]],
         row: Int,
         tokenCount: Int
     ) -> RecurrentStateCheckpoint {
         let rowIndex = MLXArray([Int32(row)])
-        var states: [Int: [MLXArray]] = [:]
-        for (index, kind) in cacheKinds.enumerated() where kind == .recurrentMamba {
-            states[index] = batchedCaches[index].cache.state.map { $0.take(rowIndex, axis: 0) }
-        }
+        let states = batchStates.mapValues { $0.map { $0.take(rowIndex, axis: 0) } }
         eval(states.values.flatMap { $0 })
         return RecurrentStateCheckpoint(tokenCount: tokenCount, states: states)
     }
+
+    /// The batch's recurrent state arrays by layer. Recurrent layers store
+    /// each step's state as new arrays, so arrays taken after a step keep
+    /// that step's values after the next step is queued (#2444);
+    /// `recurrentStateReused` detects a layer that does not.
+    private func recurrentBatchStates(_ batchedCaches: [PagedKVSharedLayerBatch]) -> [Int: [MLXArray]] {
+        var states: [Int: [MLXArray]] = [:]
+        for (index, kind) in cacheKinds.enumerated() where kind == .recurrentMamba {
+            states[index] = batchedCaches[index].cache.state
+        }
+        return states
+    }
+
+    /// The next step's token input, built on device from the sampler's
+    /// uint32 tokens. It is cast to int32, the dtype the host path feeds, so a
+    /// model that derives cache state from the token ids (Qwen4-Exp's n-gram
+    /// slot) keeps one slot dtype and a row prefilled later still packs.
+    static func pipelinedTokenInput(_ sampled: MLXArray, rows: Int) -> MLXArray {
+        sampled.reshaped([rows, 1]).asType(.int32)
+    }
+
+    /// True when a step left any recurrent layer's state array object the one
+    /// it had before the step (an in-place update), or changed its layout.
+    static func recurrentStateReused(before: [Int: [MLXArray]], after: [Int: [MLXArray]]) -> Bool {
+        guard before.keys.sorted() == after.keys.sorted() else { return true }
+        for (layer, arrays) in before {
+            guard let next = after[layer], next.count == arrays.count else { return true }
+            let previousIDs = Set(arrays.map(ObjectIdentifier.init))
+            if next.contains(where: { previousIDs.contains(ObjectIdentifier($0)) }) { return true }
+        }
+        return false
+    }
+
+    #if MACPROVIDER_LAB_HARNESS
+    /// Lab A/B only (#2444): `MACPROVIDER_LAB_HYBRID_PIPELINE=off` decodes
+    /// hybrid windows unpipelined, as before the fix.
+    static let labHybridPipelineOff =
+        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_HYBRID_PIPELINE"] == "off"
+    #endif
 
     private func recurrentStateArrays(_ caches: [KVCache]) -> [MLXArray] {
         cacheKinds.indices

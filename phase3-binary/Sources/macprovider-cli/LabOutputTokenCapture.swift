@@ -14,15 +14,20 @@ enum LabOutputTokenCapture {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws {
         guard let path = environment["MACPROVIDER_LAB_TOKEN_CAPTURE"], !path.isEmpty else { return }
-        guard (path as NSString).isAbsolutePath, !path.utf8.contains(0) else {
-            throw failure(EINVAL)
-        }
-        let record: [String: Any] = [
+        try appendRecord([
             "schema": "macprovider.lab-output-tokens.v1",
             "request_id": request.requestID.map { $0 as Any } ?? NSNull(),
             "model": request.model,
             "output_token_ids": tokenIDs,
-        ]
+        ], path: path)
+    }
+
+    /// Appends one JSON line to a private (0600, single-link, owner, no ACL)
+    /// regular file at an absolute path. Shared by the lab capture hooks.
+    static func appendRecord(_ record: [String: Any], path: String) throws {
+        guard (path as NSString).isAbsolutePath, !path.utf8.contains(0) else {
+            throw failure(EINVAL)
+        }
         var data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
         data.append(0x0A)
         lock.lock()

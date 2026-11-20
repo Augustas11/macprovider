@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.115
+**Version:** 0.1.116
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.115",
+  "version": "0.1.116",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -2472,7 +2472,8 @@ count was below the bound and a `capacity_above_native_bound` downgrade only
 at or above it; admissions plus downgrades account for every request; parity
 holds and fallback/error is zero; and native is non-inferior to ordinary at
 the mixed-load margins of this section — the Holm-corrected lower bound of
-the decode-throughput change at least -5%, the corrected upper bounds of p95
+the end-to-end committed-throughput change (0.1.116; decode throughput
+before) at least -5%, the corrected upper bounds of p95
 TTFT and p95 per-output-token latency regression at most 5%, the worst-gap
 bound below, and capacity rejection up by
 at most one percentage point. These margins are frozen in the policy
@@ -2551,15 +2552,19 @@ forwards per committed token, peak/resident memory, capacity rejection,
 fallback/error rate, terminal parity, and thermal stability.
 
 Correctness, state integrity, and zero unexplained fallback/error are hard
-gates. R015 throughput is decode throughput: a request's completion tokens
-after its first, divided by the interval from its first token to its
-completion. A run's aggregate decode throughput is the sum of every request's
-tokens after its first, divided by the interval from the run's earliest first
-token to its latest completion. Prefill is excluded from this gate because
-the decode-throughput gate judges decode; prefill is not the same work on both
-paths (a native drafter that prefills its head over the prompt adds prefill
-work), and that cost is gated separately as TTFT below. Prefill-inclusive
-(end-to-end) committed throughput MUST still be reported but is not a gate.
+gates. In a native-eligible cell, R015 throughput is decode throughput: a
+request's completion tokens after its first, divided by the interval from its
+first token to its completion. A run's aggregate decode throughput is the sum
+of every request's tokens after its first, divided by the interval from the
+run's earliest first token to its latest completion. Prefill is excluded from
+this gate because the decode-throughput gate judges decode; prefill is not the
+same work on both paths (a native drafter that prefills its head over the
+prompt adds prefill work), and that cost is gated separately as TTFT below.
+In a gated cell, R015 throughput is the run's end-to-end committed throughput
+(`aggregate_committed_tps`: committed completion tokens over the run's wall
+time), per the 0.1.116 amendment below. Prefill-inclusive (end-to-end)
+committed throughput MUST be reported in every cell; it is a gate only in
+gated cells.
 A missing or non-positive decode throughput fails the run closed; evidence
 recorded before the bench emitted it may derive it from recorded per-request
 end-to-end throughput, TTFT, completion tokens, and nominal arrival offsets,
@@ -2625,6 +2630,44 @@ the 0.1.25 to 0.1.70 set with the 15% floor) are still judged by the gate set
 they were frozen with, so every recorded verdict reproduces unchanged. The
 bench runs a policy frozen with the current set or the 0.1.25 to 0.1.70 set;
 the 0.1.24 inter-chunk set stays refused for new runs.
+
+*Gate amendment (0.1.116).* Through 0.1.115 a gated cell's throughput gate
+was the paired decode-throughput change. A gated cell's rows arrive staggered,
+so the run's decode window starts at the earliest first token of either arm,
+and both arms produce the same tokens and finish at about the same time; the
+decode ratio therefore moves with which arm's first prefill finishes first,
+not with decode speed. Prefill is the same tokens on both paths but not the
+same schedule. The recorded Qwen 27B cells show it (issue #2442): at two and
+four rows no native round ran (zero proposals, every admitted native row held
+at depth zero), yet the decode ratio read 1.06 to 1.16 while end-to-end
+committed throughput read -0.6% to +0.8%; the GLM-5.3-Flash 1.8.256 run showed
+the reverse. From 0.1.116 a gated cell's throughput hypothesis is the paired
+end-to-end committed-throughput change (native `aggregate_committed_tps` over
+ordinary, minus one), with the unchanged margin `gated_throughput_lower_bound_min`
+-0.05, the unchanged bootstrap seed and the same Holm family. That is the rate
+a buyer sees, and with rows overlapping a decode-only window cannot separate
+decode from another row's prefill. The TTFT gate and every other gate are
+unchanged, and native-eligible cells keep the decode-throughput gate. The
+analyzer records the statistic a throughput hypothesis used
+(`metrics.throughput.statistic`: `decode` or `end_to_end_committed`).
+
+This amendment changes what the gated statistic measures, not a threshold, so
+it applies to every analysis the analyzer produces from 0.1.116, whatever gate
+set the policy froze, including a re-analysis of earlier records. A committed
+analyzer output stays the immutable record of its run; it is not rewritten.
+A re-derived analysis is committed next to the records it re-analyzes, and a
+signed entry that binds it takes its `performance_evidence_sha256` (and the
+other analysis digests) and its `throughput_delta_ppm` from it. A cap extension
+whose prior analysis predates 0.1.116 binds the re-derived prior analysis in a
+new cap-extension record, since the prior analysis must equal the current
+analyzer's output. The signed native-row bound is 1 for every admitted tuple
+at 0.1.116, so the re-analysis changes no serving decision. Every re-analyzed
+admitted record keeps its verdict: the Qwen 27B and GLM-5.3-Flash records stay
+`PASS`, and the issue #2081 Qwen3.6-35B-A3B record stays `FAIL` on the same
+single hypothesis, its s2 p95 TTFT regression. The #2081 disposition covers
+that re-derived analysis as it covers the original, which stays unchanged and
+accompanies it. The re-analysis is recorded in
+`docs/evidence/r015-gated-end-to-end-reanalysis-2026-11-20/`.
 
 The campaign MUST also replay a preregistered, privacy-reviewed representative
 post-gateway request-shape sample, preserving real provider-bound conversation
@@ -2893,6 +2936,18 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.116 (2026-11-20, Related: #2442)** — MTP-15 gate amendment: a gated
+  cell's throughput hypothesis is the paired end-to-end committed-throughput
+  change instead of the decode-throughput change, with the same -5% margin,
+  seed and Holm family; native-eligible cells keep the decode gate and TTFT is
+  unchanged. A gated cell's decode window starts at the earliest first token,
+  so its ratio followed which arm's prefill finished first (Qwen 27B: 1.06 to
+  1.16 decode with no native round, -0.6% to +0.8% end to end). The change
+  applies to every analysis from 0.1.116, including re-analysis of earlier
+  records; committed analyzer outputs are not rewritten, and re-derived
+  analyses supply the re-signed `throughput_delta_ppm`. Every re-analyzed
+  admitted record keeps its verdict.
 
 - **0.1.115 (2026-11-20, Related: #2429)** — MTP-15 adds the preregistered
   `exclusion_rules` value `single_token_identical_pair`: a measured block whose

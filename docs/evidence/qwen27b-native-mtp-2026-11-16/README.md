@@ -30,7 +30,10 @@ The other fields come from the 2026-11-04 records:
   `ordinary_baseline.measurement_sha256` are the SHA-256 of
   `r015-analysis.json`.
 - `throughput_delta_ppm` is the `s4-p1536-o512` cell's `metrics.throughput.median`
-  x 1e6, rounded: 63597 for Qwen3.6 and 56356 for Qwen3.8.
+  x 1e6, rounded: 63597 for Qwen3.6 and 56356 for Qwen3.8. That median was
+  the gated cell's decode ratio, not an end-to-end gain (#2442; end to end
+  -0.62% and -0.20%). SPEC-048 0.1.116 gates it on end-to-end throughput;
+  see `docs/evidence/r015-gated-end-to-end-reanalysis-2026-11-20/`.
 - `ordinary_baseline.aggregate_tps_milli` is the same cell's ordinary
   `aggregate_committed_tps` median x 1000, truncated: 40009 for Qwen3.6 and
   39006 for Qwen3.8.

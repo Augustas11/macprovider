@@ -825,7 +825,8 @@ def _metric(pair: tuple[dict, dict], name: str) -> float:
     """Gated paired-block statistic. Callers validate both records first."""
     ordinary, native = pair
     if name == "throughput":
-        # SPEC-048-R015: the gate is decode throughput; prefill is TTFT.
+        # SPEC-048-R015: a native-eligible cell gates decode throughput;
+        # prefill is TTFT. Gated cells use end_to_end_throughput (0.1.116).
         return _safe_ratio(float(native["aggregate_decode_tps"]), float(ordinary["aggregate_decode_tps"])) - 1.0
     if name == "end_to_end_throughput":
         return _safe_ratio(float(native["aggregate_committed_tps"]), float(ordinary["aggregate_committed_tps"])) - 1.0
@@ -1369,15 +1370,24 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         metrics = {}
         usable_pairs = pairs if pairs else []
         for metric_name in GATE_METRICS[gate_set]:
-            observed = [_metric(pair, metric_name) for pair in usable_pairs]
+            # SPEC-048 0.1.116, every gate set: a gated cell's throughput gate
+            # is end-to-end committed throughput. With staggered rows a decode
+            # window starts at the earliest first token, so it moves with
+            # which arm's prefill finished first, not with decode speed.
+            statistic = "end_to_end_throughput" if gated and metric_name == "throughput" else metric_name
+            observed = [_metric(pair, statistic) for pair in usable_pairs]
             median = _median(observed)
             # Seeds of the original four metrics are unchanged so legacy
             # analyses reproduce byte for byte.
             seed = base_seed + cell_index * 17 + {"tpot": 307, "chunk_gap_p99": 401}.get(metric_name, len(metric_name))
-            boot = _bootstrap(usable_pairs, metric_name, draws, seed) if usable_pairs else []
+            boot = _bootstrap(usable_pairs, statistic, draws, seed) if usable_pairs else []
             metrics[metric_name] = {"median": median, "draws": boot}
-        # Prefill-inclusive throughput: reported, never gated (prefill is the
-        # same work on both paths and is gated as TTFT).
+            if metric_name == "throughput":
+                metrics[metric_name]["statistic"] = "end_to_end_committed" if gated else "decode"
+        # Prefill-inclusive throughput, reported for every cell with a
+        # two-sided interval. In a gated cell the same per-block statistic is
+        # also the Holm-corrected throughput gate above (own seed); this entry
+        # stays a report.
         end_to_end = [_metric(pair, "end_to_end_throughput") for pair in usable_pairs]
         end_to_end_draws = (
             _bootstrap(usable_pairs, "end_to_end_throughput", draws, base_seed + cell_index * 17 + 211)
@@ -1698,7 +1708,7 @@ def markdown_table(result: dict) -> str:
     amended = result.get("gate_set") in TPOT_GATE_SETS
     latency_header = "TPOT p95 UB | Gap p99 UB" if amended else "ITL UB"
     lines = [
-        f"| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | {latency_header} | Rejection UB | E2E ratio (info) | Hard failures |",
+        f"| Cell | Status | Blocks | Throughput ratio | Throughput LB | TTFT UB | {latency_header} | Rejection UB | E2E ratio | Hard failures |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
         if amended
         else "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",

@@ -152,7 +152,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 main([str(jsonl_path), str(policy_path), "--format", "markdown"])
             self.assertTrue(out.getvalue().startswith("| Cell | Status |"))
-            self.assertIn("Decode LB", out.getvalue())
+            self.assertIn("Throughput LB", out.getvalue())
 
     def test_amended_gates_replace_inter_chunk_itl(self):
         # Native carries ~1.9 tokens per chunk: its inter-chunk p95 is above
@@ -484,7 +484,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     def test_gated_cell_fails_on_regression_against_ordinary(self):
         result = self._run_case(
-            gated_native_overrides={"aggregate_decode_tps": 90.0, "per_request_decode_tps": [90.0]}
+            gated_native_overrides={"aggregate_committed_tps": 90.0, "per_request_tps": [90.0]}
         )
         self.assertEqual(result["overall_status"], "FAIL")
         for cell in result["cells"]:
@@ -492,6 +492,67 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 self.assertIn("throughput", cell["metric_failures"])
             else:
                 self.assertEqual(cell["status"], "PASS")
+
+    def test_gated_throughput_gate_is_end_to_end_not_decode_window(self):
+        # SPEC-048 0.1.116 (#2442): a gated cell's decode window starts at the
+        # earliest first token, so a later native first token inflates the
+        # decode ratio with no drafting. The gate reads end-to-end committed
+        # throughput, which both arms share when they do the same work.
+        no_drafting = {
+            "mtp_proposed_tokens": 0,
+            "mtp_accepted_tokens": 0,
+            "mtp_accepted_by_position": [0],
+            "target_forwards": 0,
+            "target_forwards_per_committed_token": 0.0,
+            "gated_depth_restorations": 0,
+            "gated_held_finishes_clean": 1,
+        }
+        inflated = self._run_case(
+            gated_native_overrides={
+                **no_drafting,
+                "aggregate_committed_tps": 99.4,
+                "per_request_tps": [99.4],
+                "aggregate_decode_tps": 116.0,
+                "per_request_decode_tps": [100.0],
+            }
+        )
+        for cell in inflated["cells"]:
+            if cell["cell_class"] != "gated":
+                continue
+            throughput = cell["metrics"]["throughput"]
+            self.assertEqual(throughput["statistic"], "end_to_end_committed")
+            self.assertAlmostEqual(throughput["median"], -0.006, places=9)
+            self.assertAlmostEqual(
+                throughput["median"], cell["informational_metrics"]["end_to_end_throughput"]["median"], places=12
+            )
+            self.assertEqual(throughput["status"], "PASS")
+        # The reverse artifact: an earlier native first token drags the decode
+        # ratio below the margin while end to end is level. Not a failure.
+        deflated = self._run_case(
+            gated_native_overrides={
+                **no_drafting,
+                "aggregate_committed_tps": 100.0,
+                "per_request_tps": [100.0],
+                "aggregate_decode_tps": 90.0,
+                "per_request_decode_tps": [100.0],
+            }
+        )
+        for cell in deflated["cells"]:
+            if cell["cell_class"] == "gated":
+                self.assertNotIn("throughput", cell["metric_failures"])
+                self.assertAlmostEqual(cell["metrics"]["throughput"]["median"], 0.0, places=12)
+        self.assertEqual(deflated["overall_status"], "PASS")
+
+    def test_eligible_throughput_gate_still_reads_decode(self):
+        result = self._run_case(native_tps=101.0, native_decode_tps=130.0)
+        for cell in result["cells"]:
+            throughput = cell["metrics"]["throughput"]
+            if cell["cell_class"] == "gated":
+                self.assertEqual(throughput["statistic"], "end_to_end_committed")
+                self.assertAlmostEqual(throughput["median"], 0.01, places=9)
+            else:
+                self.assertEqual(throughput["statistic"], "decode")
+                self.assertAlmostEqual(throughput["median"], 0.30, places=9)
 
     def test_eligible_cell_still_needs_the_native_improvement(self):
         # A 1% loss is non-inferior in a gated cell but fails an eligible one.
