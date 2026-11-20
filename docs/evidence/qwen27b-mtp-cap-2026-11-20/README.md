@@ -3,6 +3,16 @@
 Two formal matrices, one per dense 27B tuple: Qwen3.6-27B (`qwen36/`) and
 Qwen3.8-27B (`qwen38/`, [below](#qwen38-27b)).
 
+**Re-analysis (SPEC-048 0.1.116, #2442).** The gated cells' throughput gate is
+now end-to-end committed throughput, not decode throughput. The committed
+`r015-analysis.json` files below are the record of this run and reproduce
+with the analyzer at `d97f9370e` (before 0.1.116). With the current analyzer
+they re-derive to
+`../r015-gated-end-to-end-reanalysis-2026-11-20/qwen36-27b/` and `qwen38-27b/`:
+both stay PASS, and the `s4-p1536-o512` throughput median moves from +0.62% to
+-2.44% (Qwen3.6) and from +1.91% to -1.72% (Qwen3.8), so the re-signed
+`throughput_delta_ppm` is -24353 and -17162.
+
 ## Qwen3.6-27B
 
 Formal SPEC-048 R015 matrix at `maximum_prompt_tokens` 32768 for the

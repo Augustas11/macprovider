@@ -93,7 +93,11 @@ The record binds the five inputs by SHA-256:
 }
 ```
 
-Reproduce the verdict:
+Reproduce the verdict (with the analyzer at `d97f9370e`, before SPEC-048
+0.1.116; the current analyzer re-derives the prior's gated cells on end-to-end
+throughput, so this record now returns `prior_analysis_not_rederived`, and the
+re-derived record and analyses are in
+`../r015-gated-end-to-end-reanalysis-2026-11-20/glm53-flash/`, still PASS):
 
 ```bash
 R=docs/research/spec048-r015/glm53-flash-r015-v2
