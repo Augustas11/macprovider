@@ -50,7 +50,10 @@
 #          hash, identity, peak memory at one row at 4k and 32k context with a proposed min_ram_gb, and the
 #          buyer-UX suite (scripts/buyer_ux_conformance.py, copied to job/bux) over loopback (job header).
 #          Knobs: QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 MEM_CONTEXTS MEM_OUTPUT
-#          BUX_SAMPLES SKIP_BUILD METALLIB. Estimated duration (an estimate, not measured): about 50 min cold
+#          BUX_SAMPLES SKIP_BUILD METALLIB. BUX_EXTRA_MODELS='qwen38-27b' also serves the live row
+#          qwen/qwen3.8-27b (sha 8a8786e9; qwen36-27b likewise) with --no-join after the Flash-Next checks and
+#          runs the same buyer-UX suite on it (job header; no memory measurement; about +20-25 min, estimate).
+#          Estimated duration (an estimate, not measured): about 50 min cold
 #          (build ~20 min, two model loads ~3 min each, 4k and 32k cells ~5 min, buyer-UX 34 requests
 #          ~10-15 min, prefill-profile ~5 min), about 30 min with SKIP_BUILD=1; plus the 106 GB snapshot
 #          download if ~/lab-ablit-perf/models lacks it.
@@ -140,7 +143,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \

@@ -81,6 +81,39 @@ class JobShapeTests(unittest.TestCase):
         self.assertIn("--samples 1", r.stdout)
         self.assertIn("--prompt-tokens 4096 --step-sizes 512 --runs 1 --generate-tokens 64", r.stdout)
 
+    def test_default_has_no_extra_models(self):
+        r, _ = self.run_job()
+        self.assertNotIn("EXTRA_", r.stdout)
+
+    def test_extra_models_serve_the_live_row_by_id_and_sha_with_the_same_suite(self):
+        r, _ = self.run_job(BUX_EXTRA_MODELS="qwen38-27b,qwen36-27b", BUX_SAMPLES="2")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        cfgs = self.lines(r.stdout, "EXTRA_SERVE_CONFIG")
+        self.assertEqual(len(cfgs), 2)
+        self.assertIn('model: "qwen/qwen3.8-27b"', cfgs[0])
+        self.assertIn("model_artifact_sha256: 8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05", cfgs[0])
+        self.assertIn("lab-ablit-perf/models/Qwen3.8-27B-4bit", cfgs[0])
+        self.assertIn('model: "qwen/qwen3.6-27b"', cfgs[1])
+        self.assertIn("model_artifact_sha256: 518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931", cfgs[1])
+        for line in self.lines(r.stdout, "EXTRA_SERVE_ARGS"):
+            self.assertIn("serve --config", line)
+            self.assertTrue(line.endswith("--no-join"))
+            self.assertNotIn("continuous", line)
+        bux_lines = self.lines(r.stdout, "EXTRA_BUX_ARGS")
+        self.assertEqual(len(bux_lines), 2)
+        self.assertIn("--catalog-key qwen/qwen3.8-27b --out", bux_lines[0])
+        self.assertIn("--served-model mlx-community/Qwen3.8-27B-4bit", bux_lines[0])
+        for line in bux_lines:
+            self.assertIn("--samples 2", line)
+            self.assertIn("--capture", line)
+            self.assertIn("--max-context-tokens", line)
+        self.assertEqual(len(self.lines(r.stdout, "CLIENT_ARGS")), 2)  # memory cells stay Flash-Next only
+
+    def test_unknown_extra_model_is_refused(self):
+        r, _ = self.run_job(BUX_EXTRA_MODELS="qwen38-27b-uncensored")
+        self.assertEqual(r.returncode, 64, r.stdout)
+        self.assertIn("BLOCKER:", r.stdout)
+
     def test_bad_knobs_are_refused(self):
         for env in ({"MEM_CONTEXTS": "4k"}, {"MEM_CONTEXTS": "100"}, {"MEM_CONTEXTS": "4000,,8000"},
                     {"MEM_CONTEXTS": "200000"}, {"MEM_OUTPUT": "8"}, {"MEM_OUTPUT": "x"}, {"BUX_SAMPLES": "0"},

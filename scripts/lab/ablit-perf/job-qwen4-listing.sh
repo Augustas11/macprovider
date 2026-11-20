@@ -24,13 +24,26 @@
 #     error, /v1/messages thinking, /v1/responses function tool) against the same serve over loopback
 #     (buyer_ux_local.py header: how it differs from the gateway runs that made every existing record),
 #     BUX_SAMPLES samples each (default 3); the record is written to the results, never to the catalog.
+# BUX_EXTRA_MODELS (default empty; space or comma list of qwen38-27b, qwen36-27b): after the Flash-Next
+# checks and report, for each key serve the live catalog row (qwen/qwen3.8-27b sha 8a8786e9..., qwen/qwen3.6-27b
+# sha 518ef47c...) by catalog id + model_artifact_sha256 with `serve --no-join` (same serve path, no
+# batching flags, one row), check /v1/status model and model_hash, and run the same buyer_ux_local.py
+# (Python 3.12, --capture, --max-context-tokens from that serve) with the same samples and gate, so
+# tool_choice required/named on the function-XML Qwen templates (commit 667565f55) is captured on the
+# rows buyers use. No memory measurement. The snapshot is the lab copy ~/lab-ablit-perf/models/<name>
+# (job.sh's BASE_PATH: Qwen3.8-27B-4bit, Qwen3.6-27B-4bit), APFS-cloned (`cp -c`, source read only) from the
+# provider store ~/Library/Application Support/macprovider/models when absent; the serve verifies the hash.
+# There is no catalog row for an uncensored Qwen3.8-27B (job.sh's qwen27 build has no id or hash in
+# autotune-candidates.json); the live row with the same template is qwen/qwen3.8-27b.
+# Extra results: <results>/extra-<key>/{serve/,buyer-ux-record.json,buyer-ux.txt,buyer-ux-responses.jsonl}.
+# A failed extra check is a BLOCKER (JOB_FAIL); the Flash-Next checks above run and gate first, unchanged.
 # Steps: stage (snapshot download at the pinned revision when QWEN4_PATH is absent, as
 # job-qwen4-cb.sh), build (job.sh's .build-lab-harness path, -DMACPROVIDER_LAB_HARNESS, pinned
 # engine), serve + a + b + c, stop, prefill-profile, report.
 #
 # Results: ~/lab-ablit-perf/results/<run>/qwen4-flash-next-listing/{identity.txt,serve/,mem/,
 # memory.md,memory.json,buyer-ux-record.json,buyer-ux.txt,prefill-profile.json,build.log}.
-# Env: QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 MEM_CONTEXTS MEM_OUTPUT BUX_SAMPLES
+# Env: QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 MEM_CONTEXTS MEM_OUTPUT BUX_SAMPLES BUX_EXTRA_MODELS
 # METALLIB SKIP_BUILD. LISTING_JOB_CHECK=1: validate the knobs, print the serve config, client and
 # profile argv and exit 0 before touching anything (the unit test). Every failure prints `BLOCKER:`;
 # the job runs every step it can and ends with JOB_PASS (exit 0) or JOB_FAIL (nonzero). It never
@@ -53,6 +66,8 @@ QWEN4_SHA256=${QWEN4_SHA256:-f0dfdf5261527e3a64356f95f10c9e906a387f87d85a0d10703
 MEM_CONTEXTS=${MEM_CONTEXTS:-4000,32000}
 MEM_OUTPUT=${MEM_OUTPUT:-256}
 BUX_SAMPLES=${BUX_SAMPLES:-3}
+BUX_EXTRA_MODELS=${BUX_EXTRA_MODELS:-}
+STORE="$HOME/Library/Application Support/macprovider/models"
 PORT=18341
 PROFILE_STEP=512  # serve's serial prefill step (ModelRuntime.effectivePrefillStepSize, configured 512)
 MLX_LM_COMMIT=c4c9c762cc797fd979fc98645f5db5112753bbe9
@@ -71,6 +86,36 @@ case "$MEM_OUTPUT" in ""|*[!0-9]*) die "MEM_OUTPUT=$MEM_OUTPUT must be 16..4096"
 case "$BUX_SAMPLES" in [1-9]) ;; *) die "BUX_SAMPLES=$BUX_SAMPLES must be 1..9" 64 ;; esac
 echo "$QWEN4_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "QWEN4_SHA256=$QWEN4_SHA256 is not a lowercase sha256" 64
 echo "$QWEN4_ID" | grep -Eq '^[a-z0-9._-]+/[a-z0-9._-]+$' || die "QWEN4_ID=$QWEN4_ID is not a lowercase org/name id" 64
+
+# extra_model KEY: XID (catalog id), XREPO (artifact model id, the suite's --served-model), XSHA,
+# XPATH (lab copy), XSTORE (provider-store repo dir) of a live row (autotune-candidates.json).
+extra_model() {
+  case "$1" in
+    qwen38-27b) XID=qwen/qwen3.8-27b; XREPO=mlx-community/Qwen3.8-27B-4bit; XPATH=$LAB/models/Qwen3.8-27B-4bit
+      XSTORE=mlx-community--Qwen3.8-27B-4bit; XSHA=8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05 ;;
+    qwen36-27b) XID=qwen/qwen3.6-27b; XREPO=mlx-community/Qwen3.6-27B-4bit; XPATH=$LAB/models/Qwen3.6-27B-4bit
+      XSTORE=mlx-community--Qwen3.6-27B-4bit; XSHA=518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931 ;;
+    *) return 1 ;;
+  esac
+}
+# store_dir REPO_DIR SHA: the provider-store snapshot directory of that artifact (read only), as job.sh's.
+store_dir() {
+  local d
+  for d in "$STORE/$1"/*/"$2"; do [ -d "$d" ] && { echo "$d"; return; }; done
+  echo "$STORE/$1/<revision>/$2"
+}
+EXTRA_LIST=$(echo "$BUX_EXTRA_MODELS" | tr ',' ' ')
+for k in $EXTRA_LIST; do extra_model "$k" || die "BUX_EXTRA_MODELS: unknown key $k (qwen38-27b, qwen36-27b)" 64; done
+extra_serve_config() {  # $1 = results dir of the extra
+  SERVE_CONFIG_X="model: \"$XID\"
+model_artifact_path: \"$XPATH\"
+model_artifact_sha256: $XSHA
+port: $PORT
+ctl_socket_path: \"$1/serve/ctl.sock\"
+credential_store: protected_file"
+  BUX_ARGS_X=(--suite-dir "$JOB/bux" --base "http://127.0.0.1:$PORT/v1" --model "$XID" --served-model "$XREPO"
+              --catalog-key "$XID" --out "$1/buyer-ux-record.json" --samples "$BUX_SAMPLES")
+}
 
 SERVE_CONFIG="model: \"$QWEN4_ID\"
 model_artifact_path: \"$QWEN4_PATH\"
@@ -94,12 +139,19 @@ if [ "${LISTING_JOB_CHECK:-0}" = 1 ]; then
   for n in "${CTX_LIST[@]}"; do client_args "$n"; printf 'CLIENT_ARGS'; printf ' %s' "${CARGS[@]}"; echo " output=$MEM_OUTPUT"; done
   printf 'BUX_ARGS'; printf ' %s' "${BUX_ARGS[@]}"; echo
   printf 'PROFILE_ARGS'; printf ' %s' "${PROFILE_ARGS[@]}"; echo
+  for k in $EXTRA_LIST; do
+    extra_model "$k"; extra_serve_config "$RES/extra-$k"
+    printf 'EXTRA_SERVE_CONFIG %s %s\n' "$k" "$(echo "$SERVE_CONFIG_X" | tr '\n' ' ')"
+    printf 'EXTRA_SERVE_ARGS %s' "$k"; printf ' %s' serve --config "$RES/extra-$k/serve/config.yaml" --no-join; echo
+    printf 'EXTRA_BUX_ARGS %s' "$k"; printf ' %s' "${BUX_ARGS_X[@]}" --max-context-tokens N --capture "$RES/extra-$k/buyer-ux-responses.jsonl"; echo
+    printf 'EXTRA_CLONE_FROM %s %s\n' "$k" "$(store_dir "$XSTORE" "$XSHA")"
+  done
   printf 'BUILD_FLAGS -DMACPROVIDER_LAB_HARNESS build_path=%s\n' "$BUILD"
   exit 0
 fi
 
 rm -rf "$RES" && mkdir -p "$RES/serve" "$RES/mem"
-log "JOB_START qwen4-listing run=$RUN_ID commit=${COMMIT:-unknown} model=$QWEN4_PATH id=$QWEN4_ID contexts=$MEM_CONTEXTS output=$MEM_OUTPUT bux_samples=$BUX_SAMPLES"
+log "JOB_START qwen4-listing run=$RUN_ID commit=${COMMIT:-unknown} model=$QWEN4_PATH id=$QWEN4_ID contexts=$MEM_CONTEXTS output=$MEM_OUTPUT bux_samples=$BUX_SAMPLES extra=${EXTRA_LIST:-none}"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
@@ -297,6 +349,71 @@ fi
   || blocker "memory report: $(tail -n 2 "$RES/memory.stdout" | tr '\n' ' ')"
 [ -s "$RES/memory.json" ] && log "LISTING_MIN_RAM_GB $(/usr/bin/python3 -I -c 'import json,sys
 r=json.load(open(sys.argv[1])); print(r["proposed_min_ram_gb"], "peak_gib=%s" % r["serve_lifetime_peak_gib"], "serve_default_step=%s" % r["serve_default_step"])' "$RES/memory.json")"
+
+# Extra models (BUX_EXTRA_MODELS): the same buyer-UX run on each live row, after the Flash-Next checks.
+run_extra() {
+  local k=$1 xr rc ready ctx from
+  extra_model "$k"; xr=$RES/extra-$k; extra_serve_config "$xr"
+  rm -rf "$xr" && mkdir -p "$xr/serve"
+  if [ ! -f "$XPATH/config.json" ]; then
+    from=$(store_dir "$XSTORE" "$XSHA")
+    [ -f "$from/config.json" ] || { blocker "extra $k: no snapshot at $XPATH or in the provider store ($from)"; return; }
+    log "EXTRA_CLONE $k from $from"
+    mkdir -p "$(dirname "$XPATH")" && /bin/cp -c -R "$from" "$XPATH" || { rm -rf -- "$XPATH"; blocker "extra $k: clone failed"; return; }
+  fi
+  rm -rf -- "$XPATH/.cache"
+  echo "$SERVE_CONFIG_X" > "$xr/serve/config.yaml"
+  log "BUX_EXTRA_START $k id=$XID sha=$XSHA samples=$BUX_SAMPLES"
+  (cd "$BIN" && exec "$BIN/macprovider-cli" serve --config "$xr/serve/config.yaml" --no-join \
+    > "$xr/serve/serve.out" 2> "$xr/serve/serve.err" < /dev/null) &
+  SP=$!
+  ready=0
+  while kill -0 "$SP" 2>/dev/null; do  # no deadline: the launcher's stall watcher sees a hung load
+    if curl -s --max-time 3 "http://127.0.0.1:$PORT/v1/status" | /usr/bin/python3 -I -c \
+        'import json,sys; sys.exit(0 if json.load(sys.stdin).get("model_loaded") is True else 1)' 2>/dev/null; then
+      ready=1; break
+    fi
+    sleep 5
+  done
+  if [ "$ready" != 1 ]; then
+    blocker "extra $k: the serve exited before the model loaded: $(tail -n 5 "$xr/serve/serve.err" | tr '\n' ' ')"
+    SP=""; return
+  fi
+  # The idle self-check (if the route has one) decides before any request, as for Flash-Next.
+  /usr/bin/python3 -I "$GRID/route_status.py" gate --port "$PORT" --serve-err "$xr/serve/serve.err" --pid "$SP" \
+    > "$xr/serve/route-gate.txt" 2>&1
+  curl -s "http://127.0.0.1:$PORT/v1/status" > "$xr/serve/status.json"
+  curl -s "http://127.0.0.1:$PORT/v1/models" > "$xr/serve/models.json"
+  /usr/bin/python3 -I - "$xr/serve/status.json" "$xr/serve/models.json" "$XID" "$XSHA" <<'PY' | tee "$xr/identity.txt"
+import json, sys
+s = json.load(open(sys.argv[1]))
+try:
+    ids = [m.get("id") for m in json.load(open(sys.argv[2])).get("data") or []]
+except Exception:
+    ids = []
+ok = s.get("model") == sys.argv[3] and s.get("model_hash") == sys.argv[4] and sys.argv[3] in ids
+print("IDENTITY_STATUS model=%s model_hash=%s algorithm=%s models=%s %s" % (
+    s.get("model"), s.get("model_hash"), s.get("model_hash_algorithm"), ids, "ok" if ok else "MISMATCH"))
+sys.exit(0 if ok else 1)
+PY
+  [ "${PIPESTATUS[0]}" = 0 ] || blocker "extra $k: the serve does not report $XID with model_hash $XSHA"
+  ctx=$(/usr/bin/python3 -I -c 'import json,sys
+c=(json.load(open(sys.argv[1])).get("capacity") or {}).get("max_context_tokens"); print(c if isinstance(c,int) else 0)' \
+    "$xr/serve/status.json" 2>/dev/null || echo 0)
+  if [ "$ctx" -gt 0 ]; then
+    BUX_ARGS_X+=(--max-context-tokens "$ctx" --capture "$xr/buyer-ux-responses.jsonl")
+    "$PY_BUX" -B -I "$JOB/ablit-perf/buyer_ux_local.py" "${BUX_ARGS_X[@]}" > "$xr/buyer-ux.txt" 2>&1
+    rc=$?
+    while read -r l; do log "EXTRA_$k $l"; done < "$xr/buyer-ux.txt"
+    [ "$rc" = 0 ] || blocker "extra $k: buyer-UX gate failed (rc=$rc): $(grep -m1 '^BUX_GATE' "$xr/buyer-ux.txt" | cut -c1-400)"
+  else
+    blocker "extra $k: the serve reports no max_context_tokens for context_limit_error"
+  fi
+  grep -m1 'event=inference_error' "$xr/serve/serve.err" | cut -c1-400 | sed "s/^/INFERENCE_ERROR $k /"
+  stop_serve
+  SP=""
+}
+for k in $EXTRA_LIST; do run_extra "$k"; done
 
 [ "$FAILED" = 0 ] || { log "JOB_FAIL"; exit 1; }
 log "JOB_PASS"
