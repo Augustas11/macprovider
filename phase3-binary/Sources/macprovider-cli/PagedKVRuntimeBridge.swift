@@ -3036,8 +3036,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             // window; the window end is its one draining sync. Rows that need
             // host tokens before the next forward (drafter hidden capture,
             // batched model state) read each step before queuing the next.
-            // Hybrid rows pipeline too (#2444: a lone Qwen3.8-27B row decoded
-            // 13% slower unpipelined): a stop checkpoint is cut from the
+            // Hybrid rows pipeline too (#2444: a lone Qwen3.8-27B row went
+            // from 28.2 to 25.9 ms/token): a stop checkpoint is cut from the
             // recurrent state arrays the step itself produced, kept with the
             // step, not from the cache, which already holds the next step.
             var pipelined = captureIndices.isEmpty && !hasBatchedState
@@ -3205,7 +3205,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                 }
                 if pipelined {
-                    let next = sampled.reshaped([supportedInputs.count, 1])
+                    let next = Self.pipelinedTokenInput(sampled, rows: supportedInputs.count)
                     asyncEval(next)
                     deviceTokens = next
                     if let previous = pendingStep {
@@ -3351,6 +3351,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     /// True when a step left any recurrent layer's state array object the one
     /// it had before the step (an in-place update), or changed its layout.
+    /// The next step's token input, built on device from the sampler's
+    /// uint32 tokens. It is cast to int32, the dtype the host path feeds, so a
+    /// model that derives cache state from the token ids (Qwen4-Exp's n-gram
+    /// slot) keeps one slot dtype and a row prefilled later still packs.
+    static func pipelinedTokenInput(_ sampled: MLXArray, rows: Int) -> MLXArray {
+        sampled.reshaped([rows, 1]).asType(.int32)
+    }
+
     static func recurrentStateReused(before: [Int: [MLXArray]], after: [Int: [MLXArray]]) -> Bool {
         guard before.keys.sorted() == after.keys.sorted() else { return true }
         for (layer, arrays) in before {
