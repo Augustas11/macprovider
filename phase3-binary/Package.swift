@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.84 (#2409) on 3.32.3-macprovider.83: Six
+        // commits on 3.32.3-macprovider.83 add the native qwen4_exp /
+        // qwen4_exp_text text model (Qwen3.8-Flash-Next: QSA indexer,
+        // hyper-connections, PLE n-gram) and its batched decode, each row bit for bit
+        // its serial forward, with the rows' q/k norms, RoPE (one offset per
+        // row) and output gate run once across the rows. New model files, the
+        // two registry entries and their tests only; other model families are
+        // unchanged.
         // Tag 3.32.3-macprovider.83 (#2373) on 3.32.3-macprovider.81: Three
         // commits on 3.32.3-macprovider.81 (tag .82 is the first two and was
         // never pinned): TokenIterator evaluates only the token for the K/V
@@ -230,7 +238,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "a219eafe89323ac353b17f40e396e08cd10f9d7e"
+            revision: "ddc6f974355982773e1440957f16e998835408d0"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

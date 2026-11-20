@@ -5,6 +5,7 @@ usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
                           [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
+                          [--trials-by-rows 4=1] [--native-mtp-counters]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
 http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
@@ -34,6 +35,21 @@ keys its prefix cache only on that header. Every row record carries conversation
 --turn2-history verbatim re-sends the turn-1 assistant message with reasoning_content (the
 streamed reasoning text) next to content; content (default) sends content only. Turn-2 rows
 record turn2_history.
+
+request_tps = completion_tokens / (t_last - t0), t0 the request start: the
+request-level output tok/s (TTFT and decode tok/s are its two parts). Each row
+also records queue_ms (usage.macprovider_queue_ms) and its start and last-token
+times relative to the trial's first request start (start_offset_s,
+t_last_offset_s). The aggregate line holds aggregate_tps = total completion
+tokens / (last token of the last row - first request start), the trial's
+honest throughput whether its rows were batched or queued, and
+decode_overlap_rows (1: the rows were served one after another).
+
+--native-mtp-counters: the aggregate line also carries `native_mtp`, the change of the
+serve's /v1/status native_mtp counters over that trial (proposed/accepted/rejected tokens,
+target and MTP forwards, fallbacks, acceptance = accepted / proposed) and the mode,
+enabled flag and last_reason after it. `acceptance_valid` is false when the counters were
+reset during the trial (reset_generation changed) or the status was unreadable.
 """
 import argparse
 import hashlib
@@ -47,7 +63,13 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compare  # noqa: E402
 import prompts  # noqa: E402
+import route_status  # noqa: E402
+
+NATIVE_MTP_COUNTERS = ("proposed_tokens", "accepted_tokens", "rejected_tokens", "bonus_tokens", "committed_tokens",
+                       "target_forwards", "mtp_forwards", "preoutput_fallbacks", "postoutput_failures",
+                       "capacity_rejections", "requests_since_reset")
 
 
 def iter_sse_data(lines):
@@ -123,14 +145,16 @@ def completion_tokens_of(usage):
 
 
 def run_request(port, model, messages, max_tokens, stream_options=True, timeout=1800, host="127.0.0.1",
-                headers=None):
-    """`headers` adds request headers."""
+                headers=None, extra=None):
+    """`headers` adds request headers; `extra` adds request fields (reference_omlx.py: explicit
+    neutral sampling knobs)."""
     body = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": True,
+        **(extra or {}),
     }
     if stream_options:
         body["stream_options"] = {"include_usage": True}
@@ -155,8 +179,15 @@ def run_request(port, model, messages, max_tokens, stream_options=True, timeout=
     return result
 
 
-def row_record(res, base):
-    """Turn a run_request result into a JSONL row record."""
+def row_record(res, base, first_chunk_tokens=1, cell_t0=None):
+    """Turn a run_request result into a JSONL row record.
+
+    decode_tps = (completion_tokens - first_chunk_tokens) / (t_last - t_first): the
+    tokens that arrived after the first delta over the time they took. Our provider
+    streams one token per delta (first_chunk_tokens = 1). With cell_t0 (the earliest
+    request start of the trial) the record carries start_offset_s and t_last_offset_s,
+    from which compare.py computes a multi-row trial's aggregate tok/s and overlap.
+    """
     usage = res.get("usage") or {}
     ct = completion_tokens_of(usage)
     t_first, t_last, t0 = res.get("t_first"), res.get("t_last"), res["t0"]
@@ -165,15 +196,23 @@ def row_record(res, base):
     error = res.get("error")
     if error is None and not usage:
         error = "no usage frame (server may not honor stream_options)"
+    offsets = {}
+    if cell_t0 is not None:
+        offsets = {"start_offset_s": round(t0 - cell_t0, 4),
+                   "t_last_offset_s": round(t_last - cell_t0, 4) if t_last is not None else None}
     return {
         **base,
+        **offsets,
+        "queue_ms": usage.get("macprovider_queue_ms"),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": ct,
         "generated_completion_tokens": usage.get("macprovider_generated_completion_tokens"),
         "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
         "provider_generation_ms": usage.get("macprovider_generation_ms"),
-        "decode_tps": round((ct - 1) / span, 3) if ct and ct > 1 and span > 0 else None,
+        "decode_tps": (round((ct - first_chunk_tokens) / span, 3)
+                       if ct and ct > first_chunk_tokens and span > 0 else None),
         "ttft_s": round(t_first - t0, 4) if t_first is not None else None,
+        "request_tps": round(ct / (t_last - t0), 3) if ct and t_last is not None and t_last > t0 else None,
         "total_s": round(res["t_end"] - t0, 4),
         "chunks": res.get("chunks"),
         "finish": res.get("finish"),
@@ -189,25 +228,65 @@ def row_record(res, base):
 
 
 def aggregate_record(records, base):
-    """Aggregate tok/s across concurrent rows: sum(ct - 1) / (max t_last - min t_first)."""
+    """One trial's summary line (compare.trial_metrics over its row records).
+
+    aggregate_tps = total completion tokens / (last token of the last row - first request
+    start); decode_span_tps = sum(ct - 1) / (max t_last - min t_first), the earlier
+    aggregate, kept for reference; decode_overlap_rows = the most rows decoding at one
+    instant (1: served one after another).
+    """
     ok = [r for r in records if r["error"] is None and r["_t_first"] is not None and r["completion_tokens"]]
     per_row = [r["decode_tps"] for r in records]
-    agg = None
+    span_tps = None
     if len(ok) == len(records) and ok:
         span = max(r["_t_last"] for r in ok) - min(r["_t_first"] for r in ok)
         tokens = sum(r["completion_tokens"] - 1 for r in ok)
-        agg = round(tokens / span, 3) if span > 0 else None
+        span_tps = round(tokens / span, 3) if span > 0 else None
     valid = [x for x in per_row if x is not None]
+    req = [r.get("request_tps") for r in records]
+    timing = compare.trial_metrics(records)
     return {
         **base,
         "kind": "aggregate",
-        "aggregate_tps": agg,
+        "aggregate_tps": timing["aggregate_tps"],
+        "wall_s": timing["wall_s"],
+        "decode_span_tps": span_tps,
+        "decode_overlap_rows": timing["decode_overlap_rows"],
+        "serial_service": timing["serial_service"],
+        "queue_s_max": timing["queue_s_max"],
+        "queue_s_median": timing["queue_s_median"],
         "per_row_tps": per_row,
+        "per_row_request_tps": req,
+        "per_row_queue_ms": [r.get("queue_ms") for r in records],
         "per_row_min_tps": min(valid) if valid else None,
         "per_row_median_tps": round(statistics.median(valid), 3) if valid else None,
         "completion_tokens_sum": sum(r["completion_tokens"] or 0 for r in records),
         "errors": [r["error"] for r in records if r["error"]],
     }
+
+
+def native_mtp_of(status):
+    """The native_mtp object of a /v1/status snapshot, or None."""
+    nm = (status or {}).get("native_mtp")
+    return nm if isinstance(nm, dict) else None
+
+
+def native_mtp_delta(before, after):
+    """Counter change of one trial from two native_mtp status objects (either may be None)."""
+    if not before or not after:
+        return {"acceptance_valid": False, "reason": "status_unreadable"}
+    out = {"acceptance_valid": before.get("reset_generation") == after.get("reset_generation"),
+           "enabled": after.get("enabled"), "mode": after.get("mode"), "family": after.get("family"),
+           "proposal_depth": after.get("proposal_depth"), "last_reason": after.get("last_reason")}
+    if not out["acceptance_valid"]:
+        out["reason"] = "counters_reset_during_trial"
+        return out
+    for k in NATIVE_MTP_COUNTERS:
+        out[k] = (after.get(k) or 0) - (before.get(k) or 0)
+    out["acceptance"] = round(out["accepted_tokens"] / out["proposed_tokens"], 4) if out["proposed_tokens"] > 0 else None
+    out["mean_accepted_length"] = (round(out["accepted_tokens"] / out["mtp_forwards"], 4)
+                                   if out["mtp_forwards"] > 0 else None)
+    return out
 
 
 CONVERSATION_HEADER = "X-MacProvider-Provider-Conversation"
@@ -289,7 +368,8 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         **({"turn": 1} if turns == 2 else {}),
         "conversation_key_sent": conversation_header,
     }
-    records = [row_record(res, {**base, "kind": "row", "row": r}) for r, res in enumerate(results)]
+    cell_t0 = min(res["t0"] for res in results)
+    records = [row_record(res, {**base, "kind": "row", "row": r}, cell_t0=cell_t0) for r, res in enumerate(results)]
     agg = aggregate_record(records, base)
     for rec in records:
         rec.pop("_t_first")
@@ -320,12 +400,17 @@ def main(argv=None):
                     help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
     ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
+    ap.add_argument("--native-mtp-counters", action="store_true",
+                    help="record the change of the serve's native_mtp status counters per trial")
+    ap.add_argument("--trials-by-rows", default="",
+                    help="comma list ROWS=TRIALS overriding --trials for cells of that row count, e.g. 4=1")
     args = ap.parse_args(argv)
 
     grid = prompts.load_grid(args.grid)
     if args.rows:
         grid["rows"] = [int(x) for x in args.rows.split(",")]
     trials = args.trials or grid.get("trials", 3)
+    trials_by_rows = {int(k): int(v) for k, v in (x.split("=") for x in args.trials_by_rows.split(",") if x)}
     stream_options = not args.no_stream_options
 
     warm = run_request(args.port, args.model, prompts.build_messages(200, 9999),
@@ -337,16 +422,23 @@ def main(argv=None):
     failures = 0
     with open(args.out, "a") as out:
         for ctx, max_tokens, rows in prompts.expand_cells(grid, args.max_context):
-            for trial in range(trials):
+            for trial in range(trials_by_rows.get(rows, trials)):
+                mtp_before = native_mtp_of(route_status.fetch_status(args.port)) if args.native_mtp_counters else None
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
                                         rows, trial, stream_options, args.label, args.turns,
                                         args.conversation_header, args.turn2_history)
+                if args.native_mtp_counters:
+                    agg["native_mtp"] = native_mtp_delta(mtp_before, native_mtp_of(route_status.fetch_status(args.port)))
                 for rec in records + [agg]:
                     out.write(json.dumps(rec) + "\n")
                 out.flush()
                 failures += len(agg["errors"]) + sum(1 for r in records if r.get("turn") == 2 and r["error"])
                 print(f"ours ctx={ctx} out={max_tokens} rows={rows} trial={trial} "
-                      f"agg={agg['aggregate_tps']} per_row={agg['per_row_tps']} errors={agg['errors']}",
+                      f"agg={agg['aggregate_tps']} overlap={agg['decode_overlap_rows']} queue_max_s={agg['queue_s_max']} "
+                      f"per_row={agg['per_row_tps']} errors={agg['errors']}"
+                      + (f" mtp_proposed={agg['native_mtp'].get('proposed_tokens')} "
+                         f"mtp_accepted={agg['native_mtp'].get('accepted_tokens')} "
+                         f"acceptance={agg['native_mtp'].get('acceptance')}" if "native_mtp" in agg else ""),
                       file=sys.stderr)
     return 1 if failures else 0
 

@@ -215,10 +215,21 @@ enum PagedKVRuntimeParityProbe {
                 PagedKVCache.resetGatherDiagnostics()
                 var probeCaches: [KVCache] = []
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
-                    probeCaches = zip(stockLayout, kinds).map { _, kind in
-                        if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                    probeCaches = zip(stockLayout, kinds).map { stock, kind in
+                        // A fresh recurrent cache of the class the model built
+                        // (Qwen4-Exp PLE layers: a four-slot `ArraysCache`).
+                        if case .recurrentMamba = kind { return stock.copy() }
                         if case .pagedIndexedKV = kind {
                             return PagedMiniMaxM3SparseCache(
+                                blockSizeTokens: blockSizeTokens,
+                                maxPhysicalBlocks: maxPhysicalBlocks,
+                                poolEpoch: 1,
+                                binding: binding,
+                                reconstructViaGather: true
+                            ) as KVCache
+                        }
+                        if case .pagedQwen4ExpKV = kind {
+                            return PagedQwen4ExpSparseCache(
                                 blockSizeTokens: blockSizeTokens,
                                 maxPhysicalBlocks: maxPhysicalBlocks,
                                 poolEpoch: 1,
@@ -266,7 +277,7 @@ enum PagedKVRuntimeParityProbe {
                     nLayers: nLayers,
                     nNew: nNew,
                     nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
-                    gathersPerLayerForward: kinds.contains(.pagedIndexedKV) ? 3 : 2,
+                    gathersPerLayerForward: kinds.contains(where: \.isPagedIndexedKV) ? 3 : 2,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
                     nonIdentityPermutation: nonIdentity,
@@ -1307,7 +1318,7 @@ enum PagedKVRuntimeParityProbe {
     /// equal that token for token, without the recompute's near-tie tolerance.
     static func usesProductionIteratorReference(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Bool {
         guard let cacheKinds else { return false }
-        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(.pagedIndexedKV)
+        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(where: \.isPagedIndexedKV)
     }
 
     private static func serialContinuationReferences(

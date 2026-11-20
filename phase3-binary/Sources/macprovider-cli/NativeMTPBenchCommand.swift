@@ -2032,6 +2032,12 @@ struct NativeMTPBenchPolicy {
     /// it to the fixture family.
     var quantization: String = "4bit"
 
+    /// SPEC-048 MTP-15 preregistered exclusion rules: `none`, or
+    /// `single_token_identical_pair` (a block whose ordinary and native
+    /// records each committed exactly one token per request, the same token,
+    /// is judged by the hard gates but has no decode interval to measure).
+    static let allowedExclusionRules: Set<String> = ["none", "single_token_identical_pair"]
+
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
         let data = try Data(contentsOf: url)
         try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "policy")
@@ -2119,13 +2125,20 @@ struct NativeMTPBenchPolicy {
             "cache_mode": "paged_kv_mixed",
             "run_order": "seeded_random_counterbalanced",
             "prompt_corpus": "deterministic_synthetic_unique_v2",
-            "exclusion_rules": "none",
             "confidence_method": "paired_block_bootstrap_holm_v1",
         ]
         for (key, expected) in fixedMethodology {
             guard let actual = object[key] as? AnyHashable, actual == expected else {
                 throw NativeMTPBenchError.invalidPolicy("\(key) must equal \(expected)")
             }
+        }
+        // SPEC-048 MTP-15: the exclusion rule is preregistered. The bench
+        // applies none itself; the R015 analyzer reads the frozen value.
+        guard let exclusionRules = object["exclusion_rules"] as? String,
+              allowedExclusionRules.contains(exclusionRules) else {
+            throw NativeMTPBenchError.invalidPolicy(
+                "exclusion_rules must be one of \(allowedExclusionRules.sorted())"
+            )
         }
         guard policy.cell(id: policy.sustainedCellID) != nil else {
             throw NativeMTPBenchError.invalidPolicy("sustained_cell_id must match a matrix cell")

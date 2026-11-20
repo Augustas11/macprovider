@@ -44,9 +44,12 @@ def file_sha256(path: pathlib.Path) -> str:
 
 def snapshot_manifest_sha256(root: pathlib.Path) -> str:
     """macprovider.snapshot-manifest.v1: sorted regular single-link files, 'path\\nsize\\nsha\\n'."""
+    if (root / ".cache").is_dir():
+        # ModelArtifactVerifier.inspectCanonicalArtifact hashes every regular file, .cache/ included.
+        raise SystemExit(f"BLOCKER: {root}/.cache present: the provider hashes it; remove it from the lab copy")
     rows = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d != ".cache")
+        dirnames.sort()
         for name in filenames:
             p = pathlib.Path(dirpath) / name
             info = os.lstat(p)

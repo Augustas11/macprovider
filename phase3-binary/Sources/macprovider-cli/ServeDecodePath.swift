@@ -137,12 +137,14 @@ extension ModelRuntime {
             && cacheKinds.contains(.recurrentMamba)
     }
 
-    /// MiniMax M3 (`pagedIndexedKV`) rows prefill in the serial path's stride
+    /// MiniMax M3 (`pagedIndexedKV`) and Qwen4-Exp (`pagedQwen4ExpKV`) rows,
+    /// whose indexer selection depends on where a chunk starts, prefill in
+    /// the serial path's stride
     /// so a continuous batch matches a serial run of each row token for token.
     nonisolated static func schedulerFollowsSerialPrefillStride(
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Bool {
-        (backend as? PagedKVSharedForwardBackend)?.cacheKinds.contains(.pagedIndexedKV) ?? false
+        (backend as? PagedKVSharedForwardBackend)?.cacheKinds.contains(where: \.isPagedIndexedKV) ?? false
     }
 
     /// Decode steps per hop while a prompt prefills, scaled with the chunk so

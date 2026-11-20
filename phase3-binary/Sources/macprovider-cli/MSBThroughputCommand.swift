@@ -592,10 +592,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private static func msbCacheTopology(
         model: any LanguageModel
     ) throws -> (cacheKinds: [PagedKVSharedForwardBackend.CacheKind], recurrentStateLayout: PagedKVRecurrentStateLayout)? {
-        guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(
-            from: try model.newCache(parameters: nil)
-        ), !cacheKinds.isEmpty else {
+        let caches = try model.newCache(parameters: nil)
+        guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(from: caches), !cacheKinds.isEmpty else {
             return nil
+        }
+        // Qwen4-Exp: the PLE layers are the ones the loaded model gives a
+        // four-slot `ArraysCache` (every other recurrent layer a `MambaCache`).
+        if model is Qwen4ExpModel || model is Qwen4ExpTextModel {
+            let pleLayers = caches.indices.filter { type(of: caches[$0]) == ArraysCache.self }
+            return (cacheKinds, .qwen4ExpPLEFourSlot(pleLayers: pleLayers))
         }
         return (cacheKinds, labRecurrentStateLayout(model: model, cacheKinds: cacheKinds))
     }
@@ -618,7 +623,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
-        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(.pagedIndexedKV) { return "mixed" }
+        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(where: \.isPagedIndexedKV) { return "mixed" }
         if cacheKinds.contains(.recurrentMamba) { return "mixed" }
         let sliding = cacheKinds.filter(\.hasSlidingWindow)
         guard !sliding.isEmpty else { return "KVCacheSimple" }
@@ -947,7 +952,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
-                serialPrefillStride: cacheKinds.contains(.pagedIndexedKV),
+                serialPrefillStride: cacheKinds.contains(where: \.isPagedIndexedKV),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,

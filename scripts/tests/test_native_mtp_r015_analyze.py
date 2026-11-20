@@ -1115,6 +1115,174 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(len(result["combined_holm"]["failures"]), 35)
         self.assertEqual({item["run"] for item in result["combined_holm"]["failures"]}, {"prior", "extension"})
 
+    # SPEC-048 MTP-15 `single_token_identical_pair`. The shape is the bench's
+    # record for a request that stopped after its first token (Qwen3.8-27B
+    # s1-p32768-o128 block 9, 2026-11-19): no decode interval on either path.
+    SINGLE_CELL = "s1-p1536-o128"
+
+    @staticmethod
+    def _single_tokenize(record, token=3897, digest="a" * 64):
+        record.update({
+            "committed_completion_tokens": 1,
+            "aggregate_decode_tps": None,
+            "per_request_decode_tps": [None],
+            "inter_token_gap_p50_seconds": None,
+            "inter_token_gap_p95_seconds": None,
+            "raw_inter_token_gaps_seconds": [[]],
+            "request_metrics": [{
+                "request_id": f"c-b{record['block_index']}-r0", "completion_tokens": 1, "decode_tps": None,
+                "inter_token_gaps_seconds": [], "output_token_ids": [token], "content_sha256": digest,
+            }],
+        })
+        if record["path"] == "native_mtp":
+            record.update({"mtp_proposed_tokens": 1, "mtp_accepted_tokens": 1, "mtp_accepted_by_position": [1],
+                           "target_forwards": 1, "target_forwards_per_committed_token": 1})
+
+    def _single_token_case(self, *, rule="single_token_identical_pair", blocks=11, single_blocks=(3,),
+                           ordinary=None, native=None, fmt="json"):
+        """Blocks in `single_blocks` of SINGLE_CELL emit one token on both
+        paths; `ordinary`/`native` mutate those records afterwards."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(
+                Path(tmp), blocks_written=blocks, policy_overrides={"blocks": blocks, "exclusion_rules": rule},
+            )
+            records = [json.loads(line) for line in jsonl_path.read_text("utf-8").splitlines()]
+            for record in records:
+                if (record.get("cell_id") == self.SINGLE_CELL and record.get("record_type") == "run"
+                        and not record.get("sustained") and record.get("block_index") in single_blocks):
+                    self._single_tokenize(record)
+                    mutate = ordinary if record["path"] == "ordinary" else native
+                    if mutate:
+                        mutate(record)
+            jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
+            if fmt == "markdown":
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main([str(jsonl_path), str(policy_path), "--format", "markdown"])
+                return out.getvalue()
+            return analyze(jsonl_path, policy_path)
+
+    def test_single_token_identical_pair_is_excluded_from_decode_statistics(self):
+        result = self._single_token_case()
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertEqual(result["exclusion_rules"], "single_token_identical_pair")
+        cell = self._cell(result, self.SINGLE_CELL)
+        self.assertEqual(cell["hard_failures"], [])
+        self.assertEqual(cell["excluded_single_token_blocks"], [3])
+        self.assertEqual(cell["measurable_blocks"], 10)
+        self.assertEqual(cell["paired_blocks"], 11)
+        other = self._cell(result, "s1-p1536-o512")
+        self.assertEqual((other["excluded_single_token_blocks"], other["measurable_blocks"]), ([], 11))
+        self.assertIn("| s1-p1536-o128 | PASS | 11 (1 excl)/11 |", self._single_token_case(fmt="markdown"))
+
+    def test_single_token_rule_still_needs_ten_measurable_blocks(self):
+        result = self._single_token_case(blocks=10, single_blocks=(9,))
+        self.assertEqual(result["overall_status"], "FAIL")
+        cell = self._cell(result, self.SINGLE_CELL)
+        self.assertEqual(cell["hard_failures"], ["insufficient_measurable_blocks: 9/10"])
+        self.assertEqual(cell["excluded_single_token_blocks"], [9])
+        two = self._single_token_case(blocks=11, single_blocks=(2, 7))
+        self.assertIn("insufficient_measurable_blocks: 9/10", self._cell(two, self.SINGLE_CELL)["hard_failures"])
+
+    def test_none_policy_keeps_failing_single_token_records_and_adds_no_fields(self):
+        result = self._single_token_case(rule="none", blocks=10, single_blocks=(9,))
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertNotIn("exclusion_rules", result)
+        cell = self._cell(result, self.SINGLE_CELL)
+        self.assertNotIn("excluded_single_token_blocks", cell)
+        self.assertNotIn("measurable_blocks", cell)
+        self.assertTrue(any(item.startswith("invalid_run_record:native_mtp:9:") for item in cell["hard_failures"]))
+        self.assertTrue(any(item.startswith("invalid_run_record:ordinary:9:") for item in cell["hard_failures"]))
+
+    def test_single_token_rule_does_not_hide_anything_else(self):
+        def set_fields(**fields):
+            return lambda record: record.update(fields)
+
+        def set_request(**fields):
+            return lambda record: record["request_metrics"][0].update(fields)
+
+        def two_tokens(record):
+            record["committed_completion_tokens"] = 2
+            record["request_metrics"][0]["completion_tokens"] = 2
+
+        def restore_decode(record):
+            # One-sided: the ordinary path decoded normally.
+            record.update({
+                "committed_completion_tokens": 100, "aggregate_decode_tps": 100.0, "per_request_decode_tps": [100.0],
+                "inter_token_gap_p50_seconds": 0.009, "inter_token_gap_p95_seconds": 0.010,
+                "raw_inter_token_gaps_seconds": [[0.010] * 100],
+            })
+            record["request_metrics"] = [{
+                "request_id": record["request_metrics"][0]["request_id"], "completion_tokens": 129,
+                "decode_tps": 100.0, "inter_token_gaps_seconds": [0.010] * 100,
+            }]
+
+        cases = {
+            "different_token": (None, set_request(output_token_ids=[11])),
+            "different_content": (None, set_request(content_sha256="b" * 64)),
+            "missing_token_ids": (None, set_request(output_token_ids=None)),
+            "one_sided_single_token": (restore_decode, None),
+            "zero_tokens": (set_fields(committed_completion_tokens=0), set_fields(committed_completion_tokens=0)),
+            "zero_token_requests": (set_request(completion_tokens=0), set_request(completion_tokens=0)),
+            "two_tokens_claimed": (two_tokens, two_tokens),
+            "native_error": (None, set_fields(errors=1)),
+            "ordinary_fallback": (set_fields(fallbacks=1), None),
+            "parity_mismatch": (None, set_fields(parity_mismatch=True)),
+            "fabricated_decode_rate": (None, set_fields(aggregate_decode_tps=5.0)),
+            "fabricated_request_rate": (None, set_request(decode_tps=5.0)),
+            "other_field_invalid": (None, set_fields(ttft_p95_seconds=None)),
+        }
+        for name, (ordinary, native) in cases.items():
+            with self.subTest(case=name):
+                result = self._single_token_case(ordinary=ordinary, native=native)
+                self.assertEqual(result["overall_status"], "FAIL")
+                cell = self._cell(result, self.SINGLE_CELL)
+                self.assertEqual(cell["excluded_single_token_blocks"], [])
+                self.assertNotEqual(cell["hard_failures"], [])
+
+    def test_excluded_blocks_still_feed_the_hard_gates(self):
+        def set_fields(**fields):
+            return lambda record: record.update(fields)
+
+        cases = {
+            "non_native_admissions": set_fields(non_native_admissions=1),
+            "no_native_admissions": set_fields(native_admissions=0),
+            "no_proposed_tokens": set_fields(mtp_proposed_tokens=0),
+            "no_target_forwards": set_fields(target_forwards=0),
+            "low_available_memory": set_fields(min_available_memory_fraction=0.0001),
+        }
+        for name, native in cases.items():
+            with self.subTest(case=name):
+                result = self._single_token_case(native=native)
+                self.assertEqual(result["overall_status"], "FAIL")
+                cell = self._cell(result, self.SINGLE_CELL)
+                self.assertEqual(cell["excluded_single_token_blocks"], [3])
+                self.assertEqual(cell["status"], "FAIL")
+
+    def test_none_policy_runs_fail_digest_under_rule_enabled_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(
+                Path(tmp), blocks_written=11, policy_overrides={"blocks": 11, "exclusion_rules": "none"},
+            )
+            policy = json.loads(policy_path.read_text("utf-8"))
+            policy["exclusion_rules"] = "single_token_identical_pair"
+            policy_path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
+            result = analyze(jsonl_path, policy_path)
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "policy_digest_mismatch")
+
+    def test_exclusion_rules_are_a_closed_preregistered_set(self):
+        for value in ("none", "single_token_identical_pair"):
+            with self.subTest(value=value):
+                self.assertNotIn(
+                    "methodology_not_frozen:exclusion_rules",
+                    analyzer._policy_contract_violations({"exclusion_rules": value}),
+                )
+        for value in ("", "single_token", None, True, 1):
+            with self.subTest(value=value):
+                result = self._run_case(policy_overrides={"exclusion_rules": value})
+                self.assertIn("methodology_not_frozen:exclusion_rules", result["matrix_violations"])
+
     _DELETE = object()
 
     @staticmethod

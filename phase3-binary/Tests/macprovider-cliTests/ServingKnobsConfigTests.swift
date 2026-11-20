@@ -837,6 +837,18 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(lfm3.modelFamily, "lfm3")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(lfm3.modelFamily))
 
+        // Qwen3.8-Flash-Next (#2409) is labelled apart from `qwen`. It is a
+        // paged-KV family, but a config without the verified layer layout
+        // stays unverified, so attach fails closed on the cache class.
+        let qwen4Exp = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp",
+            configJSONData: Data(#"{"model_type":"qwen4_exp","architectures":["Qwen4ExpForConditionalGeneration"],"text_config":{"model_type":"qwen4_exp_text"}}"#.utf8)
+        )
+        XCTAssertEqual(qwen4Exp.modelFamily, "qwen4_exp")
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains(qwen4Exp.modelFamily))
+        XCTAssertFalse(qwen4Exp.hybridDecoderArchitectureVerified)
+        XCTAssertNil(qwen4Exp.qwen4ExpAttention)
+
         // DeepSeek V4-Flash has its own row-owned pool bridge. Recognizing
         // the family never admits an unverified raw artifact or layout;
         // V4.1 (`deepseek_v41`) is a different model.
@@ -3118,7 +3130,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             ModelRuntime.residentWeightsTicket(
                 modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended, residentBytes: recommended + 1)?.size,
             recommended, "MLX rejects a wired limit above the working set")
-        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "lfm3", "unknown"] {
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "lfm3", "qwen4_exp", "unknown"] {
             XCTAssertNil(
                 ModelRuntime.residentWeightsTicket(
                     modelFamily: family, recommendedWorkingSetBytes: recommended, residentBytes: weights),

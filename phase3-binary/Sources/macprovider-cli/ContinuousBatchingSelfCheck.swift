@@ -252,9 +252,13 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
 enum ContinuousBatchingSelfCheck {
     /// SPEC-038 FR-CB14 MSB-03 bar: batching must beat serial by more than 20%.
     static let minimumAggregateGain = 1.2
-    /// Lowest slot count within this fraction of the best aggregate wins, as in
-    /// the SPEC-023-R009 concurrency calibration (memory-risk posture).
-    static let tieBandFraction = AutotuneConcurrencyCalibrator().minAggregateGainFraction
+    /// Lowest slot count within this fraction of the best aggregate wins. Widths
+    /// reaching selection are already memory-bounded (AutoServedSlots) and verified
+    /// exact, so the band only absorbs measurement noise. Repeated same-window
+    /// one-row decode runs on an M3 Ultra (GLM-5.3-Flash, 512 tokens) spread
+    /// 0.4-0.6%, and the measured 2/3/4-row steps differ by 9-12%; the
+    /// calibrator's own 0.15 tie band is unchanged for its other uses.
+    static let widthSelectionNoiseBand = 0.03
     static let maxOutputTokens = 48
     static let serialBaselinePrompts = 4
 
@@ -715,7 +719,7 @@ enum ContinuousBatchingSelfCheck {
                     passed: true
                 )
             },
-            minAggregateGainFraction: tieBandFraction
+            minAggregateGainFraction: widthSelectionNoiseBand
         )
         return .init(slots: slots, reason: "granted", verifiedSlots: verified)
     }

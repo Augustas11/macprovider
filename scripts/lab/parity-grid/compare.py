@@ -4,6 +4,9 @@
 usage: compare.py --ref ref.jsonl --ours ours.jsonl [--floor 0.03] [--json summary.json]
                   [--text-fallback-reason "why byte identity cannot hold"]
                   [--margins margins.json] [--tie-steps 2]
+                  [--reference-failed "first error line"]
+       compare.py --baseline main-provider.jsonl --ours candidate-provider.jsonl
+                  [--subset] [--floor 0.03] [--json summary.json]
 
 Prints a markdown grid table, writes a JSON summary (stdout when --json is not
 given, after the table), and exits 1 when any cell fails, 2 on unusable input.
@@ -30,12 +33,44 @@ Rules (see README.md):
   slope      : per (model, ctx, rows), for consecutive output lengths a < b:
                FAIL when ours(b)/ours(a) < ref(b)/ref(a) * (1 - band(a, b))
 Reference cells the provider run never produced are listed as "not run" and
-excluded from pass/fail; provider cells without a reference still FAIL.
-Multi-row cells score aggregate tok/s against the single-row reference
-(serial stock mlx-lm); per-row tok/s ratios are reported, not gated.
+excluded from pass/fail; provider cells without a reference still FAIL (text
+status `no_reference` when none of the cell's rows has one).
+--reference-failed REASON: the reference run failed; --ref may be missing or
+hold only the rows written before the failure. The table and JSON are still
+written for every provider cell, headed by the reason (JSON `reference_failed`).
+The ratio and slope use decode tok/s for a one-row cell. A multi-row cell
+uses aggregate tok/s = total completion tokens / (last token of the last row -
+first request start), per trial, against the single-row reference's request
+tok/s (both count prefill); per-row tok/s ratios are reported, not gated.
+A reference file that also holds rows > 1 (reference_mlxlm.py --batched: kind row lines with
+rows N and one kind aggregate line per trial) scores each multi-row cell against that batched run:
+aggregate tok/s against the reference's aggregate tok/s, and every row's text and token count
+against the batched row of the same prompt. Cells without such lines use the single-row reference.
+Request starts and last-token times come from the rows (start_offset_s,
+t_last_offset_s; older rows: a common start and completion_tokens /
+request_tps). A multi-row cell whose rows never decoded at the same instant in
+any trial is service `serial` (queued one after another), noted and labelled
+SERIAL in the table: it measures queueing, not batching.
+
+Reported, never gated: the goal metric (ours_goal_tps: request tok/s for one
+row, aggregate tok/s for several) and its ratio to the reference's request
+tok/s; per-request output tok/s (request_tps = completion_tokens / (last
+token time - request start), median over rows and trials) with its ratio;
+median TTFT on both sides; our queue wait (usage.macprovider_queue_ms: max over
+the cell and median) and TTFT excluding it.
+
+--baseline mode compares two provider runs (a candidate build against the
+main build): every (cell, trial, row) of the candidate must equal the
+baseline's trial-0 row of the same cell and prompt row in text,
+reasoning_text and completion_tokens; any difference, error or missing cell
+exits 1 (--subset: baseline cells the candidate did not run are listed, not
+failed). It prints per cell the goal-metric tok/s (request tok/s for one
+row, aggregate tok/s for several), decode tok/s and TTFT medians, the request tok/s delta against the baseline and both runs' trial
+spread (noise), without gating on speed.
 """
 import argparse
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
@@ -85,10 +120,29 @@ def first_diff(a, b):
 def index_reference(lines):
     ref = defaultdict(list)
     for r in lines:
-        if r.get("kind", "row") != "row":
+        if r.get("kind", "row") != "row" or (r.get("rows") or 1) > 1:
             continue
         ref[(r["model"], r["ctx_target"], r["max_tokens"], r["row"])].append(r)
     return ref
+
+
+def index_batched_reference(lines):
+    """Reference lines of a batched run (reference_mlxlm.py --batched): rows > 1.
+
+    Returns ({(model, ctx, out, rows, row): [row records]}, {(model, ctx, out, rows): [aggregate
+    records, one per trial]}). Each aggregate holds aggregate_tps, the same definition as the
+    provider's: total completion tokens / (last token of the last row - first request start).
+    """
+    rows, aggs = defaultdict(list), defaultdict(list)
+    for r in lines:
+        n = r.get("rows") or 1
+        if n <= 1:
+            continue
+        if r.get("kind") == "aggregate":
+            aggs[(r["model"], r["ctx_target"], r["max_tokens"], n)].append(r)
+        elif r.get("kind", "row") == "row":
+            rows[(r["model"], r["ctx_target"], r["max_tokens"], n, r["row"])].append(r)
+    return rows, aggs
 
 
 def index_ours(lines):
@@ -105,13 +159,98 @@ def index_ours(lines):
     return rows, aggs, meta
 
 
-def ours_scores(rows, aggs, nrows):
-    """Aggregate tok/s per trial."""
-    if aggs:
-        return [a.get("aggregate_tps") for a in sorted(aggs, key=lambda a: a["trial"])]
+# Decode spans closer than this are not counted as overlapping (stream timing jitter).
+OVERLAP_EPS_S = 0.05
+
+
+def queue_s(r):
+    """The provider's queue wait for one row in seconds (usage.macprovider_queue_ms), or None."""
+    q = r.get("queue_ms")
+    if q is None:
+        q = (r.get("usage") or {}).get("macprovider_queue_ms")
+    return q / 1000 if isinstance(q, (int, float)) else None
+
+
+def row_times(r):
+    """(start, first token, last token) of one row in seconds from its trial's start, or None.
+
+    The client writes start_offset_s and t_last_offset_s. Rows written before those fields
+    existed were released together from one barrier, so their start is 0 and their last
+    token is at completion_tokens / request_tps.
+    """
+    start = r.get("start_offset_s") or 0.0
+    last = r.get("t_last_offset_s")
+    if last is None:
+        ct, req = r.get("completion_tokens"), r.get("request_tps")
+        if not ct or not req:
+            return None
+        last = start + ct / req
+    ttft = r.get("ttft_s")
+    return start, (start + ttft if ttft is not None else None), last
+
+
+def max_overlap(spans, eps=OVERLAP_EPS_S):
+    """Most (first, last) decode spans in progress at one instant; at least 1 for any span."""
+    events = []
+    for first, last in spans:
+        if last - first > 2 * eps:
+            events += [(first + eps, 1), (last - eps, -1)]
+    events.sort(key=lambda e: (e[0], e[1]))
+    depth = best = 0
+    for _, step in events:
+        depth += step
+        best = max(best, depth)
+    return max(best, 1) if spans else 0
+
+
+def trial_metrics(rows):
+    """Timing of one trial of one cell (its rows sent at once).
+
+    aggregate_tps = total completion tokens / (last token of the last row - first request
+    start): the honest tok/s of a multi-row trial, whether its rows were batched or queued.
+    decode_overlap_rows = the most rows decoding at one instant; 1 means the rows were served
+    one after another (serial service). Queue wait is usage.macprovider_queue_ms; TTFT
+    excluding queue = ttft_s - queue wait.
+    """
+    out = {"aggregate_tps": None, "wall_s": None, "decode_overlap_rows": None, "serial_service": None}
+    queues = [queue_s(r) for r in rows]
+    qs = [q for q in queues if q is not None]
+    out["queue_s_max"] = round(max(qs), 3) if qs else None
+    out["queue_s_median"] = round(statistics.median(qs), 3) if qs else None
+    ttft_ex = [r["ttft_s"] - q for r, q in zip(rows, queues) if r.get("ttft_s") is not None and q is not None]
+    out["ttft_excl_queue_s"] = ttft_ex
+    times = [row_times(r) for r in rows]
+    if not rows or any(r.get("error") for r in rows) or None in times:
+        return out
+    wall = max(t[2] for t in times) - min(t[0] for t in times)
+    if wall > 0:
+        out["aggregate_tps"] = round(sum(r["completion_tokens"] for r in rows) / wall, 3)
+        out["wall_s"] = round(wall, 4)
+    if all(t[1] is not None for t in times):
+        out["decode_overlap_rows"] = max_overlap([(t[1], t[2]) for t in times])
+        out["serial_service"] = len(rows) > 1 and out["decode_overlap_rows"] <= 1
+    return out
+
+
+def by_trial(rows):
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r["trial"]].append(r)
+    return [groups[t] for t in sorted(groups)]
+
+
+def ours_goal_scores(rows, nrows):
+    """The goal metric per trial: request tok/s for one row, aggregate tok/s for several."""
+    if nrows == 1:
+        return [r.get("request_tps") for r in sorted(rows, key=lambda r: r["trial"])]
+    return [trial_metrics(rs)["aggregate_tps"] for rs in by_trial(rows)]
+
+
+def ours_scores(rows, nrows):
+    """The gated tok/s per trial: decode tok/s for one row, aggregate tok/s for several."""
     if nrows == 1:
         return [r.get("decode_tps") for r in sorted(rows, key=lambda r: r["trial"])]
-    return []
+    return ours_goal_scores(rows, nrows)
 
 
 def load_margins(path):
@@ -196,11 +335,13 @@ def evaluate_turn2(ref_lines, our_lines):
     return {"cells": cells, "pass": all(c["pass"] for c in cells)}
 
 
-def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margins=None, tie_steps=2.0):
+def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margins=None, tie_steps=2.0,
+             reference_failed=None):
     turn2 = evaluate_turn2(ref_lines, our_lines)
     ref_lines = [r for r in ref_lines if not is_turn2(r)]
     our_lines = [r for r in our_lines if not is_turn2(r)]
     ref = index_reference(ref_lines)
+    bref, baggs = index_batched_reference(ref_lines)
     ours_rows, ours_aggs, cells_meta = index_ours(our_lines)
     cells = {}
 
@@ -212,14 +353,71 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
             "reasons": [], "notes": [],
         }
         cells[key] = cell
-        base = [r for r in ref.get((model, ctx, out, 0), []) if not r.get("error")]
-        scores = ours_scores(rows, ours_aggs.get(key, []), nrows)
-        ref_scores = [r.get("decode_tps") for r in base]
+        # A multi-row cell with a batched reference (rows > 1 in the reference file) is scored
+        # against that: its aggregate tok/s and its per-row texts. Without one, the single-row
+        # reference stands in as before.
+        batched = nrows > 1 and key in baggs
+
+        def ref_of(prow):
+            return bref.get((model, ctx, out, nrows, prow), []) if batched else ref.get((model, ctx, out, prow), [])
+
+        cell["reference"] = "mlx-lm batched" if batched else "single-row"
+        base = [r for r in ref_of(0) if not r.get("error")]
+        # One row: decode tok/s against the reference's. Several rows: aggregate tok/s
+        # (total tokens / wall time from the first request start) against the single-row
+        # reference's request tok/s, which also counts its prefill.
+        cell["tps_metric"] = "decode_tps" if nrows == 1 else "aggregate_tps"
+        scores = ours_scores(rows, nrows)
+        if batched:
+            ref_scores = [a.get("aggregate_tps") for a in baggs[key]]
+        else:
+            ref_scores = [r.get("decode_tps" if nrows == 1 else "request_tps") for r in base]
         cell["ours_trials"] = scores
         cell["ref_trials"] = ref_scores
         cell["ours_tps"] = median(scores)
         cell["ref_tps"] = median(ref_scores)
         cell["band"] = round(max(floor, noise(scores), noise(ref_scores)), 4)
+        # Reported only. Goal metric: request tok/s for one row, aggregate tok/s for
+        # several; per-request tok/s (median over rows and trials) and decode tok/s are parts.
+        cell["ours_goal_trials"] = ours_goal_scores(rows, nrows)
+        cell["ref_request_trials"] = [r.get("request_tps") for r in base]
+        cell["ours_goal_tps"] = median(cell["ours_goal_trials"])
+        cell["ref_request_tps"] = median(cell["ref_request_trials"])
+        ref_goal = cell["ref_tps"] if batched else cell["ref_request_tps"]  # batched reference: its aggregate
+        cell["goal_ratio"] = (round(cell["ours_goal_tps"] / ref_goal, 4)
+                              if cell["ours_goal_tps"] and ref_goal else None)
+        cell["ours_request_tps"] = median(r.get("request_tps") for r in rows)
+        cell["request_ratio"] = (round(cell["ours_request_tps"] / cell["ref_request_tps"], 4)
+                                 if cell["ours_request_tps"] and cell["ref_request_tps"] else None)
+        cell["ours_decode_tps"] = median(r.get("decode_tps") for r in rows)
+        cell["ref_decode_tps"] = median(r.get("decode_tps") for r in base)
+        cell["ours_ttft_s"] = median(r.get("ttft_s") for r in rows)
+        cell["ref_ttft_s"] = median(r.get("ttft_s") for r in base)
+        cell["ours_noise"] = round(noise(scores), 4)
+        cell["ref_noise"] = round(noise(ref_scores), 4)
+        cell["ours_goal_noise"] = round(noise(cell["ours_goal_trials"]), 4)
+        cell["ref_request_noise"] = round(noise(cell["ref_request_trials"]), 4)
+        timing = [trial_metrics(rs) for rs in by_trial(rows)]
+        qmax = [t["queue_s_max"] for t in timing if t["queue_s_max"] is not None]
+        cell["ours_queue_s_max"] = max(qmax) if qmax else None
+        cell["ours_queue_s_median"] = median(t["queue_s_median"] for t in timing)
+        cell["ours_ttft_excl_queue_s"] = median(x for t in timing for x in t["ttft_excl_queue_s"])
+        cell["service"] = None
+        if nrows > 1:
+            overlap = [t["decode_overlap_rows"] for t in timing if t["decode_overlap_rows"] is not None]
+            cell["decode_overlap_rows"] = max(overlap) if overlap else None
+            serial = [t["serial_service"] for t in timing if t["serial_service"] is not None]
+            if serial:
+                cell["service"] = "serial" if all(serial) else "batched" if not any(serial) else "mixed"
+            if cell["service"] in ("serial", "mixed"):
+                cell["notes"].append(
+                    f"{cell['service']} service: in {sum(serial)} of {len(serial)} trials the rows never "
+                    "decoded together (queued one after another), so this cell measures queueing, not batching")
+        first = min(rows, key=lambda r: (r["trial"], r["row"])) if rows else {}
+        cell["prompt_tokens"] = first.get("prompt_tokens")
+        cell["completion_tokens"] = first.get("completion_tokens")
+        cell["ref_prompt_tokens"] = base[0].get("prompt_tokens") if base else None
+        cell["ref_completion_tokens"] = base[0].get("completion_tokens") if base else None
         cell["ratio"] = None
         cell["ratio_ok"] = False
         if not base:
@@ -244,7 +442,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
             per_row.setdefault(r["row"], []).append(r.get("decode_tps"))
         cell["per_row_ratio"] = {}
         for prow, xs in sorted(per_row.items()):
-            rref = median(x.get("decode_tps") for x in ref.get((model, ctx, out, prow), []))
+            rref = median(x.get("decode_tps") for x in ref_of(prow))
             m = median(xs)
             cell["per_row_ratio"][str(prow)] = round(m / rref, 4) if m and rref else None
         if nrows > 1:
@@ -254,16 +452,18 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
         text_ok = tokens_ok = prompt_ok = True
         cell["first_text_diff"] = None
         ties, not_comparable = [], []
+        no_ref = 0
         for r in sorted(rows, key=lambda r: (r["trial"], r["row"])):
             where = f"trial {r['trial']} row {r['row']}"
             if r.get("error"):
                 cell["reasons"].append(f"{where}: error {r['error']}")
                 tokens_ok = False
                 continue
-            rref = [x for x in ref.get((model, ctx, out, r["row"]), []) if not x.get("error")]
+            rref = [x for x in ref_of(r["row"]) if not x.get("error")]
             if not rref:
                 cell["reasons"].append(f"{where}: missing single-row reference for prompt row {r['row']}")
                 text_ok = tokens_ok = False
+                no_ref += 1
                 continue
             want = rref[0]
             off = None
@@ -307,7 +507,9 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
                 cell["first_text_diff"] = {"trial": r["trial"], "row": r["row"], "byte_offset": off}
             if text_fallback_reason is None:
                 cell["reasons"].append(f"{where}: text differs from reference at byte {off}")
-        if not text_ok and text_fallback_reason is not None and cell["first_text_diff"]:
+        if no_ref and no_ref == sum(1 for r in rows if not r.get("error")):
+            cell["text_gate"] = "no_reference"
+        elif not text_ok and text_fallback_reason is not None and cell["first_text_diff"]:
             cell["text_gate"] = "fallback_token_count"
             cell["notes"].append(
                 f"text differs at byte {cell['first_text_diff']['byte_offset']}; "
@@ -377,6 +579,7 @@ def evaluate(ref_lines, our_lines, floor=0.03, text_fallback_reason=None, margin
     return {
         **extra,
         "floor": floor,
+        "reference_failed": reference_failed,
         "text_fallback_reason": text_fallback_reason,
         "tie_steps": tie_steps,
         "cells": result_cells,
@@ -398,15 +601,45 @@ def text_label(c):
     return c["text_gate"]
 
 
+def service_label(c):
+    """`-` for one row; for several: batched (most rows decoding together) or SERIAL (queued)."""
+    if c["rows"] == 1:
+        return "-"
+    if c.get("service") == "batched":
+        return f"batched ({c.get('decode_overlap_rows')})"
+    if c.get("service") in ("serial", "mixed"):
+        return f"{c['service'].upper()} (queued)"
+    return "unknown"
+
+
+METRIC_LABEL = {"decode_tps": "decode", "aggregate_tps": "aggregate vs ref request"}
+
+
 def markdown(summary):
-    lines = [
-        "| model | ctx | out | rows | ref tok/s | ours tok/s | ratio | band | text | tokens | slope | status |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
+    lines = []
+    if summary.get("reference_failed"):
+        lines += [f"REFERENCE FAILED: {summary['reference_failed']}. Reference columns are empty where it "
+                  "wrote no rows; those cells fail for want of a reference.", ""]
+    lines += [
+        "Gated tok/s: one row, decode tok/s vs the reference's; several rows, aggregate tok/s (total "
+        "tokens / (last token of the last row - first request start)) vs the single-row reference's "
+        "request tok/s (a cell with a batched reference, reference_mlxlm.py --batched: vs that run's aggregate "
+        "tok/s, same definition). Per-request tok/s is the median over rows and trials; queue = macprovider_queue_ms.",
+        "",
+        "| model | ctx | out | rows | service | gated metric | ref tok/s | ours tok/s | ratio | band "
+        "| ref req tok/s | ours per-request tok/s | per-request ratio | ours queue max s "
+        "| ref ttft s | ours ttft s | ours ttft excl queue s | text | tokens | slope | status |",
+        "|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
     ]
     for c in summary["cells"]:
         lines.append(
-            f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c['ref_tps'])} | "
+            f"| {c['model']} | {c['ctx']} | {c['out']} | {c['rows']} | {service_label(c)} | "
+            f"{'aggregate vs batched ref' if c.get('reference') == 'mlx-lm batched' else METRIC_LABEL.get(c.get('tps_metric'), '-')} | {fmt(c['ref_tps'])} | "
             f"{fmt(c['ours_tps'])} | {fmt(c['ratio'], '.3f')} | {fmt(c['band'], '.3f')} | "
+            f"{fmt(c.get('ref_request_tps'))} | {fmt(c.get('ours_request_tps'))} | "
+            f"{fmt(c.get('request_ratio'), '.3f')} | {fmt(c.get('ours_queue_s_max'), '.3f')} | "
+            f"{fmt(c.get('ref_ttft_s'), '.3f')} | {fmt(c.get('ours_ttft_s'), '.3f')} | "
+            f"{fmt(c.get('ours_ttft_excl_queue_s'), '.3f')} | "
             f"{text_label(c)} | {'ok' if c['tokens_ok'] else 'FAIL'} | "
             f"{'ok' if c['slope_ok'] else 'FAIL'} | {'PASS' if c['pass'] else 'FAIL'} |")
     if summary["not_run"]:
@@ -441,9 +674,130 @@ def markdown(summary):
     return "\n".join(lines)
 
 
+def evaluate_baseline(base_lines, cand_lines, floor=0.03, subset=False):
+    """Candidate provider run vs a baseline provider run: identity gate, speed deltas reported."""
+    def index(lines):
+        rows, aggs, _ = index_ours(lines)
+        out = {}
+        for key in set(rows) | set(aggs):
+            out[key[1:]] = (key[0], rows.get(key, []), aggs.get(key, []))
+        return out
+
+    base, cand = index(base_lines), index(cand_lines)
+    cells, not_run = [], []
+    for key in sorted(set(base) | set(cand)):
+        ctx, out, nrows = key
+        if key not in cand and subset:
+            not_run.append({"ctx": ctx, "out": out, "rows": nrows})
+            continue
+        c = {"ctx": ctx, "out": out, "rows": nrows, "reasons": [], "notes": []}
+        cells.append(c)
+        if key not in base or key not in cand:
+            c["reasons"].append("cell missing from " + ("baseline" if key not in base else "candidate"))
+            c["identical"] = False
+            c["pass"] = False
+            continue
+        bmodel, brows, _ = base[key]
+        cmodel, crows, _ = cand[key]
+        c["model"], c["baseline_model"] = cmodel, bmodel
+        sides = {}
+        for side, rows in (("base", brows), ("cand", crows)):
+            # The goal metric: request tok/s for one row, aggregate tok/s for several.
+            req = ours_goal_scores(rows, nrows)
+            sides[side] = req
+            c[f"{side}_request_tps"] = median(req)
+            c[f"{side}_decode_tps"] = median(r.get("decode_tps") for r in rows)
+            c[f"{side}_ttft_s"] = median(r.get("ttft_s") for r in rows)
+            c[f"{side}_noise"] = round(noise(req), 4)
+            c[f"{side}_request_trials"] = req
+        c["band"] = round(max(floor, c["base_noise"], c["cand_noise"]), 4)
+        c["request_delta"] = (round(c["cand_request_tps"] / c["base_request_tps"] - 1, 4)
+                              if c["cand_request_tps"] and c["base_request_tps"] else None)
+        if c["request_delta"] is not None and abs(c["request_delta"]) <= c["band"]:
+            c["notes"].append(f"request tok/s delta {c['request_delta']:+.3f} within noise band {c['band']:.3f}")
+        want = {}
+        for r in sorted(brows, key=lambda r: r["trial"]):
+            if r.get("error"):
+                continue
+            sig = (r.get("text", ""), r.get("reasoning_text", ""), r.get("completion_tokens"))
+            if r["row"] not in want:
+                want[r["row"]] = sig
+            elif want[r["row"]] != sig:
+                c["notes"].append(f"baseline trial {r['trial']} row {r['row']} differs from its trial 0")
+        identical = True
+        for r in sorted(crows, key=lambda r: (r["trial"], r["row"])):
+            where = f"trial {r['trial']} row {r['row']}"
+            if r.get("error"):
+                identical = False
+                c["reasons"].append(f"{where}: error {r['error']}")
+                continue
+            ref = want.get(r["row"])
+            if ref is None:
+                identical = False
+                c["reasons"].append(f"{where}: no baseline row {r['row']}")
+                continue
+            text, reasoning, tokens = ref
+            if r.get("completion_tokens") != tokens:
+                identical = False
+                c["reasons"].append(f"{where}: completion_tokens {r.get('completion_tokens')} vs baseline {tokens}")
+            off = first_diff(r.get("text", ""), text)
+            if off is not None:
+                identical = False
+                c["reasons"].append(f"{where}: text differs from baseline at byte {off}")
+            roff = first_diff(r.get("reasoning_text", ""), reasoning)
+            if roff is not None:
+                identical = False
+                c["reasons"].append(f"{where}: reasoning_text differs from baseline at byte {roff}")
+        if not crows:
+            identical = False
+            c["reasons"].append("candidate has no rows")
+        c["identical"] = identical
+        c["pass"] = not c["reasons"]
+    failing = [c for c in cells if not c["pass"]]
+    return {"mode": "baseline", "floor": floor, "cells": cells, "not_run": not_run,
+            "failing": [{"cell": f"ctx{c['ctx']}|out{c['out']}|rows{c['rows']}", "reasons": c["reasons"]}
+                        for c in failing],
+            "pass": not failing}
+
+
+def markdown_baseline(summary):
+    lines = [
+        "| ctx | out | rows | base req tok/s | cand req tok/s | delta | base noise | cand noise "
+        "| base decode tok/s | cand decode tok/s | base ttft s | cand ttft s | identical |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for c in summary["cells"]:
+        delta = c.get("request_delta")
+        lines.append(
+            f"| {c['ctx']} | {c['out']} | {c['rows']} | {fmt(c.get('base_request_tps'))} | "
+            f"{fmt(c.get('cand_request_tps'))} | {'-' if delta is None else format(delta, '+.3f')} | "
+            f"{fmt(c.get('base_noise'), '.3f')} | {fmt(c.get('cand_noise'), '.3f')} | "
+            f"{fmt(c.get('base_decode_tps'))} | {fmt(c.get('cand_decode_tps'))} | "
+            f"{fmt(c.get('base_ttft_s'), '.3f')} | {fmt(c.get('cand_ttft_s'), '.3f')} | "
+            f"{'yes' if c.get('identical') else 'NO'} |")
+    if summary["not_run"]:
+        lines.append("")
+        lines.append(f"Not run ({len(summary['not_run'])}, --subset): "
+                     + ", ".join(f"ctx{n['ctx']}/out{n['out']}/rows{n['rows']}" for n in summary["not_run"]))
+    if summary["failing"]:
+        lines.append("")
+        lines.append("Differences:")
+        for f in summary["failing"]:
+            lines.extend(f"- {f['cell']}: {reason}" for reason in f["reasons"])
+    notes = [(c, n) for c in summary["cells"] for n in c["notes"]]
+    if notes:
+        lines.append("")
+        lines.append("Notes:")
+        lines.extend(f"- ctx{c['ctx']}|out{c['out']}|rows{c['rows']}: {n}" for c, n in notes)
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ref", required=True)
+    ap.add_argument("--ref")
+    ap.add_argument("--baseline", help="baseline provider.jsonl: provider-vs-provider identity mode")
+    ap.add_argument("--subset", action="store_true",
+                    help="--baseline mode: baseline cells the candidate did not run are not failures")
     ap.add_argument("--ours", required=True)
     ap.add_argument("--floor", type=float, default=0.03)
     ap.add_argument("--json")
@@ -451,14 +805,33 @@ def main(argv=None):
     ap.add_argument("--margins", help="margin.py --json output; covered ties are not failures")
     ap.add_argument("--tie-steps", type=float, default=2.0,
                     help="largest margin (in float steps) still counted as a tie (default 2)")
+    ap.add_argument("--reference-failed", metavar="REASON",
+                    help="the reference run failed: report every provider cell with what reference rows exist")
     args = ap.parse_args(argv)
-    ref_lines = read_jsonl(args.ref)
+    if bool(args.ref) == bool(args.baseline):
+        ap.error("give exactly one of --ref and --baseline")
+    if args.baseline:
+        base_lines, cand_lines = read_jsonl(args.baseline), read_jsonl(args.ours)
+        if not base_lines or not cand_lines:
+            print("empty input", file=sys.stderr)
+            return 2
+        summary = evaluate_baseline(base_lines, cand_lines, args.floor, args.subset)
+        print(markdown_baseline(summary))
+        if args.json:
+            with open(args.json, "w") as f:
+                f.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        return 0 if summary["pass"] else 1
+    if args.reference_failed and not os.path.exists(args.ref):
+        ref_lines = []
+    else:
+        ref_lines = read_jsonl(args.ref)
     our_lines = read_jsonl(args.ours)
-    if not ref_lines or not our_lines:
+    if not our_lines or not (ref_lines or args.reference_failed):
         print("empty input", file=sys.stderr)
         return 2
     margins = load_margins(args.margins) if args.margins else None
-    summary = evaluate(ref_lines, our_lines, args.floor, args.text_fallback_reason, margins, args.tie_steps)
+    summary = evaluate(ref_lines, our_lines, args.floor, args.text_fallback_reason, margins, args.tie_steps,
+                       args.reference_failed)
     print(markdown(summary))
     payload = json.dumps(summary, indent=2, sort_keys=True)
     if args.json:

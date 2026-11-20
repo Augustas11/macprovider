@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.83` | `a219eafe89323ac353b17f40e396e08cd10f9d7e` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.84` | `ddc6f974355982773e1440957f16e998835408d0` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,15 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-19 the LM row is `3.32.3-macprovider.84` (`ddc6f97`), on
+`3.32.3-macprovider.83` (#2409): Six commits on 3.32.3-macprovider.83 add the
+native qwen4_exp / qwen4_exp_text text model (Qwen3.8-Flash-Next: QSA indexer,
+hyper-connections, PLE n-gram) and its batched decode, each row bit for bit
+its serial forward, with the rows' q/k norms, RoPE (one offset per row) and
+output gate run once across the rows. New model files, the two registry
+entries and their tests only; other model families are unchanged. No Swift,
+core or C pin changes.
 
 As of 2026-11-17 the LM row is `3.32.3-macprovider.83` (`a219eaf`), on
 `3.32.3-macprovider.81` (#2373): Three commits on 3.32.3-macprovider.81 (tag
