@@ -3,7 +3,8 @@
 
 usage: buyer_ux_local.py --suite-dir DIR --base http://127.0.0.1:PORT/v1 --model ID
                          --served-model ID --catalog-key KEY --out RECORD.json
-                         [--samples 3] [--attempts 6] [--retry-budget 300]
+                         [--samples 3] [--attempts 6] [--retry-budget 300] [--max-context-tokens N]
+                         [--capture RESPONSES.jsonl]
 
 scripts/buyer_ux_conformance.py (SPEC-023 §16.11) is the suite. Every record in
 phase3-binary/catalog/autotune/buyer-ux-conformance.json was taken through the production
@@ -16,6 +17,17 @@ whose /v1/chat/completions, /v1/messages and /v1/responses are the provider's ow
 response_format are checked before the CLI cut. Differences from a gateway run: the
 coordinator's capability masking and the gateway's own error answers (context_limit_error
 here is the provider's 4xx) are not in the path.
+
+--max-context-tokens N puts the serve's own limit (its /v1/status capacity.max_context_tokens)
+on the served /models row, as the gateway's catalog row carries max_context_tokens. The
+loopback row has none, so the suite sized its over-limit prompt from its 32768 default
+(2 x 32768 "lorem ipsum " = 131085 prompt tokens), under the 200000-token serve, which then
+served it with HTTP 200 (run 20261120T123728Z). With the real limit the prompt is past it
+(and past the 4 MiB body cap), as on the gateway, which answers it before routing
+(context_exceeds_capacity or request_too_large in every gateway record).
+
+--capture PATH appends one JSON line per POST answer (path, tool_choice, stream, status and
+the first 64 KiB of the body), so a failing sample's model output can be read afterwards.
 
 --model is the id the serve answers to (its config `model`); --served-model is the id the
 coordinator indexes the record by (the artifact's model id, as every gateway record has),
@@ -41,6 +53,37 @@ import pathlib
 import sys
 
 LISTING_CAPABILITIES = ("base", "tools", "reasoning", "response_format", "messages", "responses")
+
+
+CAPTURE_BODY_BYTES = 65536
+
+
+def capturing(transport, path):
+    """`transport` that appends each POST answer to the JSONL file at `path`."""
+    def send(method, url_path, headers, body):
+        resp = transport(method, url_path, headers, body)
+        if method == "POST":
+            line = {"path": url_path, "tool_choice": (body or {}).get("tool_choice"),
+                    "stream": bool((body or {}).get("stream")), "status": resp.status,
+                    "body": resp.body[:CAPTURE_BODY_BYTES].decode("utf-8", "replace")}
+            with open(path, "a", encoding="utf-8") as out:
+                out.write(json.dumps(line, sort_keys=True) + "\n")
+        return resp
+    return send
+
+
+def with_context_limit(suite, transport, model, max_context_tokens):
+    """`transport` with `max_context_tokens` added to `model`'s /models row when the row has none."""
+    def send(method, path, headers, body):
+        resp = transport(method, path, headers, body)
+        if method != "GET" or path != "/models" or resp.status != 200:
+            return resp
+        doc = resp.json()
+        for row in doc.get("data") or []:
+            if isinstance(row, dict) and row.get("id") == model and "max_context_tokens" not in row:
+                row["max_context_tokens"] = max_context_tokens
+        return suite.Response(resp.status, json.dumps(doc).encode("utf-8"), resp.headers)
+    return send
 
 
 def load_suite(suite_dir):
@@ -99,6 +142,8 @@ def main(argv=None):
     ap.add_argument("--samples", type=int, default=3)
     ap.add_argument("--attempts", type=int, default=6)
     ap.add_argument("--retry-budget", type=float, default=300.0)
+    ap.add_argument("--max-context-tokens", type=int, default=0)
+    ap.add_argument("--capture")
     args = ap.parse_args(argv)
     if not args.base.startswith(("http://127.0.0.1:", "http://localhost:")):
         print("--base must be a loopback http URL", file=sys.stderr)
@@ -106,10 +151,17 @@ def main(argv=None):
     if args.samples < 1:
         print("--samples must be >= 1", file=sys.stderr)
         return 2
+    if args.max_context_tokens < 0:
+        print("--max-context-tokens must be >= 0", file=sys.stderr)
+        return 2
     suite = load_suite(args.suite_dir)
     # A loopback serve takes no key; the suite's transport always sends one.
-    transport = suite.retrying_transport(suite.http_transport(args.base, "lab-loopback", timeout=1800.0),
-                                         args.attempts, args.retry_budget)
+    transport = suite.http_transport(args.base, "lab-loopback", timeout=1800.0)
+    if args.max_context_tokens:
+        transport = with_context_limit(suite, transport, args.model, args.max_context_tokens)
+    if args.capture:
+        transport = capturing(transport, args.capture)
+    transport = suite.retrying_transport(transport, args.attempts, args.retry_budget)
     try:
         rc, lines = run(suite, transport, args.model, args.served_model, args.catalog_key, args.base,
                         args.out, args.samples)

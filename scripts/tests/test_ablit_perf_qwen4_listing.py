@@ -214,6 +214,72 @@ class BuyerUXLocalTests(unittest.TestCase):
                                    "--out", "/dev/null"]), 2)
 
 
+class ContextLimitTests(unittest.TestCase):
+    """20261120T123728Z: the loopback /models row had no max_context_tokens, so the suite's
+    over-limit prompt (2 x its 32768 default) fit the 200000-token serve and got HTTP 200."""
+
+    def serve(self, limit, rows=None):
+        seen = []
+
+        def send(method, path, headers, body):
+            if path == "/models":
+                return suite.Response(200, json.dumps({"data": rows or [{"id": "qwen/q"}]}).encode())
+            words = body["messages"][-1]["content"].count("lorem ipsum")
+            seen.append(words)
+            if words * 2 > limit:  # about two tokens per repetition
+                return suite.Response(413, json.dumps({"error": {"code": "context_length_exceeded",
+                                                                 "message": "Request body too large"}}).encode())
+            return suite.Response(200, json.dumps({"choices": [{"message": {"content": "x"},
+                                                                "finish_reason": "length"}]}).encode())
+        return send, seen
+
+    def test_without_the_limit_the_suite_prompt_fits_a_large_serve(self):
+        send, seen = self.serve(200000)
+        status, _ = suite.check_context_limit_error(send, "qwen/q", int(suite.model_entry(send, "qwen/q").get(
+            "max_context_tokens") or 32768))
+        self.assertEqual(status, suite.FAIL)
+        self.assertEqual(seen, [65536])
+
+    def test_the_serve_limit_on_the_models_row_puts_the_prompt_past_it(self):
+        send, seen = self.serve(200000)
+        wrapped = bux.with_context_limit(suite, send, "qwen/q", 200000)
+        entry = suite.model_entry(wrapped, "qwen/q")
+        self.assertEqual(entry["max_context_tokens"], 200000)
+        self.assertEqual(suite.check_context_limit_error(wrapped, "qwen/q", entry["max_context_tokens"]),
+                         (suite.PASS, "context_length_exceeded"))
+        self.assertEqual(seen, [400000])
+
+    def test_a_row_that_already_carries_a_limit_and_other_rows_are_untouched(self):
+        rows = [{"id": "qwen/q", "max_context_tokens": 1000}, {"id": "other"}]
+        send, _ = self.serve(200000, rows)
+        data = bux.with_context_limit(suite, send, "qwen/q", 200000)("GET", "/models", {}, None).json()["data"]
+        self.assertEqual(data, rows)
+
+    def test_the_job_passes_the_serve_limit_to_the_driver(self):
+        text = JOB.read_text()
+        self.assertIn('BUX_ARGS+=(--max-context-tokens "$SERVE_MAX_CTX" --capture "$RES/buyer-ux-responses.jsonl")', text)
+        self.assertLess(text.index("SERVE_MAX_CTX=$("), text.index('BUX_ARGS+=(--max-context-tokens'))
+
+    def test_capture_records_each_post_answer(self):
+        send, _ = self.serve(200000)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "responses.jsonl"
+            wrapped = bux.capturing(send, path)
+            wrapped("GET", "/models", {}, None)
+            wrapped("POST", "/chat/completions", {}, {"messages": [{"role": "user", "content": "hi"}],
+                                                      "tool_choice": "required"})
+            lines = [json.loads(l) for l in path.read_text().splitlines()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual((lines[0]["path"], lines[0]["tool_choice"], lines[0]["status"]),
+                         ("/chat/completions", "required", 200))
+        self.assertIn("finish_reason", lines[0]["body"])
+
+    def test_cli_refuses_a_negative_limit(self):
+        self.assertEqual(bux.main(["--suite-dir", str(ROOT / "scripts"), "--base", "http://127.0.0.1:1/v1",
+                                   "--model", "a/b", "--served-model", "a/b", "--catalog-key", "a/b",
+                                   "--out", "/dev/null", "--max-context-tokens", "-1"]), 2)
+
+
 class LauncherTests(unittest.TestCase):
     def test_launcher_admits_the_job_its_knobs_and_the_suite(self):
         text = LAUNCHER.read_text()

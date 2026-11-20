@@ -248,7 +248,11 @@ print("MEM_CELL ctx=%s prompt_tokens=%s completion_tokens=%s ttft_s=%s decode_tp
 done
 
 # c. Buyer-UX suite against the same serve.
-log "BUX_START samples=$BUX_SAMPLES"
+log "BUX_START samples=$BUX_SAMPLES max_context_tokens=$SERVE_MAX_CTX"
+# The gateway's /models row carries max_context_tokens and the loopback row does not;
+# without it the suite's over-limit prompt fits this serve (buyer_ux_local.py header).
+[ "$SERVE_MAX_CTX" -gt 0 ] || blocker "the serve reports no max_context_tokens for context_limit_error"
+BUX_ARGS+=(--max-context-tokens "$SERVE_MAX_CTX" --capture "$RES/buyer-ux-responses.jsonl")
 # The suite needs Python 3.10+ (PEP 604 unions); the system python3 is 3.9.
 PY_BUX=$(command -v python3.12 || echo /opt/homebrew/bin/python3.12)
 [ -x "$PY_BUX" ] || die "python3.12 not found for the buyer-UX suite" 11
