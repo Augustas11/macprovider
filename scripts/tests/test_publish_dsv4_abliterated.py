@@ -176,6 +176,15 @@ class JobWiringTests(unittest.TestCase):
         self.assertIn('--expect-stage "$EXPECT"', text)
         self.assertIn('["model_sha256"]', text)
 
+    def test_job_blocks_bytecode_and_rechecks_the_artifact_before_pass(self):
+        text = JOB.read_text()
+        self.assertIn("export PYTHONDONTWRITEBYTECODE=1", text)
+        recheck = text.index('[ "$(manifest "$ABL")" = "$ABL_SHA256" ]')
+        self.assertNotIn('"$PY" -I ', text)
+        self.assertIn('"$PY" -B -I "$JOB/dsv4/dsv4_reference_bench.py"', text)
+        self.assertLess(text.index('find "$ABL" -name __pycache__'), recheck)
+        self.assertLess(recheck, text.index('log "JOB_PASS"'))
+
 
 if __name__ == "__main__":
     unittest.main()

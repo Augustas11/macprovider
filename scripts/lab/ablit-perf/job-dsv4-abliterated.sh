@@ -42,6 +42,10 @@
 # RUN_ID, COMMIT.
 set -u
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
+# The reference checks import deepseek_v4.py from the model folder; bytecode written there
+# would change the artifact manifest after it was recorded (run 20261120T081620Z). -I ignores
+# PYTHONDONTWRITEBYTECODE, so every "$PY" call also passes -B.
+export PYTHONDONTWRITEBYTECODE=1
 LAB=$HOME/lab-ablit-perf
 JOB=$LAB/job
 SRC=$LAB/src/phase3-binary
@@ -122,13 +126,13 @@ grep -q 'REF_VERSION mlx-vlm 0.7.10' "$RES/versions.txt" && grep -q 'REF_VERSION
 
 # 3. Fetch the rewritten shards only.
 log "FETCH_START"
-"$PY" -I "$JOB/dsv4/dsv4_abliterated_splice.py" fetch --dest "$SOURCE" --out "$RES/fetch.json" 2>&1 | tee "$RES/fetch.log" | grep -E 'FETCH_PLAN|FETCH_DONE|BLOCKER'
+"$PY" -B -I "$JOB/dsv4/dsv4_abliterated_splice.py" fetch --dest "$SOURCE" --out "$RES/fetch.json" 2>&1 | tee "$RES/fetch.log" | grep -E 'FETCH_PLAN|FETCH_DONE|BLOCKER'
 [ "${PIPESTATUS[0]}" = 0 ] || die "fetch failed: $(grep BLOCKER "$RES/fetch.log" | tail -n 1)" 13
 
 # 4. Splice into an APFS clone of the base, verify, numeric check.
 log "SPLICE_START"
 rm -rf -- "$ABL" && /bin/cp -c -R "$BASE" "$ABL" || die "APFS clone for the splice failed" 15
-"$PY" -I "$JOB/dsv4/dsv4_abliterated_splice.py" splice --base "$BASE" --source "$SOURCE" --fetch "$RES/fetch.json" \
+"$PY" -B -I "$JOB/dsv4/dsv4_abliterated_splice.py" splice --base "$BASE" --source "$SOURCE" --fetch "$RES/fetch.json" \
   --out "$ABL" --manifest "$RES/tensor-diff.json" --numeric --require-mlx 2>&1 | tee "$RES/splice.log" \
   | grep -E 'SPLICE_COMPARED|SPLICE_WRITTEN|SPLICE_VERIFIED|SPLICE_DONE|NUMERIC|BLOCKER'
 [ "${PIPESTATUS[0]}" = 0 ] || { rm -rf -- "$ABL"; die "splice failed: $(grep BLOCKER "$RES/splice.log" | tail -n 1)" 15; }
@@ -142,17 +146,17 @@ oracles() {  # oracles MODEL_DIR OUTDIR: mlx-vlm and DeepSeek-reference oracles 
   local model=$1 out=$2 c
   rm -rf -- "$out" && mkdir -p "$out" || return 1
   log "ORACLE_VLM_START $model"
-  "$PY" -I "$JOB/dsv4/dsv4_reference_bench.py" "$model" "$out/vlm" --oracle-contexts "$CTXS" --ttft-contexts "" --rows "" \
+  "$PY" -B -I "$JOB/dsv4/dsv4_reference_bench.py" "$model" "$out/vlm" --oracle-contexts "$CTXS" --ttft-contexts "" --rows "" \
     > "$out/vlm.log" 2>&1 || { log "BLOCKER: mlx-vlm oracle failed: $(tail -n 2 "$out/vlm.log" | tr '\n' ' ')"; return 1; }
   log "ORACLE_REF_START $model"
-  "$PY" -I "$JOB/dsv4/dsv4_tf_reference.py" oracle "$model" "$out/ref" --prompts "$out/vlm" --contexts "$CTXS" \
+  "$PY" -B -I "$JOB/dsv4/dsv4_tf_reference.py" oracle "$model" "$out/ref" --prompts "$out/vlm" --contexts "$CTXS" \
     > "$out/ref.log" 2>&1 || { log "BLOCKER: DeepSeek-reference oracle failed: $(tail -n 2 "$out/ref.log" | tr '\n' ' ')"; return 1; }
   for c in ${CTXS//,/ }; do
     cp "$out/vlm/oracle_$c.npz" "$out/vlm_$c.npz" && cp "$out/ref/oracle_$c.npz" "$out/ref_$c.npz" || return 1
-    "$PY" -I "$JOB/cb-studio/glm53_oracle_json.py" "$out/vlm_$c.npz" > /dev/null \
-      && "$PY" -I "$JOB/cb-studio/glm53_oracle_json.py" "$out/ref_$c.npz" > /dev/null || return 1
+    "$PY" -B -I "$JOB/cb-studio/glm53_oracle_json.py" "$out/vlm_$c.npz" > /dev/null \
+      && "$PY" -B -I "$JOB/cb-studio/glm53_oracle_json.py" "$out/ref_$c.npz" > /dev/null || return 1
   done
-  log "ORACLE_DONE $model ref_vs_vlm_greedy_equal=$("$PY" -I -c 'import json,sys
+  log "ORACLE_DONE $model ref_vs_vlm_greedy_equal=$("$PY" -B -I -c 'import json,sys
 a,b=(json.load(open(p))["greedy"] for p in sys.argv[1:3]); print(sum(x==y for x,y in zip(a,b)), "/", len(a))' "$out/ref_1024.json" "$out/vlm_1024.json") (1K)"
 }
 
@@ -203,15 +207,15 @@ if ! parity_gate "$RES/parity-abliterated.json"; then
 fi
 
 # 7. Refusal sanity, base vs abliterated.
-"$PY" -I "$JOB/dsv4/dsv4_refusal_check.py" prompts "$RES/refusal-prompts.json" --data "$REFUSAL_DATA" \
+"$PY" -B -I "$JOB/dsv4/dsv4_refusal_check.py" prompts "$RES/refusal-prompts.json" --data "$REFUSAL_DATA" \
   || die "refusal prompts unavailable" 18
 for side in base abliterated; do
   [ $side = base ] && dir=$BASE || dir=$ABL
   log "REFUSAL_START $side"
-  "$PY" -I "$JOB/dsv4/dsv4_refusal_check.py" run "$dir" "$RES/refusal-prompts.json" "$RES/refusal-$side.jsonl" --label $side \
+  "$PY" -B -I "$JOB/dsv4/dsv4_refusal_check.py" run "$dir" "$RES/refusal-prompts.json" "$RES/refusal-$side.jsonl" --label $side \
     > "$RES/refusal-$side.log" 2>&1 || die "refusal run ($side) failed: $(tail -n 2 "$RES/refusal-$side.log" | tr '\n' ' ')" 18
 done
-"$PY" -I "$JOB/dsv4/dsv4_refusal_check.py" compare "$RES/refusal-base.jsonl" "$RES/refusal-abliterated.jsonl" \
+"$PY" -B -I "$JOB/dsv4/dsv4_refusal_check.py" compare "$RES/refusal-base.jsonl" "$RES/refusal-abliterated.jsonl" \
   --json "$RES/refusal.json" || die "refusal gate failed" 18
 
 # 8. Provenance for a later catalog row, and the hand-off to the grid check.
@@ -245,6 +249,10 @@ log "HANDOFF grid check (job.sh): MODELS=dsv4abl DSV4ABL_PATH=$ABL studio-ablit-
 if [ "${KEEP_SOURCE:-0}" != 1 ]; then
   rm -rf -- "$SOURCE" && log "SOURCE_REMOVED $SOURCE (the tensor diff in $RES records it)"
 fi
+# The artifact must still be the recorded one after every check that read it.
+find "$ABL" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+[ "$(manifest "$ABL")" = "$ABL_SHA256" ] || die "the artifact changed after its manifest was recorded" 15
+log "ARTIFACT_UNCHANGED manifest=$ABL_SHA256"
 log "JOB_PASS"
 
 # 9. Optional publish, after the pass (DSV4_PUBLISH=1).
@@ -259,7 +267,7 @@ if [ "${DSV4_PUBLISH:-0}" = 1 ]; then
     [ -x "$VENV/bin/hf" ] || pfail "no hf CLI in $VENV/bin" ;;
   esac
   log "PUBLISH_START expect_stage=$EXPECT args=${DSV4_PUBLISH_ARGS:-}"
-  "$PY" -I "$JOB/ablit-perf/publish_dsv4_abliterated.py" "$ABL" "$RES" "$LAB/publish/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated" \
+  "$PY" -B -I "$JOB/ablit-perf/publish_dsv4_abliterated.py" "$ABL" "$RES" "$LAB/publish/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated" \
     --expect-stage "$EXPECT" ${DSV4_PUBLISH_ARGS:-} 2>&1 | tee "$RES/publish.log"
   [ "${PIPESTATUS[0]}" = 0 ] || pfail "publish_dsv4_abliterated.py failed: $(grep BLOCKER "$RES/publish.log" | tail -n 1)"
   log "PUBLISH_PASS"
