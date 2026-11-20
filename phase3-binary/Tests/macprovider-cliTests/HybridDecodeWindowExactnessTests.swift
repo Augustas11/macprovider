@@ -78,6 +78,31 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
         XCTAssertFalse(match([1, 2], [3], []))
     }
 
+    /// #2444: a pipelined hybrid window cuts stop checkpoints from the state
+    /// arrays each step produced; a layer that reuses its array object (an
+    /// in-place update) or changes its layout must send the window back to
+    /// the unpipelined read.
+    func testRecurrentStateReuseDetection() throws {
+        try requireMetal()
+        let a = MLXArray([Float(1)]), b = MLXArray([Float(2)])
+        let c = MLXArray([Float(3)]), d = MLXArray([Float(4)])
+        XCTAssertFalse(PagedKVSharedForwardBackend.recurrentStateReused(before: [0: [a, b]], after: [0: [c, d]]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.recurrentStateReused(before: [0: [a, b]], after: [0: [a, d]]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.recurrentStateReused(before: [0: [a, b]], after: [0: [c]]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.recurrentStateReused(before: [0: [a], 2: [b]], after: [0: [c]]))
+    }
+
+    /// #2444: pipelined steps feed the sampler's tokens back on device; they
+    /// must arrive as int32 like the host path's, or Qwen4-Exp's n-gram slot
+    /// turns int64 and a row prefilled later no longer packs with the batch.
+    func testPipelinedTokenInputIsInt32() throws {
+        try requireMetal()
+        let sampled = MLXArray([UInt32(7), UInt32(9)])
+        let input = PagedKVSharedForwardBackend.pipelinedTokenInput(sampled, rows: 2)
+        XCTAssertEqual(input.dtype, .int32)
+        XCTAssertEqual(input.shape, [2, 1])
+    }
+
     /// Fixed batch of ragged prompts, every one past the 512-token chunk (one
     /// past 1024): greedy tokens and the final recurrent state are the same
     /// whether the rows decode in 16-step windows or one step at a time.
@@ -631,8 +656,13 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
         )
     }
 
+    /// A metallib next to the host or inside the test bundle
+    /// (`Contents/MacOS/mlx.metallib`, as for `DeepseekV4NativeBackendTests`).
     private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        let tests = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }
