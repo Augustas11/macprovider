@@ -4205,6 +4205,7 @@ func validDemandModelID(model string) bool {
 		"mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
 		"aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
 		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+		"aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
 		"latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp":
 		return true
 	default:
