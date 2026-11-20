@@ -45,12 +45,24 @@ public enum GrammarTemplates {
     public static func toolCall(name: String, parameters: JSONValue, family: ToolCallGrammar,
                                 qwenCallFormat: ToolSelectionPolicy.CallFormat = .jsonEnvelope) -> ByteGrammar {
         if case .object(let object) = parameters, object["enum"] != nil {
+            var declared: [String: JSONValue] = [:]
+            if case .object(let properties)? = object["properties"] { declared = properties }
             return .choice(enumCandidates(object).compactMap { value in
                 guard case .object(let fields) = value else { return nil }
+                // The parser types a function-XML value by the buyer's schema, not by
+                // this enum: a string field it does not declare as a string would read
+                // back as a number, boolean or null ("1" -> 1). Those calls keep the
+                // JSON envelope, where the string stays quoted.
+                let stringsDeclared = fields.allSatisfy { key, field in
+                    guard case .string = field else { return true }
+                    if case .object(let details)? = declared[key] { return details["type"] == .string("string") }
+                    return false
+                }
+                let format = stringsDeclared ? qwenCallFormat : .jsonEnvelope
                 let properties = fields.mapValues { literalSchema($0) }
                 let exactObject = JSONValue.object(["type": .string("object"), "properties": .object(properties),
                     "required": .array(fields.keys.sorted().map(JSONValue.string)), "additionalProperties": .bool(false)])
-                return toolCall(name: name, parameters: exactObject, family: family, qwenCallFormat: qwenCallFormat)
+                return toolCall(name: name, parameters: exactObject, family: family, qwenCallFormat: format)
             })
         }
         // Unsupported top-level keywords must never widen a function's

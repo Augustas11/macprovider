@@ -326,6 +326,19 @@ final class GrammarTemplatesParserTests: XCTestCase {
         }
     }
 
+    func testFunctionXMLQwenGrammarKeepsRootEnumStringsTheSchemaDoesNotDeclareAsJSON() throws {
+        // The parser would read an undeclared raw `1` back as the integer 1.
+        let parameters = JSONValue.object(["type": .string("object"), "enum": .array([.object(["mode": .string("1")])])])
+        let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: .qwen,
+                                                qwenCallFormat: .functionXML).compile()
+        let xml = templateCall("f", [("mode", "1")])
+        XCTAssertFalse(dfa.transition(state: 0, bytes: Array(xml.utf8)).map { dfa.accepting(state: $0) } ?? false)
+        let json = #"<tool_call>{"name":"f","arguments":{"mode":"1"}}</tool_call>"#
+        XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(json.utf8)))))
+        let calls = try ToolCallParser.parseGuaranteedToolCalls(json, schemas: ["f": parameters])
+        XCTAssertEqual(try StrictJSONParser.parse(XCTUnwrap(calls.first).arguments), .object(["mode": .string("1")]))
+    }
+
     func testFunctionXMLQwenGrammarKeepsTheJSONEnvelopeForKeysItCannotTag() throws {
         let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
             "file.path": .object(["type": .string("string")]),

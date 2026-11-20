@@ -202,7 +202,10 @@ finish() {
   [ "$HAVE_GPU" = 1 ] && STUDIO_LANE=gpu bash "$LOCKSH" release "$OWNER" >> "$LOG" 2>&1
   say "LOCKS_RELEASED $(bash "$LOCKSH" status 2>&1 | tr '\n' ' ')"
   for f in "$RES/$RUN_ID"/*/baseline.md; do [ -f "$f" ] && say "BASELINE $f"; done
-  if grep -q 'JOB_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null && ! grep -q 'PUBLISH_FAIL' "$RES/$RUN_ID/job-$RUN_ID.log"; then
+  # A publish runs after JOB_PASS: it passes only on PUBLISH_PASS, so a job killed mid-upload fails.
+  local published=1
+  [ "${DSV4_PUBLISH:-0}" = 1 ] && ! grep -q 'PUBLISH_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null && published=0
+  if [ "$published" = 1 ] && grep -q 'JOB_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null && ! grep -q 'PUBLISH_FAIL' "$RES/$RUN_ID/job-$RUN_ID.log"; then
     say "ABLIT_END pass. Results: $RES/$RUN_ID"
   else
     blocker "the job did not pass; see $RES/$RUN_ID/job-$RUN_ID.log"
@@ -231,7 +234,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|LISTING_|IDENTITY|MEM_|BUX_|SERVE |PEAK |PROFILE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|LISTING_|IDENTITY|MEM_|BUX_|SERVE |PEAK |PROFILE_|PUBLISH_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
