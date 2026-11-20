@@ -392,6 +392,25 @@
         "residency_gb": "186",
         "projected_tps": "40"
       }
+    },
+    {
+      "source_model_id": "deepseek/deepseek-v4-flash-abliterated",
+      "canonical_model_id": "deepseek/deepseek-v4-flash-abliterated",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
+        "verification_note": "The pinned artifact's LICENSE and model card (revision 93580c78) declare the MIT license, as do its three sources: deepseek-ai/DeepSeek-V4-Flash-0731, TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX (revision d6be051a) and prem-research/DeepSeek-V4-Flash-0731-abliterated (revision 457210de)."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "13",
+        "residency_gb": "167",
+        "projected_tps": "33"
+      }
     }
   ],
   "cache_hit_fraction": "0.25",

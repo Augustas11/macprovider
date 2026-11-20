@@ -427,6 +427,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("Jundot/GLM-5.3-Flash-oQ4e-mtp", "default", "zai-org/glm-5.3-flash"),
                 ("z-ai/glm-5.3-flash", "default", "zai-org/glm-5.3-flash"),
                 ("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "default", "deepseek/deepseek-v4-flash"),
+                ("aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated", "default", "deepseek/deepseek-v4-flash-abliterated"),
                 ("prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", "default", "prism-ml/ternary-bonsai-2-2b-mlx-2bit"),
                 ("grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit", "zai-org/glm-5.3-flash-abliterated", "default"),
                 ("zai-org/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),

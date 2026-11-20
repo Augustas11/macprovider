@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "b048ff44d50995d712cde3a30079f1adab61e2d279d43dae5008bd1c04198ff0",
-  "generated_at": "2026-11-20T09:30:00Z",
+  "autotune_candidates_sha256": "c4f7b3681e20f887ed533192da6cd536475124cab482cd013923cc028b541650",
+  "generated_at": "2026-11-20T09:45:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -207,6 +207,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-listed-v289",
+  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
