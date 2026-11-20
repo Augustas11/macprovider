@@ -458,6 +458,9 @@ struct GLMParityComparison: Codable, Equatable, Sendable {
     let oracleTopTwoGaps: [Double]
     let maxAbsLogitDiff: Double?
     let maxAbsLogitDiffPerStep: [Double]
+    /// This run's logits at the oracle's top indices, per logged step, so a
+    /// reader can take this side's margin at a divergence (#2449).
+    let gatheredLogits: [[Float]]
     let tokens: [Int]
 
     init(
@@ -493,6 +496,7 @@ struct GLMParityComparison: Codable, Equatable, Sendable {
         }
         maxAbsLogitDiffPerStep = perStep
         maxAbsLogitDiff = perStep.max()
+        self.gatheredLogits = gatheredLogits
         self.tokens = tokens
     }
 }
