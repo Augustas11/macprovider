@@ -2078,6 +2078,38 @@ class LayerTraceTests(unittest.TestCase):
         self.assertGreater(r["margin"], 0)
         self.assertAlmostEqual(sum(r["weights"]), 1.0, places=5)
 
+    def test_expert_replay_reproduces_the_chosen_expert(self):
+        try:
+            import mlx.core as mx
+            import mlx.nn as nn
+        except ImportError:
+            self.skipTest("no mlx on this host")
+
+        class Router:
+            eps = 1e-6
+            _root_size = 0.5
+
+            def __init__(self):
+                self.proj = nn.Linear(4, 4, bias=False)
+                self.proj.weight = mx.eye(4, dtype=mx.bfloat16)
+                self.scale = mx.ones((4,), dtype=mx.bfloat16)
+                self.per_expert_scale = mx.array([1.0, 2.0, 3.0, 4.0], dtype=mx.bfloat16)
+
+        def experts(x, ids, w):
+            # expert e scales the input by e + 1
+            y = x[..., None, :] * (ids.astype(x.dtype) + 1)[..., None]
+            return (w[..., None] * y).sum(-2)
+
+        h = [4.0, 3.0, 2.0, 1.0]
+        r = Router()
+        ranking = layer_trace.router_ranking(mx, r, h, 3)
+        self.assertEqual([i for i, _ in ranking], [0, 1, 2])
+        out = layer_trace.expert_replay(mx, r, experts, lambda x: x, h, [0], [1, 3])
+        self.assertEqual(sorted(out), [1, 3])
+        recorded = out[3]
+        self.assertEqual(layer_trace.distance(recorded, out[3])["rel_l2"], 0.0)
+        self.assertGreater(layer_trace.distance(recorded, out[1])["rel_l2"], 0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

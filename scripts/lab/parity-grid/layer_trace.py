@@ -28,7 +28,11 @@ Gemma 4, `pre_feedforward_layernorm` (the post-attention residual state),
 `post_feedforward_layernorm_2` (the weighted expert sum). When layer N has a
 MoE router, it feeds each path's post-attention state through mlx-lm's router
 and prints the top-k experts, their weights and the score margin between the
-k-th and the next expert.
+k-th and the next expert, plus the ranking around the k-th slot. It then
+replays mlx-lm's experts on each path's state with the k-1 shared experts and
+each near-tie candidate in the k-th slot, and prints how far each replay is
+from that path's recorded MoE output: the candidate that reproduces our
+recorded output is the expert our route used.
 
 usage: layer_trace.py --model-path DIR --ours-topk FILE --ctx 4000 --index 15 [--sublayer 18] [--json OUT]
 Run under an interpreter that has mlx_lm.
@@ -179,6 +183,35 @@ def router_picks(mx, router, h, top_k):
             "margin": s[ranked[top_k - 1]] - s[ranked[top_k]]}
 
 
+def router_ranking(mx, router, h, n):
+    """mlx-lm's router scores on one bf16 hidden vector: the n best as [id, score], best first."""
+    x = mx.array(h, dtype=mx.bfloat16)[None, None]
+    s = router.proj(mx.fast.rms_norm(x, router.scale * router._root_size, router.eps))[0, 0].astype(mx.float32)
+    order = mx.argsort(-s)
+    mx.eval(s, order)
+    s = s.tolist()
+    return [[i, s[i]] for i in order.tolist()[:n]]
+
+
+def expert_replay(mx, router, experts, norm, h, base_ids, candidates):
+    """mlx-lm's weighted expert sum on h with experts base_ids + [c], for each candidate c.
+
+    Mirrors the MoE branch of mlx-lm's Gemma 4 decoder layer: the expert input is
+    norm(h), the weights are the softmax of the router scores over the chosen ids
+    times per_expert_scale, in the model's dtype. Returns {c: vector}.
+    """
+    x = mx.array(h, dtype=mx.bfloat16)[None, None]
+    scores = router.proj(mx.fast.rms_norm(x, router.scale * router._root_size, router.eps))
+    xe = norm(x)
+    out = {}
+    for c in candidates:
+        ids = mx.array([[list(base_ids) + [c]]])
+        w = mx.softmax(mx.take_along_axis(scores, ids, axis=-1), axis=-1) * router.per_expert_scale[ids]
+        out[c] = experts(xe, ids, w)[0, 0].astype(mx.float32)
+    mx.eval(*out.values())
+    return {c: v.tolist() for c, v in out.items()}
+
+
 def to_lists(mx, arrays):
     values = [a.astype(mx.float32) for a in arrays]
     mx.eval(*values)
@@ -290,6 +323,39 @@ def main(argv=None):
                       f"  k-th vs next ({r['next_id']}) margin {r['margin']:+.4f}")
             same = len({tuple(sorted(r["ids"])) for r in routing.values()}) == 1
             print(f"  expert set {'identical' if same else 'DIFFERS'} across paths")
+            paths = (("ours", ours_extra), ("cached", cached_extra), ("forward", forward_extra))
+            for name, d in paths:
+                routing[name]["ranking"] = router_ranking(mx, router, d[h_name], top_k + 8)
+            print(f"  router ranking, ranks {top_k - 1}..{top_k + 8} (id:score):")
+            for name, _ in paths:
+                print(f"    {name:<8} " + "  ".join(f"{i}:{sc:.6g}" for i, sc in routing[name]["ranking"][top_k - 2:]))
+            moe_name = layer_in[: -len("input_layernorm")] + "post_feedforward_layernorm_2"
+            bases = {tuple(sorted(i for i, _ in routing[n]["ranking"][: top_k - 1])) for n, _ in paths}
+            experts = getattr(parent, "experts", None)
+            norm2 = getattr(parent, "pre_feedforward_layernorm_2", None)
+            if experts is not None and norm2 is not None and len(bases) == 1 \
+                    and all(moe_name in d for _, d in paths):
+                base = [i for i, _ in routing["ours"]["ranking"][: top_k - 1]]
+                cands = []
+                for n, _ in paths:
+                    for i, _ in routing[n]["ranking"][top_k - 1: top_k + 4]:
+                        if i not in cands:
+                            cands.append(i)
+                norm2 = getattr(norm2, "inner", norm2)
+                replay = {"base_ids": base, "candidates": cands, "rows": []}
+                per_path = {n: expert_replay(mx, router, experts, norm2, d[h_name], base, cands) for n, d in paths}
+                print(f"  expert replay: mlx-lm's experts on each path's state, the {top_k - 1} shared experts "
+                      f"plus one candidate in slot {top_k};")
+                print(f"  rel_l2 of the replayed MoE output from that path's recorded MoE output ({moe_name}):")
+                print(f"    {'slot ' + str(top_k):<10} {'ours':>11} {'cached':>11} {'forward':>11}")
+                for c in cands:
+                    dist = {n: distance(d[moe_name], per_path[n][c]) for n, d in paths}
+                    replay["rows"].append({"candidate": c, **dist})
+                    print(f"    {c:<10} " + " ".join(f"{dist[n]['rel_l2']:11.3e}" for n, _ in paths))
+                routing["expert_replay"] = replay
+            else:
+                print(f"  expert replay skipped: base sets {len(bases)}, experts {experts is not None}, "
+                      f"MoE output on all paths {all(moe_name in d for _, d in paths)}")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"ctx_target": args.ctx, "decode_index": args.index, "prompt_tokens": len(prompt_ids),
