@@ -99,6 +99,8 @@ final class LabDecodeTopKTests: XCTestCase {
     }
 
     func testTapPathsInstallOnceAndRejectUnknownShapes() throws {
+        // Building the toy model's norms evaluates MLX arrays, which loads the metallib.
+        try XCTSkipUnless(MLXTestDevice.metallibAvailable, "no mlx.metallib on this host")
         let root = ToyRoot(layers: 2)
         let sink = try LabDecodeTopK.installTaps(in: root)
         XCTAssertEqual(sink.names, ["model.layers.0.input_layernorm", "model.layers.1.input_layernorm", "model.norm"])
