@@ -110,7 +110,9 @@ for f in "$GRID/provider_client.py" "$GRID/route_status.py" "$JOB/bux/buyer_ux_c
 done
 
 # 1. Stage, before any GPU work (job-qwen4-cb.sh's download and manifest handling).
-if [ ! -f "$QWEN4_PATH/config.json" ]; then
+# Also resume an interrupted download (config.json present, shards missing); the manifest
+# check below still decides whether the snapshot is the pinned one.
+if [ ! -f "$QWEN4_PATH/config.json" ] || [ "$(ls "$QWEN4_PATH"/model-*.safetensors 2> /dev/null | wc -l | tr -d ' ')" != 21 ]; then
   if ! "$VENV/bin/hf" version > /dev/null 2>&1; then
     rm -rf "$VENV"
     PY312=$(command -v python3.12 || echo /opt/homebrew/bin/python3.12)
