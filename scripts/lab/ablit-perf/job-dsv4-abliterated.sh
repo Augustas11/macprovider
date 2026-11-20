@@ -262,13 +262,14 @@ if [ "${DSV4_PUBLISH:-0}" = 1 ]; then
     || pfail "no model_sha256 in $RES/provenance.json"
   [ "$EXPECT" = "$ABL_SHA256" ] || pfail "provenance model_sha256 $EXPECT is not this run's artifact $ABL_SHA256"
   case " ${DSV4_PUBLISH_ARGS:-} " in *" --dry-run "*) ;; *)
-    "$PY" -c 'import huggingface_hub, hf_xet' 2>/dev/null || "$VENV/bin/pip" install -q hf_xet > "$RES/publish-pip.log" 2>&1 \
+    "$PY" -c 'import huggingface_hub, hf_xet' 2>/dev/null || "$VENV/bin/pip" install -q "hf_xet==1.8.0" > "$RES/publish-pip.log" 2>&1 \
       || pfail "hf_xet install failed"
     [ -x "$VENV/bin/hf" ] || pfail "no hf CLI in $VENV/bin" ;;
   esac
+  read -r -a PUBLISH_ARGS <<< "${DSV4_PUBLISH_ARGS:-}"
   log "PUBLISH_START expect_stage=$EXPECT args=${DSV4_PUBLISH_ARGS:-}"
   "$PY" -B -I "$JOB/ablit-perf/publish_dsv4_abliterated.py" "$ABL" "$RES" "$LAB/publish/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated" \
-    --expect-stage "$EXPECT" ${DSV4_PUBLISH_ARGS:-} 2>&1 | tee "$RES/publish.log"
+    --expect-stage "$EXPECT" ${PUBLISH_ARGS[@]+"${PUBLISH_ARGS[@]}"} 2>&1 | tee "$RES/publish.log"
   [ "${PIPESTATUS[0]}" = 0 ] || pfail "publish_dsv4_abliterated.py failed: $(grep BLOCKER "$RES/publish.log" | tail -n 1)"
   log "PUBLISH_PASS"
 fi
