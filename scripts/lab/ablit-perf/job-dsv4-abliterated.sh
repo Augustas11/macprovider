@@ -32,9 +32,14 @@
 #     effect from a pre-existing gap;
 #  7. refusal sanity: 20 harmful + 20 harmless prompts, base vs abliterated (mlx-vlm, greedy,
 #     keyword classes);
-#  8. provenance.json (catalog-row inputs) and the job.sh env line for the grid check.
+#  8. provenance.json (catalog-row inputs) and the job.sh env line for the grid check;
+#  9. only with DSV4_PUBLISH=1 (default off: it uploads), after JOB_PASS: publish_dsv4_abliterated.py
+#     stages the artifact with a model card and uploads it to aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated
+#     with the Studio's HF token, --expect-stage = provenance model_sha256, then checks every remote
+#     file. A failure prints BLOCKER and PUBLISH_FAIL and exits 20 (the launcher reports a fail).
 # Knobs: SKIP_BUILD, METALLIB, PARITY_MIN_MATCH, REFUSAL_DATA, KEEP_SOURCE (1 keeps the
-# fetched source shards after a pass), RUN_ID, COMMIT.
+# fetched source shards after a pass), DSV4_PUBLISH, DSV4_PUBLISH_ARGS (e.g. --dry-run or --private),
+# RUN_ID, COMMIT.
 set -u
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 LAB=$HOME/lab-ablit-perf
@@ -64,7 +69,7 @@ if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server liste
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
 for f in dsv4/dsv4_abliterated_splice.py dsv4/dsv4_reference_bench.py dsv4/dsv4_tf_reference.py dsv4/dsv4_refusal_check.py \
-  cb-studio/glm53_oracle_json.py minimax/publish_abliterated.py; do
+  cb-studio/glm53_oracle_json.py minimax/publish_abliterated.py ablit-perf/publish_dsv4_abliterated.py; do
   [ -f "$JOB/$f" ] || die "missing job file $JOB/$f" 11
 done
 BASE_FROM=""
@@ -210,9 +215,9 @@ done
   --json "$RES/refusal.json" || die "refusal gate failed" 18
 
 # 8. Provenance for a later catalog row, and the hand-off to the grid check.
-/usr/bin/python3 -I - "$RES" "$ABL_SHA256" "$BASE_ID" "$BASE_SHA256" > "$RES/provenance.json" <<'PY' || die "provenance failed" 19
+/usr/bin/python3 -I - "$RES" "$ABL_SHA256" "$BASE_ID" "$BASE_SHA256" "$PARITY_MIN_MATCH" > "$RES/provenance.json" <<'PY' || die "provenance failed" 19
 import hashlib, json, pathlib, sys
-res, abl_sha, base_id, base_sha = pathlib.Path(sys.argv[1]), *sys.argv[2:5]
+res, abl_sha, base_id, base_sha, min_match = pathlib.Path(sys.argv[1]), *sys.argv[2:6]
 diff = json.loads((res / "tensor-diff.json").read_text())
 parity = json.loads((res / "parity-abliterated.json").read_text())
 print(json.dumps({
@@ -229,6 +234,7 @@ print(json.dumps({
     "changed_tensors": len(diff["changed_tensors"]),
     "touched_shards": diff["touched_shards"],
     "numeric_worst_max_abs_err": diff["numeric"]["worst_max_abs_err"],
+    "parity_min_match": int(min_match),
     "parity_runs": [{"oracle": r["oracle_source"], "first_divergence": r["measurement"]["free_running"].get("first_divergence")}
                     for r in parity["runs"]],
     "refusal": json.loads((res / "refusal.json").read_text()),
@@ -240,3 +246,21 @@ if [ "${KEEP_SOURCE:-0}" != 1 ]; then
   rm -rf -- "$SOURCE" && log "SOURCE_REMOVED $SOURCE (the tensor diff in $RES records it)"
 fi
 log "JOB_PASS"
+
+# 9. Optional publish, after the pass (DSV4_PUBLISH=1).
+if [ "${DSV4_PUBLISH:-0}" = 1 ]; then
+  pfail() { log "BLOCKER: $*"; log "PUBLISH_FAIL"; exit 20; }
+  EXPECT=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["model_sha256"])' "$RES/provenance.json") \
+    || pfail "no model_sha256 in $RES/provenance.json"
+  [ "$EXPECT" = "$ABL_SHA256" ] || pfail "provenance model_sha256 $EXPECT is not this run's artifact $ABL_SHA256"
+  case " ${DSV4_PUBLISH_ARGS:-} " in *" --dry-run "*) ;; *)
+    "$PY" -c 'import huggingface_hub, hf_xet' 2>/dev/null || "$VENV/bin/pip" install -q hf_xet > "$RES/publish-pip.log" 2>&1 \
+      || pfail "hf_xet install failed"
+    [ -x "$VENV/bin/hf" ] || pfail "no hf CLI in $VENV/bin" ;;
+  esac
+  log "PUBLISH_START expect_stage=$EXPECT args=${DSV4_PUBLISH_ARGS:-}"
+  "$PY" -I "$JOB/ablit-perf/publish_dsv4_abliterated.py" "$ABL" "$RES" "$LAB/publish/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated" \
+    --expect-stage "$EXPECT" ${DSV4_PUBLISH_ARGS:-} 2>&1 | tee "$RES/publish.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || pfail "publish_dsv4_abliterated.py failed: $(grep BLOCKER "$RES/publish.log" | tail -n 1)"
+  log "PUBLISH_PASS"
+fi

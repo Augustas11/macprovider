@@ -117,6 +117,38 @@ The license's prohibited uses apply in full.
 """
 
 
+def upload_and_verify(api, repo_id: str, stage: pathlib.Path, *, private: bool, commit_message: str):
+    """Create the repo, upload STAGE with `hf upload`, then require every remote file to match STAGE
+    (LFS sha256 or git blob id, and size) and no extra remote file. Returns the model info."""
+    api.create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
+    # huggingface_hub 2.x: `hf upload` splits a large folder into several commits and resumes
+    # when re-run (HfApi.upload_large_folder no longer exists).
+    hf = pathlib.Path(sys.executable).with_name("hf")
+    subprocess.run([str(hf), "upload", repo_id, str(stage), ".", "--repo-type", "model",
+                    "--exclude", ".cache/*", "--commit-message", commit_message],
+                   check=True)
+    info = api.model_info(repo_id, files_metadata=True)
+    remote = {s.rfilename: s for s in info.siblings}
+    bad = []
+    for p in sorted(f for f in stage.rglob("*") if f.is_file() and ".cache" not in f.relative_to(stage).parts):
+        rel = str(p.relative_to(stage))
+        s = remote.get(rel)
+        if s is None or s.size != p.stat().st_size:
+            bad.append(rel); continue
+        if s.lfs is not None:
+            ok = s.lfs.sha256 == file_sha256(p)
+        else:  # small files are plain git blobs: compare the blob id
+            data = p.read_bytes()
+            ok = s.blob_id == hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        if not ok:
+            bad.append(rel)
+    extra = sorted(set(remote) - {str(f.relative_to(stage)) for f in stage.rglob("*") if f.is_file()} - {".gitattributes"})
+    if bad or extra:
+        raise SystemExit(f"BLOCKER: remote differs from stage: mismatched={bad[:10]} extra={extra[:10]}")
+    print(f"PUBLISH_VERIFIED files={len(remote)} sha256+blob ids match the stage", flush=True)
+    return info
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("base"); ap.add_argument("direction"); ap.add_argument("eval_json")
@@ -180,32 +212,8 @@ def main() -> None:
     owner = a.owner or me["name"]
     repo_id = f"{owner}/{a.repo_name}"
     print(f"PUBLISH_AUTH user={me['name']} repo={repo_id}", flush=True)
-    api.create_repo(repo_id, repo_type="model", private=a.private, exist_ok=True)
-    # huggingface_hub 2.x: `hf upload` splits a large folder into several commits and resumes
-    # when re-run (HfApi.upload_large_folder no longer exists).
-    hf = pathlib.Path(sys.executable).with_name("hf")
-    subprocess.run([str(hf), "upload", repo_id, str(stage), ".", "--repo-type", "model",
-                    "--exclude", ".cache/*", "--commit-message", "Abliterated MiniMax M3.1-Flash oQ3e-mtp"],
-                   check=True)
-    info = api.model_info(repo_id, files_metadata=True)
-    remote = {s.rfilename: s for s in info.siblings}
-    bad = []
-    for p in sorted(f for f in stage.rglob("*") if f.is_file() and ".cache" not in f.relative_to(stage).parts):
-        rel = str(p.relative_to(stage))
-        s = remote.get(rel)
-        if s is None or s.size != p.stat().st_size:
-            bad.append(rel); continue
-        if s.lfs is not None:
-            ok = s.lfs.sha256 == file_sha256(p)
-        else:  # small files are plain git blobs: compare the blob id
-            data = p.read_bytes()
-            ok = s.blob_id == hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-        if not ok:
-            bad.append(rel)
-    extra = sorted(set(remote) - {str(f.relative_to(stage)) for f in stage.rglob("*") if f.is_file()} - {".gitattributes"})
-    if bad or extra:
-        raise SystemExit(f"BLOCKER: remote differs from stage: mismatched={bad[:10]} extra={extra[:10]}")
-    print(f"PUBLISH_VERIFIED files={len(remote)} sha256+blob ids match the stage", flush=True)
+    info = upload_and_verify(api, repo_id, stage, private=a.private,
+                             commit_message="Abliterated MiniMax M3.1-Flash oQ3e-mtp")
     print(f"PUBLISH_DONE repo={repo_id} revision={info.sha} stage_manifest={stage_sha}", flush=True)
 
 
