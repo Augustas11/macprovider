@@ -22,6 +22,8 @@ always given on the command line; `grid.json` holds placeholders only.
 | `route_status.py` | stdlib python | batching warm-up gate before the first cell; `ROUTE` line and `grid.json` route record per status snapshot |
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
 | `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
+| `decode_topk.py` | python with `mlx_lm` | top-k logits at one decode index from our serial route (lab hook record) and from mlx-lm's cached decode and uncached forward, on the same token ids |
+| `layer_trace.py` | python with `mlx_lm` | per-layer last-position hidden state at that index on the same three paths; names the first layer where ours leaves mlx-lm's cached-vs-forward spread |
 | `run-grid.sh` | bash | one lab window for one model: provider (serve + client), then reference, then compare |
 
 ## Running a window
@@ -332,6 +334,62 @@ reference top-5 logits (existing output) and writes `{"records": [...]}` with
 ours ended), `top_ids`, `top_logits`, `margin`, `dtype`, `margin_steps`,
 `common_prefix_bytes`, `diff_span_bytes`. Cells are examined once per
 (ctx, token index).
+
+## decode_topk.py
+
+`margin.py` reads mlx-lm's logits from one uncached forward. To compare the two
+decode paths at a first differing index (issue #2443), serve a
+`-DMACPROVIDER_LAB_HARNESS` build on the serial route with the lab hook on, then
+replay mlx-lm's `generate_step` on the ids it recorded:
+
+```bash
+scripts/lab/parity-grid/run-grid.sh ... --cb off --no-autotune-candidate \
+  --contexts 4k --outputs 128 --rows 1 --trials 1 --skip-reference \
+  --serve-env "MACPROVIDER_LAB_DECODE_TOPK=$OUT/topk.jsonl MACPROVIDER_LAB_DECODE_TOPK_INDICES=15"
+python decode_topk.py --model-path DIR --ours-topk "$OUT/topk.jsonl" --ctx 4000 --index 15 \
+  --ref reference.jsonl --max-tokens 128 --json decode_topk.json
+```
+
+The hook (`LabDecodeTopK.swift`, off unless `MACPROVIDER_LAB_DECODE_TOPK`
+names an absolute file; `MACPROVIDER_LAB_DECODE_TOPK_K` sets k, default 5)
+appends one record per serial-route request that reaches a listed index: the
+complete prompt ids, the generated ids before the index, and the top-k logits
+the sampler saw, in float32 copies of the model's dtype. Warm-up requests are
+recorded too; `decode_topk.py` takes the record whose prompt ids equal the
+cell's mlx-lm chat-template ids. It forces mlx-lm's decode through our
+generated ids and prints, for the reference's pick and ours, the gap on each
+path in float steps, and our gap minus mlx-lm's cached-decode gap.
+
+## layer_trace.py
+
+When `decode_topk.py` shows our logits outside mlx-lm's own spread, add
+`MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1` to the same serve. The hook then swaps
+each `layers.N.input_layernorm` and the final `model.norm` for a recording
+RMSNorm (same weight, eps and kernel) and adds a `layers` list to the record:
+the last-position input of every one of those norms in the forward that made
+the logits at the index. `layer_trace.py` wraps the same norms in mlx-lm and
+compares, per tap, ours against mlx-lm's cached decode and mlx-lm's cached
+decode against its uncached forward:
+
+```bash
+scripts/lab/parity-grid/run-grid.sh ... --serve-env "MACPROVIDER_LAB_DECODE_TOPK=$OUT/topk.jsonl \
+  MACPROVIDER_LAB_DECODE_TOPK_INDICES=15 MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1"
+python layer_trace.py --model-path DIR --ours-topk "$OUT/topk.jsonl" --ctx 4000 --index 15 --json layers.json
+```
+
+It names the first tap where ours-to-cached relative L2 exceeds
+cached-to-forward. A tap's input is the previous layer's output, so
+`layers.0` is the scaled embedding and `model.norm` the last layer's output.
+
+To split one layer, add `MACPROVIDER_LAB_DECODE_TOPK_SUBLAYER=N` to the serve
+and `--sublayer N` to `layer_trace.py`. Every other RMSNorm inside layer N is
+tapped as well. The tool compares those that ran on both sides; for Gemma 4
+these are `pre_feedforward_layernorm` (the post-attention state),
+`post_feedforward_layernorm_1` (the dense MLP output) and
+`post_feedforward_layernorm_2` (the weighted expert sum). When the layer has a
+MoE router, the tool also feeds each path's post-attention state through
+mlx-lm's router. It prints the chosen experts, their weights and the score
+margin to the next expert.
 
 ## Tests
 

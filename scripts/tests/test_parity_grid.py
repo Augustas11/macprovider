@@ -26,6 +26,8 @@ prompts = module("prompts")
 client = module("provider_client")
 margin = module("margin")
 cb_margin = module("cb_margin")
+decode_topk = module("decode_topk")
+layer_trace = module("layer_trace")
 reference_mlxlm = module("reference_mlxlm")
 JOB_QWEN4_CB = Path(__file__).resolve().parents[1] / "lab" / "ablit-perf" / "job-qwen4-cb.sh"
 
@@ -1860,6 +1862,253 @@ class NativeMtpRecordTests(unittest.TestCase):
         self.assertEqual(d["mean_accepted_length"], 1.0)
         self.assertFalse(client.native_mtp_delta(before, dict(after, reset_generation=2))["acceptance_valid"])
         self.assertFalse(client.native_mtp_delta(None, after)["acceptance_valid"])
+
+
+class _FakeMx:
+    """Enough of mlx.core for ForcedDecode: arrays are plain lists."""
+    uint32 = "uint32"
+
+    @staticmethod
+    def array(values, dtype=None):
+        return list(values)
+
+    @staticmethod
+    def argmax(values, axis=-1):
+        return [max(range(len(values)), key=values.__getitem__)]
+
+
+class DecodeTopKTests(unittest.TestCase):
+    def _rec(self, index, prompt, generated, top_ids=(5, 6), top_logits=(23.875, 23.375)):
+        return {"schema": decode_topk.SCHEMA, "decode_index": index, "prompt_token_ids": list(prompt),
+                "generated_token_ids": list(generated), "top_ids": list(top_ids),
+                "top_logits": list(top_logits), "dtype": "bfloat16"}
+
+    def test_select_record_matches_prompt_ids_and_index(self):
+        warmup = self._rec(2, [9, 9], [1, 2])
+        cell = self._rec(2, [1, 2, 3], [4, 5])
+        other_index = self._rec(1, [1, 2, 3], [4])
+        self.assertIs(decode_topk.select_record([warmup, cell, other_index], [1, 2, 3], 2), cell)
+        with self.assertRaisesRegex(ValueError, "no record at decode index 2"):
+            decode_topk.select_record([warmup], [1, 2, 3], 2)
+        with self.assertRaisesRegex(ValueError, "generated ids"):
+            decode_topk.select_record([self._rec(2, [1], [4])], [1], 2)
+
+    def test_load_records_skips_other_schemas(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "topk.jsonl")
+            with open(path, "w") as f:
+                f.write(json.dumps({"schema": "macprovider.lab-output-tokens.v1"}) + "\n\n")
+                f.write(json.dumps(self._rec(0, [1], [])) + "\n")
+            self.assertEqual([r["decode_index"] for r in decode_topk.load_records(path)], [0])
+
+    def test_forced_decode_forces_then_captures_the_index(self):
+        forced = decode_topk.ForcedDecode(_FakeMx, [7, 8], capture=2)
+        seen = []
+        for step in range(3):
+            logits = [step, 10 + step]
+            self.assertIs(forced.processor(None, logits), logits)
+            seen.append(forced.sampler(logits))
+        self.assertEqual(seen, [[7], [8], [1]])
+        self.assertEqual(forced.captured, [2, 12])
+
+    def test_gap_steps_in_bf16(self):
+        # 23.875 vs 23.375 in bf16 (spacing 0.125 at 16..32): 4 steps.
+        self.assertEqual(decode_topk.gap_steps(23.875, 23.375, "bfloat16"), 4.0)
+        self.assertEqual(decode_topk.gap_steps(21.75, 21.875, "bfloat16"), -1.0)
+
+
+class LayerTraceTests(unittest.TestCase):
+    NAMES = ["m.model.layers.0.input_layernorm", "m.model.layers.1.input_layernorm",
+             "m.model.layers.2.input_layernorm", "m.model.norm"]
+
+    def test_layer_label(self):
+        self.assertEqual([layer_trace.layer_label(n) for n in self.NAMES],
+                         ["embeddings", "layer 0 output", "layer 1 output", "last layer output"])
+
+    def test_distance(self):
+        d = layer_trace.distance([1.0, 2.0, 2.0], [1.0, 2.0, 0.0])
+        self.assertEqual(d["max_abs"], 2.0)
+        self.assertEqual(d["n_diff"], 1)
+        self.assertAlmostEqual(d["rel_l2"], 2.0 / 5 ** 0.5)
+        self.assertEqual(layer_trace.distance([0.0], [0.0])["rel_l2"], 0.0)
+        with self.assertRaises(ValueError):
+            layer_trace.distance([1.0], [1.0, 2.0])
+
+    def test_compare_names_first_tap_beyond_spread(self):
+        forward = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]
+        cached = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.01], [4.0, 4.01]]
+        ours = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.01], [4.0, 4.5]]
+        rows, first = layer_trace.compare(self.NAMES, ours, cached, forward)
+        self.assertEqual([r["beyond_spread"] for r in rows], [False, False, False, True])
+        self.assertEqual(first, 3)
+        self.assertEqual(rows[first]["what"], "last layer output")
+        _, none = layer_trace.compare(self.NAMES, cached, cached, forward)
+        self.assertIsNone(none)
+
+    def test_tap_paths_order_and_shape_checks(self):
+        pairs = [(n, None) for n in reversed(self.NAMES)] + [("m.model.layers.0.mlp", None)]
+        self.assertEqual(layer_trace.tap_paths(pairs), self.NAMES)
+        with self.assertRaises(ValueError):
+            layer_trace.tap_paths([(n, None) for n in self.NAMES if n != "m.model.layers.1.input_layernorm"])
+        with self.assertRaises(ValueError):
+            layer_trace.tap_paths([(n, None) for n in self.NAMES[:3]])
+
+    def test_install_taps_records_and_forwards(self):
+        class Module:
+            def __init__(self):
+                pass
+
+            def named_modules(self):
+                out = []
+
+                def walk(prefix, obj):
+                    if isinstance(obj, list):
+                        for i, child in enumerate(obj):
+                            walk(f"{prefix}.{i}", child)
+                    elif isinstance(obj, Module):
+                        out.append((prefix, obj))
+                        for k, v in vars(obj).items():
+                            if isinstance(v, (Module, list)):
+                                walk(f"{prefix}.{k}" if prefix else k, v)
+                walk("", self)
+                return out
+
+        class Nn:
+            pass
+        Nn.Module = Module
+
+        class Norm(Module):
+            def __init__(self, tag):
+                super().__init__()
+                self.tag = tag
+
+            def __call__(self, x):
+                return (self.tag, x)
+        Nn.RMSNorm = Norm
+
+        class Vec:
+            def __init__(self, rows):
+                self.rows, self.shape = rows, (len(rows), len(rows[0]))
+
+            def reshape(self, *shape):
+                return self.rows
+
+        def layer(i):
+            obj = Module()
+            obj.input_layernorm = Norm(i)
+            obj.pre_feedforward_layernorm = Norm(f"pre{i}")
+            obj.mlp = Module()
+            return obj
+
+        inner = Module()
+        inner.layers = [layer(0), layer(1), layer(2)]
+        inner.norm = Norm("final")
+        root = Module()
+        root.m = Module()
+        root.m.model = inner
+        sink = layer_trace.install_taps(root, Nn, None)
+        self.assertEqual(sink.names, self.NAMES)
+        with self.assertRaises(RuntimeError):
+            sink.snapshot()
+        out = root.m.model.layers[1].input_layernorm(Vec([[1, 2], [3, 4]]))
+        self.assertEqual(out[0], 1)
+        self.assertEqual(sink.latest["m.model.layers.1.input_layernorm"], [3, 4])
+        self.assertEqual(sink.extra_names, [])
+
+        root2 = Module()
+        root2.m = Module()
+        root2.m.model = Module()
+        root2.m.model.layers = [layer(0), layer(1), layer(2)]
+        root2.m.model.norm = Norm("final")
+        sink2 = layer_trace.install_taps(root2, Nn, None, sublayer=1)
+        self.assertEqual(sink2.extra_names, ["m.model.layers.1.pre_feedforward_layernorm"])
+        self.assertEqual(sink2.extras(), {})
+        root2.m.model.layers[1].pre_feedforward_layernorm(Vec([[5, 6]]))
+        self.assertEqual(sink2.extras(), {"m.model.layers.1.pre_feedforward_layernorm": [5, 6]})
+        with self.assertRaises(ValueError):
+            layer_trace.install_taps(root2, Nn, None, sublayer=3)
+
+    def test_sublayer_paths_and_compare(self):
+        pairs = [("a.layers.1.input_layernorm", "n"), ("a.layers.1.self_attn.q_norm", "n"),
+                 ("a.layers.1.pre_feedforward_layernorm", "n"), ("a.layers.1.mlp", "m"),
+                 ("a.layers.10.pre_feedforward_layernorm", "n"), ("a.layers.2.input_layernorm", "n")]
+        self.assertEqual(layer_trace.sublayer_paths(pairs, "a.layers.1.input_layernorm", lambda m: m == "n"),
+                         ["a.layers.1.pre_feedforward_layernorm", "a.layers.1.self_attn.q_norm"])
+        rows = layer_trace.compare_sublayer({"x": [1.0, 2.0], "only_ours": [0.0]},
+                                            {"x": [1.0, 2.5], "only_ours": [0.0]}, {"x": [1.0, 2.5]})
+        self.assertEqual([r["tap"] for r in rows], ["x"])
+        self.assertEqual(rows[0]["ours_vs_cached"]["n_diff"], 1)
+        self.assertEqual(rows[0]["cached_vs_forward"]["n_diff"], 0)
+
+    def test_last_position_keeps_every_head(self):
+        try:
+            import mlx.core as mx
+        except ImportError:
+            self.skipTest("no mlx on this host")
+        q = mx.arange(2 * 3 * 2 * 4).reshape(2, 3, 2, 4)
+        self.assertEqual(layer_trace.last_position(q).tolist(), list(range(40, 48)))
+        h = mx.arange(2 * 3 * 4).reshape(2, 3, 4)
+        self.assertEqual(layer_trace.last_position(h).tolist(), [20, 21, 22, 23])
+
+    def test_router_picks_ranks_ids_and_margin(self):
+        try:
+            import mlx.core as mx
+            import mlx.nn as nn
+        except ImportError:
+            self.skipTest("no mlx on this host")
+
+        class Router:
+            eps = 1e-6
+            _root_size = 0.5
+
+            def __init__(self):
+                self.proj = nn.Linear(4, 5, bias=False)
+                self.proj.weight = mx.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1, 1, 0, 0]],
+                                            dtype=mx.bfloat16)
+                self.scale = mx.ones((4,), dtype=mx.bfloat16)
+
+            def __call__(self, x):
+                s = self.proj(mx.fast.rms_norm(x, self.scale * self._root_size, self.eps))
+                ids = mx.argpartition(s, kth=-2, axis=-1)[..., -2:]
+                return ids, mx.softmax(mx.take_along_axis(s, ids, axis=-1).astype(mx.float32), axis=-1)
+
+        r = layer_trace.router_picks(mx, Router(), [4.0, 3.0, 1.0, 0.0], 2)
+        self.assertEqual(r["ids"], [4, 0])
+        self.assertEqual(r["next_id"], 1)
+        self.assertGreater(r["margin"], 0)
+        self.assertAlmostEqual(sum(r["weights"]), 1.0, places=5)
+
+    def test_expert_replay_reproduces_the_chosen_expert(self):
+        try:
+            import mlx.core as mx
+            import mlx.nn as nn
+        except ImportError:
+            self.skipTest("no mlx on this host")
+
+        class Router:
+            eps = 1e-6
+            _root_size = 0.5
+
+            def __init__(self):
+                self.proj = nn.Linear(4, 4, bias=False)
+                self.proj.weight = mx.eye(4, dtype=mx.bfloat16)
+                self.scale = mx.ones((4,), dtype=mx.bfloat16)
+                self.per_expert_scale = mx.array([1.0, 2.0, 3.0, 4.0], dtype=mx.bfloat16)
+
+        def experts(x, ids, w):
+            # expert e scales the input by e + 1
+            y = x[..., None, :] * (ids.astype(x.dtype) + 1)[..., None]
+            return (w[..., None] * y).sum(-2)
+
+        h = [4.0, 3.0, 2.0, 1.0]
+        r = Router()
+        ranking = layer_trace.router_ranking(mx, r, h, 3)
+        self.assertEqual([i for i, _ in ranking], [0, 1, 2])
+        out = layer_trace.expert_replay(mx, r, experts, lambda x: x, h, [0], [1, 3])
+        self.assertEqual(sorted(out), [1, 3])
+        recorded = out[3]
+        self.assertEqual(layer_trace.distance(recorded, out[3])["rel_l2"], 0.0)
+        self.assertGreater(layer_trace.distance(recorded, out[1])["rel_l2"], 0.1)
 
 
 if __name__ == "__main__":
