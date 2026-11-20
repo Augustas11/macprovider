@@ -249,7 +249,10 @@ done
 
 # c. Buyer-UX suite against the same serve.
 log "BUX_START samples=$BUX_SAMPLES"
-/usr/bin/python3 -I "$JOB/ablit-perf/buyer_ux_local.py" "${BUX_ARGS[@]}" > "$RES/buyer-ux.txt" 2>&1
+# The suite needs Python 3.10+ (PEP 604 unions); the system python3 is 3.9.
+PY_BUX=$(command -v python3.12 || echo /opt/homebrew/bin/python3.12)
+[ -x "$PY_BUX" ] || die "python3.12 not found for the buyer-UX suite" 11
+"$PY_BUX" -B -I "$JOB/ablit-perf/buyer_ux_local.py" "${BUX_ARGS[@]}" > "$RES/buyer-ux.txt" 2>&1
 bux_rc=$?
 while read -r l; do log "$l"; done < "$RES/buyer-ux.txt"
 [ "$bux_rc" = 0 ] || blocker "buyer-UX gate failed (rc=$bux_rc): $(grep -m1 '^BUX_GATE' "$RES/buyer-ux.txt" | cut -c1-400)"

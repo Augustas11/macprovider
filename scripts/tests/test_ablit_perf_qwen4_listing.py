@@ -230,5 +230,11 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("job-qwen4-listing.sh", r.stderr)
 
 
+class BuyerUxInterpreterTest(unittest.TestCase):
+    def test_buyer_ux_driver_runs_on_python_312_not_system_python(self):
+        text = JOB.read_text()
+        self.assertNotIn('/usr/bin/python3 -I "$JOB/ablit-perf/buyer_ux_local.py"', text)
+        self.assertIn('"$PY_BUX" -B -I "$JOB/ablit-perf/buyer_ux_local.py"', text)
+
 if __name__ == "__main__":
     unittest.main()
