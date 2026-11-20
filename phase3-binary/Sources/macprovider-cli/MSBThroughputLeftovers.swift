@@ -261,13 +261,28 @@ func msb03ShortRequestTTFTPass(ratio: Double) -> Bool {
     ratio > 0 && ratio <= 2.0
 }
 
-func msbTemp0ParityMatch(serial: [Int], batched: [Int], comparedTokens: Int) -> (match: Bool, firstDivergence: Int?) {
+/// `serialStopTokenIDs`: the serial reference stops on (and omits) these
+/// model stop tokens, while the scheduler legs decode a fixed length past
+/// them. A serial run that ended early matches when the batched leg agrees up
+/// to that point and samples one of these tokens there (#2410). The serial
+/// run omits the token it stopped on, so a batched leg that samples a
+/// different token from the set at that position also matches.
+func msbTemp0ParityMatch(
+    serial: [Int],
+    batched: [Int],
+    comparedTokens: Int,
+    serialStopTokenIDs: Set<Int> = []
+) -> (match: Bool, firstDivergence: Int?) {
     guard comparedTokens > 0 else { return (false, 0) }
     let count = min(comparedTokens, serial.count, batched.count)
     for index in 0..<count {
         if serial[index] != batched[index] {
             return (false, index)
         }
+    }
+    if count < comparedTokens, serial.count == count, count < batched.count,
+       serialStopTokenIDs.contains(batched[count]) {
+        return (true, nil)
     }
     // A matching short prefix does not prove the requested output window.
     // Report the first missing token after preserving any earlier mismatch.

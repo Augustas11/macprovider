@@ -1505,10 +1505,15 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// Ends a line stream that will not be read: iterating it from a
     /// cancelled task terminates it, which runs its `onTermination` (the
     /// streaming client cancels the upstream request there).
+    ///
+    /// The drain reads until the stream ends. A single `next()` can return a
+    /// buffered line before the cancel lands, which leaves the stream open
+    /// (#2410). Once the task is cancelled, the next `next()` terminates the
+    /// stream, so the loop ends after the remaining buffered lines.
     private static func closeLines(_ lines: AsyncThrowingStream<String, Error>) async {
         let drain = Task {
             var iterator = lines.makeAsyncIterator()
-            _ = try? await iterator.next()
+            while let _ = try? await iterator.next() {}
         }
         drain.cancel()
         await drain.value

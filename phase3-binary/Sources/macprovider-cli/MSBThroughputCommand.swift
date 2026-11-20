@@ -1141,6 +1141,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     /// requests `timedDecodeTokens + 1` so the first (TTFT-boundary) token is
     /// excluded and exactly `timedDecodeTokens` tokens fall inside the timed
     /// window — matching the batched path's token convention.
+    /// Tokens on which `runProductionSerialOnce` ends early: mlx-swift-lm's
+    /// `generate` stops on the model's stop set (the serving set) and on the
+    /// tokenizer's unknown token, and omits the token it stopped on.
+    static func serialLegStopTokenIDs(context: ModelContext) -> Set<Int> {
+        var ids = ModelRuntime.generationStopTokenIDs(for: context)
+        if let unknown = context.tokenizer.unknownTokenId {
+            ids.insert(unknown)
+        }
+        return ids
+    }
+
     private func runProductionSerialOnce(
         container: ModelContainer,
         promptTokens: [Int],
@@ -1566,9 +1577,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             }
         }
 
-        func divergences(_ batched: [[Int]], _ reference: [[Int]]) -> [Int?] {
+        // Only the production serial leg stops early; scheduler legs run to length.
+        let serialStopTokenIDs = await container.perform { Self.serialLegStopTokenIDs(context: $0) }
+        func divergences(_ batched: [[Int]], _ reference: [[Int]], referenceIsSerial: Bool = false) -> [Int?] {
             zip(batched, reference).map {
-                msbTemp0ParityMatch(serial: $1, batched: $0, comparedTokens: compared).firstDivergence
+                msbTemp0ParityMatch(
+                    serial: $1, batched: $0, comparedTokens: compared,
+                    serialStopTokenIDs: referenceIsSerial ? serialStopTokenIDs : []
+                ).firstDivergence
             }
         }
 
@@ -1599,9 +1615,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 set: set,
                 raggedVsAloneFirstDivergence: divergences(ragged, raggedAlone),
                 alignedVsAloneFirstDivergence: divergences(aligned, alignedAlone),
-                raggedVsSerialFirstDivergence: divergences(ragged, serial),
-                alignedVsSerialFirstDivergence: divergences(aligned, serial),
-                raggedAloneVsSerialFirstDivergence: divergences(raggedAlone, serial)
+                raggedVsSerialFirstDivergence: divergences(ragged, serial, referenceIsSerial: true),
+                alignedVsSerialFirstDivergence: divergences(aligned, serial, referenceIsSerial: true),
+                raggedAloneVsSerialFirstDivergence: divergences(raggedAlone, serial, referenceIsSerial: true)
             )
             FileHandle.standardError.write(Data(
                 "msb-throughput: ragged-prefill set=\(set) ragged_vs_alone=\(entry.raggedVsAloneFirstDivergence) aligned_vs_alone=\(entry.alignedVsAloneFirstDivergence)\n".utf8
@@ -1681,21 +1697,28 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
         let serialRows = serialRuns.map(\.generatedTokens)
+        // The serial leg stops on these; the scheduler legs decode past them.
+        let stopTokenIDs = await container.perform { Self.serialLegStopTokenIDs(context: $0) }
         let standaloneMatches = zip(standaloneRows, serialRows).map { standalone, serial in
             msbTemp0ParityMatch(
                 serial: serial,
                 batched: standalone.tokensByRow[0],
-                comparedTokens: compared
+                comparedTokens: compared,
+                serialStopTokenIDs: stopTokenIDs
             )
         }
         let oneMatch = standaloneMatches[0]
         let batchedMatches = zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens)).map { batched, serial in
-            msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).match
+            msbTemp0ParityMatch(
+                serial: serial, batched: batched, comparedTokens: compared, serialStopTokenIDs: stopTokenIDs
+            ).match
         }
         let firstDivergence = standaloneMatches.compactMap(\.firstDivergence).first
             ?? zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens))
             .compactMap { batched, serial in
-                msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).firstDivergence
+                msbTemp0ParityMatch(
+                    serial: serial, batched: batched, comparedTokens: compared, serialStopTokenIDs: stopTokenIDs
+                ).firstDivergence
             }
             .first
         let parity = MSBParityEvidence(

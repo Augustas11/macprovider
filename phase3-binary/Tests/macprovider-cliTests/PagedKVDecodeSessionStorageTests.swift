@@ -787,6 +787,92 @@ final class PagedKVDecodeSessionFinishTests: XCTestCase {
             "b's committed K/V differs from the same batch without a's finish"
         )
     }
+
+    /// 551d145f5: `commitTerminalKV` releases retired sessions before its
+    /// forward, so the forward never writes a row that still rides a retired
+    /// session's batch. The test above cannot see that release: the forward's
+    /// first write to each layer copies the row out of the batch anyway, and
+    /// the release `finish` schedules on the container may run first. Here
+    /// the commit queues on the held container before `finish(a)` runs, so
+    /// the container (it serves waiters in order) runs the commit ahead of
+    /// that scheduled release. Every layer of `b` must then leave the retired
+    /// batch before the forward writes any layer of `b`.
+    ///
+    /// Without the release the forward's write to layer 1 detaches it after
+    /// layer 0 already holds the committed token. If the commit task has not
+    /// queued within the wait below, `finish`'s release runs first and the
+    /// test passes either way; it never fails with the release in place.
+    func testTerminalCommitReleasesARetiredSessionBeforeItsForward() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 61),
+            "b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 62),
+        ]
+        let rows = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        try await rows.prefillAll("a")
+        try await rows.prefillAll("b")
+        try await rows.decode(["a", "b"], steps: 2)
+        let backend = rows.backend
+        XCTAssertEqual(backend.rowHoldsOwnKVForTest(requestID: "b"), false, "b rides the session")
+
+        let committed = rows.committed("b")
+        let currentToken = rows.generated["b"]!.last!
+        let handle = rows.handles["b"]!
+        _ = try await rows.allocator.extend(handle, by: 1)
+        let binding = try await rows.allocator.binding(for: handle)
+        let bLayers = backend.rowPagedCachesForTest(requestID: "b")
+        XCTAssertEqual(bLayers.count, 2)
+        XCTAssertEqual(bLayers.map(\.offset), [committed, committed])
+        let bIDs = Set(bLayers.map(ObjectIdentifier.init))
+
+        let state = InterleavingState()
+        PagedKVCache.detachObserverForTest = { cache in
+            guard bIDs.contains(ObjectIdentifier(cache)) else { return }
+            state.record("b_detached")
+            if bLayers.contains(where: { $0.offset != committed }) {
+                state.record("b_written_while_attached")
+            }
+        }
+        defer { PagedKVCache.detachObserverForTest = nil }
+
+        // Hold the model container, as the window running beside `finish` does.
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let holder = Task {
+            try await backend.withTargetLockForTest {
+                entered.signal()
+                _ = release.wait(timeout: .now() + 10)
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 10), .success, "the container holder never ran")
+
+        let commit = Task {
+            try await backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                requestID: "b",
+                currentToken: currentToken,
+                binding: binding,
+                blockTable: binding.currentTable,
+                committedKVTokenCount: committed,
+                targetKVTokenCount: committed + 1
+            ))
+        }
+        // Let the commit queue on the container ahead of `finish`'s release.
+        do {
+            defer { release.signal() }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            backend.finish(requestID: "a")
+        }
+        try await holder.value
+        try await commit.value
+
+        XCTAssertTrue(state.has("b_detached"), "b never left the retired batch")
+        XCTAssertFalse(
+            state.has("b_written_while_attached"),
+            "the terminal commit's forward wrote b while b still rode the retired session's batch"
+        )
+        XCTAssertTrue(bLayers.allSatisfy(\.holdsOwnKVBuffers), "b still rides the retired batch")
+        XCTAssertEqual(bLayers.map(\.offset), [committed + 1, committed + 1])
+    }
 }
 
 /// Flags shared by a test and the threads it interleaves.

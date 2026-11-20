@@ -1,0 +1,5 @@
+mlx==0.32.4
+mlx-lm==0.32.2
+numpy==2.5.5
+huggingface_hub==2.4.0
+transformers==5.23.0
