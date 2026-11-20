@@ -99,7 +99,7 @@ OWNER=ablit-perf
 STALL_MIN=30
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 JOB_SCRIPT=${JOB_SCRIPT:-job.sh}
-case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh|job-glm-wide-prefill.sh|job-glm-gather-qmm-bitwise.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh, job-qwen-mtp-cap.sh, job-glm-gather-qmm-bitwise.sh or job-glm-wide-prefill.sh" >&2; exit 2 ;; esac
+case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh|job-glm-gather-qmm-bitwise.sh|job-glm-wide-prefill.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh, job-qwen-mtp-cap.sh, job-glm-gather-qmm-bitwise.sh or job-glm-wide-prefill.sh" >&2; exit 2 ;; esac
 mkdir -p "$SCR" "$RES"
 : > "$LOG"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
@@ -252,7 +252,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|PEAK |PROFILE_|WIDE_|FORK_TEST|GQMM_|BITWISE_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|PEAK |PROFILE_|GQMM_|BITWISE_|WIDE_|FORK_TEST)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
