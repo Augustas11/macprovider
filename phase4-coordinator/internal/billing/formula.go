@@ -122,6 +122,10 @@ var exactModelKeyAliases = map[string]string{
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",
+	// The abliterated Qwen3.8-Flash-Next build is its own labelled catalog
+	// key: its served heretic oQ4e artifact bills as that key. The qwen/
+	// namespace is stripped, so the key's fixed point has no namespace.
+	"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
 }
 
 func normalizeServedAlias(namespace, key string) string {

@@ -130,8 +130,9 @@ func TestRateFor_NormalizesGLM53FlashAliasesExactly(t *testing.T) {
 // The alias table holds whole normalized keys for GLM-5.3-Flash, its
 // abliterated and uncensored builds (#2189, #2244), Ripple-65B Preview's
 // served artifact (#2270), LFM3 1.7B's MLX artifacts (#2231), Nemotron 3.5
-// Bolt's served artifact (#2329) and DeepSeek-V4-Flash only, so no other model's
-// normalization can change through it.
+// Bolt's served artifact (#2329), DeepSeek-V4-Flash and the abliterated
+// Qwen3.8-Flash-Next artifact only, so no other model's normalization can
+// change through it.
 func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 	want := map[string]string{
 		"z-ai/glm-5.3-flash":                                    "zai-org/glm-5.3-flash",
@@ -149,6 +150,7 @@ func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 		"minimax/minimax-m3.1-flash-abliterated":                "minimaxai/minimax-m3.1-flash-abliterated",
 		"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx":           "deepseek/deepseek-v4-flash",
 		"deepseek-ai/deepseek-v4-flash-0731":                    "deepseek/deepseek-v4-flash",
+		"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
 	}
 	if len(exactModelKeyAliases) != len(want) {
 		t.Fatalf("exactModelKeyAliases = %v, want %v", exactModelKeyAliases, want)

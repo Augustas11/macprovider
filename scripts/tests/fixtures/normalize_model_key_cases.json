@@ -109,6 +109,13 @@
     {"input": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "expected": "deepseek/deepseek-v4-flash"},
     {"input": "deepseek-ai/DeepSeek-V4-Flash-0731", "expected": "deepseek/deepseek-v4-flash"},
     {"input": "tensorfold/deepseek-v4-flash-0731", "expected": "tensorfold/deepseek-v4-flash-0731"},
+    {"input": "deepseek/deepseek-v4-flash-abliterated", "expected": "deepseek/deepseek-v4-flash-abliterated"},
+    {"input": "DeepSeek/DeepSeek-V4-Flash-Abliterated", "expected": "deepseek/deepseek-v4-flash-abliterated"},
+    {"input": "qwen/qwen3.8-flash-next-abliterated", "expected": "qwen3.8-flash-next-abliterated"},
+    {"input": "Qwen/Qwen3.8-Flash-Next-Abliterated", "expected": "qwen3.8-flash-next-abliterated"},
+    {"input": "qwen3.8-flash-next-abliterated", "expected": "qwen3.8-flash-next-abliterated"},
+    {"input": "latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp", "expected": "qwen3.8-flash-next-abliterated"},
+    {"input": "mlx-community/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp", "expected": "qwen3.8-flash-next-heretic-2-oq4e-mtp"},
     {"input": "google/glm-5.3-flash", "expected": "glm-5.3-flash"},
     {"input": "z-ai/glm-4.7-flash", "expected": "z-ai/glm-4.7-flash"},
     {"input": "", "expected": ""}

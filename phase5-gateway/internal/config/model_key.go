@@ -44,6 +44,7 @@ var exactModelKeyAliases = map[string]string{
 	"minimax/minimax-m3.1-flash-abliterated":                "minimaxai/minimax-m3.1-flash-abliterated",
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx":           "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":                    "deepseek/deepseek-v4-flash",
+	"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
 }
 
 func normalizeServedModelAlias(namespace, key string) string {

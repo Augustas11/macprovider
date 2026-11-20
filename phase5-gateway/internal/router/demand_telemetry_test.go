@@ -554,6 +554,23 @@ func TestDemandTelemetryKnowsMiniMaxM3IdentitiesExactly(t *testing.T) {
 	}
 }
 
+// The abliterated DeepSeek-V4-Flash and Qwen3.8-Flash-Next catalog keys and
+// the Qwen served artifact id are recorded as themselves, never folded into a
+// base model.
+func TestDemandTelemetryKnowsAbliteratedDeepSeekAndQwenIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"deepseek/deepseek-v4-flash-abliterated", "qwen/qwen3.8-flash-next-abliterated", "latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"deepseek/deepseek-v4-flash-abliteratedx", "qwen/qwen3.8-flash-next-abliteratedx",
+		"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp", "mlx-community/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2236: the Nemotron 3.5 Lightning catalog key and served artifact id are
 // recorded as themselves, never folded into Nemotron 3 Nano.
 func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {
