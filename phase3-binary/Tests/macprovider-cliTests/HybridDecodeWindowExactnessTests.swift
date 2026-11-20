@@ -104,7 +104,6 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
     /// Fixed batch of ragged prompts, every one past the 512-token chunk (one
     /// past 1024): greedy tokens and the final recurrent state are the same
     /// whether the rows decode in 16-step windows or one step at a time.
-
     func testHybridWindowSixteenMatchesWindowOneOnFixedBatchPastPrefillChunk() async throws {
         try requireMetal()
         let target = try Self.tinyQwen35()

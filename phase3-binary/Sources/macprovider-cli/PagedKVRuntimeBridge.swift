@@ -3321,11 +3321,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    /// One row's recurrent state in the packed window batch, as a checkpoint.
-    /// A gather allocates its own output, so evaluating it detaches the
-    /// checkpoint from this step's packed state.
     /// `row`'s recurrent state from `batchStates` (`recurrentBatchStates`
-    /// taken right after the step it covers).
+    /// taken right after the step it covers), as a checkpoint. A gather
+    /// allocates its own output, so evaluating it detaches the checkpoint
+    /// from the packed state.
     private func recurrentRowCheckpoint(
         _ batchStates: [Int: [MLXArray]],
         row: Int,
@@ -3349,8 +3348,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return states
     }
 
-    /// True when a step left any recurrent layer's state array object the one
-    /// it had before the step (an in-place update), or changed its layout.
     /// The next step's token input, built on device from the sampler's
     /// uint32 tokens. It is cast to int32, the dtype the host path feeds, so a
     /// model that derives cache state from the token ids (Qwen4-Exp's n-gram
@@ -3359,6 +3356,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         sampled.reshaped([rows, 1]).asType(.int32)
     }
 
+    /// True when a step left any recurrent layer's state array object the one
+    /// it had before the step (an in-place update), or changed its layout.
     static func recurrentStateReused(before: [Int: [MLXArray]], after: [Int: [MLXArray]]) -> Bool {
         guard before.keys.sorted() == after.keys.sorted() else { return true }
         for (layer, arrays) in before {
