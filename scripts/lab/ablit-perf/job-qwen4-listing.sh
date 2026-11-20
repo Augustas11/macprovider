@@ -126,6 +126,9 @@ if [ ! -f "$QWEN4_PATH/config.json" ] || [ "$(ls "$QWEN4_PATH"/model-*.safetenso
   "$VENV/bin/hf" download "$QWEN4_REPO" --revision "$QWEN4_REVISION" --local-dir "$QWEN4_PATH" \
     > "$RES/download.log" 2>&1 || die "download: $(tail -n 2 "$RES/download.log" | tr '\n' ' ')" 11
 fi
+# hf download --local-dir keeps its resume metadata in <dir>/.cache; the provider hashes every file,
+# so the served snapshot must not carry it.
+rm -rf -- "$QWEN4_PATH/.cache"
 [ "$(ls "$QWEN4_PATH"/model-*.safetensors 2> /dev/null | wc -l | tr -d ' ')" = 21 ] || die "snapshot at $QWEN4_PATH is not 21 shards" 11
 model_type=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model_type"))' "$QWEN4_PATH/config.json")
 manifest=$(/usr/bin/python3 -I -c 'import sys,pathlib; sys.path.insert(0, sys.argv[1])
