@@ -298,17 +298,32 @@ class JobKnobTests(unittest.TestCase):
         rc, out = self.job("job-qwen4-exactness.sh", EXACT_JOB_CHECK="1")
         self.assertEqual(rc, 0, out)
         plan = [l for l in out.splitlines() if l.startswith("PLAN ")]
-        self.assertEqual([l.split()[1] for l in plan], ["fence-a", "fence-b", "determinism", "served-4000", "parity"])
-        self.assertIn("CB_ROWS=1,4,8,11 CONTEXTS=200 OUTPUTS=512 TRIALS=3 LAB_FENCE=1", plan[0])
-        self.assertIn("seed=fresh", plan[0])
-        self.assertIn("SKIP_BUILD=1 seed=fence-a", plan[1])
-        self.assertIn("CB_ROWS=1 CONTEXTS=4000", plan[3])
+        self.assertEqual([l.split()[1] for l in plan],
+                         ["engine-tests", "fence-a", "fence-b", "determinism", "served-4000", "parity"])
+        # #2448: the fork's Qwen4ExpTests, join and leave included, before any model pass.
+        self.assertIn("filter=Qwen4ExpTests", plan[0])
+        self.assertIn("required=testRowJoiningADecodingBatchMatchesSerial,testRowLeavingADecodingBatchMatchesSerial",
+                      plan[0])
+        self.assertIn("FORK=" + tempfile.gettempdir() + "/lab-ablit-perf/mlx-swift-lm-2409 ", plan[0])
+        self.assertIn("CB_ROWS=1,4,8,11 CONTEXTS=200 OUTPUTS=512 TRIALS=3 LAB_FENCE=1", plan[1])
+        self.assertIn("seed=fresh", plan[1])
+        self.assertIn("SKIP_BUILD=1 seed=fence-a", plan[2])
+        self.assertIn("CB_ROWS=1 CONTEXTS=4000", plan[4])
         # Without 1-row determinism cells both served contexts need their own pass.
         rc, out = self.job("job-qwen4-exactness.sh", EXACT_JOB_CHECK="1", DET_ROWS="4,8,11")
         self.assertIn("PLAN served-200 ", out)
         rc, out = self.job("job-qwen4-exactness.sh", EXACT_JOB_CHECK="1", RUN_DETERMINISM="0")
         self.assertEqual([l.split()[1] for l in out.splitlines() if l.startswith("PLAN ")],
-                         ["served-200", "served-4000", "parity"])
+                         ["engine-tests", "served-200", "served-4000", "parity"])
+
+    def test_exactness_engine_tests_gate_the_job(self):
+        text = (LAB / "job-qwen4-exactness.sh").read_text()
+        engine = text.index("swift test --skip-build")
+        self.assertLess(engine, text.index("step fence-a"))
+        self.assertIn("--filter Qwen4ExpTests", text)
+        self.assertIn('die "engine tests failed', text)
+        self.assertIn("FORK_DIR=$HOME/mlx-swift-lm-2448 JOB_SCRIPT=job-qwen4-exactness.sh",
+                      (LAB / "studio-ablit-perf.sh").read_text())
 
     def test_exactness_bad_knobs(self):
         for env in ({"DET_ROWS": "4,,8"}, {"TRIALS": "1"}, {"SERVED_CONTEXTS": "4k"},

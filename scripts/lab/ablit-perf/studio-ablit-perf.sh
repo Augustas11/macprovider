@@ -43,12 +43,15 @@
 #          OUTPUTS=256 TRIALS=1 SKIP_REFERENCE=1 SERVE_ENV='MLX_LM_SECTION_TIMING=1'; FORK_DIR HEAD must
 #          then hold Libraries/MLXLMCommon/LabSectionTimer.swift (fork branch
 #          campaign/2409-qwen4-exp-batch-labtimer; the pinned engine has no timer).
-#        FORK_DIR=$HOME/mlx-swift-lm-2409 JOB_SCRIPT=job-qwen4-exactness.sh studio-ablit-perf.sh
-#          #2448 + #2449 Flash-Next exactness, one window (job header): two fenced provider passes of
+#        FORK_DIR=$HOME/mlx-swift-lm-2448 JOB_SCRIPT=job-qwen4-exactness.sh studio-ablit-perf.sh
+#          #2448 + #2449 Flash-Next exactness, one window (job header): the fork's Qwen4ExpTests on
+#          Metal first (row join/leave included; any failure ends the job), then two fenced passes of
 #          job-qwen4-cb.sh (rows 1,4,8,11, context 200, 512 tokens, 3 trials, each its own serve) gated
 #          on identical per-row text and token counts (DETERMINISM PASS|FAIL), one 1-row pass at 4000,
 #          then job-qwen4-parity.sh with the two served chat prompts (DIVERGENCE_VERDICT per prompt,
-#          PARITY_GATES with close-call prompts). FORK_DIR as for job-qwen4-cb.sh. Knobs: DET_ROWS
+#          PARITY_GATES with close-call prompts). FORK_DIR is the campaign/2448-qwen4-join-test
+#          worktree: the job-qwen4-cb.sh engine (tag 3.32.3-macprovider.84) plus the join/leave tests,
+#          which the job requires. Knobs: DET_ROWS
 #          DET_CONTEXTS OUTPUTS TRIALS CB_SLOTS SERVED_CONTEXTS SERVED_STEPS CONTEXTS STEPS
 #          SEED_SELF_CHECK_RUN SKIP_BUILD RUN_DETERMINISM RUN_PARITY and the QWEN4_* pins. Estimated
 #          duration: about 1 h 25 cold (build ~20 min, fresh self-check up to ~15 min, two fenced grids

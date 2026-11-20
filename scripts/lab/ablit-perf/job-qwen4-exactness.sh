@@ -1,7 +1,17 @@
 #!/bin/bash
 # Runs ON THE STUDIO from ~/lab-ablit-perf/job/ablit-perf/. One window, two Flash-Next (qwen4_exp)
 # exactness checks back to back, on the snapshot and pins of job-qwen4-cb.sh (QWEN4_*, FORK, the
-# .build-lab-qwen4 lab-harness build):
+# .build-lab-qwen4 lab-harness build), after the engine tests:
+#
+# 0. #2448 engine tests, before any model load. `swift test --filter Qwen4ExpTests` in FORK on Metal
+#    (debug build in ~/lab-ablit-perf/.build-fork-tests, METALLIB copied into the test bundle,
+#    Xcode's XCTest via DEVELOPER_DIR, default ~/Applications/Xcode.app): batched decode equals each
+#    row alone bit for bit at 2/8/16 rows and mixed offsets, and with a row joining a batch that is
+#    already decoding and rows leaving it (float and 4-bit). Any failed test, or a FORK without the
+#    join/leave tests, ends the job (JOB_FAIL) before pass fence-a. FORK is the launcher's rsync of
+#    FORK_DIR, which must be the mlx-swift-lm worktree on campaign/2448-qwen4-join-test
+#    (FORK_DIR=$HOME/mlx-swift-lm-2448): tag 3.32.3-macprovider.84 (the campaign/2409-qwen4-exp-batch
+#    engine job-qwen4-cb.sh builds) plus the join/leave tests, so every other step is unchanged.
 #
 # A. #2448, batched token identity at a fixed admission. Two passes of job-qwen4-cb.sh, each its own
 #    serve process, provider side only (SKIP_REFERENCE=1), LAB_FENCE=1: every trial's rows go out as
@@ -28,14 +38,16 @@
 # Knobs: DET_ROWS (1,4,8,11) DET_CONTEXTS (200) OUTPUTS (512) TRIALS (3) CB_SLOTS (16)
 # SERVED_CONTEXTS (200,4000) SERVED_STEPS (512) CONTEXTS/STEPS (the code-prompt gate cells, parity job
 # defaults 1024,8192 / 256) SEED_SELF_CHECK_RUN SKIP_BUILD (1: also reuse the build for fence-a)
-# RUN_DETERMINISM (1) RUN_PARITY (1) and the QWEN4_* pins, FORK, METALLIB, SERVE_ENV of
-# job-qwen4-cb.sh. EXACT_JOB_CHECK=1 validates the knobs, prints the plan and exits 0 (the unit test).
+# RUN_DETERMINISM (1) RUN_PARITY (1) and the QWEN4_* pins, FORK, METALLIB (also the engine tests'),
+# SERVE_ENV of job-qwen4-cb.sh. EXACT_JOB_CHECK=1 validates the knobs, prints the plan and exits 0
+# (the unit test).
 # Sub-job lines pass through with JOB_START/JOB_PASS/JOB_FAIL renamed STEP_START/STEP_PASS/STEP_FAIL;
 # every failure prints `BLOCKER:`; the job ends with JOB_PASS (exit 0: every step passed, DETERMINISM
 # PASS, PARITY_GATES PASS) or JOB_FAIL (nonzero). A DIVERGENCE_VERDICT is a finding, not a failure.
 # No wall-clock deadline: the launcher's stall watcher is the only bound.
 # Results: <run>/qwen4-flash-next-cb/{fence-a,fence-b,served-<ctx>}/, <run>/qwen4-parity/ and
-# <run>/qwen4-exactness/{determinism.json,determinism.md,summary.txt}.
+# <run>/qwen4-exactness/{engine-tests.log,engine-tests-build.log,determinism.json,determinism.md,
+# summary.txt}.
 set -u
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -55,6 +67,11 @@ SERVED_STEPS=${SERVED_STEPS:-512}
 SEED_SELF_CHECK_RUN=${SEED_SELF_CHECK_RUN:-}
 RUN_DETERMINISM=${RUN_DETERMINISM:-1}
 RUN_PARITY=${RUN_PARITY:-1}
+FORK=${FORK:-$LAB/mlx-swift-lm-2409}
+METALLIB=${METALLIB:-/Applications/Malibu.app/Contents/MacOS/mlx.metallib}
+ENGINE_TESTS_BUILD=$LAB/.build-fork-tests
+ENGINE_TESTS_FILE=$FORK/Tests/MLXLMTests/Qwen4ExpTests.swift
+ENGINE_REQUIRED_TESTS="testRowJoiningADecodingBatchMatchesSerial testRowLeavingADecodingBatchMatchesSerial"
 log() { echo "$(date '+%H:%M:%S') $*"; }
 die() { log "BLOCKER: $*"; log "JOB_FAIL"; exit "${2:-1}"; }
 
@@ -83,6 +100,7 @@ for c in ${SERVED_LIST[@]+"${SERVED_LIST[@]}"}; do
 done
 
 if [ "${EXACT_JOB_CHECK:-0}" = 1 ]; then
+  echo "PLAN engine-tests FORK=$FORK filter=Qwen4ExpTests required=${ENGINE_REQUIRED_TESTS// /,} metallib=$METALLIB build=$ENGINE_TESTS_BUILD"
   [ "$RUN_DETERMINISM" = 0 ] || echo "PLAN fence-a CB_ROWS=$DET_ROWS CONTEXTS=$DET_CONTEXTS OUTPUTS=$OUTPUTS TRIALS=$TRIALS LAB_FENCE=1 SKIP_REFERENCE=1 seed=${SEED_SELF_CHECK_RUN:-fresh}"
   [ "$RUN_DETERMINISM" = 0 ] || echo "PLAN fence-b CB_ROWS=$DET_ROWS CONTEXTS=$DET_CONTEXTS OUTPUTS=$OUTPUTS TRIALS=$TRIALS LAB_FENCE=1 SKIP_REFERENCE=1 SKIP_BUILD=1 seed=fence-a"
   [ "$RUN_DETERMINISM" = 0 ] || echo "PLAN determinism rows=$DET_ROWS passes=fence-a,fence-b"
@@ -110,6 +128,40 @@ step() {
   log "STEP $name exit=$rc"
   return "$rc"
 }
+
+# 0. Engine tests on Metal; a failure ends the job before any model load.
+for t in $ENGINE_REQUIRED_TESTS; do
+  grep -q "func $t()" "$ENGINE_TESTS_FILE" 2>/dev/null \
+    || die "FORK=$FORK has no Qwen4ExpTests.$t; set FORK_DIR=\$HOME/mlx-swift-lm-2448 (campaign/2448-qwen4-join-test)" 11
+done
+[ -f "$METALLIB" ] || die "no metallib at $METALLIB" 14
+log "STEP engine-tests start fork=$FORK"
+(
+  XCODE_DEV=$HOME/Applications/Xcode.app/Contents/Developer
+  [ -n "${DEVELOPER_DIR:-}" ] || [ ! -d "$XCODE_DEV" ] || export DEVELOPER_DIR=$XCODE_DEV
+  cd "$FORK" || exit 14
+  nice -n 10 swift build --build-tests --scratch-path "$ENGINE_TESTS_BUILD" > "$OUT/engine-tests-build.log" 2>&1 || exit 14
+  # Xcode's build system makes one bundle per test target, the native one a single package bundle.
+  bundle=$(ls -d "$ENGINE_TESTS_BUILD"/debug/MLXLMTests.xctest "$ENGINE_TESTS_BUILD"/debug/*PackageTests.xctest 2>/dev/null | head -n 1)
+  [ -n "$bundle" ] && cp "$METALLIB" "$bundle/Contents/MacOS/mlx.metallib" || exit 15
+  swift test --skip-build --scratch-path "$ENGINE_TESTS_BUILD" --filter Qwen4ExpTests > "$OUT/engine-tests.log" 2>&1
+)
+rc=$?
+[ "$rc" != 14 ] || die "engine test build failed: $(tail -n 3 "$OUT/engine-tests-build.log" | tr '\n' ' ' | cut -c1-400)" 14
+[ "$rc" != 15 ] || die "no test bundle under $ENGINE_TESTS_BUILD/debug for the metallib" 14
+grep -E "Qwen4ExpTests test[A-Za-z0-9]+\]' (passed|failed)" "$OUT/engine-tests.log" | sed 's/^/STEP engine-tests /'
+# Xcode's build system runs every test bundle, each with its own XCTest summary: count the cases.
+passed=$(grep -cE "Qwen4ExpTests test[A-Za-z0-9]+\]' passed" "$OUT/engine-tests.log")
+failed=$(grep -cE "Qwen4ExpTests test[A-Za-z0-9]+\]' failed" "$OUT/engine-tests.log")
+log "STEP engine-tests exit=$rc passed=$passed failed=$failed"
+missing=""
+for t in $ENGINE_REQUIRED_TESTS; do
+  grep -q "Qwen4ExpTests $t\]' passed" "$OUT/engine-tests.log" || missing="$missing $t"
+done
+if [ "$rc" != 0 ] || [ -n "$missing" ] || [ "$failed" != 0 ] \
+   || grep -qE 'with [1-9][0-9]* failures?' "$OUT/engine-tests.log"; then
+  die "engine tests failed (rc=$rc, not passed:${missing:- none}): $(grep -m1 -E 'error: .*Qwen4ExpTests' "$OUT/engine-tests.log" | cut -c1-400)" 1
+fi
 
 CB_COMMON=(CB_SLOTS="$CB_SLOTS" OUTPUTS="$OUTPUTS" SKIP_REFERENCE=1 LAB_FENCE=1)
 BUILT=0
