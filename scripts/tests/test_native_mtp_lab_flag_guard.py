@@ -34,6 +34,7 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-step-gate.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-cb.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen-mtp-cap.sh",
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-wide-prefill.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.

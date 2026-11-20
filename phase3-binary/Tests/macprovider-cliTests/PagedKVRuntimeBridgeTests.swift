@@ -1324,6 +1324,40 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    /// #2451: a wide forward's slices never share a batched forward, and a
+    /// model that ignores them (full-width logits: one plain forward, other
+    /// numerics) fails the row instead of committing it.
+    func testPrefillSlicesIgnoredByTheModelFailTheRow() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [12: 13]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        var inputs: [ContinuousBatchPrefillInput] = []
+        for id in ["a", "b"] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            _ = try await allocator.extend(handle, by: 3)
+            inputs.append(ContinuousBatchPrefillInput(
+                requestID: id, promptTokens: [10, 11, 12], binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0, committedKVTokenCount: 0, targetKVTokenCount: 3, isFinalChunk: true,
+                prefillSliceTokens: [2, 1]
+            ))
+        }
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+        let output = try await backend.prefill(rows: [inputs[0]])
+        XCTAssertEqual(output, [
+            ContinuousBatchPrefillOutput(requestID: "a", failureCode: "continuous_batching_prefill_failed"),
+        ])
+    }
+
     /// #2328: a drafter that keeps nothing from the prompt
     /// (`requiresPromptPrefill` false; the Gemma 4 assistant) has no packed
     /// advance without a verified round's target K/V. A chunked prompt

@@ -1360,8 +1360,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             modelState = modelState ?? LMOutput.State()
                             modelState?[mtpEmitFlagKey] = true
                         }
+                        // Wide prefill (#2451): the row's balanced chunks as
+                        // exact slices of this one forward.
+                        if let slices = input.prefillSliceTokens {
+                            modelState = modelState ?? LMOutput.State()
+                            modelState?[glm5NextPrefillSlicesKey] = slices
+                        }
                         let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
                             context.model(text, cache: state.caches, state: modelState)
+                        }
+                        // A model that ran the slices returns the last
+                        // slice's logits only; full-width logits mean it ran
+                        // one plain forward, whose numerics differ: fail the row.
+                        if let slices = input.prefillSliceTokens, output.logits.dim(1) != slices[slices.count - 1] {
+                            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prefill_slices_not_run")
                         }
                         if input.sampleFirstToken {
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -1658,7 +1670,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         _ inputs: [ContinuousBatchPrefillInput],
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false
     ) -> Bool {
-        guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
+        guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty,
+              inputs.allSatisfy({ $0.prefillSliceTokens == nil }) else {
             return false
         }
         let chunkLength = first.promptTokens.count

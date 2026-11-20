@@ -185,7 +185,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("job-glm-prefill-profile.sh) FORK_FILE=Libraries/MLXLMCommon/LabSectionTimer.swift", text)
         self.assertIn("|job-glm-prefill-profile.sh|", text)
         self.assertIn("PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|", text)
-        self.assertIn("PEAK |PROFILE_)", text)
+        self.assertIn("PEAK |PROFILE_|", text)
 
     def test_launcher_refuses_an_unknown_job_before_ssh(self):
         r = subprocess.run(["bash", str(LAUNCHER)], env={**os.environ, "JOB_SCRIPT": "job-nope.sh"},

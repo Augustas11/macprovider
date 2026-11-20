@@ -163,6 +163,10 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertNil(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: qwen))
         XCTAssertEqual(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: hybridQwenMoE), 512)
         XCTAssertNil(ModelRuntime.schedulerIdlePrefillCohortChunkTokens(backend: nil))
+        XCTAssertEqual(ModelRuntime.schedulerWidePrefillChunkTokens(backend: glm), 4_096)
+        XCTAssertNil(ModelRuntime.schedulerWidePrefillChunkTokens(backend: qwen))
+        XCTAssertNil(ModelRuntime.schedulerWidePrefillChunkTokens(backend: hybridQwenMoE))
+        XCTAssertNil(ModelRuntime.schedulerWidePrefillChunkTokens(backend: nil))
     }
 
     /// #2402 serve and native-MTP hardware wiring: only the hybrid Qwen MoE
