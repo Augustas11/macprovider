@@ -7,6 +7,7 @@ import MLX
 import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
+import MLXNN
 import MLXVLM
 import MacProviderCore
 import Security
@@ -2158,6 +2159,69 @@ actor ModelRuntime: ModelRuntimeServing {
         containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
+    /// #2415: the serial prompt chunk for families measured at 2048 tokens.
+    /// At ~16k-token prompts on M3 Ultra, 2048 brought the TTFT gap to mlx-lm
+    /// from +3.9..+5.8% (512) to -0.46..+1.08% on Llama 3.2 3B, Llama 3.1 8B
+    /// and Qwen3-8B, with byte-identical output. Larger dense models keep 512:
+    /// #2402 measured only 0.5-1.7% from 2048 on dense Qwen3.8-27B.
+    static let serialFamilyPrefillStepSize = 2048
+    /// Llama 3.x tokenizer vocabulary; separates Llama 3 from Llama 2 and
+    /// Mistral, which share `LlamaModel`.
+    static let llama3VocabularySize = 128_256
+    /// Widest measured model (Llama 3.1 8B, Qwen3-8B: hidden 4096). Qwen3-14B
+    /// and larger, and Llama 3 70B, are wider and keep the global step.
+    static let serialFamilyPrefillMaximumHiddenSize = 4096
+    /// The larger chunk holds more activation memory per forward (+0.58 GiB
+    /// peak measured on Qwen3-8B at 16k). Macs at or under 24 GiB, which also
+    /// run the longest default context per GiB, keep the global step.
+    static let serialFamilyPrefillMinimumPhysicalMemoryBytes: UInt64 = 24 * 1_073_741_824
+
+    enum SerialPrefillFamily: Equatable {
+        case llama3
+        case qwen3Dense
+    }
+
+    nonisolated static func serialPrefillFamily(model: any LanguageModel) -> SerialPrefillFamily? {
+        if let llama = model as? LlamaModel, llama.vocabularySize == llama3VocabularySize { return .llama3 }
+        if type(of: model) == Qwen3Model.self { return .qwen3Dense }
+        return nil
+    }
+
+    /// The model width from its final norm (`model.norm.weight`, never
+    /// quantized), or nil when the module has no such parameter.
+    nonisolated static func finalNormWidth(model: any LanguageModel) -> Int? {
+        model.parameters().flattened().first { $0.0 == "model.norm.weight" }?.1.shape.first
+    }
+
+    nonisolated static func serialFamilyPrefillStep(family: SerialPrefillFamily?, hiddenSize: Int?) -> Int? {
+        guard family != nil, let hiddenSize, hiddenSize > 0,
+              hiddenSize <= serialFamilyPrefillMaximumHiddenSize else { return nil }
+        return serialFamilyPrefillStepSize
+    }
+
+    /// The family's serial prefill step, or nil when the model keeps the
+    /// global `prefill_step_size`.
+    nonisolated static func serialFamilyPrefillStep(model: any LanguageModel) -> Int? {
+        guard let family = serialPrefillFamily(model: model) else { return nil }
+        return serialFamilyPrefillStep(family: family, hiddenSize: finalNormWidth(model: model))
+    }
+
+    /// The serial route's prompt chunk. Images keep the vision step; an
+    /// operator-set `prefill_step_size` wins over the family step; the family
+    /// step applies only above the small-Mac memory bound.
+    nonisolated static func serialPrefillStepSize(
+        configured: Int,
+        explicitlyConfigured: Bool,
+        containsImage: Bool,
+        familyStep: Int?,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        let base = effectivePrefillStepSize(configured: configured, containsImage: containsImage)
+        guard !containsImage, !explicitlyConfigured, let familyStep,
+              physicalMemoryBytes > serialFamilyPrefillMinimumPhysicalMemoryBytes else { return base }
+        return max(1, familyStep)
+    }
+
     struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
         let base: any MLXLMCommon.Tokenizer
 
@@ -2395,6 +2459,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The CB prompt chunk the operator set through `prefill_step_size`; nil
     /// keeps the backend family's ceiling (SPEC-038 FR-CB2).
     private let continuousBatchPromptChunkOverride: Int?
+    /// #2415: an operator-set `prefill_step_size` keeps the serial route on
+    /// that step instead of the family step.
+    private let prefillStepSizeExplicitlyConfigured: Bool
 
     /// Both initializers resolve the CB chunk override here, so serve, test
     /// and hardware-harness runtimes take the same family default.
@@ -4305,6 +4372,7 @@ maxTokens: 1,
         self.kvBitsOverride = kvBitsOverride
         self.familyKVQuantDefault = familyKVQuantDefault
         self.prefillStepSize = max(1, prefillStepSize)
+        self.prefillStepSizeExplicitlyConfigured = prefillStepSizeExplicitlyConfigured
         self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
             prefillStepSize: prefillStepSize,
             explicitlyConfigured: prefillStepSizeExplicitlyConfigured
@@ -4881,6 +4949,7 @@ maxTokens: 1,
         self.kvBitsOverride = kvBitsOverride
         self.familyKVQuantDefault = familyKVQuantDefault
         self.prefillStepSize = max(1, prefillStepSize)
+        self.prefillStepSizeExplicitlyConfigured = prefillStepSizeExplicitlyConfigured
         self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
             prefillStepSize: prefillStepSize,
             explicitlyConfigured: prefillStepSizeExplicitlyConfigured
@@ -11035,8 +11104,8 @@ maxTokens: boundedMaxTokens,
 
         let maxContextTokens = maxContextTokens
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = Self.effectivePrefillStepSize(
-            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
+        let configuredPrefillStepSize = prefillStepSize
+        let prefillStepSizeExplicitlyConfigured = prefillStepSizeExplicitlyConfigured
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
@@ -11073,6 +11142,13 @@ maxTokens: boundedMaxTokens,
                 try Task.checkCancellation()
                 return try await container.perform { context in
                     timeline.markStarted()
+                    // #2415: Llama 3.x and dense Qwen3 prefill serial prompts (local
+                    // loop and buyer iterator alike) in the family's larger chunk.
+                    let prefillStepSize = Self.serialPrefillStepSize(
+                        configured: configuredPrefillStepSize,
+                        explicitlyConfigured: prefillStepSizeExplicitlyConfigured,
+                        containsImage: request.containsNonTextMessageContentPart,
+                        familyStep: Self.serialFamilyPrefillStep(model: context.model))
                     try drainCancelled.check()
                     try Task.checkCancellation()
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
@@ -12073,8 +12149,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
 
         let maxContextTokens = maxContextTokens
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = Self.effectivePrefillStepSize(
-            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
+        let configuredPrefillStepSize = prefillStepSize
+        let prefillStepSizeExplicitlyConfigured = prefillStepSizeExplicitlyConfigured
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
@@ -12116,6 +12192,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 try Task.checkCancellation()
                 return try await container.perform { context in
                     timeline.markStarted()
+                    // #2415: Llama 3.x and dense Qwen3 prefill serial prompts (local
+                    // loop and buyer iterator alike) in the family's larger chunk.
+                    let prefillStepSize = Self.serialPrefillStepSize(
+                        configured: configuredPrefillStepSize,
+                        explicitlyConfigured: prefillStepSizeExplicitlyConfigured,
+                        containsImage: request.containsNonTextMessageContentPart,
+                        familyStep: Self.serialFamilyPrefillStep(model: context.model))
                     try drainCancelled.check()
                     try Task.checkCancellation()
                     let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
