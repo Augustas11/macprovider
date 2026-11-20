@@ -215,7 +215,7 @@
       "artifact_hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
       "artifact_id": "mlx-4bit",
       "batch_evidence_sha256": "47f1c6e5e44bf831f651bff001898fbc56449160b003aba7c5659c575fbdaf0f",
-      "benchmark_policy_sha256": "64c17208cf58f02da1e1adac6bd58eebaf346e2d2018f876746f903f531d1b3a",
+      "benchmark_policy_sha256": "c9b266d2418fde0f57b8f8bc40f0d970edf4c3f4ef04504f618a46498697808a",
       "cache_state_classes": [
         "hybrid_stageable_rewindable"
       ],
@@ -227,12 +227,12 @@
       "decode_path": "native_mtp",
       "decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
       "decrease_threshold_ppm": 400000,
-      "fit_evidence_sha256": "b3f0934e72335e58dee7ea044f9473dddaadb68621911392a14c5f7e65cb5287",
+      "fit_evidence_sha256": "8f9a2ea1dd0a3981715ff83f8c867492dde32010c36090164b685b8e41e1c807",
       "hardware_class": "apple-m3-ultra",
       "hash_algorithm": "macprovider.snapshot-manifest.v1",
       "increase_threshold_ppm": 700000,
       "max_native_active_rows": 1,
-      "max_prompt_tokens": 4096,
+      "max_prompt_tokens": 32768,
       "max_verification_positions_per_committed_milli": 2500,
       "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
       "model_key": "qwen/qwen3.8-27b",
@@ -241,17 +241,17 @@
       "mtp_manifest_sha256": "16094efa6177985ab3725a9d6d61d6ab248b71e4b42a114efddcdb2aaddc0a55",
       "mtp_state_class": "hybrid_stageable_rewindable",
       "ordinary_baseline": {
-        "aggregate_tps_milli": 39006,
+        "aggregate_tps_milli": 36644,
         "artifact_hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
         "decode_path": "ordinary",
-        "measurement_sha256": "b3f0934e72335e58dee7ea044f9473dddaadb68621911392a14c5f7e65cb5287",
+        "measurement_sha256": "8f9a2ea1dd0a3981715ff83f8c867492dde32010c36090164b685b8e41e1c807",
         "qualified_slots": 4,
         "runtime_revision": "6c27b743bae5dd60eb07954f2819316b22b92094"
       },
-      "performance_evidence_sha256": "b3f0934e72335e58dee7ea044f9473dddaadb68621911392a14c5f7e65cb5287",
+      "performance_evidence_sha256": "8f9a2ea1dd0a3981715ff83f8c867492dde32010c36090164b685b8e41e1c807",
       "proposal_depth": 1,
       "qualified_slots": 4,
-      "quality_evidence_sha256": "b3f0934e72335e58dee7ea044f9473dddaadb68621911392a14c5f7e65cb5287",
+      "quality_evidence_sha256": "8f9a2ea1dd0a3981715ff83f8c867492dde32010c36090164b685b8e41e1c807",
       "quantization": {
         "alignment_bytes": null,
         "block_size_elements": 64,
@@ -270,7 +270,7 @@
       "runtime_revision": "6c27b743bae5dd60eb07954f2819316b22b92094",
       "security_negative_evidence_sha256": "752052f9a01cd5111f11e968ab275675c1a6ca0d6a6002682f28f8ab6f7aa0f2",
       "state_rollback_evidence_sha256": "47f1c6e5e44bf831f651bff001898fbc56449160b003aba7c5659c575fbdaf0f",
-      "throughput_delta_ppm": 56356,
+      "throughput_delta_ppm": 19105,
       "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
     },
     "schema_version": "macprovider.native-mtp-admission-tuple-input.v1"
