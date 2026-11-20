@@ -22,7 +22,7 @@ runs (`qwen36/r015.jsonl`) so a later extension can reuse them.
 
 ## Run
 
-Studio M3 Ultra 256 GB, 2026-11-19/20, live provider and buyer runner paused,
+M3 Ultra 256 GB, 2026-11-19/20, machine otherwise idle,
 isolated lab harness (`scripts/lab/ablit-perf/job-qwen-mtp-cap.sh`,
 `QMTP_FORMAL=1 QMTP_CAP=32768`) built from `ba4e46990` on
 `campaign/abliterated-perf`, mlx-swift-lm `a219eafe…`, release
@@ -88,7 +88,7 @@ the 2026-11-04 runs was committed. This directory commits the raw runs
 
 ### Run
 
-Studio M3 Ultra 256 GB, 2026-11-20, live provider and buyer runner paused,
+M3 Ultra 256 GB, 2026-11-20, machine otherwise idle,
 same isolated lab harness (`QMTP_FORMAL=1 QMTP_CAP=32768`) built from
 `637b0ad61` on `campaign/abliterated-perf`, mlx-swift-lm `ddc6f974…` (the
 3.32.3-macprovider.84 pin this branch carries), release `mlx.metallib`
