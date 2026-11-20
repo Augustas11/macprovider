@@ -1,0 +1,13 @@
+22:22:00 WINDOW_2440_START run=20261120T062159Z commit=018ded3a08e9a15e463d459c2bfbc958c3e51c6e model=qwen36-27b cell=s3-p1536-o512
+22:22:00 BUILD start
+22:29:58 BUILD done cli_sha256=cb8dd47e720bab3b metallib_sha256=3d9b4a747758128c
+22:30:09 VALIDATED policy_sha256=b15a573802fe37f0359bfa8f293359e885227bd31db841be6698185811bfc4a2
+22:30:09 CELL_START s3-p1536-o512
+22:43:37 CELL_DONE s3-p1536-o512 rc=0 elapsed_s=808 records=23
+ARM ordinary: runs=10 rows_per_run=[3] decode_tps_median=37.416 committed_tps_median=31.521 ttft_p50_s_median=15.143 ttft_p95_s_median=15.367 mtp_proposed_tokens=0 mtp_accepted_tokens=0 mtp_forwards=0 errors=0 fallbacks=0
+ARM native_mtp: runs=10 rows_per_run=[3] decode_tps_median=38.505 committed_tps_median=31.035 ttft_p50_s_median=11.620 ttft_p95_s_median=15.705 mtp_proposed_tokens=7 mtp_accepted_tokens=7 mtp_forwards=7 errors=0 fallbacks=0
+NATIVE_ADMISSIONS active_rows_at_admission={"1": 10, "2": 10, "3": 10} path_reason={"native_mtp/eligible": 10, "ordinary/capacity_above_native_bound": 20} max_active_rows=3 native_admissions=10 load_gate_downgrades=20 gated_depth_zero_rounds=285 gated_hold_episodes=11 gated_held_unresolved=0
+PARITY per_row_identical={"r0": "10/10", "r1": "10/10", "r2": "10/10"} blocks=10 bench_parity_mismatch_blocks=0
+ANALYZER overall_status=EXPLORATORY_NO_VERDICT
+RESULT native_rounds=7 tokens_identical_to_ordinary=yes
+22:43:38 WINDOW_2440_DONE
