@@ -6666,6 +6666,35 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             cursor: 0, end: 3_000, spanEnd: 3_673, maxChunkTokens: 2_048))
     }
 
+    /// #2451: the wide forward covers at most two chunks, so a lowered
+    /// `prefill_step_size` lowers it too.
+    func testGLMWidePrefillIsAtMostTwoChunks() {
+        func wide(_ step: Int?) -> Int? {
+            ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                tuple: Self.tuple(),
+                maxBatch: 2,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: 32_768,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3,
+                prefillStepSize: step,
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .ungrouped,
+                promptChunkCeiling: ModelRuntime.pagedMLAPromptChunkTokens,
+                widePrefillChunkTokens: ModelRuntime.pagedMLAWidePrefillTokens
+            ).widePrefillChunkTokens
+        }
+        XCTAssertEqual(wide(nil), 4_096)
+        XCTAssertEqual(wide(256), 512)
+        XCTAssertEqual(wide(1_024), 2_048)
+    }
+
     /// #2451: an idle `glm5_next` row prefills its 2048-token balanced chunks
     /// two per forward, each forward carrying its chunks as slices; the
     /// serial stride and the reference partition keep wide prefill off.

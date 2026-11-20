@@ -62,7 +62,9 @@ extension ModelRuntime {
             idlePrefillCohortChunkTokens: idlePrefillCohortChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
             serialPrefillStride: serialPrefillStride,
-            widePrefillChunkTokens: widePrefillChunkTokens,
+            // At most two chunks per forward, so a lowered `prefill_step_size` also
+            // lowers the wide forward's activation peak instead of packing more slices.
+            widePrefillChunkTokens: widePrefillChunkTokens.map { min($0, 2 * promptChunkTokens) },
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
