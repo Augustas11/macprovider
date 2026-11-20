@@ -78,12 +78,14 @@ enum LabDecodeTopK {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> GenerationComponents {
         guard let configuration = try configuration(environment: environment) else { return components }
-        var taps: TapSink?
+        let taps: TapSink?
         if configuration.layers {
             guard let root = model as? Module else {
                 throw ConfigurationError(description: "\(layersKey)=1 needs the loaded model")
             }
             taps = try installTaps(in: root)
+        } else {
+            taps = nil
         }
         return components.appendingLogitProcessor {
             Recorder(configuration: configuration, promptTokenIDs: promptTokenIDs, taps: taps)
@@ -246,7 +248,7 @@ enum LabDecodeTopK {
                     out["layers"] = zip(taps.names, zip(vectors, values)).map { name, pair in
                         [
                             "tap": name, "dtype": String(describing: pair.0.dtype),
-                            "values": pair.1.asArray(Float.self).map(Double.init),
+                            "values": pair.1.asArray(Float.self).map { Double($0) },
                         ] as [String: Any]
                     }
                 } else {
