@@ -23,6 +23,7 @@ always given on the command line; `grid.json` holds placeholders only.
 | `compare.py` | stdlib python | grid table, JSON summary, ratio / gates / slope checks, exit code |
 | `margin.py` | python with `mlx_lm` | explains text mismatches: reference top-5 logits at the first differing token; `--json` writes records for `compare.py --margins` |
 | `decode_topk.py` | python with `mlx_lm` | top-k logits at one decode index from our serial route (lab hook record) and from mlx-lm's cached decode and uncached forward, on the same token ids |
+| `layer_trace.py` | python with `mlx_lm` | per-layer last-position hidden state at that index on the same three paths; names the first layer where ours leaves mlx-lm's cached-vs-forward spread |
 | `run-grid.sh` | bash | one lab window for one model: provider (serve + client), then reference, then compare |
 
 ## Running a window
@@ -358,6 +359,27 @@ recorded too; `decode_topk.py` takes the record whose prompt ids equal the
 cell's mlx-lm chat-template ids. It forces mlx-lm's decode through our
 generated ids and prints, for the reference's pick and ours, the gap on each
 path in float steps, and our gap minus mlx-lm's cached-decode gap.
+
+## layer_trace.py
+
+When `decode_topk.py` shows our logits outside mlx-lm's own spread, add
+`MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1` to the same serve. The hook then swaps
+each `layers.N.input_layernorm` and the final `model.norm` for a recording
+RMSNorm (same weight, eps and kernel) and adds a `layers` list to the record:
+the last-position input of every one of those norms in the forward that made
+the logits at the index. `layer_trace.py` wraps the same norms in mlx-lm and
+compares, per tap, ours against mlx-lm's cached decode and mlx-lm's cached
+decode against its uncached forward:
+
+```bash
+scripts/lab/parity-grid/run-grid.sh ... --serve-env "MACPROVIDER_LAB_DECODE_TOPK=$OUT/topk.jsonl \
+  MACPROVIDER_LAB_DECODE_TOPK_INDICES=15 MACPROVIDER_LAB_DECODE_TOPK_LAYERS=1"
+python layer_trace.py --model-path DIR --ours-topk "$OUT/topk.jsonl" --ctx 4000 --index 15 --json layers.json
+```
+
+It names the first tap where ours-to-cached relative L2 exceeds
+cached-to-forward. A tap's input is the previous layer's output, so
+`layers.0` is the scaled embedding and `model.norm` the last layer's output.
 
 ## Tests
 

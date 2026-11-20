@@ -11377,7 +11377,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             #if MACPROVIDER_LAB_HARNESS
                             generation.components = try LabDecodeTopK.appending(
-                                to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init))
+                                to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init),
+                                model: generationContext.model)
                             #endif
                             // SPEC-001-R018: beside an active sibling a keyless text prompt on a
                             // model with no fixed prefill plan takes the arbiter's short chunk;
@@ -12528,7 +12529,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                         #if MACPROVIDER_LAB_HARNESS
                         generation.components = try LabDecodeTopK.appending(
-                            to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init))
+                            to: generation.components, promptTokenIDs: promptTokenIds.map(Int.init),
+                            model: context.model)
                         #endif
                         // SPEC-001-R018: beside an active sibling a keyless text prompt on a
                         // model with no fixed prefill plan takes the arbiter's short chunk;

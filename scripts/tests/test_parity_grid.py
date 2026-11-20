@@ -27,6 +27,7 @@ client = module("provider_client")
 margin = module("margin")
 cb_margin = module("cb_margin")
 decode_topk = module("decode_topk")
+layer_trace = module("layer_trace")
 reference_mlxlm = module("reference_mlxlm")
 JOB_QWEN4_CB = Path(__file__).resolve().parents[1] / "lab" / "ablit-perf" / "job-qwen4-cb.sh"
 
@@ -1914,6 +1915,101 @@ class DecodeTopKTests(unittest.TestCase):
         # 23.875 vs 23.375 in bf16 (spacing 0.125 at 16..32): 4 steps.
         self.assertEqual(decode_topk.gap_steps(23.875, 23.375, "bfloat16"), 4.0)
         self.assertEqual(decode_topk.gap_steps(21.75, 21.875, "bfloat16"), -1.0)
+
+
+class LayerTraceTests(unittest.TestCase):
+    NAMES = ["m.model.layers.0.input_layernorm", "m.model.layers.1.input_layernorm",
+             "m.model.layers.2.input_layernorm", "m.model.norm"]
+
+    def test_layer_label(self):
+        self.assertEqual([layer_trace.layer_label(n) for n in self.NAMES],
+                         ["embeddings", "layer 0 output", "layer 1 output", "last layer output"])
+
+    def test_distance(self):
+        d = layer_trace.distance([1.0, 2.0, 2.0], [1.0, 2.0, 0.0])
+        self.assertEqual(d["max_abs"], 2.0)
+        self.assertEqual(d["n_diff"], 1)
+        self.assertAlmostEqual(d["rel_l2"], 2.0 / 5 ** 0.5)
+        self.assertEqual(layer_trace.distance([0.0], [0.0])["rel_l2"], 0.0)
+        with self.assertRaises(ValueError):
+            layer_trace.distance([1.0], [1.0, 2.0])
+
+    def test_compare_names_first_tap_beyond_spread(self):
+        forward = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]
+        cached = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.01], [4.0, 4.01]]
+        ours = [[1.0, 1.0], [2.0, 2.0], [3.0, 3.01], [4.0, 4.5]]
+        rows, first = layer_trace.compare(self.NAMES, ours, cached, forward)
+        self.assertEqual([r["beyond_spread"] for r in rows], [False, False, False, True])
+        self.assertEqual(first, 3)
+        self.assertEqual(rows[first]["what"], "last layer output")
+        _, none = layer_trace.compare(self.NAMES, cached, cached, forward)
+        self.assertIsNone(none)
+
+    def test_tap_paths_order_and_shape_checks(self):
+        pairs = [(n, None) for n in reversed(self.NAMES)] + [("m.model.layers.0.mlp", None)]
+        self.assertEqual(layer_trace.tap_paths(pairs), self.NAMES)
+        with self.assertRaises(ValueError):
+            layer_trace.tap_paths([(n, None) for n in self.NAMES if n != "m.model.layers.1.input_layernorm"])
+        with self.assertRaises(ValueError):
+            layer_trace.tap_paths([(n, None) for n in self.NAMES[:3]])
+
+    def test_install_taps_records_and_forwards(self):
+        class Module:
+            def __init__(self):
+                pass
+
+            def named_modules(self):
+                out = []
+
+                def walk(prefix, obj):
+                    if isinstance(obj, list):
+                        for i, child in enumerate(obj):
+                            walk(f"{prefix}.{i}", child)
+                    elif isinstance(obj, Module):
+                        out.append((prefix, obj))
+                        for k, v in vars(obj).items():
+                            if isinstance(v, (Module, list)):
+                                walk(f"{prefix}.{k}" if prefix else k, v)
+                walk("", self)
+                return out
+
+        class Nn:
+            pass
+        Nn.Module = Module
+
+        class Norm(Module):
+            def __init__(self, tag):
+                super().__init__()
+                self.tag = tag
+
+            def __call__(self, x):
+                return (self.tag, x)
+
+        class Vec:
+            def __init__(self, rows):
+                self.rows, self.shape = rows, (len(rows), len(rows[0]))
+
+            def reshape(self, *shape):
+                return self.rows
+
+        def layer(i):
+            obj = Module()
+            obj.input_layernorm = Norm(i)
+            return obj
+
+        inner = Module()
+        inner.layers = [layer(0), layer(1), layer(2)]
+        inner.norm = Norm("final")
+        root = Module()
+        root.m = Module()
+        root.m.model = inner
+        sink = layer_trace.install_taps(root, Nn, None)
+        self.assertEqual(sink.names, self.NAMES)
+        with self.assertRaises(RuntimeError):
+            sink.snapshot()
+        out = root.m.model.layers[1].input_layernorm(Vec([[1, 2], [3, 4]]))
+        self.assertEqual(out[0], 1)
+        self.assertEqual(sink.latest["m.model.layers.1.input_layernorm"], [3, 4])
 
 
 if __name__ == "__main__":
