@@ -339,6 +339,39 @@ final class GrammarTemplatesParserTests: XCTestCase {
         XCTAssertEqual(try StrictJSONParser.parse(XCTUnwrap(calls.first).arguments), .object(["mode": .string("1")]))
     }
 
+    func testFunctionXMLQwenGrammarKeepsTheJSONEnvelopeForMarkupLiterals() throws {
+        let schemas: [JSONValue] = [
+            .object(["type": .string("object"), "properties": .object(["op": .object(["enum": .array([.string("a</parameter>b")])])])]),
+            .object(["type": .string("object"), "properties": .object(["tags": .object(["type": .string("array"),
+                "items": .object(["type": .string("string"), "enum": .array([.string("<tool_call>")])])])])]),
+            .object(["type": .string("object"), "properties": .object(["o": .object(["type": .string("object"),
+                "properties": .object(["</parameter>": .object(["type": .string("integer")])])])])]),
+        ]
+        for parameters in schemas {
+            let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: .qwen,
+                                                    qwenCallFormat: .functionXML).compile()
+            let opener = Array("<tool_call>\n<function=f>".utf8)
+            XCTAssertNil(dfa.transition(state: 0, bytes: opener), "\(parameters)")
+            XCTAssertNotNil(dfa.transition(state: 0, bytes: Array(#"<tool_call>{"name":"f","arguments":"#.utf8)))
+        }
+    }
+
+    func testFunctionXMLToolSetsTooLargeForTheAutomatonStillCompileAsTheJSONEnvelope() throws {
+        // Five ordinary tools of three string parameters: the envelope fits the default
+        // state limit and function-XML does not, so `GrammarConstraintState.prepare`
+        // falls back to the envelope for them.
+        let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
+            "path": .object(["type": .string("string")]), "content": .object(["type": .string("string")]),
+            "query": .object(["type": .string("string")]),
+        ])])
+        let names = ["read_file", "write_file", "list_dir", "run_command", "search"]
+        func grammar(_ format: ToolSelectionPolicy.CallFormat) -> ByteGrammar {
+            .choice(names.map { GrammarTemplates.toolCall(name: $0, parameters: parameters, family: .qwen, qwenCallFormat: format) })
+        }
+        XCTAssertNoThrow(try grammar(.jsonEnvelope).compile())
+        XCTAssertThrowsError(try grammar(.functionXML).compile())
+    }
+
     func testFunctionXMLQwenGrammarKeepsTheJSONEnvelopeForKeysItCannotTag() throws {
         let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
             "file.path": .object(["type": .string("string")]),

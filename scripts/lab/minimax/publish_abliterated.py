@@ -48,8 +48,15 @@ def snapshot_manifest_sha256(root: pathlib.Path) -> str:
         # ModelArtifactVerifier.inspectCanonicalArtifact hashes every regular file, .cache/ included.
         raise SystemExit(f"BLOCKER: {root}/.cache present: the provider hashes it; remove it from the lab copy")
     rows = []
+    if root.is_symlink():
+        raise SystemExit(f"BLOCKER: {root} is a symlink; pass the artifact directory itself")
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
+        for name in dirnames:
+            # os.walk lists a symlinked directory but never enters it, so it would be
+            # outside the manifest while a recursive copy or upload still follows it.
+            if (pathlib.Path(dirpath) / name).is_symlink():
+                raise SystemExit(f"BLOCKER: {pathlib.Path(dirpath) / name} is a symlinked directory")
         for name in filenames:
             p = pathlib.Path(dirpath) / name
             info = os.lstat(p)

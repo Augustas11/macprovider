@@ -31,6 +31,24 @@ class SnapshotManifestCacheTests(unittest.TestCase):
             (root / "config.json").write_text("{}")
             self.assertEqual(len(pub.snapshot_manifest_sha256(root)), 64)
 
+    def test_symlinked_directory_or_root_is_a_blocker(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, outside = base / "abl", base / "outside"
+            root.mkdir(); outside.mkdir()
+            (root / "config.json").write_text("{}")
+            (outside / "secret").write_text("x")
+            (root / "extra").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(SystemExit) as cm:
+                pub.snapshot_manifest_sha256(root)
+            self.assertIn("is a symlinked directory", str(cm.exception))
+            (root / "extra").unlink()
+            link = base / "link"
+            link.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(SystemExit) as cm:
+                pub.snapshot_manifest_sha256(link)
+            self.assertIn("is a symlink", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

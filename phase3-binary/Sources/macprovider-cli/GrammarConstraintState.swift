@@ -224,12 +224,22 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
                         guardsDeclaredFunctions: Bool = false) throws -> GrammarConstraintState? {
         do {
             if isRequired(request) {
-                guard let language = try GrammarTemplates.grammar(
-                    for: request, traits: request.outputTraits,
-                    qwenCallFormat: guaranteedQwenCallFormat(configuration.toolCallFormat)) else { return nil }
-                return try prepareChecked(
-                    grammar: .sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language]), request: request,
-                    tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: nil)
+                func constrained(_ format: ToolSelectionPolicy.CallFormat) throws -> GrammarConstraintState? {
+                    guard let language = try GrammarTemplates.grammar(
+                        for: request, traits: request.outputTraits, qwenCallFormat: format) else { return nil }
+                    return try prepareChecked(
+                        grammar: .sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language]), request: request,
+                        tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: nil)
+                }
+                let format = guaranteedQwenCallFormat(configuration.toolCallFormat)
+                guard format == .functionXML else { return try constrained(format) }
+                do { return try constrained(format) }
+                catch let error as APIError where error.code == "unsupported_output_grammar" {
+                    // Function-XML spends about twice the automaton states per tool of the
+                    // JSON envelope; a tool set it cannot fit keeps the envelope, which the
+                    // guaranteed parser also reads, instead of failing a request main served.
+                    return try constrained(.jsonEnvelope)
+                }
             }
         } catch let error as APIError { throw error }
         catch { throw Compiled.error("Unable to prepare the local tokenizer for constrained output") }

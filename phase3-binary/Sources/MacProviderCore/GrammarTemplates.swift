@@ -286,12 +286,43 @@ public enum GrammarTemplates {
             guard (1...128).contains(key.utf8.count), key.utf8.allSatisfy({
                 (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45
             }) else { return false }
+            // A literal or nested key carrying `<` could close or open call markup inside a
+            // JSON value, which the parser then cuts at; those tools keep the JSON envelope.
+            guard !schemaLiteralsHaveMarkup(property) else { return false }
             guard case .object(let details) = property, details["type"] == .string("string"),
                   details["enum"] != nil else { return true }
             return enumCandidates(details).allSatisfy {
                 if case .string(let text) = $0 { return !text.contains("<") && !text.unicodeScalars.contains("\r") }
                 return true
             }
+        }
+    }
+
+    /// True when an `enum`/`const` literal or a nested property key anywhere in the schema
+    /// contains `<` or CR. Annotation keywords (`description`, `title`, ...) are never generated.
+    private static func schemaLiteralsHaveMarkup(_ schema: JSONValue) -> Bool {
+        func literal(_ value: JSONValue) -> Bool {
+            switch value {
+            case .string(let text): return text.contains("<") || text.unicodeScalars.contains("\r")
+            case .array(let items): return items.contains(where: literal)
+            case .object(let fields): return fields.contains { literal(.string($0.key)) || literal($0.value) }
+            default: return false
+            }
+        }
+        switch schema {
+        case .array(let items): return items.contains(where: schemaLiteralsHaveMarkup)
+        case .object(let object):
+            return object.contains { key, value in
+                switch key {
+                case "enum", "const": return literal(value)
+                case "description", "title", "examples", "default", "pattern", "$comment": return false
+                case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+                    guard case .object(let named) = value else { return schemaLiteralsHaveMarkup(value) }
+                    return named.contains { literal(.string($0.key)) || schemaLiteralsHaveMarkup($0.value) }
+                default: return schemaLiteralsHaveMarkup(value)
+                }
+            }
+        default: return false
         }
     }
 
