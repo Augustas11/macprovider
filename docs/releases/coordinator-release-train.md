@@ -22,6 +22,12 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Quota and allowance 429s typed `insufficient_quota` (SPEC-006 v0.9.82, SPEC-050 v0.1.3) — merged 2026-11-21, not live
+
+[PR 2461](https://github.com/Augustas11/macprovider/pull/2461) merged as `4b6942e51`. The `quota_exhausted` (gateway and coordinator) and `allowance_exhausted` (coordinator) 429s carry error type `insufficient_quota`. Codes, `retryable: false` and headers are unchanged. Codex reports these as its quota error instead of "exceeded retry limit". On `/v1/messages`, `allowance_exhausted` maps to `rate_limit_error` (was `api_error`). No schema change, no wire change, no provider CLI change.
+
+Live step: the next Pearl runtime through `scripts/ops/pearl-runtime.sh status`, then `next --run` (coordinator and gateway source change, no schema change; state the about 1-2 min coordinator downtime first). Live probe: an account past its daily quota gets `429` with `"type":"insufficient_quota","code":"quota_exhausted"` from `/v1/chat/completions`.
+
 ## A self-degraded provider returns while a chat is forwarded to it — live in v1.8.292 (merged 2026-11-16)
 
 Issue #2399. Coordinator: a `degraded` provider with no coordinator hold (for example the first-token stall hold of PR 2378) that sends a `ready` or `busy` `state_update` leaves `degraded` on it even while a chat the coordinator forwarded is still running on it. The coordinator keeps owning the seat count while chats are forwarded: the provider returns as `busy` or `ready` from that count, never from its own `slots_free`, and free seats never exceed `slots_total` minus the forwarded chats. A heartbeat's `ready` does not lift `degraded` while chats are forwarded, so wake warm-up (SPEC-002 FR-P8) still waits for its own exit. Recovery and breaker holds, coordinator drains and thermal reports are unchanged. No schema change, no wire change, no provider CLI change.
