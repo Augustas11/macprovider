@@ -5,7 +5,7 @@ usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
                           [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
-                          [--trials-by-rows 4=1] [--native-mtp-counters]
+                          [--trials-by-rows 4=1] [--native-mtp-counters] [--lab-fence]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
 http://127.0.0.1:PORT/v1/chat/completions with stream=true, temperature=0.
@@ -50,6 +50,13 @@ serve's /v1/status native_mtp counters over that trial (proposed/accepted/reject
 target and MTP forwards, fallbacks, acceptance = accepted / proposed) and the mode,
 enabled flag and last_reason after it. `acceptance_valid` is false when the counters were
 reset during the trial (reset_generation changed) or the status was unreadable.
+
+--lab-fence (#2448, lab-harness serve builds only): each turn-1 trial of a cell sends its rows
+with X-Request-ID `labfence-<token>-<rows>-<row>`, one fresh token per trial. A lab build's
+scheduler holds such a set until every row is queued and admits it in row order
+(LabRequestFence.swift), so the admission waves do not depend on which HTTP request arrived
+first. Row records then carry `lab_fence` (the row's request id); a release build ignores the
+id pattern and the rows are admitted as they arrive.
 """
 import argparse
 import hashlib
@@ -292,14 +299,28 @@ def native_mtp_delta(before, after):
 CONVERSATION_HEADER = "X-MacProvider-Provider-Conversation"
 
 
-def conversation_headers(conversation_ids, r):
-    return {CONVERSATION_HEADER: conversation_ids[r]} if conversation_ids else None
+LAB_FENCE_PREFIX = "labfence-"
+LAB_FENCE_SETTLE_S = 0.5
 
 
-def run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids=None):
+def lab_fence_ids(rows, token=None):
+    """The X-Request-ID of each row of one fenced trial (LabRequestFence.swift's id grammar)."""
+    token = token or uuid.uuid4().hex[:16]
+    return [f"{LAB_FENCE_PREFIX}{token}-{rows}-{r}" for r in range(rows)]
+
+
+def conversation_headers(conversation_ids, r, request_ids=None):
+    headers = {CONVERSATION_HEADER: conversation_ids[r]} if conversation_ids else {}
+    if request_ids:
+        headers["X-Request-ID"] = request_ids[r]
+    return headers or None
+
+
+def run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids=None, request_ids=None):
     """One request per builder at once (one thread each); builders[r]() returns row r's messages or None.
 
-    With conversation_ids row r sends the conversation header with conversation_ids[r]."""
+    With conversation_ids row r sends the conversation header with conversation_ids[r]; with
+    request_ids it sends X-Request-ID request_ids[r] (else a random id)."""
     results = [None] * len(builders)
     barrier = threading.Barrier(len(builders))
 
@@ -307,7 +328,7 @@ def run_concurrent(port, model, builders, max_tokens, stream_options, conversati
         messages = builders[r]()
         barrier.wait()
         results[r] = (run_request(port, model, messages, max_tokens, stream_options,
-                                  headers=conversation_headers(conversation_ids, r))
+                                  headers=conversation_headers(conversation_ids, r, request_ids))
                       if messages is not None else None)
 
     threads = [threading.Thread(target=worker, args=(r,)) for r in range(len(builders))]
@@ -351,11 +372,15 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
 
 
 def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turns=1,
-             conversation_header=False, turn2_history="content"):
+             conversation_header=False, turn2_history="content", lab_fence=False):
     # One id per (trial, row) conversation, shared by its turn 1 and turn 2.
     conversation_ids = ["conv:" + uuid.uuid4().hex for _ in range(rows)] if conversation_header else None
+    request_ids = lab_fence_ids(rows) if lab_fence else None
+    if lab_fence:
+        # A fence installs only on an idle scheduler: let the previous trial's pump wind down.
+        time.sleep(LAB_FENCE_SETTLE_S)
     results = run_concurrent(port, model, [(lambda r=r: prompts.build_messages(ctx, r)) for r in range(rows)],
-                             max_tokens, stream_options, conversation_ids)
+                             max_tokens, stream_options, conversation_ids, request_ids)
     base = {
         "side": "provider",
         "label": label,
@@ -369,7 +394,9 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         "conversation_key_sent": conversation_header,
     }
     cell_t0 = min(res["t0"] for res in results)
-    records = [row_record(res, {**base, "kind": "row", "row": r}, cell_t0=cell_t0) for r, res in enumerate(results)]
+    records = [row_record(res, {**base, "kind": "row", "row": r,
+                                **({"lab_fence": request_ids[r]} if request_ids else {})}, cell_t0=cell_t0)
+               for r, res in enumerate(results)]
     agg = aggregate_record(records, base)
     for rec in records:
         rec.pop("_t_first")
@@ -402,6 +429,8 @@ def main(argv=None):
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
     ap.add_argument("--native-mtp-counters", action="store_true",
                     help="record the change of the serve's native_mtp status counters per trial")
+    ap.add_argument("--lab-fence", action="store_true",
+                    help="send each trial's rows as one request-named admission fence (lab-harness serve only)")
     ap.add_argument("--trials-by-rows", default="",
                     help="comma list ROWS=TRIALS overriding --trials for cells of that row count, e.g. 4=1")
     args = ap.parse_args(argv)
@@ -426,7 +455,7 @@ def main(argv=None):
                 mtp_before = native_mtp_of(route_status.fetch_status(args.port)) if args.native_mtp_counters else None
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
                                         rows, trial, stream_options, args.label, args.turns,
-                                        args.conversation_header, args.turn2_history)
+                                        args.conversation_header, args.turn2_history, args.lab_fence)
                 if args.native_mtp_counters:
                     agg["native_mtp"] = native_mtp_delta(mtp_before, native_mtp_of(route_status.fetch_status(args.port)))
                 for rec in records + [agg]:

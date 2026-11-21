@@ -81,6 +81,10 @@ LAB_HOOK_SYMBOLS = (
     "readLabStaticFeedOverride",
     "labStaticFeedOriginKey",
     "labNativeMTPSourceCommit",
+    # #2448: request-named admission fences (LabRequestFence.swift) exist only in lab builds.
+    "LabRequestFence",
+    "installLabRequestFenceIfNamed",
+    "labBatchCompositionOrdersAdmission",
 )
 
 
