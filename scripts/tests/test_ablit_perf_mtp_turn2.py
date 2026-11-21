@@ -263,6 +263,40 @@ class JobPassTests(unittest.TestCase):
         self.assertIn("cold rows=1 native_mtp=off turn2_header=0' \\\n#          MTP_T2_COMPARE='mtp off cold'", text)
         self.assertIn("QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh", text)
 
+    def test_serve_env_reaches_the_serve(self):
+        launcher, job = LAUNCHER.read_text(), JOB.read_text()
+        grid = (LAB.parent / "parity-grid" / "run-grid.sh").read_text()
+        self.assertIn("|SERVE_ENV|", launcher)
+        self.assertIn('[ -z "${SERVE_ENV:-}" ] || SERVE+=(--serve-env "$SERVE_ENV")', job)
+        self.assertIn('--serve-env) SERVE_ENV="$2"; shift 2 ;;', grid)
+        self.assertIn('exec env "${ENV_ARGS[@]}" "$BIN_DIR/macprovider-cli" serve', grid)
+
+    def test_launcher_streams_every_serve_err_live_and_stops_with_the_job(self):
+        text = LAUNCHER.read_text()
+        self.assertIn('"${SSH[@]}" "bash -s $PID $RUN_ID" > "$RES/$RUN_ID/serve-err.live.log"', text)
+        self.assertIn('[ -z "$STREAM_PID" ] || kill "$STREAM_PID"', text)
+        # The stream starts after the job pid is known and before the progress loop.
+        self.assertLess(text.index('say "remote job pid=$PID"'), text.index("STREAM_PID=$!"))
+        self.assertLess(text.index("STREAM_PID=$!"), text.index("seen=0; stalled=0"))
+        remote = text.split("<<'STREAM' &\n", 1)[1].split("\nSTREAM\n", 1)[0]
+        with tempfile.TemporaryDirectory() as d:
+            serve = Path(d) / "lab-ablit-perf" / "results" / "R1" / "m"
+            (serve / "main" / "serve").mkdir(parents=True)
+            # Detached like the remote job (no zombie for kill -0 to see after it exits).
+            job = int(subprocess.run(["bash", "-c", "sleep 5 >/dev/null 2>&1 & echo $!"],
+                                     capture_output=True, text=True, check=True).stdout)
+            writer = subprocess.Popen(["bash", "-c",
+                                       f"sleep 1; echo one > {serve}/main/serve/serve.err; sleep 1; "
+                                       f"echo two >> {serve}/main/serve/serve.err; mkdir -p {serve}/b/serve; "
+                                       f"echo three > {serve}/b/serve/serve.err"])
+            p = subprocess.run(["bash", "-s", str(job), "R1"], input=remote, capture_output=True,
+                               text=True, timeout=30, env={"HOME": d, "PATH": "/usr/bin:/bin"})
+            writer.wait()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.splitlines(), ["R1/m/main/serve/serve.err: one",
+                                                 "R1/m/main/serve/serve.err: two",
+                                                 "R1/m/b/serve/serve.err: three"])
+
 
 if __name__ == "__main__":
     unittest.main()

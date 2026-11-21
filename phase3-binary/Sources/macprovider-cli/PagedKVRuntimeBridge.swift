@@ -2558,11 +2558,31 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Largest MTP head state a retained entry keeps (summed logical bytes);
+    /// a larger head is not captured and the next hit serves ordinary.
+    static let nativeMTPRetainedDrafterByteCap = 1 << 30
+
+    static func nativeMTPRetainedDrafterFits(
+        _ arrays: [MLXArray],
+        cap: Int = PagedKVSharedForwardBackend.nativeMTPRetainedDrafterByteCap
+    ) -> Bool {
+        var total = 0
+        for array in arrays {
+            let (sum, overflow) = total.addingReportingOverflow(array.nbytes)
+            guard !overflow, sum <= cap else { return false }
+            total = sum
+        }
+        return true
+    }
+
     /// SPEC-048-R009 (0.1.118): the row's committed MTP head state at a normal
     /// terminal. Only the shape every committed round leaves: no tentative
     /// proposal, no buffered depth-zero columns, every head layer at
-    /// `nextPosition`, and the committed token there known. The cache layers
-    /// are copies, so the row's later writes never reach them.
+    /// `nextPosition`, and the committed token there known, and at most
+    /// `nativeMTPRetainedDrafterByteCap` bytes. Each layer's arrays are
+    /// evaluated into new buffers (`+ 0` writes a fresh output; a `copy()`
+    /// alone is a view of the live row's buffers), so the entry never holds
+    /// the row's arrays.
     func snapshotNativeMTPDrafter(
         requestID: String,
         committedTokens: [Int],
@@ -2577,9 +2597,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                   state.nextPosition > 0,
                   committedTokens.indices.contains(state.nextPosition),
                   !state.cache.isEmpty,
-                  state.cache.allSatisfy({ $0.offset == state.nextPosition })
+                  state.cache.allSatisfy({ $0.offset == state.nextPosition }),
+                  Self.nativeMTPRetainedDrafterFits(state.cache.flatMap(\.state))
             else { return nil }
-            let cache = state.cache.map { $0.copy() }
+            var cache: [KVCache] = []
+            for layer in state.cache {
+                var copy = layer.copy()
+                let arrays = copy.state
+                guard !arrays.isEmpty else { return nil }
+                copy.state = arrays.map { $0 + MLXArray.zeros([1], dtype: $0.dtype) }
+                guard copy.offset == layer.offset else { return nil }
+                cache.append(copy)
+            }
             eval(cache)
             var folded: [Int: Int] = [:]
             for position in checkpointPositions where position > 0 && position <= state.nextPosition {
@@ -2610,6 +2639,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
               !snapshot.cache.isEmpty,
               snapshot.cache.allSatisfy({ $0.offset == snapshot.nextPosition })
         else { throw unavailable }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        #if DEBUG
+        nativeMTPDrafterInstallObserverForTest?(activeOperationCountForTest())
+        #endif
         storeNativeMTPDrafterAdvance(
             requestIDs: [requestID],
             states: [MTPDrafterState(cache: snapshot.cache.map { $0.copy() }, nextPosition: snapshot.nextPosition)],
@@ -5049,6 +5085,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// its rows (`packed`), on the model container.
     var rebuildObserverForTest: ((String) -> Void)?
 
+    /// Tests: called inside `installNativeMTPDrafter` with the backend's
+    /// active operation count.
+    var nativeMTPDrafterInstallObserverForTest: ((Int) -> Void)?
+
     /// Whether some caller holds this backend's target `container.perform`.
     func targetLockHeldForTest() -> Bool {
         lock.lock()
@@ -5061,6 +5101,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         existingRowState(for: requestID).map { Self.pagedAttentionCaches(in: $0.caches) } ?? []
     }
     #endif
+
+    func activeOperationCountForTest() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeOperations
+    }
 
     func retainedRowCountForTest() -> Int {
         lock.lock()

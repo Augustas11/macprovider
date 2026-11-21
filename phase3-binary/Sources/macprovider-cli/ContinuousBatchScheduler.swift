@@ -7894,8 +7894,16 @@ actor ContinuousBatchScheduler {
             }
             // SPEC-048-R009 (0.1.118): a native row also hands back its
             // committed head state, bounded by the retained length. Best
-            // effort: without it the next turn's hit is served ordinary.
-            let nativeMTPDrafter: NativeMTPRetainedDrafter? = row.usesNativeMTP
+            // effort: without it the next turn's hit is served ordinary. A
+            // row whose drafter prefilled only a prompt window holds head
+            // positions relative to that window, so it hands back none.
+            let headAtAbsolutePositions = Self.nativeMTPPromptWindowStart(
+                promptTokenCount: row.request.promptTokens.count,
+                window: configuration.nativeMTPDrafterPromptWindow,
+                keepsWholePrompt: row.request.promptSnapshotTokenCount != nil
+                    || row.request.cachedPromptTokens > 0
+            ) == 0
+            let nativeMTPDrafter: NativeMTPRetainedDrafter? = row.usesNativeMTP && headAtAbsolutePositions
                 ? await backend.snapshotNativeMTPDrafter(
                     requestID: row.request.id,
                     committedTokens: Array((row.request.promptTokens + row.generatedTokens).prefix(targetLogicalTokens + 1)),

@@ -269,8 +269,9 @@ if [ -n "$MAIN_BASE" ]; then
   [ "$rc" = 0 ] || { blocker "main tree copy to the Studio failed"; exit 2; }
 fi
 
-HAVE_GPU=0; PID=""
+HAVE_GPU=0; PID=""; STREAM_PID=""
 finish() {
+  [ -z "$STREAM_PID" ] || kill "$STREAM_PID" 2>/dev/null
   if [ -n "$PID" ] && "${SSH[@]}" "kill -0 $PID 2>/dev/null"; then
     say "remote job still running at exit; killing its process group $PID"
     "${SSH[@]}" "kill -TERM -- -$PID 2>/dev/null; sleep 15; kill -KILL -- -$PID 2>/dev/null"
@@ -308,6 +309,26 @@ REMOTE
 )
 say "remote job pid=$PID"
 [ -n "$PID" ] || { blocker "remote job did not start"; exit 4; }
+# Every serve.err of the run streams live into this Mac's results dir, one line
+# prefixed with its path, so a Studio reboot cannot lose the serve log. Each
+# remote tail stops 2 s after the job exits; finish() kills the local ssh.
+mkdir -p "$RES/$RUN_ID"
+"${SSH[@]}" "bash -s $PID $RUN_ID" > "$RES/$RUN_ID/serve-err.live.log" 2>/dev/null <<'STREAM' &
+seen=" "
+while kill -0 "$1" 2>/dev/null; do
+  for f in $(find ~/lab-ablit-perf/results/"$2" -name serve.err 2>/dev/null); do
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    { tail -F -n +1 "$f" 2>/dev/null & t=$!
+      while kill -0 "$1" 2>/dev/null; do sleep 2; done
+      sleep 2; kill "$t"; } | awk -v f="${f#$HOME/lab-ablit-perf/results/}" '{ print f ": " $0; fflush() }' &
+  done
+  sleep 2
+done
+wait
+STREAM
+STREAM_PID=$!
+say "serve.err live stream -> $RES/$RUN_ID/serve-err.live.log"
 
 seen=0; stalled=0
 while :; do

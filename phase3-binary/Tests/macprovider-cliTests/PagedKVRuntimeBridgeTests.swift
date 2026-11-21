@@ -3436,6 +3436,185 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }, expectedResume: stopPrompt.count)
     }
 
+    /// SPEC-048-R009 (0.1.118): the startup cached-turns probe sequence
+    /// (`runContinuousBatchingCachedTurnsProbe`) through the scheduler: a
+    /// keyed native turn 1 retains its entry with the head, the warm turn 2
+    /// hits it and installs the head once, under a backend operation, and the
+    /// cold turn 2 misses. Each row snapshots its head once at terminal; no
+    /// row installs twice or retries.
+    func testStartupCachedTurnsProbeSequenceSnapshotsAndInstallsTheHeadOnceUnderAnOperation() async throws {
+        try requireMetal()
+        let warmKey = "conv:cb-selfcheck-ac26-test-warm"
+        let coldKey = "conv:cb-selfcheck-ac26-test-cold"
+        let modelID = Self.bridgeDescriptor().modelID
+        let budget = 8
+
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let tiny = try Self.tinyQwen35Native(dtype: .bfloat16, contiguousCacheBridge: bridge)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64, contiguousCacheBridge: bridge)
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64,
+            allocator: allocator, contiguousCacheBridge: bridge)
+        final class OperationCounts: @unchecked Sendable {
+            private let lock = NSLock()
+            private var values: [Int] = []
+            func append(_ value: Int) { lock.lock(); values.append(value); lock.unlock() }
+            func all() -> [Int] { lock.lock(); defer { lock.unlock() }; return values }
+        }
+        let installOperations = OperationCounts()
+        tiny.backend.base.nativeMTPDrafterInstallObserverForTest = { installOperations.append($0) }
+
+        func serialGreedy(_ tokens: [Int], count: Int) throws -> [Int] {
+            let cache = try tiny.target.newCache(parameters: nil)
+            var logits = tiny.target(MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count), cache: cache)
+            var out: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                out.append(next)
+                logits = tiny.target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return out
+        }
+        func keyed(
+            _ id: String, _ key: String, _ tokens: [Int], lease: ConversationCacheLease? = nil,
+            stop: Int? = nil, drafter: NativeMTPDrafterPrefixSnapshot? = nil
+        ) -> ContinuousBatchSchedulerRequest {
+            ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: key,
+                promptTokens: tokens,
+                maxOutputTokens: budget,
+                stopTokenSequences: stop.map { [[$0]] } ?? [],
+                modelStopTokenIDs: stop.map { [$0] } ?? [],
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                recurrentCheckpointPositions: [33, 38],
+                modelHasRecurrentLayers: true,
+                retainedRecurrentCheckpoints: ModelRuntime.retainedRecurrentCheckpoints(for: lease),
+                retainedNativeMTPDrafter: drafter,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPCompleteWindowBytesByDepth: [16, 16],
+                nativeMTPTupleFence: Self.nativeMTPFence()
+            )
+        }
+        let conversationCache = makeConversationCacheForTest(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+
+        // Turn 1 (warm key, miss): ends on a model stop so the reply end
+        // equals the head's own length and turn 2 can resume natively there.
+        let prompt = Self.tinyPrompt(length: 40, salt: 37)
+        let stop = try serialGreedy(prompt, count: 1)[0]
+        let firstBegun = await conversationCache.begin(
+            conversationKey: warmKey, incomingTokens: prompt.map(Int32.init), modelID: modelID,
+            kvBits: nil, allowRetainedPagedKVHandoff: true)
+        let firstLease = try XCTUnwrap(firstBegun)
+        XCTAssertEqual(firstLease.cachedPromptTokens, 0)
+        let first = try await scheduler.submit(keyed("probe-1", warmKey, prompt, stop: stop))
+        XCTAssertEqual(first.stopCause, .modelStop)
+        let canonical = prompt + first.generatedTokens.dropLast()
+        let retained = try XCTUnwrap(first.retainedCache, "turn 1 retained no entry")
+        let head = try XCTUnwrap(retained.nativeMTPDrafter, "turn 1 retained no head")
+        XCTAssertEqual(head.head.nextPosition, canonical.count, "head sits at the absolute committed length")
+        XCTAssertTrue(head.head.cache.allSatisfy { $0.offset == canonical.count })
+        XCTAssertEqual(tiny.backend.base.activeOperationCountForTest(), 0)
+        await conversationCache.commit(
+            firstLease,
+            cache: ConversationCacheLayers(
+                retained.layers,
+                retainedPagedKVSequence: retained.retainedSequence,
+                discardRetainedPagedKVSequence: { sequence, key in
+                    await scheduler.discardRetainedCache(sequence, conversationKey: key)
+                },
+                recurrentCheckpoints: retained.recurrentCheckpoints,
+                retainedNativeMTPDrafter: retained.nativeMTPDrafter),
+            fullTokens: canonical.map(Int32.init))
+        await scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+        // Turn 2 warm (hit): installs the head at the cached length.
+        let second = canonical + [stop, 6, 1, 7]
+        let begun = await conversationCache.begin(
+            conversationKey: warmKey, incomingTokens: second.map(Int32.init), modelID: modelID,
+            kvBits: nil, allowRetainedPagedKVHandoff: true)
+        let lease = try XCTUnwrap(begun)
+        XCTAssertEqual(lease.cachedPromptTokens, canonical.count)
+        let resumed = try XCTUnwrap(ModelRuntime.retainedNativeMTPDrafterResume(for: lease))
+        XCTAssertEqual(resumed.nextPosition, lease.cachedPromptTokens)
+        let warm = try await scheduler.submit(keyed("probe-2w", warmKey, second, lease: lease, drafter: resumed))
+        XCTAssertEqual(warm.terminalStatus, .length)
+        XCTAssertEqual(warm.cachedPromptTokens, canonical.count)
+        let expected = try serialGreedy(second, count: budget)
+        XCTAssertEqual(warm.generatedTokens, expected, "warm turn 2 diverged")
+        if let warmRetained = warm.retainedCache {
+            await scheduler.cancelRetainedCacheDelivery(warmRetained, conversationKey: warm.conversationKey)
+        }
+        await conversationCache.abort(lease)
+
+        // Turn 2 cold (new key, miss).
+        let cold = try await scheduler.submit(keyed("probe-2c", coldKey, second))
+        XCTAssertEqual(cold.cachedPromptTokens, 0)
+        XCTAssertEqual(cold.generatedTokens, expected, "cold turn 2 diverged")
+        if let coldRetained = cold.retainedCache {
+            await scheduler.cancelRetainedCacheDelivery(coldRetained, conversationKey: cold.conversationKey)
+        }
+        _ = await conversationCache.purgeHot(conversationKey: warmKey)
+        _ = await conversationCache.purgeHot(conversationKey: coldKey)
+
+        let retention = tiny.backend.nativeMTPDrafterRetention()
+        XCTAssertEqual(retention.snapshots.map(\.requestID), ["probe-1", "probe-2w", "probe-2c"])
+        XCTAssertEqual(retention.snapshots.first?.captured, true)
+        XCTAssertEqual(retention.installs, ["probe-2w"], "one install, no retry")
+        XCTAssertEqual(installOperations.all(), [1], "the install ran inside exactly one backend operation")
+        XCTAssertEqual(tiny.backend.base.activeOperationCountForTest(), 0)
+    }
+
+    /// SPEC-048-R009 (0.1.118): a keyed miss whose drafter prefills only a
+    /// prompt window holds head positions relative to the window, so its
+    /// retained entry carries no head (the next hit serves ordinary) and the
+    /// backend is never asked for one.
+    func testKeyedNativeMissWithAPromptWindowRetainsNoHead() async throws {
+        try requireMetal()
+        let key = "conv:auto-prefix"
+        let prompt = Self.tinyPrompt(length: 40, salt: 41)
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let tiny = try Self.tinyQwen35Native(dtype: .bfloat16, contiguousCacheBridge: bridge)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64, contiguousCacheBridge: bridge)
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64,
+            allocator: allocator, contiguousCacheBridge: bridge, nativeMTPDrafterPromptWindow: 8)
+        let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+            id: "windowed-1",
+            conversationKey: key,
+            promptTokens: prompt,
+            maxOutputTokens: 8,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: "windowed-1"),
+            temperature: 0,
+            topP: 1,
+            recurrentCheckpointPositions: [33, 38],
+            modelHasRecurrentLayers: true,
+            decodePath: .nativeMTP,
+            nativeMTPMaximumProposalDepth: 1,
+            nativeMTPCompleteWindowBytesByDepth: [16, 16],
+            nativeMTPTupleFence: Self.nativeMTPFence()
+        ))
+        XCTAssertEqual(result.terminalStatus, .length)
+        let retained = try XCTUnwrap(result.retainedCache, "the keyed row retained no entry")
+        XCTAssertNil(retained.nativeMTPDrafter, "a windowed head must not be retained")
+        XCTAssertTrue(tiny.backend.nativeMTPDrafterRetention().snapshots.isEmpty)
+        await scheduler.cancelRetainedCacheDelivery(retained, conversationKey: result.conversationKey)
+    }
+
+    /// The retained head byte cap: summed logical bytes at most the cap.
+    func testNativeMTPRetainedDrafterByteCap() {
+        let arrays = [MLXArray.zeros([4], dtype: .float32), MLXArray.zeros([2], dtype: .float16)]
+        XCTAssertTrue(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 20))
+        XCTAssertFalse(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 19))
+        XCTAssertEqual(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterByteCap, 1 << 30)
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
@@ -6826,7 +7005,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         allowsRaggedPrefillOffsets: Bool = false,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority(),
         allocator: PagedKVBlockAllocator? = nil,
-        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
+        nativeMTPDrafterPromptWindow: Int? = nil
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
@@ -6867,6 +7047,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
                 maxPromptChunkTokens: maxPromptChunkTokens,
                 allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
+                nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
@@ -7763,6 +7944,8 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     private var verifyHook: (@Sendable ([String]) async -> Void)?
     private var prefillHook: (@Sendable ([String]) async -> Void)?
     private var prefillGroups: [[String]] = []
+    private var drafterSnapshots: [(requestID: String, captured: Bool)] = []
+    private var drafterInstalls: [String] = []
 
     /// Runs before each packed verify with the round's request IDs.
     var onVerify: (@Sendable ([String]) async -> Void)? {
@@ -7807,6 +7990,14 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         lock.lock()
         defer { lock.unlock() }
         return finalized
+    }
+
+    /// Every terminal head snapshot call (whether it captured a head) and
+    /// every head install, in call order.
+    func nativeMTPDrafterRetention() -> (snapshots: [(requestID: String, captured: Bool)], installs: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (drafterSnapshots, drafterInstalls)
     }
 
     /// Backend proposals by request ID and sampler step (committed tokens).
@@ -7901,14 +8092,21 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         committedTokens: [Int],
         checkpointPositions: [Int]
     ) async -> NativeMTPRetainedDrafter? {
-        await base.snapshotNativeMTPDrafter(
+        let drafter = await base.snapshotNativeMTPDrafter(
             requestID: requestID,
             committedTokens: committedTokens,
             checkpointPositions: checkpointPositions
         )
+        lock.lock()
+        drafterSnapshots.append((requestID, drafter != nil))
+        lock.unlock()
+        return drafter
     }
 
     func installNativeMTPDrafter(requestID: String, snapshot: NativeMTPDrafterPrefixSnapshot) async throws {
+        lock.lock()
+        drafterInstalls.append(requestID)
+        lock.unlock()
         try await base.installNativeMTPDrafter(requestID: requestID, snapshot: snapshot)
     }
 
