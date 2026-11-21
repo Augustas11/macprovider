@@ -246,7 +246,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "4090f213105858adac36c394b8c48d6ee0a02699"
+            revision: "2a89037deb90ee67ee2be950e7a871fe2167f0fb"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
