@@ -51,6 +51,12 @@ func recentPartialSince() string {
 // every test.
 func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB) {
 	t.Helper()
+	mux, adminDB := setupStatsMux(t)
+	return mux.Handler(), adminDB
+}
+
+func setupStatsMux(t *testing.T) (*stats.Mux, *sql.DB) {
+	t.Helper()
 	fx, adminDB := setupRollupFixture(t)
 	seedFreshOverview(t, adminDB)
 	seedFreshHealthAll(t, adminDB)
@@ -69,7 +75,7 @@ func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB) {
 		nil,
 		zerolog.Nop(),
 	)
-	return mux.Handler(), adminDB
+	return mux, adminDB
 }
 
 func readerPool(t *testing.T, fx *pgFixture) *sql.DB {
@@ -341,7 +347,13 @@ func TestAC21_MethodNotAllowed(t *testing.T) {
 
 // HEAD support — same headers as GET, empty body.
 func TestHEADReturnsSameHeadersEmptyBody(t *testing.T) {
-	h, _ := setupStatsHandler(t)
+	mux, _ := setupStatsMux(t)
+	// /v1/stats/health stamps request time into its body (so its ETag)
+	// and X-Stats-Generated-At at second resolution; a GET/HEAD pair
+	// that straddles a second would differ. Pin the clock so both
+	// requests see the same instant.
+	frozen := time.Now().UTC()
+	h := mux.WithNowForTest(func() time.Time { return frozen }).Handler()
 	for _, path := range []string{"/v1/stats/leaderboard", "/v1/stats/health", "/v1/stats/overview"} {
 		t.Run(path, func(t *testing.T) {
 			get := mustDo(t, h, http.MethodGet, path, nil)

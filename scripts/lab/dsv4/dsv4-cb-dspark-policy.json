@@ -27,7 +27,7 @@
     "pr": 2151,
     "fork_tag": "3.32.3-macprovider.56",
     "fork_commit": "e7a256000dda3278260667e8c3c9c7b48c4dbd38",
-    "decode_path_digest": "63463b9d82971d4a253fc76ca9dfe45801e0b4a650279c93139c57706dd32e0a",
+    "decode_path_digest": "b78de489667912e8185eafad443d62c5cb26d59b5477f5626626283c322cbb9d",
     "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b"
   },
   "cb": {
