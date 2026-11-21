@@ -356,6 +356,20 @@ case $warm_rc in
   5) echo "serve exited during the batching warm-up" >&2; tail -20 "$D/serve.err" >&2; exit 5 ;;
   *) echo "batching warm-up failed rc=$warm_rc; measuring the route that serves" >&2 ;;
 esac
+# A two-turn grid measures the cached-prefix path, which serves only after the
+# startup cached-turns probe passes. That probe defers while any request is in
+# flight, and the client sends back to back, so wait for its verdict first.
+if [ "$TURNS" = 2 ]; then
+  ct_wait=0
+  until grep -q "action=cached_turns_decided" "$D/serve.err" 2>/dev/null; do
+    kill -0 "$SP" 2>/dev/null || { echo "serve exited before the cached-turns verdict" >&2; tail -20 "$D/serve.err" >&2; exit 5; }
+    [ "$ct_wait" -lt "${CACHED_TURNS_WAIT_S:-900}" ] || { echo "BLOCKER: no cached-turns verdict after ${ct_wait}s; turn 2 would cold-prefill" >&2; exit 12; }
+    sleep 5; ct_wait=$((ct_wait + 5))
+  done
+  grep "action=cached_turns_decided" "$D/serve.err" | tail -1 | grep -q "result=passed" \
+    || { echo "BLOCKER: the cached-turns self-check failed: $(grep 'action=cached_turns_decided' "$D/serve.err" | tail -1)" >&2; exit 12; }
+  echo "== cached turns accepted after ${ct_wait}s"
+fi
 route_rc=0
 curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status.json"
 /usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status.json" --serve-err "$D/serve.err" \
