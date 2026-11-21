@@ -479,6 +479,8 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
 }
 
 private final class QualificationDrafter: Module, MTPDrafterModel {
+    func validateCompatibility(with target: any LanguageModel) throws {}
+
     func draftBlock(
         target _: any LanguageModel,
         lastToken: MLXArray,

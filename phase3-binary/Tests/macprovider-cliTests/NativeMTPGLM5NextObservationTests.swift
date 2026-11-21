@@ -395,7 +395,7 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
             weights["model.language_model.layers.6.mlp.experts.\(expert).down_proj.weight"] = floats([8, 8])
         }
 
-        let sanitized = Set(model.sanitize(weights: weights).keys)
+        let sanitized = Set(try model.sanitize(weights: weights).keys)
         let textKeys = Set(weights.keys.compactMap {
             NativeMTPArtifactObserver.glm5NextTextKey($0, hiddenLayers: hiddenLayers)
         })
