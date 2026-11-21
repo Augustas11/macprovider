@@ -1195,6 +1195,41 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         }
     }
 
+    /// SPEC-048-R009 (0.1.119): with the terminal-token hidden, a resume one
+    /// past the head is an untrimmed copy carrying that hidden and the
+    /// incoming token at `r`, gated on the incoming token at `r - 1` being the
+    /// head's folded token. Two past the head, no hidden, a different token
+    /// at `r - 1`, or a prompt ending at `r` stays ordinary (nil).
+    func testRetainedNativeMTPDrafterResumesOnePastTheHeadOnlyWithTheTerminalHidden() throws {
+        guard Self.hasMetallib else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let layer = KVCacheSimple()
+        _ = layer.update(keys: MLXArray.ones([1, 1, 6, 4]), values: MLXArray.ones([1, 1, 6, 4]))
+        let head = NativeMTPDrafterPrefixSnapshot(cache: [layer], nextPosition: 6, foldedNextToken: 9)
+        let hidden = MLXArray.ones([1, 1, 4])
+        let retained = NativeMTPRetainedDrafter(head: head, foldedTokens: [4: 3, 6: 9], terminalHidden: hidden)
+        let incoming: [Int32] = [0, 1, 2, 5, 3, 7, 9, 2, 4]
+
+        let onePast = try XCTUnwrap(retained.resumed(at: 7, incomingTokens: incoming))
+        XCTAssertEqual(onePast.nextPosition, 7)
+        XCTAssertEqual(onePast.foldedNextToken, 2, "the fold pairs the hidden with the token at r")
+        XCTAssertTrue(onePast.boundaryHidden === hidden)
+        XCTAssertEqual(onePast.cache.map(\.offset), [6], "the head is copied untrimmed")
+        XCTAssertFalse((onePast.cache[0] as AnyObject) === (layer as AnyObject))
+        let inside = try XCTUnwrap(retained.resumed(at: 6, incomingTokens: incoming))
+        XCTAssertNil(inside.boundaryHidden, "a covered checkpoint folds nothing")
+
+        XCTAssertNil(retained.resumed(at: 8, incomingTokens: incoming), "two past the head")
+        XCTAssertNil(
+            NativeMTPRetainedDrafter(head: head, foldedTokens: [4: 3, 6: 9]).resumed(at: 7, incomingTokens: incoming),
+            "no terminal hidden")
+        var wrongPrevious = incoming
+        wrongPrevious[6] = 1
+        XCTAssertNil(retained.resumed(at: 7, incomingTokens: wrongPrevious), "token at r - 1 differs")
+        XCTAssertNil(retained.resumed(at: 7, incomingTokens: Array(incoming.prefix(7))), "prompt ends at r")
+    }
+
     private func decodeInput(
         requestID: String,
         currentToken: Int,

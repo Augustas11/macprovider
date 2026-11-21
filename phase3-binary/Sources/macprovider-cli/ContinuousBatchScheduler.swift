@@ -6615,6 +6615,7 @@ actor ContinuousBatchScheduler {
                 waiter.delivery.markStarted()
             }
             var admissionHandle: PagedKVBlockTableHandle?
+            var admittedOrdinaryAfterFoldFailure = false
             do {
                 let reservation = try initialReservation(for: request)
                 let handle: PagedKVBlockTableHandle
@@ -6663,7 +6664,19 @@ actor ContinuousBatchScheduler {
                                 "continuous_batching_retained_native_mtp_drafter_unavailable"
                             )
                         }
-                        try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                        if drafter.boundaryHidden == nil {
+                            try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                        } else {
+                            // SPEC-048-R009 (0.1.119): a failed boundary fold
+                            // leaves the installed target state, which ordinary
+                            // decode serves; the row runs ordinary, before output.
+                            do {
+                                try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                            } catch {
+                                ContinuousBatchingPolicy.logForwardFailed(error)
+                                admittedOrdinaryAfterFoldFailure = true
+                            }
+                        }
                     }
                     prefillCursor = request.cachedPromptTokens
                 } else if let snapshot = request.promptSnapshotCache, request.cachedPromptTokens > 0 {
@@ -6718,7 +6731,8 @@ actor ContinuousBatchScheduler {
                 record(.promptHeadroomReserved)
                 record(.accepted)
                 try? FileHandle.standardError.write(contentsOf: Data("event=batching_admitted action=scheduler_admitted\n".utf8))
-                if request.decodePath == .nativeMTP {
+                let admittedNative = request.decodePath == .nativeMTP && !admittedOrdinaryAfterFoldFailure
+                if admittedNative {
                     configuration.nativeMTPStatusSink?.recordNativeMTPAdmission()
                 }
                 activePrompt[request.id] = Row(
@@ -6735,9 +6749,9 @@ actor ContinuousBatchScheduler {
                     recurrentCheckpoints: request.retainedRecurrentCheckpoints.filter {
                         request.recurrentCheckpointPositions.contains($0.tokenCount)
                     },
-                    decodePath: request.decodePath,
-                    nativeMTPAdaptation: initialNativeMTPAdaptation(for: request),
-                    nativeMTPDirective: request.nativeMTPAdaptationDirective,
+                    decodePath: admittedNative || request.decodePath != .nativeMTP ? request.decodePath : .ordinary,
+                    nativeMTPAdaptation: admittedNative ? initialNativeMTPAdaptation(for: request) : nil,
+                    nativeMTPDirective: admittedNative ? request.nativeMTPAdaptationDirective : nil,
                     nativeMTPTupleFence: request.nativeMTPTupleFence,
                     nativeMTPFixtureProposalsConsumed: false
                 )

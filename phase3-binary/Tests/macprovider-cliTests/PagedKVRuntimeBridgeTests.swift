@@ -3524,8 +3524,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(head.head.foldedNextToken, canonical[canonical.count - 1])
         XCTAssertTrue(head.head.cache.allSatisfy { $0.offset == head.head.nextPosition })
         XCTAssertEqual(Set(head.foldedTokens.keys), [33, 38])
-        // SPEC-048-R009: a length-stopped reply end lies past the head.
-        XCTAssertNil(head.resumed(at: canonical.count, incomingTokens: (canonical + [1]).map(Int32.init)))
+        // SPEC-048-R009 (0.1.119): the terminal-token hidden rides along, so
+        // the length-stopped reply end one past the head stays resumable.
+        XCTAssertEqual(head.terminalHidden?.shape.prefix(2), [1, 1])
+        let replyEnd = try XCTUnwrap(head.resumed(at: canonical.count, incomingTokens: (canonical + [1]).map(Int32.init)))
+        XCTAssertEqual(replyEnd.nextPosition, canonical.count)
+        XCTAssertNotNil(replyEnd.boundaryHidden)
         await conversationCache.commit(
             firstLease,
             cache: ConversationCacheLayers(
@@ -3559,6 +3563,209 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
         await conversationCache.abort(lease)
         _ = await conversationCache.purgeHot(conversationKey: key)
+    }
+
+    /// SPEC-048-R009 (0.1.119): a turn 1 that stops at max_tokens retains the
+    /// terminal-token hidden with its head, so turn 2 hits the full-turn
+    /// reply end `r = P + G`, one past the head: the install folds that
+    /// hidden with turn 2's token at `r`, the row runs native from `r`, and
+    /// both turns emit the keyless cold serial greedy tokens. With adaptation
+    /// (last step on the ordinary forward) and without (last step a depth-zero
+    /// native verify). The same entry without the hidden does not restore, so
+    /// its hit stays ordinary; a fold that fails at install runs turn 2
+    /// ordinary from the same hit, and the request still completes.
+    func testKeyedNativeLengthStoppedTurnTwoResumesNativelyAtTheFullTurnReplyEnd() async throws {
+        try requireMetal()
+        let key = "conv:auto-prefix"
+        let modelID = Self.bridgeDescriptor().modelID
+        let budget = 8
+        let adaptation = try NativeMTPAdaptationConfig(
+            qualifiedMaximumDepth: 1,
+            decreaseThresholdPPM: 1,
+            increaseThresholdPPM: 1_000_000,
+            maxVerificationPositionsPerCommittedMilli: NativeMTPAdaptationConfig.maximumCircuitBreakerPositionsPerCommittedMilli
+        )
+
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let tiny = try Self.tinyQwen35Native(dtype: .bfloat16, contiguousCacheBridge: bridge)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64, contiguousCacheBridge: bridge)
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64,
+            allocator: allocator, contiguousCacheBridge: bridge)
+
+        func serialGreedy(_ tokens: [Int], count: Int) throws -> [Int] {
+            let cache = try tiny.target.newCache(parameters: nil)
+            var logits = tiny.target(MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count), cache: cache)
+            var out: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                out.append(next)
+                logits = tiny.target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return out
+        }
+        func keyed(
+            _ id: String, _ tokens: [Int], adaptation: NativeMTPAdaptationConfig?,
+            lease: ConversationCacheLease? = nil, drafter: NativeMTPDrafterPrefixSnapshot? = nil,
+            conversationKey: String = key
+        ) -> ContinuousBatchSchedulerRequest {
+            ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: conversationKey,
+                promptTokens: tokens,
+                maxOutputTokens: budget,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                recurrentCheckpointPositions: [33, 38],
+                modelHasRecurrentLayers: true,
+                retainedRecurrentCheckpoints: ModelRuntime.retainedRecurrentCheckpoints(for: lease),
+                retainedNativeMTPDrafter: drafter,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPCompleteWindowBytesByDepth: [16, 16],
+                nativeMTPTupleFence: Self.nativeMTPFence(),
+                nativeMTPAdaptationConfig: adaptation
+            )
+        }
+        func verifiedProposal(_ id: String) -> Bool {
+            tiny.backend.finalizedRounds().flatMap { $0 }.contains { $0.requestID == id && $0.proposalTokenCount == 1 }
+        }
+        /// The head a whole-prompt drafter prefill of `tokens` leaves when
+        /// `bonus` follows them: its last entry pairs the last hidden with `bonus`.
+        func referenceHead(_ tokens: [Int], bonus: Int) throws -> MTPDrafterState {
+            let cache = try tiny.target.newCache(parameters: nil)
+            var emit = LMOutput.State()
+            emit[mtpEmitFlagKey] = true
+            let prompt = MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count)
+            let output = tiny.target(LMInput.Text(tokens: prompt), cache: cache, state: emit)
+            let hidden = try XCTUnwrap(output.state?[mtpLastHiddenStatesKey])
+            var state = tiny.drafter.makeState(parameters: nil)
+            tiny.drafter.prepareDrafterState(
+                target: tiny.target, promptTokens: prompt, targetHidden: hidden,
+                firstBonus: MLXArray([Int32(bonus)]), positionDeltas: nil, state: &state,
+                sampler: GenerateParameters(temperature: 0).sampler())
+            eval(state.cache.flatMap(\.state))
+            return state
+        }
+        /// Largest absolute difference between two heads' entry `position`.
+        func entryDistance(_ lhs: MTPDrafterState, _ rhs: MTPDrafterState, at position: Int) -> Float {
+            var distance: Float = 0
+            for (a, b) in zip(lhs.cache, rhs.cache) {
+                for (x, y) in zip(a.state, b.state) {
+                    let dx = x[.ellipsis, position ..< position + 1, 0...].asType(.float32)
+                    let dy = y[.ellipsis, position ..< position + 1, 0...].asType(.float32)
+                    distance = max(distance, abs(dx - dy).max().item(Float.self))
+                }
+            }
+            return distance
+        }
+
+        for (name, config, salt) in [("adapted", Optional(adaptation), 43), ("plain", nil, 47), ("fold-fails", nil, 53)] {
+            let conversationCache = makeConversationCacheForTest(
+                config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let prompt = Self.tinyPrompt(length: 40, salt: salt)
+            let firstBegun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: prompt.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let firstLease = try XCTUnwrap(firstBegun)
+            let first = try await scheduler.submit(keyed("\(name)-1", prompt, adaptation: config))
+            XCTAssertEqual(first.terminalStatus, .length, name)
+            XCTAssertEqual(first.generatedTokens, try serialGreedy(prompt, count: budget), "\(name): turn 1 output changed")
+            XCTAssertTrue(verifiedProposal("\(name)-1"), "\(name): turn 1 never verified a proposal")
+            let canonical = prompt + first.generatedTokens
+            let retained = try XCTUnwrap(first.retainedCache, "\(name): no retained entry")
+            XCTAssertEqual(retained.retainedSequence.logicalTokenCount, canonical.count, name)
+            let head = try XCTUnwrap(retained.nativeMTPDrafter, "\(name): no head retained")
+            XCTAssertEqual(head.head.nextPosition, canonical.count - 1, name)
+            let hidden = try XCTUnwrap(head.terminalHidden, "\(name): no terminal hidden retained")
+            XCTAssertEqual(Array(hidden.shape.prefix(2)), [1, 1], name)
+
+            // Negative: the same entry without the hidden does not restore at r.
+            let second = canonical + [3, 6, 1, 7]
+            let stripped = NativeMTPRetainedDrafter(head: head.head, foldedTokens: head.foldedTokens)
+            XCTAssertNil(stripped.resumed(at: canonical.count, incomingTokens: second.map(Int32.init)), name)
+
+            await conversationCache.commit(
+                firstLease,
+                cache: ConversationCacheLayers(
+                    retained.layers,
+                    retainedPagedKVSequence: retained.retainedSequence,
+                    discardRetainedPagedKVSequence: { sequence, key in
+                        await scheduler.discardRetainedCache(sequence, conversationKey: key)
+                    },
+                    recurrentCheckpoints: retained.recurrentCheckpoints,
+                    retainedNativeMTPDrafter: retained.nativeMTPDrafter),
+                fullTokens: canonical.map(Int32.init))
+            await scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+            let begun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: second.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let lease = try XCTUnwrap(begun)
+            XCTAssertEqual(lease.cachedPromptTokens, canonical.count, "\(name): hit at the full-turn reply end")
+            let resumed = try XCTUnwrap(
+                ModelRuntime.retainedNativeMTPDrafterResume(for: lease), "\(name): head does not restore at r")
+            XCTAssertEqual(resumed.nextPosition, canonical.count, name)
+            XCTAssertEqual(resumed.foldedNextToken, second[canonical.count], name)
+            XCTAssertNotNil(resumed.boundaryHidden, name)
+            XCTAssertTrue(resumed.cache.allSatisfy { $0.offset == canonical.count - 1 }, name)
+            if name == "fold-fails" {
+                let hiddenSize = try XCTUnwrap(resumed.boundaryHidden).dim(2)
+                let broken = NativeMTPDrafterPrefixSnapshot(
+                    cache: resumed.cache, nextPosition: resumed.nextPosition,
+                    foldedNextToken: resumed.foldedNextToken,
+                    boundaryHidden: MLXArray.zeros([1, 2, hiddenSize], dtype: .bfloat16))
+                let ordinary = try await scheduler.submit(
+                    keyed("\(name)-2", second, adaptation: config, lease: lease, drafter: broken))
+                XCTAssertEqual(ordinary.terminalStatus, .length, name)
+                XCTAssertEqual(ordinary.cachedPromptTokens, canonical.count, "\(name): the hit is kept")
+                XCTAssertEqual(ordinary.generatedTokens, try serialGreedy(second, count: budget), name)
+                XCTAssertFalse(verifiedProposal("\(name)-2"), "\(name): a failed fold must run ordinary")
+                if let secondRetained = ordinary.retainedCache {
+                    await scheduler.cancelRetainedCacheDelivery(secondRetained, conversationKey: ordinary.conversationKey)
+                }
+                await conversationCache.abort(lease)
+                _ = await conversationCache.purgeHot(conversationKey: key)
+                continue
+            }
+            // The fold's new entry pairs the terminal hidden with turn 2's
+            // token at r: far closer to a whole-prompt prefill with that token
+            // than to one with any other token.
+            let r = canonical.count
+            try await tiny.backend.base.installNativeMTPDrafter(requestID: "\(name)-probe", snapshot: resumed)
+            let folded = try XCTUnwrap(tiny.backend.base.nativeMTPDrafterSnapshotForTest(requestID: "\(name)-probe").state)
+            XCTAssertEqual(folded.nextPosition, r, name)
+            XCTAssertTrue(folded.cache.allSatisfy { $0.offset == r }, name)
+            let matching = entryDistance(folded, try referenceHead(Array(second.prefix(r)), bonus: second[r]), at: r - 1)
+            let other = entryDistance(folded, try referenceHead(Array(second.prefix(r)), bonus: (second[r] + 5) % 8), at: r - 1)
+            XCTAssertLessThan(matching * 4, other, "\(name): folded entry \(matching) vs wrong-token \(other)")
+            tiny.backend.base.finish(requestID: "\(name)-probe")
+            let turnTwo = try await scheduler.submit(
+                keyed("\(name)-2", second, adaptation: config, lease: lease, drafter: resumed))
+            XCTAssertEqual(turnTwo.terminalStatus, .length, name)
+            XCTAssertEqual(turnTwo.cachedPromptTokens, canonical.count, name)
+            XCTAssertEqual(turnTwo.generatedTokens, try serialGreedy(second, count: budget), "\(name): turn 2 diverged")
+            XCTAssertTrue(verifiedProposal("\(name)-2"), "\(name): turn 2 never verified a proposal")
+            XCTAssertTrue(tiny.backend.nativeMTPDrafterRetention().installs.contains("\(name)-2"), name)
+            XCTAssertTrue(head.head.cache.allSatisfy { $0.offset == head.head.nextPosition },
+                          "\(name): the fold must not touch the stored head")
+            // The folded head proposes what a keyless cold native row whose
+            // drafter prefilled the whole turn-2 prompt proposes.
+            let cold = try await scheduler.submit(
+                keyed("\(name)-2c", second, adaptation: config, conversationKey: ""))
+            XCTAssertEqual(cold.generatedTokens, turnTwo.generatedTokens, name)
+            let proposals = tiny.backend.proposalsByStep()
+            XCTAssertFalse((proposals["\(name)-2"] ?? [:]).isEmpty, name)
+            XCTAssertEqual(proposals["\(name)-2"], proposals["\(name)-2c"], "\(name): folded head proposes differently")
+            if let secondRetained = turnTwo.retainedCache {
+                await scheduler.cancelRetainedCacheDelivery(secondRetained, conversationKey: turnTwo.conversationKey)
+            }
+            await conversationCache.abort(lease)
+            _ = await conversationCache.purgeHot(conversationKey: key)
+        }
     }
 
     /// SPEC-048-R009 (0.1.118): the startup cached-turns probe sequence

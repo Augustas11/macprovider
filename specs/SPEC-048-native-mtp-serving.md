@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.118
+**Version:** 0.1.119
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.118",
+  "version": "0.1.119",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1766,11 +1766,24 @@ mutation, so the change is a selection and never a fallback:
   `native_mtp` and keeps the hit and its discount only when that head covers
   `r` and the incoming prompt carries the recorded token at `r`: the CB row
   installs the retained target state, then a copy of the head trimmed to `r`
-  entries, and resumes prefill at `r`. Any other hit on such an entry (no head
-  state, `r` past the head, as at a length-stopped reply end, or a different
-  token at `r`) reselects `ordinary` with reason `conversation_key` and keeps
-  the hit. The head bytes count toward the entry's retained bytes, so the
-  conversation-cache memory budget reserves them with the entry;
+  entries, and resumes prefill at `r`. **(0.1.119)** A row whose terminal
+  commit forwards its last sampled token (a length stop, where the retained
+  length is one past the head) keeps the target hidden state from that
+  forward, the hidden at position `r - 1` for the full-turn reply end `r`,
+  as an owned copy next to the head; it counts toward the head's byte cap. A
+  hit at exactly `r = nextPosition + 1` stays `native_mtp` when that hidden
+  is present and the incoming prompt's token at `r - 1` equals the head's
+  last folded token: after installing the retained target state, the CB row
+  folds that hidden paired with the prompt's token at `r` into a copy of the
+  head with one drafter advance, under the target lock and as one GPU turn,
+  before the first prompt chunk, so the head reaches `r` and prefill resumes
+  there. A failed fold runs the row `ordinary` before any output and keeps
+  the hit; it never fails the request. Any other hit on such an entry (no head
+  state, `r` past the head without that hidden or by more than one, or a
+  different token at `r` or `r - 1`) reselects `ordinary` with reason
+  `conversation_key` and keeps the hit. The head bytes count toward the
+  entry's retained bytes, so the conversation-cache memory budget reserves
+  them with the entry;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1821,6 +1834,17 @@ the same `cached_prompt_tokens` with the same greedy tokens),
 model-stop reply end, and every turn emits the keyless cold serial greedy
 tokens),
 `PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnlyAtACoveredCheckpointWithItsToken`,
+**(0.1.119)**
+`PagedKVRuntimeBridgeTests.testKeyedNativeLengthStoppedTurnTwoResumesNativelyAtTheFullTurnReplyEnd`
+(a max_tokens turn 1, with and without depth adaptation, hits turn 2 at the
+full-turn reply end; the folded head entry matches a whole-prompt drafter
+prefill with turn 2's token, turn 2 verifies proposals and both turns emit
+the keyless cold serial greedy tokens; the same entry without the hidden does
+not restore),
+`PagedKVRuntimeBridgeTests.testKeyedNativeTurnEndingOnADepthZeroStepRetainsTheFlushedHeadAndTurnTwoResumesNatively`
+(buffered depth-zero columns are flushed into the head before the terminal
+snapshot),
+`PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnePastTheHeadOnlyWithTheTerminalHidden`,
 `PagedKVRuntimeBridgeTests.testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry`
 and `NativeMTPSelectorTests.testCacheOnlyNativeAdmissionResolvesOnTheLease`.
 
@@ -2986,6 +3010,16 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.119 (2026-11-21, Related: #2459)** — R009 (MTP-9): a length-stopped
+  row keeps the target hidden from its terminal-token forward next to the
+  retained head, so a turn-2 hit at the full-turn reply end `r`, one past the
+  head, stays native: the install folds that hidden with the prompt's token
+  at `r` in one drafter advance under the target lock, before the prompt
+  chunk, when the prompt's token at `r - 1` is the head's last folded token.
+  A failed fold runs the row ordinary before output. A row whose last steps
+  rode the ordinary forward at depth zero flushes their buffered drafter
+  columns into the head before the terminal snapshot. Names the tests that
+  prove it.
 - **0.1.118 (2026-11-21, Related: #2459)** — R009 (MTP-9): on a hybrid
   runtime with cached turns, a keyed cache-only native row that misses stays
   native and commits the ordinary CB retained paged-KV entry, built only from

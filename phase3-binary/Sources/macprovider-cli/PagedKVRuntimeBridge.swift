@@ -921,6 +921,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// rows go straight to the state a flush would give them
     /// (`storePromptFreeHeldDrafterState`).
     private var nativeMTPPendingDrafterColumns: [String: [(token: Int, hidden: MLXArray)]] = [:]
+    /// SPEC-048-R009 (0.1.119): a native row's target hidden state from its
+    /// terminal-token forward (`commitTerminalKV`), an owned `[1, 1, hidden]`
+    /// copy at `position`, for the retained head (`snapshotNativeMTPDrafter`).
+    private var nativeMTPTerminalHidden: [String: (position: Int, hidden: MLXArray)] = [:]
     /// Far above the R015 cells' 512-token completions, so the cap never
     /// fires in a measured gated cell; it bounds the buffer's memory, which
     /// the paged-KV accounting does not see, for long held completions.
@@ -2404,12 +2408,38 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             )
             let tokenInput = MLXArray([Int32(input.currentToken)]).reshaped([1, 1])
             let text = LMInput.Text(tokens: tokenInput)
-            let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                context.model(text, cache: state.caches, state: state.state)
+            // SPEC-048-R009 (0.1.119): a native row also asks for the hidden
+            // state at the terminal position, which a retained head folds
+            // with the next turn's first token. The emission is per-call
+            // output, never row state, as in prompt prefill.
+            let emitHidden = self.drafterContainer != nil
+                && self.nativeMTPDrafterState(for: input.requestID) != nil
+            var modelState = state.state
+            if emitHidden {
+                modelState = modelState ?? LMOutput.State()
+                modelState?[mtpEmitFlagKey] = true
             }
-            eval(output.logits)
-            state.state = output.state
+            let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                context.model(text, cache: state.caches, state: modelState)
+            }
+            var terminalHidden: MLXArray?
+            if emitHidden, output.state?[mtpPositionDeltasKey] == nil,
+               let hidden = output.state?[mtpLastHiddenStatesKey],
+               hidden.ndim == 3, hidden.dim(0) == 1, hidden.dim(1) >= 1 {
+                // `+ 0` writes a fresh buffer: the kept column never holds
+                // the forward's output.
+                let column = hidden[0..., (-1)..., 0...]
+                terminalHidden = column + MLXArray.zeros([1], dtype: column.dtype)
+            }
+            eval([output.logits] + (terminalHidden.map { [$0] } ?? []))
+            if !(emitHidden && state.state == nil) {
+                state.state = output.state
+            }
             try self.setRowState(state, for: input.requestID, binding: input.binding)
+            if let terminalHidden {
+                self.storeNativeMTPTerminalHidden(
+                    requestID: input.requestID, position: input.committedKVTokenCount, hidden: terminalHidden)
+            }
             self.invalidateDecodeSession(containing: input.requestID)
         }
     }
@@ -2622,9 +2652,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                   state.nextPosition > 0,
                   committedTokens.indices.contains(state.nextPosition),
                   !state.cache.isEmpty,
-                  state.cache.allSatisfy({ $0.offset == state.nextPosition }),
-                  Self.nativeMTPRetainedDrafterFits(state.cache.flatMap(\.state))
+                  state.cache.allSatisfy({ $0.offset == state.nextPosition })
             else { return nil }
+            // SPEC-048-R009 (0.1.119): the terminal hidden joins the head only
+            // at the head's own position (entry `nextPosition` pairs it with
+            // the next turn's token at `nextPosition + 1`).
+            let terminal = self.takeNativeMTPTerminalHidden(requestID: requestID)
+            let terminalHidden = terminal?.position == state.nextPosition ? terminal?.hidden : nil
+            guard Self.nativeMTPRetainedDrafterFits(
+                state.cache.flatMap(\.state) + (terminalHidden.map { [$0] } ?? [])
+            ) else { return nil }
             var cache: [KVCache] = []
             for layer in state.cache {
                 var copy = layer.copy()
@@ -2645,13 +2682,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     nextPosition: state.nextPosition,
                     foldedNextToken: committedTokens[state.nextPosition]
                 ),
-                foldedTokens: folded
+                foldedTokens: folded,
+                terminalHidden: terminalHidden
             )
         }
     }
 
     /// SPEC-048-R009 (0.1.118): the row's MTP head resumes from a copy of
     /// `snapshot` at its `nextPosition`; the next prompt chunk starts there.
+    /// **(0.1.119)** A snapshot with `boundaryHidden` holds the head one
+    /// entry short: one drafter advance, under the target lock and as one GPU
+    /// turn, folds that hidden with `foldedNextToken` (the prompt's token at
+    /// `nextPosition`) before the prompt chunk. Nothing is stored unless the
+    /// advance lands exactly at `nextPosition`.
     func installNativeMTPDrafter(
         requestID: String,
         snapshot: NativeMTPDrafterPrefixSnapshot
@@ -2659,10 +2702,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let unavailable = ContinuousBatchSchedulerError.unsupported(
             "continuous_batching_retained_native_mtp_drafter_unavailable"
         )
-        guard drafterContainer != nil,
-              snapshot.nextPosition > 0,
+        let cacheOffset = snapshot.nextPosition - (snapshot.boundaryHidden == nil ? 0 : 1)
+        guard let drafterContainer,
+              cacheOffset > 0,
               !snapshot.cache.isEmpty,
-              snapshot.cache.allSatisfy({ $0.offset == snapshot.nextPosition })
+              snapshot.cache.allSatisfy({ $0.offset == cacheOffset })
         else { throw unavailable }
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
@@ -2671,11 +2715,58 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         #if DEBUG
         nativeMTPDrafterInstallObserverForTest?(activeOperationCountForTest())
         #endif
-        storeNativeMTPDrafterAdvance(
-            requestIDs: [requestID],
-            states: [MTPDrafterState(cache: snapshot.cache.map { $0.copy() }, nextPosition: snapshot.nextPosition)],
-            seedTokens: [nil]
-        )
+        guard let boundaryShape = snapshot.boundaryHidden?.shape else {
+            storeNativeMTPDrafterAdvance(
+                requestIDs: [requestID],
+                states: [MTPDrafterState(cache: snapshot.cache.map { $0.copy() }, nextPosition: snapshot.nextPosition)],
+                seedTokens: [nil]
+            )
+            return
+        }
+        guard boundaryShape.count == 3, boundaryShape[0] == 1, boundaryShape[1] == 1 else {
+            throw unavailable
+        }
+        try await container.perform { context in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            self.releaseRetiredDecodeSessions()
+            // SPEC-001-R018: the boundary fold is one GPU turn.
+            let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: 1)) ?? false
+            defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
+            guard let boundaryHidden = snapshot.boundaryHidden else { throw unavailable }
+            let row = MTPPackedDrafterAdvanceRow(
+                targetHidden: boundaryHidden,
+                acceptedTokens: [],
+                finalToken: snapshot.foldedNextToken,
+                positionDeltas: nil,
+                state: MTPDrafterState(cache: snapshot.cache.map { $0.copy() }, nextPosition: cacheOffset)
+            )
+            let folded = try await drafterContainer.perform(
+                nonSendable: (row, context.model)
+            ) { drafterContext, values -> (state: MTPDrafterState, seed: Int) in
+                let (row, targetModel) = values
+                guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel,
+                      drafter.requiresPromptPrefill, !drafter.requiresSharedTargetKV
+                else { throw unavailable }
+                let result = try drafter.advanceAndProposePacked(
+                    target: targetModel,
+                    rows: [row],
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+                let seeds = result.proposals.asType(.int32)
+                eval(result.states.flatMap { $0.cache.flatMap(\.state) } + [seeds])
+                guard result.states.count == 1, let seed = seeds.asArray(Int32.self).first else { throw unavailable }
+                return (result.states[0], Int(seed))
+            }
+            guard folded.state.nextPosition == snapshot.nextPosition,
+                  folded.state.proposalAppended == 0,
+                  folded.state.cache.allSatisfy({ $0.offset == snapshot.nextPosition })
+            else { throw unavailable }
+            self.storeNativeMTPDrafterAdvance(
+                requestIDs: [requestID],
+                states: [folded.state],
+                seedTokens: [folded.seed]
+            )
+        }
     }
 
     /// Row caches for `installPromptSnapshotCache`, nil-free or throwing.
@@ -3806,6 +3897,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
     #endif
 
+    private func storeNativeMTPTerminalHidden(requestID: String, position: Int, hidden: MLXArray) {
+        lock.lock()
+        nativeMTPTerminalHidden[requestID] = (position, hidden)
+        lock.unlock()
+    }
+
+    private func takeNativeMTPTerminalHidden(requestID: String) -> (position: Int, hidden: MLXArray)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPTerminalHidden.removeValue(forKey: requestID)
+    }
+
     private func nativeMTPDrafterState(for requestID: String) -> MTPDrafterState? {
         lock.lock()
         defer { lock.unlock() }
@@ -4405,6 +4508,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         nativeMTPDrafterStates.removeValue(forKey: requestID)
         nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
         nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
+        nativeMTPTerminalHidden.removeValue(forKey: requestID)
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         nativeMTPDrafterRecomputeDigests.removeValue(forKey: requestID)
         labNativeMTPCommittedPrefixTokens.removeValue(forKey: requestID)
