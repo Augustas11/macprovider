@@ -8,7 +8,12 @@ Rows pair by (ctx_target, max_tokens, rows, trial, row). Per cell (context, outp
 
 - parity: with --ordinary, every turn-1 and turn-2 pair has identical text, reasoning text and
   completion token count (greedy). Turn 1 counts because its text is the turn-2 history.
-- cache: every turn-2 row reports cached_prompt_tokens > 0 on both sides.
+- cache: every turn-2 row reports cached_prompt_tokens > 0 on both sides, and every trial whose
+  turn-2 rows carry conversation_cache_turn2 (provider_client.py --native-mtp-counters) shows at
+  least one conversation-cache hit over its turn-2 requests.
+- key: a native turn 2 sent with a sticky conversation key (conversation_key_sent and not
+  conversation_cache_only, TURN2_HEADER=1) fails: SPEC-048-R009 decodes it ordinarily, so the
+  pass measured nothing. TURN2_HEADER=cache_only sends the live cached-turn key.
 - admission: every native turn-2 prompt is at most --cap tokens (above it native MTP is not
   admitted and the row decodes ordinarily) and the native pass proposed tokens on turn 2
   (native_mtp_turn2, provider_client.py --native-mtp-counters).
@@ -82,11 +87,15 @@ def first_diff(a, b):
 
 def side_stats(turns):
     t1, t2 = list(turns.get(1, {}).values()), list(turns.get(2, {}).values())
-    trials = {}
+    trials, cache = {}, {}
     for r in t2:
         nm = r.get("native_mtp_turn2")
         if isinstance(nm, dict):
             trials[r["trial"]] = nm  # one counter change per trial, repeated on its rows
+        cc = r.get("conversation_cache_turn2")
+        if isinstance(cc, dict) and cc.get("valid"):
+            cache[r["trial"]] = cc
+    sticky = sum(1 for r in t2 if r.get("conversation_key_sent") and r.get("conversation_cache_only") is False)
     proposed = sum((nm.get("proposed_tokens") or 0) for nm in trials.values() if nm.get("acceptance_valid"))
     accepted = sum((nm.get("accepted_tokens") or 0) for nm in trials.values() if nm.get("acceptance_valid"))
     return {
@@ -102,6 +111,12 @@ def side_stats(turns):
         "t2_proposed": proposed if trials else None,
         "t2_accepted": accepted if trials else None,
         "t2_acceptance": round(accepted / proposed, 4) if trials and proposed else None,
+        "t2_last_reasons": sorted({str(nm.get("last_reason")) for nm in trials.values()}),
+        "t2_sticky_key_rows": sticky,
+        "t2_cache_only_rows": sum(1 for r in t2 if r.get("conversation_cache_only")),
+        "t2_cache_trials": len(cache),
+        "t2_cache_hits": sum(cc.get("hits") or 0 for cc in cache.values()) if cache else None,
+        "t2_cache_miss_trials": sum(1 for cc in cache.values() if not cc.get("hits")),
     }
 
 
@@ -119,6 +134,11 @@ def score(native_rows, ordinary_rows, cap, ordinary_off):
             f.append(f"native: {n['errors']} request errors")
         if n["t2_rows"] and not n["t2_cached_min"]:
             f.append("native: a turn-2 row reports 0 cached tokens")
+        if n["t2_cache_miss_trials"]:
+            f.append(f"native: {n['t2_cache_miss_trials']} trial(s) show no conversation-cache hit on turn 2")
+        if n["t2_sticky_key_rows"]:
+            f.append(f"native: {n['t2_sticky_key_rows']} turn-2 row(s) sent a sticky conversation key "
+                     "(SPEC-048-R009 decodes them ordinarily; use TURN2_HEADER=cache_only)")
         if n["t2_prompt_tokens_max"] and n["t2_prompt_tokens_max"] > cap:
             f.append(f"native: turn-2 prompt {n['t2_prompt_tokens_max']} tokens is above the cap {cap}")
         if n["t2_counter_trials"] == 0:
@@ -135,6 +155,8 @@ def score(native_rows, ordinary_rows, cap, ordinary_off):
                 f.append(f"ordinary: {o['errors']} request errors")
             if o["t2_rows"] and not o["t2_cached_min"]:
                 f.append("ordinary: a turn-2 row reports 0 cached tokens")
+            if o["t2_cache_miss_trials"]:
+                f.append(f"ordinary: {o['t2_cache_miss_trials']} trial(s) show no conversation-cache hit on turn 2")
             if ordinary_off is not True:
                 f.append("ordinary: serve status does not show native MTP off"
                          if ordinary_off is False else "ordinary: serve/status.json unreadable")
@@ -174,7 +196,9 @@ def report(cells, out=None):
               f"native_t1_ttft={fmt(n['t1_ttft_s'])} cached_min={fmt(n['t2_cached_min'])}/{fmt(o.get('t2_cached_min'))} "
               f"t1_prompt={fmt(n['t1_prompt_tokens_max'])} t2_prompt_max={fmt(n['t2_prompt_tokens_max'])} "
               f"t2_tokens={n['t2_completion_tokens']} proposed_t2={fmt(n['t2_proposed'])} "
-              f"acceptance_t2={fmt(n['t2_acceptance'])} verdict={c['verdict']}", file=out)
+              f"acceptance_t2={fmt(n['t2_acceptance'])} cache_hits_t2={fmt(n['t2_cache_hits'])}/"
+              f"{fmt(o.get('t2_cache_hits'))} cache_only_rows_t2={n['t2_cache_only_rows']} "
+              f"mtp_last_reason_t2={','.join(n['t2_last_reasons']) or '-'} verdict={c['verdict']}", file=out)
         for msg in c["failures"]:
             print(f"T2_FAIL ctx={c['ctx_target']} out={c['max_tokens']} rows={c['rows']} {msg}", file=out)
     print("", file=out)

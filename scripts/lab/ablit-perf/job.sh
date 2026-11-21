@@ -89,7 +89,9 @@
 #   build, weights and config but the mode. Without REUSE_REFERENCE a pass runs no reference and
 #   no compare (run-grid.sh --skip-reference --skip-compare): provider-only cells.
 # TURNS=2: every grid sends the two-turn cell (run-grid.sh --turns 2); TURN2_HEADER, TURN2_HISTORY
-#   and TURN2_FOLLOWUP pass to run-grid.sh through the environment (its header).
+#   and TURN2_FOLLOWUP pass to run-grid.sh through the environment (its header). TURN2_HEADER=1 sends
+#   the sticky conversation key (native MTP then decodes turn 2 ordinarily); TURN2_HEADER=cache_only
+#   sends it cache-only, the live cached-turn path (needs this lab-harness build).
 # MTP_T2_COMPARE="NATIVE ORDINARY" (two pass names): after a model's passes, mtp_turn2_compare.py
 #   scores pass NATIVE against pass ORDINARY on the turn-2 rows (text, reasoning and token parity,
 #   decode tok/s and TTFT medians, cached tokens, native-MTP proposals on turn 2) into

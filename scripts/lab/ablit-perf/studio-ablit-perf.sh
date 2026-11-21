@@ -112,14 +112,16 @@
 #          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has it); one serve
 #          cannot do both (native MTP admits one active row, the 4-slot pass needs the pin), so two loads.
 #          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
-#        MODELS=qwen38-27b TURNS=2 TURN2_HEADER=1 TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512,2048 TRIALS=3 \
+#        MODELS=qwen38-27b TURNS=2 TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512,2048 TRIALS=3 \
 #          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto; off rows=1 native_mtp=off' MTP_T2_COMPARE='mtp off' \
 #          studio-ablit-perf.sh
 #          #2459 native MTP vs ordinary decode on the cached-prefix turn-2 path, Qwen3.8-27B (catalog row
 #          qwen/qwen3.8-27b, durable store snapshot), one build, two serves: pass `mtp` (native_mtp_mode auto,
 #          exit 11 when native MTP is off) and pass `off` (the same config with native_mtp_mode off). Each
 #          trial: turn 1 at ~29.7K prompt tokens (34000 target x 0.873 measured for Qwen3.8-27B at 16000 ->
-#          13965 in run 20261117T064439Z), then turn 2 with the conv: conversation header, history = the
+#          13965 in run 20261117T064439Z), then turn 2 with the conv: conversation header sent cache-only
+#          (TURN2_HEADER=cache_only: the live cached-turn key; TURN2_HEADER=1 is sticky and SPEC-048-R009
+#          decodes it ordinarily, so native MTP would measure nothing), history = the
 #          turn-1 content (<= 2048 tokens) + the `continue` follow-up, so turn 2 is <= ~31.8K < the 32,768
 #          native-MTP prompt cap and decodes to its budget. mtp_turn2_compare.py writes
 #          results/<run>/qwen3.8-27b/mtp-turn2.{md,json}: per cell parity (text, reasoning, token count) of
@@ -127,7 +129,7 @@
 #          proposals on turn 2; T2_CELL / T2_VERDICT lines in the log. Add Qwen3.6-27B with
 #          MODELS="qwen38-27b qwen36-27b" and QWEN36_27B_PASSES set the same (two more serves).
 #          Preflight probe first (one cell, one trial, native pass only): MODELS=qwen38-27b TURNS=2
-#          TURN2_HEADER=1 TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512 TRIALS=1
+#          TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512 TRIALS=1
 #          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh; the full
 #          run then adds SKIP_BUILD=1. Estimated duration (an estimate, not measured): probe ~20 min (build
 #          ~8 min as in run 20261117T064439Z, one load + idle self-check ~6 min, one trial ~2.5 min); full

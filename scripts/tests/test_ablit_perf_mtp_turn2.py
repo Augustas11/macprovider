@@ -112,6 +112,33 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("ordinary: serve status does not show native MTP off", out)
 
+    def test_cache_only_key_and_conversation_cache_hits(self):
+        native, ordinary = self.pair()
+        for r in native + ordinary:
+            if r["turn"] == 2:
+                r.update(conversation_key_sent=True, conversation_cache_only=True,
+                         conversation_cache_turn2={"valid": True, "lookups": 1, "hits": 1,
+                                                   "cached_prompt_tokens": 29700})
+                r["native_mtp_turn2"] = {**r.get("native_mtp_turn2", {}), "last_reason": "active"}
+        rc, out = self.run_cmp(native, ordinary)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("cache_hits_t2=3/3 cache_only_rows_t2=3 mtp_last_reason_t2=active", out)
+        # A trial without a conversation-cache hit on turn 2 fails, on either side.
+        native[3]["conversation_cache_turn2"] = {"valid": True, "lookups": 1, "hits": 0, "cached_prompt_tokens": 0}
+        ordinary[5]["conversation_cache_turn2"] = {"valid": True, "lookups": 1, "hits": 0, "cached_prompt_tokens": 0}
+        rc, out = self.run_cmp(native, ordinary)
+        self.assertEqual(rc, 1)
+        self.assertIn("native: 1 trial(s) show no conversation-cache hit on turn 2", out)
+        self.assertIn("ordinary: 1 trial(s) show no conversation-cache hit on turn 2", out)
+        # A sticky key (TURN2_HEADER=1) on the native side fails loudly.
+        native, ordinary = self.pair()
+        for r in native:
+            if r["turn"] == 2:
+                r.update(conversation_key_sent=True, conversation_cache_only=False)
+        rc, out = self.run_cmp(native, ordinary)
+        self.assertEqual(rc, 1)
+        self.assertIn("3 turn-2 row(s) sent a sticky conversation key", out)
+
     def test_native_only_probe_and_unusable_input(self):
         native, _ = self.pair()
         rc, out = self.run_cmp(native)
@@ -187,6 +214,9 @@ class JobPassTests(unittest.TestCase):
         text = LAUNCHER.read_text()
         for name in ("TURNS", "TURN2_HEADER", "TURN2_HISTORY", "TURN2_FOLLOWUP", "MTP_T2_COMPARE"):
             self.assertIn(f"|{name}|", text)
+        # The #2459 probe and full commands send the live cached-turn key, not the sticky one.
+        self.assertEqual(text.count("TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue"), 2)
+        self.assertNotIn("TURN2_HEADER=1 TURN2_FOLLOWUP=continue", text)
 
 
 if __name__ == "__main__":

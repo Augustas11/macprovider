@@ -1,4 +1,5 @@
 import MacProviderCore
+import NIOHTTP1
 import XCTest
 @testable import macprovider_cli
 
@@ -7,6 +8,31 @@ final class HTTPServerStructuredOutputTests: XCTestCase {
         XCTAssertNoThrow(try Self.request(responseFormat: ["type": "json_object"], stream: true))
         XCTAssertNoThrow(try Self.request(responseFormat: Self.jsonSchemaResponseFormat(), stream: true))
     }
+
+    #if DEBUG
+    func testDirectHTTPConversationCacheOnlyHeaderParse() throws {
+        let name = RouterHandler.conversationCacheOnlyHeaderName
+        XCTAssertFalse(RouterHandler.directHTTPConversationCacheOnly(HTTPHeaders()))
+        XCTAssertTrue(RouterHandler.directHTTPConversationCacheOnly(HTTPHeaders([(name, "1")])))
+        XCTAssertTrue(RouterHandler.directHTTPConversationCacheOnly(HTTPHeaders([(name, " 1 ")])))
+        for rejected in ["0", "true", "", "11"] {
+            XCTAssertFalse(RouterHandler.directHTTPConversationCacheOnly(HTTPHeaders([(name, rejected)])), rejected)
+        }
+        let body = try JSONSerialization.data(withJSONObject: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+        let cacheOnly = try ChatCompletionRequest.parse(data: body).withConversationKey(
+            "conv:2459",
+            cacheOnly: RouterHandler.directHTTPConversationCacheOnly(HTTPHeaders([(name, "1")]))
+        )
+        XCTAssertEqual(cacheOnly.conversationKey, "conv:2459")
+        XCTAssertTrue(cacheOnly.conversationCacheOnly)
+        // Without a key the marker is dropped, as on the relay path.
+        let keyless = try ChatCompletionRequest.parse(data: body).withConversationKey(nil, cacheOnly: true)
+        XCTAssertFalse(keyless.conversationCacheOnly)
+    }
+    #endif
 
     func testContentEncodingGate() throws {
         XCTAssertNoThrow(try RouterHandler.validateContentEncoding([]))

@@ -4,7 +4,8 @@
 usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours.jsonl
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
-                          [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
+                          [--turns 1|2] [--conversation-header] [--conversation-cache-only]
+                          [--turn2-history content|verbatim]
                           [--turn2-followup restate|continue]
                           [--trials-by-rows 4=1] [--native-mtp-counters] [--lab-fence]
 
@@ -33,6 +34,11 @@ assistant1 "" (content mode), which is what a client that drops reasoning sends.
 --conversation-header sends `X-MacProvider-Provider-Conversation: <id>` on both turns of a
 (trial, row) conversation, one random id per conversation: a direct-HTTP `serve --no-join`
 keys its prefix cache only on that header. Every row record carries conversation_key_sent.
+--conversation-cache-only (implies --conversation-header) also sends
+`X-MacProvider-Provider-Conversation-Cache-Only: 1` on both turns: a lab-harness serve then keys the
+prefix cache on the id cache-only, as the relay does for the coordinator's auto-prefix key, so native
+MTP stays eligible on turn 2 (a sticky key decodes ordinarily, SPEC-048-R009). Release builds ignore
+the header. Every row record carries conversation_cache_only.
 --turn2-history verbatim re-sends the turn-1 assistant message with reasoning_content (the
 streamed reasoning text) next to content; content (default) sends content only. Turn-2 rows
 record turn2_history.
@@ -40,7 +46,9 @@ record turn2_history.
 of the one-sentence restate, so turn 2 decodes to its output budget; turn-2 rows record
 turn2_followup. With --native-mtp-counters every turn-2 row also carries `native_mtp_turn2`, the
 native_mtp counter change over that trial's turn-2 requests alone (the aggregate line's
-`native_mtp` spans both turns).
+`native_mtp` spans both turns), and `conversation_cache_turn2`, the change of the serve's
+/v1/status conversation_cache counters (lookups, hits, cached_prompt_tokens, summed over models)
+over the same requests: the prefix-reuse evidence next to each row's cached_prompt_tokens.
 
 request_tps = completion_tokens / (t_last - t0), t0 the request start: the
 request-level output tok/s (TTFT and decode tok/s are its two parts). Each row
@@ -303,6 +311,31 @@ def native_mtp_delta(before, after):
 
 
 CONVERSATION_HEADER = "X-MacProvider-Provider-Conversation"
+CONVERSATION_CACHE_ONLY_HEADER = "X-MacProvider-Provider-Conversation-Cache-Only"
+CONVERSATION_CACHE_COUNTERS = ("lookups", "hits", "cached_prompt_tokens")
+
+
+def conversation_cache_totals(status):
+    """Sum of the conversation_cache counters over models in a /v1/status snapshot, or None."""
+    cc = (status or {}).get("conversation_cache")
+    if not isinstance(cc, dict) or not isinstance(cc.get("models"), list):
+        return None
+    totals = {k: 0 for k in CONVERSATION_CACHE_COUNTERS}
+    for m in cc["models"]:
+        if isinstance(m, dict):
+            for k in CONVERSATION_CACHE_COUNTERS:
+                totals[k] += m.get(k) or 0
+    return {"process_id": cc.get("process_id"), **totals}
+
+
+def conversation_cache_delta(before, after):
+    """Counter change of the turn-2 requests from two /v1/status snapshots (either may be None)."""
+    b, a = conversation_cache_totals(before), conversation_cache_totals(after)
+    if b is None or a is None:
+        return {"valid": False, "reason": "status_unreadable"}
+    if b["process_id"] != a["process_id"]:
+        return {"valid": False, "reason": "serve_restarted"}
+    return {"valid": True, **{k: a[k] - b[k] for k in CONVERSATION_CACHE_COUNTERS}}
 
 
 LAB_FENCE_PREFIX = "labfence-"
@@ -315,18 +348,22 @@ def lab_fence_ids(rows, token=None):
     return [f"{LAB_FENCE_PREFIX}{token}-{rows}-{r}" for r in range(rows)]
 
 
-def conversation_headers(conversation_ids, r, request_ids=None):
+def conversation_headers(conversation_ids, r, request_ids=None, cache_only=False):
     headers = {CONVERSATION_HEADER: conversation_ids[r]} if conversation_ids else {}
+    if conversation_ids and cache_only:
+        headers[CONVERSATION_CACHE_ONLY_HEADER] = "1"
     if request_ids:
         headers["X-Request-ID"] = request_ids[r]
     return headers or None
 
 
-def run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids=None, request_ids=None):
+def run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids=None, request_ids=None,
+                   cache_only=False):
     """One request per builder at once (one thread each); builders[r]() returns row r's messages or None.
 
-    With conversation_ids row r sends the conversation header with conversation_ids[r]; with
-    request_ids it sends X-Request-ID request_ids[r] (else a random id)."""
+    With conversation_ids row r sends the conversation header with conversation_ids[r] (and, with
+    cache_only, the cache-only header); with request_ids it sends X-Request-ID request_ids[r]
+    (else a random id)."""
     results = [None] * len(builders)
     barrier = threading.Barrier(len(builders))
 
@@ -334,7 +371,7 @@ def run_concurrent(port, model, builders, max_tokens, stream_options, conversati
         messages = builders[r]()
         barrier.wait()
         results[r] = (run_request(port, model, messages, max_tokens, stream_options,
-                                  headers=conversation_headers(conversation_ids, r, request_ids))
+                                  headers=conversation_headers(conversation_ids, r, request_ids, cache_only))
                       if messages is not None else None)
 
     threads = [threading.Thread(target=worker, args=(r,)) for r in range(len(builders))]
@@ -346,7 +383,7 @@ def run_concurrent(port, model, builders, max_tokens, stream_options, conversati
 
 
 def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turn1_records,
-              conversation_ids=None, history="content", followup="restate"):
+              conversation_ids=None, history="content", followup="restate", cache_only=False):
     """Turn-2 rows for one trial: [user1, assistant1 = our turn-1 text, follow-up], sent after turn 1.
 
     Only the turn-2 request is timed. A row whose turn 1 failed or gave no output is recorded as an
@@ -358,12 +395,14 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
     builders = [(lambda r=r: prompts.build_turn2_messages(ctx, r, texts[r], reasoning[r], followup)
                  if texts[r] is not None else None)
                 for r in range(rows)]
-    results = run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids)
+    results = run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids,
+                             cache_only=cache_only)
     base = {
         "side": "provider", "label": label, "model": model_name,
         "cell": prompts.cell_key(model_name, ctx, max_tokens, rows), "ctx_target": ctx,
         "max_tokens": max_tokens, "rows": rows, "trial": trial, "turn": 2,
-        "conversation_key_sent": bool(conversation_ids), "turn2_history": history,
+        "conversation_key_sent": bool(conversation_ids),
+        "conversation_cache_only": bool(conversation_ids) and cache_only, "turn2_history": history,
         "turn2_followup": followup,
     }
     records = []
@@ -380,8 +419,10 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
 
 def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turns=1,
              conversation_header=False, turn2_history="content", lab_fence=False, turn2_followup="restate",
-             mtp_status=None):
-    """mtp_status (callable returning the native_mtp status object): turn-2 rows get native_mtp_turn2."""
+             status=None, cache_only=False):
+    """status (callable returning the /v1/status snapshot): turn-2 rows get native_mtp_turn2 and
+    conversation_cache_turn2. cache_only (implies conversation_header) adds the cache-only header."""
+    conversation_header = conversation_header or cache_only
     # One id per (trial, row) conversation, shared by its turn 1 and turn 2.
     conversation_ids = ["conv:" + uuid.uuid4().hex for _ in range(rows)] if conversation_header else None
     request_ids = lab_fence_ids(rows) if lab_fence else None
@@ -389,7 +430,7 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         # A fence installs only on an idle scheduler: let the previous trial's pump wind down.
         time.sleep(LAB_FENCE_SETTLE_S)
     results = run_concurrent(port, model, [(lambda r=r: prompts.build_messages(ctx, r)) for r in range(rows)],
-                             max_tokens, stream_options, conversation_ids, request_ids)
+                             max_tokens, stream_options, conversation_ids, request_ids, cache_only)
     base = {
         "side": "provider",
         "label": label,
@@ -401,6 +442,7 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         "trial": trial,
         **({"turn": 1} if turns == 2 else {}),
         "conversation_key_sent": conversation_header,
+        "conversation_cache_only": cache_only,
     }
     cell_t0 = min(res["t0"] for res in results)
     records = [row_record(res, {**base, "kind": "row", "row": r,
@@ -411,13 +453,16 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         rec.pop("_t_first")
         rec.pop("_t_last")
     if turns == 2:
-        before = mtp_status() if mtp_status else None
+        before = status() if status else None
         turn2 = run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label,
-                          records[:rows], conversation_ids, turn2_history, turn2_followup)
-        if mtp_status:
-            delta = native_mtp_delta(before, mtp_status())
+                          records[:rows], conversation_ids, turn2_history, turn2_followup, cache_only)
+        if status:
+            after = status()
+            delta = native_mtp_delta(native_mtp_of(before), native_mtp_of(after))
+            cache = conversation_cache_delta(before, after)
             for rec in turn2:
                 rec["native_mtp_turn2"] = delta
+                rec["conversation_cache_turn2"] = cache
         records += turn2
     return records, agg
 
@@ -440,6 +485,9 @@ def main(argv=None):
                          "short follow-up) and record it with turn=2 (TTFT, cached_prompt_tokens)")
     ap.add_argument("--conversation-header", action="store_true",
                     help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
+    ap.add_argument("--conversation-cache-only", action="store_true",
+                    help=f"also send {CONVERSATION_CACHE_ONLY_HEADER}: 1 (implies --conversation-header; "
+                         "lab-harness serve builds only)")
     ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
     ap.add_argument("--turn2-followup", choices=sorted(prompts.FOLLOWUPS), default="restate",
@@ -474,8 +522,9 @@ def main(argv=None):
                                         rows, trial, stream_options, args.label, args.turns,
                                         args.conversation_header, args.turn2_history, args.lab_fence,
                                         args.turn2_followup,
-                                        (lambda: native_mtp_of(route_status.fetch_status(args.port)))
-                                        if args.native_mtp_counters else None)
+                                        (lambda: route_status.fetch_status(args.port))
+                                        if args.native_mtp_counters else None,
+                                        args.conversation_cache_only)
                 if args.native_mtp_counters:
                     agg["native_mtp"] = native_mtp_delta(mtp_before, native_mtp_of(route_status.fetch_status(args.port)))
                 for rec in records + [agg]:

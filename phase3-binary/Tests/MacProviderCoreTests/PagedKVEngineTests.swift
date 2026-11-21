@@ -945,6 +945,53 @@ final class PagedKVEngineTests: XCTestCase {
         XCTAssertEqual(afterCommit.rowGeneration, checkpoint.rowGeneration + 1)
     }
 
+    func testNativeMTPCommitEqualsStagedTablePrefixAcrossBlockBoundaries() async throws {
+        // Block size 4; 5 drafts plus the bonus slot are staged. Checkpoints
+        // sit mid-block (3) and on a block boundary (4); accepted counts are
+        // 0, partial, all drafts, and all drafts plus the bonus token.
+        let drafts = 5
+        for checkpointTokens in [3, 4] {
+            for accepted in [0, 2, drafts, drafts + 1] {
+                let label = "checkpoint=\(checkpointTokens) accepted=\(accepted)"
+                let allocator = try PagedKVBlockAllocator(
+                    blockSizeTokens: 4,
+                    maxPhysicalBlocks: 4,
+                    physicalBlockOrder: [2, 0, 3, 1]
+                )
+                let handle = try await allocator.allocate(
+                    conversationKey: "conv:native-mtp-prefix",
+                    initialCapacityTokens: checkpointTokens,
+                    maxLogicalTokens: 16,
+                    initialTokens: checkpointTokens
+                )
+                let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+                    handle: handle,
+                    servedSnapshotID: "snapshot-prefix",
+                    topology: try nativeMTPTopology()
+                )
+                let staged = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: drafts + 1)
+                let stagedTable = staged.privateStagedTable
+                XCTAssertGreaterThan(stagedTable.physicalBlocks.count, 2, label)
+
+                let committedCount = checkpointTokens + accepted
+                let expected = try stagedTable.prefix(logicalTokenCount: committedCount)
+                let committed = try await allocator.commitNativeMTPTransaction(
+                    checkpoint,
+                    acceptedPrefixTokenCount: accepted
+                )
+                XCTAssertEqual(committed.logicalTokenCount, committedCount, label)
+                XCTAssertEqual(committed.physicalBlocks, expected.physicalBlocks, label)
+                XCTAssertEqual(committed.tailValidTokenCount, expected.tailValidTokenCount, label)
+                XCTAssertEqual(committed.poolEpoch, expected.poolEpoch, label)
+                XCTAssertEqual(committed.handleID, expected.handleID, label)
+                XCTAssertEqual(committed.blockSizeTokens, expected.blockSizeTokens, label)
+                XCTAssertEqual(committed, expected, label)
+                let visible = try await allocator.binding(for: handle)
+                XCTAssertEqual(visible.currentTable, expected, label)
+            }
+        }
+    }
+
     func testNativeMTPAbortRestoresCheckpointAndReleasesStagedBlocks() async throws {
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: 4,

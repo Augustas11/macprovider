@@ -89,7 +89,10 @@
 # adds a turn-2 section and fails a cell whose provider reports 0 cached tokens. Default 1:
 # nothing changes. With --turns 2, env TURN2_HEADER=1 makes the provider client send
 # X-MacProvider-Provider-Conversation (one id per trial and row, on both turns; a --no-join
-# serve keys its prefix cache only on it) and TURN2_HISTORY=verbatim re-sends the turn-1
+# serve keys its prefix cache only on it; the key is sticky, so native MTP decodes turn 2
+# ordinarily, SPEC-048-R009). TURN2_HEADER=cache_only sends the same id plus
+# X-MacProvider-Provider-Conversation-Cache-Only: 1, which a lab-harness serve maps to a
+# cache-only key as the relay does for live cached turns (native MTP stays eligible). TURN2_HISTORY=verbatim re-sends the turn-1
 # reasoning as reasoning_content in the turn-2 history (default content: content only). Both
 # are provider-client only; the reference is unchanged. TURN2_FOLLOWUP=continue (default restate)
 # makes user2 ask to keep writing, so turn 2 decodes to its output budget (#2459); the reference
@@ -223,7 +226,7 @@ fi
 REF_MODEL_PATH="${REF_MODEL_PATH:-$MODEL_PATH}"
 case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >&2; exit 64 ;; esac
 case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
-case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
+case "$TURN2_HEADER" in 0|1|cache_only) ;; *) echo "TURN2_HEADER must be 0|1|cache_only" >&2; exit 64 ;; esac
 case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
 case "$TURN2_FOLLOWUP" in restate) ;; continue)
   [ "$SKIP_REF" = 1 ] || { echo "TURN2_FOLLOWUP=continue needs --skip-reference (the reference replays restate)" >&2; exit 64; } ;;
@@ -268,7 +271,10 @@ REF_COMMON=("${COMMON[@]}")
 [ "$TURNS" = 1 ] || REF_COMMON+=(--provider-jsonl "$OURS")
 CLIENT_ARGS=()
 if [ "$TURNS" = 2 ]; then
-  [ "$TURN2_HEADER" = 0 ] || CLIENT_ARGS+=(--conversation-header)
+  case "$TURN2_HEADER" in
+    1) CLIENT_ARGS+=(--conversation-header) ;;
+    cache_only) CLIENT_ARGS+=(--conversation-header --conversation-cache-only) ;;
+  esac
   CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY" --turn2-followup "$TURN2_FOLLOWUP")
 fi
 
