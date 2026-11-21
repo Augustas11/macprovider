@@ -2311,9 +2311,18 @@ func setRateLimitHeaders(w http.ResponseWriter, limit, remaining, reset int64) {
 // name the reset (#2362). It sends no Retry-After: the reset is up to a day
 // away and agent clients (Codex) sleep until a Retry-After deadline without a
 // cap, so the header would hang them instead of stopping them.
+// quotaRefusedErrorType is the OpenAI error type for a quota that refills only
+// at X-RateLimit-Reset, so a retry cannot succeed now.
+const quotaRefusedErrorType = "insufficient_quota"
+
 func writeQuotaExhausted(w http.ResponseWriter, decision storage.QuotaDecision) {
 	setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
-	writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+	// Type insufficient_quota makes Codex (rust-v0.168.0 to v0.171.0) report its
+	// quota error ("Quota exceeded. Check your plan and billing details.").
+	// The previous type, rate_limit_exceeded, with no Retry-After ended the turn
+	// as "exceeded retry limit, last status: 429 Too Many Requests". The code
+	// stays quota_exhausted.
+	writeError(w, http.StatusTooManyRequests, quotaRefusedErrorType, "quota_exhausted", "Quota exhausted")
 }
 
 // Issue #190: per-account concurrency rate-limit headers, distinct

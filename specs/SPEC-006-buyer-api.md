@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.81 (2026-11-15, Messages sessions partitioned by metadata.user_id)
+**Version:** 0.9.82 (2026-11-21, quota refusals typed insufficient_quota)
 **Depends on:** SPEC-001 v1.9.56, SPEC-002 v1.6.33, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.82 (2026-11-21):** §7.7. The `quota_exhausted` and `allowance_exhausted` 429s carry error type `insufficient_quota` instead of `rate_limit_exceeded` (gateway) or `rate_limit_error` (coordinator). Codes, `retryable: false`, and headers are unchanged. Codex rust-v0.168.0 to v0.171.0 maps a 429 of type `insufficient_quota` to its quota error ("Quota exceeded. Check your plan and billing details."; app-server `usageLimitExceeded`). Before, these 429s already ended the turn, since they carry no `Retry-After` (v0.9.79), but Codex reported them as "exceeded retry limit, last status: 429 Too Many Requests".
 
 **Change log v0.9.81 (2026-11-15, Related: #2365):** Amend SPEC-006-R014 (§5.4.1). A `/v1/messages` request partitions the auto-prefix tag by `metadata.user_id` exactly as Chat and Responses do by `prompt_cache_key` (same 256-byte bound, same hash), because Anthropic Messages has no `prompt_cache_key` and agents such as Claude Code send one `metadata.user_id` per session. Measured on an M3 Ultra with GLM-5.3-Flash, 8 concurrent sessions sharing one system prompt: follow-up first-token time median 68.5 s and 0 conversation-cache hits with one shared key, 17.5 s and 24 of 24 hits with per-session keys. `metadata` is still never forwarded. Requests without a usable `user_id` keep the unpartitioned tag. An app that sends one `user_id` per end user gets one partition per user. `/v1/messages` usage (non-streaming body and the streaming `message_delta`) now reports the observed cached prompt tokens (the SPEC-006-R013 value) as `cache_read_input_tokens`, and `input_tokens` excludes them, as Anthropic reports usage: `input_tokens + cache_read_input_tokens` equals the provider prompt tokens. The `message_start` estimate is unchanged and carries `cache_read_input_tokens: 0`; an out-of-range cached count reports 0, as on Chat. `cache_creation_input_tokens` is not reported. Billing is unchanged; it settles from the provider chat usage, not from the translated body.
 
@@ -3411,11 +3413,13 @@ The error code SHOULD be:
 quota_exhausted
 ```
 
-The response MUST include `X-RateLimit-Reset`. `retryable` is `false` and no
-`Retry-After` is sent, since the refill can be a day away (v0.9.79).
+The error type MUST be `insufficient_quota` (v0.9.82), the type Codex reports
+as a quota error. The response MUST include `X-RateLimit-Reset`. `retryable` is
+`false` and no `Retry-After` is sent, since the refill can be a day away
+(v0.9.79).
 
 When an account's SPEC-050 allowance cannot cover a request and its overage
-setting is off, the gateway returns `429 rate_limit_exceeded` with code
+setting is off, the gateway returns `429 insufficient_quota` with code
 `allowance_exhausted` and `X-RateLimit-Reset` at the next 00:00 UTC. When the
 coordinator cannot answer and the account's last known overage setting is off,
 it returns `503 api_error` with code `allowance_unavailable`. SPEC-050-R007 and

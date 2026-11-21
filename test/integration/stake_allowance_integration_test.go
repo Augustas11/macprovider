@@ -358,7 +358,8 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 	usedBefore := s.paidQuotaUsed()
 	status, _, body = s.chatRequest(map[string]string{"Authorization": "Bearer " + s.apiKey, "X-Request-ID": "00000000-0000-4000-8000-999999999999"},
 		fmt.Sprintf(`{"model":%q,"max_tokens":64,"messages":[{"role":"user","content":"refused"}]}`, defaultFakeModelID))
-	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "allowance_exhausted") {
+	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "allowance_exhausted") ||
+		!strings.Contains(string(body), `"type":"insufficient_quota"`) {
 		t.Fatalf("overage-off status %d body %s", status, body)
 	}
 	if used := s.paidQuotaUsed(); used != usedBefore {

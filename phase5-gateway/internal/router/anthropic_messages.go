@@ -1960,7 +1960,7 @@ func anthropicErrorTypeFromOpenAI(openAIType, code string) string {
 		return "permission_error"
 	case "invalid_request_error":
 		return "invalid_request_error"
-	case "rate_limit_exceeded":
+	case "rate_limit_exceeded", "insufficient_quota":
 		return "rate_limit_error"
 	}
 	switch code {

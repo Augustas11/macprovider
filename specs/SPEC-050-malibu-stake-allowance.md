@@ -1,6 +1,6 @@
 # SPEC-050 - MALIBU Stake Allowance
 
-**Version:** 0.1.2
+**Version:** 0.1.3
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1062
@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
 {
   "spec_id": "SPEC-050",
   "title": "MALIBU Stake Allowance",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "path": "specs/SPEC-050-malibu-stake-allowance.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -30,6 +30,10 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
   }
 }
 ```
+
+**Change log v0.1.3 (2026-11-21):** SPEC-050-R007's two refusals,
+`allowance_exhausted` and `quota_exhausted`, carry error type
+`insufficient_quota` (SPEC-006 v0.9.82 §7.7). Codes and headers are unchanged.
 
 **Change log v0.1.2 (2026-10-19, Related: #2054):** SPEC-050-R002 states that
 the persisted stake identity is immutable once positive, so the SPEC-002-R008
@@ -229,14 +233,14 @@ bound from the account's remaining allowance (grant minus closed spend minus
 active holds) in one transaction when it fits, and fund the request from the
 allowance. When it does not fit, the request is funded from the paid quota if
 the account's overage setting is on, and refused with `429
-rate_limit_exceeded / allowance_exhausted` and `X-RateLimit-Reset` at the next
+insufficient_quota / allowance_exhausted` and `X-RateLimit-Reset` at the next
 00:00 UTC if it is off. Overage defaults to on. The coordinator MUST tell the
 gateway the funding and whether the account has an allowance today; the
 gateway MUST then keep an allowance-funded request off the paid daily quota,
 both its hold and its usage. When the paid quota cannot take a request, the
 gateway MAY forward it only for an account the coordinator reported an
 allowance for that UTC day, marked so that only the allowance may fund it; the
-coordinator MUST refuse it with `429 quota_exhausted` when the allowance
+coordinator MUST refuse it with `429 insufficient_quota / quota_exhausted` when the allowance
 cannot cover it. A refusal happens before dispatch and the gateway refunds its
 reservation. A request is funded by one source; allowance and paid quota are
 not combined inside one request. A gateway retry of an admitted request keeps

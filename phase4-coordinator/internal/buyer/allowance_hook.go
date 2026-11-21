@@ -96,7 +96,10 @@ func (s *Server) admitAllowance(w http.ResponseWriter, r *http.Request, rec *bil
 		}
 		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(decision.ResetAt.Unix(), 10))
 		rec.logBuyerFailure(http.StatusTooManyRequests, msg)
-		writeError(w, http.StatusTooManyRequests, code, msg)
+		// insufficient_quota, not the default 429 type: both codes refill only
+		// at X-RateLimit-Reset, and Codex reports a 429 of this type as its
+		// quota error rather than as a generic retry-limit failure.
+		writeErrorTyped(w, http.StatusTooManyRequests, "insufficient_quota", code, msg)
 		return false
 	}
 	w.Header().Set(allowanceFundingHeader, decision.Funding)

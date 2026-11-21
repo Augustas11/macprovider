@@ -122,7 +122,7 @@ func TestPaidQuotaExhaustedFallsBackToAllowanceOnly(t *testing.T) {
 		}
 		h := markedNoProviderHeaders()
 		h.Set(allowanceActiveHeader, "1")
-		return http.StatusTooManyRequests, h, `{"error":{"code":"quota_exhausted","message":"Quota exhausted","type":"rate_limit_exceeded"}}`
+		return http.StatusTooManyRequests, h, `{"error":{"code":"quota_exhausted","message":"Quota exhausted","type":"insufficient_quota"}}`
 	})
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Quotas.AccountDailyTokens = reservation + 3 // room for one request
