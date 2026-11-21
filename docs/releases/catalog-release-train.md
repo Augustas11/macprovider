@@ -13,12 +13,28 @@ Update this file when a catalog-content or rows-only pricing PR merges, when a
 signed content release goes live, or when a rollout is deliberately held behind
 another gate.
 
-## Current state — 2026-11-14
+## Current state — 2026-11-21
 
 Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14; the Live
 entry is updated for the 2026-11-15 MiniMax activation.
 
-- **Live:** `published-2026-11-17-glm53-uncensored-short-challenge-id-v289`
+- **Live (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
+  (catalog release B of [PR 2456](https://github.com/Augustas11/macprovider/pull/2456), merged as
+  `8e0814aed`; Related: #2452), activated through `scripts/ops/catalog-activate.sh` on top of
+  `published-2026-11-20-qwen38-27b-mtp-cap-32k-v289`. Release A (`3fa5689f2`, the listed row) was
+  not activated separately; B verifies against A. Order: Pearl runtime v1.8.295 (the DeepSeek
+  abliterated billing and gateway aliases) went live first (apply 11:45 WITA, coordinator
+  unreachable about 63 s), then the buyer-UX records (SIGHUP, no restart), preflight and activation
+  (SIGHUP, canary drained and restarted onto the release). `deepseek/deepseek-v4-flash-abliterated`
+  is `recommendable` at 45000 / 2500 / 130000 credits per 1M (0.045 / 0.0025 / 0.13 USD input /
+  cached input / output, the base DeepSeek V4-Flash rate; operator approved 2026-11-20, price
+  digest `0bb547f6…`). The release is `live_verified`; the canary self-test bank reloaded
+  (`6a54310e…`); the gateway proof to `zai-org/glm-5.3-flash-uncensored` returned HTTP 200 with
+  native-MTP forwards and continuous batching active. **Not yet done (#2452 stays open):** no
+  provider serves the DeepSeek abliterated key yet, so its `buyer_serving_e2e` request and its
+  owed buyer-UX conformance record need a 256 GB provider loaded with
+  `aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated` @ `93580c78`.
+- **Previously live:** `published-2026-11-17-glm53-uncensored-short-challenge-id-v289`
   (activated 2026-11-17 through `scripts/ops/catalog-activate.sh`, no
   coordinator restart, no price change), from
   [PR 2408](https://github.com/Augustas11/macprovider/pull/2408)
