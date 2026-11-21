@@ -2583,6 +2583,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// evaluated into new buffers (`+ 0` writes a fresh output; a `copy()`
     /// alone is a view of the live row's buffers), so the entry never holds
     /// the row's arrays.
+    ///
+    /// #2459: a row whose last steps rode the ordinary forward at depth zero
+    /// (the `remaining - 1` depth cap at a length stop, or adaptation parked
+    /// at zero) ends with those steps' columns buffered. They are committed
+    /// (sampled token, target hidden) pairs, so they are flushed into the
+    /// head first, as the row's next proposal round would, leaving the head
+    /// where a final native round leaves it: at the last sampled token. A
+    /// failed flush, or a prompt-free drafter (whose flush leaves its fresh
+    /// state at position 0), retains no head.
     func snapshotNativeMTPDrafter(
         requestID: String,
         committedTokens: [Int],
@@ -2590,7 +2599,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async -> NativeMTPRetainedDrafter? {
         guard drafterContainer != nil, beginOperation() else { return nil }
         defer { endOperation() }
-        return await container.perform { _ -> NativeMTPRetainedDrafter? in
+        return await container.perform { context -> NativeMTPRetainedDrafter? in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            if self.hasPendingNativeMTPDrafterColumns(for: requestID) {
+                self.releaseRetiredDecodeSessions()
+                // SPEC-001-R018: the terminal drafter catch-up is one GPU turn.
+                let gpuTurnHeld = self.gpuTurnParticipant?.beginTurn(.decodeStep(rows: 1)) ?? false
+                defer { if gpuTurnHeld { self.gpuTurnParticipant?.endTurn() } }
+                do {
+                    try await self.flushNativeMTPDrafterColumns(
+                        targetModel: context.model,
+                        requestIDs: [requestID],
+                        minimumColumns: 1
+                    )
+                } catch {
+                    return nil
+                }
+            }
             guard let state = self.nativeMTPDrafterState(for: requestID),
                   state.proposalAppended == 0,
                   !self.hasPendingNativeMTPDrafterColumns(for: requestID),
