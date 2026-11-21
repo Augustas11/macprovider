@@ -21,9 +21,18 @@
 #  - mtp pass (":mtp", the key has a native-MTP admission entry): rows 1, native_mtp_mode auto
 #    with the catalog provenance lines; run-grid --expect-native-mtp on fails a serve that does
 #    not propose tokens.
-# Every pass runs base, new, base. compare.py --baseline gates identical text and token counts
-# (new vs the first base run) and reports decode tok/s, aggregate tok/s and TTFT; the second
-# base run is the noise control. Exit 0 = every grid ran and every identity gate passed.
+# Every pass runs base, new, base; compare.py --baseline scores new and the second base run
+# against the first base run (decode tok/s, aggregate tok/s, TTFT, text and token identity).
+# Gates (gate.py, per pass):
+#  - every 1-row cell of new is byte-identical to base1, and every 4-row cell is too unless
+#    base2 also differs from base1 there (a batched stock-order route is not row-invariant
+#    run to run: window 2 measured base-vs-base 4-row differences on qwen3.5-27b);
+#  - no cell of new is slower than base1 beyond the cell's noise band;
+#  - cb pass of a key with a signed CB entry: new's ROUTE is batched (run-grid --expect-route);
+#  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on) and its text equals new's
+#    own ordinary decode in the cb pass (SPEC-048 R015: native MTP is lossless). Base runs that
+#    cannot admit native MTP on this loopback are reported, not gated.
+# Exit 0 = every new grid ran and every gate passed.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PG="$HERE/../parity-grid"
@@ -57,7 +66,9 @@ failed=0
 if [ -n "$LM" ]; then
   echo "#### heavy mlx-swift-lm suites $(date +%T)"
   ( export DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}"
-    cd "$LM" && git rev-parse HEAD && swift build --build-tests && swift test --skip-build \
+    cd "$LM" && git rev-parse HEAD && swift build --build-tests \
+      && cp "$NEW/mlx.metallib" .build/arm64-apple-macosx/debug/mlx-swift-lmPackageTests.xctest/Contents/MacOS/mlx.metallib \
+      && swift test --skip-build \
       --filter 'GLM5Next|GatherQMM|ReferencePrefill|ParoQuant|MatmulPrecision|Bitwise|LayerDump|TeacherForced|Gemma4MTPPackedDrafter' --skip DeepseekV4 --skip MiniMax ) \
     > "$OUT/heavy-suites.log" 2>&1
   rc=$?; echo "heavy suites rc=$rc"; [ $rc -eq 0 ] || { failed=1; grep -E "error:|failed" "$OUT/heavy-suites.log" | head -20; }
@@ -124,16 +135,25 @@ for spec in "${MODELS[@]}"; do
       [ "$pass" = mtp ] && args+=(--expect-native-mtp on)
       echo "#### $name $pass $tag $(date +%T)"
       bash "$PG/run-grid.sh" "${args[@]}" > "$R/run.log" 2>&1
-      rc=$?; echo "grid rc=$rc $name $pass $tag"; [ $rc -eq 0 ] || { failed=1; tail -8 "$R/run.log"; }
+      rc=$?; echo "grid rc=$rc $name $pass $tag"
+      if [ $rc -ne 0 ]; then tail -8 "$R/run.log"; [ "$tag" = new ] && failed=1; fi
       grep -h "^ROUTE\|NATIVE_MTP\|CB_WARMUP_DONE" "$R/run.log" | tail -4
     done
     for cand in new base2; do
-      [ -f "$M/base1/provider.jsonl" ] && [ -f "$M/$cand/provider.jsonl" ] || { echo "compare $name $pass $cand: missing provider.jsonl"; failed=1; continue; }
+      [ -f "$M/base1/provider.jsonl" ] && [ -f "$M/$cand/provider.jsonl" ] || { echo "compare $name $pass $cand: missing provider.jsonl"; continue; }
       /usr/bin/python3 -I "$PG/compare.py" --baseline "$M/base1/provider.jsonl" --ours "$M/$cand/provider.jsonl" \
         --json "$M/compare-$cand.json" > "$M/compare-$cand.md" 2>&1
-      rc=$?; echo "compare $name $pass $cand vs base1 rc=$rc"; cat "$M/compare-$cand.md"
-      [ "$cand" = base2 ] || [ $rc -eq 0 ] || failed=1
+      echo "compare $name $pass $cand vs base1 rc=$?"; cat "$M/compare-$cand.md"
     done
+    if [ "$pass" = mtp ]; then
+      if [ -f "$OUT/$name/cb/new/provider.jsonl" ] && [ -f "$M/new/provider.jsonl" ]; then
+        /usr/bin/python3 -I "$PG/compare.py" --subset --baseline "$OUT/$name/cb/new/provider.jsonl" \
+          --ours "$M/new/provider.jsonl" --json "$M/compare-new-mtp-vs-new-ordinary.json" > "$M/compare-new-mtp-vs-new-ordinary.md" 2>&1
+        echo "compare $name new native MTP vs new ordinary rc=$?"; cat "$M/compare-new-mtp-vs-new-ordinary.md"
+      fi
+    fi
+    /usr/bin/python3 -I "$HERE/gate.py" --pass "$pass" "$M" | tee "$M/gate.txt"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || failed=1
   done
 done
 echo "== window done $(date +%T) failed=$failed"
