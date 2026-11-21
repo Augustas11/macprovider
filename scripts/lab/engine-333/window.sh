@@ -42,7 +42,7 @@ failed=0
 if [ -n "$LM" ]; then
   echo "#### heavy mlx-swift-lm suites $(date +%T)"
   ( cd "$LM" && git rev-parse HEAD && swift build --build-tests && swift test --skip-build \
-      --filter 'DeepseekV4|GLM5Next|GatherQMM|ReferencePrefill|ParoQuant|MatmulPrecision|Bitwise|LayerDump|TeacherForced|MiniMaxM3Parity' ) \
+      --filter 'DeepseekV4|GLM5Next|GatherQMM|ReferencePrefill|ParoQuant|MatmulPrecision|Bitwise|LayerDump|TeacherForced|MiniMaxM3Parity|Gemma4MTPPackedDrafter' ) \
     > "$OUT/heavy-suites.log" 2>&1
   rc=$?; echo "heavy suites rc=$rc"; [ $rc -eq 0 ] || { failed=1; grep -E "error:|failed" "$OUT/heavy-suites.log" | head -20; }
 fi
