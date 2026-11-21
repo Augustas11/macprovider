@@ -5,6 +5,7 @@ usage: provider_client.py --port PORT --model MODEL --model-name NAME --out ours
                           [--grid grid.json] [--trials 3] [--rows 1,4]
                           [--max-context N] [--no-stream-options] [--label provider]
                           [--turns 1|2] [--conversation-header] [--turn2-history content|verbatim]
+                          [--turn2-followup restate|continue]
                           [--trials-by-rows 4=1] [--native-mtp-counters] [--lab-fence]
 
 Sends the same chat messages as reference_mlxlm.py (prompts.build_messages) to
@@ -35,6 +36,11 @@ keys its prefix cache only on that header. Every row record carries conversation
 --turn2-history verbatim re-sends the turn-1 assistant message with reasoning_content (the
 streamed reasoning text) next to content; content (default) sends content only. Turn-2 rows
 record turn2_history.
+--turn2-followup continue sends prompts.FOLLOWUP_CONTINUE (keep writing the story) as user2 instead
+of the one-sentence restate, so turn 2 decodes to its output budget; turn-2 rows record
+turn2_followup. With --native-mtp-counters every turn-2 row also carries `native_mtp_turn2`, the
+native_mtp counter change over that trial's turn-2 requests alone (the aggregate line's
+`native_mtp` spans both turns).
 
 request_tps = completion_tokens / (t_last - t0), t0 the request start: the
 request-level output tok/s (TTFT and decode tok/s are its two parts). Each row
@@ -340,7 +346,7 @@ def run_concurrent(port, model, builders, max_tokens, stream_options, conversati
 
 
 def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turn1_records,
-              conversation_ids=None, history="content"):
+              conversation_ids=None, history="content", followup="restate"):
     """Turn-2 rows for one trial: [user1, assistant1 = our turn-1 text, follow-up], sent after turn 1.
 
     Only the turn-2 request is timed. A row whose turn 1 failed or gave no output is recorded as an
@@ -349,7 +355,7 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
     texts = [(r.get("text") or "") if r["error"] is None and (r.get("text") or r.get("reasoning_text")) else None
              for r in turn1_records]
     reasoning = [(r.get("reasoning_text") or "") if history == "verbatim" else None for r in turn1_records]
-    builders = [(lambda r=r: prompts.build_turn2_messages(ctx, r, texts[r], reasoning[r])
+    builders = [(lambda r=r: prompts.build_turn2_messages(ctx, r, texts[r], reasoning[r], followup)
                  if texts[r] is not None else None)
                 for r in range(rows)]
     results = run_concurrent(port, model, builders, max_tokens, stream_options, conversation_ids)
@@ -358,6 +364,7 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
         "cell": prompts.cell_key(model_name, ctx, max_tokens, rows), "ctx_target": ctx,
         "max_tokens": max_tokens, "rows": rows, "trial": trial, "turn": 2,
         "conversation_key_sent": bool(conversation_ids), "turn2_history": history,
+        "turn2_followup": followup,
     }
     records = []
     for r, res in enumerate(results):
@@ -372,7 +379,9 @@ def run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_opti
 
 
 def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label, turns=1,
-             conversation_header=False, turn2_history="content", lab_fence=False):
+             conversation_header=False, turn2_history="content", lab_fence=False, turn2_followup="restate",
+             mtp_status=None):
+    """mtp_status (callable returning the native_mtp status object): turn-2 rows get native_mtp_turn2."""
     # One id per (trial, row) conversation, shared by its turn 1 and turn 2.
     conversation_ids = ["conv:" + uuid.uuid4().hex for _ in range(rows)] if conversation_header else None
     request_ids = lab_fence_ids(rows) if lab_fence else None
@@ -402,8 +411,14 @@ def run_cell(port, model, model_name, ctx, max_tokens, rows, trial, stream_optio
         rec.pop("_t_first")
         rec.pop("_t_last")
     if turns == 2:
-        records += run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label,
-                             records[:rows], conversation_ids, turn2_history)
+        before = mtp_status() if mtp_status else None
+        turn2 = run_turn2(port, model, model_name, ctx, max_tokens, rows, trial, stream_options, label,
+                          records[:rows], conversation_ids, turn2_history, turn2_followup)
+        if mtp_status:
+            delta = native_mtp_delta(before, mtp_status())
+            for rec in turn2:
+                rec["native_mtp_turn2"] = delta
+        records += turn2
     return records, agg
 
 
@@ -427,6 +442,8 @@ def main(argv=None):
                     help=f"send {CONVERSATION_HEADER} (one id per trial and row) on every turn")
     ap.add_argument("--turn2-history", choices=("content", "verbatim"), default="content",
                     help="verbatim: the turn-2 assistant message also carries the turn-1 reasoning_content")
+    ap.add_argument("--turn2-followup", choices=sorted(prompts.FOLLOWUPS), default="restate",
+                    help="continue: user2 asks to keep writing, so turn 2 decodes to its budget")
     ap.add_argument("--native-mtp-counters", action="store_true",
                     help="record the change of the serve's native_mtp status counters per trial")
     ap.add_argument("--lab-fence", action="store_true",
@@ -455,7 +472,10 @@ def main(argv=None):
                 mtp_before = native_mtp_of(route_status.fetch_status(args.port)) if args.native_mtp_counters else None
                 records, agg = run_cell(args.port, args.model, args.model_name, ctx, max_tokens,
                                         rows, trial, stream_options, args.label, args.turns,
-                                        args.conversation_header, args.turn2_history, args.lab_fence)
+                                        args.conversation_header, args.turn2_history, args.lab_fence,
+                                        args.turn2_followup,
+                                        (lambda: native_mtp_of(route_status.fetch_status(args.port)))
+                                        if args.native_mtp_counters else None)
                 if args.native_mtp_counters:
                     agg["native_mtp"] = native_mtp_delta(mtp_before, native_mtp_of(route_status.fetch_status(args.port)))
                 for rec in records + [agg]:

@@ -112,7 +112,30 @@
 #          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has it); one serve
 #          cannot do both (native MTP admits one active row, the 4-slot pass needs the pin), so two loads.
 #          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
-# Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB DET_ROWS DET_CONTEXTS
+#        MODELS=qwen38-27b TURNS=2 TURN2_HEADER=1 TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512,2048 TRIALS=3 \
+#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto; off rows=1 native_mtp=off' MTP_T2_COMPARE='mtp off' \
+#          studio-ablit-perf.sh
+#          #2459 native MTP vs ordinary decode on the cached-prefix turn-2 path, Qwen3.8-27B (catalog row
+#          qwen/qwen3.8-27b, durable store snapshot), one build, two serves: pass `mtp` (native_mtp_mode auto,
+#          exit 11 when native MTP is off) and pass `off` (the same config with native_mtp_mode off). Each
+#          trial: turn 1 at ~29.7K prompt tokens (34000 target x 0.873 measured for Qwen3.8-27B at 16000 ->
+#          13965 in run 20261117T064439Z), then turn 2 with the conv: conversation header, history = the
+#          turn-1 content (<= 2048 tokens) + the `continue` follow-up, so turn 2 is <= ~31.8K < the 32,768
+#          native-MTP prompt cap and decodes to its budget. mtp_turn2_compare.py writes
+#          results/<run>/qwen3.8-27b/mtp-turn2.{md,json}: per cell parity (text, reasoning, token count) of
+#          turns 1 and 2, decode tok/s and TTFT medians, cached tokens, turn-2 prompt vs the cap, native
+#          proposals on turn 2; T2_CELL / T2_VERDICT lines in the log. Add Qwen3.6-27B with
+#          MODELS="qwen38-27b qwen36-27b" and QWEN36_27B_PASSES set the same (two more serves).
+#          Preflight probe first (one cell, one trial, native pass only): MODELS=qwen38-27b TURNS=2
+#          TURN2_HEADER=1 TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512 TRIALS=1
+#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh; the full
+#          run then adds SKIP_BUILD=1. Estimated duration (an estimate, not measured): probe ~20 min (build
+#          ~8 min as in run 20261117T064439Z, one load + idle self-check ~6 min, one trial ~2.5 min); full
+#          Qwen3.8-27B ~50 min with SKIP_BUILD=1 (per pass: turn-1 TTFT ~110 s at 29.7K from 44 s at 14K,
+#          decode ~35 tok/s, 3 trials x (512 + 2048) tokens x 2 turns ~19 min, plus load and self-check
+#          ~6 min); Qwen3.6-27B adds ~50 min.
+# Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS TURNS TURN2_HEADER TURN2_HISTORY
+# TURN2_FOLLOWUP MTP_T2_COMPARE METALLIB DET_ROWS DET_CONTEXTS
 # SERVED_CONTEXTS SERVED_STEPS STEPS RUN_DETERMINISM RUN_PARITY LAB_FENCE
 # QMTP_* SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SEED_SELF_CHECK_RUN SERVE_ENV PROMPT_TOKENS STEP_SIZES PROFILE_RUNS GENERATE_TOKENS and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
@@ -185,7 +208,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|TURNS|TURN2_HEADER|TURN2_HISTORY|TURN2_FOLLOWUP|MTP_T2_COMPARE|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD}${MAIN_BASE:+ main_base=$MAIN_BASE} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/job/pins ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \

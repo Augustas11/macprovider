@@ -2111,5 +2111,70 @@ class LayerTraceTests(unittest.TestCase):
         self.assertGreater(layer_trace.distance(recorded, out[1])["rel_l2"], 0.1)
 
 
+class Turn2ContinueTests(unittest.TestCase):
+    """#2459: the `continue` turn-2 follow-up, turn-2-only native-MTP counters, numeric --contexts."""
+
+    def run_grid(self, *extra, env_extra=None):
+        import socket
+        import subprocess
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (d / "bin").mkdir()
+        (d / "fake").mkdir()
+        (d / "serve.py").write_text(_FAKE_CB_SERVE)
+        cli = d / "bin" / "macprovider-cli"
+        cli.write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {d / "serve.py"} "$@"\n')
+        lsof = d / "fake" / "lsof"
+        lsof.write_text("#!/bin/bash\nexit 1\n")
+        for p in (cli, lsof):
+            p.chmod(0o755)
+        out = d / "out"
+        env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin", FAKE_DECISION="granted", FAKE_MTP="on",
+                   TURN2_HEADER="1", TURN2_FOLLOWUP="continue", **(env_extra or {}))
+        proc = subprocess.run(
+            ["bash", str(HARNESS / "run-grid.sh"), "--model-path", str(d), "--model-name", MODEL,
+             "--bin-dir", str(d / "bin"), "--out-dir", str(out), "--port", str(port), "--outputs", "4",
+             "--rows", "1", "--trials", "2", "--warmup-poll-s", "0.5", "--turns", "2", *extra],
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc, out
+
+    def test_continue_followup_numeric_context_and_turn2_counters(self):
+        proc, out = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short,300",
+                                  "--expect-native-mtp", "on")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        grid = json.loads((out / "grid.json").read_text())
+        self.assertEqual([c["tokens"] for c in grid["contexts"]], [200, 300])
+        rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        t2 = [r for r in rows if r.get("turn") == 2]
+        self.assertEqual(sorted({r["ctx_target"] for r in t2}), [200, 300])
+        self.assertEqual(len(t2), 4)
+        for r in t2:
+            self.assertEqual(r["turn2_followup"], "continue")
+            self.assertTrue(r["conversation_key_sent"])
+            # one turn-2 request per trial: the fake serve adds 6 proposed / 4 accepted per request
+            self.assertEqual((r["native_mtp_turn2"]["proposed_tokens"], r["native_mtp_turn2"]["accepted_tokens"]), (6, 4))
+        for a in (r for r in rows if r["kind"] == "aggregate"):
+            self.assertEqual(a["native_mtp"]["proposed_tokens"], 12)  # the trial: both turns
+
+    def test_continue_needs_skip_reference(self):
+        proc, _ = self.run_grid("--python", "/usr/bin/python3", "--contexts", "short")
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("TURN2_FOLLOWUP=continue needs --skip-reference", proc.stderr)
+
+    def test_unknown_named_context_still_fails(self):
+        proc, _ = self.run_grid("--skip-reference", "--contexts", "huge")
+        self.assertEqual(proc.returncode, 64)
+
+    def test_build_turn2_messages_followups(self):
+        restate = prompts.build_turn2_messages(200, 0, "a1")
+        cont = prompts.build_turn2_messages(200, 0, "a1", followup="continue")
+        self.assertEqual(restate[-1]["content"], prompts.FOLLOWUP)
+        self.assertEqual(cont[-1]["content"], prompts.FOLLOWUP_CONTINUE)
+        self.assertEqual(restate[:-1], cont[:-1])
+
+
 if __name__ == "__main__":
     unittest.main()

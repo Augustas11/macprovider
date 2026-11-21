@@ -91,7 +91,12 @@
 # X-MacProvider-Provider-Conversation (one id per trial and row, on both turns; a --no-join
 # serve keys its prefix cache only on it) and TURN2_HISTORY=verbatim re-sends the turn-1
 # reasoning as reasoning_content in the turn-2 history (default content: content only). Both
-# are provider-client only; the reference is unchanged.
+# are provider-client only; the reference is unchanged. TURN2_FOLLOWUP=continue (default restate)
+# makes user2 ask to keep writing, so turn 2 decodes to its output budget (#2459); the reference
+# replays only the restate follow-up, so continue needs --skip-reference.
+#
+# --contexts takes grid.json context names or token counts; a token count grid.json lacks
+# (e.g. 34000) becomes one more context of that many target tokens, named by the number.
 #
 # --no-autotune-candidate drops the lab autotune flag from the serve command;
 # with --cb off (and native MTP off for a model that has an admission entry)
@@ -136,6 +141,7 @@ SERVE_ARGS=()
 TURNS=1
 TURN2_HEADER=${TURN2_HEADER:-0}
 TURN2_HISTORY=${TURN2_HISTORY:-content}
+TURN2_FOLLOWUP=${TURN2_FOLLOWUP:-restate}
 REFERENCE=mlx-lm
 REF_ARGS=()
 REF_MODEL_PATH=""
@@ -219,6 +225,9 @@ case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >
 case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
 case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
 case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
+case "$TURN2_FOLLOWUP" in restate) ;; continue)
+  [ "$SKIP_REF" = 1 ] || { echo "TURN2_FOLLOWUP=continue needs --skip-reference (the reference replays restate)" >&2; exit 64; } ;;
+  *) echo "TURN2_FOLLOWUP must be restate|continue" >&2; exit 64 ;; esac
 case "$EXPECT_MTP" in on|any) ;; *) echo "--expect-native-mtp must be on|any" >&2; exit 64 ;; esac
 case "$EXPECT_ROUTE" in batched|any) ;; *) echo "--expect-route must be batched|any" >&2; exit 64 ;; esac
 [ -z "$SEED_SELF_CHECK" ] || [ -f "$SEED_SELF_CHECK" ] || { echo "no --seed-self-check file $SEED_SELF_CHECK" >&2; exit 64; }
@@ -243,6 +252,8 @@ if outs: g["outputs"] = [int(x) for x in outs.split(",")]
 if ctxs:
     want = ctxs.split(",")
     g["contexts"] = [c for c in g["contexts"] if c["name"] in want or str(c["tokens"]) in want]
+    known = {c["name"] for c in g["contexts"]} | {str(c["tokens"]) for c in g["contexts"]}
+    g["contexts"] += [{"name": w, "tokens": int(w)} for w in want if w not in known and w.isdigit() and int(w) > 0]
     if len(g["contexts"]) != len(want): sys.exit("unknown context in %s" % ctxs)
 json.dump(g, open(sys.argv[2], "w"), indent=2)' "$HERE/grid.json" "$GRID" "$OUTPUTS" "$CONTEXTS" \
     || { echo "bad --outputs/--contexts" >&2; exit 64; }
@@ -258,7 +269,7 @@ REF_COMMON=("${COMMON[@]}")
 CLIENT_ARGS=()
 if [ "$TURNS" = 2 ]; then
   [ "$TURN2_HEADER" = 0 ] || CLIENT_ARGS+=(--conversation-header)
-  CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY")
+  CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY" --turn2-followup "$TURN2_FOLLOWUP")
 fi
 
 if [ -z "$MAX_CONTEXT" ] && [ -f "$REF_MODEL_PATH/config.json" ]; then
