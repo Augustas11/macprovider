@@ -320,7 +320,7 @@ nohup bash -c '
     if [ "\$free" -lt "\$floor" ]; then
       echo "\$(date +%H:%M:%S) MEMGUARD_KILL free_pct=\$free floor=\$floor" >> "\$log"
       kill -TERM -- -"\$jp" 2>/dev/null; sleep 5; kill -KILL -- -"\$jp" 2>/dev/null
-      pkill -KILL -f "lab-ablit-perf/.*macprovider-cli serve" 2>/dev/null
+      pkill -KILL -f "lab-ablit-perf/.*macprovider-cli[ ]serve" 2>/dev/null
       exit 0
     fi
     n=\$((n + 1)); sleep 2
