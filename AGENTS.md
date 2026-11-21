@@ -370,13 +370,18 @@ Before any agent starts, write the brief:
   output and identical token count, so nothing wins by doing less work.
 - **Cells:** the independent pieces, one per agent, no shared files. A grid of
   model by output length by context length by rows is a split; one big failing
-  test is not.
+  test is not. Cells come from a diff grid against the reference: every cell
+  where we are slower or tokens differ is one cell. Token-parity diffs that
+  need no timing run off the Studio.
 
 Then:
 
 1. Prove the check on unmodified `main` before any fix is written. It fails
    where we are known to be slow and passes where we are not. A check that
-   cannot run fails loudly.
+   cannot run fails loudly. Prove it can fail: plant one deliberate defect
+   (a changed token, a slower path) and confirm the check catches it. The
+   check prints the goal metric and a per-phase time split (prefill, decode
+   forward, sampling, host sync) from the same run.
    For a speed goal, record the ceiling next to the baseline: decode =
    measured memory bandwidth / bytes read per output token (active weights,
    output layer, KV at the working context); prefill = about half the
@@ -384,7 +389,9 @@ Then:
    from the spec sheet. Report progress as a share of the ceiling, and report
    a target above it early, with the arithmetic.
 2. Profile before ideas. Each idea states the share of the metric it can
-   touch; ideas without that number are not built.
+   touch, citing the check's time split; ideas without that number are not
+   built. Each builder brief states the gap to the ceiling as a multiple and
+   asks for a redesign, not tuning.
 3. Keep or revert is automatic against a baseline from the same window.
    For a noisy metric (speed, memory, TTFT), run each candidate between two
    controls (control, candidate, control; medians of at least 6 samples).
@@ -392,7 +399,10 @@ Then:
    metric more than about 3%. Repeat any surprising single win.
 4. The judge is never an author of what it judges and has a veto. Disprovers
    attack every kept change on inputs the builder did not use.
-5. Log every rejected candidate with its measured number. Scouts read the log
+5. Log every rejected candidate with its measured number and what replays
+   it (weights hash, prompt set, seed, exact check command); append every
+   measured candidate to one results curve per goal, shown against the
+   ceiling in the final report. Scouts read the log
    and the "Known levers" table in
    `docs/runbooks/model-family-performance-intake.md` before proposing; every
    measured lever result, kept or rejected, is added to that table.
