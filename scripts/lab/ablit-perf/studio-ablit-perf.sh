@@ -113,11 +113,13 @@
 #          cannot do both (native MTP admits one active row, the 4-slot pass needs the pin), so two loads.
 #          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
 #        MODELS=qwen38-27b TURNS=2 TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512,2048 TRIALS=3 \
-#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto; off rows=1 native_mtp=off' MTP_T2_COMPARE='mtp off' \
-#          studio-ablit-perf.sh
+#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto; off rows=1 native_mtp=off; cold rows=1 native_mtp=off turn2_header=0' \
+#          MTP_T2_COMPARE='mtp off cold' studio-ablit-perf.sh
 #          #2459 native MTP vs ordinary decode on the cached-prefix turn-2 path, Qwen3.8-27B (catalog row
-#          qwen/qwen3.8-27b, durable store snapshot), one build, two serves: pass `mtp` (native_mtp_mode auto,
-#          exit 11 when native MTP is off) and pass `off` (the same config with native_mtp_mode off). Each
+#          qwen/qwen3.8-27b, durable store snapshot), one build, three serves: pass `mtp` (native_mtp_mode auto,
+#          exit 11 when native MTP is off), pass `off` (the same config with native_mtp_mode off) and pass
+#          `cold` (native MTP off, no conversation header on either turn: the keyless cold control; every
+#          turn-1/turn-2 pair of `off` must equal `cold`, cold_parity_t1/t2 on T2_CELL). Each
 #          trial: turn 1 at ~29.7K prompt tokens (34000 target x 0.873 measured for Qwen3.8-27B at 16000 ->
 #          13965 in run 20261117T064439Z), then turn 2 with the conv: conversation header sent cache-only
 #          (TURN2_HEADER=cache_only: the live cached-turn key; TURN2_HEADER=1 is sticky and SPEC-048-R009
@@ -127,15 +129,15 @@
 #          results/<run>/qwen3.8-27b/mtp-turn2.{md,json}: per cell parity (text, reasoning, token count) of
 #          turns 1 and 2, decode tok/s and TTFT medians, cached tokens, turn-2 prompt vs the cap, native
 #          proposals on turn 2; T2_CELL / T2_VERDICT lines in the log. Add Qwen3.6-27B with
-#          MODELS="qwen38-27b qwen36-27b" and QWEN36_27B_PASSES set the same (two more serves).
+#          MODELS="qwen38-27b qwen36-27b" and QWEN36_27B_PASSES set the same (three more serves).
 #          Preflight probe first (one cell, one trial, native pass only): MODELS=qwen38-27b TURNS=2
 #          TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512 TRIALS=1
 #          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh; the full
 #          run then adds SKIP_BUILD=1. Estimated duration (an estimate, not measured): probe ~20 min (build
 #          ~8 min as in run 20261117T064439Z, one load + idle self-check ~6 min, one trial ~2.5 min); full
-#          Qwen3.8-27B ~50 min with SKIP_BUILD=1 (per pass: turn-1 TTFT ~110 s at 29.7K from 44 s at 14K,
+#          Qwen3.8-27B ~75 min with SKIP_BUILD=1 (three passes; per pass: turn-1 TTFT ~110 s at 29.7K from 44 s at 14K,
 #          decode ~35 tok/s, 3 trials x (512 + 2048) tokens x 2 turns ~19 min, plus load and self-check
-#          ~6 min); Qwen3.6-27B adds ~50 min.
+#          ~6 min); Qwen3.6-27B adds ~75 min.
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS TURNS TURN2_HEADER TURN2_HISTORY
 # TURN2_FOLLOWUP MTP_T2_COMPARE METALLIB DET_ROWS DET_CONTEXTS
 # SERVED_CONTEXTS SERVED_STEPS STEPS RUN_DETERMINISM RUN_PARITY LAB_FENCE

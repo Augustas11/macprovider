@@ -48,12 +48,15 @@ class CompareTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
 
-    def run_cmp(self, native_rows, ordinary_rows=None, ordinary_native=False):
+    def run_cmp(self, native_rows, ordinary_rows=None, ordinary_native=False, cold_rows=None, cold_native=False):
         write_pass(self.tmp / "mtp", native_rows, native=True)
         args = ["--native", str(self.tmp / "mtp"), "--json", str(self.tmp / "out.json")]
         if ordinary_rows is not None:
             write_pass(self.tmp / "off", ordinary_rows, native=ordinary_native)
             args += ["--ordinary", str(self.tmp / "off")]
+        if cold_rows is not None:
+            write_pass(self.tmp / "cold", cold_rows, native=cold_native)
+            args += ["--cold", str(self.tmp / "cold")]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = cmp.main(args)
@@ -139,6 +142,35 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("3 turn-2 row(s) sent a sticky conversation key", out)
 
+    def test_keyed_ordinary_must_equal_keyless_cold(self):
+        native, ordinary = self.pair()
+        cold = [row(1, t) for t in range(3)] + [row(2, t, cached=0) for t in range(3)]
+        rc, out = self.run_cmp(native, ordinary, cold_rows=cold)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("cold_parity_t1=True cold_parity_t2=True", out)
+        # Default (no --cold) output is unchanged apart from the empty cold fields.
+        rc, out = self.run_cmp(native, ordinary)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("cold_parity_t1=- cold_parity_t2=-", out)
+        # A keyed turn-2 token difference from the cold run fails even when mtp == off.
+        bad = list(cold)
+        bad[4] = row(2, 1, cached=0, tokens=511)
+        rc, out = self.run_cmp(native, ordinary, cold_rows=bad)
+        self.assertEqual(rc, 1)
+        self.assertIn("keyed vs cold: turn 2: 1/3 pairs differ (trial 1 row 0", out)
+        self.assertIn("cold_parity_t2=False", out)
+        # A cold pass that sent a key, or ran native MTP, is not the control.
+        keyed = [dict(r, conversation_key_sent=True) for r in cold]
+        rc, out = self.run_cmp(native, ordinary, cold_rows=keyed)
+        self.assertEqual(rc, 1)
+        self.assertIn("cold: 6 row(s) sent a conversation key", out)
+        rc, out = self.run_cmp(native, ordinary, cold_rows=cold, cold_native=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("cold: serve status does not show native MTP off", out)
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                cmp.main(["--native", str(self.tmp / "mtp"), "--cold", str(self.tmp / "cold")])
+
     def test_native_only_probe_and_unusable_input(self):
         native, _ = self.pair()
         rc, out = self.run_cmp(native)
@@ -192,6 +224,14 @@ class JobPassTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("P off off 1", p.stdout)
         self.assertIn("ERR NATIVE_MTP must be auto or off", p.stdout)
+        p2, _ = self.bash('parse_pass qwen38-27b "cold rows=1 native_mtp=off turn2_header=0" || exit 1\n'
+                          'echo "T [$P_T2H]"\n'
+                          'parse_pass qwen38-27b "mtp rows=1" || exit 1\necho "D [$P_T2H]"\n'
+                          'parse_pass qwen38-27b "x turn2_header=sticky" || echo "ERR $KNOB_ERR"\n')
+        self.assertEqual(p2.returncode, 0, p2.stderr)
+        self.assertIn("T [0]", p2.stdout)
+        self.assertIn("D []", p2.stdout)
+        self.assertIn("ERR turn2_header must be 0|1|cache_only", p2.stdout)
         durable = f"{d}/store/mlx-community--Qwen3.8-27B-4bit/rev/{'s' * 64}"
         self.assertEqual(p.stdout.count(durable), 2)
         off = (Path(d) / "job" / "off.yaml").read_text().splitlines()
@@ -206,6 +246,8 @@ class JobPassTests(unittest.TestCase):
         self.assertIn('[ "$P_NM" != auto ] || extra+=(--expect-native-mtp on)', text)
         self.assertIn("extra+=(--skip-compare)", text)
         self.assertIn("mtp_turn2_compare.py", text)
+        self.assertIn('TURN2_HEADER=${P_T2H:-${TURN2_HEADER:-0}} grid "$k"', text)
+        self.assertIn('[ -z "${3:-}" ] || dirs+=(--cold "$RES/$name/$3")', text)
         for k in ("QWEN38_27B", "QWEN36_27B"):
             self.assertIn(f': "${{{k}_ID:=qwen/qwen3.', text)
         self.assertNotIn("PASSES needs REUSE_REFERENCE", text)
@@ -217,6 +259,9 @@ class JobPassTests(unittest.TestCase):
         # The #2459 probe and full commands send the live cached-turn key, not the sticky one.
         self.assertEqual(text.count("TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue"), 2)
         self.assertNotIn("TURN2_HEADER=1 TURN2_FOLLOWUP=continue", text)
+        # The full command adds the keyless cold control; the probe runs the native pass only.
+        self.assertIn("cold rows=1 native_mtp=off turn2_header=0' \\\n#          MTP_T2_COMPARE='mtp off cold'", text)
+        self.assertIn("QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh", text)
 
 
 if __name__ == "__main__":

@@ -82,7 +82,8 @@
 #   grid pass per entry, each its own serve and output directory results/<run>/<name>/NAME, scored
 #   against the REUSE_REFERENCE rows (required, no reference runs). Keys: rows (default 1,4),
 #   native_mtp, slots (the two knobs above for this pass only), contexts, outputs, trials (default
-#   CONTEXTS, OUTPUTS, TRIALS). Example, the abliterated GLM native-MTP and 4-slot passes:
+#   CONTEXTS, OUTPUTS, TRIALS), turn2_header (0|1|cache_only, TURN2_HEADER for this pass only; 0
+#   sends no conversation header on either turn, the keyless cold control). Example, the abliterated GLM native-MTP and 4-slot passes:
 #   GLM_PASSES='mtp rows=1 native_mtp=auto; slots4 rows=4 slots=4'.
 #   native_mtp=off writes the same catalog provenance and durable store path as auto with
 #   native_mtp_mode off (the kill switch): the ordinary-decode control of a native pass, the same
@@ -96,7 +97,9 @@
 #   scores pass NATIVE against pass ORDINARY on the turn-2 rows (text, reasoning and token parity,
 #   decode tok/s and TTFT medians, cached tokens, native-MTP proposals on turn 2) into
 #   RES/<name>/mtp-turn2.{md,json}, `T2_*` lines in the log. A parity or cache failure is a finding
-#   (T2_VERDICT FAIL); unusable input (rc 2) is a BLOCKER. One name alone checks that pass only.
+#   (T2_VERDICT FAIL); unusable input (rc 2) is a BLOCKER. One name alone checks that pass only. A
+#   third name COLD (a keyless pass, turn2_header=0) also requires every turn-1 and turn-2 pair of
+#   ORDINARY (keyed, cache-only) to equal COLD: the keyed snapshot path keeps cold output.
 # #2459 (native MTP vs ordinary decode on the cached-prefix turn-2 path at ~30K prompt tokens): model
 #   keys qwen38-27b and qwen36-27b serve the signed catalog rows qwen/qwen3.8-27b and qwen/qwen3.6-27b
 #   from their durable store snapshots (the job-qwen-mtp-cap.sh target identities); the launcher
@@ -216,24 +219,25 @@ serve_knob_check() {
   return 0
 }
 
-# parse_pass K "NAME key=val ...": sets P_NAME P_ROWS P_NM P_SL P_CTX P_OUTS P_TRIALS (PASSES header).
+# parse_pass K "NAME key=val ...": sets P_NAME P_ROWS P_NM P_SL P_CTX P_OUTS P_TRIALS P_T2H (PASSES header).
 parse_pass() {
   local k=$1 w key val
   set -- $2
   P_NAME=${1:-}; shift
-  P_ROWS=1,4 P_NM="" P_SL="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS
+  P_ROWS=1,4 P_NM="" P_SL="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS P_T2H=""
   case "$P_NAME" in ""|*[!a-z0-9_-]*) KNOB_ERR="pass name must be [a-z0-9_-]+"; return 1 ;; esac
   for w in "$@"; do
     key=${w%%=*}; val=${w#*=}
     [ "$key" != "$w" ] && [ -n "$val" ] || { KNOB_ERR="bad word $w (key=value)"; return 1; }
     case $key in
       rows) P_ROWS=$val ;; native_mtp) P_NM=$val ;; slots) P_SL=$val ;;
-      contexts) P_CTX=$val ;; outputs) P_OUTS=$val ;; trials) P_TRIALS=$val ;;
+      contexts) P_CTX=$val ;; outputs) P_OUTS=$val ;; trials) P_TRIALS=$val ;; turn2_header) P_T2H=$val ;;
       *) KNOB_ERR="unknown key $key"; return 1 ;;
     esac
   done
   case "$P_ROWS" in *[!0-9,]*) KNOB_ERR="rows must be a comma list of numbers"; return 1 ;; esac
   case "$P_TRIALS" in ""|*[!0-9]*) KNOB_ERR="trials must be a number"; return 1 ;; esac
+  case "$P_T2H" in ""|0|1|cache_only) ;; *) KNOB_ERR="turn2_header must be 0|1|cache_only"; return 1 ;; esac
   serve_knob_check "$k" "$P_NM" "$P_SL"
 }
 
@@ -822,8 +826,8 @@ run_pass() {
   setv "$k" NATIVE_MTP "$old_nm"; setv "$k" SERVED_SLOTS "$old_sl"
   [ $rc = 0 ] || return 1
   [ "$P_NM" != auto ] || extra+=(--expect-native-mtp on)
-  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-unset} served_slots=${P_SL:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS turns=$TURNS reference=${REUSE_REFERENCE:+reused from }${REUSE_REFERENCE:-none, no compare} seed=${SEED_SELF_CHECK_RUN:-none}"
-  OUTPUTS=$P_OUTS TRIALS=$P_TRIALS grid "$k" "$pdir" "${SERVE[@]}" --rows "$P_ROWS" --contexts "$P_CTX" \
+  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-unset} served_slots=${P_SL:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS turns=$TURNS turn2_header=${P_T2H:-${TURN2_HEADER:-0}} reference=${REUSE_REFERENCE:+reused from }${REUSE_REFERENCE:-none, no compare} seed=${SEED_SELF_CHECK_RUN:-none}"
+  OUTPUTS=$P_OUTS TRIALS=$P_TRIALS TURN2_HEADER=${P_T2H:-${TURN2_HEADER:-0}} grid "$k" "$pdir" "${SERVE[@]}" --rows "$P_ROWS" --contexts "$P_CTX" \
     --skip-reference --expect-route "$(expect_route "$k")" ${extra[@]+"${extra[@]}"}
   rc=$?
   log "PASS_DONE $name $P_NAME rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 10 the route was serial where production batches, 11 native MTP was not on)"
@@ -850,6 +854,7 @@ run_passes() {
   name=$(v "$k" NAME)
   set -- $MTP_T2_COMPARE
   dirs=(--native "$RES/$name/$1"); [ -z "${2:-}" ] || dirs+=(--ordinary "$RES/$name/$2")
+  [ -z "${3:-}" ] || dirs+=(--cold "$RES/$name/$3")
   /usr/bin/python3 -I "$JOB/ablit-perf/mtp_turn2_compare.py" "${dirs[@]}" --json "$RES/$name/mtp-turn2.json" \
     > "$RES/$name/mtp-turn2.md"
   rc=$?

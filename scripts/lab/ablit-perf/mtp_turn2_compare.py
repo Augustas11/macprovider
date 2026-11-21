@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native MTP against ordinary decode on the cached-prefix turn-2 path (#2459).
 
-usage: mtp_turn2_compare.py --native DIR [--ordinary DIR] [--cap 32768] [--json OUT]
+usage: mtp_turn2_compare.py --native DIR [--ordinary DIR [--cold DIR]] [--cap 32768] [--json OUT]
 
 DIR is one job.sh pass directory (provider.jsonl from run-grid.sh --turns 2, serve/status.json).
 Rows pair by (ctx_target, max_tokens, rows, trial, row). Per cell (context, output, rows):
@@ -18,6 +18,10 @@ Rows pair by (ctx_target, max_tokens, rows, trial, row). Per cell (context, outp
   admitted and the row decodes ordinarily) and the native pass proposed tokens on turn 2
   (native_mtp_turn2, provider_client.py --native-mtp-counters).
 - control: the ordinary pass's serve/status.json shows native MTP off.
+- cold: with --cold (a keyless pass, no conversation header on either turn, native MTP off), every
+  turn-1 and turn-2 pair of the ordinary (keyed) pass equals the cold pass: the keyed
+  prompt-snapshot path keeps the output of a keyless cold prefill. Cold rows sending a
+  conversation key fail; their 0 cached tokens are expected and not checked.
 - speed: medians of decode tok/s and TTFT per turn and side, and the native/ordinary decode ratio.
 
 Prints one `T2_CELL ...` line per cell, a markdown table, then `T2_VERDICT PASS|FAIL`. Exit 0 when
@@ -120,9 +124,26 @@ def side_stats(turns):
     }
 
 
-def score(native_rows, ordinary_rows, cap, ordinary_off):
+def pair_check(c, f, label, a_turns, b_turns, prefix):
+    for turn in (1, 2):
+        a, b = a_turns.get(turn, {}), b_turns.get(turn, {})
+        keys = sorted(set(a) | set(b))
+        bad = [k for k in keys if k not in a or k not in b or not same(a[k], b[k])]
+        c[f"{prefix}t{turn}_pairs"] = len(keys)
+        c[f"{prefix}t{turn}_parity"] = not bad and bool(keys)
+        if bad:
+            k = bad[0]
+            where = (f"first difference at char {first_diff(a[k], b[k])}" if k in a and k in b
+                     else "unpaired row")
+            f.append(f"{label}turn {turn}: {len(bad)}/{len(keys)} pairs differ (trial {k[3]} row {k[4]}: {where})")
+        elif not keys:
+            f.append(f"{label}turn {turn}: no pairs")
+
+
+def score(native_rows, ordinary_rows, cap, ordinary_off, cold_rows=None, cold_off=None):
     nat = by_cell(native_rows)
     ordc = by_cell(ordinary_rows) if ordinary_rows is not None else None
+    coldc = by_cell(cold_rows) if cold_rows is not None else None
     cells = []
     for cell in sorted(nat):
         n = side_stats(nat[cell])
@@ -160,19 +181,18 @@ def score(native_rows, ordinary_rows, cap, ordinary_off):
             if ordinary_off is not True:
                 f.append("ordinary: serve status does not show native MTP off"
                          if ordinary_off is False else "ordinary: serve/status.json unreadable")
-            for turn in (1, 2):
-                a, b = nat[cell].get(turn, {}), o_turns.get(turn, {})
-                keys = sorted(set(a) | set(b))
-                bad = [k for k in keys if k not in a or k not in b or not same(a[k], b[k])]
-                c[f"t{turn}_pairs"] = len(keys)
-                c[f"t{turn}_parity"] = not bad and bool(keys)
-                if bad:
-                    k = bad[0]
-                    where = (f"first difference at char {first_diff(a[k], b[k])}" if k in a and k in b
-                             else "unpaired row")
-                    f.append(f"turn {turn}: {len(bad)}/{len(keys)} pairs differ (trial {k[3]} row {k[4]}: {where})")
-                elif not keys:
-                    f.append(f"turn {turn}: no pairs")
+            pair_check(c, f, "", nat[cell], o_turns, "")
+            if coldc is not None:
+                k_turns = coldc.get(cell, {})
+                keyed = sum(1 for t in k_turns.values() for r in t.values() if r.get("conversation_key_sent"))
+                if keyed:
+                    f.append(f"cold: {keyed} row(s) sent a conversation key (use turn2_header=0)")
+                if sum(1 for t in k_turns.values() for r in t.values() if r.get("error")):
+                    f.append("cold: request errors")
+                if cold_off is not True:
+                    f.append("cold: serve status does not show native MTP off"
+                             if cold_off is False else "cold: serve/status.json unreadable")
+                pair_check(c, f, "keyed vs cold: ", o_turns, k_turns, "cold_")
             nd, od = n["t2_decode_tps"], o["t2_decode_tps"]
             c["t2_decode_ratio"] = round(nd / od, 4) if nd and od else None
         c["verdict"] = "FAIL" if f else "PASS"
@@ -190,7 +210,8 @@ def report(cells, out=None):
         n, o = c["native"], c.get("ordinary") or {}
         print(f"T2_CELL ctx={c['ctx_target']} out={c['max_tokens']} rows={c['rows']} "
               f"parity_t1={fmt(c.get('t1_parity'))} parity_t2={fmt(c.get('t2_parity'))} "
-              f"pairs_t2={fmt(c.get('t2_pairs'))} native_t2_decode={fmt(n['t2_decode_tps'])} "
+              f"pairs_t2={fmt(c.get('t2_pairs'))} cold_parity_t1={fmt(c.get('cold_t1_parity'))} "
+              f"cold_parity_t2={fmt(c.get('cold_t2_parity'))} native_t2_decode={fmt(n['t2_decode_tps'])} "
               f"ordinary_t2_decode={fmt(o.get('t2_decode_tps'))} ratio={fmt(c.get('t2_decode_ratio'))} "
               f"native_t2_ttft={fmt(n['t2_ttft_s'])} ordinary_t2_ttft={fmt(o.get('t2_ttft_s'))} "
               f"native_t1_ttft={fmt(n['t1_ttft_s'])} cached_min={fmt(n['t2_cached_min'])}/{fmt(o.get('t2_cached_min'))} "
@@ -221,12 +242,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--native", required=True)
     ap.add_argument("--ordinary")
+    ap.add_argument("--cold", help="keyless native-MTP-off pass; needs --ordinary")
     ap.add_argument("--cap", type=int, default=32768, help="native-MTP prompt-token cap (signed: 32768)")
     ap.add_argument("--json")
     args = ap.parse_args(argv)
+    if args.cold and not args.ordinary:
+        ap.error("--cold needs --ordinary")
     try:
         native_rows = load_rows(args.native)
         ordinary_rows = load_rows(args.ordinary) if args.ordinary else None
+        cold_rows = load_rows(args.cold) if args.cold else None
     except (OSError, ValueError, KeyError) as exc:
         print(f"unusable input: {exc}")
         return 2
@@ -234,7 +259,8 @@ def main(argv=None):
         print("unusable input: no turn-2 rows in the native pass (run with TURNS=2)")
         return 2
     try:
-        cells = score(native_rows, ordinary_rows, args.cap, native_off(args.ordinary) if args.ordinary else None)
+        cells = score(native_rows, ordinary_rows, args.cap, native_off(args.ordinary) if args.ordinary else None,
+                      cold_rows, native_off(args.cold) if args.cold else None)
     except KeyError as exc:
         print(f"unusable input: row without {exc}")
         return 2
