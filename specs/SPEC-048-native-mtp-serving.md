@@ -1554,9 +1554,17 @@ target hidden state that produced it. These are exactly the columns per-round
 depth-zero finalizes would have fed the MTP adapter. Only before the row's
 next native proposal do they advance its proposal state, in one packed step,
 so a restored row proposes from the same committed prefix as one that was
-never gated. A held row MUST NOT advance its proposal state inside the shared
-ordinary rounds, except at the column cap: a row held until it finishes within
-1024 committed columns adds no MTP-adapter forward to them. A held row MUST
+never gated. **(0.1.119)** The one exception is the bounded terminal flush:
+a keyed row that retains its head under R009 and ends a normal terminal with
+at most 16 buffered columns (the deepest qualifiable proposal depth, so the
+flush costs no more than one native round at that depth; the `remaining - 1`
+depth cap's last ordinary step leaves one) advances its proposal state over
+them once, in one packed step, before its head is captured. A row ending with
+more than 16 buffered columns, as a load-gated row held for its completion,
+runs no MTP-adapter forward at terminal and retains no head. A held row MUST
+NOT advance its proposal state inside the shared ordinary rounds, except at
+the column cap: a row held until it finishes within 1024 committed columns
+adds no MTP-adapter forward to them. A held row MUST
 NOT buffer more than 1024 columns; one whose next ordinary window would pass
 the cap advances its proposal state first, in one packed step, so a long held
 completion pays one catch-up per 1024 tokens and its buffer stays bounded.
@@ -1766,7 +1774,10 @@ mutation, so the change is a selection and never a fallback:
   `native_mtp` and keeps the hit and its discount only when that head covers
   `r` and the incoming prompt carries the recorded token at `r`: the CB row
   installs the retained target state, then a copy of the head trimmed to `r`
-  entries, and resumes prefill at `r`. **(0.1.119)** A row whose terminal
+  entries, and resumes prefill at `r`. **(0.1.119)** A row that ends with
+  buffered depth-zero columns flushes them into its head first only within the
+  MTP-6 bounded terminal flush (at most 16 columns); with more it retains no
+  head. A row whose terminal
   commit forwards its last sampled token (a length stop, where the retained
   length is one past the head) keeps the target hidden state from that
   forward, the hidden at position `r - 1` for the full-turn reply end `r`,
@@ -1844,6 +1855,12 @@ not restore),
 `PagedKVRuntimeBridgeTests.testKeyedNativeTurnEndingOnADepthZeroStepRetainsTheFlushedHeadAndTurnTwoResumesNatively`
 (buffered depth-zero columns are flushed into the head before the terminal
 snapshot),
+`PagedKVRuntimeBridgeTests.testKeyedNativeRowHeldAtDepthZeroPastTheFlushCapRetainsNoHead`
+(a row held at depth zero past the 16-column cap retains no head and its next
+turn is served ordinary),
+`PagedKVRuntimeBridgeTests.testTerminalFlushAndBoundaryFoldInterleaveWithACoRunningNativeRow`
+(the flush and the fold run beside a decoding native row; every row emits its
+serial greedy tokens),
 `PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnePastTheHeadOnlyWithTheTerminalHidden`,
 `PagedKVRuntimeBridgeTests.testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry`
 and `NativeMTPSelectorTests.testCacheOnlyNativeAdmissionResolvesOnTheLease`.
@@ -2477,7 +2494,11 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   largest at bound + 1, and `qualified_slots` adds the full-load scheduling
   and memory point. A runtime change that adds per-row native work above the
   bound (for example drafting for downgraded rows) invalidates the model and
-  requires every gated slot count to be measured.
+  requires every gated slot count to be measured. **(0.1.119)** The MTP-6
+  bounded terminal flush leaves the model unchanged: a load-gated row held
+  for more than 16 columns, as every gated-cell row holding its 512 tokens,
+  keeps no head and runs no drafter forward at terminal, and a flush within
+  the cap is at most one 16-column catch-up per completion.
 - *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
   prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
   production-shaped full load. It is a separate bench phase on the same frozen
@@ -3016,10 +3037,16 @@ requests.
   head, stays native: the install folds that hidden with the prompt's token
   at `r` in one drafter advance under the target lock, before the prompt
   chunk, when the prompt's token at `r - 1` is the head's last folded token.
-  A failed fold runs the row ordinary before output. A row whose last steps
-  rode the ordinary forward at depth zero flushes their buffered drafter
-  columns into the head before the terminal snapshot. Names the tests that
-  prove it.
+  A failed fold runs the row ordinary before output. MTP-6 gains one
+  exception, the bounded terminal flush: a row ending a normal terminal with
+  at most 16 buffered depth-zero columns (the deepest qualifiable depth)
+  flushes them into its head once before the snapshot; a row with more, as a
+  load-gated row held for its completion, runs no drafter forward at terminal
+  and retains no head. R015's gated cost model is unchanged: load-gated rows
+  above the cap keep no head and add no terminal work, and a flush within the
+  cap is at most one 16-column catch-up per completion, bounded like the
+  catch-up the model already counts when a held row's depth returns. Names
+  the tests that prove it.
 - **0.1.118 (2026-11-21, Related: #2459)** — R009 (MTP-9): on a hybrid
   runtime with cached turns, a keyed cache-only native row that misses stays
   native and commits the ordinary CB retained paged-KV entry, built only from

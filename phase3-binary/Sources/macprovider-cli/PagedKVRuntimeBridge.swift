@@ -911,8 +911,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// produced while riding the ordinary forward at load-gate depth zero, in
     /// order. They are exactly the columns a depth-zero native finalize would
     /// have fed the drafter, and are flushed into it with one packed advance
-    /// only before the row's next proposal. A held row that finishes at depth
-    /// zero never advances its drafter, so the gate adds no drafter forward to
+    /// only before the row's next proposal, or at a keyed normal terminal when
+    /// at most `nativeMTPTerminalFlushMaxColumns` are buffered (SPEC-048
+    /// MTP-6, R009 0.1.119). A held row that finishes with more never advances
+    /// its drafter and retains no head, so the gate adds no drafter forward to
     /// the shared ordinary rounds (SPEC-048 R015 gated cells). Each column is
     /// one token and its own copied `[1, 1, hidden]` row, never a view of the
     /// batch output. A row holds at most `nativeMTPDrafterColumnCap` columns:
@@ -929,6 +931,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// fires in a measured gated cell; it bounds the buffer's memory, which
     /// the paged-KV accounting does not see, for long held completions.
     static let defaultNativeMTPDrafterColumnCap = 1024
+    /// SPEC-048 MTP-6 / R009 (0.1.119): the most buffered depth-zero columns
+    /// a keyed terminal flushes into the retained head. The tail this flush
+    /// exists for is the `remaining - 1` depth cap's final ordinary step (one
+    /// column) or a short adaptation park; a flush of at most the deepest
+    /// qualifiable depth's worth costs no more than one native round at that
+    /// depth. A row the load gate held longer (a gated R015 cell holds all 512
+    /// tokens) retains no head and runs no drafter forward, as before.
+    static let nativeMTPTerminalFlushMaxColumns = NativeMTPAdaptationConfig.maximumQualifiedDepth
     let nativeMTPDrafterColumnCap: Int
     /// Most target tokens (rows x verify width) one packed native-MTP
     /// verification forward carries. Every quantized projection of that
@@ -2620,14 +2630,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// (sampled token, target hidden) pairs, so they are flushed into the
     /// head first, as the row's next proposal round would, leaving the head
     /// where a final native round leaves it: at the last sampled token. A
-    /// failed flush, or a prompt-free drafter (whose flush leaves its fresh
-    /// state at position 0), retains no head.
+    /// failed flush, a prompt-free drafter (whose flush leaves its fresh
+    /// state at position 0), or more than `nativeMTPTerminalFlushMaxColumns`
+    /// buffered columns (checked before any GPU work) retains no head.
     func snapshotNativeMTPDrafter(
         requestID: String,
         committedTokens: [Int],
         checkpointPositions: [Int]
     ) async -> NativeMTPRetainedDrafter? {
-        guard drafterContainer != nil, beginOperation() else { return nil }
+        guard drafterContainer != nil,
+              pendingNativeMTPDrafterColumnCount(for: requestID) <= Self.nativeMTPTerminalFlushMaxColumns,
+              beginOperation()
+        else { return nil }
         defer { endOperation() }
         return await container.perform { context -> NativeMTPRetainedDrafter? in
             self.enterTargetLock(); defer { self.exitTargetLock() }
@@ -2747,6 +2761,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel,
                       drafter.requiresPromptPrefill, !drafter.requiresSharedTargetKV
                 else { throw unavailable }
+                #if DEBUG
+                try self.nativeMTPBoundaryFoldHookForTest?()
+                #endif
                 let result = try drafter.advanceAndProposePacked(
                     target: targetModel,
                     rows: [row],
@@ -2893,6 +2910,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPDrafterStates.removeAll()
             nativeMTPDrafterSeedTokens.removeAll()
             nativeMTPPendingDrafterColumns.removeAll()
+            nativeMTPTerminalHidden.removeAll()
             #if DEBUG || MACPROVIDER_LAB_HARNESS
             nativeMTPDrafterRecomputeDigests.removeAll()
             labNativeMTPCommittedPrefixTokens.removeAll()
@@ -5217,6 +5235,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// Tests: called inside `installNativeMTPDrafter` with the backend's
     /// active operation count.
     var nativeMTPDrafterInstallObserverForTest: ((Int) -> Void)?
+    /// Tests: runs inside the boundary fold's drafter advance, under the
+    /// target lock; a throw fails the fold there.
+    var nativeMTPBoundaryFoldHookForTest: (() throws -> Void)?
 
     /// Whether some caller holds this backend's target `container.perform`.
     func targetLockHeldForTest() -> Bool {
