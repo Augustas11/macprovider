@@ -5569,6 +5569,9 @@ func TestQuotaExhaustedReturns429Not500(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), "quota_exhausted") {
 		t.Fatalf("body missing quota_exhausted: %s", resp.Body.String())
 	}
+	if !strings.Contains(resp.Body.String(), `"type":"insufficient_quota"`) {
+		t.Fatalf("quota_exhausted 429 type is not insufficient_quota: %s", resp.Body.String())
+	}
 	// #2362: the daily quota refills only at the reset, so the code is
 	// retryable=false (as at the coordinator). X-RateLimit-Reset names the
 	// refill; no Retry-After, which agent clients would sleep on for hours.

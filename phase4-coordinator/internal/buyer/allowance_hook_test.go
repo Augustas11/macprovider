@@ -108,7 +108,8 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 	// before any provider runs, even with overage on.
 	rec = allowanceChat(h, "acct_allow", "ext-big", allowanceHeaders("900000000", true))
 	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "quota_exhausted") ||
-		!strings.Contains(rec.Body.String(), `"retryable":false`) {
+		!strings.Contains(rec.Body.String(), `"retryable":false`) ||
+		!strings.Contains(rec.Body.String(), `"type":"insufficient_quota"`) {
 		t.Fatalf("required status %d body %s", rec.Code, rec.Body.String())
 	}
 	// #2362: retryable false; X-RateLimit-Reset names the refill, and no
@@ -125,6 +126,7 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 	}
 	rec = allowanceChat(h, "acct_allow", "ext-over", allowanceHeaders("900000000", false))
 	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "allowance_exhausted") || rec.Header().Get("X-RateLimit-Reset") == "" ||
+		!strings.Contains(rec.Body.String(), `"type":"insufficient_quota"`) ||
 		rec.Header().Get(settlementNoPriorDispatchHeader) != "1" {
 		t.Fatalf("overage-off status %d headers %v body %s", rec.Code, rec.Header(), rec.Body.String())
 	}

@@ -2026,3 +2026,13 @@ func TestAnthropicMessagesToolResultRequestTranslation(t *testing.T) {
 		t.Fatalf("anthropic toolu_a leaked to coordinator: %v", tool)
 	}
 }
+
+// Quota refusals typed insufficient_quota (SPEC-006 v0.9.82) keep the
+// Anthropic rate_limit_error type, allowance_exhausted included.
+func TestAnthropicErrorTypeFromOpenAIInsufficientQuota(t *testing.T) {
+	for _, code := range []string{"quota_exhausted", "allowance_exhausted"} {
+		if got := anthropicErrorTypeFromOpenAI("insufficient_quota", code); got != "rate_limit_error" {
+			t.Fatalf("%s: got %q, want rate_limit_error", code, got)
+		}
+	}
+}
