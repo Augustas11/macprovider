@@ -19,9 +19,12 @@ public struct GrammarCompileLimits: Sendable {
     public var maxStates: Int
     public var maxWork: Int
     public var maxDepth: Int
-    public var maxSeconds: Double
+    /// Optional wall-clock cap. Off by default: `maxWork` already bounds
+    /// compile cost deterministically, and a wall-clock cap made the same
+    /// grammar compile on a fast Mac and fail with 400 on a slow or loaded one.
+    public var maxSeconds: Double?
     public init(maxNodes: Int = 4096, maxStates: Int = 1024, maxWork: Int = 8_000_000,
-                maxDepth: Int = 128, maxSeconds: Double = 2) {
+                maxDepth: Int = 128, maxSeconds: Double? = nil) {
         self.maxNodes = maxNodes; self.maxStates = maxStates; self.maxWork = maxWork
         self.maxDepth = maxDepth; self.maxSeconds = maxSeconds
     }
@@ -60,7 +63,7 @@ private final class GrammarCompiler {
     init(limits: GrammarCompileLimits) { self.limits = limits }
     func spend(_ amount: Int = 1) throws {
         guard amount <= limits.maxWork - work,
-              ProcessInfo.processInfo.systemUptime - started <= limits.maxSeconds else {
+              limits.maxSeconds.map({ ProcessInfo.processInfo.systemUptime - started <= $0 }) ?? true else {
             throw unsupportedGrammar("Output grammar compilation budget exceeded")
         }
         work += amount
@@ -117,7 +120,7 @@ private final class GrammarCompiler {
     }
     func compile(_ grammar: ByteGrammar) throws -> GrammarAutomaton {
         guard limits.maxNodes > 0, limits.maxStates > 0, limits.maxWork > 0,
-              limits.maxDepth >= 0, limits.maxSeconds.isFinite, limits.maxSeconds > 0 else {
+              limits.maxDepth >= 0, limits.maxSeconds.map({ $0.isFinite && $0 > 0 }) ?? true else {
             throw unsupportedGrammar("Invalid output grammar compilation limits")
         }
         let (start, end) = try build(grammar, depth: 0)

@@ -333,7 +333,10 @@ final class InferenceRelayTests: XCTestCase {
 
             try await waitUntil {
                 let chunks = await recorder.frames.filter { $0["type"] as? String == "inference_response_chunk" }
-                return chunks.count == 2
+                // `>=`: a poll can land after the fake runtime's second
+                // content chunk (20 ms later), so `== 2` can be skipped
+                // over and never observed again.
+                return chunks.count >= 2
             }
 
             try await relay.handleCancelRequest([
