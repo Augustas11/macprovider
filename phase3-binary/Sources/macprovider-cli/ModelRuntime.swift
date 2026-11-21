@@ -9935,6 +9935,11 @@ maxTokens: 1,
             keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
+            // SPEC-048-R009 (0.1.118): with cached turns a hybrid row hands back
+            // the CB retained entry, which a native row builds from committed
+            // state only, equal to the ordinary row's.
+            keyedRowsCommitProvenRetainedEntry: prepared.modelHasRecurrentLayers
+                && effectiveContinuousBatchingCachedTurns,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
@@ -10520,6 +10525,11 @@ maxTokens: 1,
             keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
+            // SPEC-048-R009 (0.1.118): with cached turns a hybrid row hands back
+            // the CB retained entry, which a native row builds from committed
+            // state only, equal to the ordinary row's.
+            keyedRowsCommitProvenRetainedEntry: prepared.modelHasRecurrentLayers
+                && effectiveContinuousBatchingCachedTurns,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")

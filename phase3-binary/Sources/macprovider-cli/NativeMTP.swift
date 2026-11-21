@@ -452,15 +452,23 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     /// **(0.1.57, SPEC-024-R005)** A hit on a GLM-5-Next prompt snapshot that
     /// carries the MTP head state at its boundary also stays native: the CB
     /// row restores target and head state together and keeps the hit.
+    /// **(0.1.118)** `keyedRowsCommitProvenRetainedEntry`: the runtime hands
+    /// back the ordinary CB retained paged-KV entry, and a native hybrid row
+    /// builds it from committed state only (accepted-prefix paged KV,
+    /// `stageCommit`-selected recurrent state, prompt checkpoints), so it
+    /// equals the ordinary row's entry. A miss stays native; a hit stays
+    /// native only when the retained entry restores the MTP head at the
+    /// resume point.
     func resolvingConversationCacheLease(
         hasConversationKey: Bool,
         leaseAllowed: Bool,
         cachedPromptTokens: Int?,
         keyedRowsCommitSerialFormat: Bool,
+        keyedRowsCommitProvenRetainedEntry: Bool = false,
         cachedPrefixRestoresNativeMTPDrafter: Bool = false
     ) -> NativeMTPRuntimeAdmission {
         guard usesNativeMTP, hasConversationKey, leaseAllowed else { return self }
-        guard keyedRowsCommitSerialFormat,
+        guard keyedRowsCommitSerialFormat || keyedRowsCommitProvenRetainedEntry,
               cachedPromptTokens == 0
                 || ((cachedPromptTokens ?? 0) > 0 && cachedPrefixRestoresNativeMTPDrafter)
         else {

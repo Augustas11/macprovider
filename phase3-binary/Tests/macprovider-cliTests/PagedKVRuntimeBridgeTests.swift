@@ -3145,6 +3145,152 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// SPEC-048-R009 (0.1.118): with cached turns a hybrid runtime hands back
+    /// the CB retained paged-KV entry. A keyed native row builds it from
+    /// committed state only, so turn 1 native and turn 1 ordinary retain the
+    /// same token count, checkpoint positions, attention KV and recurrent
+    /// checkpoints, bit for bit, and the same turn 2 hits both entries at the
+    /// same `cached_prompt_tokens` with the same greedy tokens.
+    func testKeyedNativeHybridRowRetainsTheOrdinaryRetainedEntryAndTurnTwoHitMatches() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 40, salt: 23)
+        let budget = 8
+        let key = "conv:auto-prefix"
+        let modelID = Self.bridgeDescriptor().modelID
+
+        struct World {
+            let scheduler: ContinuousBatchScheduler
+            let allocator: PagedKVBlockAllocator
+            let backend: RuntimeBridgeRecordingNativeMTPBackend
+        }
+        func world() throws -> World {
+            let bridge = PagedKVRuntimeContiguousCacheBridge()
+            let tiny = try Self.tinyQwen35Native(dtype: .bfloat16, contiguousCacheBridge: bridge)
+            let allocator = try PagedKVBlockAllocator(
+                blockSizeTokens: 4, maxPhysicalBlocks: 64, contiguousCacheBridge: bridge)
+            let scheduler = try Self.makeScheduler(
+                maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64,
+                allocator: allocator, contiguousCacheBridge: bridge)
+            return World(scheduler: scheduler, allocator: allocator, backend: tiny.backend)
+        }
+        func keyed(
+            _ id: String, _ tokens: [Int], _ path: DecodePath,
+            lease: ConversationCacheLease? = nil, checkpoints: [Int]
+        ) -> ContinuousBatchSchedulerRequest {
+            ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: key,
+                promptTokens: tokens,
+                maxOutputTokens: budget,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                recurrentCheckpointPositions: checkpoints,
+                modelHasRecurrentLayers: true,
+                retainedRecurrentCheckpoints: ModelRuntime.retainedRecurrentCheckpoints(for: lease),
+                decodePath: path,
+                nativeMTPMaximumProposalDepth: path == .nativeMTP ? 1 : 0,
+                nativeMTPCompleteWindowBytesByDepth: path == .nativeMTP ? [16, 16] : [],
+                nativeMTPTupleFence: path == .nativeMTP ? Self.nativeMTPFence() : nil
+            )
+        }
+
+        func run(_ turnOnePath: DecodePath) async throws -> (
+            first: ContinuousBatchSchedulerResult, retained: ContinuousBatchRetainedCache,
+            cached: Int, second: ContinuousBatchSchedulerResult
+        ) {
+            let world = try world()
+            let conversationCache = makeConversationCacheForTest(
+                config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let firstBegun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: prompt.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let firstLease = try XCTUnwrap(firstBegun)
+            XCTAssertEqual(firstLease.cachedPromptTokens, 0)
+            let first = try await world.scheduler.submit(keyed("turn-1", prompt, turnOnePath, checkpoints: [33, 38]))
+            XCTAssertEqual(first.terminalStatus, .length)
+            if turnOnePath == .nativeMTP {
+                XCTAssertTrue(
+                    world.backend.finalizedRounds().flatMap { $0 }.contains { $0.proposalTokenCount == 1 },
+                    "the keyed native row never verified a proposal")
+            }
+            let retained = try XCTUnwrap(first.retainedCache, "the keyed row retained no entry")
+            XCTAssertNil(first.serialConversationCache)
+            let canonical = prompt + first.generatedTokens
+            XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(
+                retained, modelHasRecurrentLayers: true, canonicalTokenCount: canonical.count))
+            await conversationCache.commit(
+                firstLease,
+                cache: ConversationCacheLayers(
+                    retained.layers,
+                    retainedPagedKVSequence: retained.retainedSequence,
+                    discardRetainedPagedKVSequence: { sequence, key in
+                        await world.scheduler.discardRetainedCache(sequence, conversationKey: key)
+                    },
+                    recurrentCheckpoints: retained.recurrentCheckpoints),
+                fullTokens: canonical.map(Int32.init))
+            await world.scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+            let secondPrompt = canonical + [3, 1, 4, 1]
+            let begun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: secondPrompt.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let lease = try XCTUnwrap(begun)
+            // Slice 1: a hit without head restore is served ordinary.
+            let second = try await world.scheduler.submit(
+                keyed("turn-2", secondPrompt, .ordinary, lease: lease, checkpoints: [33, 38]))
+            XCTAssertEqual(second.terminalStatus, .length)
+            XCTAssertEqual(second.cachedPromptTokens, lease.cachedPromptTokens)
+            if let secondRetained = second.retainedCache {
+                await world.scheduler.cancelRetainedCacheDelivery(secondRetained, conversationKey: second.conversationKey)
+            }
+            await conversationCache.abort(lease)
+            _ = await conversationCache.purgeHot(conversationKey: key)
+            return (first, retained, lease.cachedPromptTokens, second)
+        }
+
+        let ordinary = try await run(.ordinary)
+        let native = try await run(.nativeMTP)
+        XCTAssertEqual(native.first.generatedTokens, ordinary.first.generatedTokens)
+        XCTAssertEqual(
+            native.retained.retainedSequence.logicalTokenCount,
+            ordinary.retained.retainedSequence.logicalTokenCount)
+        XCTAssertEqual(native.retained.recurrentCheckpoints.map(\.tokenCount), [33, 38, 48])
+        XCTAssertEqual(
+            native.retained.recurrentCheckpoints.map(\.tokenCount),
+            ordinary.retained.recurrentCheckpoints.map(\.tokenCount))
+        var maxAbsDiff: Float = 0
+        func compare(_ a: MLXArray, _ b: MLXArray, _ label: String) {
+            XCTAssertEqual(a.shape, b.shape, label)
+            XCTAssertEqual(a.dtype, b.dtype, label)
+            guard a.shape == b.shape else { return }
+            maxAbsDiff = max(maxAbsDiff, abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self))
+            XCTAssertTrue(arrayEqual(a, b).item(Bool.self), "\(label) differs")
+        }
+        XCTAssertEqual(native.retained.layers.count, ordinary.retained.layers.count)
+        for (index, (lhs, rhs)) in zip(native.retained.layers, ordinary.retained.layers).enumerated() {
+            XCTAssertFalse(lhs.state.isEmpty, "layer \(index) holds no KV")
+            XCTAssertEqual(lhs.state.count, rhs.state.count, "layer \(index)")
+            for (a, b) in zip(lhs.state, rhs.state) { compare(a, b, "attention layer \(index)") }
+        }
+        for (lhs, rhs) in zip(native.retained.recurrentCheckpoints, ordinary.retained.recurrentCheckpoints) {
+            XCTAssertEqual(Set(lhs.states.keys), Set(rhs.states.keys))
+            for (layer, arrays) in lhs.states {
+                let other = try XCTUnwrap(rhs.states[layer])
+                XCTAssertEqual(arrays.count, other.count)
+                for (a, b) in zip(arrays, other) {
+                    compare(a, b, "checkpoint \(lhs.tokenCount) layer \(layer)")
+                }
+            }
+        }
+        XCTAssertEqual(maxAbsDiff, 0, "retained state max abs diff")
+        XCTAssertEqual(native.cached, 48, "turn 2 resumes from the reply-end checkpoint")
+        XCTAssertEqual(native.cached, ordinary.cached)
+        XCTAssertEqual(native.second.generatedTokens, ordinary.second.generatedTokens)
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
@@ -3368,7 +3514,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     private static func tinyQwen35Native(
         maxPhysicalBlocks: Int = 64,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
-        dtype: DType? = nil
+        dtype: DType? = nil,
+        contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) throws -> TinyQwen35Native {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
@@ -3394,6 +3541,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             descriptor: descriptor,
             layerCount: 2,
             cacheKinds: [.recurrentMamba, .pagedAttention],
+            contiguousCacheBridge: contiguousCacheBridge,
             drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "mtp"),
                 model: drafter
@@ -6531,7 +6679,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         maxPrefillTokensPerIteration: Int? = nil,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         allowsRaggedPrefillOffsets: Bool = false,
-        replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority(),
+        allocator: PagedKVBlockAllocator? = nil,
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
@@ -6585,9 +6735,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     )
                 }
             ),
-            allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
+            allocator: try allocator ?? PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
-            replayAuthority: replayAuthority
+            replayAuthority: replayAuthority,
+            contiguousCacheBridge: contiguousCacheBridge
         )
     }
 

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.117
+**Version:** 0.1.118
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.117",
+  "version": "0.1.118",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1747,6 +1747,19 @@ mutation, so the change is a selection and never a fallback:
   prefills from zero instead of reselecting ordinary. Under that grant a keyed
   GLM-5-Next row publishes only its prompt snapshot, or nothing when its prompt
   is too short for one, so a cache miss stays native whatever its length;
+- **(0.1.118)** on a hybrid (recurrent-layer) runtime with SPEC-038 cached
+  turns, which hands back the ordinary CB retained paged-KV entry, a miss
+  stays `native_mtp`, keeps the lease and reports `cached_prompt_tokens = 0`.
+  The native row MAY commit that retained entry because it is built from
+  committed state only: the paged attention KV of the accepted prefix (a
+  verify round's staged K/V never enters the committed table), the recurrent
+  state each round selects with `stageCommit` from the states stored for the
+  accepted input count (never recomputed from rejected drafts), the prompt
+  recurrent checkpoints captured during the shared prefill, and the terminal
+  covered-token checkpoint. It MUST equal the ordinary row's retained entry
+  for the same request: token count, checkpoint positions, attention KV and
+  recurrent checkpoint states, bit for bit. A hit on such an entry reselects
+  `ordinary` with reason `conversation_key` and keeps the hit;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1785,6 +1798,15 @@ that amendment for GLM-5-Next: its proof is the SPEC-038 v0.3.31 AC-26 GLM
 proof (resumed native rows match ordinary CB tokens at the same row count,
 with tokens/s, acceptance and TTFT reported in the R015 cells), recorded
 before the signed `cached_turns_accepted` grant.
+**(0.1.118)** The retained-entry grant above is that amendment for hybrid
+Qwen rows under cached turns. Its proof is
+`PagedKVRuntimeBridgeTests.testKeyedNativeHybridRowRetainsTheOrdinaryRetainedEntryAndTurnTwoHitMatches`
+(real tiny hybrid Qwen3.5 target and MTP head behind the production paged
+backend and contiguous cache bridge: turn 1 native and ordinary retain equal
+entries bit for bit, maximum absolute difference 0, and turn 2 hits both at
+the same `cached_prompt_tokens` with the same greedy tokens),
+`PagedKVRuntimeBridgeTests.testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry`
+and `NativeMTPSelectorTests.testCacheOnlyNativeAdmissionResolvesOnTheLease`.
 
 ### MTP-10 — observability and warm-swap isolation (SPEC-048-R010)
 
@@ -2948,6 +2970,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.118 (2026-11-21, Related: #2459)** — R009 (MTP-9): on a hybrid
+  runtime with cached turns, a keyed cache-only native row that misses stays
+  native and commits the ordinary CB retained paged-KV entry, built only from
+  committed state (accepted-prefix paged KV, `stageCommit`-selected recurrent
+  state, prompt and terminal checkpoints) and equal to the ordinary row's
+  entry bit for bit. Hits on that entry stay ordinary. Names the tests that
+  prove it.
 - **0.1.117 (2026-11-21, Related: #2451)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.85` (`8aa564dbf780cb4bd88e3fb591981eae868780f4`) on
   `3.32.3-macprovider.84` (#2451, #2448): Three GLM5Next commits on
