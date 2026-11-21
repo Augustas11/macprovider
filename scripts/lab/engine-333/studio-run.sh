@@ -7,7 +7,7 @@
 # usage: studio-run.sh LAB_DIR   (LAB_DIR holds macprovider/, the worktree of this branch)
 set -uo pipefail
 L="${1:?usage: studio-run.sh LAB_DIR}"
-LM_REV=2a89037deb90ee67ee2be950e7a871fe2167f0fb
+LM_REV=748d330d213c673637617f29bd863020f4565fd4
 MODELS_ROOT="$HOME/Library/Application Support/macprovider/models"
 cd "$L" || exit 64
 
@@ -51,7 +51,7 @@ done
 
 echo "== window $(date +%T)"
 bash macprovider/scripts/lab/engine-333/window.sh --base-bin "$L/base" --new-bin "$NEW" \
-  --out "$L/window-${WINDOW:-2}" --lm-dir "$L/mlx-swift-lm" "${ARGS[@]}"
+  --out "$L/window-${WINDOW:-3}" --lm-dir "$L/mlx-swift-lm" "${ARGS[@]}"
 rc=$?
 echo "== studio-run done rc=$rc $(date +%T)"
 exit $rc
