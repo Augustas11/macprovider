@@ -9771,6 +9771,23 @@ maxTokens: 1,
     /// The stored checkpoints a hybrid cached turn hands the scheduler: every
     /// one at or below the cached length (they are a prefix of this prompt).
     /// Empty unless the lease resumes a retained hybrid entry.
+    /// SPEC-048-R009 (0.1.118): the MTP head state a retained hybrid hit
+    /// resumes from at exactly `cachedPromptTokens`, when the retained entry
+    /// carries head state that covers it and the prompt's token there matches.
+    /// Nil keeps the hit ordinary.
+    nonisolated static func retainedNativeMTPDrafterResume(
+        for lease: ConversationCacheLease?
+    ) -> NativeMTPDrafterPrefixSnapshot? {
+        guard let lease,
+              lease.cachedPromptTokens > 0,
+              lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens,
+              let reusable = lease.reusableCache,
+              reusable.retainedPagedKVSequence != nil,
+              let drafter = reusable.retainedNativeMTPDrafter
+        else { return nil }
+        return drafter.resumed(at: lease.cachedPromptTokens, incomingTokens: lease.incomingTokens)
+    }
+
     nonisolated static func retainedRecurrentCheckpoints(
         for lease: ConversationCacheLease?
     ) -> [RecurrentStateCheckpoint] {
@@ -9920,6 +9937,7 @@ maxTokens: 1,
             )
         }
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
+        let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
         // fence), which strict `.on` refuses, so strict rows publish no
         // snapshot unless a CB row can install it (R005).
@@ -9941,6 +9959,7 @@ maxTokens: 1,
             keyedRowsCommitProvenRetainedEntry: prepared.modelHasRecurrentLayers
                 && effectiveContinuousBatchingCachedTurns,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
+                || retainedNativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
@@ -9969,6 +9988,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            retainedNativeMTPDrafter: nativeMTPAdmission.usesNativeMTP ? retainedNativeMTPDrafter : nil,
             promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
@@ -10054,7 +10074,8 @@ maxTokens: 1,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         },
-                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints,
+                        retainedNativeMTPDrafter: retainedCache.nativeMTPDrafter
                     ),
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
@@ -10510,6 +10531,7 @@ maxTokens: 1,
             )
         }
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
+        let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
         // fence), which strict `.on` refuses, so strict rows publish no
         // snapshot unless a CB row can install it (R005).
@@ -10531,6 +10553,7 @@ maxTokens: 1,
             keyedRowsCommitProvenRetainedEntry: prepared.modelHasRecurrentLayers
                 && effectiveContinuousBatchingCachedTurns,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
+                || retainedNativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
@@ -10552,6 +10575,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            retainedNativeMTPDrafter: nativeMTPAdmission.usesNativeMTP ? retainedNativeMTPDrafter : nil,
             promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
@@ -10690,7 +10714,8 @@ maxTokens: 1,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         },
-                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints,
+                        retainedNativeMTPDrafter: retainedCache.nativeMTPDrafter
                     ),
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )

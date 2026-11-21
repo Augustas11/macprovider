@@ -2558,6 +2558,65 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// SPEC-048-R009 (0.1.118): the row's committed MTP head state at a normal
+    /// terminal. Only the shape every committed round leaves: no tentative
+    /// proposal, no buffered depth-zero columns, every head layer at
+    /// `nextPosition`, and the committed token there known. The cache layers
+    /// are copies, so the row's later writes never reach them.
+    func snapshotNativeMTPDrafter(
+        requestID: String,
+        committedTokens: [Int],
+        checkpointPositions: [Int]
+    ) async -> NativeMTPRetainedDrafter? {
+        guard drafterContainer != nil, beginOperation() else { return nil }
+        defer { endOperation() }
+        return await container.perform { _ -> NativeMTPRetainedDrafter? in
+            guard let state = self.nativeMTPDrafterState(for: requestID),
+                  state.proposalAppended == 0,
+                  !self.hasPendingNativeMTPDrafterColumns(for: requestID),
+                  state.nextPosition > 0,
+                  committedTokens.indices.contains(state.nextPosition),
+                  !state.cache.isEmpty,
+                  state.cache.allSatisfy({ $0.offset == state.nextPosition })
+            else { return nil }
+            let cache = state.cache.map { $0.copy() }
+            eval(cache)
+            var folded: [Int: Int] = [:]
+            for position in checkpointPositions where position > 0 && position <= state.nextPosition {
+                folded[position] = committedTokens[position]
+            }
+            return NativeMTPRetainedDrafter(
+                head: NativeMTPDrafterPrefixSnapshot(
+                    cache: cache,
+                    nextPosition: state.nextPosition,
+                    foldedNextToken: committedTokens[state.nextPosition]
+                ),
+                foldedTokens: folded
+            )
+        }
+    }
+
+    /// SPEC-048-R009 (0.1.118): the row's MTP head resumes from a copy of
+    /// `snapshot` at its `nextPosition`; the next prompt chunk starts there.
+    func installNativeMTPDrafter(
+        requestID: String,
+        snapshot: NativeMTPDrafterPrefixSnapshot
+    ) async throws {
+        let unavailable = ContinuousBatchSchedulerError.unsupported(
+            "continuous_batching_retained_native_mtp_drafter_unavailable"
+        )
+        guard drafterContainer != nil,
+              snapshot.nextPosition > 0,
+              !snapshot.cache.isEmpty,
+              snapshot.cache.allSatisfy({ $0.offset == snapshot.nextPosition })
+        else { throw unavailable }
+        storeNativeMTPDrafterAdvance(
+            requestIDs: [requestID],
+            states: [MTPDrafterState(cache: snapshot.cache.map { $0.copy() }, nextPosition: snapshot.nextPosition)],
+            seedTokens: [nil]
+        )
+    }
+
     /// Row caches for `installPromptSnapshotCache`, nil-free or throwing.
     static func promptSnapshotRowCaches(
         _ snapshot: ContinuousBatchSerialConversationCache,

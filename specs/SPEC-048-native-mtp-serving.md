@@ -1758,8 +1758,19 @@ mutation, so the change is a selection and never a fallback:
   recurrent checkpoints captured during the shared prefill, and the terminal
   covered-token checkpoint. It MUST equal the ordinary row's retained entry
   for the same request: token count, checkpoint positions, attention KV and
-  recurrent checkpoint states, bit for bit. A hit on such an entry reselects
-  `ordinary` with reason `conversation_key` and keeps the hit;
+  recurrent checkpoint states, bit for bit. The entry MAY also carry the
+  row's committed MTP head state: the head cache after its last committed
+  round (no tentative proposal, no buffered depth-zero column), never past
+  the retained length, with the committed token at each retained checkpoint
+  the head covers. It is draft-side only. A hit at checkpoint `r` stays
+  `native_mtp` and keeps the hit and its discount only when that head covers
+  `r` and the incoming prompt carries the recorded token at `r`: the CB row
+  installs the retained target state, then a copy of the head trimmed to `r`
+  entries, and resumes prefill at `r`. Any other hit on such an entry (no head
+  state, `r` past the head, as at a length-stopped reply end, or a different
+  token at `r`) reselects `ordinary` with reason `conversation_key` and keeps
+  the hit. The head bytes count toward the entry's retained bytes, so the
+  conversation-cache memory budget reserves them with the entry;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1805,6 +1816,11 @@ Qwen rows under cached turns. Its proof is
 backend and contiguous cache bridge: turn 1 native and ordinary retain equal
 entries bit for bit, maximum absolute difference 0, and turn 2 hits both at
 the same `cached_prompt_tokens` with the same greedy tokens),
+`PagedKVRuntimeBridgeTests.testKeyedNativeTurnTwoHitRestoresTheRetainedHeadAndMatchesColdSerialGreedy`
+(turn 2 hits natively from the restored head, trimmed inside it and at a
+model-stop reply end, and every turn emits the keyless cold serial greedy
+tokens),
+`PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnlyAtACoveredCheckpointWithItsToken`,
 `PagedKVRuntimeBridgeTests.testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry`
 and `NativeMTPSelectorTests.testCacheOnlyNativeAdmissionResolvesOnTheLease`.
 
@@ -2975,8 +2991,10 @@ requests.
   native and commits the ordinary CB retained paged-KV entry, built only from
   committed state (accepted-prefix paged KV, `stageCommit`-selected recurrent
   state, prompt and terminal checkpoints) and equal to the ordinary row's
-  entry bit for bit. Hits on that entry stay ordinary. Names the tests that
-  prove it.
+  entry bit for bit. The entry may carry the row's committed MTP head
+  state; a hit stays native when that head covers the resume checkpoint and
+  the prompt's token there matches, and otherwise stays ordinary. Head bytes
+  count toward the retained entry. Names the tests that prove it.
 - **0.1.117 (2026-11-21, Related: #2451)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.85` (`8aa564dbf780cb4bd88e3fb591981eae868780f4`) on
   `3.32.3-macprovider.84` (#2451, #2448): Three GLM5Next commits on

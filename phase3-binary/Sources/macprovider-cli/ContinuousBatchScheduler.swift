@@ -610,6 +610,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// The row installs it at admission and prefills the rest of the prompt.
     /// Runtime-only; excluded from the idempotency fingerprint.
     let promptSnapshotCache: ContinuousBatchSerialConversationCache?
+    /// SPEC-048-R009 (0.1.118): on a native row resuming a retained hybrid
+    /// entry, the MTP head state at exactly `cachedPromptTokens`, installed
+    /// with the retained paged KV. Runtime-only; excluded from the
+    /// idempotency fingerprint.
+    let retainedNativeMTPDrafter: NativeMTPDrafterPrefixSnapshot?
     /// SPEC-001-R013 (v1.9.50): receives this row's prompt snapshot when the
     /// row joins decode, so a caller that cancels it during decode can keep
     /// the snapshot. Runtime-only; excluded from the idempotency fingerprint.
@@ -686,6 +691,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
+        retainedNativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil,
         promptSnapshotHandoff: ContinuousBatchPromptSnapshotHandoff? = nil,
         publishesPromptSnapshotOnly: Bool = false,
         promptResumeBoundaries: [Int] = [],
@@ -738,6 +744,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPFamilyAdapter = nativeMTPFamilyAdapter
         self.nativeMTPMaximumActiveRows = max(1, nativeMTPMaximumActiveRows)
         self.nativeMTPTupleFence = self.decodePath == .nativeMTP ? nativeMTPTupleFence : nil
+        self.retainedNativeMTPDrafter = self.decodePath == .nativeMTP && retainedPagedKVSequence != nil
+            ? retainedNativeMTPDrafter : nil
         self.nativeMTPIntegrityProbe = self.decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
@@ -1038,17 +1046,22 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
     /// Keyed hybrid rows: recurrent state at each checkpoint the row reached, so
     /// the next cached turn can resume from one (SPEC-038 AC-26). Empty otherwise.
     let recurrentCheckpoints: [RecurrentStateCheckpoint]
+    /// SPEC-048-R009 (0.1.118): a native hybrid row's committed MTP head
+    /// state, so a later cached turn can resume natively. Nil otherwise.
+    let nativeMTPDrafter: NativeMTPRetainedDrafter?
 
     init(
         retainedSequence: PagedKVRetainedSequence,
         layers: [KVCache],
         deliveryID: UUID? = nil,
-        recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+        recurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        nativeMTPDrafter: NativeMTPRetainedDrafter? = nil
     ) {
         self.retainedSequence = retainedSequence
         self.layers = layers
         self.deliveryID = deliveryID
         self.recurrentCheckpoints = recurrentCheckpoints
+        self.nativeMTPDrafter = nativeMTPDrafter
     }
 
     func withDeliveryID(_ deliveryID: UUID?) -> ContinuousBatchRetainedCache {
@@ -1056,7 +1069,8 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
             retainedSequence: retainedSequence,
             layers: layers,
             deliveryID: deliveryID,
-            recurrentCheckpoints: recurrentCheckpoints
+            recurrentCheckpoints: recurrentCheckpoints,
+            nativeMTPDrafter: nativeMTPDrafter
         )
     }
 }
@@ -1776,6 +1790,24 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
         binding: PagedKVStorageBinding,
         restoreNativeMTPDrafter: Bool
     ) async throws
+    /// SPEC-048-R009 (0.1.118): a native row's committed MTP head state at a
+    /// normal terminal, before its state is released: the head after its last
+    /// committed round, with no tentative proposal or buffered column, plus
+    /// the committed token (from `committedTokens`) at each of
+    /// `checkpointPositions` the head covers. Nil when the backend has no
+    /// head state or it is not in that committed shape. The default takes none.
+    func snapshotNativeMTPDrafter(
+        requestID: String,
+        committedTokens: [Int],
+        checkpointPositions: [Int]
+    ) async -> NativeMTPRetainedDrafter?
+    /// SPEC-048-R009 (0.1.118): after `installRetainedPagedKVCache`, a native
+    /// row's MTP head resumes from a copy of `snapshot` at its `nextPosition`.
+    /// Backends that cannot express it MUST fail closed.
+    func installNativeMTPDrafter(
+        requestID: String,
+        snapshot: NativeMTPDrafterPrefixSnapshot
+    ) async throws
     /// Build the row's serial-format conversation cache at a normal terminal,
     /// before its blocks are released: attention KV materialized from `binding`
     /// and trimmed to `tokenCount`. Nil when the backend has no recurrent layers.
@@ -1978,6 +2010,21 @@ extension ContinuousBatchSchedulerBackend {
         restoreNativeMTPDrafter: Bool
     ) async throws {
         throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
+    }
+
+    func snapshotNativeMTPDrafter(
+        requestID: String,
+        committedTokens: [Int],
+        checkpointPositions: [Int]
+    ) async -> NativeMTPRetainedDrafter? {
+        nil
+    }
+
+    func installNativeMTPDrafter(
+        requestID: String,
+        snapshot: NativeMTPDrafterPrefixSnapshot
+    ) async throws {
+        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_native_mtp_drafter_unavailable")
     }
 
     func materializeSerialConversationCache(
@@ -2501,6 +2548,7 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_local_binding_mismatch": 503,
         "continuous_batching_terminal_kv_commit_unavailable": 503,
         "continuous_batching_retained_hybrid_cache_unavailable": 503,
+        "continuous_batching_retained_native_mtp_drafter_unavailable": 503,
         "continuous_batching_prompt_snapshot_install_unavailable": 503,
         "continuous_batching_native_mtp_backend_unavailable": 503,
         "continuous_batching_native_mtp_round_memory_exhausted": 503,
@@ -6605,6 +6653,18 @@ actor ContinuousBatchScheduler {
                         binding: binding,
                         recurrentCheckpoint: recurrentCheckpoint
                     )
+                    // SPEC-048-R009 (0.1.118): a native row resumes its MTP
+                    // head at exactly the cached length, or fails admission.
+                    if request.decodePath == .nativeMTP {
+                        guard let drafter = request.retainedNativeMTPDrafter,
+                              drafter.nextPosition == request.cachedPromptTokens
+                        else {
+                            throw ContinuousBatchSchedulerError.unsupported(
+                                "continuous_batching_retained_native_mtp_drafter_unavailable"
+                            )
+                        }
+                        try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                    }
                     prefillCursor = request.cachedPromptTokens
                 } else if let snapshot = request.promptSnapshotCache, request.cachedPromptTokens > 0 {
                     // SPEC-024-R005: a fresh table already counting the snapshot
@@ -7832,6 +7892,16 @@ actor ContinuousBatchScheduler {
             ) else {
                 return nil
             }
+            // SPEC-048-R009 (0.1.118): a native row also hands back its
+            // committed head state, bounded by the retained length. Best
+            // effort: without it the next turn's hit is served ordinary.
+            let nativeMTPDrafter: NativeMTPRetainedDrafter? = row.usesNativeMTP
+                ? await backend.snapshotNativeMTPDrafter(
+                    requestID: row.request.id,
+                    committedTokens: Array((row.request.promptTokens + row.generatedTokens).prefix(targetLogicalTokens + 1)),
+                    checkpointPositions: recurrentCheckpoints.map(\.tokenCount).filter { $0 <= targetLogicalTokens }
+                ).flatMap { $0.head.nextPosition <= targetLogicalTokens ? $0 : nil }
+                : nil
             let retained = try await allocator.retain(row.handle)
             retainedSequence = retained
             let retainedBinding = try await allocator.binding(for: retained.handle)
@@ -7842,7 +7912,8 @@ actor ContinuousBatchScheduler {
             return ContinuousBatchRetainedCache(
                 retainedSequence: retained,
                 layers: handoff.caches,
-                recurrentCheckpoints: recurrentCheckpoints
+                recurrentCheckpoints: recurrentCheckpoints,
+                nativeMTPDrafter: nativeMTPDrafter
             )
         } catch {
             if let retainedSequence {

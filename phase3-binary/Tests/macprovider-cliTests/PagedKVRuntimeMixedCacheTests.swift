@@ -1135,6 +1135,66 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         try await allocator.release(reattached)
     }
 
+    /// SPEC-048-R009 (0.1.118): retained MTP head state resumes only at a
+    /// checkpoint it covers whose committed token the incoming prompt carries;
+    /// a resume inside the head trims fresh copies and never the stored head.
+    /// A backend without a drafter takes and installs no head state.
+    func testRetainedNativeMTPDrafterResumesOnlyAtACoveredCheckpointWithItsToken() async throws {
+        guard Self.hasMetallib else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let layer = KVCacheSimple()
+        _ = layer.update(keys: MLXArray.ones([1, 1, 6, 4]), values: MLXArray.ones([1, 1, 6, 4]))
+        XCTAssertEqual(layer.offset, 6)
+        let retained = NativeMTPRetainedDrafter(
+            head: NativeMTPDrafterPrefixSnapshot(cache: [layer], nextPosition: 6, foldedNextToken: 9),
+            foldedTokens: [4: 3, 6: 9]
+        )
+        let incoming: [Int32] = [0, 1, 2, 5, 3, 7, 9, 2]
+
+        let atEnd = try XCTUnwrap(retained.resumed(at: 6, incomingTokens: incoming))
+        XCTAssertEqual(atEnd.nextPosition, 6)
+        XCTAssertEqual(atEnd.foldedNextToken, 9)
+        XCTAssertEqual(atEnd.cache.map(\.offset), [6])
+        let inside = try XCTUnwrap(retained.resumed(at: 4, incomingTokens: incoming))
+        XCTAssertEqual(inside.nextPosition, 4)
+        XCTAssertEqual(inside.foldedNextToken, 3)
+        XCTAssertEqual(inside.cache.map(\.offset), [4])
+        XCTAssertEqual(layer.offset, 6, "the stored head is never trimmed")
+        XCTAssertFalse((inside.cache[0] as AnyObject) === (layer as AnyObject))
+
+        var wrongToken = incoming
+        wrongToken[4] = 2
+        XCTAssertNil(retained.resumed(at: 4, incomingTokens: wrongToken), "boundary token differs")
+        XCTAssertNil(retained.resumed(at: 5, incomingTokens: incoming), "no recorded token at 5")
+        XCTAssertNil(retained.resumed(at: 7, incomingTokens: incoming), "past the head")
+        XCTAssertNil(retained.resumed(at: 6, incomingTokens: Array(incoming.prefix(6))), "prompt ends at the head")
+
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let taken = await backend.snapshotNativeMTPDrafter(
+            requestID: "row", committedTokens: Array(0 ..< 8), checkpointPositions: [4])
+        XCTAssertNil(taken)
+        do {
+            try await backend.installNativeMTPDrafter(requestID: "row", snapshot: atEnd)
+            XCTFail("a backend without a drafter must refuse head state")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_retained_native_mtp_drafter_unavailable")
+        }
+    }
+
     private func decodeInput(
         requestID: String,
         currentToken: Int,

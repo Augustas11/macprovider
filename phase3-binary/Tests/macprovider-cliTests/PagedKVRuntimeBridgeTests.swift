@@ -3291,6 +3291,151 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(native.second.generatedTokens, ordinary.second.generatedTokens)
     }
 
+    /// SPEC-048-R009 (0.1.118) end to end: a keyed native turn 1 retains its
+    /// entry with the committed MTP head state, and turn 2 hits it and runs
+    /// native from the restored head, both at a prompt checkpoint inside the
+    /// head (trimmed) and at a model-stop reply end (the head's own length).
+    /// Every turn emits the keyless cold serial greedy tokens of its prompt.
+    func testKeyedNativeTurnTwoHitRestoresTheRetainedHeadAndMatchesColdSerialGreedy() async throws {
+        try requireMetal()
+        let key = "conv:auto-prefix"
+        let modelID = Self.bridgeDescriptor().modelID
+        let budget = 8
+
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let tiny = try Self.tinyQwen35Native(dtype: .bfloat16, contiguousCacheBridge: bridge)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64, contiguousCacheBridge: bridge)
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64,
+            allocator: allocator, contiguousCacheBridge: bridge)
+
+        func serialGreedy(_ tokens: [Int], count: Int) throws -> [Int] {
+            let cache = try tiny.target.newCache(parameters: nil)
+            var logits = tiny.target(MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count), cache: cache)
+            var out: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                out.append(next)
+                logits = tiny.target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return out
+        }
+        func keyed(
+            _ id: String, _ tokens: [Int], lease: ConversationCacheLease? = nil,
+            stop: Int? = nil, drafter: NativeMTPDrafterPrefixSnapshot? = nil
+        ) -> ContinuousBatchSchedulerRequest {
+            ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: key,
+                promptTokens: tokens,
+                maxOutputTokens: budget,
+                stopTokenSequences: stop.map { [[$0]] } ?? [],
+                modelStopTokenIDs: stop.map { [$0] } ?? [],
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                recurrentCheckpointPositions: [33, 38],
+                modelHasRecurrentLayers: true,
+                retainedRecurrentCheckpoints: ModelRuntime.retainedRecurrentCheckpoints(for: lease),
+                retainedNativeMTPDrafter: drafter,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPCompleteWindowBytesByDepth: [16, 16],
+                nativeMTPTupleFence: Self.nativeMTPFence()
+            )
+        }
+        func verifiedProposal(_ id: String) -> Bool {
+            tiny.backend.finalizedRounds().flatMap { $0 }.contains { $0.requestID == id && $0.proposalTokenCount == 1 }
+        }
+
+        /// Turn 1 (native, keyed) then turn 2 (native, on the hit).
+        func conversation(
+            _ name: String, prompt: [Int], stop: Int?, secondPrompt: ([Int]) -> [Int], expectedResume: Int
+        ) async throws {
+            let conversationCache = makeConversationCacheForTest(
+                config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let firstBegun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: prompt.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let firstLease = try XCTUnwrap(firstBegun)
+            let first = try await scheduler.submit(keyed("\(name)-1", prompt, stop: stop))
+            if stop == nil {
+                XCTAssertTrue(verifiedProposal("\(name)-1"), "\(name): turn 1 never verified a proposal")
+            }
+            let expectedFirst = try serialGreedy(prompt, count: budget)
+            let canonical: [Int]
+            if let stop {
+                XCTAssertEqual(first.stopCause, .modelStop, name)
+                XCTAssertEqual(first.generatedTokens.last, stop, name)
+                XCTAssertEqual(first.generatedTokens, Array(expectedFirst.prefix(first.generatedTokens.count)), name)
+                canonical = prompt + first.generatedTokens.dropLast()
+            } else {
+                XCTAssertEqual(first.generatedTokens, expectedFirst, name)
+                canonical = prompt + first.generatedTokens
+            }
+            let retained = try XCTUnwrap(first.retainedCache, "\(name): no retained entry")
+            let head = try XCTUnwrap(retained.nativeMTPDrafter, "\(name): no head state retained")
+            // The head covers committed tokens only: the last sampled token was
+            // never fed back, so the head sits one short of the full turn.
+            XCTAssertEqual(head.head.nextPosition, prompt.count + first.generatedTokens.count - 1, name)
+            XCTAssertLessThanOrEqual(head.head.nextPosition, retained.retainedSequence.logicalTokenCount, name)
+            await conversationCache.commit(
+                firstLease,
+                cache: ConversationCacheLayers(
+                    retained.layers,
+                    retainedPagedKVSequence: retained.retainedSequence,
+                    discardRetainedPagedKVSequence: { sequence, key in
+                        await scheduler.discardRetainedCache(sequence, conversationKey: key)
+                    },
+                    recurrentCheckpoints: retained.recurrentCheckpoints,
+                    retainedNativeMTPDrafter: retained.nativeMTPDrafter),
+                fullTokens: canonical.map(Int32.init))
+            await scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+            let second = secondPrompt(canonical)
+            let begun = await conversationCache.begin(
+                conversationKey: key, incomingTokens: second.map(Int32.init), modelID: modelID,
+                kvBits: nil, allowRetainedPagedKVHandoff: true)
+            let lease = try XCTUnwrap(begun)
+            XCTAssertEqual(lease.cachedPromptTokens, expectedResume, name)
+            let resumed = try XCTUnwrap(
+                ModelRuntime.retainedNativeMTPDrafterResume(for: lease), "\(name): head does not restore")
+            XCTAssertEqual(resumed.nextPosition, expectedResume, name)
+            XCTAssertTrue(resumed.cache.allSatisfy { $0.offset == expectedResume }, name)
+            XCTAssertTrue(
+                head.head.cache.allSatisfy { $0.offset == head.head.nextPosition },
+                "\(name): resuming must not trim the stored head")
+            let turnTwo = try await scheduler.submit(keyed("\(name)-2", second, lease: lease, drafter: resumed))
+            XCTAssertEqual(turnTwo.terminalStatus, .length, name)
+            XCTAssertEqual(turnTwo.cachedPromptTokens, expectedResume, name)
+            XCTAssertEqual(turnTwo.generatedTokens, try serialGreedy(second, count: budget), "\(name): turn 2 diverged")
+            XCTAssertTrue(verifiedProposal("\(name)-2"), "\(name): turn 2 never verified a proposal")
+            if let secondRetained = turnTwo.retainedCache {
+                await scheduler.cancelRetainedCacheDelivery(secondRetained, conversationKey: turnTwo.conversationKey)
+            }
+            await conversationCache.abort(lease)
+            _ = await conversationCache.purgeHot(conversationKey: key)
+        }
+
+        // A prompt checkpoint inside the head: turn 2 diverges after token 44,
+        // so it resumes at checkpoint 38 and the head is trimmed to 38.
+        try await conversation("trimmed", prompt: Self.tinyPrompt(length: 40, salt: 29), stop: nil,
+                               secondPrompt: { canonical in
+            Array(canonical.prefix(44)) + [(canonical[44] + 1) % 8, 2, 5, 3]
+        }, expectedResume: 38)
+        // A model-stop reply end: the retained length equals the head's, and
+        // turn 2's prompt carries the stop token there. The tiny random model's
+        // greedy run repeats one token, so the stop is its first sampled token:
+        // turn 1 ends at prefill and the head is the prefill-seeded one.
+        let stopPrompt = Self.tinyPrompt(length: 40, salt: 31)
+        let stop = try serialGreedy(stopPrompt, count: 1)[0]
+        try await conversation("reply-end", prompt: stopPrompt, stop: stop, secondPrompt: { canonical in
+            canonical + [stop, 6, 1, 7]
+        }, expectedResume: stopPrompt.count)
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
@@ -7749,6 +7894,22 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
 
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
         try await base.commitTerminalKV(input)
+    }
+
+    func snapshotNativeMTPDrafter(
+        requestID: String,
+        committedTokens: [Int],
+        checkpointPositions: [Int]
+    ) async -> NativeMTPRetainedDrafter? {
+        await base.snapshotNativeMTPDrafter(
+            requestID: requestID,
+            committedTokens: committedTokens,
+            checkpointPositions: checkpointPositions
+        )
+    }
+
+    func installNativeMTPDrafter(requestID: String, snapshot: NativeMTPDrafterPrefixSnapshot) async throws {
+        try await base.installNativeMTPDrafter(requestID: requestID, snapshot: snapshot)
     }
 
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
