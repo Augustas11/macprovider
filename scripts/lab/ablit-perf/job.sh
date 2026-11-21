@@ -83,7 +83,9 @@
 #   against the REUSE_REFERENCE rows (required, no reference runs). Keys: rows (default 1,4),
 #   native_mtp, slots (the two knobs above for this pass only), contexts, outputs, trials (default
 #   CONTEXTS, OUTPUTS, TRIALS), turn2_header (0|1|cache_only, TURN2_HEADER for this pass only; 0
-#   sends no conversation header on either turn, the keyless cold control). Example, the abliterated GLM native-MTP and 4-slot passes:
+#   sends no conversation header on either turn, the keyless cold control), small_m_route
+#   (row_invariant: the kernel every request of a native-MTP process runs, for an ordinary control
+#   that differs from the native pass only in the mode). Example, the abliterated GLM native-MTP and 4-slot passes:
 #   GLM_PASSES='mtp rows=1 native_mtp=auto; slots4 rows=4 slots=4'.
 #   native_mtp=off writes the same catalog provenance and durable store path as auto with
 #   native_mtp_mode off (the kill switch): the ordinary-decode control of a native pass, the same
@@ -224,7 +226,7 @@ parse_pass() {
   local k=$1 w key val
   set -- $2
   P_NAME=${1:-}; shift
-  P_ROWS=1,4 P_NM="" P_SL="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS P_T2H=""
+  P_ROWS=1,4 P_NM="" P_SL="" P_SMR="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS P_T2H=""
   case "$P_NAME" in ""|*[!a-z0-9_-]*) KNOB_ERR="pass name must be [a-z0-9_-]+"; return 1 ;; esac
   for w in "$@"; do
     key=${w%%=*}; val=${w#*=}
@@ -232,12 +234,14 @@ parse_pass() {
     case $key in
       rows) P_ROWS=$val ;; native_mtp) P_NM=$val ;; slots) P_SL=$val ;;
       contexts) P_CTX=$val ;; outputs) P_OUTS=$val ;; trials) P_TRIALS=$val ;; turn2_header) P_T2H=$val ;;
+      small_m_route) P_SMR=$val ;;
       *) KNOB_ERR="unknown key $key"; return 1 ;;
     esac
   done
   case "$P_ROWS" in *[!0-9,]*) KNOB_ERR="rows must be a comma list of numbers"; return 1 ;; esac
   case "$P_TRIALS" in ""|*[!0-9]*) KNOB_ERR="trials must be a number"; return 1 ;; esac
   case "$P_T2H" in ""|0|1|cache_only) ;; *) KNOB_ERR="turn2_header must be 0|1|cache_only"; return 1 ;; esac
+  case "$P_SMR" in ""|row_invariant) ;; *) KNOB_ERR="small_m_route must be row_invariant"; return 1 ;; esac
   serve_knob_check "$k" "$P_NM" "$P_SL"
 }
 
@@ -671,7 +675,7 @@ serve_args() {
   [ -z "$(v "$k" ID)" ] || SERVE+=(--model-id "$(v "$k" ID)" --model-sha256 "$(v "$k" SHA256)")
   if [ -f "$RES/$name/cb-tuple.yaml" ]; then extra=$RES/$name/cb-tuple.yaml
   elif [ -n "$(v "$k" CONFIG_EXTRA)" ]; then extra=$(v "$k" CONFIG_EXTRA); fi
-  if [ -n "$(v "$k" NATIVE_MTP)$(v "$k" SERVED_SLOTS)" ]; then
+  if [ -n "$(v "$k" NATIVE_MTP)$(v "$k" SERVED_SLOTS)$(v "$k" SMALL_M_ROUTE)" ]; then
     f=$RES/$name/serve-extra-${SERVE_TAG:-main}.yaml
     mkdir -p "$RES/$name"
     { [ -z "$extra" ] || cat "$extra"; } > "$f"
@@ -683,6 +687,9 @@ serve_args() {
     if [ -n "$(v "$k" SERVED_SLOTS)" ]; then
       printf 'max_concurrency_override: %s\nmax_concurrency_source: owner\n' "$(v "$k" SERVED_SLOTS)" >> "$f"
     fi
+    # small_m_route=row_invariant: the kernel a native-MTP process forces on every request, so an
+    # ordinary-decode control on it isolates native MTP from the stock-order kernel.
+    [ -z "$(v "$k" SMALL_M_ROUTE)" ] || printf 'small_m_route: %s\n' "$(v "$k" SMALL_M_ROUTE)" >> "$f"
     extra=$f
   fi
   [ -z "$extra" ] || SERVE+=(--config-extra "$extra")
@@ -820,13 +827,13 @@ run_pass() {
   else
     extra+=(--skip-compare)
   fi
-  old_nm=$(v "$k" NATIVE_MTP); old_sl=$(v "$k" SERVED_SLOTS)
-  setv "$k" NATIVE_MTP "$P_NM"; setv "$k" SERVED_SLOTS "$P_SL"
+  old_nm=$(v "$k" NATIVE_MTP); old_sl=$(v "$k" SERVED_SLOTS); old_smr=$(v "$k" SMALL_M_ROUTE)
+  setv "$k" NATIVE_MTP "$P_NM"; setv "$k" SERVED_SLOTS "$P_SL"; setv "$k" SMALL_M_ROUTE "$P_SMR"
   SERVE_TAG=$P_NAME serve_args "$k"; rc=$?
-  setv "$k" NATIVE_MTP "$old_nm"; setv "$k" SERVED_SLOTS "$old_sl"
+  setv "$k" NATIVE_MTP "$old_nm"; setv "$k" SERVED_SLOTS "$old_sl"; setv "$k" SMALL_M_ROUTE "$old_smr"
   [ $rc = 0 ] || return 1
   [ "$P_NM" != auto ] || extra+=(--expect-native-mtp on)
-  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-unset} served_slots=${P_SL:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS turns=$TURNS turn2_header=${P_T2H:-${TURN2_HEADER:-0}} reference=${REUSE_REFERENCE:+reused from }${REUSE_REFERENCE:-none, no compare} seed=${SEED_SELF_CHECK_RUN:-none}"
+  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-unset} served_slots=${P_SL:-auto} small_m_route=${P_SMR:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS turns=$TURNS turn2_header=${P_T2H:-${TURN2_HEADER:-0}} reference=${REUSE_REFERENCE:+reused from }${REUSE_REFERENCE:-none, no compare} seed=${SEED_SELF_CHECK_RUN:-none}"
   OUTPUTS=$P_OUTS TRIALS=$P_TRIALS TURN2_HEADER=${P_T2H:-${TURN2_HEADER:-0}} grid "$k" "$pdir" "${SERVE[@]}" --rows "$P_ROWS" --contexts "$P_CTX" \
     --skip-reference --expect-route "$(expect_route "$k")" ${extra[@]+"${extra[@]}"}
   rc=$?

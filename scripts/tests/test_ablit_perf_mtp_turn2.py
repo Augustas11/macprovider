@@ -195,13 +195,13 @@ def extract(names):
 
 
 class JobPassTests(unittest.TestCase):
-    def bash(self, script, **env):
+    def bash(self, script, extra_funcs=(), **env):
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         if True:
             harness = Path(d) / "h.sh"
             harness.write_text("set -u\n" + extract(["kname", "v", "setv", "serve_knob_check", "parse_pass",
-                                                     "native_mtp_extra"])
+                                                     "native_mtp_extra", *extra_funcs])
                                + f"\nJOB={d}/job\nSTORE={d}/store\nCONTEXTS=short\nOUTPUTS=512\nTRIALS=3\n" + script)
             job = Path(d) / "job" / "catalog"
             job.mkdir(parents=True)
@@ -239,6 +239,24 @@ class JobPassTests(unittest.TestCase):
         self.assertEqual(off[0], "native_mtp_mode: off")
         self.assertEqual(auto[0], "native_mtp_mode: auto")
         self.assertEqual(off[1:], auto[1:])
+
+    def test_small_m_route_pass_writes_the_row_invariant_route_into_the_serve_extra(self):
+        p, d = self.bash('parse_pass qwen38-27b "rowinv rows=1 native_mtp=off small_m_route=row_invariant" '
+                         '|| { echo "ERR $KNOB_ERR"; exit 1; }\n'
+                         'echo "P $P_NAME $P_NM [$P_SMR]"\n'
+                         'parse_pass qwen38-27b "mtp rows=1" || exit 1\necho "D [$P_SMR]"\n'
+                         'parse_pass qwen38-27b "x small_m_route=stock" || echo "ERR $KNOB_ERR"\n'
+                         'RES=$JOB/res; QWEN38_27B_NAME=qwen3.8-27b; QWEN38_27B_PATH=/m\n'
+                         'setv qwen38-27b SMALL_M_ROUTE row_invariant\n'
+                         'SERVE_TAG=rowinv serve_args qwen38-27b || exit 1\necho "S ${SERVE[*]}"\n'
+                         'cat "$RES/qwen3.8-27b/serve-extra-rowinv.yaml"\n',
+                         extra_funcs=["serve_args"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("P rowinv off [row_invariant]", p.stdout)
+        self.assertIn("D []", p.stdout)
+        self.assertIn("ERR small_m_route must be row_invariant", p.stdout)
+        self.assertIn(f"--config-extra {d}/job/res/qwen3.8-27b/serve-extra-rowinv.yaml", p.stdout)
+        self.assertTrue(p.stdout.rstrip().endswith("small_m_route: row_invariant"), p.stdout)
 
     def test_job_wires_turns_compare_and_qwen_keys(self):
         text = JOB.read_text()
