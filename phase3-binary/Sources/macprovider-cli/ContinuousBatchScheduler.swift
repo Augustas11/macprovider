@@ -2803,6 +2803,10 @@ actor ContinuousBatchScheduler {
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
     private var labBatchComposition: [String]?
+    /// Set by a request-named fence (`LabRequestFence`): when the fence
+    /// releases, its rows also take admission sequences in fence order, so
+    /// decode row order follows the fence and not HTTP arrival.
+    private var labBatchCompositionOrdersAdmission = false
     private struct LabNativeMTPProbeGroup {
         let id = UUID()
         var pending: Set<String>
@@ -3579,6 +3583,9 @@ actor ContinuousBatchScheduler {
             continuation: continuation,
             delivery: delivery
         ))
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        installLabRequestFenceIfNamed(request.id)
+        #endif
         waiting.append(request)
         if case .configuredTimeout = admissionWaitPolicy {
             beginQueueWait(requestID: request.id)
@@ -3809,6 +3816,13 @@ actor ContinuousBatchScheduler {
             })
             guard requestIDs.allSatisfy({ id in waiting.contains(where: { $0.id == id }) }) else {
                 return
+            }
+            if labBatchCompositionOrdersAdmission {
+                let sequences = requestIDs.compactMap { requestAdmissionSequences[$0] }.sorted()
+                if sequences.count == requestIDs.count {
+                    for (id, sequence) in zip(requestIDs, sequences) { requestAdmissionSequences[id] = sequence }
+                }
+                labBatchCompositionOrdersAdmission = false
             }
             waiting.sort { lhs, rhs in
                 let left = positions[lhs.id] ?? Int.max
@@ -5492,6 +5506,7 @@ actor ContinuousBatchScheduler {
               admittingRequests.isEmpty, !pumpRunning,
               pendingBindingChecks == 0,
               labNativeMTPProbeGroup?.running.isEmpty ?? true else { return false }
+        labBatchCompositionOrdersAdmission = false
         guard let requestIDs else {
             labBatchComposition = nil
             if labNativeMTPProbeGroup != nil {
@@ -5513,6 +5528,20 @@ actor ContinuousBatchScheduler {
         }
         labBatchComposition = requestIDs
         return true
+    }
+
+    /// Lab-only (#2448): the first row of a request-named fence
+    /// (`LabRequestFence`) to arrive installs it, before it is queued. One
+    /// stderr line per install attempt; `installed=false` means the scheduler
+    /// was not idle or another fence was held, so that cell is not fenced.
+    private func installLabRequestFenceIfNamed(_ requestID: String) {
+        guard let requestIDs = LabRequestFence.composition(forRequestID: requestID),
+              labBatchComposition.map({ $0 != requestIDs }) ?? true else { return }
+        let installed = installLabBatchComposition(requestIDs)
+        if installed { labBatchCompositionOrdersAdmission = true }
+        try? FileHandle.standardError.write(contentsOf: Data(
+            "event=lab_request_fence installed=\(installed) rows=\(requestIDs.count) fence=\(requestIDs[0])\n".utf8
+        ))
     }
 
     private func finishLabNativeMTPProbe(requestID: String) async {

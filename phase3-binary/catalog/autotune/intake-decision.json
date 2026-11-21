@@ -1,0 +1,44 @@
+{
+  "decisions": [
+    {
+      "action": "promote_recommendable",
+      "admission_clause": null,
+      "as_of": "2026-11-20T09:45:00Z",
+      "coldstart_slot_used": false,
+      "fit_clause": null,
+      "listed_since": "2026-11-20T09:30:00Z",
+      "model_key": "deepseek/deepseek-v4-flash-abliterated",
+      "observation_window_end": null,
+      "observation_window_start": null,
+      "operator_decision": "promoted",
+      "operator_role": "catalog-operator",
+      "promotion": {
+        "bench_provenance_source": "runtime_validated_only",
+        "conformance_owed": true,
+        "demand_rank_recommendable": true,
+        "demand_rank_source_sha256": "17a0b23e8a94fbcb67f3da63195d936ebbfc3a4a7ea900ed70da3bf2bf363304",
+        "operator_admission_reference": "#2452",
+        "rate_card_source_sha256": "205034bfb0cd02fe939f22404f78701a8dedb8eeb13572073202d36bfce9c2ea",
+        "rate_class": "class-120b-moe",
+        "rate_row_resolved": true
+      },
+      "signals": null
+    }
+  ],
+  "generated_at": "2026-11-20T09:45:00Z",
+  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289",
+  "schema_version": "macprovider.intake-decision.v1",
+  "thresholds": {
+    "INTAKE_BUYER_REQUEST_FLOOR": 250,
+    "INTAKE_COLDSTART_SLOTS": 1,
+    "INTAKE_DEMAND_RANK_MAX": 100,
+    "INTAKE_FLEET_FIT_MIN_PCT": 0,
+    "INTAKE_K_ANONYMITY_MIN": 3,
+    "INTAKE_OFFER_FLOOR": 3,
+    "INTAKE_UNKNOWN_KEY_BUCKETS": 64,
+    "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000,
+    "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+    "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+    "tier_target": "<= 256 GB"
+  }
+}

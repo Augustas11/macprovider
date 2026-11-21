@@ -200,4 +200,209 @@ final class GrammarTemplatesParserTests: XCTestCase {
             XCTAssertNil(dfa.transition(state: 0, bytes: Array(invalid.utf8)), family.rawValue)
         }
     }
+
+    // Qwen3.8-Flash-Next (qwen4_exp) lab serve, 2026-11-20: tool_choice
+    // required/named failed 2/3 and 1/3 with 502 tool_selection_validation_failed.
+    // The template teaches function-XML calls but the guaranteed grammar forced
+    // the JSON envelope. The grammar now follows the loaded template's form.
+    private static let readFile = JSONValue.object(["type": .string("object"),
+        "properties": .object(["path": .object(["type": .string("string")])]), "required": .array([.string("path")])])
+
+    private func guaranteedRequest(_ choice: Any, parameters: JSONValue = readFile,
+                                   extraTools: [String] = []) throws -> ChatCompletionRequest {
+        let tools: [[String: Any]] = (["read_file"] + extraTools).map {
+            ["type": "function", "function": ["name": $0, "parameters": parameters.jsonObject]]
+        }
+        let body: [String: Any] = ["model": "qwen/qwen3.8-flash-next-abliterated", "max_tokens": 1024,
+            "messages": [["role": "user", "content": "Read the file /etc/hosts using the read_file tool."]],
+            "tools": tools, "tool_choice": choice]
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
+    /// The call as the Qwen3.8 chat template renders it (fixture
+    /// `scripts/tests/fixtures/qwen38-27b-official/chat_template.jinja`).
+    private func templateCall(_ name: String = "read_file", _ arguments: [(String, String)] = [("path", "/etc/hosts")]) -> String {
+        "<tool_call>\n<function=\(name)>\n"
+            + arguments.map { "<parameter=\($0.0)>\n\($0.1)\n</parameter>\n" }.joined()
+            + "</function>\n</tool_call>"
+    }
+
+    func testGuaranteedQwenCallFormatFollowsTheLoadedTemplate() {
+        XCTAssertEqual(GrammarConstraintState.guaranteedQwenCallFormat(.xmlFunction), .functionXML)
+        XCTAssertEqual(GrammarConstraintState.guaranteedQwenCallFormat(.qwen35), .functionXML)
+        XCTAssertEqual(GrammarConstraintState.guaranteedQwenCallFormat(.json), .jsonEnvelope)
+        XCTAssertEqual(GrammarConstraintState.guaranteedQwenCallFormat(nil), .jsonEnvelope)
+    }
+
+    func testFunctionXMLQwenGuaranteedGrammarIsTheTemplateFormAndParses() throws {
+        let named: Any = ["type": "function", "function": ["name": "read_file"]]
+        for choice in ["required", named] as [Any] {
+            let request = try guaranteedRequest(choice, extraTools: ["write_file"])
+            request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+            let dfa = try XCTUnwrap(GrammarTemplates.grammar(
+                for: request, traits: request.outputTraits, qwenCallFormat: .functionXML)).compile()
+            let call = templateCall()
+            XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))))
+            // The JSON envelope is no longer the forced form for this template.
+            let json = #"<tool_call>{"name":"read_file","arguments":{"path":"/etc/hosts"}}</tool_call>"#
+            XCTAssertNil(dfa.transition(state: 0, bytes: Array(json.utf8)))
+            let other = templateCall("write_file")
+            if choice is String {
+                XCTAssertNotNil(dfa.transition(state: 0, bytes: Array(other.utf8)))
+            } else {
+                XCTAssertNil(dfa.transition(state: 0, bytes: Array(other.utf8)), "named admits only the selected function")
+            }
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: call, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                mode: .complete(), defaultCompletionTokens: 26, toolCallPrefill: nil)
+            XCTAssertEqual(parsed.content, "")
+            XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["read_file"])
+            XCTAssertEqual(try StrictJSONParser.parse(XCTUnwrap(parsed.toolCalls.first).arguments),
+                           .object(["path": .string("/etc/hosts")]))
+            XCTAssertNoThrow(try ToolSelectionPolicy.validateOutput(
+                calls: parsed.toolCalls.map { MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments) }, finishReason: "tool_calls", generatedTokens: 26, request: request))
+        }
+        // The default stays the JSON envelope (JSON templates, unknown format).
+        let request = try guaranteedRequest("required")
+        let json = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: .qwen))).compile()
+        XCTAssertNil(json.transition(state: 0, bytes: Array(templateCall().utf8)))
+    }
+
+    func testFunctionXMLQwenGrammarRoundTripsTypedMultilineAndUnicodeValues() throws {
+        let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
+            "content": .object(["type": .string("string")]),
+            "count": .object(["type": .string("integer")]),
+            "mode": .object(["type": .string("string"), "enum": .array([.string("a b"), .string("w")])]),
+            "opts": .object(["type": .string("object"), "properties": .object(["ok": .object(["type": .string("boolean")])])]),
+        ]), "required": .array([.string("content"), .string("count")])])
+        let request = try guaranteedRequest("required", parameters: parameters)
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+        let dfa = try XCTUnwrap(GrammarTemplates.grammar(
+            for: request, traits: request.outputTraits, qwenCallFormat: .functionXML)).compile()
+        let content = "line one\n\tKaunas – Vilnius 🚀\n"
+        let call = templateCall("read_file", [("content", content), ("count", "3"), ("mode", "a b"), ("opts", #"{"ok":true}"#)])
+        XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))))
+        for bad in [call.replacingOccurrences(of: "\n3\n", with: "\n\"3\"\n"),       // integer as a string
+                    call.replacingOccurrences(of: "a b", with: "x"),                // outside the enum
+                    call.replacingOccurrences(of: "Vilnius", with: "<b>"),          // markup in a raw value
+                    call.replacingOccurrences(of: "one", with: "one\r")] {          // CR in a raw value
+            XCTAssertFalse(dfa.transition(state: 0, bytes: Array(bad.utf8)).map(dfa.accepting(state:)) ?? false)
+        }
+        XCTAssertNil(dfa.transition(state: 0, bytes: Array("<tool_call>\n<function=read_file>\n<parameter=content>\n".utf8) + [0xFF]),
+                     "invalid UTF-8 never enters a value")
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: call, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+            mode: .complete(), defaultCompletionTokens: 40, toolCallPrefill: nil)
+        let arguments = try StrictJSONParser.parse(XCTUnwrap(parsed.toolCalls.first).arguments)
+        XCTAssertEqual(arguments, .object(["content": .string(content), "count": .int(3), "mode": .string("a b"),
+                                           "opts": .object(["ok": .bool(true)])]))
+        XCTAssertNoThrow(try ToolSelectionPolicy.validateOutput(
+            calls: parsed.toolCalls.map { MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments) }, finishReason: "tool_calls", generatedTokens: 40, request: request))
+    }
+
+    func testFunctionXMLQwenGrammarCoversUndeclaredRequiredKeysAndRootEnums() throws {
+        let cases: [(JSONValue, String, JSONValue)] = [
+            // A required key the schema does not declare is read untyped.
+            (.object(["type": .string("object"), "required": .array([.string("city")])]),
+             templateCall("read_file", [("city", "true")]), .object(["city": .bool(true)])),
+            // A root object enum admits only its complete instances.
+            (.object(["type": .string("object"), "properties": .object(["city": .object(["type": .string("string")])]),
+                      "required": .array([.string("city")]), "enum": .array([.object(["city": .string("Paris")])])]),
+             templateCall("read_file", [("city", "Paris")]), .object(["city": .string("Paris")])),
+        ]
+        for (parameters, call, arguments) in cases {
+            let request = try guaranteedRequest("required", parameters: parameters)
+            request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+            let dfa = try XCTUnwrap(GrammarTemplates.grammar(
+                for: request, traits: request.outputTraits, qwenCallFormat: .functionXML)).compile()
+            XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), call)
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: call, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                mode: .complete(), defaultCompletionTokens: 20, toolCallPrefill: nil)
+            XCTAssertEqual(try StrictJSONParser.parse(XCTUnwrap(parsed.toolCalls.first).arguments), arguments)
+            XCTAssertNoThrow(try ToolSelectionPolicy.validateOutput(
+                calls: parsed.toolCalls.map { MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments) },
+                finishReason: "tool_calls", generatedTokens: 20, request: request))
+        }
+    }
+
+    func testFunctionXMLQwenGrammarKeepsRootEnumStringsTheSchemaDoesNotDeclareAsJSON() throws {
+        // The parser would read an undeclared raw `1` back as the integer 1.
+        let parameters = JSONValue.object(["type": .string("object"), "enum": .array([.object(["mode": .string("1")])])])
+        let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: .qwen,
+                                                qwenCallFormat: .functionXML).compile()
+        let xml = templateCall("f", [("mode", "1")])
+        XCTAssertFalse(dfa.transition(state: 0, bytes: Array(xml.utf8)).map { dfa.accepting(state: $0) } ?? false)
+        let json = #"<tool_call>{"name":"f","arguments":{"mode":"1"}}</tool_call>"#
+        XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(json.utf8)))))
+        let calls = try ToolCallParser.parseGuaranteedToolCalls(json, schemas: ["f": parameters])
+        XCTAssertEqual(try StrictJSONParser.parse(XCTUnwrap(calls.first).arguments), .object(["mode": .string("1")]))
+    }
+
+    func testFunctionXMLQwenGrammarKeepsTheJSONEnvelopeForMarkupLiterals() throws {
+        let schemas: [JSONValue] = [
+            .object(["type": .string("object"), "properties": .object(["op": .object(["enum": .array([.string("a</parameter>b")])])])]),
+            .object(["type": .string("object"), "properties": .object(["tags": .object(["type": .string("array"),
+                "items": .object(["type": .string("string"), "enum": .array([.string("<tool_call>")])])])])]),
+            .object(["type": .string("object"), "properties": .object(["o": .object(["type": .string("object"),
+                "properties": .object(["</parameter>": .object(["type": .string("integer")])])])])]),
+        ]
+        for parameters in schemas {
+            let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: .qwen,
+                                                    qwenCallFormat: .functionXML).compile()
+            let opener = Array("<tool_call>\n<function=f>".utf8)
+            XCTAssertNil(dfa.transition(state: 0, bytes: opener), "\(parameters)")
+            XCTAssertNotNil(dfa.transition(state: 0, bytes: Array(#"<tool_call>{"name":"f","arguments":"#.utf8)))
+        }
+    }
+
+    func testFunctionXMLToolSetsTooLargeForTheAutomatonStillCompileAsTheJSONEnvelope() throws {
+        // Five ordinary tools of three string parameters: the envelope fits the default
+        // state limit and function-XML does not, so `GrammarConstraintState.prepare`
+        // falls back to the envelope for them.
+        let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
+            "path": .object(["type": .string("string")]), "content": .object(["type": .string("string")]),
+            "query": .object(["type": .string("string")]),
+        ])])
+        let names = ["read_file", "write_file", "list_dir", "run_command", "search"]
+        func grammar(_ format: ToolSelectionPolicy.CallFormat) -> ByteGrammar {
+            .choice(names.map { GrammarTemplates.toolCall(name: $0, parameters: parameters, family: .qwen, qwenCallFormat: format) })
+        }
+        XCTAssertNoThrow(try grammar(.jsonEnvelope).compile())
+        XCTAssertThrowsError(try grammar(.functionXML).compile())
+    }
+
+    func testFunctionXMLQwenGrammarKeepsTheJSONEnvelopeForKeysItCannotTag() throws {
+        let parameters = JSONValue.object(["type": .string("object"), "properties": .object([
+            "file.path": .object(["type": .string("string")]),
+        ])])
+        let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: .qwen,
+                                                qwenCallFormat: .functionXML).compile()
+        let json = #"<tool_call>{"name":"f","arguments":{"file.path":"/etc/hosts"}}</tool_call>"#
+        XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(json.utf8)))))
+        let calls = try ToolCallParser.parseGuaranteedToolCalls(json, schemas: ["f": parameters])
+        XCTAssertEqual(calls.first?.functionName, "f")
+    }
+
+    func testFunctionXMLQwenConstraintAdmitsTheTemplateTokensOnly() throws {
+        // Synthetic byte vocabulary plus the Qwen `<tool_call>` control token.
+        var tokens: [Int: [UInt8]] = [:]
+        for byte in 0...255 { tokens[byte] = [UInt8(byte)] }
+        let callOpen = 300, eos = 301
+        tokens[callOpen] = Array("<tool_call>".utf8)
+        tokens[eos] = Array("<|im_end|>".utf8)
+        let request = try guaranteedRequest("required")
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+        let grammar = try XCTUnwrap(GrammarTemplates.grammar(
+            for: request, traits: request.outputTraits, qwenCallFormat: .functionXML))
+        func replay(_ text: String) throws -> GrammarConstraintState {
+            let state = try GrammarConstraintState(grammar: grammar, tokens: tokens, eosTokenIDs: [eos])
+            state.didSample(token: callOpen)
+            for byte in text.dropFirst("<tool_call>".count).utf8 { state.didSample(token: Int(byte)) }
+            state.didSample(token: eos)
+            return state
+        }
+        XCTAssertNoThrow(try replay(templateCall()).validate())
+        XCTAssertThrowsError(try replay(#"<tool_call>{"name":"read_file","arguments":{"path":"/etc/hosts"}}</tool_call>"#).validate())
+    }
 }

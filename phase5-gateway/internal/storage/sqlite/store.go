@@ -4169,6 +4169,8 @@ func validDemandModelID(model string) bool {
 		"minimaxai/minimax-m3.1-flash-abliterated",
 		"minimax/minimax-m3.1-flash-abliterated",
 		"deepseek/deepseek-v4-flash",
+		"deepseek/deepseek-v4-flash-abliterated",
+		"qwen/qwen3.8-flash-next-abliterated",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",
 		"mlx-community/gpt-oss-120b-4bit",
@@ -4202,7 +4204,9 @@ func validDemandModelID(model string) bool {
 		"LiquidAI/LFM3-1.7B-MLX-8bit",
 		"mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
 		"aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
-		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX":
+		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+		"aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
+		"latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp":
 		return true
 	default:
 		return false

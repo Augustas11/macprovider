@@ -25,6 +25,31 @@
       "primary_artifact_id": "mlx-mxfp4",
       "rate_class": "class-120b-moe"
     },
+    "deepseek/deepseek-v4-flash-abliterated": {
+      "artifacts": {
+        "mlx-mxfp4": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "c4373972754de5f271744dfcb0a98cd156a4200802a87b8e23344f8be78a6478",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 195,
+          "notes": "DeepSeek-V4-Flash-0731 abliterated (#2452): the abliterated weights of prem-research/DeepSeek-V4-Flash-0731-abliterated at 457210de spliced into the served layout of TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX at d6be051a (the deepseek/deepseek-v4-flash artifact). 320 of 31,450 tensors differ from the base, all in the steered modules of layers 17-36, each transplanted with numeric check error 0.0; every other tensor and file is byte-identical to the base except the model card (scripts/lab/ablit-perf/job-dsv4-abliterated.sh). Same quantization (routed experts MXFP4 g32, attention and shared experts MXFP8) and the same native Swift deepseek_v4 engine as the base row. min_ram_gb = 195, the base row's figure (165 GB measured native peak at 32k + 26 GB SPEC-048-R012 floor + 4 GB margin); the weights have the base's shapes and dtypes. Snapshot-manifest hash recomputed from the HF tree API at the pinned revision (scripts/catalog-hash-sweep.py algorithm, 62 files). License: MIT (deepseek-ai/DeepSeek-V4-Flash-0731, TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX and prem-research/DeepSeek-V4-Flash-0731-abliterated).",
+          "quantization": "mxfp4-experts-mxfp8-attention-g32",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 167094762550,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
+            "revision": "93580c7832b77d6ed29dece0dfb026ea91ecd3a4"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-20"
+        }
+      },
+      "primary_artifact_id": "mlx-mxfp4",
+      "rate_class": "class-120b-moe"
+    },
     "google-gemma-4-26b-a4b-it": {
       "artifacts": {
         "mlx-4bit": {

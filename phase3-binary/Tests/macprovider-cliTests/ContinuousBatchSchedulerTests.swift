@@ -48,6 +48,43 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(prefillOrder.first, ["second", "first"])
     }
 
+    func testLabRequestFenceNamesItsRowsInIndexOrder() {
+        XCTAssertEqual(LabRequestFence.composition(forRequestID: "labfence-ab12-3-2"),
+                       ["labfence-ab12-3-0", "labfence-ab12-3-1", "labfence-ab12-3-2"])
+        XCTAssertEqual(LabRequestFence.composition(forRequestID: "labfence-x-1-0"), ["labfence-x-1-0"])
+        for id in ["labfence-ab-3-3", "labfence-ab-0-0", "labfence-ab-65-0", "labfence--3-0", "labfence-a_b-3-0",
+                   "labfence-ab-03-0", "labfence-ab-3-01", "labfence-ab-3", "labfence-ab-3-0-1", "fence-ab-3-0",
+                   "labfence-ab-+3-0", "labfence-ab-3-٣", String(repeating: "a", count: 4)] {
+            XCTAssertNil(LabRequestFence.composition(forRequestID: id), id)
+        }
+    }
+
+    /// #2448: rows of a request-named fence that arrive out of order are held
+    /// until all are queued, then prefill and decode in index order.
+    func testLabRequestFenceHoldsRowsAndOrdersAdmissionByIndex() async throws {
+        let ids = (0 ..< 3).map { "labfence-t1-3-\($0)" }
+        let backend = ScriptedBackend(scripts: Dictionary(uniqueKeysWithValues: ids.map { ($0, [7, 8, 9, 10]) }))
+        let scheduler = try await makeScheduler(maxActiveRows: 3, maxPrefillRowsPerIteration: 3, backend: backend)
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for (queued, id) in [ids[2], ids[0], ids[1]].enumerated() {
+            tasks.append(Task {
+                try await scheduler.submit(.init(id: id, conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 4))
+            })
+            guard queued < 2 else { break }
+            try await eventually { await scheduler.metrics().waitingCount == queued + 1 }
+            let prefills = await backend.prefillCallCount()
+            XCTAssertEqual(prefills, 0, "the pump must stay fenced until every row is queued")
+        }
+        for task in tasks { _ = try await task.value }
+        let prefillOrder = await backend.prefillOrder().flatMap { $0 }
+        XCTAssertEqual(prefillOrder, ids)
+        let decodeBatches = await backend.decodeBatches()
+        XCTAssertTrue(decodeBatches.contains { $0.count == 3 }, "the fenced rows must decode together: \(decodeBatches)")
+        for batch in decodeBatches {
+            XCTAssertEqual(batch, ids.filter(batch.contains), "decode rows must follow the fence order")
+        }
+    }
+
     func testConfigurationHonorsExplicitPrefillTokensPerIterationAndDefault() {
         let snapshot = ContinuousBatchSchedulerSnapshot(
             modelID: Self.modelID,

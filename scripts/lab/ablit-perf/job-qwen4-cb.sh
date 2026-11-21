@@ -48,7 +48,15 @@
 # reference, no compare). SERVE_ENV with MLX_LM_SECTION_TIMING=1 (the #2409 fork's LabSectionTimer,
 # one stderr line per forward) adds section_timing_report.py over the serve's stderr:
 # <run>/qwen4-flash-next-cb/decode-profile.{md,json}, the per-row decode cost by section at the
-# CB_ROWS row counts (its header has the definitions). CB_JOB_CHECK=1:
+# CB_ROWS row counts (its header has the definitions). CB_PASS (default main): the pass name, so
+# one run can hold several grids: results go to <run>/qwen4-flash-next-cb/<CB_PASS>/ and the
+# self-check copy to .../cb-self-check-<CB_PASS>.json (main keeps cb-self-check.json).
+# SEED_SELF_CHECK_FILE: a cb-self-check.json path that seeds the serve (wins over
+# SEED_SELF_CHECK_RUN; job-qwen4-exactness.sh seeds its second pass from its first).
+# LAB_FENCE=1 (#2448): the client sends each trial's rows as one request-named admission fence
+# (run-grid.sh --lab-fence; this lab-harness build admits them in row order once all are queued);
+# the job then requires one `event=lab_request_fence installed=true` serve line per fenced trial
+# (PASS_FENCE line). CB_JOB_CHECK=1:
 # validate the knobs, print the run-grid argv and exit 0 before touching anything (the unit test).
 # Every failure prints `BLOCKER:`; the job ends with JOB_PASS (exit 0) or JOB_FAIL (nonzero). A cell
 # slower than the reference, or a text/token difference run-grid.sh reports as rc 1, is a finding:
@@ -62,7 +70,8 @@ SRC=$LAB/src/phase3-binary
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 NAME=qwen4-flash-next-cb
 RES=$LAB/results/$RUN_ID
-OUT=$RES/$NAME/main
+CB_PASS=${CB_PASS:-main}
+OUT=$RES/$NAME/$CB_PASS
 QWEN4_REPO=${QWEN4_REPO:-latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp}
 QWEN4_REVISION=${QWEN4_REVISION:-65b0cd66046e41b63fb565466c5a52a6295a7592}
 QWEN4_PATH=${QWEN4_PATH:-$LAB/models/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp}
@@ -76,6 +85,10 @@ OUTPUTS=${OUTPUTS:-512}
 TRIALS=${TRIALS:-3}
 REF_PREFILL_BATCH_SIZE=${REF_PREFILL_BATCH_SIZE:-}
 SEED_SELF_CHECK_RUN=${SEED_SELF_CHECK_RUN:-}
+SEED_SELF_CHECK_FILE=${SEED_SELF_CHECK_FILE:-}
+[ -n "$SEED_SELF_CHECK_FILE" ] || [ -z "$SEED_SELF_CHECK_RUN" ] \
+  || SEED_SELF_CHECK_FILE=$LAB/results/$SEED_SELF_CHECK_RUN/$NAME/main/serve/cb-self-check.json
+LAB_FENCE=${LAB_FENCE:-0}
 SERVE_ENV=${SERVE_ENV:-}
 SKIP_REFERENCE=${SKIP_REFERENCE:-0}
 MLX_LM_COMMIT=c4c9c762cc797fd979fc98645f5db5112753bbe9
@@ -104,6 +117,8 @@ case "$REF_PREFILL_BATCH_SIZE" in ""|[1-9]|[1-9][0-9]) ;; *) die "REF_PREFILL_BA
 [ -z "$SEED_SELF_CHECK_RUN" ] || echo "$SEED_SELF_CHECK_RUN" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "SEED_SELF_CHECK_RUN=$SEED_SELF_CHECK_RUN is not a run id" 64
 [ -z "$QWEN4_SHA256" ] || echo "$QWEN4_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "QWEN4_SHA256=$QWEN4_SHA256 is not a lowercase sha256" 64
 case "$SKIP_REFERENCE" in 0|1) ;; *) die "SKIP_REFERENCE=$SKIP_REFERENCE must be 0 or 1" 64 ;; esac
+case "$LAB_FENCE" in 0|1) ;; *) die "LAB_FENCE=$LAB_FENCE must be 0 or 1" 64 ;; esac
+echo "$CB_PASS" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || die "CB_PASS=$CB_PASS must be a short lowercase name" 64
 echo "$SERVE_ENV" | grep -Eq '^([A-Za-z_][A-Za-z0-9_]*=[^ ]*( |$))*$' || die "SERVE_ENV=$SERVE_ENV must be space-separated K=V pairs" 64
 echo "$QWEN4_ID" | grep -Eq '^[a-z0-9._-]+/[a-z0-9._-]+$' || die "QWEN4_ID=$QWEN4_ID is not a lowercase org/name id" 64
 
@@ -120,7 +135,8 @@ grid_args() {
     [ -z "$REF_PREFILL_BATCH_SIZE" ] || GARGS+=(--ref-arg --prefill-batch-size --ref-arg "$REF_PREFILL_BATCH_SIZE")
   fi
   [ -z "$SERVE_ENV" ] || GARGS+=(--serve-env "$SERVE_ENV")
-  [ -z "$SEED_SELF_CHECK_RUN" ] || GARGS+=(--seed-self-check "$LAB/results/$SEED_SELF_CHECK_RUN/$NAME/main/serve/cb-self-check.json")
+  [ -z "$SEED_SELF_CHECK_FILE" ] || GARGS+=(--seed-self-check "$SEED_SELF_CHECK_FILE")
+  [ "$LAB_FENCE" = 0 ] || GARGS+=(--lab-fence)
 }
 if [ "${CB_JOB_CHECK:-0}" = 1 ]; then
   grid_args
@@ -130,13 +146,12 @@ if [ "${CB_JOB_CHECK:-0}" = 1 ]; then
 fi
 
 mkdir -p "$OUT/serve"
-log "JOB_START qwen4-cb run=$RUN_ID commit=${COMMIT:-unknown} model=$QWEN4_PATH fork=$FORK rows=$CB_ROWS slots=$CB_SLOTS contexts=$CONTEXTS outputs=$OUTPUTS trials=$TRIALS${SEED_SELF_CHECK_RUN:+ seed=$SEED_SELF_CHECK_RUN}${SERVE_ENV:+ serve_env=$SERVE_ENV} skip_reference=$SKIP_REFERENCE"
+log "JOB_START qwen4-cb run=$RUN_ID pass=$CB_PASS commit=${COMMIT:-unknown} model=$QWEN4_PATH fork=$FORK rows=$CB_ROWS slots=$CB_SLOTS contexts=$CONTEXTS outputs=$OUTPUTS trials=$TRIALS${SEED_SELF_CHECK_FILE:+ seed=$SEED_SELF_CHECK_FILE}${SERVE_ENV:+ serve_env=$SERVE_ENV} skip_reference=$SKIP_REFERENCE lab_fence=$LAB_FENCE"
 if lsof -nP -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1; then die "a server listens on :8080; the Studio is not paused" 3; fi
 launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null 2>&1 && die "live.malibu.provider is loaded" 3
 pgrep -f "[m]acprovider-cli serve" >/dev/null 2>&1 && die "a macprovider-cli serve process runs" 3
-if [ -n "$SEED_SELF_CHECK_RUN" ]; then
-  [ -s "$LAB/results/$SEED_SELF_CHECK_RUN/$NAME/main/serve/cb-self-check.json" ] \
-    || die "SEED_SELF_CHECK_RUN: no cb-self-check.json at $LAB/results/$SEED_SELF_CHECK_RUN/$NAME/main/serve" 11
+if [ -n "$SEED_SELF_CHECK_FILE" ]; then
+  [ -s "$SEED_SELF_CHECK_FILE" ] || die "no seed self-check verdict at $SEED_SELF_CHECK_FILE (SEED_SELF_CHECK_RUN / SEED_SELF_CHECK_FILE)" 11
 fi
 
 # 1. Stage, before any GPU work.
@@ -228,8 +243,10 @@ grep -q '^ROUTE_FAIL ' "$OUT/run.log" && [ $rc != 10 ] && blocker "ROUTE_FAIL: $
 [ "${PIPESTATUS[0]}" = 0 ] || blocker "the computed CB tuple does not match the serve's runtime identity: $(cut -c1-400 "$RES/$NAME/cb-tuple-check.txt")"
 grep -m1 'event=inference_error' "$OUT/serve/serve.err" | cut -c1-400 | sed 's/^/INFERENCE_ERROR /'
 if [ -s "$OUT/serve/cb-self-check.json" ]; then
-  cp "$OUT/serve/cb-self-check.json" "$RES/$NAME/cb-self-check.json"
-  /usr/bin/python3 -I - "$RES/$NAME/cb-self-check.json" <<'PY' | sed 's/^/CB_SELF_CHECK /'
+  SC_COPY=$RES/$NAME/cb-self-check.json
+  [ "$CB_PASS" = main ] || SC_COPY=$RES/$NAME/cb-self-check-$CB_PASS.json
+  cp "$OUT/serve/cb-self-check.json" "$SC_COPY"
+  /usr/bin/python3 -I - "$SC_COPY" <<'PY' | sed 's/^/CB_SELF_CHECK /'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -251,6 +268,11 @@ else
   blocker "no grid.json in $OUT"
 fi
 [ -s "$OUT/provider.jsonl" ] || blocker "provider.jsonl missing or empty in $OUT"
+if [ "$LAB_FENCE" = 1 ] && [ -s "$OUT/provider.jsonl" ]; then
+  /usr/bin/python3 -I "$JOB/ablit-perf/cb_determinism.py" fences --provider "$OUT/provider.jsonl" \
+    --serve-err "$OUT/serve/serve.err" | tee "$OUT/fences.txt"
+  [ "${PIPESTATUS[0]}" = 0 ] || blocker "a fenced trial was not admitted as one fence: $(tail -n 1 "$OUT/fences.txt" | cut -c1-300)"
+fi
 [ "$SKIP_REFERENCE" = 1 ] || [ -s "$OUT/reference.jsonl" ] || blocker "reference.jsonl missing or empty in $OUT"
 
 # 5. Section timing: the per-row decode cost by section.

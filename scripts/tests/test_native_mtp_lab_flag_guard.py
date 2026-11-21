@@ -33,6 +33,7 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-profile.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-step-gate.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-cb.sh",
+    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-listing.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen-mtp-cap.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-wide-prefill.sh",
 }
@@ -81,6 +82,10 @@ LAB_HOOK_SYMBOLS = (
     "readLabStaticFeedOverride",
     "labStaticFeedOriginKey",
     "labNativeMTPSourceCommit",
+    # #2448: request-named admission fences (LabRequestFence.swift) exist only in lab builds.
+    "LabRequestFence",
+    "installLabRequestFenceIfNamed",
+    "labBatchCompositionOrdersAdmission",
 )
 
 

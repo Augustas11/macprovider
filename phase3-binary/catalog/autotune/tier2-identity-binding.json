@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "146a9e14ae80ecd9612ab6153ed9cf10bb5967ea118faafa5cb7d025951e8d2e",
-  "generated_at": "2026-11-20T02:00:00Z",
+  "autotune_candidates_sha256": "c4f7b3681e20f887ed533192da6cd536475124cab482cd013923cc028b541650",
+  "generated_at": "2026-11-20T09:45:00Z",
   "models": [
+    {
+      "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
+      "min_ram_gb": 195,
+      "model_id": "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
+      "model_revision": "93580c7832b77d6ed29dece0dfb026ea91ecd3a4",
+      "sha256": "c4373972754de5f271744dfcb0a98cd156a4200802a87b8e23344f8be78a6478"
+    },
     {
       "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
       "min_ram_gb": 230,
@@ -200,6 +207,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-20-qwen38-27b-mtp-cap-32k-v289",
+  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

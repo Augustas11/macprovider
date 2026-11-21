@@ -22,6 +22,8 @@ func TestNormalizeModelKeyMatchesCoordinatorAliases(t *testing.T) {
 		"nemotron-3.5-bolt-74b-a9b":                {"nvidia/nemotron-3.5-bolt-74b-a9b", "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B", "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"},
 		"openai/gpt-oss-20b":                       {"openai/gpt-oss-20b", "mlx-community/gpt-oss-20b-MXFP4-Q8"},
 		"deepseek/deepseek-v4-flash":               {"deepseek/deepseek-v4-flash", "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"},
+		"deepseek/deepseek-v4-flash-abliterated":   {"deepseek/deepseek-v4-flash-abliterated", "DeepSeek/DeepSeek-V4-Flash-Abliterated", "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated"},
+		"qwen3.8-flash-next-abliterated":           {"qwen/qwen3.8-flash-next-abliterated", "Qwen/Qwen3.8-Flash-Next-Abliterated", "qwen3.8-flash-next-abliterated", "latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp"},
 	} {
 		for _, spelling := range spellings {
 			if got := NormalizeModelKey(spelling); got != want {

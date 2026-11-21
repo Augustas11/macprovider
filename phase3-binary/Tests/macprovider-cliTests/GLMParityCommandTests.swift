@@ -47,6 +47,7 @@ final class GLMParityCommandTests: XCTestCase {
         XCTAssertEqual(comparison.top1Agreement, 2)
         XCTAssertEqual(comparison.maxAbsLogitDiffPerStep, [0, 0.25, 0.75])
         XCTAssertEqual(comparison.maxAbsLogitDiff, 0.75)
+        XCTAssertEqual(comparison.gatheredLogits, [[10, 9], [8.25, 7], [5.5, 5.75]])
     }
 
     func testExactRunHasNoDivergenceAndComparesOnlyDecodedTokens() {
