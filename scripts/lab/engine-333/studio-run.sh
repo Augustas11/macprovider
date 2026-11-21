@@ -32,7 +32,6 @@ SPECS=(
   "qwen36-35b-a3b-mtp|mlx-community--Qwen3.6-35B-A3B-MTP-4bit|on"
   "qwen38-27b-mtp|mlx-community--Qwen3.8-27B-MTP-4bit|on"
   "glm53-flash-live|Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2|on"
-  "dsv4-flash|TensorFold--DeepSeek-V4-Flash-0731-MXFP4-MLX|"
   "gemma4-26b-a4b|mlx-community--gemma-4-26b-a4b-it-4bit|"
   "gpt-oss-20b|mlx-community--gpt-oss-20b-MXFP4-Q8|"
   "nemotron3-nano|mlx-community--Nemotron-3-Nano-30B-A3B-4bit|"
