@@ -1900,12 +1900,16 @@ func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 		"ricursiveai/ripple-65b-preview", "frogggias/Ripple-65B-Preview-MLX-4bit",
 		"liquidai/lfm3-1.7b", "LiquidAI/LFM3-1.7B-MLX-4bit", "LiquidAI/LFM3-1.7B-MLX-8bit",
 		"minimaxai/minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
-		"minimaxai/minimax-m3.1-flash-abliterated", "minimax/minimax-m3.1-flash-abliterated", "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated"} {
+		"minimaxai/minimax-m3.1-flash-abliterated", "minimax/minimax-m3.1-flash-abliterated", "aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated",
+		"deepseek/deepseek-v4-flash-abliterated", "qwen/qwen3.8-flash-next-abliterated", "latent-variable/Qwen3.8-Flash-Next-heretic-2-oQ4e-mtp",
+		"aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated"} {
 		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
 			t.Errorf("%q must be a known demand model id", model)
 		}
 	}
-	for _, model := range []string{"z-ai/glm-5.3-flashx", "zai-org/glm-5.3", "glm-5.3-flash", "jundot/glm-5.3-flash-oq4e-mtp"} {
+	for _, model := range []string{"z-ai/glm-5.3-flashx", "zai-org/glm-5.3", "glm-5.3-flash", "jundot/glm-5.3-flash-oq4e-mtp",
+		"deepseek/deepseek-v4-flash-abliteratedx", "latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp",
+		"aug11/deepseek-v4-flash-0731-mxfp4-mlx-abliterated"} {
 		if validDemandModelID(model) {
 			t.Errorf("%q must not be a known demand model id", model)
 		}

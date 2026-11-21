@@ -193,6 +193,15 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         format == .xmlFunction || format == .qwen35
     }
 
+    /// The call form a guaranteed Qwen-family selection is constrained to:
+    /// the form the loaded template prompts, so the forced call stays on the
+    /// model's own distribution. Function-XML templates (Qwen3.5/3.6/3.8,
+    /// Qwen3-Coder) get function-XML; JSON templates and an unknown format
+    /// keep the JSON envelope.
+    static func guaranteedQwenCallFormat(_ format: ToolCallFormat?) -> ToolSelectionPolicy.CallFormat {
+        promptsFunctionXMLHeader(format) ? .functionXML : .jsonEnvelope
+    }
+
     static func isRequired(_ request: ChatCompletionRequest) -> Bool {
         if case .text = request.responseFormat {
             return (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
@@ -215,10 +224,22 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
                         guardsDeclaredFunctions: Bool = false) throws -> GrammarConstraintState? {
         do {
             if isRequired(request) {
-                guard let language = try GrammarTemplates.grammar(for: request, traits: request.outputTraits) else { return nil }
-                return try prepareChecked(
-                    grammar: .sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language]), request: request,
-                    tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: nil)
+                func constrained(_ format: ToolSelectionPolicy.CallFormat) throws -> GrammarConstraintState? {
+                    guard let language = try GrammarTemplates.grammar(
+                        for: request, traits: request.outputTraits, qwenCallFormat: format) else { return nil }
+                    return try prepareChecked(
+                        grammar: .sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language]), request: request,
+                        tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: nil)
+                }
+                let format = guaranteedQwenCallFormat(configuration.toolCallFormat)
+                guard format == .functionXML else { return try constrained(format) }
+                do { return try constrained(format) }
+                catch let error as APIError where error.code == "unsupported_output_grammar" {
+                    // Function-XML spends about twice the automaton states per tool of the
+                    // JSON envelope; a tool set it cannot fit keeps the envelope, which the
+                    // guaranteed parser also reads, instead of failing a request main served.
+                    return try constrained(.jsonEnvelope)
+                }
             }
         } catch let error as APIError { throw error }
         catch { throw Compiled.error("Unable to prepare the local tokenizer for constrained output") }

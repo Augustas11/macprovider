@@ -137,4 +137,28 @@ final class Qwen38OfficialTemplateTests: XCTestCase {
             XCTAssertFalse(messages.contains { ($0["reasoning_content"] as? String) == "PRESERVED_TOOL_REASONING" })
         }
     }
+
+    /// A guaranteed selection on a function-XML template is constrained to the
+    /// call exactly as this template renders one (Qwen3.8-Flash-Next lab serve,
+    /// 2026-11-20: the JSON envelope it was forced into failed 3 of 6 samples).
+    func testGuaranteedGrammarAcceptsTheTemplateRenderedCall() throws {
+        let rendered = try render(input(request(history: true)))
+        // The history turn's call, not the system prompt's format example.
+        let start = try XCTUnwrap(rendered.range(of: "<tool_call>\n<function=lookup>"))
+        let end = try XCTUnwrap(rendered.range(of: "</tool_call>", range: start.upperBound..<rendered.endIndex))
+        let call = String(rendered[start.lowerBound..<end.upperBound])
+        let guaranteed = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": Self.officialModel, "max_tokens": 64, "tool_choice": "required",
+            "messages": [["role": "user", "content": "Look up Paris."]],
+            "tools": [["type": "function", "function": [
+                "name": "lookup", "parameters": ["type": "object", "properties": ["city": ["type": "string"]]],
+            ]]],
+        ] as [String: Any]))
+        let format = GrammarConstraintState.guaranteedQwenCallFormat(
+            ToolCallFormat.inferred(fromChatTemplate: try String(contentsOf: Self.templateURL, encoding: .utf8)))
+        XCTAssertEqual(format, .functionXML)
+        let dfa = try XCTUnwrap(GrammarTemplates.grammar(
+            for: guaranteed, traits: RequestOutputTraits(toolGrammar: .qwen), qwenCallFormat: format)).compile()
+        XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), call)
+    }
 }

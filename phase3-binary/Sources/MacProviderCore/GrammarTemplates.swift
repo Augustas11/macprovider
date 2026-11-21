@@ -3,7 +3,11 @@ import Foundation
 /// Canonical, schema-shaped output languages. Object keys use a stable order;
 /// optional declared fields are emitted too. Values remain model-generated.
 public enum GrammarTemplates {
-    public static func grammar(for request: ChatCompletionRequest, traits: RequestOutputTraits) throws -> ByteGrammar? {
+    /// `qwenCallFormat` is the call form the loaded Qwen-family template
+    /// teaches (`GrammarConstraintState.promptsFunctionXMLHeader`); other
+    /// families ignore it.
+    public static func grammar(for request: ChatCompletionRequest, traits: RequestOutputTraits,
+                               qwenCallFormat: ToolSelectionPolicy.CallFormat = .jsonEnvelope) throws -> ByteGrammar? {
         let family = traits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
         switch request.responseFormat {
         case .jsonSchema(let spec):
@@ -32,20 +36,33 @@ public enum GrammarTemplates {
             return true
         }
         return .choice(names.compactMap { name in
-            schemas[name].map { toolCall(name: name, parameters: $0, family: family) }
+            schemas[name].map { toolCall(name: name, parameters: $0, family: family, qwenCallFormat: qwenCallFormat) }
         })
     }
 
     public static func schema(_ value: JSONValue) -> ByteGrammar { schema(value, depth: 0, gemma: false) }
 
-    public static func toolCall(name: String, parameters: JSONValue, family: ToolCallGrammar) -> ByteGrammar {
+    public static func toolCall(name: String, parameters: JSONValue, family: ToolCallGrammar,
+                                qwenCallFormat: ToolSelectionPolicy.CallFormat = .jsonEnvelope) -> ByteGrammar {
         if case .object(let object) = parameters, object["enum"] != nil {
+            var declared: [String: JSONValue] = [:]
+            if case .object(let properties)? = object["properties"] { declared = properties }
             return .choice(enumCandidates(object).compactMap { value in
                 guard case .object(let fields) = value else { return nil }
+                // The parser types a function-XML value by the buyer's schema, not by
+                // this enum: a string field it does not declare as a string would read
+                // back as a number, boolean or null ("1" -> 1). Those calls keep the
+                // JSON envelope, where the string stays quoted.
+                let stringsDeclared = fields.allSatisfy { key, field in
+                    guard case .string = field else { return true }
+                    if case .object(let details)? = declared[key] { return details["type"] == .string("string") }
+                    return false
+                }
+                let format = stringsDeclared ? qwenCallFormat : .jsonEnvelope
                 let properties = fields.mapValues { literalSchema($0) }
                 let exactObject = JSONValue.object(["type": .string("object"), "properties": .object(properties),
                     "required": .array(fields.keys.sorted().map(JSONValue.string)), "additionalProperties": .bool(false)])
-                return toolCall(name: name, parameters: exactObject, family: family)
+                return toolCall(name: name, parameters: exactObject, family: family, qwenCallFormat: format)
             })
         }
         // Unsupported top-level keywords must never widen a function's
@@ -53,6 +70,26 @@ public enum GrammarTemplates {
         let parameters = canonicalToolObject(parameters)
         let arguments = schema(parameters)
         switch family {
+        case .qwen where qwenCallFormat == .functionXML && functionXMLExpresses(parameters):
+            // The call exactly as a function-XML Qwen template (Qwen3.5/3.6/
+            // 3.8, Qwen3-Coder) renders one, which is what its model was trained
+            // to write: a forced JSON envelope is off-distribution for it and
+            // can run a value to the token budget. String values are raw text;
+            // other values are JSON, as `ToolCallParser.guaranteedFunctionXMLCall`
+            // reads them.
+            var parts: [ByteGrammar] = [.literal("<tool_call>\n<function=" + name + ">\n")]
+            if case .object(let object) = parameters, case .object(let properties)? = object["properties"] {
+                for key in properties.keys.sorted() {
+                    let property = properties[key]!
+                    var rawString = false
+                    if case .object(let details) = property { rawString = details["type"] == .string("string") }
+                    parts += [.literal("<parameter=" + key + ">\n"),
+                              rawString ? rawStringGrammar(property, multiline: true) : schema(property),
+                              .literal("\n</parameter>\n")]
+                }
+            }
+            parts.append(.literal("</function>\n</tool_call>"))
+            return .sequence(parts)
         case .qwen:
             return .sequence([.literal("<tool_call>{\"name\":" + quoted(name) + ",\"arguments\":"), arguments, .literal("}</tool_call>")])
         case .llama3:
@@ -230,11 +267,63 @@ public enum GrammarTemplates {
         }
     }
 
-    private static func rawStringGrammar(_ property: JSONValue) -> ByteGrammar {
+    private static func rawStringGrammar(_ property: JSONValue, multiline: Bool = false) -> ByteGrammar {
         if case .object(let details) = property, details["enum"] != nil {
             return .choice(enumCandidates(details).compactMap { if case .string(let text) = $0 { return .literal(text) }; return nil })
         }
-        return rawText
+        return multiline ? rawMultilineText : rawText
+    }
+
+    /// Whether every argument of a canonical tool object can be written as a
+    /// function-XML `<parameter=KEY>`: a key the parser admits
+    /// (`[A-Za-z0-9_-]{1,128}`) and no raw enum string holding `<` or a CR
+    /// (see `rawMultilineText`). Anything
+    /// else keeps the JSON envelope, which the guaranteed parser also reads.
+    private static func functionXMLExpresses(_ parameters: JSONValue) -> Bool {
+        guard case .object(let object) = parameters else { return false }
+        guard case .object(let properties)? = object["properties"] else { return true }
+        return properties.allSatisfy { key, property in
+            guard (1...128).contains(key.utf8.count), key.utf8.allSatisfy({
+                (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45
+            }) else { return false }
+            // A literal or nested key carrying `<` could close or open call markup inside a
+            // JSON value, which the parser then cuts at; those tools keep the JSON envelope.
+            guard !schemaLiteralsHaveMarkup(property) else { return false }
+            guard case .object(let details) = property, details["type"] == .string("string"),
+                  details["enum"] != nil else { return true }
+            return enumCandidates(details).allSatisfy {
+                if case .string(let text) = $0 { return !text.contains("<") && !text.unicodeScalars.contains("\r") }
+                return true
+            }
+        }
+    }
+
+    /// True when an `enum`/`const` literal or a nested property key anywhere in the schema
+    /// contains `<` or CR. Annotation keywords (`description`, `title`, ...) are never generated.
+    private static func schemaLiteralsHaveMarkup(_ schema: JSONValue) -> Bool {
+        func literal(_ value: JSONValue) -> Bool {
+            switch value {
+            case .string(let text): return text.contains("<") || text.unicodeScalars.contains("\r")
+            case .array(let items): return items.contains(where: literal)
+            case .object(let fields): return fields.contains { literal(.string($0.key)) || literal($0.value) }
+            default: return false
+            }
+        }
+        switch schema {
+        case .array(let items): return items.contains(where: schemaLiteralsHaveMarkup)
+        case .object(let object):
+            return object.contains { key, value in
+                switch key {
+                case "enum", "const": return literal(value)
+                case "description", "title", "examples", "default", "pattern", "$comment": return false
+                case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+                    guard case .object(let named) = value else { return schemaLiteralsHaveMarkup(value) }
+                    return named.contains { literal(.string($0.key)) || schemaLiteralsHaveMarkup($0.value) }
+                default: return schemaLiteralsHaveMarkup(value)
+                }
+            }
+        default: return false
+        }
     }
 
     private static let digits = ByteGrammar.bytes(Set("0123456789".utf8))
@@ -262,6 +351,24 @@ public enum GrammarTemplates {
     ])), .literal("\"")])
     private static let hex = ByteGrammar.bytes(Set("0123456789abcdefABCDEF".utf8))
     private static let rawText = ByteGrammar.zeroOrMore(.bytes(Set(UInt8(32)...UInt8(126)).subtracting([60])))
+    /// Function-XML string values: like `rawText` plus tab, newline and
+    /// well-formed multi-byte UTF-8, since the value has no escape syntax.
+    /// No CR: the parser drops one trailing line break as a Character, and a
+    /// CR before the closing newline would merge with it.
+    private static let rawMultilineText: ByteGrammar = {
+        let tail = ByteGrammar.bytes(Set(UInt8(0x80)...UInt8(0xBF)))
+        func range(_ low: UInt8, _ high: UInt8) -> ByteGrammar { .bytes(Set(low...high)) }
+        return .zeroOrMore(.choice([
+            .bytes(Set(UInt8(32)...UInt8(126)).subtracting([60]).union([9, 10])),
+            .sequence([range(0xC2, 0xDF), tail]),
+            .sequence([range(0xE0, 0xE0), range(0xA0, 0xBF), tail]),
+            .sequence([.bytes(Set(UInt8(0xE1)...UInt8(0xEC)).union([0xEE, 0xEF])), tail, tail]),
+            .sequence([range(0xED, 0xED), range(0x80, 0x9F), tail]),
+            .sequence([range(0xF0, 0xF0), range(0x90, 0xBF), tail, tail]),
+            .sequence([range(0xF1, 0xF3), tail, tail, tail]),
+            .sequence([range(0xF4, 0xF4), range(0x80, 0x8F), tail, tail]),
+        ]))
+    }()
     private static func quoted(_ value: String) -> String { (try? JSONValue.string(value).deterministicJSONString()) ?? "\"\"" }
 
     private static func schema(_ value: JSONValue, depth: Int, gemma: Bool) -> ByteGrammar {

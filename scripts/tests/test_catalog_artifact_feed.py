@@ -697,6 +697,12 @@ class RateCardSourceTest(unittest.TestCase):
         # stays at the cold-start floor and it never outranks the base row.
         self.assertLess(demand["zai-org/glm-5.3-flash-uncensored"]["demand_weight"],
                         demand["zai-org/glm-5.3-flash"]["demand_weight"])
+        # #2452: the abliterated DeepSeek V4-Flash build is recommendable at the
+        # cold-start floor, so it never outranks the base row.
+        self.assertIn("deepseek/deepseek-v4-flash-abliterated", recommendable)
+        self.assertEqual(demand["deepseek/deepseek-v4-flash-abliterated"]["demand_weight"], 0.15)
+        self.assertLessEqual(demand["deepseek/deepseek-v4-flash-abliterated"]["demand_weight"],
+                             demand["deepseek/deepseek-v4-flash"]["demand_weight"])
         # #2189: MiniMax M3.1-Flash is recommendable at its class-120b-moe
         # class rate, with its demand weight at the cold-start floor.
         for key, rate_class in CLASS_ONLY_RECOMMENDABLE.items():

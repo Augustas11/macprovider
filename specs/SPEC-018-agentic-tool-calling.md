@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.18 (2026-11-13, MiniMax M3 tool-call grammar and adaptive `<mm:think>` reasoning split; Related: #2189)
+**Version:** 0.3.19 (2026-11-21, guaranteed tool choice on function-XML Qwen templates uses the template's own call form; Related: #2452)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,15 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.19 (2026-11-21, Related: #2452):** §3.11 conformance. When
+  `tool_choice` is `required` or names a function and the loaded template's
+  call format is function-XML (`xml_function`, `qwen3_5`), the guaranteed
+  call is constrained to that template's own `<tool_call><function=NAME>`
+  `<parameter=KEY>VALUE</parameter>` form instead of the JSON envelope, as
+  §3.11 already requires ("the loaded template selects the actual wrapper
+  grammar"). Under the constraint a raw string value cannot contain `<` or
+  CR; a schema whose keys or enum strings the form cannot express falls back
+  to the JSON envelope. Parsing is unchanged.
 - **v0.3.18 (2026-11-13, Related: #2189):** §3.1 adds the `minimax` grammar
   (MiniMax M3 / M3.1, `MiniMaxAI/MiniMax-M3.1-Flash` `chat_template.jinja`):
   `]<]minimax[>[<tool_call>` wrappers holding `]<]minimax[>[<invoke

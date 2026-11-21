@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-15-minimax-m3.1-flash-abliterated-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-20-deepseek-v4-flash-abliterated-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-15T16:55:00Z",
+  "issued_at": "2026-11-20T09:30:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -10,6 +10,15 @@
       "min_ram_gb": 195,
       "notes": "Buyer-serving candidate deepseek/deepseek-v4-flash (campaign #2111 native deepseek_v4 engine); identity from signed SPEC-023 row.",
       "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
+      "min_ram_gb": 195,
+      "notes": "Buyer-serving candidate deepseek/deepseek-v4-flash-abliterated (#2452 abliterated DeepSeek V4-Flash, native deepseek_v4 engine, listed); identity from signed SPEC-023 row.",
+      "sha256": "c4373972754de5f271744dfcb0a98cd156a4200802a87b8e23344f8be78a6478",
       "source": "operator-curated"
     },
     {
@@ -259,7 +268,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "_jeZyJiKwpg9Su1J6V-8cedVLypV1giREzvXdgKFEfdcoZwTyM8Cra8LsHvSj_dOUc5I0zS0DmCHFfC9s6ZUDQ"
+    "sig": "T6_zbGp54-1U3hoJGJSrFMB9tC5J7E6nML2t_p8xUVqRPWzYkn19DPpPL8KxMG-ab-bjljmBTb_X3ptMpFKYAw"
   },
   "version": 1
 }

@@ -16,6 +16,7 @@
 #        MODELS=minimax studio-ablit-perf.sh   one model alone
 #        JOB_SCRIPT=job-dsv4-abliterated.sh studio-ablit-perf.sh   the abliterated DeepSeek V4-Flash
 #          splice and its checks (also copies scripts/lab/dsv4 and glm53_oracle_json.py)
+#          (DSV4_PUBLISH=1 adds the upload after JOB_PASS; DSV4_PUBLISH_ARGS=--dry-run stages only)
 #        FORK_DIR=$HOME/mlx-swift-lm-2409 JOB_SCRIPT=job-qwen4-parity.sh studio-ablit-perf.sh
 #          #2409 qwen4_exp token parity; FORK_DIR is the clean mlx-swift-lm worktree
 #          (campaign/2409-qwen4-exp) with Libraries/MLXLLM/Models/Qwen4Exp.swift committed, rsynced
@@ -43,6 +44,19 @@
 #          OUTPUTS=256 TRIALS=1 SKIP_REFERENCE=1 SERVE_ENV='MLX_LM_SECTION_TIMING=1'; FORK_DIR HEAD must
 #          then hold Libraries/MLXLMCommon/LabSectionTimer.swift (fork branch
 #          campaign/2409-qwen4-exp-batch-labtimer; the pinned engine has no timer).
+#        JOB_SCRIPT=job-qwen4-listing.sh studio-ablit-perf.sh
+#          #2452 step 3: Qwen3.8-Flash-Next pre-listing checks on a lab build of this tree (pinned engine,
+#          no FORK_DIR): serve under the catalog id qwen/qwen3.8-flash-next-abliterated with the snapshot
+#          hash, identity, peak memory at one row at 4k and 32k context with a proposed min_ram_gb, and the
+#          buyer-UX suite (scripts/buyer_ux_conformance.py, copied to job/bux) over loopback (job header).
+#          Knobs: QWEN4_PATH QWEN4_REPO QWEN4_REVISION QWEN4_ID QWEN4_SHA256 MEM_CONTEXTS MEM_OUTPUT
+#          BUX_SAMPLES SKIP_BUILD METALLIB. BUX_EXTRA_MODELS='qwen38-27b' also serves the live row
+#          qwen/qwen3.8-27b (sha 8a8786e9; qwen36-27b likewise) with --no-join after the Flash-Next checks and
+#          runs the same buyer-UX suite on it (job header; no memory measurement; about +20-25 min, estimate).
+#          Estimated duration (an estimate, not measured): about 50 min cold
+#          (build ~20 min, two model loads ~3 min each, 4k and 32k cells ~5 min, buyer-UX 34 requests
+#          ~10-15 min, prefill-profile ~5 min), about 30 min with SKIP_BUILD=1; plus the 106 GB snapshot
+#          download if ~/lab-ablit-perf/models lacks it.
 #        FORK_DIR=$HOME/mlx-swift-lm-2448 JOB_SCRIPT=job-qwen4-exactness.sh studio-ablit-perf.sh
 #          #2448 + #2449 Flash-Next exactness, one window (job header): the fork's Qwen4ExpTests on
 #          Metal first (row join/leave included; any failure ends the job), then two fenced passes of
@@ -99,7 +113,7 @@ OWNER=ablit-perf
 STALL_MIN=30
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 JOB_SCRIPT=${JOB_SCRIPT:-job.sh}
-case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-qwen4-exactness.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-qwen4-exactness.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh or job-qwen-mtp-cap.sh" >&2; exit 2 ;; esac
+case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-qwen4-listing.sh|job-qwen4-exactness.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-qwen4-listing.sh, job-qwen4-exactness.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh or job-qwen-mtp-cap.sh" >&2; exit 2 ;; esac
 mkdir -p "$SCR" "$RES"
 : > "$LOG"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
@@ -108,7 +122,7 @@ blocker() { say "BLOCKER: $*"; }
 [ -f "$LOCKSH" ] || { blocker "no lock helper at $LOCKSH"; exit 2; }
 dirty=$(git -C "$REPO" status --porcelain -- phase3-binary scripts/lab/parity-grid scripts/lab/ablit-perf scripts/lab/minimax \
   scripts/lab/dsv4 scripts/lab/cb-studio/glm53_oracle_json.py \
-  scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json)
+  scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json scripts/buyer_ux_conformance.py)
 [ -z "$dirty" ] || { blocker "uncommitted changes in the built or copied paths; commit first: $(echo "$dirty" | head -n 3 | tr '\n' ' ')"; exit 2; }
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 FORK_HEAD=""
@@ -145,10 +159,10 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
 
-"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
+"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
   || { blocker "mkdir failed"; exit 2; }
 rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/parity-grid/ >> "$LOG" 2>&1 \
   && rsync -a --delete "$REPO/scripts/lab/ablit-perf/" macstudio:lab-ablit-perf/job/ablit-perf/ >> "$LOG" 2>&1 \
@@ -160,6 +174,7 @@ rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/
        "$REPO/phase3-binary/catalog/autotune/autotune-candidates.json" macstudio:lab-ablit-perf/job/catalog/ >> "$LOG" 2>&1 \
   && rsync -a "$REPO/scripts/native_mtp_r015_analyze.py" "$REPO/scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json" \
        macstudio:lab-ablit-perf/job/mtp/ >> "$LOG" 2>&1 \
+  && rsync -a "$REPO/scripts/buyer_ux_conformance.py" macstudio:lab-ablit-perf/job/bux/ >> "$LOG" 2>&1 \
   && rsync -a --delete --exclude '.build*' --exclude '.swiftpm' "$REPO/phase3-binary/" macstudio:lab-ablit-perf/src/phase3-binary/ >> "$LOG" 2>&1 \
   || { blocker "copy to the Studio failed"; exit 2; }
 if [ -n "${REFERENCE_ONLY:-}" ]; then
@@ -203,7 +218,10 @@ finish() {
   [ "$HAVE_GPU" = 1 ] && STUDIO_LANE=gpu bash "$LOCKSH" release "$OWNER" >> "$LOG" 2>&1
   say "LOCKS_RELEASED $(bash "$LOCKSH" status 2>&1 | tr '\n' ' ')"
   for f in "$RES/$RUN_ID"/*/baseline.md; do [ -f "$f" ] && say "BASELINE $f"; done
-  if grep -q 'JOB_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null; then
+  # A publish runs after JOB_PASS: it passes only on PUBLISH_PASS, so a job killed mid-upload fails.
+  local published=1
+  [ "${DSV4_PUBLISH:-0}" = 1 ] && ! grep -q 'PUBLISH_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null && published=0
+  if [ "$published" = 1 ] && grep -q 'JOB_PASS' "$RES/$RUN_ID/job-$RUN_ID.log" 2>/dev/null && ! grep -q 'PUBLISH_FAIL' "$RES/$RUN_ID/job-$RUN_ID.log"; then
     say "ABLIT_END pass. Results: $RES/$RUN_ID"
   else
     blocker "the job did not pass; see $RES/$RUN_ID/job-$RUN_ID.log"
@@ -232,7 +250,7 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|PEAK |PROFILE_|STEP |STEP_|DETERMINISM|DIVERGENCE_VERDICT|SPEC_EVIDENCE|SERVED_ORACLE)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|LISTING_|IDENTITY|MEM_|BUX_|SERVE |PEAK |PROFILE_|STEP |STEP_|DETERMINISM|DIVERGENCE_VERDICT|SPEC_EVIDENCE|SERVED_ORACLE|PUBLISH_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
