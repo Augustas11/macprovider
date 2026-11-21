@@ -3165,7 +3165,22 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         try await runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(maxVerifyTokensPerForward: 2)
     }
 
-    private func runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(maxVerifyTokensPerForward: Int?) async throws {
+    /// The same scenario with the cached-turns contiguous cache bridge that
+    /// hybrid Qwen serving installs. Verify stages draft K/V without
+    /// advancing the paged row caches, so recording a row against its staged
+    /// table failed closed with `blockTableMismatch` on every native round
+    /// (#2459); finalize must leave the record on the committed table.
+    func testRealQwen35PackedNativeMTPRowsWithContiguousCacheBridgeMatchSerialOrdinaryGreedy() async throws {
+        try await runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(
+            maxVerifyTokensPerForward: nil,
+            contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge()
+        )
+    }
+
+    private func runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(
+        maxVerifyTokensPerForward: Int?,
+        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil
+    ) async throws {
         try requireMetal()
 
         let configuration = try JSONDecoder().decode(
@@ -3175,6 +3190,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         MLXRandom.seed(1770)
         let target = Qwen35TextModel(configuration)
         let drafter = Qwen35MTPDraftModel(configuration)
+        if contiguousCacheBridge != nil {
+            // The bridge records only fp16/bf16 K/V, as served weights are.
+            for model in [target, drafter] as [Module] {
+                model.update(parameters: ModuleParameters.unflattened(
+                    model.parameters().flattened().map { ($0.0, $0.1.asType(.bfloat16)) }
+                ))
+            }
+        }
         eval(target, drafter)
 
         func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
@@ -3200,6 +3223,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             descriptor: descriptor,
             layerCount: 2,
             cacheKinds: [.recurrentMamba, .pagedAttention],
+            contiguousCacheBridge: contiguousCacheBridge,
             drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "mtp"),
                 model: drafter

@@ -478,6 +478,23 @@ public struct PagedKVBlockTable: Equatable, Sendable, Codable {
     public let poolEpoch: Int
 
     public var isEmpty: Bool { logicalTokenCount == 0 }
+
+    /// The table of this sequence's first `logicalTokenCount` tokens: what
+    /// the allocator returns when it commits or trims to that length.
+    public func prefix(logicalTokenCount count: Int) throws -> PagedKVBlockTable {
+        guard count >= 0, count <= logicalTokenCount, blockSizeTokens > 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("prefix length exceeds logical length")
+        }
+        let blocks = (count + blockSizeTokens - 1) / blockSizeTokens
+        return PagedKVBlockTable(
+            handleID: handleID,
+            blockSizeTokens: blockSizeTokens,
+            logicalTokenCount: count,
+            physicalBlocks: Array(physicalBlocks.prefix(blocks)),
+            tailValidTokenCount: count == 0 ? 0 : ((count - 1) % blockSizeTokens) + 1,
+            poolEpoch: poolEpoch
+        )
+    }
 }
 
 public struct PagedKVLayoutMetadata: Equatable, Sendable, Codable {

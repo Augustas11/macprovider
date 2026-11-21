@@ -826,6 +826,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// drafter at finalize.
         let proposalTokens: [Int]
         let layers: [NativeMTPPendingLayerResolution]
+        /// The staged binding and committed KV count from verify; finalize
+        /// derives the committed table from them to re-record the row.
+        let stagedBinding: PagedKVStorageBinding
+        let committedKVTokenCount: Int
     }
 
     private let container: ModelContainer
@@ -1994,8 +1998,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 transactions: pendingByRequestID
             )
             #endif
+            // Verify stages draft K/V in the pending transaction and leaves the
+            // row caches at the committed count, while `input.binding` carries
+            // the staged table (committed + proposal columns). Recording here
+            // would fail `offset == logicalTokenCount` on every row; the
+            // committed record is refreshed at finalize instead.
             for (index, input) in inputs.enumerated() {
-                try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+                try self.setRowState(
+                    rowStates[index],
+                    for: input.requestID,
+                    binding: input.binding,
+                    recordContiguousCache: false
+                )
             }
             // One selection and one host transfer for the whole packed round
             // instead of two blocking GPU round trips per row.
@@ -2165,6 +2179,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
                 #endif
+            }
+            // The commit advanced each row cache past the table it was last
+            // recorded against; trim and materialize read that record, so it
+            // must move to the committed table now, before the allocator
+            // commits the same prefix (`commitNativeMTPTransaction`).
+            for (input, transaction) in committing {
+                try self.recordCommittedNativeMTPRow(
+                    requestID: input.requestID,
+                    transaction: transaction,
+                    committedInputTokenCount: input.committedInputTokenCount
+                )
             }
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
@@ -2795,7 +2820,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func setRowState(
         _ state: RowState,
         for requestID: String,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recordContiguousCache: Bool = true
     ) throws {
         lock.lock()
         let cancelledBeforeRecord = cancelRequested
@@ -2811,7 +2837,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             PagedKVLabTrace.emit("set_row_state", fields)
         }
         do {
-            try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+            if recordContiguousCache {
+                try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+            }
         } catch {
             var fields = PagedKVLabTrace.row(requestID: requestID, index: nil, caches: state.caches, binding: binding)
             fields["error"] = ContinuousBatchingPolicy.prefillFailureReason(error)
@@ -2819,7 +2847,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw error
         }
         #else
-        try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        if recordContiguousCache {
+            try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
+        }
         #endif
         lock.lock()
         if !cancelRequested {
@@ -4167,7 +4197,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     currentToken: input.currentToken,
                     targetState: continuationState,
                     proposalTokens: input.proposalTokens,
-                    layers: layers
+                    layers: layers,
+                    stagedBinding: input.binding,
+                    committedKVTokenCount: input.committedKVTokenCount
                 )
             )
         }
@@ -4214,6 +4246,32 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
         }
         return consumed
+    }
+
+    private func recordCommittedNativeMTPRow(
+        requestID: String,
+        transaction: NativeMTPPendingTransaction,
+        committedInputTokenCount: Int
+    ) throws {
+        let staged = transaction.stagedBinding
+        lock.lock()
+        let state = rows[requestID]
+        lock.unlock()
+        guard let state else {
+            contiguousCacheBridge?.discardContiguousCache(handle: staged.handle)
+            return
+        }
+        let committedBinding = PagedKVStorageBinding(
+            handle: staged.handle,
+            blockSizeTokens: staged.blockSizeTokens,
+            maxLogicalTokens: staged.maxLogicalTokens,
+            rowGeneration: staged.rowGeneration,
+            currentTable: try staged.currentTable.prefix(
+                logicalTokenCount: transaction.committedKVTokenCount + committedInputTokenCount
+            ),
+            poolEpoch: staged.poolEpoch
+        )
+        try setRowState(state, for: requestID, binding: committedBinding)
     }
 
     private func removeNativeMTPPendingTransaction(for requestID: String) {
