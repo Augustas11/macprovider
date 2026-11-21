@@ -25,6 +25,10 @@
 #          #2409 GLM one-row prefill profile (job header); FORK_DIR must hold
 #          Libraries/MLXLMCommon/LabSectionTimer.swift at HEAD. Knobs: PROMPT_TOKENS STEP_SIZES
 #          PROFILE_RUNS GLM_PATH GLM_OMLX_DIR (oMLX install dir, to record its prefill chunk)
+#        FORK_DIR=$HOME/mlx-swift-lm-2451-profile JOB_SCRIPT=job-glm-prefill-profile.sh PROFILE_MODEL=minimax studio-ablit-perf.sh
+#          #2458 the same profile on the abliterated MiniMax M3.1-Flash (3,179 and 12,128 tokens, mlx-vlm
+#          reference TTFTs); FORK_DIR HEAD must time MiniMaxM3.swift with LabSectionTimer. Knobs as above,
+#          MINIMAX_PATH for GLM_PATH
 #        JOB_SCRIPT=job-glm-prefill-step-gate.sh studio-ablit-perf.sh
 #          #2409 gate for the glm5_next 2048 serial prefill step (job header): every greedy token
 #          at step 512 vs 2048, TTFT per step. Knobs: PROMPT_TOKENS PROFILE_RUNS GENERATE_TOKENS GLM_PATH
@@ -114,7 +118,7 @@
 #          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
 # Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB DET_ROWS DET_CONTEXTS
 # SERVED_CONTEXTS SERVED_STEPS STEPS RUN_DETERMINISM RUN_PARITY LAB_FENCE
-# QMTP_* SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SEED_SELF_CHECK_RUN SERVE_ENV PROMPT_TOKENS STEP_SIZES PROFILE_RUNS GENERATE_TOKENS and every <KEY>_<FIELD> model variable job.sh reads (see its header).
+# QMTP_* SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SEED_SELF_CHECK_RUN SERVE_ENV PROMPT_TOKENS STEP_SIZES PROFILE_RUNS PROFILE_MODEL GENERATE_TOKENS and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -158,6 +162,10 @@ if [ -n "$FORK_FILE" ]; then
     git -C "$FORK_DIR" cat-file -e HEAD:Libraries/MLXLMCommon/LabSectionTimer.swift 2>/dev/null \
       || { blocker "SERVE_ENV sets MLX_LM_SECTION_TIMING=1 but FORK_DIR=$FORK_DIR HEAD has no Libraries/MLXLMCommon/LabSectionTimer.swift"; exit 2; } ;;
   esac
+  if [ "$JOB_SCRIPT" = job-glm-prefill-profile.sh ] && [ "${PROFILE_MODEL:-glm}" = minimax ]; then
+    git -C "$FORK_DIR" grep -q LabSectionTimer HEAD -- Libraries/MLXLLM/Models/MiniMaxM3.swift \
+      || { blocker "FORK_DIR=$FORK_DIR HEAD has no LabSectionTimer sections in Libraries/MLXLLM/Models/MiniMaxM3.swift (campaign/2451-profile)"; exit 2; }
+  fi
   if [ "$JOB_SCRIPT" = job-glm-wide-prefill.sh ]; then
     git -C "$FORK_DIR" grep -q glm5NextPrefillSlicesKey HEAD -- "$FORK_FILE" \
       || { blocker "FORK_DIR=$FORK_DIR HEAD has no glm5NextPrefillSlicesKey in $FORK_FILE (campaign/2451-glm-wide-prefill)"; exit 2; }
@@ -185,7 +193,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|PROFILE_MODEL|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD}${MAIN_BASE:+ main_base=$MAIN_BASE} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/job/pins ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \

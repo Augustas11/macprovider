@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Tables from a `macprovider-cli prefill-profile` run on GLM-5.3-Flash (#2409 job 1).
+"""Tables from a `macprovider-cli prefill-profile` run on GLM-5.3-Flash (#2409 job 1) or
+MiniMax M3.1-Flash (#2458; config `model_type` minimax_m3 / minimax_m3_vl).
 
 usage: prefill_profile_report.py --profile prefill-profile.json --peak peak.json
            --config MODEL/config.json --out-md profile.md --out-json profile-summary.json
            [--reference-ttft 3673=8.00,14126=32.76] [--grid-ttft 3673=11.02,14126=42.49]
-           [--reference-chunk TEXT]
+           [--reference-chunk TEXT] [--model-name GLM-5.3-Flash]
 
 Stdlib only. The tables, per prompt length P:
 
@@ -21,15 +22,22 @@ Stdlib only. The tables, per prompt length P:
     in ms per chunk per 1,000 tokens of offset (least squares).
  4. Section shares (section-timed pass, every section evaluated at its edges): the
     exclusive ms per section summed over the prompt, its share of all sections, that
-    share applied to the served TTFT, and groups: attention (mla.*, indexer.*), MoE/MLP,
-    KDA (linear attention, its state writes included), hyper-connections (hc.*), cache
-    writes (mla.cache_append + indexer.pools), other (the forward's own time).
+    share applied to the served TTFT, and groups: attention (mla.*, indexer.*, attn.*),
+    MoE/MLP (moe, moe.*, mlp), KDA (linear attention, its state writes included),
+    hyper-connections (hc.*), norms (norm.*), embedding and output head (embed, lm_head),
+    residual adds and the refusal projection (residual, ablation), cache writes
+    (mla.cache_append + indexer.pools + attn.cache_write), other (the forward's own time).
+    `lm_head` counts from the first forward only: it sits outside the forward bracket and
+    the timer evaluates it on every chunk, whose logits the served path never reads.
  5. The prefill ceiling: about half the measured matmul peak / compute per token.
     Compute per token = 2 x active weight MACs (inventory: every weight matrix, routed
     experts at num_experts_per_tok of n_routed_experts, MTP, embedding and lm_head
     excluded) + attention FLOPs averaged over positions 0..P-1 (sparse MLA: 4 H R
     min(t+1, index_topk); indexer: 2 idxH idxD floor((t+1)/kpool) on layers with their
-    own indexer; KDA: 4 H_l D_l^2 per linear layer, an estimate). Ceilings use the bf16
+    own indexer; KDA: 4 H_l D_l^2 per linear layer, an estimate; MiniMax M3: 4 H D (t+1)
+    per dense layer, 4 H D min(t+1, block x topk_blocks) per block-sparse layer and its
+    indexer 2 idxH idxD (t+1) once t+1 > block x topk_blocks, the work the selection
+    needs, not what a masked dense SDPA does). Ceilings use the bf16
     GEMM peak (the AGENTS.md rule) and the 4-bit quantized-matmul peak.
 
 The JSON summary carries every number in the tables. Exit 0, or 2 on unusable input.
@@ -46,13 +54,20 @@ import sys
 from pathlib import Path
 
 GROUPS = (
-    ("attention", lambda s: s.startswith("mla.") or s.startswith("indexer.")),
-    ("moe_mlp", lambda s: s in ("moe", "mlp")),
+    ("attention", lambda s: s.startswith(("mla.", "indexer.", "attn."))),
+    ("moe_mlp", lambda s: s in ("moe", "mlp") or s.startswith("moe.")),
     ("kda", lambda s: s == "kda"),
     ("hyper_connections", lambda s: s.startswith("hc.")),
+    ("norms", lambda s: s.startswith("norm.")),
+    ("embed_and_head", lambda s: s in ("embed", "lm_head")),
+    ("residual_and_ablation", lambda s: s in ("residual", "ablation")),
     ("other", lambda s: s == "forward"),
 )
-CACHE_WRITES = ("mla.cache_append", "indexer.pools")
+# Listed only when a section falls in them (GLM's tables keep their groups).
+OPTIONAL_GROUPS = ("norms", "embed_and_head", "residual_and_ablation")
+CACHE_WRITES = ("mla.cache_append", "indexer.pools", "attn.cache_write")
+# Sections the timer evaluates on every forward but the served path reads on the last only.
+LAST_FORWARD_ONLY = ("lm_head",)
 
 
 def parse_pairs(text: str | None) -> dict[int, float]:
@@ -67,6 +82,10 @@ def parse_pairs(text: str | None) -> dict[int, float]:
 def text_config(config: dict) -> dict:
     tc = config.get("text_config")
     return {**config, **tc} if isinstance(tc, dict) else config
+
+
+def is_minimax(config: dict) -> bool:
+    return str(text_config(config).get("model_type", "")).startswith("minimax_m3")
 
 
 def weight_macs(inventory: list[dict], config: dict) -> dict:
@@ -93,7 +112,7 @@ def weight_macs(inventory: list[dict], config: dict) -> dict:
             group = "indexer"
         elif ".self_attn." in path:
             group = "attention_projections"
-        elif ".mlp." in path:
+        elif ".mlp." in path or ".shared_experts." in path:
             group = "shared_or_dense_mlp"
         else:
             group = "hyper_connections_and_other"
@@ -101,12 +120,15 @@ def weight_macs(inventory: list[dict], config: dict) -> dict:
     return groups
 
 
-def layer_counts(inventory: list[dict]) -> dict[str, int]:
+def layer_counts(inventory: list[dict], config: dict | None = None) -> dict[str, int]:
     def layers(pattern: str) -> set[int]:
         rx = re.compile(pattern)
         return {int(m.group(1)) for e in inventory if (m := rx.search(e["path"]))}
 
     attn = layers(r"(?:^|\.)layers\.(\d+)\.self_attn\.")
+    if config is not None and is_minimax(config):
+        sparse = layers(r"(?:^|\.)layers\.(\d+)\.self_attn\.index_k_proj\.weight$")
+        return {"dense": len(attn - sparse), "sparse": len(sparse)}
     mla = layers(r"(?:^|\.)layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.weight$")
     indexer = layers(r"(?:^|\.)layers\.(\d+)\.self_attn\.indexer\.wk\.weight$")
     return {"mla": len(mla), "indexer": len(indexer), "kda": len(attn - mla)}
@@ -115,6 +137,8 @@ def layer_counts(inventory: list[dict]) -> dict[str, int]:
 def attention_flops_per_token(config: dict, counts: dict[str, int], prompt: int) -> dict:
     """Context-dependent FLOPs per token, averaged over positions 0..prompt-1."""
     c = text_config(config)
+    if is_minimax(config):
+        return minimax_attention_flops_per_token(c, counts, prompt)
     lin = c.get("linear_attn_config") or {}
     heads = int(c.get("num_attention_heads", 64))
     rank = int(c.get("kv_lora_rank", 512))
@@ -134,6 +158,24 @@ def attention_flops_per_token(config: dict, counts: dict[str, int], prompt: int)
     return {"mla": mla, "indexer": idx, "kda": kda}
 
 
+def minimax_attention_flops_per_token(c: dict, counts: dict[str, int], prompt: int) -> dict:
+    """MiniMax M3: dense causal layers, block-sparse layers and their indexer (module header)."""
+    sp = c.get("sparse_attention_config") or {}
+    heads = int(c.get("num_attention_heads", 64))
+    dim = int(c.get("head_dim") or int(c.get("hidden_size", 6144)) // heads)
+    idx_heads = int(sp.get("sparse_num_index_heads", c.get("index_n_heads", 4)))
+    idx_dim = int(sp.get("sparse_index_dim", c.get("index_head_dim", 128)))
+    selected = int(sp.get("sparse_block_size", c.get("index_block_size", 128))) * int(
+        sp.get("sparse_topk_blocks", c.get("index_topk_blocks", 16)))
+    n = prompt
+    causal = n * (n + 1) // 2
+    attended = causal if n <= selected else selected * (selected + 1) // 2 + (n - selected) * selected
+    scored = causal - selected * (selected + 1) // 2 if n > selected else 0
+    return {"dense": counts.get("dense", 0) * 4 * heads * dim * causal / n,
+            "sparse": counts.get("sparse", 0) * 4 * heads * dim * attended / n,
+            "indexer": counts.get("sparse", 0) * 2 * idx_heads * idx_dim * scored / n}
+
+
 def median(values: list[float]) -> float:
     return statistics.median(values) if values else float("nan")
 
@@ -148,9 +190,12 @@ def fit_slope(xs: list[float], ys: list[float]) -> float:
 
 def section_totals(sections_pass: dict) -> dict[str, dict]:
     totals: dict[str, dict] = {}
-    parts = list(sections_pass.get("chunks", [])) + [sections_pass.get("first_forward", {})]
-    for part in parts:
+    chunks = list(sections_pass.get("chunks", []))
+    parts = chunks + [sections_pass.get("first_forward", {})]
+    for i, part in enumerate(parts):
         for name, v in (part.get("sections") or {}).items():
+            if name in LAST_FORWARD_ONLY and i < len(chunks):
+                continue
             t = totals.setdefault(name, {"ms": 0.0, "calls": 0})
             t["ms"] += float(v["ms"])
             t["calls"] += int(v["calls"])
@@ -161,7 +206,7 @@ def summarize(profile: dict, peak: dict, config: dict, ref: dict[int, float], gr
     inventory = profile.get("inventory") or []
     macs = weight_macs(inventory, config)
     per_token_weight = sum(v for k, v in macs.items() if k != "lm_head")
-    counts = layer_counts(inventory)
+    counts = layer_counts(inventory, config)
     prompts = []
     for p in profile["prompts"]:
         n = int(p["tokens"])
@@ -206,6 +251,8 @@ def summarize(profile: dict, peak: dict, config: dict, ref: dict[int, float], gr
                            for k, v in totals.items()), key=lambda r: -r["ms"])
             groups = {}
             for g, match in GROUPS:
+                if g in OPTIONAL_GROUPS and not any(match(r["section"]) for r in rows):
+                    continue
                 ms = sum(r["ms"] for r in rows if match(r["section"]))
                 groups[g] = {"ms": ms, "share": ms / all_ms, "served_ms_est": ms / all_ms * base["ttft_ms_median"]}
             ms = sum(r["ms"] for r in rows if r["section"] in CACHE_WRITES)
@@ -240,8 +287,8 @@ def fmt(x, digits=1) -> str:
     return f"{x:,.{digits}f}"
 
 
-def markdown(summary: dict, reference_chunk: str) -> str:
-    out = ["# GLM-5.3-Flash one-row serial prefill profile", ""]
+def markdown(summary: dict, reference_chunk: str, model_name: str = "GLM-5.3-Flash") -> str:
+    out = [f"# {model_name} one-row serial prefill profile", ""]
     if reference_chunk:
         out += [f"Reference prefill chunk: {reference_chunk}", ""]
     out += ["## 1. TTFT by chunk size (served path)", "",
@@ -310,6 +357,7 @@ def main(argv=None) -> int:
     ap.add_argument("--reference-ttft", default="")
     ap.add_argument("--grid-ttft", default="")
     ap.add_argument("--reference-chunk", default="")
+    ap.add_argument("--model-name", default="GLM-5.3-Flash")
     a = ap.parse_args(argv)
     try:
         profile = json.loads(Path(a.profile).read_text())
@@ -321,7 +369,7 @@ def main(argv=None) -> int:
         return 2
     summary["reference_chunk"] = a.reference_chunk
     Path(a.out_json).write_text(json.dumps(summary, indent=2, sort_keys=True))
-    md = markdown(summary, a.reference_chunk)
+    md = markdown(summary, a.reference_chunk, a.model_name)
     Path(a.out_md).write_text(md)
     print(md, end="")
     return 0

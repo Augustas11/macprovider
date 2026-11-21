@@ -1,4 +1,4 @@
-"""scripts/lab/ablit-perf: the #2409 GLM prefill profile job, its report and the launcher allowlist."""
+"""scripts/lab/ablit-perf: the #2409 GLM / #2458 MiniMax prefill profile job, its report and the launcher allowlist."""
 
 import importlib.util
 import json
@@ -150,6 +150,78 @@ class ReportTests(unittest.TestCase):
                                           f"{d}/bad.json", "--out-md", f"{d}/o.md", "--out-json", f"{d}/o.json"]), 2)
 
 
+MINIMAX_CONFIG = {
+    "model_type": "minimax_m3_vl",
+    "text_config": {
+        "model_type": "minimax_m3", "num_attention_heads": 4, "head_dim": 8, "num_experts_per_tok": 2,
+        "sparse_attention_config": {"sparse_num_index_heads": 2, "sparse_index_dim": 8,
+                                    "sparse_block_size": 4, "sparse_topk_blocks": 2},
+    },
+}
+MINIMAX_INVENTORY = [
+    {"path": "language_model.model.embed_tokens.weight", "kind": "embedding", "shape": [100, 16]},
+    # layer 0: dense attention, MoE with a shared expert
+    {"path": "language_model.model.layers.0.self_attn.q_proj.weight", "kind": "linear", "shape": [32, 16]},
+    {"path": "language_model.model.layers.0.block_sparse_moe.gate.weight", "kind": "linear", "shape": [8, 16]},
+    {"path": "language_model.model.layers.0.block_sparse_moe.switch_mlp.up_proj.weight", "kind": "switch",
+     "shape": [8, 32, 16]},
+    {"path": "language_model.model.layers.0.block_sparse_moe.shared_experts.up_proj.weight", "kind": "linear",
+     "shape": [32, 16]},
+    # layers 1 and 2: block-sparse attention with an indexer
+    {"path": "language_model.model.layers.1.self_attn.q_proj.weight", "kind": "linear", "shape": [32, 16]},
+    {"path": "language_model.model.layers.1.self_attn.index_k_proj.weight", "kind": "linear", "shape": [8, 16]},
+    {"path": "language_model.model.layers.2.self_attn.q_proj.weight", "kind": "linear", "shape": [32, 16]},
+    {"path": "language_model.model.layers.2.self_attn.index_k_proj.weight", "kind": "linear", "shape": [8, 16]},
+    {"path": "language_model.lm_head.weight", "kind": "linear", "shape": [100, 16]},
+]
+
+
+class MiniMaxReportTests(unittest.TestCase):
+    def test_layer_counts_and_shared_expert_group(self):
+        self.assertEqual(report.layer_counts(MINIMAX_INVENTORY, MINIMAX_CONFIG), {"dense": 1, "sparse": 2})
+        self.assertEqual(report.layer_counts(INVENTORY, CONFIG), {"mla": 1, "indexer": 1, "kda": 1})
+        macs = report.weight_macs(MINIMAX_INVENTORY, MINIMAX_CONFIG)
+        self.assertEqual(macs["shared_or_dense_mlp"], 32 * 16)
+        self.assertEqual(macs["routed_experts"], 16 * 32 * 2)
+
+    def test_attention_flops_match_brute_force(self):
+        counts = {"dense": 1, "sparse": 2}
+        for n in (5, 8, 9, 40):
+            got = report.attention_flops_per_token(MINIMAX_CONFIG, counts, n)
+            self.assertAlmostEqual(got["dense"], sum(t + 1 for t in range(n)) * 4 * 4 * 8 / n)
+            self.assertAlmostEqual(got["sparse"], 2 * sum(min(t + 1, 8) for t in range(n)) * 4 * 4 * 8 / n)
+            self.assertAlmostEqual(got["indexer"], 2 * sum(t + 1 for t in range(n) if t + 1 > 8) * 2 * 2 * 8 / n)
+
+    def test_minimax_sections_group_and_lm_head_counts_once(self):
+        prof = profile()
+        prof["inventory"] = MINIMAX_INVENTORY
+        sec = {"attn.kernel": {"calls": 1, "ms": 20.0}, "attn.cache_write": {"calls": 1, "ms": 10.0},
+               "moe.experts": {"calls": 1, "ms": 30.0}, "norm.input": {"calls": 1, "ms": 5.0},
+               "lm_head": {"calls": 1, "ms": 50.0}, "residual": {"calls": 1, "ms": 5.0},
+               "forward": {"calls": 1, "ms": 10.0}}
+        prof["prompts"][0]["sections"]["chunks"] = [{"sections": sec}]
+        prof["prompts"][0]["sections"]["first_forward"]["sections"] = {
+            "lm_head": {"calls": 1, "ms": 20.0}, "moe.experts": {"calls": 1, "ms": 0.0}}
+        s = report.summarize(prof, {"bf16_tflops": 10.0, "q4_tflops": 5.0}, MINIMAX_CONFIG, {}, {})
+        sections = s["prompts"][0]["sections"]
+        self.assertEqual(sections["total_ms"], 100.0)  # the chunk's lm_head is dropped
+        g = sections["groups"]
+        self.assertAlmostEqual(g["attention"]["share"], 0.3)
+        self.assertAlmostEqual(g["moe_mlp"]["share"], 0.3)
+        self.assertAlmostEqual(g["cache_writes"]["share"], 0.1)
+        self.assertAlmostEqual(g["norms"]["share"], 0.05)
+        self.assertAlmostEqual(g["embed_and_head"]["share"], 0.2)
+        self.assertAlmostEqual(g["residual_and_ablation"]["share"], 0.05)
+        self.assertEqual(set(s["prompts"][0]["attention_flops_per_token"]), {"dense", "sparse", "indexer"})
+        self.assertIn("# MiniMax M3.1-Flash one-row", report.markdown(s, "", "MiniMax M3.1-Flash"))
+
+    def test_glm_tables_keep_their_groups(self):
+        s = report.summarize(profile(), {"bf16_tflops": 10.0, "q4_tflops": 5.0}, CONFIG, {}, {})
+        self.assertEqual(list(s["prompts"][0]["sections"]["groups"]),
+                         ["attention", "moe_mlp", "kda", "hyper_connections", "other", "cache_writes"])
+        self.assertIn("# GLM-5.3-Flash one-row", report.markdown(s, ""))
+
+
 class JobTests(unittest.TestCase):
     def run_job(self, **env):
         with tempfile.TemporaryDirectory() as home:
@@ -164,11 +236,28 @@ class JobTests(unittest.TestCase):
         self.assertIn("--prompt-tokens 3673,14126 --step-sizes 512,2048 --runs 3", lines["PROFILE_ARGS"])
         self.assertIn("--reference-ttft 3673=8.00,14126=32.76", lines["REPORT_ARGS"])
         self.assertIn("-DMACPROVIDER_SECTION_TIMING", lines["BUILD_FLAGS"])
+        self.assertIn("/glm-prefill-profile/prefill-profile.json", lines["PROFILE_ARGS"])
+        self.assertIn("models/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2 ", lines["PROFILE_ARGS"])
+        self.assertNotIn("--model-name", lines["REPORT_ARGS"])
         self.assertFalse((Path(home) / "lab-ablit-perf").exists())  # check mode touches nothing
+
+    def test_minimax_check_mode_selects_its_model_prompts_and_references(self):
+        r, home = self.run_job(PROFILE_MODEL="minimax")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = dict(line.split(" ", 1) for line in r.stdout.splitlines())
+        self.assertIn("models/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated ", lines["PROFILE_ARGS"])
+        self.assertIn("--prompt-tokens 3179,12128 --step-sizes 512,2048 --runs 3", lines["PROFILE_ARGS"])
+        self.assertIn("/minimax-prefill-profile/prefill-profile.json", lines["PROFILE_ARGS"])
+        self.assertIn("--reference-ttft 3179=10.91,12128=49.11 --grid-ttft 3179=12.87,12128=55.11", lines["REPORT_ARGS"])
+        self.assertTrue(lines["REPORT_ARGS"].endswith("--model-name MiniMax M3.1-Flash abliterated"))
+        self.assertFalse((Path(home) / "lab-ablit-perf").exists())
+        r, _ = self.run_job(PROFILE_MODEL="minimax", MINIMAX_PATH="/m/minimax", PROMPT_TOKENS="4096")
+        self.assertIn("--model-dir /m/minimax", r.stdout)
+        self.assertIn("--prompt-tokens 4096 ", r.stdout)
 
     def test_knobs_are_validated(self):
         for env in ({"PROMPT_TOKENS": "4k"}, {"STEP_SIZES": "512,"}, {"PROFILE_RUNS": "0"},
-                    {"PROMPT_TOKENS": "8"}, {"REFERENCE_TTFT": "3673:8"}):
+                    {"PROMPT_TOKENS": "8"}, {"REFERENCE_TTFT": "3673:8"}, {"PROFILE_MODEL": "qwen"}):
             r, _ = self.run_job(**env)
             self.assertEqual(r.returncode, 64, (env, r.stdout))
             self.assertIn("BLOCKER:", r.stdout)
@@ -185,6 +274,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("job-glm-prefill-profile.sh) FORK_FILE=Libraries/MLXLMCommon/LabSectionTimer.swift", text)
         self.assertIn("|job-glm-prefill-profile.sh|", text)
         self.assertIn("PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|", text)
+        self.assertIn("|GENERATE_TOKENS|PROFILE_MODEL|", text)
+        self.assertIn("JOB_SCRIPT=job-glm-prefill-profile.sh PROFILE_MODEL=minimax studio-ablit-perf.sh", text)
+        self.assertIn("grep -q LabSectionTimer HEAD -- Libraries/MLXLLM/Models/MiniMaxM3.swift", text)
         self.assertIn("PEAK |PROFILE_", text)
 
     def test_launcher_refuses_an_unknown_job_before_ssh(self):
