@@ -6655,6 +6655,196 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(whilePrefilling.contains { $0.steps > 16 })
     }
 
+    /// #2451 wide prefill: grouping a row's balanced chunks never changes
+    /// them. For every span, the wide forwards' slices, concatenated, are
+    /// exactly the chunks the row prefills one forward at a time, each wide
+    /// forward fits the bound (or is one chunk), and the slices a forward
+    /// carries are recovered from its end alone.
+    func testWidePrefillSlicesAreTheBalancedChunksInOrder() {
+        for chunk in [2_048, 512, 7] {
+            for wide in [4_096, chunk, 3 * chunk + 1] {
+                for span in Array(1 ... 300) + Array(stride(from: 301, through: 40_000, by: 37)) + [3_673, 14_126] {
+                    var serial: [Int] = []
+                    var cursor = 0
+                    while cursor < span {
+                        let end = ContinuousBatchScheduler.balancedPrefillChunkEnd(
+                            cursor: cursor, spanEnd: span, maxChunkTokens: chunk)
+                        serial.append(end - cursor)
+                        cursor = end
+                    }
+                    var grouped: [Int] = []
+                    cursor = 0
+                    while cursor < span {
+                        let slices = ContinuousBatchScheduler.widePrefillSlices(
+                            cursor: cursor, spanEnd: span, maxChunkTokens: chunk, wideTokens: wide)
+                        let tokens = slices.reduce(0, +)
+                        XCTAssertTrue(slices.count == 1 || tokens <= wide, "span \(span) slices \(slices)")
+                        XCTAssertEqual(
+                            ContinuousBatchScheduler.prefillSliceTokens(
+                                cursor: cursor, end: cursor + tokens, spanEnd: span, maxChunkTokens: chunk),
+                            slices.count > 1 ? slices : nil, "span \(span) at \(cursor)")
+                        grouped += slices
+                        cursor += tokens
+                    }
+                    XCTAssertEqual(grouped, serial, "chunk \(chunk) wide \(wide) span \(span)")
+                }
+            }
+        }
+        // The #2451 cells: 3,673 tokens in one forward of the two balanced
+        // chunks; 14,126 in three forwards of two 2,018-token chunks and one.
+        XCTAssertEqual(
+            ContinuousBatchScheduler.widePrefillSlices(
+                cursor: 0, spanEnd: 3_673, maxChunkTokens: 2_048, wideTokens: 4_096), [1_837, 1_836])
+        XCTAssertEqual(
+            ContinuousBatchScheduler.widePrefillSlices(
+                cursor: 12_108, spanEnd: 14_126, maxChunkTokens: 2_048, wideTokens: 4_096), [2_018])
+        // A forward that ends inside a chunk carries no slices.
+        XCTAssertNil(ContinuousBatchScheduler.prefillSliceTokens(
+            cursor: 0, end: 3_000, spanEnd: 3_673, maxChunkTokens: 2_048))
+    }
+
+    /// #2451: the wide forward covers at most two chunks, so a lowered
+    /// `prefill_step_size` lowers it too.
+    func testGLMWidePrefillIsAtMostTwoChunks() {
+        func wide(_ step: Int?) -> Int? {
+            ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                tuple: Self.tuple(),
+                maxBatch: 2,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: 32_768,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3,
+                prefillStepSize: step,
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .ungrouped,
+                promptChunkCeiling: ModelRuntime.pagedMLAPromptChunkTokens,
+                widePrefillChunkTokens: ModelRuntime.pagedMLAWidePrefillTokens
+            ).widePrefillChunkTokens
+        }
+        XCTAssertEqual(wide(nil), 4_096)
+        XCTAssertEqual(wide(256), 512)
+        XCTAssertEqual(wide(1_024), 2_048)
+    }
+
+    /// #2451: an idle `glm5_next` row prefills its 2048-token balanced chunks
+    /// two per forward, each forward carrying its chunks as slices; the
+    /// serial stride and the reference partition keep wide prefill off.
+    func testGLMWidePrefillCarriesTheBalancedChunksAsSlices() async throws {
+        func run(_ prompt: Int) async throws -> [ContinuousBatchPrefillInput] {
+            let backend = ScriptedBackend(scripts: ["long": [7]])
+            let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                tuple: Self.tuple(),
+                maxBatch: 2,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: 32_768,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3,
+                prefillStepSize: nil,
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .ungrouped,
+                promptChunkCeiling: ModelRuntime.pagedMLAPromptChunkTokens,
+                widePrefillChunkTokens: ModelRuntime.pagedMLAWidePrefillTokens
+            )
+            XCTAssertEqual(configuration.widePrefillChunkTokens, 4_096)
+            let scheduler = ContinuousBatchScheduler(
+                configuration: configuration,
+                allocator: try PagedKVBlockAllocator(blockSizeTokens: 256, maxPhysicalBlocks: 128),
+                backend: backend,
+                replayAuthority: TestReplayAuthority()
+            )
+            let result = try await scheduler.submit(.init(
+                id: "long", conversationKey: "", promptTokens: Array(1 ... prompt), maxOutputTokens: 1,
+                temperature: 0.0, topP: 1.0
+            ))
+            XCTAssertEqual(result.outputTokens, [7])
+            return await backend.prefillInputs()
+        }
+        let short = try await run(3_673)
+        XCTAssertEqual(short.map(\.promptTokens.count), [3_673])
+        XCTAssertEqual(short.map(\.prefillSliceTokens), [[1_837, 1_836]])
+        let long = try await run(14_126)
+        XCTAssertEqual(long.map(\.promptTokens.count), [4_036, 4_036, 4_036, 2_018])
+        XCTAssertEqual(long.map(\.prefillSliceTokens), [[2_018, 2_018], [2_018, 2_018], [2_018, 2_018], nil])
+        XCTAssertEqual(long.map(\.promptTokenOffset), [0, 4_036, 8_072, 12_108])
+
+        for (stride, reference) in [(true, nil), (false, 512)] as [(Bool, Int?)] {
+            let off = ContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(), tuple: Self.tuple(), maxActiveRows: 1, decodeHeadroomTokens: 2,
+                referencePrefillStepSize: reference, serialPrefillStride: stride, widePrefillChunkTokens: 4_096,
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 3))
+            XCTAssertNil(off.widePrefillChunkTokens)
+        }
+    }
+
+    /// #2451: while a row decodes, a long prompt keeps one 2048-token chunk
+    /// per forward with wide prefill configured, so the decoding row's wait
+    /// per decode window is unchanged.
+    func testGLMWidePrefillIsOffWhileARowDecodes() async throws {
+        let decodeGate = AsyncGate()
+        let backend = WindowRecordingBackend(
+            scripts: ["active": Array(100 ..< 164), "long": [200, 201]],
+            decodeGate: decodeGate
+        )
+        let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(),
+            maxBatch: 2,
+            queueLimit: nil,
+            queueWaitTimeoutMS: nil,
+            prefillTokensPerIteration: nil,
+            maxContextTokens: 8_192,
+            modelID: Self.modelID,
+            modelSHA256: Self.modelSHA,
+            weightsGeneration: 3,
+            prefillStepSize: nil,
+            maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+            nativeMTPRoundByteCapacity: nil,
+            nativeMTPStatusSink: nil,
+            prefillGrouping: .ungrouped,
+            promptChunkCeiling: ModelRuntime.pagedMLAPromptChunkTokens,
+            widePrefillChunkTokens: ModelRuntime.pagedMLAWidePrefillTokens
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 256, maxPhysicalBlocks: 64),
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active", conversationKey: "", promptTokens: [1], maxOutputTokens: 64,
+                temperature: 0.0, topP: 1.0
+            ))
+        }
+        try await eventually { await backend.windowCallCount() == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long", conversationKey: "", promptTokens: Array(1 ... 6_144), maxOutputTokens: 2,
+                temperature: 0.0, topP: 1.0
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+        _ = try await active.value
+        let longResult = try await long.value
+        XCTAssertEqual(longResult.outputTokens, [200, 201])
+        let chunks = await backend.prefillChunks(id: "long")
+        XCTAssertEqual(chunks, [2_048, 2_048, 2_048])
+    }
+
     /// #2402 / SPEC-038 FR-CB2: four equal 4,096-token prompts arriving
     /// together on an idle hybrid Qwen MoE scheduler (2048-token chunk, idle
     /// cohort sized by 512) prefill one row per forward: no forward carries

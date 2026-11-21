@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.84` | `ddc6f974355982773e1440957f16e998835408d0` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.85` | `8aa564dbf780cb4bd88e3fb591981eae868780f4` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,16 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-21 the LM row is `3.32.3-macprovider.85` (`8aa564d`), on
+`3.32.3-macprovider.84` (#2451, #2448): Three GLM5Next commits on
+3.32.3-macprovider.84 add prefill slices (`glm5NextPrefillSlicesKey`): the
+routed and shared experts and dense MLPs run once over consecutive balanced
+chunks, while router, hyper-connections and attention stay per chunk,
+bit-identical to separate forwards; on NAX GPUs slices join only when the wide
+gather_qmm call keeps their row tile. Plus a Qwen4Exp join/leave test and a
+GLM5NextTests type-check split. Other model families and decode are unchanged.
+No Swift, core or C pin changes.
 
 As of 2026-11-19 the LM row is `3.32.3-macprovider.84` (`ddc6f97`), on
 `3.32.3-macprovider.83` (#2409): Six commits on 3.32.3-macprovider.83 add the

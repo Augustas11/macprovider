@@ -42,15 +42,16 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.84 (#2409) on 3.32.3-macprovider.83: Six commits on
-# 3.32.3-macprovider.83 add the native qwen4_exp / qwen4_exp_text text model
-# (Qwen3.8-Flash-Next: QSA indexer, hyper-connections, PLE n-gram) and its
-# batched decode, each row bit for bit its serial forward, with the rows' q/k
-# norms, RoPE (one offset per row) and output gate run once across the rows.
-# New model files, the two registry entries and their tests only; other model
-# families are unchanged.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.84"
-SPEC048_MLX_SWIFT_LM_REVISION = "ddc6f974355982773e1440957f16e998835408d0"
+# 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84: Three
+# GLM5Next commits on 3.32.3-macprovider.84 add prefill slices
+# (`glm5NextPrefillSlicesKey`): the routed and shared experts and dense MLPs
+# run once over consecutive balanced chunks, while router, hyper-connections
+# and attention stay per chunk, bit-identical to separate forwards; on NAX
+# GPUs slices join only when the wide gather_qmm call keeps their row tile.
+# Plus a Qwen4Exp join/leave test and a GLM5NextTests type-check split. Other
+# model families and decode are unchanged.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.85"
+SPEC048_MLX_SWIFT_LM_REVISION = "8aa564dbf780cb4bd88e3fb591981eae868780f4"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"

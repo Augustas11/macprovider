@@ -308,6 +308,14 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// its QSA `indexer_budget`), so where a chunk starts changes the row's
     /// numerics; the serial stride keeps its partition the serial one.
     let serialPrefillStride: Bool
+    /// Wide prefill (#2451): with no row decoding, a prompt row's forward may
+    /// cover up to this many tokens of its consecutive balanced chunks, which
+    /// the backend then runs as one forward with each chunk an exact slice
+    /// (`ContinuousBatchPrefillInput.prefillSliceTokens`): the row's chunk
+    /// partition, and so its numerics, stay the balanced one. Nil: off. Only
+    /// a backend whose model runs the slices bit-identically sets it
+    /// (`glm5_next`, `ModelRuntime.schedulerWidePrefillChunkTokens`).
+    let widePrefillChunkTokens: Int?
     /// Whether one prefill group may hold rows at different prompt offsets
     /// (SPEC-038 FR-CB2 ragged shared prefill). Set only when the backend runs
     /// that shape in one forward (`PagedKVSharedForwardBackend
@@ -385,6 +393,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         idlePrefillCohortChunkTokens: Int? = nil,
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
+        widePrefillChunkTokens: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
@@ -425,6 +434,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.referencePrefillStepSize = referencePrefillStepSize.map { max(1, $0) }
         self.serialPrefillStride = serialPrefillStride
+        // The balanced partition is the one wide prefill keeps; the serial
+        // stride and the reference partition keep their own.
+        self.widePrefillChunkTokens = serialPrefillStride || referencePrefillStepSize != nil
+            ? nil : widePrefillChunkTokens.map { max(1, $0) }
         self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
@@ -1307,6 +1320,10 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     /// the whole prompt, else the start of the drafter's prompt window. The
     /// chunk holding it starts a fresh drafter state there.
     let nativeMTPPromptWindowStart: Int
+    /// Wide prefill (#2451): the row's balanced chunks this forward covers,
+    /// in order, summing to `promptTokens.count`; the backend runs each as
+    /// an exact slice of one forward. Nil: one ordinary forward.
+    let prefillSliceTokens: [Int]?
 
     init(
         requestID: String,
@@ -1324,7 +1341,8 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPPromptPrefill: Bool = false,
         nativeMTPNextPromptToken: Int? = nil,
-        nativeMTPPromptWindowStart: Int = 0
+        nativeMTPPromptWindowStart: Int = 0,
+        prefillSliceTokens: [Int]? = nil
     ) {
         self.requestID = requestID
         self.promptTokens = promptTokens
@@ -1342,6 +1360,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
         self.nativeMTPNextPromptToken = nativeMTPNextPromptToken
         self.nativeMTPPromptWindowStart = nativeMTPPromptWindowStart
+        self.prefillSliceTokens = prefillSliceTokens
     }
 }
 
@@ -6921,7 +6940,12 @@ actor ContinuousBatchScheduler {
                         nativeMTPNextPromptToken: nativePromptPrefill && end < promptTokenCount
                             ? row.request.promptTokens[end]
                             : nil,
-                        nativeMTPPromptWindowStart: nativeWindowStart
+                        nativeMTPPromptWindowStart: nativeWindowStart,
+                        prefillSliceTokens: configuration.widePrefillChunkTokens == nil ? nil
+                            : Self.prefillSliceTokens(
+                                cursor: row.prefillCursor, end: end, spanEnd: prefillSpanEnd(for: row),
+                                maxChunkTokens: min(
+                                    configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration))
                     ),
                     chunk.count
                 ))
@@ -7239,8 +7263,58 @@ actor ContinuousBatchScheduler {
         if configuration.serialPrefillStride {
             return min(prefillSpanEnd(for: row), row.prefillCursor + max(1, maxChunkTokens))
         }
+        if let wideTokens = widePrefillTokens(for: row) {
+            let slices = Self.widePrefillSlices(
+                cursor: row.prefillCursor, spanEnd: prefillSpanEnd(for: row),
+                maxChunkTokens: maxChunkTokens, wideTokens: wideTokens)
+            return row.prefillCursor + slices.reduce(0, +)
+        }
         return Self.balancedPrefillChunkEnd(
             cursor: row.prefillCursor, spanEnd: prefillSpanEnd(for: row), maxChunkTokens: maxChunkTokens)
+    }
+
+    /// The wide forward bound for `row` (#2451), or nil for one balanced
+    /// chunk: only while no row decodes, so a decoding row never waits more
+    /// than one chunk per decode window, and never for a native-MTP row, whose
+    /// drafter is seeded from each forward's hidden states.
+    private func widePrefillTokens(for row: Row) -> Int? {
+        guard let wide = configuration.widePrefillChunkTokens, activeDecode.isEmpty, !row.usesNativeMTP
+        else { return nil }
+        return wide
+    }
+
+    /// The row's next balanced chunks (`balancedPrefillChunkEnd`, one after
+    /// another from `cursor`, exactly the chunks it prefills one forward at a
+    /// time), as many as fit in `wideTokens`, at least one.
+    nonisolated static func widePrefillSlices(cursor: Int, spanEnd: Int, maxChunkTokens: Int, wideTokens: Int)
+        -> [Int]
+    {
+        var slices: [Int] = []
+        var position = cursor
+        var total = 0
+        while position < spanEnd {
+            let end = balancedPrefillChunkEnd(cursor: position, spanEnd: spanEnd, maxChunkTokens: maxChunkTokens)
+            let tokens = end - position
+            guard tokens > 0, slices.isEmpty || total + tokens <= wideTokens else { break }
+            slices.append(tokens)
+            total += tokens
+            position = end
+        }
+        return slices
+    }
+
+    /// The balanced chunks `[cursor, end)` covers when it spans more than one
+    /// of them and ends on a chunk boundary, else nil (one ordinary forward).
+    nonisolated static func prefillSliceTokens(cursor: Int, end: Int, spanEnd: Int, maxChunkTokens: Int) -> [Int]? {
+        var slices: [Int] = []
+        var position = cursor
+        while position < end {
+            let next = balancedPrefillChunkEnd(cursor: position, spanEnd: spanEnd, maxChunkTokens: maxChunkTokens)
+            guard next > position else { return nil }
+            slices.append(next - position)
+            position = next
+        }
+        return position == end && slices.count > 1 ? slices : nil
     }
 
     /// The end of the next chunk: `[cursor, spanEnd)` split into the fewest

@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84:
+        // GLM5Next prefill slices (`glm5NextPrefillSlicesKey`): the routed and
+        // shared experts and dense MLPs run once over consecutive balanced
+        // chunks while router, hyper-connections and attention stay per chunk,
+        // bit-identical to separate forwards; on NAX GPUs slices join only when
+        // the wide gather_qmm call keeps their row tile. Plus a Qwen4Exp
+        // join/leave test and a GLM5NextTests type-check split. Other model
+        // families and decode are unchanged.
         // Tag 3.32.3-macprovider.84 (#2409) on 3.32.3-macprovider.83: Six
         // commits on 3.32.3-macprovider.83 add the native qwen4_exp /
         // qwen4_exp_text text model (Qwen3.8-Flash-Next: QSA indexer,
@@ -238,7 +246,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ddc6f974355982773e1440957f16e998835408d0"
+            revision: "8aa564dbf780cb4bd88e3fb591981eae868780f4"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

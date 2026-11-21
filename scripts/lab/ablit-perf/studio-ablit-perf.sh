@@ -72,6 +72,22 @@
 #          ~7 min each, three serve loads ~3 min each, the 4000 pass ~1 min, parity ~25 min: three model
 #          loads, four oracles, glm-parity at 2048 and 512), about 55 min with SKIP_BUILD=1 and
 #          SEED_SELF_CHECK_RUN=<run>. Estimates, not measured.
+#        FORK_DIR=$HOME/mlx-swift-lm-2451 JOB_SCRIPT=job-glm-wide-prefill.sh GLM_OMLX_DIR=<studio dir> studio-ablit-perf.sh
+#          #2451 GLM wide row-local prefill on the batching route (job header): fork bit-identity tests
+#          (Metal), main vs wide builds, control/candidate/control grids at 4k,16k x 128,512 x 3 trials,
+#          the oMLX reference on the wide pass, token gate + TTFT verdict (wide_prefill_gate.py). FORK_DIR
+#          is the mlx-swift-lm worktree on campaign/2451-glm-wide-prefill (rsynced like the parity job's);
+#          the main build is phase3-binary at this checkout's merge-base with origin/main, copied to
+#          ~/lab-ablit-perf/src-main. Knobs: CONTEXTS OUTPUTS TRIALS GLM_PATH GLM_OMLX_DIR SKIP_REFERENCE
+#          SKIP_FORK_TESTS SKIP_BUILD SEED_SELF_CHECK_RUN SERVE_ENV. Estimated duration: about 1 h 45 cold
+#          (fork tests ~15 min, two release builds ~20 min each, three serves with self-check, grids
+#          ~7 min each, oMLX ~10 min). Estimate, not measured.
+#        JOB_SCRIPT=job-glm-gather-qmm-bitwise.sh studio-ablit-perf.sh
+#          #2451: mx.gather_qmm sorted-indices route, row bits vs tile composition at GLM-5.3-Flash expert
+#          shapes (random 4-bit weights, no model, no build), on the mlx wheel of the pinned MLX core
+#          (scripts/read_swiftpm_pins.py copied to job/pins). Knobs: GQMM_SEED GQMM_TARGETS. Estimated
+#          duration (an estimate, not measured): about 5 min (venv ~1-2 min on first use, weights and
+#          13 cases a few minutes).
 #        JOB_SCRIPT=job-qwen-mtp-cap.sh studio-ablit-perf.sh
 #          #2429 Qwen native MTP depth 1 vs off, one row, prompts above the 4096 cap (job header).
 #          Knobs: QMTP_MODELS QMTP_PROMPTS QMTP_OUTPUTS QMTP_BLOCKS QMTP_SHAPE QMTP_FORMAL QMTP_CAP QMTP_FORMAL_BLOCKS
@@ -113,7 +129,7 @@ OWNER=ablit-perf
 STALL_MIN=30
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 JOB_SCRIPT=${JOB_SCRIPT:-job.sh}
-case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-qwen4-listing.sh|job-qwen4-exactness.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-qwen4-listing.sh, job-qwen4-exactness.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh or job-qwen-mtp-cap.sh" >&2; exit 2 ;; esac
+case "$JOB_SCRIPT" in job.sh|job-dsv4-abliterated.sh|job-qwen4-parity.sh|job-qwen4-cb.sh|job-qwen4-listing.sh|job-qwen4-exactness.sh|job-glm-prefill-profile.sh|job-glm-prefill-step-gate.sh|job-qwen-mtp-cap.sh|job-glm-gather-qmm-bitwise.sh|job-glm-wide-prefill.sh) ;; *) echo "BLOCKER: JOB_SCRIPT must be job.sh, job-dsv4-abliterated.sh, job-qwen4-parity.sh, job-qwen4-cb.sh, job-qwen4-listing.sh, job-qwen4-exactness.sh, job-glm-prefill-profile.sh, job-glm-prefill-step-gate.sh, job-qwen-mtp-cap.sh, job-glm-gather-qmm-bitwise.sh or job-glm-wide-prefill.sh" >&2; exit 2 ;; esac
 mkdir -p "$SCR" "$RES"
 : > "$LOG"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
@@ -122,7 +138,7 @@ blocker() { say "BLOCKER: $*"; }
 [ -f "$LOCKSH" ] || { blocker "no lock helper at $LOCKSH"; exit 2; }
 dirty=$(git -C "$REPO" status --porcelain -- phase3-binary scripts/lab/parity-grid scripts/lab/ablit-perf scripts/lab/minimax \
   scripts/lab/dsv4 scripts/lab/cb-studio/glm53_oracle_json.py \
-  scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json scripts/buyer_ux_conformance.py)
+  scripts/native_mtp_r015_analyze.py scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json scripts/read_swiftpm_pins.py scripts/buyer_ux_conformance.py)
 [ -z "$dirty" ] || { blocker "uncommitted changes in the built or copied paths; commit first: $(echo "$dirty" | head -n 3 | tr '\n' ' ')"; exit 2; }
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 FORK_HEAD=""
@@ -130,6 +146,7 @@ FORK_FILE=""
 case "$JOB_SCRIPT" in
   job-qwen4-parity.sh|job-qwen4-cb.sh|job-qwen4-exactness.sh) FORK_FILE=Libraries/MLXLLM/Models/Qwen4Exp.swift ;;
   job-glm-prefill-profile.sh) FORK_FILE=Libraries/MLXLMCommon/LabSectionTimer.swift ;;
+  job-glm-wide-prefill.sh) FORK_FILE=Libraries/MLXLLM/Models/GLM5Next.swift ;;
 esac
 if [ -n "$FORK_FILE" ]; then
   [ -n "${FORK_DIR:-}" ] || { blocker "FORK_DIR is unset; set it to the mlx-swift-lm worktree on campaign/2409-qwen4-exp (parity) or campaign/2409-qwen4-exp-batch (CB)"; exit 2; }
@@ -141,7 +158,16 @@ if [ -n "$FORK_FILE" ]; then
     git -C "$FORK_DIR" cat-file -e HEAD:Libraries/MLXLMCommon/LabSectionTimer.swift 2>/dev/null \
       || { blocker "SERVE_ENV sets MLX_LM_SECTION_TIMING=1 but FORK_DIR=$FORK_DIR HEAD has no Libraries/MLXLMCommon/LabSectionTimer.swift"; exit 2; } ;;
   esac
+  if [ "$JOB_SCRIPT" = job-glm-wide-prefill.sh ]; then
+    git -C "$FORK_DIR" grep -q glm5NextPrefillSlicesKey HEAD -- "$FORK_FILE" \
+      || { blocker "FORK_DIR=$FORK_DIR HEAD has no glm5NextPrefillSlicesKey in $FORK_FILE (campaign/2451-glm-wide-prefill)"; exit 2; }
+  fi
   FORK_HEAD=$(git -C "$FORK_DIR" rev-parse HEAD)
+fi
+# The wide-prefill job's control build: phase3-binary at the campaign's merge-base with origin/main.
+MAIN_BASE=""
+if [ "$JOB_SCRIPT" = job-glm-wide-prefill.sh ]; then
+  MAIN_BASE=$(git -C "$REPO" merge-base HEAD origin/main 2>/dev/null) || { blocker "no merge-base of HEAD and origin/main in $REPO"; exit 2; }
 fi
 
 pre=$("${SSH[@]}" 'u=$(id -u)
@@ -159,10 +185,11 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
-say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD} env:${ENVS:- (defaults)}"
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD}${MAIN_BASE:+ main_base=$MAIN_BASE} env:${ENVS:- (defaults)}"
 
-"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
+"${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/job/pins ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
+  && rsync -a "$REPO/scripts/read_swiftpm_pins.py" macstudio:lab-ablit-perf/job/pins/ >> "$LOG" 2>&1 \
   || { blocker "mkdir failed"; exit 2; }
 rsync -a --delete "$REPO/scripts/lab/parity-grid/" macstudio:lab-ablit-perf/job/parity-grid/ >> "$LOG" 2>&1 \
   && rsync -a --delete "$REPO/scripts/lab/ablit-perf/" macstudio:lab-ablit-perf/job/ablit-perf/ >> "$LOG" 2>&1 \
@@ -197,13 +224,22 @@ fi
 if [ -n "${SEED_SELF_CHECK_RUN:-}" ]; then
   [ -d "$RES/$SEED_SELF_CHECK_RUN" ] || { blocker "no local results at $RES/$SEED_SELF_CHECK_RUN"; exit 2; }
   # Only the stored verdicts of the main passes; files the Studio still has are never overwritten.
-  rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='main/serve/cb-self-check.json' --exclude='*' \
+  rsync -a --ignore-existing --prune-empty-dirs --include='*/' --include='main/serve/cb-self-check.json' \
+      --include='main-a/serve/cb-self-check.json' --exclude='*' \
       "$RES/$SEED_SELF_CHECK_RUN/" "macstudio:lab-ablit-perf/results/$SEED_SELF_CHECK_RUN/" >> "$LOG" 2>&1 \
     || { blocker "push of the self-check verdict of $SEED_SELF_CHECK_RUN to the Studio failed"; exit 2; }
 fi
 if [ -n "$FORK_HEAD" ]; then
   rsync -a --delete --exclude '.build*' --exclude '.swiftpm' --exclude '.git' "$FORK_DIR/" macstudio:lab-ablit-perf/mlx-swift-lm-2409/ >> "$LOG" 2>&1 \
     || { blocker "fork copy to the Studio failed"; exit 2; }
+fi
+if [ -n "$MAIN_BASE" ]; then
+  MAIN_TMP=$(mktemp -d "$SCR/main-src.XXXXXX")
+  git -C "$REPO" archive "$MAIN_BASE" phase3-binary | tar -x -C "$MAIN_TMP" \
+    && rsync -a --delete --exclude '.build*' --exclude '.swiftpm' "$MAIN_TMP/phase3-binary/" macstudio:lab-ablit-perf/src-main/phase3-binary/ >> "$LOG" 2>&1
+  rc=$?
+  rm -rf "$MAIN_TMP"
+  [ "$rc" = 0 ] || { blocker "main tree copy to the Studio failed"; exit 2; }
 fi
 
 HAVE_GPU=0; PID=""
@@ -250,12 +286,12 @@ seen=0; stalled=0
 while :; do
   sleep 60
   alive=$("${SSH[@]}" "kill -0 $PID 2>/dev/null && echo yes || echo no") || alive=unknown
-  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|LISTING_|IDENTITY|MEM_|BUX_|SERVE |PEAK |PROFILE_|STEP |STEP_|DETERMINISM|DIVERGENCE_VERDICT|SPEC_EVIDENCE|SERVED_ORACLE|PUBLISH_)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
+  new=$("${SSH[@]}" "grep -E '(BLOCKER|PASS_|JOB_|BUILD_|BUILD |FORK |DOWNLOAD |ORACLE|STAGE|CLONE_|REFERENCE_|DOWNLOAD_|MTP_|GRID_|BASE_|NOISE_|BASELINE_MD|REF_VERSION|FETCH_|SPLICE_|NUMERIC|ORACLE_|PARITY_|REFUSAL_|PROVENANCE|HANDOFF|SOURCE_|MODEL |CB_TUPLE|TUPLE_|INFERENCE_ERROR|DECODE_PROFILE|LISTING_|IDENTITY|MEM_|BUX_|SERVE |PEAK |PROFILE_|STEP |STEP_|DETERMINISM|DIVERGENCE_VERDICT|SPEC_EVIDENCE|SERVED_ORACLE|PUBLISH_|GQMM_|BITWISE_|WIDE_|FORK_TEST)' ~/lab-ablit-perf/logs/job-$RUN_ID.log 2>/dev/null")
   n=$(printf '%s\n' "$new" | grep -c .)
   [ "$n" -gt "$seen" ] && { printf '%s\n' "$new" | tail -n +$((seen + 1)) | tee -a "$LOG"; seen=$n; }
   [ "$alive" = no ] && break
   [ "$alive" = unknown ] && { say "ssh probe failed, retrying"; continue; }
-  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/venv-dsv4 ~/lab-ablit-perf/omlx-state ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
+  fresh=$("${SSH[@]}" "find ~/lab-ablit-perf/results/$RUN_ID ~/lab-ablit-perf/logs ~/lab-ablit-perf/models ~/lab-ablit-perf/venv-vlm ~/lab-ablit-perf/venv-lm ~/lab-ablit-perf/venv-dsv4 ~/lab-ablit-perf/venv-gqmm ~/lab-ablit-perf/omlx-state ~/lab-ablit-perf/src/phase3-binary/.build-lab-harness ~/lab-ablit-perf/src/phase3-binary/.build-lab-wide ~/lab-ablit-perf/src-main/phase3-binary/.build-lab-main ~/lab-ablit-perf/mlx-swift-lm-2409/.build -type f -mmin -$STALL_MIN 2>/dev/null | head -n 1")
   if [ -z "$fresh" ]; then
     stalled=$((stalled + 1))
     [ $((stalled % STALL_MIN)) = 1 ] && blocker "no file progress for ${STALL_MIN}+ minutes; last job log lines: $("${SSH[@]}" "tail -n 2 ~/lab-ablit-perf/logs/job-$RUN_ID.log" | tr '\n' ' ')"

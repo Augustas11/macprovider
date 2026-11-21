@@ -38,7 +38,8 @@ extension ModelRuntime {
         nativeMTPDrafterPromptWindow: Int? = nil,
         maxDecodeRowsPerForward: Int = Int.max,
         referencePrefillStepSize: Int? = nil,
-        serialPrefillStride: Bool = false
+        serialPrefillStride: Bool = false,
+        widePrefillChunkTokens: Int? = nil
     ) -> ContinuousBatchSchedulerConfiguration {
         // The family ceiling is the chunk unless the operator set
         // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
@@ -61,6 +62,9 @@ extension ModelRuntime {
             idlePrefillCohortChunkTokens: idlePrefillCohortChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
             serialPrefillStride: serialPrefillStride,
+            // At most two chunks per forward, so a lowered `prefill_step_size` also
+            // lowers the wide forward's activation peak instead of packing more slices.
+            widePrefillChunkTokens: widePrefillChunkTokens.map { min($0, 2 * promptChunkTokens) },
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
@@ -90,6 +94,26 @@ extension ModelRuntime {
     /// 224.0 prefill tok/s at 512 vs 308.7 at 2048 with 16/16 top-1 parity
     /// and 189 GB peak (#2100).
     static let pagedMLAPromptChunkTokens = 2_048
+
+    /// Wide prefill bound of a `glm5_next` (pagedMLA) backend (#2451): with
+    /// no row decoding, one forward covers up to this many tokens of a row's
+    /// consecutive 2048-token balanced chunks, each an exact slice (the
+    /// fork's `glm5NextPrefillSlicesKey`). The routed and shared experts and
+    /// the dense MLPs (55-57% of GLM-5.3-Flash prefill on the M3 Ultra) then
+    /// see twice the rows per expert; attention, KDA, the mHC and router
+    /// fp32 GEMMs and the logits stay per chunk, so tokens are unchanged.
+    static let pagedMLAWidePrefillTokens = 4_096
+
+    /// The wide prefill bound for this backend's family, nil for every
+    /// family whose model does not run prefill slices.
+    nonisolated static func schedulerWidePrefillChunkTokens(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int? {
+        guard let backend = backend as? PagedKVSharedForwardBackend,
+              backend.cacheKinds.contains(where: \.isPagedMLA)
+        else { return nil }
+        return pagedMLAWidePrefillTokens
+    }
 
     /// CB prompt chunk ceiling of a hybrid Qwen MoE backend. M3 Ultra,
     /// Qwen3.6-35B-A3B, one request: TTFT 1.47 s at 512 vs 1.36 s at 2048
@@ -307,7 +331,8 @@ extension ModelRuntime {
                     .nativeMTPDrafterPromptWindow,
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
                 referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.prefillChunkTokens : nil,
-                serialPrefillStride: schedulerFollowsSerialPrefillStride(backend: backend)
+                serialPrefillStride: schedulerFollowsSerialPrefillStride(backend: backend),
+                widePrefillChunkTokens: schedulerWidePrefillChunkTokens(backend: backend)
             ),
             allocator: allocator,
             backend: backend,
