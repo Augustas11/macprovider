@@ -15,7 +15,11 @@
 #                    [--model-id ID --model-sha256 SHA] [--config-extra FILE]
 #                    [--skip-compare] [--trials-by-rows 4=1] [--reference-only]
 #                    [--expect-route batched|any] [--warmup-stall-s 1200] [--warmup-poll-s 10]
-#                    [--seed-self-check FILE] [--expect-native-mtp on|any]
+#                    [--seed-self-check FILE] [--expect-native-mtp on|any] [--lab-fence]
+#
+# --lab-fence (#2448): the provider client sends each trial's rows as one request-named
+# admission fence (provider_client.py --lab-fence); a lab-harness serve then admits the
+# rows in row order once all are queued. The reference is unaffected.
 #
 # --reference picks the reference script: reference_mlxlm.py (default) or
 # reference_mlxvlm.py for families mlx-lm cannot load, or reference_omlx.py (an
@@ -145,6 +149,7 @@ WARMUP_STALL_S=1200
 WARMUP_POLL_S=10
 SEED_SELF_CHECK=""
 EXPECT_MTP=any
+LAB_FENCE=0
 MODEL_PATH="" MODEL_NAME="" BIN_DIR="" OUT_DIR="" PY=""
 
 while [ $# -gt 0 ]; do
@@ -185,6 +190,7 @@ while [ $# -gt 0 ]; do
     --warmup-poll-s) WARMUP_POLL_S="$2"; shift 2 ;;
     --seed-self-check) SEED_SELF_CHECK="$2"; shift 2 ;;
     --expect-native-mtp) EXPECT_MTP="$2"; shift 2 ;;
+    --lab-fence) LAB_FENCE=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -351,6 +357,7 @@ fi
 
 MTP_CLIENT_ARGS=()
 [ "$EXPECT_MTP" != on ] || MTP_CLIENT_ARGS=(--native-mtp-counters)
+[ "$LAB_FENCE" = 0 ] || MTP_CLIENT_ARGS+=(--lab-fence)
 echo "== client $(date +%T)"
 if [ "$SAMPLE_SECS" -gt 0 ] 2>/dev/null; then
   # One stack sample of the serve process while the client runs, to split
