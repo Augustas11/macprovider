@@ -142,7 +142,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     let tokens = MLXArray(input.promptTokens.map(Int32.init)).reshaped([1, input.promptTokens.count])
                     var state = LMOutput.State()
                     state[mtpEmitFlagKey] = input.nativeMTPPromptPrefill
-                    let output = SmallMRouteScope.build { model.prefillLastOutput(.init(tokens: tokens), cache: row.caches, state: state) }
+                    let output = try SmallMRouteScope.build { model.prefillLastOutput(.init(tokens: tokens), cache: row.caches, state: state) }
                     let logits = output.logits
                     let sampledArray = input.sampleFirstToken ? ContinuousBatchRowSampler.sample(
                         logits: logits[0..., -1, 0...], rows: [.init(temperature: input.temperature,
@@ -250,7 +250,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         }
         guard !eligible.isEmpty else { return (steps, []) }
         let tokens = MLXArray(eligible.map { Int32($0.0.input.currentToken) }).reshaped([eligible.count, 1])
-        let output = SmallMRouteScope.build {
+        let output = try SmallMRouteScope.build {
             model.decodeBatchOutput(tokens, rowCaches: eligible.map(\.1.caches), emitMTPState: false)
         }
         let sampledArray = ContinuousBatchRowSampler.sample(
@@ -350,8 +350,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             var stopped = Set<Int>()
             var streaming = eligible.count == inputs.count
 
-            func enqueue(_ tokens: MLXArray, indices: [Int], step: Int) -> (tokens: MLXArray, hidden: MLXArray?) {
-                let output = SmallMRouteScope.build {
+            func enqueue(_ tokens: MLXArray, indices: [Int], step: Int) throws -> (tokens: MLXArray, hidden: MLXArray?) {
+                let output = try SmallMRouteScope.build {
                     model.decodeBatchOutput(tokens.reshaped([indices.count, 1]),
                         rowCaches: indices.map { eligible[$0].1.caches },
                         emitMTPState: indices.contains { eligible[$0].0.captureNativeMTPDrafterColumns })
@@ -378,7 +378,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             let decodeTurn = GPUWorkKind.decodeStep(rows: eligible.count)
             gpuTurn?.begin(decodeTurn)
             var pendingIndices = Array(eligible.indices)
-            var pending = enqueue(MLXArray(eligible.map { Int32($0.0.currentToken) }), indices: pendingIndices, step: 0)
+            var pending = try enqueue(MLXArray(eligible.map { Int32($0.0.currentToken) }), indices: pendingIndices, step: 0)
             var cancelledWindow = false
             for step in 0..<steps {
                 gpuTurn?.begin(decodeTurn)
@@ -392,7 +392,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     let positions = nextIndices.map { Int32(currentIndices.firstIndex(of: $0)!) }
                     let nextTokens = nextIndices.count == currentIndices.count
                         ? current.tokens : current.tokens.take(MLXArray(positions), axis: 0)
-                    pending = enqueue(nextTokens, indices: nextIndices, step: step + 1)
+                    pending = try enqueue(nextTokens, indices: nextIndices, step: step + 1)
                     pendingIndices = nextIndices
                 }
                 let sampled = current.tokens.asArray(Int.self)
@@ -532,7 +532,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_packed_drafter_required")
             }
             var state = values.3 ?? model.makeState(parameters: nil)
-            SmallMRouteScope.build {
+            try SmallMRouteScope.build {
                 model.prepareDrafterState(target: values.0, promptTokens: values.1,
                     targetHidden: values.2, firstBonus: MLXArray([Int32(bonus)]), positionDeltas: nil,
                     state: &state, sampler: ArgMaxSampler())
@@ -681,7 +681,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             }
             if !group.isEmpty { groups.append(group) }
             for indices in groups {
-                let verified = SmallMRouteScope.build {
+                let verified = try SmallMRouteScope.build {
                     model.verifyBatchOutput(
                         indices.map { [inputs[$0].currentToken] + inputs[$0].proposalTokens },
                         rowCaches: indices.map { working[$0] })
@@ -843,7 +843,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             guard input.targetKVTokenCount == input.committedKVTokenCount + 1 else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_row_offset_mismatch")
             }
-            let logits = SmallMRouteScope.build {
+            let logits = try SmallMRouteScope.build {
                 model.decodeBatch(MLXArray([Int32(input.currentToken)]).reshaped([1, 1]), rowCaches: [row.caches])
             }
             eval([logits] + row.caches.flatMap(\.state))
