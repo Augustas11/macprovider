@@ -8,9 +8,12 @@ Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security /
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.63 (2026-11-22, FR-CB9 `mixed`: ordinary requests join `row_invariant` while one is in flight, Related: #2462):**
 In a `mixed` process an ordinary request admitted while any `row_invariant`
-request (native, or ordinary admitted this way) is in flight, active or
-queued, is admitted on `row_invariant` for its whole life; with none in
-flight it takes `stock_order` as before. The lab window measured two forwards
+request (native, or ordinary admitted this way) is in flight, active, queued
+or decided native at registration and not yet admitted, is admitted on
+`row_invariant` for its whole life. With none in flight it takes the route of
+the hot conversation-cache entry stored for its key, so a keyed
+conversation's next turn reuses its KV, and otherwise `stock_order` as
+before. The lab window measured two forwards
 per step (one per route) at 1 native + 2 ordinary rows on Qwen3.8-27B: mix
 aggregate output 34.7 against 44.7 tok/s on a process-wide `row_invariant`
 (-22%), because each step read the weights twice. The rule keeps such a step
@@ -18,7 +21,8 @@ one forward per decode kind. A native request admitted while `stock_order`
 rows are in flight still splits forwards per route until those rows finish;
 later ordinary arrivals join `row_invariant`, so the `stock_order` set
 drains. Each admission logs `event=small_m_route_admission route=...
-reason=native_admitted|native_active|idle`, and local `/v1/status` adds
+reason=native_admitted|native_active|conversation_cache|idle`, and local
+`/v1/status` adds
 `continuous_batching.small_m_route_admissions`. No other behaviour changes.
 
 **Change log v0.3.62 (2026-11-22, FR-CB9 `mixed` keeps out of NAX GPUs; prefill pauses stay on one route, Related: #2462):**
@@ -2162,10 +2166,15 @@ role, another warm-swap target, a configured further model, and a recorded
   `row_invariant` when the request is admitted native (its SPEC-048 native
   admission selects the native path); (v0.3.63) `row_invariant` for an
   ordinary request admitted while any `row_invariant` request is in flight
-  (admitted and not yet returned by the scheduler, decoding or queued), with
-  reason `native_active`; `stock_order` for an ordinary request admitted
-  with none in flight, with reason `idle`. The check and the count of the
-  new request are one atomic step, so concurrent admissions see each other. A native
+  (admitted and not yet returned by the scheduler, decoding or queued, or
+  decided native at registration and not yet admitted: such a request is
+  counted from its native decision, and released on every exit path), with
+  reason `native_active`; for an ordinary request admitted with none in
+  flight, the route of the hot conversation-cache entry stored for its
+  conversation key (reason `conversation_cache`), else `stock_order` (reason
+  `idle`). An ordinary request is never admitted on `stock_order` while a
+  `row_invariant` request is in flight. The check and the count of the new
+  request are one atomic step, so concurrent admissions see each other. A native
   request keeps `row_invariant` for its whole life: every prefill chunk
   (only chunks of 16 rows or fewer reach the small-row kernels), every
   decode step and native verify window, and any ordinary fallback, before or
@@ -2208,7 +2217,8 @@ role, another warm-swap target, a configured further model, and a recorded
   `continuous_batching.small_m_route_requests`, the count of in-flight
   requests per route (`stock_order`, `row_invariant`), and (v0.3.63)
   `continuous_batching.small_m_route_admissions`, the admissions since start
-  per reason (`native_admitted`, `native_active`, `idle`). Each admission
+  per reason (`native_admitted`, `native_active`, `conversation_cache`,
+  `idle`). Each admission
   logs `event=small_m_route_admission route=<route> reason=<reason>
   in_flight_row_invariant=<n> in_flight_stock_order=<n>`. Every other mode
   omits `small_m_route_requests` and `small_m_route_admissions` and logs no

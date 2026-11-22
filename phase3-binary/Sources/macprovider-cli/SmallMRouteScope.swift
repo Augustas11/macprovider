@@ -148,12 +148,36 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
         }
 
         func end() {
+            if close() { counter.end(route) }
+        }
+
+        /// Marks the ticket ended without touching the count; true if it was open.
+        fileprivate func close() -> Bool {
             lock.lock()
+            defer { lock.unlock() }
             let wasOpen = open
             open = false
-            lock.unlock()
-            if wasOpen { counter.end(route) }
+            return wasOpen
         }
+
+        fileprivate var isOpen: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return open
+        }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63): counts a request decided native at
+    /// registration as `rowInvariant` in flight until `admit` takes the
+    /// ticket over (or the request leaves: the caller ends it on every exit
+    /// path), so an ordinary request that reaches admission first still
+    /// joins `rowInvariant`. Nil outside `mixed`.
+    func reserveNative(mixed: Bool = SmallMRoute.processMixed) -> Ticket? {
+        guard mixed else { return nil }
+        lock.lock()
+        counts[.rowInvariant, default: 0] += 1
+        lock.unlock()
+        return Ticket(route: .rowInvariant, reason: .nativeAdmitted, counter: self)
     }
 
     /// SPEC-038 FR-CB9 (v0.3.63): fixes a request's route
@@ -161,27 +185,44 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     /// it in flight, in one step, so two concurrent admissions cannot both
     /// miss each other. In `mixed` it logs
     /// `event=small_m_route_admission route=... reason=...`.
+    ///
+    /// `reservation` is the request's own `reserveNative` ticket: a request
+    /// still native takes it over (it is already counted); one that turned
+    /// ordinary since releases it first, so it never counts as its own
+    /// row-invariant request in flight. `storedRoute` is the route of the
+    /// hot conversation-cache entry stored for the request's key.
     func admit(
         nativeAdmitted: Bool,
+        reservation: Ticket? = nil,
+        storedRoute: SmallMRoute? = nil,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
         mixed: Bool = SmallMRoute.processMixed,
         log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
     ) -> Ticket {
         lock.lock()
-        let rowInvariant = counts[.rowInvariant] ?? 0
+        var reused: Ticket?
+        if let reservation, reservation.isOpen {
+            if nativeAdmitted, mixed {
+                reused = reservation
+            } else if reservation.close() {
+                counts[reservation.route] = max(0, (counts[reservation.route] ?? 0) - 1)
+            }
+        }
+        // In-flight counts other than this request.
+        let rowInvariant = (counts[.rowInvariant] ?? 0) - (reused == nil ? 0 : 1)
         let stockOrder = counts[.stockOrder] ?? 0
         let (route, reason) = SmallMRoute.admissionRoute(
-            nativeAdmitted: nativeAdmitted, rowInvariantInFlight: rowInvariant,
+            nativeAdmitted: nativeAdmitted, rowInvariantInFlight: rowInvariant, storedRoute: storedRoute,
             processRoute: processRoute, mixed: mixed
         )
-        counts[route, default: 0] += 1
+        if reused == nil { counts[route, default: 0] += 1 }
         admissions[reason, default: 0] += 1
         lock.unlock()
         if mixed {
             log("event=small_m_route_admission route=\(route.rawValue) reason=\(reason.rawValue) "
                 + "in_flight_row_invariant=\(rowInvariant) in_flight_stock_order=\(stockOrder)\n")
         }
-        return Ticket(route: route, reason: reason, counter: self)
+        return reused ?? Ticket(route: route, reason: reason, counter: self)
     }
 
     /// Admissions per reason since start, for

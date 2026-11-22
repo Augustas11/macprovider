@@ -551,6 +551,17 @@ actor ConversationCache {
         coldTier = tier
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.63): the small-row route of the hot entry stored
+    /// for `conversationKey`, read at admission so a keyed conversation's next
+    /// turn can take the route its KV was written on. Nil: no hot entry (an
+    /// entry leased to an in-flight turn is not stored).
+    func storedSmallMRoute(conversationKey: String?) -> SmallMRoute? {
+        guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return nil
+        }
+        return entries[key]?.smallMRoute
+    }
+
     func begin(
         conversationKey: String?,
         incomingTokens: [Int32],

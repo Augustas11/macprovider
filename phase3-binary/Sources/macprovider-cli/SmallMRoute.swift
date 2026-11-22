@@ -434,26 +434,40 @@ enum SmallMRoute: String, Sendable, Equatable {
         /// An ordinary request admitted while a `rowInvariant` request
         /// (native, or ordinary admitted here before) was in flight.
         case nativeActive = "native_active"
-        /// An ordinary request admitted with no `rowInvariant` request in flight.
+        /// An ordinary request admitted with no `rowInvariant` request in
+        /// flight and no stored conversation-cache entry for its key.
         case idle
+        /// An ordinary request admitted with no `rowInvariant` request in
+        /// flight on the route of the hot conversation-cache entry stored for
+        /// its key, so the next turn reuses that entry's KV.
+        case conversationCache = "conversation_cache"
         /// Not `mixed`: every request takes the process route.
         case processRoute = "process_route"
     }
 
     /// SPEC-038 FR-CB9 (v0.3.63): the route a request is admitted on, for
     /// its whole life. In `mixed` an ordinary request joins `rowInvariant`
-    /// while any `rowInvariant` request is in flight (active or queued), so
-    /// the scheduler keeps one forward per step instead of one per route;
-    /// with none in flight it takes the stock order process route.
+    /// while any `rowInvariant` request is in flight (active, queued, or
+    /// decided native and not yet admitted), so the scheduler keeps one
+    /// forward per step instead of one per route. With none in flight it
+    /// takes the route of its key's stored conversation-cache entry
+    /// (`storedRoute`), so a keyed conversation keeps its KV across turns,
+    /// and otherwise the stock order process route. It never takes stock
+    /// order while a `rowInvariant` request is in flight.
     static func admissionRoute(
         nativeAdmitted: Bool,
         rowInvariantInFlight: Int,
+        storedRoute: SmallMRoute? = nil,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
         mixed: Bool = SmallMRoute.processMixed
     ) -> (route: SmallMRoute, reason: AdmissionReason) {
         guard mixed else { return (processRoute, .processRoute) }
         if nativeAdmitted { return (.rowInvariant, .nativeAdmitted) }
-        return rowInvariantInFlight > 0 ? (.rowInvariant, .nativeActive) : (.stockOrder, .idle)
+        if rowInvariantInFlight > 0 { return (.rowInvariant, .nativeActive) }
+        if let storedRoute, storedRoute == .rowInvariant || storedRoute == .stockOrder {
+            return (storedRoute, .conversationCache)
+        }
+        return (.stockOrder, .idle)
     }
 
     /// The route this process runs: the one `apply` set, else the one the

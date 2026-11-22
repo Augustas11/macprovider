@@ -9823,6 +9823,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
@@ -9836,7 +9837,8 @@ maxTokens: 1,
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
                 return try await self.admittedContinuousBatchCompletion(request: request, snapshot: snapshot, capability: capability,
-                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        nativeMTPAdmission: nativeMTPAdmission, smallMRouteReservation: smallMRouteReservation,
+                        completionStartedAt: completionStartedAt,
                         shouldCancel: shouldCancel, drainCancelled: drainCancelled)
             }
         }
@@ -9847,6 +9849,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
@@ -9913,8 +9916,16 @@ maxTokens: 1,
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
+        // An ordinary request with no row-invariant request in flight takes
+        // the route of its key's stored entry, so its next turn hits.
+        var storedSmallMRoute: SmallMRoute?
+        if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(conversationKey: request.conversationKey)
+        }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
-            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
+            reservation: smallMRouteReservation,
+            storedRoute: storedSmallMRoute
         )
         defer { smallMRouteTicket.end() }
         let requestSmallMRoute = smallMRouteTicket.route
@@ -10413,6 +10424,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
@@ -10430,7 +10442,8 @@ maxTokens: 1,
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
                 return try await self.admittedContinuousBatchStreamingCompletion(request: request, snapshot: snapshot, capability: capability,
-                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        nativeMTPAdmission: nativeMTPAdmission, smallMRouteReservation: smallMRouteReservation,
+                        completionStartedAt: completionStartedAt,
                         shouldCancel: shouldCancel, drainCancelled: drainCancelled, structuredAccumulator: structuredAccumulator,
                         idleState: idleState, idleCancellation: idleCancellation, onChunk: onChunk)
             }
@@ -10442,6 +10455,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
@@ -10522,8 +10536,16 @@ maxTokens: 1,
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
+        // An ordinary request with no row-invariant request in flight takes
+        // the route of its key's stored entry, so its next turn hits.
+        var storedSmallMRoute: SmallMRoute?
+        if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(conversationKey: request.conversationKey)
+        }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
-            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
+            reservation: smallMRouteReservation,
+            storedRoute: storedSmallMRoute
         )
         defer { smallMRouteTicket.end() }
         let requestSmallMRoute = smallMRouteTicket.route
@@ -11095,6 +11117,12 @@ maxTokens: boundedMaxTokens,
             emitTelemetry: true
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
+        // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
+        // row-invariant in flight from now, so an ordinary request that
+        // reaches admission first still joins row-invariant.
+        let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
+            ? SmallMRouteRequestCounter.shared.reserveNative() : nil
+        defer { smallMRouteReservation?.end() }
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -11106,6 +11134,7 @@ maxTokens: boundedMaxTokens,
             snapshot: snapshot,
             capability: continuousBatchingCapability,
             nativeMTPAdmission: nativeMTPAdmission,
+            smallMRouteReservation: smallMRouteReservation,
             completionStartedAt: completionStartedAt,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
@@ -12090,6 +12119,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             emitTelemetry: false
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
+        // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
+        // row-invariant in flight from now, so an ordinary request that
+        // reaches admission first still joins row-invariant.
+        let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
+            ? SmallMRouteRequestCounter.shared.reserveNative() : nil
+        defer { smallMRouteReservation?.end() }
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -12121,6 +12156,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 snapshot: snapshot,
                 capability: continuousBatchingCapability,
                 nativeMTPAdmission: nativeMTPAdmission,
+                smallMRouteReservation: smallMRouteReservation,
                 completionStartedAt: batchedCompletionStartedAt,
                 shouldCancel: shouldCancel,
                 drainCancelled: drainCancelled,
