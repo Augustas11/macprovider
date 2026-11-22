@@ -32,7 +32,7 @@ Do not put spec-only or CONFORMANCE-only PRs here. They do not change the
 binary the Mac runs.
 
 The next train step comes from `scripts/ops/cli-release.sh status`. On
-2026-11-18 it reported `v1.8.294 train complete`.
+2026-11-22 it reported `v1.8.296 train complete`.
 
 ## Core rule (do not violate)
 
@@ -75,9 +75,9 @@ Generated 2026-11-17T23:54:24Z from GitHub release metadata and live coordinator
 
 | Field | Value |
 |---|---|
-| GitHub provider release | [v1.8.294](https://github.com/Augustas11/macprovider/releases/tag/v1.8.294), published 2026-11-17T23:31:03Z |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.294@5acd5a50c8816e285b4cfead9f0f320af88eee7e` |
-| Pearl runtime / recommended provider | `v1.8.293` / `1.8.294` |
+| GitHub provider release | [v1.8.296](https://github.com/Augustas11/macprovider/releases/tag/v1.8.296), published 2026-11-22T09:56:05Z |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.296@6a0823184fb47cf85a650685ab67819c66801f7f` |
+| Pearl runtime / recommended provider | `v1.8.295` / `1.8.296` |
 | Compatibility target | not exposed by public health; read the applied coordinator config |
 | Mirror discovery | not checked (MIRROR_LATEST_URL unset) |
 
@@ -152,9 +152,24 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
-## Next CLI release — net changes vs 1.8.294 (tracked 2026-11-18)
+## Next CLI release — net changes vs 1.8.296 (tracked 2026-11-22)
 
 ### Merged, rides the next CLI cut
+
+| Change | What it is |
+| --- | --- |
+
+## CLI release — 1.8.296 (published 2026-11-22 17:56 WITA; tracked from 2026-11-18)
+
+`v1.8.296` was published from `6a0823184` (`6a0823184fb47cf85a650685ab67819c66801f7f`; PR 2464 staged the version identity). Acceptance run 44973560669 passed; signed-byte verification recorded checksums `c098b42b…b71a`; the privacy release identity was staged on Pearl with no restart.
+
+Canary swap on the canary provider 2026-11-22 17:30-17:42 WITA: the provider restarted on 1.8.296, served buyers and passed the crash hold; the gateway proof passed and the continuous-batching self-check re-check was granted with 4 served slots. The signed annotated tag `v1.8.296` is pushed; promotion run 45009610436 passed. `install.sh` is republished from v1.8.296, the Pearl recommendation moved to 1.8.296 by SIGHUP with no buyer outage, live-rollout run 45010802540 passed (no `posture_unapproved_code_identity` rejections over 180 s), and the mirror's `latest.json` names v1.8.296.
+
+Every merge commit named in the rows below is an ancestor of `6a0823184` (`git merge-base --is-ancestor`), so each row's CLI step is done by this release. Live probes and catalog steps named in a row stay open where the row says so.
+
+The canary step's tooling gap from the 1.8.294 cut is closed locally: `CANARY_RUNNER_STOP_CMD` / `CANARY_RUNNER_START_CMD` are now set in the operator Mac's `ops.env` to `lib/runner-reserve.sh pause-studio` / `restore`. The canary provider had to be serving buyers before the swap; a stale lab-window pause on it (`studio-live.py pause`, which survives restarts) held the swap until it was lifted.
+
+### Shipped in 1.8.296
 
 | Change | What it is |
 | --- | --- |
