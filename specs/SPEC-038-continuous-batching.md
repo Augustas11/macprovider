@@ -1,24 +1,43 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.64
+Version: v0.3.65
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.65 (2026-11-23, FR-CB9 `mixed`: the stored route is read only for a turn that can hit, and a stock order entry beside `row_invariant` takes the cheaper of re-prefill and split, Related: #2462):**
+Admission reads the stored conversation-cache entry only for an ordinary
+request that may take a conversation-cache lease, and only when its prompt
+extends the entry under the `begin` prefix rule (a shared prefix of at least
+the lcp threshold with new tokens after it, the whole stored prompt for a
+prompt snapshot, a recurrent checkpoint inside the prefix); the lookup also
+returns the prompt tokens the hit would reuse. A request whose entry is
+`stock_order` admitted while a `row_invariant` request is in flight keeps
+`stock_order` (reason `conversation_cache`, two forwards per step while both
+decode) only when reused tokens x prefill cost per token exceed expected
+overlap tokens x the cost of the extra forward per step; otherwise it joins
+`row_invariant` and re-prefills (new reason `conversation_cache_join`). A
+`stock_order` conversation overlapping `row_invariant` therefore pays at
+most min(re-prefill, split) instead of either one unconditionally. A
+`conversation_cache` admission whose lease then misses logs
+`event=small_m_route_admission_miss reason=stored_route_stale`. Every other
+case is unchanged.
+
 **Change log v0.3.64 (2026-11-23, FR-CB9 `mixed`: a stored conversation-cache entry decides first; every `row_invariant` request is joinable, Related: #2462):**
 In a `mixed` process an ordinary request whose conversation key has a hot
 stored conversation-cache entry is admitted on that entry's route (reason
 `conversation_cache`) even while requests of the other route are in flight,
 so the turn reuses its KV instead of re-prefilling on the other route; the
-scheduler runs a transient split while both routes are active. Otherwise an
+scheduler runs one forward per route while both routes are active (v0.3.65
+bounds that cost). Otherwise an
 ordinary request joins `row_invariant` while any `row_invariant` request is
 in flight, now including one admitted `conversation_cache` (reason
 `native_active`), else takes `stock_order` (reason `idle`). The worst case
 equals the process-wide `row_invariant` serve (every row one route, every
-turn hits) except for a transient split only while a `stock_order`
-conversation turn overlaps a `row_invariant` row: a hit beats a re-prefill,
-whose cost grows with the context. The v0.3.63 lab window measured both
+turn hits) except for a split while a `stock_order` conversation turn
+overlaps a `row_invariant` row: a hit beats a re-prefill, whose cost grows
+with the context (v0.3.65 replaces this with a cost rule). The v0.3.63 lab window measured both
 gaps: an unkeyed row beside a keyed `row_invariant` turn ran its own
 forward (aggregate 31.39 against 40.99 tok/s process-wide, -23.4%), and a
 keyed turn with a `stock_order` entry admitted beside a native row
@@ -2188,22 +2207,59 @@ role, another warm-swap target, a configured further model, and a recorded
   order (v0.3.64): `row_invariant` when the request is admitted native (its
   SPEC-048 native admission selects the native path, reason
   `native_admitted`); for an ordinary request whose conversation key has a
-  hot stored conversation-cache entry, that entry's route (`row_invariant`
-  or `stock_order`, reason `conversation_cache`), whatever is in flight, so
-  the turn reuses its KV; else `row_invariant` for an ordinary request
+  hot stored conversation-cache entry it can reuse (v0.3.65, below), that entry's route
+  (`row_invariant` or `stock_order`, reason `conversation_cache`), so the
+  turn reuses its KV, except that a `stock_order` entry with a
+  `row_invariant` request in flight follows the cost rule below; else `row_invariant` for an ordinary request
   admitted while any `row_invariant` request is in flight (admitted and not
   yet returned by the scheduler, decoding or queued, or decided native at
   registration and not yet admitted: such a request is counted from its
   native decision, and released on every exit path), with reason
   `native_active`; else `stock_order` (reason `idle`). Every `row_invariant`
   request counts as in flight for this rule, one admitted
-  `conversation_cache` included. A `stock_order` conversation turn admitted
-  beside a `row_invariant` row decodes in its own forward while both are in
-  flight: the worst case equals the process-wide `row_invariant` serve
-  (every row one route, every turn hits) except for that transient split,
-  and a hit beats a re-prefill on the other route, whose cost grows with the
-  context. An ordinary request without a stored entry is never admitted on
-  `stock_order` while a `row_invariant` request is in flight. The check and
+  `conversation_cache` included. An ordinary request without a reusable
+  stored entry is never admitted on `stock_order` while a `row_invariant`
+  request is in flight;
+- (v0.3.65) the stored entry is read at admission only for an ordinary
+  request whose conversation-cache lease is allowed, and only when the
+  request's prompt extends it under the `begin` prefix rule: a shared prefix
+  of at least the lcp threshold (32 tokens) with new tokens after it, the
+  whole stored prompt for a prompt snapshot, and a recurrent checkpoint
+  inside the prefix for a recurrent entry. The lookup returns the entry's
+  route and the prompt tokens the hit would reuse (`reusable`). It reads the
+  hot tier only: a cold-tier lookup is disk I/O on the admission path, so a
+  turn whose entry lives only on disk is admitted as if it had none, and a
+  cold promotion serves it only when the envelope's route class matches the
+  admitted route (SPEC-037 v0.2.8). `begin`'s other checks (layer class,
+  retained handoff) and an eviction or expiry between admission and `begin`
+  can still miss: the request then logs
+  `event=small_m_route_admission_miss route=<route> reason=stored_route_stale`
+  and prefills fully on its admitted route, and its own commit stores a
+  fresh entry, so the miss is bounded to that turn;
+- (v0.3.65) cost rule: a request whose reusable entry is `stock_order`,
+  admitted while a `row_invariant` request is in flight, keeps `stock_order`
+  (reason `conversation_cache`) only when `reusable x prefill cost per token
+  > overlap x split cost per step`, where `overlap` is the smaller of its own
+  output budget and the largest remaining output budget (budget less tokens
+  produced) among the `row_invariant` requests in flight; a native request
+  reserved but not yet admitted has an unknown budget, which leaves
+  `overlap` the request's own budget, and with neither known it joins.
+  Otherwise it is admitted `row_invariant` and re-prefills (reason
+  `conversation_cache_join`). The cost ratio is one constant,
+  `splitStepPrefillTokens = 8` prompt tokens per extra single-row decode
+  forward, from lab rerun `20261122T165705Z` (re-prefill 4.67 s for 1384
+  tokens = 3.37 ms per token; the extra forward is about one single-row
+  decode step, 26 ms at 38 tok/s): the runtime measures a prefill rate but
+  not a model's single-row decode step time. A `stock_order` conversation
+  overlapping `row_invariant` rows therefore pays at most min(re-prefill,
+  split). A `row_invariant` entry, or a `stock_order` entry with nothing
+  `row_invariant` in flight, keeps its route as in v0.3.64. Under
+  continuous `row_invariant` overlap the rule drifts one way: each
+  `conversation_cache_join` stores the conversation's next entry on
+  `row_invariant`, and no rule moves a `row_invariant` conversation back to
+  `stock_order` (its entry keeps it there), so under sustained native
+  traffic keyed conversations converge on `row_invariant`, the route of the
+  process-wide serve. The check and
   the count of the new request are one atomic step, so concurrent admissions
   see each other. A native
   request keeps `row_invariant` for its whole life: every prefill chunk
@@ -2225,8 +2281,8 @@ role, another warm-swap target, a configured further model, and a recorded
   route. Running two forwards reads the weights twice in that step; with the
   v0.3.63 admission rule it applies only while `stock_order` rows admitted
   before the first `row_invariant` request, or (v0.3.64) admitted
-  `conversation_cache` on a `stock_order` entry, are in flight beside
-  `row_invariant` rows;
+  `conversation_cache` on a `stock_order` entry under the v0.3.65 cost
+  rule, are in flight beside `row_invariant` rows;
 - the FR-CB10 self-check runs on the process route, under the
   `+small_m_stock_order` key (FR-CB10 item 5); its verdict decides batching
   for the process, and its grant bounds the process's concurrent rows across
@@ -2251,11 +2307,13 @@ role, another warm-swap target, a configured further model, and a recorded
   requests per route (`stock_order`, `row_invariant`), and (v0.3.63)
   `continuous_batching.small_m_route_admissions`, the admissions since start
   per reason (`native_admitted`, `native_active`, `conversation_cache`,
-  `idle`). Each admission
+  (v0.3.65) `conversation_cache_join`, `idle`). Each admission
   logs `event=small_m_route_admission route=<route> reason=<reason>
   in_flight_row_invariant=<n> in_flight_stock_order=<n>
   joinable_row_invariant=<n>` (v0.3.64: every `row_invariant` request in
-  flight other than this one). Every other mode
+  flight other than this one), and (v0.3.65) for a request with a reusable
+  stored entry ` stored_route=<route> cached_tokens=<n>
+  overlap_tokens=<n|unknown>`; `route` is the route chosen. Every other mode
   omits `small_m_route_requests` and `small_m_route_admissions` and logs no
   admission line.
 

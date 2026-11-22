@@ -9437,6 +9437,26 @@ maxTokens: 1,
     /// A batched row's token event on its request timeline: the first event
     /// is the row's first sampled token, or, for a waiter that attached to a
     /// row already in flight, its first replayed delivery.
+    /// SPEC-038 FR-CB9 (v0.3.65): whether admission reads the stored entry's
+    /// route: only for an ordinary request that may take a conversation-cache
+    /// lease, since no other request can hit the entry.
+    static func admissionReadsStoredSmallMRoute(conversationCacheAllowed: Bool, nativeAdmitted: Bool) -> Bool {
+        conversationCacheAllowed && !nativeAdmitted
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): a request admitted on its stored entry's
+    /// route (`conversation_cache`) whose lease then missed: the entry was
+    /// evicted, expired or failed a `begin` check between admission and
+    /// `begin`. The turn runs on that route with a full prefill; its own
+    /// commit stores a fresh entry, so the cost is bounded to this turn.
+    static func logSmallMRouteStoredRouteStale(
+        ticket: SmallMRouteRequestCounter.Ticket, lease: ConversationCacheLease?,
+        log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) {
+        guard ticket.reason == .conversationCache, (lease?.cachedPromptTokens ?? 0) == 0 else { return }
+        log("event=small_m_route_admission_miss route=\(ticket.route.rawValue) reason=stored_route_stale\n")
+    }
+
     static func noteContinuousBatchTokenEvent(_ event: ContinuousBatchSchedulerTokenEvent, on timeline: RequestTimeline) {
         if event.replayTokens != nil {
             timeline.markReplayAttach()
@@ -9917,18 +9937,32 @@ maxTokens: 1,
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
         // v0.3.64: an ordinary request whose key has a hot stored entry takes
-        // that entry's route first, whatever is in flight, so the turn hits.
-        var storedSmallMRoute: SmallMRoute?
-        if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
+        // that entry's route first, so the turn hits. v0.3.65: only an entry
+        // this request may lease and whose prefix it extends, and beside
+        // row-invariant requests only when the hit costs less than the split.
+        let conversationCacheAllowed = Self.allowsConversationCacheLease(
+            provenance: request.ingestProvenance,
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
+        )
+        var storedSmallMRoute: ConversationCache.StoredSmallMRoute?
+        if Self.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: conversationCacheAllowed,
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        ) {
             storedSmallMRoute = await conversationCache.storedSmallMRoute(
-                conversationKey: request.conversationKey, modelID: request.model,
+                conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
                 kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
             )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
             reservation: smallMRouteReservation,
-            storedRoute: storedSmallMRoute
+            storedRoute: storedSmallMRoute?.route,
+            reusableCachedTokens: storedSmallMRoute?.reusableCachedTokens ?? 0,
+            maxOutputTokens: maxOutputTokens
         )
         defer { smallMRouteTicket.end() }
         let requestSmallMRoute = smallMRouteTicket.route
@@ -9936,12 +9970,6 @@ maxTokens: 1,
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
-        )
-        let conversationCacheAllowed = Self.allowsConversationCacheLease(
-            provenance: request.ingestProvenance,
-            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
-                cacheOnlyKey: request.conversationCacheOnly
-            )
         )
         func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
             await conversationCache.begin(
@@ -9980,6 +10008,7 @@ maxTokens: 1,
                 rebeginCold: { await beginLease(cold: nil) }
             )
         }
+        Self.logSmallMRouteStoredRouteStale(ticket: smallMRouteTicket, lease: lease)
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -10051,7 +10080,10 @@ maxTokens: 1,
                 try await scheduler.submit(
                     submission.schedulerRequest,
                     admissionWaitPolicy: .callerBounded,
-                    tokenSink: { event in Self.noteContinuousBatchTokenEvent(event, on: timeline) },
+                    tokenSink: { event in
+                        smallMRouteTicket.noteOutputToken(index: event.tokenIndex)
+                        Self.noteContinuousBatchTokenEvent(event, on: timeline)
+                    },
                     onStarted: { timeline.markStarted() }
                 )
             }
@@ -10541,18 +10573,32 @@ maxTokens: 1,
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
         // v0.3.64: an ordinary request whose key has a hot stored entry takes
-        // that entry's route first, whatever is in flight, so the turn hits.
-        var storedSmallMRoute: SmallMRoute?
-        if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
+        // that entry's route first, so the turn hits. v0.3.65: only an entry
+        // this request may lease and whose prefix it extends, and beside
+        // row-invariant requests only when the hit costs less than the split.
+        let conversationCacheAllowed = Self.allowsConversationCacheLease(
+            provenance: request.ingestProvenance,
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
+        )
+        var storedSmallMRoute: ConversationCache.StoredSmallMRoute?
+        if Self.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: conversationCacheAllowed,
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        ) {
             storedSmallMRoute = await conversationCache.storedSmallMRoute(
-                conversationKey: request.conversationKey, modelID: request.model,
+                conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
                 kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
             )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
             reservation: smallMRouteReservation,
-            storedRoute: storedSmallMRoute
+            storedRoute: storedSmallMRoute?.route,
+            reusableCachedTokens: storedSmallMRoute?.reusableCachedTokens ?? 0,
+            maxOutputTokens: maxOutputTokens
         )
         defer { smallMRouteTicket.end() }
         let requestSmallMRoute = smallMRouteTicket.route
@@ -10560,12 +10606,6 @@ maxTokens: 1,
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
-        )
-        let conversationCacheAllowed = Self.allowsConversationCacheLease(
-            provenance: request.ingestProvenance,
-            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
-                cacheOnlyKey: request.conversationCacheOnly
-            )
         )
         func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
             await conversationCache.begin(
@@ -10603,6 +10643,7 @@ maxTokens: 1,
                 rebeginCold: { await beginLease(cold: nil) }
             )
         }
+        Self.logSmallMRouteStoredRouteStale(ticket: smallMRouteTicket, lease: lease)
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -10668,6 +10709,7 @@ maxTokens: 1,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
+                    smallMRouteTicket.noteOutputToken(index: event.tokenIndex)
                     Self.noteContinuousBatchTokenEvent(event, on: timeline)
                     guard !drainCancelled.isFired,
                           !shouldCancel(),

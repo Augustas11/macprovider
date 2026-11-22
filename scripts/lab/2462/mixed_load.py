@@ -3,8 +3,9 @@
 
 usage: mixed_load.py --port P --model ID --label A1 --out rows.jsonl
                      [--trials 6] [--ctx 1000] [--ord-rows 2] [--ord-out 512] [--nat-out 1024]
-                     [--cells ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread] [--late-after 128]
-                     [--conv-turn2-out 64] [--idle-timeout-s 300]
+                     [--cells ord1,nat1,mix,mix_late,conv2,conv_flip,conv_flip_long,conv_spread]
+                     [--late-after 128] [--conv-turn2-out 64] [--conv-flip-long-turn2-out 1024]
+                     [--idle-timeout-s 300]
                      [--ordinary-field x_lab_2462_ordinary]
 
 How a request becomes native or ordinary (NativeMTP.swift `NativeMTPDecodeSelector.reason`):
@@ -44,10 +45,18 @@ Cells, each trial in this order, one trial of every cell before the next trial:
   conv_flip  prompt row ord_rows + 2: turn 1 alone, then (idle) the native prompt and turn 2
         (--conv-turn2-out tokens) once the native row streams. On a `mixed` serve (SPEC-038
         v0.3.64) turn 1 is admitted stock_order (idle) and stores a stock order entry, and turn 2
-        is admitted on that entry's route (stock_order, conversation_cache) beside the
-        row_invariant native row, so it hits its KV and decodes in its own forward while both
-        run (a transient split). The trial's aggregate_tps covers the native row and turn 2 from
-        the turn-2 start. Roles conv1, native, conv2;
+        keeps that entry's route (stock_order, conversation_cache) beside the row_invariant native
+        row under the v0.3.65 cost rule, so it hits its KV and decodes in its own forward while
+        both run (a split). Cost rule arithmetic (SmallMRoute.splitStepPrefillTokens = 8): about
+        1384 cached tokens > min(64 turn-2 tokens, the native row's remaining <= 1024) x 8 = 512,
+        so it splits. The trial's aggregate_tps and peaks cover the native row and turn 2 from the
+        turn-2 start (own poller); turn 2 carries native_overlap_share. Roles conv1, native, conv2;
+  conv_flip_long  prompt row ord_rows + 5: conv_flip with turn 2 at --conv-flip-long-turn2-out
+        tokens (continue follow-up) and the native row at --nat-out. On a `mixed` serve the cost
+        rule joins: 1384 cached <= min(1024, the native row's remaining, about 1000) x 8, about
+        8000 (it joins while the native row has more than 173 tokens left), so turn 2 is
+        admitted row_invariant (conversation_cache_join) and re-prefills, one forward with the
+        native row. Same records as conv_flip;
   conv_spread  prompt row ord_rows + 3: turn 1 beside a native row (row_invariant entry), then
         from idle turn 2 (continue follow-up, --ord-out tokens) and, after its first token, an
         unkeyed ordinary prompt (row ord_rows + 4, --ord-out tokens). On a `mixed` serve turn 2
@@ -109,7 +118,7 @@ def busy(status):
 
 
 IDLE_TIMEOUT_S = 300.0
-CELLS = ("ord1", "nat1", "mix", "mix_late", "conv2", "conv_flip", "conv_spread")
+CELLS = ("ord1", "nat1", "mix", "mix_late", "conv2", "conv_flip", "conv_flip_long", "conv_spread")
 
 
 def wait_idle(port, poll_s, settle_s=1.0, timeout_s=None):
@@ -263,11 +272,14 @@ def trial(args, cell, t, out):
         res = run_request(args.port, args.model, prompts.build_messages(args.ctx, 0), args.nat_out)
         rows.append(record(res, {**base, "kind": "row", "role": "native", "prompt_row": 0,
                                  "max_tokens": args.nat_out}, t0))
-    elif cell in ("conv2", "conv_flip", "conv_spread"):
+    elif cell in ("conv2", "conv_flip", "conv_flip_long", "conv_spread"):
         poller = Poller(args.port, args.poll_s)
         poller.start()
         results = {}
-        row = args.ord_rows + {"conv2": 1, "conv_flip": 2, "conv_spread": 3}[cell]
+        row = args.ord_rows + {"conv2": 1, "conv_flip": 2, "conv_spread": 3, "conv_flip_long": 5}[cell]
+        flip = cell in ("conv_flip", "conv_flip_long")
+        turn2_out = (args.conv_flip_long_turn2_out if cell == "conv_flip_long"
+                     else args.ord_out if cell == "conv_spread" else args.conv_turn2_out)
         conv = {CONVERSATION_HEADER: f"conv:lab2462-{args.label}-{cell}-{t}-{uuid.uuid4().hex[:8]}"}
 
         def go(key, messages, max_tokens, extra=None, ev=None, headers=None):
@@ -284,13 +296,19 @@ def trial(args, cell, t, out):
             nat.join()
 
         turn1 = prompts.build_messages(args.ctx, row)
-        if cell == "conv_flip":
+        if flip:
             # Turn 1 alone (stock order entry on a mixed serve), turn 2 beside a native row.
+            # Phase-2 peaks come from their own poller.
             go("conv1", turn1, args.ord_out, ordinary_extra, None, conv)
             wait_idle(args.port, args.poll_s, settle_s=0.5)
+            poller.stop.set()
+            poller.join()
+            poller = Poller(args.port, args.poll_s)
+            poller.start()
             t2 = time.perf_counter()
-            beside_native("conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or ""),
-                          args.conv_turn2_out, conv)
+            beside_native("conv2", prompts.build_turn2_messages(
+                args.ctx, row, results["conv1"].get("text") or "",
+                **({"followup": "continue"} if cell == "conv_flip_long" else {})), turn2_out, conv)
         else:
             # Turn 1 beside a native row (row-invariant entry on a mixed serve), turn 2 from idle.
             beside_native("conv1", turn1, args.ord_out, conv)
@@ -325,8 +343,11 @@ def trial(args, cell, t, out):
         r1["native_overlap_share"] = overlap_share(r1, native)
         rows.append(r1)
         r2 = record(results["conv2"], {**base, "kind": "row", "role": "conv2", "prompt_row": row,
-                                       "max_tokens": args.ord_out if cell == "conv_spread" else args.conv_turn2_out}, t0)
+                                       "max_tokens": turn2_out}, t0)
         r2["turn2_start_offset_s"] = round(t2 - t0, 4)
+        if flip:
+            # Share of turn 2's decode span during which the native row also decoded.
+            r2["native_overlap_share"] = overlap_share(r2, native)
         rows.append(r2)
         if cell == "conv_spread":
             ru = record(results["unkeyed"], {**base, "kind": "row", "role": "unkeyed", "prompt_row": row + 1,
@@ -342,7 +363,7 @@ def trial(args, cell, t, out):
                 phase2_tps = round(sum(r.get("completion_tokens") or 0 for r in (r2, ru)) / (max(ends) - start), 3)
             else:
                 phase2_tps = None
-        elif cell == "conv_flip":
+        elif flip:
             # Output tok/s of the native row and turn 2 from the turn-2 start to the last token.
             start = t2 - t0
             ends = [r.get("t_last_offset_s") for r in (native, r2)]
@@ -416,7 +437,7 @@ def trial(args, cell, t, out):
                "native_mtp": native_mtp_delta(native_mtp_of(before), native_mtp_of(after)),
                "small_m_route": cb_of(after).get("small_m_route"),
                "small_m_route_admissions": admissions_delta(before, after),
-               "aggregate_tps": (phase2_tps if cell in ("conv_spread", "conv_flip")
+               "aggregate_tps": (phase2_tps if cell in ("conv_spread", "conv_flip", "conv_flip_long")
                                  else (round(tokens / last, 3) if last else None)),
                "wall_s": round(t_end - t0, 3),
                "errors": [r["error"] for r in rows if r.get("error")]}
@@ -445,8 +466,9 @@ def main(argv=None):
     p.add_argument("--ord-rows", type=int, default=2)
     p.add_argument("--ord-out", type=int, default=512)
     p.add_argument("--nat-out", type=int, default=1024)
-    p.add_argument("--cells", default="ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread")
-    p.add_argument("--conv-turn2-out", type=int, default=64, help="conv2: turn-2 max_tokens")
+    p.add_argument("--cells", default="ord1,nat1,mix,mix_late,conv2,conv_flip,conv_flip_long,conv_spread")
+    p.add_argument("--conv-turn2-out", type=int, default=64, help="conv2 and conv_flip: turn-2 max_tokens")
+    p.add_argument("--conv-flip-long-turn2-out", type=int, default=1024, help="conv_flip_long: turn-2 max_tokens")
     p.add_argument("--idle-timeout-s", type=float, default=IDLE_TIMEOUT_S,
                    help="a serve still busy this long before a trial fails the run")
     p.add_argument("--late-after", type=int, default=128,
@@ -457,8 +479,8 @@ def main(argv=None):
     cells = [c for c in args.cells.split(",") if c]
     if not cells or any(c not in CELLS for c in cells):
         p.error("--cells takes " + ",".join(CELLS))
-    if args.idle_timeout_s <= 0 or args.conv_turn2_out < 1:
-        p.error("--idle-timeout-s and --conv-turn2-out must be > 0")
+    if args.idle_timeout_s <= 0 or args.conv_turn2_out < 1 or args.conv_flip_long_turn2_out < 1:
+        p.error("--idle-timeout-s, --conv-turn2-out and --conv-flip-long-turn2-out must be > 0")
     IDLE_TIMEOUT_S = args.idle_timeout_s
     if args.ord_rows < 1 or args.trials < 1:
         p.error("--ord-rows and --trials must be >= 1")

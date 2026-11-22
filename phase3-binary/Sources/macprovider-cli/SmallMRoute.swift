@@ -431,47 +431,93 @@ enum SmallMRoute: String, Sendable, Equatable {
     enum AdmissionReason: String, Sendable, CaseIterable {
         /// The request is admitted native.
         case nativeAdmitted = "native_admitted"
-        /// An ordinary request with no hot conversation-cache entry for its
-        /// key, admitted while a `rowInvariant` request (any reason) was in
-        /// flight.
+        /// An ordinary request with no reusable conversation-cache entry for
+        /// its key, admitted while a `rowInvariant` request (any reason) was
+        /// in flight.
         case nativeActive = "native_active"
         /// An ordinary request admitted with no `rowInvariant` request in
-        /// flight and no stored conversation-cache entry for its key.
+        /// flight and no reusable conversation-cache entry for its key.
         case idle
         /// An ordinary request admitted on the route of the hot
-        /// conversation-cache entry stored for its key, whatever is in
-        /// flight (v0.3.64), so the turn reuses that entry's KV.
+        /// conversation-cache entry stored for its key, so the turn reuses
+        /// that entry's KV (v0.3.64; v0.3.65: beside `rowInvariant` requests
+        /// only when the cost rule keeps it).
         case conversationCache = "conversation_cache"
+        /// (v0.3.65) An ordinary request whose stored entry is `stockOrder`,
+        /// admitted `rowInvariant` beside a `rowInvariant` request because the
+        /// cost rule found the re-prefill cheaper than the split.
+        case conversationCacheJoin = "conversation_cache_join"
         /// Not `mixed`: every request takes the process route.
         case processRoute = "process_route"
     }
 
-    /// SPEC-038 FR-CB9 (v0.3.64): the route a request is admitted on, for
+    /// SPEC-038 FR-CB9 (v0.3.65): prompt tokens one extra single-row forward
+    /// per decode step costs, as a prefill of that many tokens. The runtime
+    /// measures prefill tokens/s (FirstTokenStallWatchdog) but not a model's
+    /// single-row decode step time, so the ratio is one constant.
+    /// rerun 20261122T165705Z: re-prefill 4.67 s for 1384 tokens = 3.37 ms/token;
+    /// extra forward ≈ one single-row decode step ≈ 26 ms (38 tok/s), so ratio ≈ 8
+    static let splitStepPrefillTokens = 8
+
+    /// SPEC-038 FR-CB9 (v0.3.65): decode steps a `stockOrder` conversation
+    /// turn would run in its own forward beside the `rowInvariant` requests in
+    /// flight: the shorter of its own output budget and the largest remaining
+    /// output budget among them. Nil when neither is known.
+    static func expectedOverlapTokens(maxOutputTokens: Int?, rowInvariantRemainingTokens: Int?) -> Int? {
+        switch (maxOutputTokens, rowInvariantRemainingTokens) {
+        case let (own?, other?): return max(0, min(own, other))
+        case let (own?, nil): return max(0, own)
+        case let (nil, other?): return max(0, other)
+        case (nil, nil): return nil
+        }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): whether a `stockOrder` conversation turn
+    /// keeps its entry's route beside `rowInvariant` requests (a split for
+    /// the overlap) rather than joining them and re-prefilling: the reused
+    /// prefill must cost more than the extra forwards,
+    /// `reusable x prefill cost/token > overlap x split cost/step`. An
+    /// unknown overlap joins.
+    static func keepsStoredRouteBesideRowInvariant(reusableCachedTokens: Int, overlapTokens: Int?) -> Bool {
+        guard let overlapTokens else { return false }
+        let (splitCost, overflow) = overlapTokens.multipliedReportingOverflow(by: splitStepPrefillTokens)
+        return !overflow && reusableCachedTokens > splitCost
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): the route a request is admitted on, for
     /// its whole life. In `mixed`, in order: a native request takes
-    /// `rowInvariant`; an ordinary request whose key has a hot stored
-    /// conversation-cache entry (`storedRoute`) takes that entry's route even
-    /// while requests of the other route are in flight, so the turn keeps its
-    /// KV (the scheduler runs a transient split while both routes are
-    /// active); otherwise it joins `rowInvariant` while any `rowInvariant`
-    /// request is in flight (active, queued, or decided native and not yet
-    /// admitted), so the scheduler keeps one forward per step; otherwise it
-    /// takes the stock order process route.
-    /// The worst case equals the process-wide `rowInvariant` serve (every row
-    /// one route, every turn hits) except for a transient split while a stock
-    /// order conversation turn overlaps a `rowInvariant` row: a hit beats a
-    /// re-prefill, which grows with the context. An entry is never reused
-    /// across routes (AC-26, SPEC-037 route class).
+    /// `rowInvariant`. An ordinary request whose key has a reusable hot
+    /// conversation-cache entry (`storedRoute`, `reusableCachedTokens` > 0)
+    /// takes that entry's route, so the turn keeps its KV, except that a
+    /// `stockOrder` entry with a `rowInvariant` request in flight takes the
+    /// cheaper of two costs: keep `stockOrder` (two forwards per step for the
+    /// overlap) only when `keepsStoredRouteBesideRowInvariant`, else join
+    /// `rowInvariant` and re-prefill (`conversationCacheJoin`). So a
+    /// `stockOrder` conversation overlapping `rowInvariant` pays at most
+    /// min(re-prefill, split). Otherwise an ordinary request joins
+    /// `rowInvariant` while any `rowInvariant` request is in flight (active,
+    /// queued, or decided native and not yet admitted), so the scheduler
+    /// keeps one forward per step; otherwise it takes the stock order process
+    /// route. An entry is never reused across routes (AC-26, SPEC-037 route
+    /// class).
     static func admissionRoute(
         nativeAdmitted: Bool,
         rowInvariantInFlight: Int,
         storedRoute: SmallMRoute? = nil,
+        reusableCachedTokens: Int = 0,
+        maxOutputTokens: Int? = nil,
+        rowInvariantRemainingTokens: Int? = nil,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
         mixed: Bool = SmallMRoute.processMixed
     ) -> (route: SmallMRoute, reason: AdmissionReason) {
         guard mixed else { return (processRoute, .processRoute) }
         if nativeAdmitted { return (.rowInvariant, .nativeAdmitted) }
-        if let storedRoute, storedRoute == .rowInvariant || storedRoute == .stockOrder {
-            return (storedRoute, .conversationCache)
+        if let storedRoute, storedRoute == .rowInvariant || storedRoute == .stockOrder, reusableCachedTokens > 0 {
+            guard storedRoute == .stockOrder, rowInvariantInFlight > 0 else { return (storedRoute, .conversationCache) }
+            let overlap = expectedOverlapTokens(
+                maxOutputTokens: maxOutputTokens, rowInvariantRemainingTokens: rowInvariantRemainingTokens)
+            return keepsStoredRouteBesideRowInvariant(reusableCachedTokens: reusableCachedTokens, overlapTokens: overlap)
+                ? (.stockOrder, .conversationCache) : (.rowInvariant, .conversationCacheJoin)
         }
         if rowInvariantInFlight > 0 { return (.rowInvariant, .nativeActive) }
         return (.stockOrder, .idle)

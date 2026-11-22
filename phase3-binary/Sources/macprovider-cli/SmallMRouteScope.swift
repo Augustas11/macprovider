@@ -132,8 +132,9 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     private var admissions: [SmallMRoute.AdmissionReason: Int] = [:]
     /// Row-invariant requests an ordinary admission joins (`Ticket.joinable`):
     /// since v0.3.64 every admitted row-invariant request, native (reserved
-    /// or admitted) or ordinary, `conversation_cache` included.
-    private var joinableRowInvariant = 0
+    /// or admitted) or ordinary, `conversation_cache` included. (v0.3.65) Kept
+    /// by identity so admission reads their remaining output budgets.
+    private var joinableRowInvariant: [ObjectIdentifier: Ticket] = [:]
 
     /// One admitted request's place in the count. `end` is idempotent, so a
     /// caller may end it where the request leaves the scheduler and again,
@@ -148,12 +149,41 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
         private let counter: SmallMRouteRequestCounter
         private let lock = NSLock()
         private var open = true
+        /// (v0.3.65) The request's output budget and the output tokens it has
+        /// produced, for the remaining budget the cost rule reads. Nil until
+        /// admission (a native reservation).
+        private var maxOutputTokens: Int?
+        private var outputTokens = 0
 
-        fileprivate init(route: SmallMRoute, reason: SmallMRoute.AdmissionReason, counter: SmallMRouteRequestCounter) {
+        fileprivate init(
+            route: SmallMRoute, reason: SmallMRoute.AdmissionReason, maxOutputTokens: Int? = nil,
+            counter: SmallMRouteRequestCounter
+        ) {
             self.route = route
             self.reason = reason
             self.joinable = route == .rowInvariant
+            self.maxOutputTokens = maxOutputTokens
             self.counter = counter
+        }
+
+        /// Records output token `index` (0-based) as produced.
+        func noteOutputToken(index: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            outputTokens = max(outputTokens, index + 1)
+        }
+
+        /// Output tokens the request may still produce; nil when its budget is unknown.
+        var remainingOutputTokens: Int? {
+            lock.lock()
+            defer { lock.unlock() }
+            return maxOutputTokens.map { max(0, $0 - outputTokens) }
+        }
+
+        fileprivate func setMaxOutputTokens(_ value: Int?) {
+            lock.lock()
+            defer { lock.unlock() }
+            if let value { maxOutputTokens = value }
         }
 
         func end() {
@@ -183,18 +213,19 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     /// joins `rowInvariant`. Nil outside `mixed`.
     func reserveNative(mixed: Bool = SmallMRoute.processMixed) -> Ticket? {
         guard mixed else { return nil }
+        let ticket = Ticket(route: .rowInvariant, reason: .nativeAdmitted, counter: self)
         lock.lock()
         counts[.rowInvariant, default: 0] += 1
-        joinableRowInvariant += 1
+        joinableRowInvariant[ObjectIdentifier(ticket)] = ticket
         lock.unlock()
-        return Ticket(route: .rowInvariant, reason: .nativeAdmitted, counter: self)
+        return ticket
     }
 
     /// Ends one ticket's count; under `lock` when `locked`.
     fileprivate func release(_ ticket: Ticket, locked: Bool = false) {
         if !locked { lock.lock() }
         counts[ticket.route] = max(0, (counts[ticket.route] ?? 0) - 1)
-        if ticket.joinable { joinableRowInvariant = max(0, joinableRowInvariant - 1) }
+        if ticket.joinable { joinableRowInvariant[ObjectIdentifier(ticket)] = nil }
         if !locked { lock.unlock() }
     }
 
@@ -208,14 +239,20 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     /// still native takes it over (it is already counted); one that turned
     /// ordinary since releases it first, so it never counts as its own
     /// row-invariant request in flight. `storedRoute` is the route of the
-    /// hot conversation-cache entry stored for the request's key; it decides
-    /// the route ahead of the requests in flight (v0.3.64). Otherwise any
-    /// row-invariant request in flight (`Ticket.joinable`) moves an ordinary
-    /// admission onto row-invariant.
+    /// hot conversation-cache entry stored for the request's key and
+    /// `reusableCachedTokens` the prompt tokens it would reuse; it decides the
+    /// route ahead of the requests in flight (v0.3.64), under the v0.3.65 cost
+    /// rule beside row-invariant requests, which reads `maxOutputTokens` and
+    /// their remaining output budgets. Otherwise any row-invariant request in
+    /// flight (`Ticket.joinable`) moves an ordinary admission onto
+    /// row-invariant. With a stored route the log line adds `stored_route`,
+    /// `cached_tokens` and `overlap_tokens`.
     func admit(
         nativeAdmitted: Bool,
         reservation: Ticket? = nil,
         storedRoute: SmallMRoute? = nil,
+        reusableCachedTokens: Int = 0,
+        maxOutputTokens: Int? = nil,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
         mixed: Bool = SmallMRoute.processMixed,
         log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
@@ -231,23 +268,42 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
         }
         // In-flight counts other than this request.
         let rowInvariant = (counts[.rowInvariant] ?? 0) - (reused == nil ? 0 : 1)
-        let joinable = joinableRowInvariant - (reused == nil ? 0 : 1)
+        let reusedID = reused.map(ObjectIdentifier.init)
+        let others = joinableRowInvariant.filter { $0.key != reusedID }.values
+        let joinable = others.count
+        // The largest remaining output budget among them; unknown when any is.
+        var remaining: Int? = 0
+        for other in others {
+            guard let current = remaining, let budget = other.remainingOutputTokens else { remaining = nil; break }
+            remaining = max(current, budget)
+        }
         let stockOrder = counts[.stockOrder] ?? 0
         let (route, reason) = SmallMRoute.admissionRoute(
             nativeAdmitted: nativeAdmitted, rowInvariantInFlight: joinable, storedRoute: storedRoute,
+            reusableCachedTokens: reusableCachedTokens, maxOutputTokens: maxOutputTokens,
+            rowInvariantRemainingTokens: joinable > 0 ? remaining : nil,
             processRoute: processRoute, mixed: mixed
         )
-        let ticket = reused ?? Ticket(route: route, reason: reason, counter: self)
-        if reused == nil {
+        let ticket = reused ?? Ticket(route: route, reason: reason, maxOutputTokens: maxOutputTokens, counter: self)
+        if let reused {
+            reused.setMaxOutputTokens(maxOutputTokens)
+        } else {
             counts[route, default: 0] += 1
-            if ticket.joinable { joinableRowInvariant += 1 }
+            if ticket.joinable { joinableRowInvariant[ObjectIdentifier(ticket)] = ticket }
         }
         admissions[reason, default: 0] += 1
         lock.unlock()
         if mixed {
+            var decision = ""
+            if let storedRoute {
+                let overlap = SmallMRoute.expectedOverlapTokens(
+                    maxOutputTokens: maxOutputTokens, rowInvariantRemainingTokens: joinable > 0 ? remaining : nil)
+                decision = " stored_route=\(storedRoute.rawValue) cached_tokens=\(reusableCachedTokens) "
+                    + "overlap_tokens=\(overlap.map(String.init) ?? "unknown")"
+            }
             log("event=small_m_route_admission route=\(route.rawValue) reason=\(reason.rawValue) "
                 + "in_flight_row_invariant=\(rowInvariant) in_flight_stock_order=\(stockOrder) "
-                + "joinable_row_invariant=\(joinable)\n")
+                + "joinable_row_invariant=\(joinable)" + decision + "\n")
         }
         return ticket
     }

@@ -1007,22 +1007,44 @@ extension SmallMRouteTests {
         XCTAssertTrue(route(false, 0) == (.stockOrder, .idle))
         XCTAssertTrue(route(false, 1) == (.rowInvariant, .nativeActive))
         XCTAssertTrue(route(false, 3) == (.rowInvariant, .nativeActive))
-        // v0.3.64: a stored conversation-cache entry decides ahead of the requests in flight.
-        func stored(_ inFlight: Int, _ entry: SmallMRoute?) -> (SmallMRoute, SmallMRoute.AdmissionReason) {
+        // v0.3.64: a reusable stored conversation-cache entry decides ahead of the
+        // requests in flight; v0.3.65: a stock order entry beside row-invariant ones
+        // only when the reused prefill costs more than the split.
+        func stored(
+            _ inFlight: Int, _ entry: SmallMRoute?, cached: Int = 1_384, own: Int? = 64, remaining: Int? = 900
+        ) -> (SmallMRoute, SmallMRoute.AdmissionReason) {
             let r = SmallMRoute.admissionRoute(
                 nativeAdmitted: false, rowInvariantInFlight: inFlight, storedRoute: entry,
+                reusableCachedTokens: cached, maxOutputTokens: own, rowInvariantRemainingTokens: remaining,
                 processRoute: .stockOrder, mixed: true)
             return (r.route, r.reason)
         }
         XCTAssertTrue(stored(0, .rowInvariant) == (.rowInvariant, .conversationCache))
         XCTAssertTrue(stored(0, .stockOrder) == (.stockOrder, .conversationCache))
+        XCTAssertTrue(stored(0, .stockOrder, own: 1_024) == (.stockOrder, .conversationCache))
         XCTAssertTrue(stored(0, .serialOnly) == (.stockOrder, .idle))
+        // Nothing reusable: as if no entry.
+        XCTAssertTrue(stored(0, .rowInvariant, cached: 0) == (.stockOrder, .idle))
+        XCTAssertTrue(stored(1, .stockOrder, cached: 0) == (.rowInvariant, .nativeActive))
+        // Split chosen: 1384 cached > min(64, 900) x 8 = 512.
         XCTAssertTrue(stored(1, .stockOrder) == (.stockOrder, .conversationCache))
-        XCTAssertTrue(stored(2, .rowInvariant) == (.rowInvariant, .conversationCache))
+        // Join chosen: 1384 cached <= min(1024, 900) x 8 = 7200.
+        XCTAssertTrue(stored(1, .stockOrder, own: 1_024) == (.rowInvariant, .conversationCacheJoin))
+        // The shorter budget decides the overlap: min(1024, 100) x 8 = 800 < 1384.
+        XCTAssertTrue(stored(1, .stockOrder, own: 1_024, remaining: 100) == (.stockOrder, .conversationCache))
+        // Unknown overlap joins.
+        XCTAssertTrue(stored(1, .stockOrder, own: nil, remaining: nil) == (.rowInvariant, .conversationCacheJoin))
+        // A row-invariant entry beside row-invariant requests keeps its route.
+        XCTAssertTrue(stored(2, .rowInvariant, own: 1_024) == (.rowInvariant, .conversationCache))
         XCTAssertTrue(stored(1, .serialOnly) == (.rowInvariant, .nativeActive))
         XCTAssertTrue(stored(1, nil) == (.rowInvariant, .nativeActive))
+        XCTAssertEqual(SmallMRoute.splitStepPrefillTokens, 8)
+        XCTAssertEqual(SmallMRoute.expectedOverlapTokens(maxOutputTokens: 64, rowInvariantRemainingTokens: 900), 64)
+        XCTAssertNil(SmallMRoute.expectedOverlapTokens(maxOutputTokens: nil, rowInvariantRemainingTokens: nil))
+        XCTAssertFalse(SmallMRoute.keepsStoredRouteBesideRowInvariant(reusableCachedTokens: .max, overlapTokens: .max))
         XCTAssertTrue(SmallMRoute.admissionRoute(
-            nativeAdmitted: true, rowInvariantInFlight: 0, storedRoute: .stockOrder, processRoute: .stockOrder, mixed: true
+            nativeAdmitted: true, rowInvariantInFlight: 0, storedRoute: .stockOrder, reusableCachedTokens: 100,
+            processRoute: .stockOrder, mixed: true
         ) == (.rowInvariant, .nativeAdmitted))
         // Outside mixed every request takes the process route.
         for process in [SmallMRoute.rowInvariant, .stockOrder, .serialOnly] {
@@ -1052,7 +1074,7 @@ extension SmallMRouteTests {
         a.end()
         b.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
-        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 0, "native_active": 0, "conversation_cache": 0, "idle": 2])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 0, "native_active": 0, "conversation_cache": 0, "conversation_cache_join": 0, "idle": 2])
         // Not mixed: the process route, counted, and no admission line.
         let quiet = AdmissionLogLines()
         let c = counter.admit(nativeAdmitted: true, processRoute: .rowInvariant, mixed: false, log: quiet.append)
@@ -1096,7 +1118,7 @@ extension SmallMRouteTests {
         XCTAssertEqual(later.route, .stockOrder)
         XCTAssertEqual(later.reason, .idle)
         later.end()
-        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 2, "conversation_cache": 0, "idle": 1])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 2, "conversation_cache": 0, "conversation_cache_join": 0, "idle": 1])
         XCTAssertEqual(lines.all.map { $0.split(separator: " ").prefix(3).joined(separator: " ") }, [
             "event=small_m_route_admission route=row_invariant reason=native_admitted",
             "event=small_m_route_admission route=row_invariant reason=native_active",
@@ -1152,7 +1174,7 @@ extension SmallMRouteTests {
         reservation.end()
         ordinary.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
-        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 1, "conversation_cache": 0, "idle": 0])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 1, "conversation_cache": 0, "conversation_cache_join": 0, "idle": 0])
     }
 
     /// M1: a reservation released on early rejection, and one whose request
@@ -1186,8 +1208,8 @@ extension SmallMRouteTests {
         let counter = SmallMRouteRequestCounter()
         let lines = AdmissionLogLines()
         func admit(_ stored: SmallMRoute?, native: Bool = false) -> SmallMRouteRequestCounter.Ticket {
-            counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true,
-                          log: lines.append)
+            counter.admit(nativeAdmitted: native, storedRoute: stored, reusableCachedTokens: stored == nil ? 0 : 1_000,
+                          maxOutputTokens: 64, processRoute: .stockOrder, mixed: true, log: lines.append)
         }
         let keyedRI = admit(.rowInvariant)
         XCTAssertEqual(keyedRI.route, .rowInvariant)
@@ -1199,10 +1221,14 @@ extension SmallMRouteTests {
         XCTAssertEqual(unkeyed.reason, .nativeActive)
         XCTAssertEqual(lines.all.last, "event=small_m_route_admission route=row_invariant reason=native_active "
             + "in_flight_row_invariant=1 in_flight_stock_order=0 joinable_row_invariant=1\n")
+        // Split chosen: 1000 cached > min(64, 64) x 8.
         let keyedStock = admit(.stockOrder)
         XCTAssertEqual(keyedStock.route, .stockOrder)
         XCTAssertEqual(keyedStock.reason, .conversationCache)
         XCTAssertFalse(keyedStock.joinable)
+        XCTAssertEqual(lines.all.last, "event=small_m_route_admission route=stock_order reason=conversation_cache "
+            + "in_flight_row_invariant=2 in_flight_stock_order=0 joinable_row_invariant=2 "
+            + "stored_route=stock_order cached_tokens=1000 overlap_tokens=64\n")
         let secondKeyedRI = admit(.rowInvariant)
         XCTAssertEqual(secondKeyedRI.route, .rowInvariant)
         XCTAssertEqual(secondKeyedRI.reason, .conversationCache)
@@ -1220,19 +1246,22 @@ extension SmallMRouteTests {
         XCTAssertEqual(idle.reason, .idle)
         idle.end()
         XCTAssertEqual(counter.admissionSnapshot(),
-                       ["native_admitted": 0, "native_active": 2, "conversation_cache": 3, "idle": 1])
+                       ["native_admitted": 0, "native_active": 2, "conversation_cache": 3, "conversation_cache_join": 0, "idle": 1])
     }
 
-    /// v0.3.64: beside an in-flight native row a keyed request whose stored
-    /// entry is stock order keeps stock order (its KV hits), while unkeyed
-    /// ordinary requests join row-invariant and are joinable themselves.
+    /// v0.3.64/v0.3.65: beside an in-flight native row a keyed request whose
+    /// stored entry is stock order keeps stock order when the reused prefill
+    /// costs more than the split (its KV hits), while unkeyed ordinary
+    /// requests join row-invariant and are joinable themselves.
     func testStoredStockOrderEntryKeepsStockOrderBesideANativeRow() {
         let counter = SmallMRouteRequestCounter()
-        func admit(_ stored: SmallMRoute?, native: Bool = false) -> SmallMRouteRequestCounter.Ticket {
-            counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true, log: { _ in })
+        func admit(_ stored: SmallMRoute?, native: Bool = false, maxOut: Int = 64) -> SmallMRouteRequestCounter.Ticket {
+            counter.admit(nativeAdmitted: native, storedRoute: stored, reusableCachedTokens: stored == nil ? 0 : 1_384,
+                          maxOutputTokens: maxOut, processRoute: .stockOrder, mixed: true, log: { _ in })
         }
-        let native = admit(nil, native: true)
+        let native = admit(nil, native: true, maxOut: 1_024)
         XCTAssertTrue(native.joinable)
+        XCTAssertEqual(native.remainingOutputTokens, 1_024)
         let keyedStock = admit(.stockOrder)
         XCTAssertEqual(keyedStock.route, .stockOrder)
         XCTAssertEqual(keyedStock.reason, .conversationCache)
@@ -1253,6 +1282,56 @@ extension SmallMRouteTests {
         XCTAssertEqual(idle.reason, .conversationCache)
         idle.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+
+    /// v0.3.65: a long stock order turn beside a native row with a long
+    /// remaining budget joins row-invariant and re-prefills; once the native
+    /// row has produced most of its budget the same turn keeps stock order.
+    func testStoredStockOrderEntryJoinsWhenTheSplitCostsMore() {
+        let counter = SmallMRouteRequestCounter()
+        let lines = AdmissionLogLines()
+        let native = counter.admit(nativeAdmitted: true, maxOutputTokens: 1_024, processRoute: .stockOrder, mixed: true,
+                                   log: { _ in })
+        func keyed() -> SmallMRouteRequestCounter.Ticket {
+            counter.admit(nativeAdmitted: false, storedRoute: .stockOrder, reusableCachedTokens: 1_384,
+                          maxOutputTokens: 1_024, processRoute: .stockOrder, mixed: true, log: lines.append)
+        }
+        // 1384 <= min(1024, 1024) x 8: join.
+        let joining = keyed()
+        XCTAssertEqual(joining.route, .rowInvariant)
+        XCTAssertEqual(joining.reason, .conversationCacheJoin)
+        XCTAssertTrue(joining.joinable)
+        XCTAssertEqual(lines.all.last, "event=small_m_route_admission route=row_invariant reason=conversation_cache_join "
+            + "in_flight_row_invariant=1 in_flight_stock_order=0 joinable_row_invariant=1 "
+            + "stored_route=stock_order cached_tokens=1384 overlap_tokens=1024\n")
+        joining.end()
+        // The native row has produced 1000 of its 1024 tokens: 1384 > 24 x 8, split.
+        native.noteOutputToken(index: 999)
+        XCTAssertEqual(native.remainingOutputTokens, 24)
+        let splitting = keyed()
+        XCTAssertEqual(splitting.route, .stockOrder)
+        XCTAssertEqual(splitting.reason, .conversationCache)
+        splitting.end()
+        native.end()
+        XCTAssertEqual(counter.admissionSnapshot(),
+                       ["native_admitted": 1, "native_active": 0, "conversation_cache": 1, "conversation_cache_join": 1,
+                        "idle": 0])
+        // A reservation's budget is unknown until admission: the overlap is the turn's own budget.
+        let reservation = counter.reserveNative(mixed: true)
+        XCTAssertNil(reservation?.remainingOutputTokens)
+        let besideReservation = keyed()
+        XCTAssertEqual(besideReservation.reason, .conversationCacheJoin)
+        besideReservation.end()
+        reservation?.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+
+    /// v0.3.65: admission reads the stored route only for an ordinary request
+    /// that may take a conversation-cache lease.
+    func testStoredRouteIsReadOnlyWhenTheLeaseIsAllowed() {
+        XCTAssertTrue(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: true, nativeAdmitted: false))
+        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: false, nativeAdmitted: false))
+        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: true, nativeAdmitted: true))
     }
 
     func testConcurrentAdmissionsBesideANativeRowAllJoinRowInvariant() async {

@@ -9,19 +9,23 @@ small_m_route: row_invariant), mode B = mixed. The B serve must sit between two 
 
 Path checks (a failure means the cells did not measure what they claim):
   every request returned usage and no error; per trial the native_mtp admissions are 0 in ord1
-  and 1 in nat1, mix, conv2, conv_flip and conv_spread, with no pre-output fallback or post-output failure and counters not
+  and 1 in nat1, mix, conv2, conv_flip, conv_flip_long and conv_spread, with no pre-output fallback or post-output failure and counters not
   reset; every A trial reports small_m_route row_invariant and every B trial mixed; a mix trial
   peaks at 1 + ord_rows active decode rows, and on B at row_invariant=1+ord_rows / stock_order=0
   in-flight route requests (SPEC-038 v0.3.63: the ordinary rows join row_invariant); on B the
   small_m_route_admissions change (SPEC-038 v0.3.64: a stored entry decides first, every
-  row_invariant request is joinable) is idle=ord_rows in ord1, native_admitted=1 in nat1,
-  native_admitted=1 / native_active=ord_rows in mix, native_admitted=1 / native_active=1 /
-  conversation_cache=1 in conv2 (turn 1 beside the native row, turn 2 idle on its entry's
-  route), idle=1 / native_admitted=1 / conversation_cache=1 in conv_flip (turn 1 alone on
-  stock_order, turn 2 beside the native row on its stock_order entry), and native_admitted=1 /
-  native_active=2 / conversation_cache=1 in conv_spread (turn 1 beside the native row, turn 2
-  on its row_invariant entry, the unkeyed row joins it); native proposals > 0 in every cell
-  with a native row.
+  row_invariant request is joinable; v0.3.65 cost rule, SmallMRoute.splitStepPrefillTokens = 8)
+  is idle=ord_rows in ord1, native_admitted=1 in nat1, native_admitted=1 /
+  native_active=ord_rows in mix, native_admitted=1 / native_active=1 / conversation_cache=1 in
+  conv2 (turn 1 beside the native row, turn 2 idle on its entry's route), idle=1 /
+  native_admitted=1 / conversation_cache=1 in conv_flip (turn 1 alone on stock_order; turn 2
+  keeps its stock_order entry beside the native row: about 1384 cached > min(64, native
+  remaining) x 8 = 512, split), idle=1 / native_admitted=1 / conversation_cache_join=1 in
+  conv_flip_long (turn 2 at 1024 tokens: 1384 <= min(1024, native remaining ~1000) x 8, join
+  and re-prefill), and native_admitted=1 / native_active=2 / conversation_cache=1 in
+  conv_spread (turn 1 beside the native row, turn 2 on its row_invariant entry, the unkeyed
+  row joins it); conversation_cache_join=0 everywhere else; native proposals > 0 in every
+  cell with a native row.
   mix_late (INFO cell) is checked for errors, counter resets and the route mode, and fails the
   path when any trial admits its late request native (the cell assumes it runs ordinary).
 Gates:
@@ -40,6 +44,12 @@ Gates:
                    idle=0 / native_active=2, phase-2 peak route requests row_invariant=2 /
                    stock_order=0), and the unkeyed row's turn2_overlap_share is > 0 (the two rows
                    decoded together, one forward);
+  conv_flip_split  in every B conv_flip trial turn 2 decodes beside the native row
+                   (native_overlap_share > 0) on its own route: phase-2 peak route requests
+                   row_invariant=1 / stock_order=1;
+  conv_flip_long_joins  in every B conv_flip_long trial turn 2 decodes beside the native row
+                   (native_overlap_share > 0) on row_invariant: phase-2 peak route requests
+                   row_invariant=2 / stock_order=0;
   token_counts     every pair compared for speed has equal token counts: native rows across
                    serves, and ordinary rows of the same cell, prompt and trial across serves
                    (ord1 and mix).
@@ -49,16 +59,18 @@ Speed (AGENTS.md Swarm Runs step 3), medians per serve:
   goal: ordinary decode tok/s in ord1 (rows admitted from idle, so stock order on B); B must
   beat both neighbouring A serves;
   cost: ordinary decode tok/s in mix, native decode tok/s (nat1, mix), native acceptance (nat1,
-  mix), mix aggregate output tok/s, conv_spread phase-2 aggregate output tok/s:
-  B >= (1 - cost) x each A; TTFT medians (ord1 ordinary,
-  nat1 native, mix native, conv2 turn 2, conv_flip turn 2): B <= (1 + cost) x each A + 0.05 s.
+  mix), mix aggregate output tok/s, conv_spread and conv_flip_long phase-2 aggregate output
+  tok/s: B >= (1 - cost) x each A; TTFT medians (ord1 ordinary, nat1 native, mix native,
+  conv2 turn 2, conv_flip turn 2, a hit on B): B <= (1 + cost) x each A + 0.05 s. Every gated
+  speed median (goal, cost and TTFT) needs at least --min-samples samples per serve.
   INFO: the mix_late cell (2 ordinary rows, then the late request after --late-after chunks):
   aggregate, ordinary and late-row decode tok/s, late-row TTFT and its native admissions. With
   the signed max_native_active_rows = 1 the late request runs ordinary, so the cell measures
   three ordinary rows, not a transient route split. conv2: turn-1 decode tok/s and turn-2
   cached prompt tokens. conv_flip: turn-2 cached prompt tokens and the phase-2 aggregate output
-  tok/s of the native row and turn 2 (on B a transient split: turn 2 hits its stock_order entry
-  and decodes in its own forward beside the row_invariant native row).
+  tok/s of the native row and turn 2 (on B a split: turn 2 hits its stock_order entry and
+  decodes in its own forward beside the row_invariant native row). conv_flip_long: turn-2 TTFT
+  and cached prompt tokens (on B it re-prefills by design).
   Every goal median needs at least --min-samples samples per serve.
 Prints T2462_* lines and one `T2462_VERDICT PASS|FAIL ...` line. Exit 0 PASS, 1 FAIL, 2 unusable input.
 """
@@ -116,6 +128,9 @@ def metrics(rows, trials):
         "conv_flip_turn2_ttft_s": med(sel("conv_flip", "conv2", "ttft_s")),
         "conv_flip_turn2_cached_prompt_tokens": med(sel("conv_flip", "conv2", "cached_prompt_tokens")),
         "conv_flip_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_flip"]),
+        "conv_flip_long_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_flip_long"]),
+        "conv_flip_long_turn2_ttft_s": med(sel("conv_flip_long", "conv2", "ttft_s")),
+        "conv_flip_long_turn2_cached_prompt_tokens": med(sel("conv_flip_long", "conv2", "cached_prompt_tokens")),
         "conv_spread_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_spread"]),
         "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
         "mix_late_ordinary_decode_tps": med(sel("mix_late", "ordinary", "decode_tps")),
@@ -130,14 +145,15 @@ def metrics(rows, trials):
 
 GOAL = ("ord1_ordinary_decode_tps",)
 HIGHER = ("mix_ordinary_decode_tps", "nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance",
-          "mix_acceptance", "mix_aggregate_tps", "conv_spread_aggregate_tps")
+          "mix_acceptance", "mix_aggregate_tps", "conv_spread_aggregate_tps", "conv_flip_long_aggregate_tps")
 LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s", "conv2_turn2_ttft_s",
          "conv_flip_turn2_ttft_s")
 INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_tps", "mix_late_ordinary_decode_tps",
         "mix_late_late_decode_tps", "mix_late_late_ttft_s", "mix_late_late_overlap_share",
         "mix_late_native_admissions", "conv2_turn2_cached_prompt_tokens",
-        "conv2_turn1_decode_tps", "conv_flip_turn2_cached_prompt_tokens", "conv_flip_aggregate_tps")
-GATED_CELLS = ("ord1", "nat1", "mix", "conv2", "conv_flip", "conv_spread")
+        "conv2_turn1_decode_tps", "conv_flip_turn2_cached_prompt_tokens", "conv_flip_aggregate_tps",
+        "conv_flip_long_turn2_ttft_s", "conv_flip_long_turn2_cached_prompt_tokens")
+GATED_CELLS = ("ord1", "nat1", "mix", "conv2", "conv_flip", "conv_flip_long", "conv_spread")
 CONV_IDENTITY_CELLS = ("conv2", "conv_spread")
 
 
@@ -182,8 +198,11 @@ def path_checks(label, mode, rows, trials, ord_rows):
                 "mix": {"idle": 0, "native_active": ord_rows, "native_admitted": 1, "conversation_cache": 0},
                 "conv2": {"idle": 0, "native_active": 1, "native_admitted": 1, "conversation_cache": 1},
                 "conv_flip": {"idle": 1, "native_active": 0, "native_admitted": 1, "conversation_cache": 1},
+                "conv_flip_long": {"idle": 1, "native_active": 0, "native_admitted": 1, "conversation_cache": 0,
+                                   "conversation_cache_join": 1},
                 "conv_spread": {"idle": 0, "native_active": 2, "native_admitted": 1, "conversation_cache": 1},
             }[t["cell"]]
+            want_adm.setdefault("conversation_cache_join", 0)
             adm = t.get("small_m_route_admissions")
             if adm is None or any(adm.get(k) != v for k, v in want_adm.items()):
                 bad.append(f"{label} {t['cell']} t{t['trial']}: route admissions {adm} != {want_adm}")
@@ -310,12 +329,28 @@ def main(argv=None):
             spread_bad.append(t["trial"])
             print(f"T2462_CONV_SPREAD_NO_JOIN {b} trial={t['trial']} admissions={adm} phase2_peak_routes={pk} "
                   f"unkeyed_turn2_overlap_share={overlap}")
+    # Gates: conv_flip splits beside the native row; conv_flip_long joins it (v0.3.65 cost rule).
+    flip_bad = {"conv_flip": [], "conv_flip_long": []}
+    flip_trials = {c: [t for t in data[b][1] if t["cell"] == c] for c in flip_bad}
+    want_peak = {"conv_flip": {"row_invariant": 1, "stock_order": 1},
+                 "conv_flip_long": {"row_invariant": 2, "stock_order": 0}}
+    for cell, trials_c in flip_trials.items():
+        for t in trials_c:
+            pk = t.get("peak_small_m_route_requests") or {}
+            turn2 = by[b].get((cell, t["trial"], "conv2", a.ord_rows + {"conv_flip": 2, "conv_flip_long": 5}[cell])) or {}
+            overlap = turn2.get("native_overlap_share")
+            if (any((pk.get(k) or 0) != v for k, v in want_peak[cell].items()) or not (overlap or 0) > 0):
+                flip_bad[cell].append(t["trial"])
+                print(f"T2462_CONV_FLIP_PATH {b} cell={cell} trial={t['trial']} phase2_peak_routes={pk} "
+                      f"turn2_native_overlap_share={overlap} want={want_peak[cell]}")
     gates = {
         "native_identity": nat_mismatch == 0,
         "ordinary_route_identity": route_mismatch == 0,
         "conv2_cache_reuse": bool(conv_turn2) and not conv_misses,
         "conv_identity": bool(conv_keys) and conv_mismatch == 0,
         "conv_spread_joins": bool(spread_trials) and not spread_bad,
+        "conv_flip_split": bool(flip_trials["conv_flip"]) and not flip_bad["conv_flip"],
+        "conv_flip_long_joins": bool(flip_trials["conv_flip_long"]) and not flip_bad["conv_flip_long"],
         "token_counts": tok_mismatch == 0,
     }
     for g, ok in gates.items():
@@ -335,9 +370,11 @@ def main(argv=None):
             ok = (vb is not None and all(va is not None and vb > va for va in (va1, va2))
                   and min(nb, na1, na2) >= a.min_samples)
         elif name in HIGHER:
-            ok = vb is not None and all(va is not None and vb >= (1 - cost) * va for va in (va1, va2))
+            ok = (vb is not None and all(va is not None and vb >= (1 - cost) * va for va in (va1, va2))
+                  and min(nb, na1, na2) >= a.min_samples)
         elif name in LOWER:
-            ok = vb is not None and all(va is not None and vb <= (1 + cost) * va + 0.05 for va in (va1, va2))
+            ok = (vb is not None and all(va is not None and vb <= (1 + cost) * va + 0.05 for va in (va1, va2))
+                  and min(nb, na1, na2) >= a.min_samples)
         else:
             ok = None
         speed[name] = {"A1": va1, "B": vb, "A2": va2, "n": [na1, nb, na2], "B_over_A": ratios, "ok": ok}
@@ -374,6 +411,12 @@ def main(argv=None):
             f"conv_flip_turn2_ttft={s['conv_flip_turn2_ttft_s']['A1']}/{s['conv_flip_turn2_ttft_s']['B']}/"
             f"{s['conv_flip_turn2_ttft_s']['A2']}s ({gain('conv_flip_turn2_ttft_s')}) "
             f"conv_flip_aggregate_tps={s['conv_flip_aggregate_tps']['B']} ({gain('conv_flip_aggregate_tps')}, INFO) "
+            f"conv_flip_split={gates['conv_flip_split']} conv_flip_long_joins={gates['conv_flip_long_joins']} "
+            f"conv_flip_long_aggregate_tps={s['conv_flip_long_aggregate_tps']['A1']}/"
+            f"{s['conv_flip_long_aggregate_tps']['B']}/{s['conv_flip_long_aggregate_tps']['A2']} "
+            f"({gain('conv_flip_long_aggregate_tps')}) "
+            f"conv_flip_long_turn2_ttft={s['conv_flip_long_turn2_ttft_s']['B']}s "
+            f"({gain('conv_flip_long_turn2_ttft_s')}, INFO) "
             f"token_counts={gates['token_counts']}"
             + (f" failed={','.join(sorted(set(failures)))}" if failures else ""))
     print(line, flush=True)

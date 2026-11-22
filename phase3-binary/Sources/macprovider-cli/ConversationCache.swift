@@ -551,15 +551,31 @@ actor ConversationCache {
         coldTier = tier
     }
 
-    /// SPEC-038 FR-CB9 (v0.3.63): the small-row route of the hot entry stored
-    /// for `conversationKey`, read at admission so a keyed conversation's next
+    /// SPEC-038 FR-CB9 (v0.3.65): the hot entry a keyed turn could reuse at
+    /// admission: its small-row route and the prompt tokens `begin` would
+    /// reuse from it.
+    struct StoredSmallMRoute: Sendable, Equatable {
+        let route: SmallMRoute
+        let reusableCachedTokens: Int
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63, v0.3.65): the hot entry stored for
+    /// `conversationKey`, read at admission so a keyed conversation's next
     /// turn can take the route its KV was written on. Nil when `begin` could
     /// not reuse the entry anyway: no hot entry (an entry leased to an
-    /// in-flight turn is not stored), an expired one, or one of another model
-    /// or KV bit width.
+    /// in-flight turn is not stored), an expired one, one of another model or
+    /// KV bit width, or (v0.3.65) one `incomingTokens` does not extend under
+    /// `begin`'s prefix rule: a shared prefix of at least `lcpThreshold`
+    /// tokens with something new after it, the whole stored prompt for a
+    /// prompt snapshot, and a recurrent checkpoint inside the prefix for a
+    /// recurrent entry. `begin`'s remaining checks (layer classes, handoff)
+    /// still decide the lease; a miss there is logged `stored_route_stale`.
+    /// The cold tier is not read here: its lookup is disk I/O on the
+    /// admission path, so a turn whose entry lives only on disk is admitted
+    /// as if it had none.
     func storedSmallMRoute(
-        conversationKey: String?, modelID: String, kvBits: Int?, now: Date = Date()
-    ) -> SmallMRoute? {
+        conversationKey: String?, incomingTokens: [Int32], modelID: String, kvBits: Int?, now: Date = Date()
+    ) -> StoredSmallMRoute? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
               let entry = entries[key],
               now.timeIntervalSince(entry.storedAt) <= config.ttlSeconds,
@@ -568,7 +584,19 @@ actor ConversationCache {
         else {
             return nil
         }
-        return entry.smallMRoute
+        let lcp = Self.longestCommonPrefix(entry.canonicalPromptTokens, incomingTokens)
+        guard lcp >= Self.lcpThreshold, lcp < incomingTokens.count else { return nil }
+        let retained = entry.kvCache.retainedPagedKVSequence != nil
+        if !retained, entry.kvCache.promptSnapshot, lcp != entry.canonicalPromptTokens.count { return nil }
+        var reusable = lcp
+        if !entry.kvCache.recurrentCheckpoints.isEmpty,
+           retained || ConversationCacheLayers.hasRecurrentLayers(entry.kvCache.layers) {
+            guard let checkpoint = Self.selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
+                return nil
+            }
+            reusable = checkpoint.tokenCount
+        }
+        return StoredSmallMRoute(route: entry.smallMRoute, reusableCachedTokens: reusable)
     }
 
     func begin(

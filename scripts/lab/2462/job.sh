@@ -16,7 +16,7 @@
 #     that skips is a failure): SmallMRouteScopeTests|SmallMRouteTests|
 #     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|
 #     SmallMRouteConversationAdmissionTests and the scheduler's
-#     ContinuousBatchSchedulerTests/testSmallMRoute* (v0.3.63/v0.3.64 admission), which must
+#     ContinuousBatchSchedulerTests/testSmallMRoute* (v0.3.63-v0.3.65 admission), which must
 #     include every REQUIRED_TESTS case passed; then the mlx-swift
 #     fork's MLXTests SmallMRouteTests from a copy of the package's own checkout
 #     (.build-tests/checkouts/mlx-swift), FORK_TESTS_UNAVAILABLE when that copy cannot build;
@@ -28,14 +28,17 @@
 #       B = no override: FR-CB9 decides `mixed` (reason native_mtp_per_request); an ordinary
 #           request admitted while a row-invariant one is in flight joins row_invariant for life
 #           (SPEC-038 v0.3.63), so the `mix` cell runs one forward per decode kind as on A.
-#           v0.3.64: a keyed turn with a hot stored entry takes that entry's route whatever is in
-#           flight (`conv2` idle on row_invariant; `conv_flip` turn 2 on its stock order entry
-#           beside a native row, a hit, TTFT gated against A), and every row_invariant request is
-#           joinable: an unkeyed row beside a conversation_cache row_invariant turn joins it
-#           (`conv_spread`, gated conv_spread_joins and aggregate tok/s).
+#           v0.3.64: a keyed turn with a reusable stored entry takes that entry's route (`conv2`
+#           idle on row_invariant), and every row_invariant request is joinable: an unkeyed row
+#           beside a conversation_cache row_invariant turn joins it (`conv_spread`, gated
+#           conv_spread_joins and aggregate tok/s). v0.3.65 cost rule (8 prompt tokens per split
+#           step): `conv_flip` turn 2 (64 tokens, ~1384 cached) keeps its stock order entry beside
+#           a native row (split, a hit: TTFT gated against A, conv_flip_split); `conv_flip_long`
+#           turn 2 (1024 tokens) joins row_invariant and re-prefills (conv_flip_long_joins,
+#           aggregate gated, TTFT INFO).
 #     Each serve: ready, idle CB self-check verdict (route_status.py gate), the cached-turns probe
 #     decided, startup event and /v1/status route checked, batching active, native MTP on, then
-#     mixed_load.py (cells ord1, nat1, mix, mix_late, conv2, conv_flip, conv_spread; its header says how rows become
+#     mixed_load.py (cells ord1, nat1, mix, mix_late, conv2, conv_flip, conv_flip_long, conv_spread; its header says how rows become
 #     native or ordinary).
 #     A later serve of the same mode starts with the earlier one's stored self-check verdict;
 #  5. verdict.py: gates, medians, `T2462_VERDICT PASS|FAIL ...`.
@@ -69,12 +72,12 @@ NAT_OUT=${NAT_OUT:-1024}
 LATE_AFTER=${LATE_AFTER:-128}
 CONV_TURN2_OUT=${CONV_TURN2_OUT:-64}
 IDLE_TIMEOUT_S=${IDLE_TIMEOUT_S:-300}
-CELLS=${CELLS:-ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread}
+CELLS=${CELLS:-ord1,nat1,mix,mix_late,conv2,conv_flip,conv_flip_long,conv_spread}
 SERVES=${SERVES:-A1:A B:B A2:A}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 STALL_S=${STALL_S:-1800}
 TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|SmallMRouteConversationAdmissionTests|ContinuousBatchSchedulerTests/testSmallMRoute'
-# Each must have passed (the v0.3.63/v0.3.64 admission tests and the mixed attach probe).
+# Each must have passed (the v0.3.63-v0.3.65 admission tests and the mixed attach probe).
 REQUIRED_TESTS='testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute
 testAdmissionRouteJoinsRowInvariantWhileOneIsInFlight
 testOrdinaryAdmittedWhenIdleGetsStockOrder
@@ -87,7 +90,10 @@ testNativeDecidedAtRegistrationCountsBeforeItIsAdmitted
 testNativeReservationIsReleasedOnRejectionAndOnTurningOrdinary
 testOrdinaryTurnTakesTheStoredEntryRouteWhateverIsInFlight
 testConversationCacheRowInvariantPullsUnkeyedRequests
-testStoredStockOrderEntryKeepsStockOrderBesideANativeRow'
+testStoredStockOrderEntryKeepsStockOrderBesideANativeRow
+testStoredStockOrderEntryJoinsWhenTheSplitCostsMore
+testStoredRouteIsReadOnlyWhenTheLeaseIsAllowed
+testStoredRouteStaleIsLoggedOnlyForAConversationCacheMiss'
 # Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
 # Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
 # job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps
