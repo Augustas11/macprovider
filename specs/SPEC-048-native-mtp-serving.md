@@ -603,7 +603,8 @@ revoke a descriptor opened in between, so any other mode uses the exclusive
 `0400` byte copy. **(0.1.120)** The provider model store keeps adopted
 files at mode `0400`, and before validation the capture sets mode `0400` on
 each manifested regular file it owns (single link, no group/other write) that
-lies under the provider model store root; files elsewhere are never changed.
+lies at or under a provider model store root (the static-feed path uses the
+store root itself as the artifact root); files elsewhere are never changed.
 This runs before the first stat validation records, so every later identity
 check (including `ctime`) compares against the sealed mode. A byte copy is
 also the fallback when the volume cannot
@@ -3041,7 +3042,7 @@ requests.
 
 - **0.1.120 (2026-11-22, Related: #2468)** — MTP-2: the provider model
   store keeps adopted files at mode `0400`, and the capture sets mode `0400`
-  on owned manifested files under the store root before validation, so a
+  on owned manifested files at or under the store root before validation, so a
   store-held model is cloned rather than byte-copied. The clone gate (source
   and clone birth mode `0400`) and all identity checks are unchanged. The
   mode-based byte copy now logs `event=native_mtp_capture_clone_fallback`
