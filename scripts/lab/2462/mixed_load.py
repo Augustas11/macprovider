@@ -42,14 +42,17 @@ Cells, each trial in this order, one trial of every cell before the next trial:
         on its entry's route (conversation_cache), so turn 2 reuses turn 1's KV. Roles native,
         conv1, conv2; turn-2 rows carry cached_prompt_tokens;
   conv_flip  prompt row ord_rows + 2: turn 1 alone, then (idle) the native prompt and turn 2
-        (--conv-turn2-out tokens) once the native row streams. On a `mixed` serve turn 1 stores a
-        stock order entry and turn 2 is admitted row_invariant (native_active), so it misses that
-        entry and re-prefills: the documented flip cost. Roles conv1, native, conv2;
+        (--conv-turn2-out tokens) once the native row streams. On a `mixed` serve (SPEC-038
+        v0.3.64) turn 1 is admitted stock_order (idle) and stores a stock order entry, and turn 2
+        is admitted on that entry's route (stock_order, conversation_cache) beside the
+        row_invariant native row, so it hits its KV and decodes in its own forward while both
+        run (a transient split). The trial's aggregate_tps covers the native row and turn 2 from
+        the turn-2 start. Roles conv1, native, conv2;
   conv_spread  prompt row ord_rows + 3: turn 1 beside a native row (row_invariant entry), then
         from idle turn 2 (continue follow-up, --ord-out tokens) and, after its first token, an
         unkeyed ordinary prompt (row ord_rows + 4, --ord-out tokens). On a `mixed` serve turn 2
-        is admitted row_invariant (conversation_cache) and must not pull the unkeyed row: that
-        row is admitted stock_order (idle). The trial's aggregate_tps covers these two phase-2
+        is admitted row_invariant (conversation_cache) and the unkeyed row joins it on
+        row_invariant (native_active, v0.3.64), one forward. The trial's aggregate_tps covers these two phase-2
         rows only, and its peaks come from phase 2 alone; the unkeyed row carries
         turn2_overlap_share. Roles native, conv1, conv2, unkeyed.
 Native prompt: prompts.build_messages(ctx, 0); ordinary prompt j: build_messages(ctx, j), j >= 1.
@@ -329,7 +332,7 @@ def trial(args, cell, t, out):
             ru = record(results["unkeyed"], {**base, "kind": "row", "role": "unkeyed", "prompt_row": row + 1,
                                              "max_tokens": args.ord_out}, t0)
             # Share of the unkeyed row's decode span during which turn 2 also decoded; the
-            # no-pull gate needs it > 0, or the two rows never shared a step.
+            # joins gate needs it > 0, or the two rows never shared a step.
             ru["turn2_overlap_share"] = overlap_share(ru, r2)
             rows.append(ru)
             # Output tok/s of the two phase-2 rows from the turn-2 start to the last token.
@@ -339,6 +342,12 @@ def trial(args, cell, t, out):
                 phase2_tps = round(sum(r.get("completion_tokens") or 0 for r in (r2, ru)) / (max(ends) - start), 3)
             else:
                 phase2_tps = None
+        elif cell == "conv_flip":
+            # Output tok/s of the native row and turn 2 from the turn-2 start to the last token.
+            start = t2 - t0
+            ends = [r.get("t_last_offset_s") for r in (native, r2)]
+            if all(e is not None for e in ends) and max(ends) > start:
+                phase2_tps = round(sum(r.get("completion_tokens") or 0 for r in (native, r2)) / (max(ends) - start), 3)
     elif cell == "mix":
         poller = Poller(args.port, args.poll_s)
         poller.start()
@@ -407,7 +416,7 @@ def trial(args, cell, t, out):
                "native_mtp": native_mtp_delta(native_mtp_of(before), native_mtp_of(after)),
                "small_m_route": cb_of(after).get("small_m_route"),
                "small_m_route_admissions": admissions_delta(before, after),
-               "aggregate_tps": (phase2_tps if cell == "conv_spread"
+               "aggregate_tps": (phase2_tps if cell in ("conv_spread", "conv_flip")
                                  else (round(tokens / last, 3) if last else None)),
                "wall_s": round(t_end - t0, 3),
                "errors": [r["error"] for r in rows if r.get("error")]}

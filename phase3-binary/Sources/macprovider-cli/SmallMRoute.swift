@@ -431,33 +431,36 @@ enum SmallMRoute: String, Sendable, Equatable {
     enum AdmissionReason: String, Sendable, CaseIterable {
         /// The request is admitted native.
         case nativeAdmitted = "native_admitted"
-        /// An ordinary request admitted while a `rowInvariant` request
-        /// (native, or ordinary admitted here before) was in flight.
+        /// An ordinary request with no hot conversation-cache entry for its
+        /// key, admitted while a `rowInvariant` request (any reason) was in
+        /// flight.
         case nativeActive = "native_active"
         /// An ordinary request admitted with no `rowInvariant` request in
         /// flight and no stored conversation-cache entry for its key.
         case idle
-        /// An ordinary request admitted with no `rowInvariant` request in
-        /// flight on the route of the hot conversation-cache entry stored for
-        /// its key, so the next turn reuses that entry's KV.
+        /// An ordinary request admitted on the route of the hot
+        /// conversation-cache entry stored for its key, whatever is in
+        /// flight (v0.3.64), so the turn reuses that entry's KV.
         case conversationCache = "conversation_cache"
         /// Not `mixed`: every request takes the process route.
         case processRoute = "process_route"
     }
 
-    /// SPEC-038 FR-CB9 (v0.3.63): the route a request is admitted on, for
-    /// its whole life. In `mixed` an ordinary request joins `rowInvariant`
-    /// while any `rowInvariant` request is in flight (active, queued, or
-    /// decided native and not yet admitted), so the scheduler keeps one
-    /// forward per step instead of one per route. With none in flight it
-    /// takes the route of its key's stored conversation-cache entry
-    /// (`storedRoute`), so a keyed conversation keeps its KV across turns,
-    /// and otherwise the stock order process route. It never takes stock
-    /// order while a joinable `rowInvariant` request is in flight.
-    /// `rowInvariantInFlight` counts only joinable requests: native ones and
-    /// ordinary ones that joined them, never one on `rowInvariant` for its own
-    /// conversation-cache entry, which would otherwise pull every later
-    /// ordinary request (and so every keyed conversation) onto `rowInvariant`.
+    /// SPEC-038 FR-CB9 (v0.3.64): the route a request is admitted on, for
+    /// its whole life. In `mixed`, in order: a native request takes
+    /// `rowInvariant`; an ordinary request whose key has a hot stored
+    /// conversation-cache entry (`storedRoute`) takes that entry's route even
+    /// while requests of the other route are in flight, so the turn keeps its
+    /// KV (the scheduler runs a transient split while both routes are
+    /// active); otherwise it joins `rowInvariant` while any `rowInvariant`
+    /// request is in flight (active, queued, or decided native and not yet
+    /// admitted), so the scheduler keeps one forward per step; otherwise it
+    /// takes the stock order process route.
+    /// The worst case equals the process-wide `rowInvariant` serve (every row
+    /// one route, every turn hits) except for a transient split while a stock
+    /// order conversation turn overlaps a `rowInvariant` row: a hit beats a
+    /// re-prefill, which grows with the context. An entry is never reused
+    /// across routes (AC-26, SPEC-037 route class).
     static func admissionRoute(
         nativeAdmitted: Bool,
         rowInvariantInFlight: Int,
@@ -467,10 +470,10 @@ enum SmallMRoute: String, Sendable, Equatable {
     ) -> (route: SmallMRoute, reason: AdmissionReason) {
         guard mixed else { return (processRoute, .processRoute) }
         if nativeAdmitted { return (.rowInvariant, .nativeAdmitted) }
-        if rowInvariantInFlight > 0 { return (.rowInvariant, .nativeActive) }
         if let storedRoute, storedRoute == .rowInvariant || storedRoute == .stockOrder {
             return (storedRoute, .conversationCache)
         }
+        if rowInvariantInFlight > 0 { return (.rowInvariant, .nativeActive) }
         return (.stockOrder, .idle)
     }
 

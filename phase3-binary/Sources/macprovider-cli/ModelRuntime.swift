@@ -9916,8 +9916,8 @@ maxTokens: 1,
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
-        // An ordinary request with no row-invariant request in flight takes
-        // the route of its key's stored entry, so its next turn hits.
+        // v0.3.64: an ordinary request whose key has a hot stored entry takes
+        // that entry's route first, whatever is in flight, so the turn hits.
         var storedSmallMRoute: SmallMRoute?
         if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
             storedSmallMRoute = await conversationCache.storedSmallMRoute(
@@ -10540,8 +10540,8 @@ maxTokens: 1,
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
         // v0.3.63: an ordinary request admitted while a row-invariant one is
         // in flight joins row-invariant, so each step stays one forward.
-        // An ordinary request with no row-invariant request in flight takes
-        // the route of its key's stored entry, so its next turn hits.
+        // v0.3.64: an ordinary request whose key has a hot stored entry takes
+        // that entry's route first, whatever is in flight, so the turn hits.
         var storedSmallMRoute: SmallMRoute?
         if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
             storedSmallMRoute = await conversationCache.storedSmallMRoute(

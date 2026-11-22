@@ -131,10 +131,8 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     private var counts: [SmallMRoute: Int] = [:]
     private var admissions: [SmallMRoute.AdmissionReason: Int] = [:]
     /// Row-invariant requests an ordinary admission joins (`Ticket.joinable`):
-    /// native ones, reserved or admitted, and ordinary ones that joined them.
-    /// A request on row-invariant only for its own conversation-cache entry
-    /// is left out, so one keyed conversation never moves other requests off
-    /// stock order.
+    /// since v0.3.64 every admitted row-invariant request, native (reserved
+    /// or admitted) or ordinary, `conversation_cache` included.
     private var joinableRowInvariant = 0
 
     /// One admitted request's place in the count. `end` is idempotent, so a
@@ -144,8 +142,8 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
         let route: SmallMRoute
         let reason: SmallMRoute.AdmissionReason
         /// Whether ordinary admissions join this request's route while it is
-        /// in flight: a row-invariant native request, or an ordinary one that
-        /// joined one (`native_active`); never `conversation_cache`.
+        /// in flight: every row-invariant request (v0.3.64), so the rows
+        /// beside a row-invariant conversation turn share its forward.
         let joinable: Bool
         private let counter: SmallMRouteRequestCounter
         private let lock = NSLock()
@@ -154,7 +152,7 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
         fileprivate init(route: SmallMRoute, reason: SmallMRoute.AdmissionReason, counter: SmallMRouteRequestCounter) {
             self.route = route
             self.reason = reason
-            self.joinable = route == .rowInvariant && (reason == .nativeAdmitted || reason == .nativeActive)
+            self.joinable = route == .rowInvariant
             self.counter = counter
         }
 
@@ -210,8 +208,9 @@ final class SmallMRouteRequestCounter: @unchecked Sendable {
     /// still native takes it over (it is already counted); one that turned
     /// ordinary since releases it first, so it never counts as its own
     /// row-invariant request in flight. `storedRoute` is the route of the
-    /// hot conversation-cache entry stored for the request's key. Only
-    /// joinable row-invariant requests (`Ticket.joinable`) move an ordinary
+    /// hot conversation-cache entry stored for the request's key; it decides
+    /// the route ahead of the requests in flight (v0.3.64). Otherwise any
+    /// row-invariant request in flight (`Ticket.joinable`) moves an ordinary
     /// admission onto row-invariant.
     func admit(
         nativeAdmitted: Bool,

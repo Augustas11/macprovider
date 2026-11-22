@@ -13,12 +13,15 @@ Path checks (a failure means the cells did not measure what they claim):
   reset; every A trial reports small_m_route row_invariant and every B trial mixed; a mix trial
   peaks at 1 + ord_rows active decode rows, and on B at row_invariant=1+ord_rows / stock_order=0
   in-flight route requests (SPEC-038 v0.3.63: the ordinary rows join row_invariant); on B the
-  small_m_route_admissions change is idle=ord_rows in ord1, native_admitted=1 in nat1,
-  native_admitted=1 / native_active=ord_rows in mix, and native_admitted=1 / native_active=1 /
+  small_m_route_admissions change (SPEC-038 v0.3.64: a stored entry decides first, every
+  row_invariant request is joinable) is idle=ord_rows in ord1, native_admitted=1 in nat1,
+  native_admitted=1 / native_active=ord_rows in mix, native_admitted=1 / native_active=1 /
   conversation_cache=1 in conv2 (turn 1 beside the native row, turn 2 idle on its entry's
-  route), idle=1 / native_admitted=1 / native_active=1 in conv_flip, and idle=1 /
-  native_admitted=1 / native_active=1 / conversation_cache=1 in conv_spread; native proposals
-  > 0 in every cell with a native row.
+  route), idle=1 / native_admitted=1 / conversation_cache=1 in conv_flip (turn 1 alone on
+  stock_order, turn 2 beside the native row on its stock_order entry), and native_admitted=1 /
+  native_active=2 / conversation_cache=1 in conv_spread (turn 1 beside the native row, turn 2
+  on its row_invariant entry, the unkeyed row joins it); native proposals > 0 in every cell
+  with a native row.
   mix_late (INFO cell) is checked for errors, counter resets and the route mode, and fails the
   path when any trial admits its late request native (the cell assumes it runs ordinary).
 Gates:
@@ -29,12 +32,14 @@ Gates:
                    same route, row-invariant kernels, so the same bits;
   conv2_cache_reuse  every B conv2 turn-2 row reports cached_prompt_tokens > 0: the keyed turn
                    after a turn beside a native row reuses its KV (v0.3.63 conversation_cache);
-  conv_identity    every conv1 and conv2 row of B in conv2 and conv_spread (row_invariant on
-                   both serves) equals the same row on each A serve (output and token count);
-  conv_spread_no_pull  in every B conv_spread trial the unkeyed row is admitted idle on
-                   stock_order beside the conversation_cache row_invariant turn (admissions idle=1,
-                   phase-2 peak route requests row_invariant=1 / stock_order=1), and the unkeyed
-                   row's turn2_overlap_share is > 0 (the two rows decoded together);
+  conv_identity    every conv1 and conv2 row of B in conv2 and conv_spread, and the conv_spread
+                   unkeyed row (row_invariant on both serves), equals the same row on each A serve
+                   (output and token count);
+  conv_spread_joins  in every B conv_spread trial the unkeyed row is admitted row_invariant
+                   (native_active) beside the conversation_cache row_invariant turn (admissions
+                   idle=0 / native_active=2, phase-2 peak route requests row_invariant=2 /
+                   stock_order=0), and the unkeyed row's turn2_overlap_share is > 0 (the two rows
+                   decoded together, one forward);
   token_counts     every pair compared for speed has equal token counts: native rows across
                    serves, and ordinary rows of the same cell, prompt and trial across serves
                    (ord1 and mix).
@@ -46,13 +51,14 @@ Speed (AGENTS.md Swarm Runs step 3), medians per serve:
   cost: ordinary decode tok/s in mix, native decode tok/s (nat1, mix), native acceptance (nat1,
   mix), mix aggregate output tok/s, conv_spread phase-2 aggregate output tok/s:
   B >= (1 - cost) x each A; TTFT medians (ord1 ordinary,
-  nat1 native, mix native, conv2 turn 2): B <= (1 + cost) x each A + 0.05 s.
+  nat1 native, mix native, conv2 turn 2, conv_flip turn 2): B <= (1 + cost) x each A + 0.05 s.
   INFO: the mix_late cell (2 ordinary rows, then the late request after --late-after chunks):
   aggregate, ordinary and late-row decode tok/s, late-row TTFT and its native admissions. With
   the signed max_native_active_rows = 1 the late request runs ordinary, so the cell measures
   three ordinary rows, not a transient route split. conv2: turn-1 decode tok/s and turn-2
-  cached prompt tokens. conv_flip: turn-2 TTFT and cached prompt tokens, the documented cost of
-  a stock order entry whose next turn runs beside a native row (a miss on B).
+  cached prompt tokens. conv_flip: turn-2 cached prompt tokens and the phase-2 aggregate output
+  tok/s of the native row and turn 2 (on B a transient split: turn 2 hits its stock_order entry
+  and decodes in its own forward beside the row_invariant native row).
   Every goal median needs at least --min-samples samples per serve.
 Prints T2462_* lines and one `T2462_VERDICT PASS|FAIL ...` line. Exit 0 PASS, 1 FAIL, 2 unusable input.
 """
@@ -109,6 +115,7 @@ def metrics(rows, trials):
         "conv2_turn1_decode_tps": med(sel("conv2", "conv1", "decode_tps")),
         "conv_flip_turn2_ttft_s": med(sel("conv_flip", "conv2", "ttft_s")),
         "conv_flip_turn2_cached_prompt_tokens": med(sel("conv_flip", "conv2", "cached_prompt_tokens")),
+        "conv_flip_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_flip"]),
         "conv_spread_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_spread"]),
         "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
         "mix_late_ordinary_decode_tps": med(sel("mix_late", "ordinary", "decode_tps")),
@@ -124,12 +131,12 @@ def metrics(rows, trials):
 GOAL = ("ord1_ordinary_decode_tps",)
 HIGHER = ("mix_ordinary_decode_tps", "nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance",
           "mix_acceptance", "mix_aggregate_tps", "conv_spread_aggregate_tps")
-LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s", "conv2_turn2_ttft_s")
+LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s", "conv2_turn2_ttft_s",
+         "conv_flip_turn2_ttft_s")
 INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_tps", "mix_late_ordinary_decode_tps",
         "mix_late_late_decode_tps", "mix_late_late_ttft_s", "mix_late_late_overlap_share",
         "mix_late_native_admissions", "conv2_turn2_cached_prompt_tokens",
-        "conv2_turn1_decode_tps", "conv_flip_turn2_ttft_s",
-        "conv_flip_turn2_cached_prompt_tokens")
+        "conv2_turn1_decode_tps", "conv_flip_turn2_cached_prompt_tokens", "conv_flip_aggregate_tps")
 GATED_CELLS = ("ord1", "nat1", "mix", "conv2", "conv_flip", "conv_spread")
 CONV_IDENTITY_CELLS = ("conv2", "conv_spread")
 
@@ -174,8 +181,8 @@ def path_checks(label, mode, rows, trials, ord_rows):
                 "nat1": {"idle": 0, "native_active": 0, "native_admitted": 1, "conversation_cache": 0},
                 "mix": {"idle": 0, "native_active": ord_rows, "native_admitted": 1, "conversation_cache": 0},
                 "conv2": {"idle": 0, "native_active": 1, "native_admitted": 1, "conversation_cache": 1},
-                "conv_flip": {"idle": 1, "native_active": 1, "native_admitted": 1, "conversation_cache": 0},
-                "conv_spread": {"idle": 1, "native_active": 1, "native_admitted": 1, "conversation_cache": 1},
+                "conv_flip": {"idle": 1, "native_active": 0, "native_admitted": 1, "conversation_cache": 1},
+                "conv_spread": {"idle": 0, "native_active": 2, "native_admitted": 1, "conversation_cache": 1},
             }[t["cell"]]
             adm = t.get("small_m_route_admissions")
             if adm is None or any(adm.get(k) != v for k, v in want_adm.items()):
@@ -281,7 +288,8 @@ def main(argv=None):
         print(f"T2462_CONV2_CACHE_MISS {b} trial={trial}")
     # Gate: keyed turns on row_invariant on both serves have the same output.
     conv_mismatch = 0
-    conv_keys = [k for k in by[b] if k[0] in CONV_IDENTITY_CELLS and k[2] in ("conv1", "conv2")]
+    conv_keys = [k for k in by[b] if k[0] in CONV_IDENTITY_CELLS
+                 and (k[2] in ("conv1", "conv2") or (k[0] == "conv_spread" and k[2] == "unkeyed"))]
     for k in conv_keys:
         rb = by[b][k]
         for ctl in (a1, a2):
@@ -289,7 +297,7 @@ def main(argv=None):
             if ra is None or ra["output_sha256"] != rb["output_sha256"] or ra.get("completion_tokens") != rb.get("completion_tokens"):
                 conv_mismatch += 1
                 print(f"T2462_CONV_DIFF {ctl} vs {b} cell={k[0]} trial={k[1]} role={k[2]}")
-    # Gate: a conversation_cache row_invariant turn does not pull the unkeyed row.
+    # Gate: the unkeyed row joins the conversation_cache row_invariant turn (v0.3.64).
     spread_trials = [t for t in data[b][1] if t["cell"] == "conv_spread"]
     spread_bad = []
     for t in spread_trials:
@@ -297,17 +305,17 @@ def main(argv=None):
         pk = t.get("peak_small_m_route_requests") or {}
         unkeyed = by[b].get(("conv_spread", t["trial"], "unkeyed", a.ord_rows + 4)) or {}
         overlap = unkeyed.get("turn2_overlap_share")
-        if (adm.get("idle") != 1 or pk.get("stock_order") != 1 or pk.get("row_invariant") != 1
-                or not (overlap or 0) > 0):
+        if (adm.get("idle") != 0 or adm.get("native_active") != 2 or pk.get("stock_order")
+                or pk.get("row_invariant") != 2 or not (overlap or 0) > 0):
             spread_bad.append(t["trial"])
-            print(f"T2462_CONV_SPREAD_PULL {b} trial={t['trial']} admissions={adm} phase2_peak_routes={pk} "
+            print(f"T2462_CONV_SPREAD_NO_JOIN {b} trial={t['trial']} admissions={adm} phase2_peak_routes={pk} "
                   f"unkeyed_turn2_overlap_share={overlap}")
     gates = {
         "native_identity": nat_mismatch == 0,
         "ordinary_route_identity": route_mismatch == 0,
         "conv2_cache_reuse": bool(conv_turn2) and not conv_misses,
         "conv_identity": bool(conv_keys) and conv_mismatch == 0,
-        "conv_spread_no_pull": bool(spread_trials) and not spread_bad,
+        "conv_spread_joins": bool(spread_trials) and not spread_bad,
         "token_counts": tok_mismatch == 0,
     }
     for g, ok in gates.items():
@@ -360,10 +368,12 @@ def main(argv=None):
             f"conv2_turn2_cached={s['conv2_turn2_cached_prompt_tokens']['B']} "
             f"gates native_identity={gates['native_identity']} ordinary_route_identity={gates['ordinary_route_identity']} "
             f"conv2_cache_reuse={gates['conv2_cache_reuse']} conv_identity={gates['conv_identity']} "
-            f"conv_spread_no_pull={gates['conv_spread_no_pull']} "
+            f"conv_spread_joins={gates['conv_spread_joins']} "
             f"conv_spread_aggregate_tps={s['conv_spread_aggregate_tps']['A1']}/{s['conv_spread_aggregate_tps']['B']}/"
             f"{s['conv_spread_aggregate_tps']['A2']} ({gain('conv_spread_aggregate_tps')}) "
-            f"conv_flip_turn2_ttft={s['conv_flip_turn2_ttft_s']['B']}s ({gain('conv_flip_turn2_ttft_s')}, INFO) "
+            f"conv_flip_turn2_ttft={s['conv_flip_turn2_ttft_s']['A1']}/{s['conv_flip_turn2_ttft_s']['B']}/"
+            f"{s['conv_flip_turn2_ttft_s']['A2']}s ({gain('conv_flip_turn2_ttft_s')}) "
+            f"conv_flip_aggregate_tps={s['conv_flip_aggregate_tps']['B']} ({gain('conv_flip_aggregate_tps')}, INFO) "
             f"token_counts={gates['token_counts']}"
             + (f" failed={','.join(sorted(set(failures)))}" if failures else ""))
     print(line, flush=True)

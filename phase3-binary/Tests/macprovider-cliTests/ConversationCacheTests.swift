@@ -1810,13 +1810,12 @@ private final class FakeConversationColdTier: ConversationColdTier, @unchecked S
     )
 }
 
-/// SPEC-038 FR-CB9 v0.3.63 (Related: #2462): an ordinary turn with no
-/// row-invariant request in flight takes the route of its key's stored entry,
-/// so a keyed conversation whose first turn ran beside a native row keeps
-/// its KV on the next turn; with a row-invariant request in flight it never
-/// takes stock order.
+/// SPEC-038 FR-CB9 v0.3.64 (Related: #2462): an ordinary turn takes the route
+/// of its key's stored entry whatever is in flight, so a keyed conversation
+/// whose first turn ran beside a native row keeps its KV on the next turn, and
+/// one whose entry is stock order keeps stock order beside a native row.
 final class SmallMRouteConversationAdmissionTests: XCTestCase {
-    func testOrdinaryTurnTakesTheStoredEntryRouteUnlessRowInvariantIsInFlight() async throws {
+    func testOrdinaryTurnTakesTheStoredEntryRouteWhateverIsInFlight() async throws {
         let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let counter = SmallMRouteRequestCounter()
         let tokens: [Int32] = (0 ..< 64).map(Int32.init)
@@ -1880,11 +1879,22 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
         await cache.commit(soLease, cache: layers(tokens.count), fullTokens: tokens)
         fresh.end()
 
-        // Its stock order entry never puts it on stock order beside a row-invariant request.
+        // Its stock order entry keeps it on stock order beside a native row, and it hits.
         let nativeAgain = await admit(nil, native: true)
         let beside = await admit("conv:fresh")
-        XCTAssertEqual(beside.route, .rowInvariant)
-        XCTAssertEqual(beside.reason, .nativeActive)
+        XCTAssertEqual(beside.route, .stockOrder)
+        XCTAssertEqual(beside.reason, .conversationCache)
+        let besideLeaseValue = await cache.begin(
+            conversationKey: "conv:fresh", incomingTokens: tokens + [7], modelID: "model-a", kvBits: nil,
+            smallMRoute: beside.route)
+        let besideLease = try XCTUnwrap(besideLeaseValue)
+        XCTAssertEqual(besideLease.cachedPromptTokens, tokens.count)
+        await cache.abort(besideLease)
+        // A keyless request beside the native row still joins row-invariant.
+        let keyless = await admit(nil)
+        XCTAssertEqual(keyless.route, .rowInvariant)
+        XCTAssertEqual(keyless.reason, .nativeActive)
+        keyless.end()
         beside.end()
         nativeAgain.end()
         let idle = await admit("conv:fresh")
