@@ -1,11 +1,26 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.62
+Version: v0.3.63
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.63 (2026-11-22, FR-CB9 `mixed`: ordinary requests join `row_invariant` while one is in flight, Related: #2462):**
+In a `mixed` process an ordinary request admitted while any `row_invariant`
+request (native, or ordinary admitted this way) is in flight, active or
+queued, is admitted on `row_invariant` for its whole life; with none in
+flight it takes `stock_order` as before. The lab window measured two forwards
+per step (one per route) at 1 native + 2 ordinary rows on Qwen3.8-27B: mix
+aggregate output 34.7 against 44.7 tok/s on a process-wide `row_invariant`
+(-22%), because each step read the weights twice. The rule keeps such a step
+one forward per decode kind. A native request admitted while `stock_order`
+rows are in flight still splits forwards per route until those rows finish;
+later ordinary arrivals join `row_invariant`, so the `stock_order` set
+drains. Each admission logs `event=small_m_route_admission route=...
+reason=native_admitted|native_active|idle`, and local `/v1/status` adds
+`continuous_batching.small_m_route_admissions`. No other behaviour changes.
+
 **Change log v0.3.62 (2026-11-22, FR-CB9 `mixed` keeps out of NAX GPUs; prefill pauses stay on one route, Related: #2462):**
 On a GPU where the MLX core takes its NAX quantized-matmul kernels (macOS
 26.2 or later, architecture generation 17 or later, 18 for a phone), both
@@ -2031,7 +2046,7 @@ of 1-16 rows on one of three routes:
 | `row_invariant` | unset, or parses to neither 0 nor 2 | one row: a single-row kernel with the batch kernel's reduction order; 2-16 rows: the batch kernel | a row computes the same bits alone and in any forward of 1-16 rows |
 | `serial_only` | parses to 0 | the fork's pre-window per-row `qmv` below the `qmm` limit | none across row counts; only for a process that can never batch |
 | `stock_order` | parses to 2 | one row: upstream's one-row kernel; exactly two rows: an exact two-row kernel; 3-16 rows: the batch kernel | a lone row equals the same row of a two-row forward bit for bit; rows of 3-16-row forwards equal each other bit for bit; a row MAY differ in low bits between a lone or two-row forward and a forward of three or more rows, so a near-tied greedy token MAY differ when a third request joins or leaves |
-| `mixed` (v0.3.61) | parses to 2; native-admitted requests scoped to the row-invariant route per op | ordinary requests: the `stock_order` kernels; native-admitted requests: the `row_invariant` kernels; never both in one forward | each request keeps its own route's guarantee above for its whole life |
+| `mixed` (v0.3.61) | parses to 2; native-admitted requests scoped to the row-invariant route per op | ordinary requests admitted with no `row_invariant` request in flight: the `stock_order` kernels; native-admitted requests, and (v0.3.63) ordinary requests admitted while one is in flight: the `row_invariant` kernels; never both in one forward | each request keeps its own route's guarantee above for its whole life |
 
 A `serve` process MUST take `stock_order` when items 1 and 3 above hold and
 item 2 does not: native MTP cannot activate, there is no draft model, no
@@ -2145,11 +2160,18 @@ role, another warm-swap target, a configured further model, and a recorded
   ordinary request runs on it exactly as in a `stock_order` process;
 - each request's route is fixed once, at admission, and never changes:
   `row_invariant` when the request is admitted native (its SPEC-048 native
-  admission selects the native path), `stock_order` otherwise. A native
+  admission selects the native path); (v0.3.63) `row_invariant` for an
+  ordinary request admitted while any `row_invariant` request is in flight
+  (admitted and not yet returned by the scheduler, decoding or queued), with
+  reason `native_active`; `stock_order` for an ordinary request admitted
+  with none in flight, with reason `idle`. The check and the count of the
+  new request are one atomic step, so concurrent admissions see each other. A native
   request keeps `row_invariant` for its whole life: every prefill chunk
   (only chunks of 16 rows or fewer reach the small-row kernels), every
   decode step and native verify window, and any ordinary fallback, before or
-  after output. A request admitted ordinary never moves to `row_invariant`.
+  after output. A request never changes route after admission: an ordinary
+  request admitted on `row_invariant` stays on it after every native request
+  finishes, and one admitted on `stock_order` never moves to `row_invariant`.
   A native request takes `row_invariant` even when it is the only native row
   at depth 1;
 - a forward (prefill, decode or native verify) MUST hold rows of one route
@@ -2159,9 +2181,10 @@ role, another warm-swap target, a configured further model, and a recorded
   table above and in FR-CB6 (v0.3.56) therefore hold for every row as they
   do in a process on that route alone: a native request's tokens equal its
   own one-row ordinary decode on `row_invariant` (SPEC-048 R015/R016), and an
-  ordinary row's forwards of one or two rows equal its serial path. Running
-  two forwards reads the weights twice in that step; it applies only while
-  both kinds of request are active;
+  ordinary row's forwards of one or two rows equal its serial path on its
+  route. Running two forwards reads the weights twice in that step; with the
+  v0.3.63 admission rule it applies only while `stock_order` rows admitted
+  before the first `row_invariant` request are still in flight;
 - the FR-CB10 self-check runs on the process route, under the
   `+small_m_stock_order` key (FR-CB10 item 5); its verdict decides batching
   for the process, and its grant bounds the process's concurrent rows across
@@ -2183,8 +2206,13 @@ role, another warm-swap target, a configured further model, and a recorded
   reason=native_mtp_per_request`, and local `/v1/status` reports
   `continuous_batching.small_m_route: mixed` and
   `continuous_batching.small_m_route_requests`, the count of in-flight
-  requests per route (`stock_order`, `row_invariant`). Every other mode
-  omits `small_m_route_requests`.
+  requests per route (`stock_order`, `row_invariant`), and (v0.3.63)
+  `continuous_batching.small_m_route_admissions`, the admissions since start
+  per reason (`native_admitted`, `native_active`, `idle`). Each admission
+  logs `event=small_m_route_admission route=<route> reason=<reason>
+  in_flight_row_invariant=<n> in_flight_stock_order=<n>`. Every other mode
+  omits `small_m_route_requests` and `small_m_route_admissions` and logs no
+  admission line.
 
 **MLX core per-op route (v0.3.61).** The core captures the small-row route
 and the `qmv_mma` partial-sum count (4 on `row_invariant`; on `stock_order` 8 on
