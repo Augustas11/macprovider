@@ -32,6 +32,10 @@ enum DeepseekV4RuntimeParityProbe {
         promptA: [Int],
         promptB: [Int]
     ) async -> (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?) {
+        // SPEC-038 FR-CB9 (v0.3.61): one route for the whole probe, the
+        // process route unless the caller set one (see the paged-KV probe).
+        await SmallMRouteScope.run(SmallMRouteScope.current ?? SmallMRoute.processRoute) {
+        () async -> (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?) in
         let count = PagedKVRuntimeParityProbe.sharedForwardParityTokens
         do {
             guard !promptA.isEmpty, !promptB.isEmpty, promptA.count != promptB.count else {
@@ -96,6 +100,7 @@ enum DeepseekV4RuntimeParityProbe {
             )
         } catch {
             return (.failClosed(nNew: count), .failClosed)
+        }
         }
     }
 

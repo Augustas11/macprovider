@@ -321,6 +321,12 @@ enum PagedKVRuntimeParityProbe {
         guard layerCount > 0, promptA.count >= 1, promptB.count >= 1 else {
             return .failClosed
         }
+        // SPEC-038 FR-CB9 (v0.3.61): the attach probe compares a shared
+        // forward with serial decode on one route, the process route unless
+        // the caller set one. Outside a request route a `mixed` build fails
+        // closed, which would refuse attach on every start.
+        return await SmallMRouteScope.run(SmallMRouteScope.current ?? SmallMRoute.processRoute) {
+        () async -> PagedKVRuntimeMoEProbeResult in
         do {
             let sharedForwardParityProven = try await Self.runSharedForwardExactParityProbe(
                 container: container,
@@ -604,6 +610,7 @@ enum PagedKVRuntimeParityProbe {
         } catch {
             PagedKVRuntimeDiagnostics.log("moe-isolation-probe threw, failing closed: \(error)")
             return .failClosed
+        }
         }
     }
 
