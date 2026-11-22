@@ -253,7 +253,7 @@ cmp -s "$MAIN_BIN/macprovider-cli" "$CAND_BIN/macprovider-cli" && die "the main 
 mkdir -p "$RES/metallib"
 for side in main cand; do
   ck="$PKG/.build-lab-main/checkouts/mlx-swift"; [ $side = cand ] && ck="$MLXSWIFT"
-  if (xc python3 "$SRC/scripts/mlx-metallib-kernels.py" derive --mlx-swift-checkout "$ck" \
+  if (xc env MACOSX_DEPLOYMENT_TARGET=14.0 python3 "$SRC/scripts/mlx-metallib-kernels.py" derive --mlx-swift-checkout "$ck" \
         --output "$RES/metallib/required-kernels-$side.json") > "$RES/metallib/derive-$side.log" 2>&1; then
     log "METALLIB_DERIVE $side ok rev=$(git -C "$ck" rev-parse HEAD 2>/dev/null) out=$RES/metallib/required-kernels-$side.json"
   else
