@@ -25,7 +25,7 @@
 #     decode     decode-bench --prefill-tokens 1024/8192/32768 --decode-tokens 256 --runs 5;
 #     parity     msb-throughput --engine scheduler --scenario parity --rows 4 --prompt-tokens 1024
 #                --parity-tokens 256;
-#     reference  oracle_mlxlm.py in VENV_LM (read only; python -I -B) at 1024/8192/32768, 256
+#     reference  oracle_mlxlm.py in VENV_LM (read only; python -I -B; see VENV_LM below) at 1024/8192/32768, 256
 #                greedy tokens, then glm53_oracle_json.py and glm-parity --steps 256
 #                --prefill-step-size 2048 --mlx-cache-limit-mb 2048;
 #     mtp        native-mtp-bench, then scripts/native_mtp_r015_analyze.py. Candidate: the formal
@@ -66,7 +66,14 @@ QWEN_MTP=${QWEN_MTP:-s1}
 MTP_BLOCKS=${MTP_BLOCKS:-12}
 DECODE_CTX=${DECODE_CTX:-1024,8192,32768}
 REF_CTX=${REF_CTX:-1024,8192,32768}
-VENV_LM=${VENV_LM:-$HOME/lab-ablit-perf/venv-lm-qwen4}
+# The mlx-lm reference venv (read only): the first that exists. ~/lab-ablit-perf/venv-lm-qwen4 was
+# removed in the 2026-11-22 disk cleanup; ~/venvs/ref-lm-main has mlx 0.32.4 and mlx-lm with qwen3_5.
+if [ -z "${VENV_LM:-}" ]; then
+  for v in "$HOME/lab-ablit-perf/venv-lm-qwen4" "$HOME/venvs/ref-lm-main" "$HOME/venvs/ref-lm"; do
+    [ -z "${VENV_LM:-}" ] && [ -x "$v/bin/python" ] && VENV_LM=$v
+  done
+fi
+VENV_LM=${VENV_LM:-$HOME/venvs/ref-lm-main}
 DAISY_DIR=${DAISY_DIR:-$LAB/models/DaisyRose-27B-4bit}
 QWEN_KEY=qwen/qwen3.8-27b
 QWEN_SHA=8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05
