@@ -122,12 +122,79 @@ extension SmallMRoute {
 }
 
 /// SPEC-038 FR-CB9 (v0.3.61): in-flight requests per route, for
-/// `continuous_batching.small_m_route_requests` in a `mixed` process.
+/// `continuous_batching.small_m_route_requests` in a `mixed` process, and
+/// (v0.3.63) the admission that reads them (`admit`).
 final class SmallMRouteRequestCounter: @unchecked Sendable {
     static let shared = SmallMRouteRequestCounter()
 
     private let lock = NSLock()
     private var counts: [SmallMRoute: Int] = [:]
+    private var admissions: [SmallMRoute.AdmissionReason: Int] = [:]
+
+    /// One admitted request's place in the count. `end` is idempotent, so a
+    /// caller may end it where the request leaves the scheduler and again,
+    /// as a backstop, on every exit path.
+    final class Ticket: @unchecked Sendable {
+        let route: SmallMRoute
+        let reason: SmallMRoute.AdmissionReason
+        private let counter: SmallMRouteRequestCounter
+        private let lock = NSLock()
+        private var open = true
+
+        fileprivate init(route: SmallMRoute, reason: SmallMRoute.AdmissionReason, counter: SmallMRouteRequestCounter) {
+            self.route = route
+            self.reason = reason
+            self.counter = counter
+        }
+
+        func end() {
+            lock.lock()
+            let wasOpen = open
+            open = false
+            lock.unlock()
+            if wasOpen { counter.end(route) }
+        }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63): fixes a request's route
+    /// (`SmallMRoute.admissionRoute`) from the requests in flight and counts
+    /// it in flight, in one step, so two concurrent admissions cannot both
+    /// miss each other. In `mixed` it logs
+    /// `event=small_m_route_admission route=... reason=...`.
+    func admit(
+        nativeAdmitted: Bool,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed,
+        log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) -> Ticket {
+        lock.lock()
+        let rowInvariant = counts[.rowInvariant] ?? 0
+        let stockOrder = counts[.stockOrder] ?? 0
+        let (route, reason) = SmallMRoute.admissionRoute(
+            nativeAdmitted: nativeAdmitted, rowInvariantInFlight: rowInvariant,
+            processRoute: processRoute, mixed: mixed
+        )
+        counts[route, default: 0] += 1
+        admissions[reason, default: 0] += 1
+        lock.unlock()
+        if mixed {
+            log("event=small_m_route_admission route=\(route.rawValue) reason=\(reason.rawValue) "
+                + "in_flight_row_invariant=\(rowInvariant) in_flight_stock_order=\(stockOrder)\n")
+        }
+        return Ticket(route: route, reason: reason, counter: self)
+    }
+
+    /// Admissions per reason since start, for
+    /// `continuous_batching.small_m_route_admissions` (v0.3.63).
+    func admissionSnapshot() -> [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        var out: [String: Int] = [:]
+        for reason in SmallMRoute.AdmissionReason.allCases where reason != .processRoute {
+            out[reason.rawValue] = admissions[reason] ?? 0
+        }
+        return out
+    }
 
     func begin(_ route: SmallMRoute) {
         lock.lock()

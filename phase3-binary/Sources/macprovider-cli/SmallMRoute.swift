@@ -412,10 +412,12 @@ enum SmallMRoute: String, Sendable, Equatable {
     }
 
     /// SPEC-038 FR-CB9 (v0.3.61): the route a request's forwards are built
-    /// on, fixed once at admission. In `mixed` a native-admitted request runs
-    /// the row-invariant route for its whole life, ordinary fallback
-    /// included, and every other request the stock order process route; in
-    /// every other mode each request runs the process route.
+    /// on when nothing else is in flight. In `mixed` a native-admitted
+    /// request runs the row-invariant route for its whole life, ordinary
+    /// fallback included, and an ordinary request the stock order process
+    /// route; in every other mode each request runs the process route.
+    /// Serving admissions use `admissionRoute` (v0.3.63), which also sees the
+    /// requests in flight.
     static func requestRoute(
         nativeAdmitted: Bool,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
@@ -423,6 +425,35 @@ enum SmallMRoute: String, Sendable, Equatable {
     ) -> SmallMRoute {
         guard mixed else { return processRoute }
         return nativeAdmitted ? .rowInvariant : .stockOrder
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63, #2462): why an admission took its route.
+    enum AdmissionReason: String, Sendable, CaseIterable {
+        /// The request is admitted native.
+        case nativeAdmitted = "native_admitted"
+        /// An ordinary request admitted while a `rowInvariant` request
+        /// (native, or ordinary admitted here before) was in flight.
+        case nativeActive = "native_active"
+        /// An ordinary request admitted with no `rowInvariant` request in flight.
+        case idle
+        /// Not `mixed`: every request takes the process route.
+        case processRoute = "process_route"
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63): the route a request is admitted on, for
+    /// its whole life. In `mixed` an ordinary request joins `rowInvariant`
+    /// while any `rowInvariant` request is in flight (active or queued), so
+    /// the scheduler keeps one forward per step instead of one per route;
+    /// with none in flight it takes the stock order process route.
+    static func admissionRoute(
+        nativeAdmitted: Bool,
+        rowInvariantInFlight: Int,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> (route: SmallMRoute, reason: AdmissionReason) {
+        guard mixed else { return (processRoute, .processRoute) }
+        if nativeAdmitted { return (.rowInvariant, .nativeAdmitted) }
+        return rowInvariantInFlight > 0 ? (.rowInvariant, .nativeActive) : (.stockOrder, .idle)
     }
 
     /// The route this process runs: the one `apply` set, else the one the

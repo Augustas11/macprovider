@@ -3049,7 +3049,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         smallMRoute: SmallMRoute = SmallMRoute.processRoute,
         smallMRouteReason: String = SmallMRoute.processReason,
         smallMRouteMixed: Bool = SmallMRoute.processMixed,
-        smallMRouteRequests: @autoclosure () -> [String: Int] = SmallMRouteRequestCounter.shared.snapshot()
+        smallMRouteRequests: @autoclosure () -> [String: Int] = SmallMRouteRequestCounter.shared.snapshot(),
+        smallMRouteAdmissions: @autoclosure () -> [String: Int] = SmallMRouteRequestCounter.shared.admissionSnapshot()
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
         let policy = snapshot?.policy
@@ -3090,9 +3091,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "shared_forward_calls": scheduler?.sharedForwardCalls ?? 0,
             ],
         ]
-        // SPEC-038 FR-CB9 (v0.3.61): in-flight requests per route, `mixed` only.
+        // SPEC-038 FR-CB9 (v0.3.61): in-flight requests per route, `mixed`
+        // only; v0.3.63: admissions per route reason since start.
         if smallMRouteMixed {
             fields["small_m_route_requests"] = smallMRouteRequests()
+            fields["small_m_route_admissions"] = smallMRouteAdmissions()
         }
         return fields
     }

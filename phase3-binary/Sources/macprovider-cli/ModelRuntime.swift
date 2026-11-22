@@ -9911,7 +9911,13 @@ maxTokens: 1,
         // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
         // here from its native admission before any cache is read. A native
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
-        let requestSmallMRoute = SmallMRoute.requestRoute(nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP)
+        // v0.3.63: an ordinary request admitted while a row-invariant one is
+        // in flight joins row-invariant, so each step stays one forward.
+        let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        )
+        defer { smallMRouteTicket.end() }
+        let requestSmallMRoute = smallMRouteTicket.route
         let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -10022,7 +10028,6 @@ maxTokens: 1,
             smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
-        SmallMRouteRequestCounter.shared.begin(requestSmallMRoute)
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=complete")
             // Non-streaming receipts report full generation latency as TTFT
@@ -10037,7 +10042,7 @@ maxTokens: 1,
                 )
             }
         } catch {
-            SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
+            smallMRouteTicket.end()
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
@@ -10057,7 +10062,7 @@ maxTokens: 1,
             throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
-        SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
+        smallMRouteTicket.end()
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             try drainCancelled.check()
@@ -10515,7 +10520,13 @@ maxTokens: 1,
         // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
         // here from its native admission before any cache is read. A native
         // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
-        let requestSmallMRoute = SmallMRoute.requestRoute(nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP)
+        // v0.3.63: an ordinary request admitted while a row-invariant one is
+        // in flight joins row-invariant, so each step stays one forward.
+        let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        )
+        defer { smallMRouteTicket.end() }
+        let requestSmallMRoute = smallMRouteTicket.route
         let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -10618,7 +10629,6 @@ maxTokens: 1,
             smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
-        SmallMRouteRequestCounter.shared.begin(requestSmallMRoute)
         let timeline = RequestTimeline.current ?? RequestTimeline()
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=stream")
@@ -10654,7 +10664,7 @@ maxTokens: 1,
                 }, onStarted: { timeline.markStarted() })
             }
         } catch {
-            SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
+            smallMRouteTicket.end()
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
@@ -10673,7 +10683,7 @@ maxTokens: 1,
             // streaming and non-streaming paths cannot drift.
             throw error
         }
-        SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
+        smallMRouteTicket.end()
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             if let error = streamState.error() {
