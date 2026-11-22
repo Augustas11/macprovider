@@ -10,14 +10,14 @@
 #     process; free disk >= MIN_FREE_GB (the native-MTP admission capture byte-copies the whole
 #     model per start, #2468); the metallib is the one the signed native-MTP entry names;
 #  2. builds in $SRC/phase3-binary (a git-archive checkout of the pushed campaign commit):
-#     `swift build --build-tests` (debug) and
+#     `swift build --build-tests --build-system native` (debug, full Xcode, .build-tests) and
 #     `swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS`;
 #  3. filtered tests only, on Metal (the metallib is copied into the test bundle, so a Metal test
 #     that skips is a failure): SmallMRouteScopeTests|SmallMRouteTests|
 #     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests, which must include a
 #     passed testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute; then the mlx-swift
 #     fork's MLXTests SmallMRouteTests from a copy of the package's own checkout
-#     (.build/checkouts/mlx-swift), FORK_TESTS_UNAVAILABLE when that copy cannot build;
+#     (.build-tests/checkouts/mlx-swift), FORK_TESTS_UNAVAILABLE when that copy cannot build;
 #  4. serves in SERVES order (default "A1:A B:B A2:A", control-candidate-control), one at a time,
 #     each a production `serve --no-join` on loopback :$PORT (no autotune flag, batching auto, the
 #     signed native-MTP admission via native_mtp_mode auto + model_catalog_* provenance):
@@ -59,11 +59,14 @@ MIN_FREE_GB=${MIN_FREE_GB:-60}
 STALL_S=${STALL_S:-1800}
 TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests'
 REQUIRED_TEST=testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute
-XCODE_DEV=$HOME/Applications/Xcode.app/Contents/Developer
-# The full Xcode only for the mlx-swift checkout copy (as job-qwen4-exactness.sh); the provider
-# builds use the default toolchain, as every earlier lab build did.
-FORK_DEV=${DEVELOPER_DIR:-}
-[ -n "$FORK_DEV" ] || [ ! -d "$XCODE_DEV" ] || FORK_DEV=$XCODE_DEV
+# Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
+# Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
+# job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps
+# the default toolchain (DEVELOPER_DIR unset) and its own .build, as every earlier lab build did.
+TEST_DEV=${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}
+TEST_BUILD=$PKG/.build-tests
+# xc CMD...: CMD with the test toolchain.
+xc() { env DEVELOPER_DIR="$TEST_DEV" "$@"; }
 # The route must come from the serve's own decision: no inherited lab override or MLX value.
 unset MACPROVIDER_LAB_SMALL_M_ROUTE MLX_METAL_SMALL_M_ROW_INVARIANT MLX_METAL_QMV_MMA_WK
 FAILED=0
@@ -132,11 +135,13 @@ log "MODEL $MODEL_KEY sha=$MODEL_SHA path=$DURABLE size_gb=$MODEL_GB"
 BIN=$PKG/.build/release
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   log "BUILD_START debug tests"
-  (cd "$PKG" && nice -n 10 swift build --build-tests) > "$RES/build-tests.log" 2>&1 \
+  [ -d "$TEST_DEV" ] || die "no Xcode developer dir at $TEST_DEV (XCTest needs the full Xcode)" 14
+  (cd "$PKG" && xc nice -n 10 swift build --build-tests --build-system native --scratch-path "$TEST_BUILD") \
+    > "$RES/build-tests.log" 2>&1 \
     || die "debug test build failed: $(grep -m3 'error:' "$RES/build-tests.log" | tr '\n' ' ' | cut -c1-400)" 14
   log "BUILD_DONE debug tests"
   log "BUILD_START release"
-  (cd "$PKG" && nice -n 10 swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS) \
+  (cd "$PKG" && unset DEVELOPER_DIR && nice -n 10 swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS) \
     > "$RES/build-release.log" 2>&1 \
     || die "release build failed: $(grep -m3 'error:' "$RES/build-release.log" | tr '\n' ' ' | cut -c1-400)" 14
 fi
@@ -157,13 +162,17 @@ count_cases() {
 # 3. Filtered tests on Metal.
 TESTS_OK=1
 if [ "${SKIP_TESTS:-0}" != 1 ]; then
-  bundle=$(ls -d "$PKG"/.build/debug/*PackageTests.xctest "$PKG"/.build/debug/macprovider-cliTests.xctest 2>/dev/null | head -n 1)
-  [ -n "$bundle" ] || die "no test bundle under $PKG/.build/debug" 14
-  cp "$METALLIB" "$bundle/Contents/MacOS/mlx.metallib" && cp "$METALLIB" "$PKG/.build/debug/mlx.metallib" \
+  # MLX loads mlx.metallib from beside the test binary; without it no Metal test runs.
+  bundle=$(ls -d "$TEST_BUILD"/debug/*PackageTests.xctest "$TEST_BUILD"/debug/macprovider-cliTests.xctest 2>/dev/null | head -n 1)
+  [ -n "$bundle" ] || die "no test bundle under $TEST_BUILD/debug" 14
+  cp "$METALLIB" "$bundle/Contents/MacOS/mlx.metallib" && cp "$METALLIB" "$TEST_BUILD/debug/mlx.metallib" \
     || die "metallib copy into the test bundle failed" 14
   log "TESTS_START filter=$TEST_FILTER"
-  (cd "$PKG" && swift test --skip-build --filter "$TEST_FILTER") > "$RES/tests.log" 2>&1
+  (cd "$PKG" && xc swift test --build-system native --skip-build --scratch-path "$TEST_BUILD" --filter "$TEST_FILTER") \
+    > "$RES/tests.log" 2>&1
   rc=$?
+  grep -q "Failed to load the default metallib" "$RES/tests.log" \
+    && die "provider tests could not load the metallib (no Metal test ran): $RES/tests.log" 15
   read -r p f s <<< "$(count_cases "$RES/tests.log" "$TEST_FILTER")"
   req=$(grep -cE "Test Case '-\[[^ ]* $REQUIRED_TEST\]' passed" "$RES/tests.log")
   log "TESTS_DONE rc=$rc passed=$p failed=$f skipped=$s $REQUIRED_TEST=$([ "$req" -ge 1 ] && echo passed || echo not_passed)"
@@ -171,7 +180,7 @@ if [ "${SKIP_TESTS:-0}" != 1 ]; then
   if [ "$rc" != 0 ] || [ "$f" != 0 ] || [ "$s" != 0 ] || [ "$p" = 0 ] || [ "$req" -lt 1 ]; then
     TESTS_OK=0; blocker "filtered tests did not all pass on Metal (rc=$rc passed=$p failed=$f skipped=$s required=$req)"
   fi
-  FORK_SRC=$PKG/.build/checkouts/mlx-swift
+  FORK_SRC=$TEST_BUILD/checkouts/mlx-swift
   FORK=$LAB/fork-mlx-swift
   if [ "${SKIP_FORK_TESTS:-0}" = 1 ]; then
     log "FORK_TESTS_SKIPPED (SKIP_FORK_TESTS=1)"
@@ -180,12 +189,15 @@ if [ "${SKIP_TESTS:-0}" != 1 ]; then
   else
     log "FORK_TESTS_START mlx-swift $(git -C "$FORK_SRC" rev-parse HEAD 2>/dev/null)"
     rsync -a --delete --exclude '.build' --exclude '.swiftpm' "$FORK_SRC/" "$FORK/" > "$RES/fork-copy.log" 2>&1
-    if (cd "$FORK" && env ${FORK_DEV:+DEVELOPER_DIR=$FORK_DEV} nice -n 10 swift build --build-tests --scratch-path "$LAB/fork-mlx-swift-build") > "$RES/fork-tests-build.log" 2>&1; then
+    if (cd "$FORK" && xc nice -n 10 swift build --build-tests --build-system native --scratch-path "$LAB/fork-mlx-swift-build") \
+         > "$RES/fork-tests-build.log" 2>&1; then
       fbundle=$(ls -d "$LAB"/fork-mlx-swift-build/debug/*PackageTests.xctest "$LAB"/fork-mlx-swift-build/debug/MLXTests.xctest 2>/dev/null | head -n 1)
       if [ -n "$fbundle" ] && cp "$METALLIB" "$fbundle/Contents/MacOS/mlx.metallib"; then
-        (cd "$FORK" && env ${FORK_DEV:+DEVELOPER_DIR=$FORK_DEV} swift test --skip-build --scratch-path "$LAB/fork-mlx-swift-build" --filter 'MLXTests.SmallMRouteTests') \
-          > "$RES/fork-tests.log" 2>&1
+        (cd "$FORK" && xc swift test --build-system native --skip-build --scratch-path "$LAB/fork-mlx-swift-build" \
+           --filter 'MLXTests.SmallMRouteTests') > "$RES/fork-tests.log" 2>&1
         rc=$?
+        grep -q "Failed to load the default metallib" "$RES/fork-tests.log" \
+          && die "mlx-swift SmallMRouteTests could not load the metallib (no test ran): $RES/fork-tests.log" 15
         read -r p f s <<< "$(count_cases "$RES/fork-tests.log" SmallMRouteTests)"
         log "FORK_TESTS_DONE rc=$rc passed=$p failed=$f skipped=$s"
         if [ "$rc" != 0 ] || [ "$f" != 0 ] || [ "$s" != 0 ] || [ "$p" = 0 ]; then
