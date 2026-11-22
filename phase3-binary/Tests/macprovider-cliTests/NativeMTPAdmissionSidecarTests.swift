@@ -384,6 +384,315 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertNotEqual(try XCTUnwrap(Self.apfsCloneID(capturedURL.path)), sourceCloneID)
     }
 
+    /// #2468: the provider's own model store kept weights at 0600, so every
+    /// native-MTP start byte-copied the whole model. A store-owned 0600
+    /// source is now sealed to 0400 before validation and cloned.
+    func testOwnedStoreWritableSourceIsSealedAndCloned() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        var logLines: [String] = []
+        NativeMTPAdmissionSidecar.testingCaptureLogSink = { logLines.append($0) }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingCaptureLogSink = nil
+        }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let original = try Data(contentsOf: source)
+
+        let captured = try loadCapturedArtifacts(fixture)
+        let capturedURL = captured.targetURL
+        XCTAssertEqual(try permissions(source) & 0o7777, 0o400)
+        XCTAssertEqual(try permissions(capturedURL) & 0o7777, 0o400)
+        XCTAssertEqual(try Data(contentsOf: capturedURL), original)
+        XCTAssertEqual(logLines.filter { $0.contains("native_mtp_capture_clone_fallback") }, [])
+        XCTAssertNoThrow(try captured.revalidateAfterLoad())
+        if Self.volumeIsAPFS(source.path), let sourceCloneID = Self.apfsCloneID(source.path), sourceCloneID != 0 {
+            XCTAssertEqual(try XCTUnwrap(Self.apfsCloneID(capturedURL.path)), sourceCloneID)
+        }
+
+        XCTAssertEqual(chmod(source.path, 0o644), 0)
+        try Data("rewritten after capture".utf8).write(to: source)
+        XCTAssertEqual(try Data(contentsOf: capturedURL), original)
+        XCTAssertEqual(try permissions(capturedURL) & 0o7777, 0o400)
+        XCTAssertNoThrow(try captured.revalidateAfterLoad())
+    }
+
+    func testOwnedStoreDirectoryArtifactIsSealedAndCloned() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        var logLines: [String] = []
+        NativeMTPAdmissionSidecar.testingCaptureLogSink = { logLines.append($0) }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingCaptureLogSink = nil
+        }
+        let targetDirectory = fixture.snapshot.appendingPathComponent("target", isDirectory: true)
+        let nested = targetDirectory.appendingPathComponent("shards", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let weights = nested.appendingPathComponent("model-00001-of-00001.safetensors")
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("target.safetensors"),
+            to: weights
+        )
+        try Data("config".utf8).write(to: targetDirectory.appendingPathComponent("config.json"))
+        XCTAssertEqual(chmod(weights.path, 0o600), 0)
+        XCTAssertEqual(chmod(targetDirectory.appendingPathComponent("config.json").path, 0o600), 0)
+        let digest = try MLXSnapshotIdentity.compute(directory: targetDirectory).digest
+        let sidecar = try fixture.mutatingRoot({ root in
+            var artifacts = root["artifacts"] as! [String: Any]
+            artifacts["target"] = ["path": "target", "sha256": digest]
+            root["artifacts"] = artifacts
+        }, recomputeTuple: true)
+
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+            sidecarData: sidecar,
+            signatureData: fixture.signature(for: sidecar),
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: true
+        )
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, digest)
+        XCTAssertEqual(try permissions(weights) & 0o7777, 0o400)
+        let capturedWeights = captured.targetURL.appendingPathComponent("shards/model-00001-of-00001.safetensors")
+        XCTAssertEqual(try permissions(capturedWeights) & 0o7777, 0o400)
+        XCTAssertEqual(logLines.filter { $0.contains("native_mtp_capture_clone_fallback") }, [])
+        if Self.volumeIsAPFS(weights.path), let sourceCloneID = Self.apfsCloneID(weights.path), sourceCloneID != 0 {
+            XCTAssertEqual(try XCTUnwrap(Self.apfsCloneID(capturedWeights.path)), sourceCloneID)
+        }
+    }
+
+    /// A source outside the provider model store is never chmodded: it keeps
+    /// its mode and takes the exclusive byte copy, which is now logged.
+    func testWritableSourceOutsideStoreTakesLoggedCopy() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let elsewhere = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-other-store-\(UUID().uuidString)", isDirectory: true)
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [elsewhere]
+        var logLines: [String] = []
+        NativeMTPAdmissionSidecar.testingCaptureLogSink = { logLines.append($0) }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingCaptureLogSink = nil
+        }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let original = try Data(contentsOf: source)
+
+        let captured = try loadCapturedArtifacts(fixture)
+        XCTAssertEqual(try permissions(source) & 0o7777, 0o600)
+        XCTAssertEqual(try permissions(captured.targetURL) & 0o7777, 0o400)
+        XCTAssertEqual(try Data(contentsOf: captured.targetURL), original)
+        let fallback = logLines.filter {
+            $0.contains("event=native_mtp_capture_clone_fallback")
+                && $0.contains("reason=mode mode=0600")
+                && $0.contains("path=\"target.safetensors\"")
+                && $0.contains("bytes=\(original.count)")
+        }
+        XCTAssertEqual(fallback.count, 1, "\(logLines)")
+        if Self.volumeIsAPFS(source.path), let sourceCloneID = Self.apfsCloneID(source.path), sourceCloneID != 0 {
+            XCTAssertNotEqual(try XCTUnwrap(Self.apfsCloneID(captured.targetURL.path)), sourceCloneID)
+        }
+    }
+
+    /// The seal runs only for a capture: validation-only loads under the
+    /// store leave source modes alone.
+    func testValidationWithoutCaptureDoesNotSealStoreSources() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        defer { NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: false
+        )
+        XCTAssertNil(capability.capturedArtifacts)
+        XCTAssertEqual(try permissions(source) & 0o7777, 0o600)
+    }
+
+    func testOwnedModelStoreContainmentIncludesTheRootItself() {
+        let root = URL(fileURLWithPath: "/tmp/native-mtp-store-\(UUID().uuidString)", isDirectory: true)
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [root]
+        defer { NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil }
+        XCTAssertTrue(NativeMTPAdmissionSidecar.isUnderOwnedModelStore(root.appendingPathComponent("org--model/rev/sha")))
+        // The static-feed path validates with the store root as artifact root.
+        XCTAssertTrue(NativeMTPAdmissionSidecar.isUnderOwnedModelStore(root))
+        XCTAssertFalse(NativeMTPAdmissionSidecar.isUnderOwnedModelStore(root.deletingLastPathComponent()))
+        XCTAssertFalse(NativeMTPAdmissionSidecar.isUnderOwnedModelStore(URL(fileURLWithPath: root.path + "-sibling/x")))
+        XCTAssertFalse(NativeMTPAdmissionSidecar.isUnderOwnedModelStore(root.appendingPathComponent("a/../../escape")))
+    }
+
+    /// The static-feed admission path passes the store root itself as the
+    /// artifact root. A 0600 source there must still be sealed and cloned.
+    func testArtifactRootEqualToStoreRootIsSealedAndCloned() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.snapshot]
+        var logLines: [String] = []
+        NativeMTPAdmissionSidecar.testingCaptureLogSink = { logLines.append($0) }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingCaptureLogSink = nil
+        }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let original = try Data(contentsOf: source)
+
+        let captured = try loadCapturedArtifacts(fixture)
+        XCTAssertEqual(try permissions(source) & 0o7777, 0o400)
+        XCTAssertEqual(try permissions(captured.targetURL) & 0o7777, 0o400)
+        XCTAssertEqual(try Data(contentsOf: captured.targetURL), original)
+        XCTAssertEqual(logLines.filter { $0.contains("native_mtp_capture_clone_fallback") }, [])
+        if Self.volumeIsAPFS(source.path), let sourceCloneID = Self.apfsCloneID(source.path), sourceCloneID != 0 {
+            XCTAssertEqual(try XCTUnwrap(Self.apfsCloneID(captured.targetURL.path)), sourceCloneID)
+        }
+    }
+
+    /// A symlink leaf under the store is not followed by the seal: the file
+    /// it names keeps its mode, and validation rejects the symlink.
+    func testStoreSymlinkLeafIsNotSealedAndRejects() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        defer { NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil }
+        let outside = fixture.root.appendingPathComponent("outside.safetensors")
+        try Data("outside".utf8).write(to: outside)
+        XCTAssertEqual(chmod(outside.path, 0o600), 0)
+        try FileManager.default.removeItem(at: fixture.snapshot.appendingPathComponent("target.safetensors"))
+        try FileManager.default.createSymbolicLink(
+            at: fixture.snapshot.appendingPathComponent("target.safetensors"),
+            withDestinationURL: outside
+        )
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .pathRejected("target.safetensors")
+        )
+        XCTAssertEqual(try permissions(outside) & 0o7777, 0o600)
+    }
+
+    /// A hardlinked file (`nlink == 2`) under the store is not sealed, and
+    /// validation rejects it.
+    func testStoreHardlinkedFileIsNotSealedAndRejects() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        defer { NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil }
+        let original = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(original.path, 0o600), 0)
+        let linked = fixture.snapshot.appendingPathComponent("target-hardlink.safetensors")
+        try FileManager.default.linkItem(at: original, to: linked)
+
+        XCTAssertEqual(
+            try rejectedCaptureError(
+                fixture.replacingArtifactPath("target", with: "target-hardlink.safetensors"),
+                fixture: fixture
+            ),
+            .artifactNotRegularFile("target-hardlink.safetensors")
+        )
+        XCTAssertEqual(try permissions(linked) & 0o7777, 0o600)
+    }
+
+    /// A seal that does not hold (here the mode is restored between the seal
+    /// and validation) leaves a 0600 validated stat: the capture takes the
+    /// exclusive byte copy and logs it.
+    func testFailedSealFallsBackToLoggedCopy() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        var logLines: [String] = []
+        NativeMTPAdmissionSidecar.testingCaptureLogSink = { logLines.append($0) }
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { label in
+            if label == "after_seal" {
+                XCTAssertEqual(chmod(source.path, 0o600), 0)
+            }
+        }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingCaptureLogSink = nil
+            NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil
+        }
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let original = try Data(contentsOf: source)
+
+        let captured = try loadCapturedArtifacts(fixture)
+        XCTAssertEqual(try permissions(source) & 0o7777, 0o600)
+        XCTAssertEqual(try permissions(captured.targetURL) & 0o7777, 0o400)
+        XCTAssertEqual(try Data(contentsOf: captured.targetURL), original)
+        let fallback = logLines.filter {
+            $0.contains("event=native_mtp_capture_clone_fallback")
+                && $0.contains("reason=mode mode=0600")
+                && $0.contains("path=\"target.safetensors\"")
+        }
+        XCTAssertEqual(fallback.count, 1, "\(logLines)")
+    }
+
+    /// A chmod after the seal and validation, before the capture finishes,
+    /// moves ctime and is rejected.
+    func testChmodAfterSealBeforeCaptureRejects() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { label in
+            if label == "before_capture" {
+                XCTAssertEqual(chmod(source.path, 0o600), 0)
+            }
+        }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil
+        }
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
+    /// A rewrite after the seal and validation, before the capture finishes,
+    /// is rejected. The writer holds a descriptor opened before the seal, so
+    /// the 0400 mode does not stop the write; the identity checks do.
+    func testRewriteThroughPreSealDescriptorBeforeCaptureRejects() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let writer = try FileHandle(forWritingTo: source)
+        defer { try? writer.close() }
+        NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = [fixture.root]
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { label in
+            if label == "before_capture" {
+                XCTAssertEqual(try self.permissions(source) & 0o7777, 0o400)
+                try writer.seek(toOffset: 0)
+                try writer.write(contentsOf: Data("X".utf8))
+                try writer.synchronize()
+            }
+        }
+        defer {
+            NativeMTPAdmissionSidecar.testingOwnedModelStoreRootsOverride = nil
+            NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil
+        }
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
     func testRevalidateAfterLoadRejectsStagedMutation() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

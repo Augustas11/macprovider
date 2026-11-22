@@ -102,6 +102,9 @@ struct DurableModelArtifactStore {
                 existing = nil
             }
             if existing == sha256 {
+                // Trees adopted before #2468 hold 0600 weights; seal them so
+                // the native-MTP capture can clone instead of copying.
+                Self.sealRegularFilesReadOnly(in: destination, fileManager: fileManager)
                 return destination
             }
             // A stale or corrupt destination is kept in place until a verified
@@ -264,10 +267,41 @@ struct DurableModelArtifactStore {
                     "durable copy hash mismatch expected=\(expectedSHA256) actual=\(copied)"
                 )
             }
+            Self.sealRegularFilesReadOnly(in: staging, fileManager: fileManager)
             try replaceDestination(destination, with: staging)
         } catch {
             try? fileManager.removeItem(at: staging)
             throw error
+        }
+    }
+
+    /// Make every owned, single-link regular file in an adopted tree mode
+    /// `0400` (#2468). Stored weights are never rewritten in place: a
+    /// replacement is a new verified tree swapped in by rename, and GC unlinks,
+    /// which needs only the parent directory's write bit. A `0400` source is
+    /// what lets the native-MTP admission capture clone instead of copying
+    /// the whole model. Best effort: the capture re-checks the mode itself,
+    /// and a file left writable only costs a byte copy there.
+    static func sealRegularFilesReadOnly(in directory: URL, fileManager: FileManager = .default) {
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else {
+            return
+        }
+        for case let url as URL in enumerator {
+            let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard fd >= 0 else { continue }
+            var st = stat()
+            if fstat(fd, &st) == 0,
+               (st.st_mode & S_IFMT) == S_IFREG,
+               st.st_uid == geteuid(),
+               st.st_nlink == 1,
+               (st.st_mode & 0o7777) != 0o400 {
+                _ = fchmod(fd, 0o400)
+            }
+            close(fd)
         }
     }
 

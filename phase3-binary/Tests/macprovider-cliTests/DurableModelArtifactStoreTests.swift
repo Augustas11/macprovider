@@ -39,6 +39,56 @@ final class DurableModelArtifactStoreTests: XCTestCase {
         )
     }
 
+    /// #2468: adopted files are 0400 so the native-MTP capture can clone
+    /// them. Replacement and GC still work on 0400 files.
+    func testAdoptSealsFilesReadOnlyAndGCAndReplacementStillWork() throws {
+        let root = try tempDir()
+        let store = DurableModelArtifactStore(root: root)
+        let staging = try tempDir()
+        let nested = staging.appendingPathComponent("shards", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: nested.appendingPathComponent("model.safetensors"))
+        try Data("{}".utf8).write(to: staging.appendingPathComponent("config.json"))
+        XCTAssertEqual(chmod(nested.appendingPathComponent("model.safetensors").path, 0o600), 0)
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: staging)
+        let revision = String(repeating: "e", count: 40)
+
+        let adopted = try store.adoptVerifiedStaging(staging: staging, modelID: "namespace/model", revision: revision, sha256: sha)
+        for relative in ["shards/model.safetensors", "config.json"] {
+            XCTAssertEqual(try Self.mode(adopted.appendingPathComponent(relative)), 0o400, relative)
+        }
+        XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: adopted), sha)
+
+        // A tree adopted before the seal (0600) is sealed on the next adopt.
+        XCTAssertEqual(chmod(adopted.appendingPathComponent("config.json").path, 0o600), 0)
+        _ = try store.adoptVerifiedStaging(staging: staging, modelID: "namespace/model", revision: revision, sha256: sha)
+        XCTAssertEqual(try Self.mode(adopted.appendingPathComponent("config.json")), 0o400)
+
+        // A corrupt sealed tree is still replaced by a verified one.
+        XCTAssertEqual(chmod(adopted.appendingPathComponent("config.json").path, 0o600), 0)
+        try Data("corrupt".utf8).write(to: adopted.appendingPathComponent("config.json"))
+        XCTAssertEqual(chmod(adopted.appendingPathComponent("config.json").path, 0o400), 0)
+        let repaired = try store.adoptVerifiedStaging(staging: staging, modelID: "namespace/model", revision: revision, sha256: sha)
+        XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: repaired), sha)
+        XCTAssertEqual(try Self.mode(repaired.appendingPathComponent("config.json")), 0o400)
+
+        // GC removes a sealed inactive tree.
+        let other = try tempDir()
+        try Data("other".utf8).write(to: other.appendingPathComponent("weights.bin"))
+        let otherSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: other)
+        let stale = try store.adoptVerifiedStaging(staging: other, modelID: "namespace/other", revision: revision, sha256: otherSHA)
+        XCTAssertEqual(try Self.mode(stale.appendingPathComponent("weights.bin")), 0o400)
+        try store.gcInactive(keeping: [repaired.path])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repaired.path))
+    }
+
+    private static func mode(_ url: URL) throws -> mode_t {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { throw CocoaError(.fileNoSuchFile) }
+        return st.st_mode & 0o7777
+    }
+
     func testFailedSwapRestoresPriorDestination() throws {
         let root = try tempDir()
         let revision = String(repeating: "b", count: 40)
