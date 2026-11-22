@@ -4635,16 +4635,16 @@ actor ContinuousBatchScheduler {
     /// SPEC-038 FR-CB9 (v0.3.61): one native round per small-row route, each
     /// with every backend call on that route. In a `mixed` process native
     /// rows are all row-invariant; any other process has one route.
-    private func runNativeMTPDecodeStep(rows: [Row]) async {
+    private func runNativeMTPRoundsPerRoute(rows: [Row]) async {
         for group in SmallMRouteScope.groups(rows, route: \.request.smallMRoute) {
             let current = group.compactMap { activeDecode[$0.request.id] }
             guard let route = current.first?.request.smallMRoute else { continue }
-            await onRoute(route) { await runNativeMTPDecodeStepOnRoute(rows: current) }
+            await onRoute(route) { await runNativeMTPDecodeStep(rows: current) }
             guard !cleanupFailedClosed else { return }
         }
     }
 
-    private func runNativeMTPDecodeStepOnRoute(rows: [Row]) async {
+    private func runNativeMTPDecodeStep(rows: [Row]) async {
         let nativeMTPStatusSink = configuration.nativeMTPStatusSink
         var nativeMTPStatusRoundStarted = false
         let nativeMTPStatusStartedAt = Date()
@@ -5686,20 +5686,20 @@ actor ContinuousBatchScheduler {
             labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
         }
         guard !nativeRows.isEmpty else {
-            await runOrdinaryDecodeStep(rows: rows.compactMap { activeDecode[$0.request.id] })
+            await runOrdinaryForwardsPerRoute(rows: rows.compactMap { activeDecode[$0.request.id] })
             return
         }
         let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
-            await runNativeMTPDecodeStep(rows: nativeRows)
+            await runNativeMTPRoundsPerRoute(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
             let remainingOrdinary = ordinaryRows.compactMap { activeDecode[$0.request.id] }
-            await runOrdinaryDecodeStep(rows: remainingOrdinary)
+            await runOrdinaryForwardsPerRoute(rows: remainingOrdinary)
         } else {
-            await runOrdinaryDecodeStep(rows: ordinaryRows)
+            await runOrdinaryForwardsPerRoute(rows: ordinaryRows)
             guard !cleanupFailedClosed else { return }
             let remainingNative = nativeRows.compactMap { activeDecode[$0.request.id] }
-            await runNativeMTPDecodeStep(rows: remainingNative)
+            await runNativeMTPRoundsPerRoute(rows: remainingNative)
         }
     }
 
@@ -5708,11 +5708,11 @@ actor ContinuousBatchScheduler {
     /// ordinary forward, or a native request's ordinary fallback, beside
     /// ordinary requests) each route decodes in its own forwards this step,
     /// and each forward's row count counts only its own route's rows.
-    private func runOrdinaryDecodeStep(rows: [Row]) async {
+    private func runOrdinaryForwardsPerRoute(rows: [Row]) async {
         for group in SmallMRouteScope.groups(rows, route: \.request.smallMRoute) {
             let current = group.compactMap { activeDecode[$0.request.id] }
             guard let route = current.first?.request.smallMRoute else { continue }
-            await onRoute(route) { await runOrdinaryDecodeStepOnRoute(rows: current) }
+            await onRoute(route) { await runOrdinaryDecodeStep(rows: current) }
             guard !cleanupFailedClosed else { return }
         }
     }
@@ -5723,7 +5723,7 @@ actor ContinuousBatchScheduler {
         try await SmallMRouteScope.run(route, operation)
     }
 
-    private func runOrdinaryDecodeStepOnRoute(rows: [Row]) async {
+    private func runOrdinaryDecodeStep(rows: [Row]) async {
         guard !rows.isEmpty else { return }
         // Each forward stays below the device's quantized-matmul vector limit
         // (`ContinuousBatchDecodeRouteBound`); a backend whose model attended
@@ -6105,6 +6105,10 @@ actor ContinuousBatchScheduler {
     /// Ordinary rows already decoding, in admission order, capped at the V4
     /// decode width. Native MTP, grammar, and penalty rows stay on the
     /// official decode step: a pause samples one ordinary forward only.
+    /// SPEC-038 FR-CB9 (v0.3.62): the pause forward runs inside the prefill's
+    /// route scope, so only rows on the prefill's small-M route take it; a
+    /// row on the other route waits for its own decode step after the
+    /// prefill, as a native row does.
     private func prefillPauseDecodeInputs(route: SmallMRoute) async -> [ContinuousBatchPrefillPauseRow] {
         guard configuration.referencePrefillStepSize != nil else { return [] }
         let rows = activeDecode.values.filter { row in

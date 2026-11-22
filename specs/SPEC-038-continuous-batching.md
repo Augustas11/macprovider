@@ -1,11 +1,21 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.61
+Version: v0.3.62
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.62 (2026-11-22, FR-CB9 `mixed` keeps out of NAX GPUs; prefill pauses stay on one route, Related: #2462):**
+On a GPU where the MLX core takes its NAX quantized-matmul kernels (macOS
+26.2 or later, architecture generation 17 or later, 18 for a phone), both
+small-row routes select the same kernels, so `mixed` would split forwards
+and caches for no gain: such a process keeps `row_invariant` process-wide,
+as before v0.3.61. A DeepSeek V4 prefill decode pause (FR-CB4) serves only
+decoding rows on the prefill's route. A one-row verdict recorded by a
+`mixed` process logs the next start's mode from the same decision as
+startup. No other behaviour changes.
+
 **Change log v0.3.61 (2026-11-22, FR-CB9 `mixed` small-row route: stock order process, row-invariant native requests, Related: #2462):**
 FR-CB9 adds a fourth process mode, `mixed`. A `serve` process that today
 keeps `row_invariant` only because native MTP may activate (no draft model,
@@ -1392,7 +1402,10 @@ While that chunk is one forward, ordinary rows already decoding may take one
 decode step between evaluated prefill tiles. Each such step is its own decode
 forward: its tokens are not mixed into the prefill, and the prefill token
 span is unchanged. Grammar rows, native-MTP rows, and rows with a non-zero
-presence or frequency penalty do not take these steps.
+presence or frequency penalty do not take these steps. In a FR-CB9 `mixed`
+process (v0.3.62) only rows on the prefill's small-row route take them, so
+the step forward holds one route; a row on the other route decodes after
+the prefill forward.
 
 DeepSeek decode MUST share model projections across compatible rows while
 each row retains its own absolute token offset, compression-ratio-4 and
@@ -2107,8 +2120,12 @@ does not hold) and every other condition for `stock_order` holds: item 3
 holds (no draft model, no shard-group role, no other warm-swap target, no
 configured further model, not an autotune child), item 2 does not
 (continuous batching can activate), the startup identity has no
-`stock_order_fallback`, and the operator override is absent. Its reason is
-`native_mtp_per_request`. A process whose native MTP may activate and that
+`stock_order_fallback`, the operator override is absent, and the GPU does
+not take the MLX core's NAX quantized-matmul kernels (v0.3.62: core
+`is_nax_available`, macOS 26.2 or later and architecture generation 17 or
+later, 18 for a phone; there both routes select the same kernels). Its
+reason is `native_mtp_per_request`. A NAX process whose native MTP may
+activate keeps `row_invariant` process-wide with its native reason. A process whose native MTP may activate and that
 would otherwise take `serial_only` (item 2 holds) keeps `row_invariant` as
 before. Every condition that keeps a process on `row_invariant` today still
 keeps it there process-wide: the operator override

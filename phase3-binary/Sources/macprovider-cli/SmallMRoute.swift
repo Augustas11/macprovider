@@ -154,6 +154,10 @@ enum SmallMRoute: String, Sendable, Equatable {
         var stockOrderFallback: String? = nil
         /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant`.
         var operatorForcesRowInvariant: Bool = false
+        /// SPEC-038 FR-CB9 (v0.3.62): the MLX core takes its NAX quantized
+        /// matmul kernels on this GPU (`SmallMRoute.processNAXAvailable`),
+        /// which are the same on both small-row routes.
+        var naxGPU: Bool = false
 
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
@@ -163,6 +167,7 @@ enum SmallMRoute: String, Sendable, Equatable {
                 + "switch_targets=\(otherSwitchTargets) self_check=\(selfCheckVerdict.rawValue)"
                 + (stockOrderFallback.map { " stock_order_fallback=\($0)" } ?? "")
                 + (operatorForcesRowInvariant ? " operator_small_m_route=row_invariant" : "")
+                + (naxGPU ? " nax=true" : "")
         }
     }
 
@@ -172,8 +177,8 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// or another switch target keeps the row-invariant route. Native MTP
     /// that may activate takes `mixed` (v0.3.61: stock order process route,
     /// row-invariant native requests) when batching can activate and no
-    /// stock order fallback or operator override applies, and keeps the
-    /// row-invariant route otherwise. Otherwise serial-only needs all of:
+    /// stock order fallback or operator override applies and the GPU is not
+    /// NAX (v0.3.62), and keeps the row-invariant route otherwise. Otherwise serial-only needs all of:
     /// - native MTP inactive: mode `off`, or `auto` with no verified entry
     ///   for the loaded model and artifact digest (its rounds batch target
     ///   rows); an unreadable or unverifiable set keeps the invariant route;
@@ -233,6 +238,9 @@ enum SmallMRoute: String, Sendable, Equatable {
             }
             if let fallback = inputs.stockOrderFallback { return Decision(route: .rowInvariant, reason: fallback) }
             if inputs.operatorForcesRowInvariant { return Decision(route: .rowInvariant, reason: operatorRowInvariant) }
+            // v0.3.62: on a NAX GPU both routes select the same kernels, so
+            // splitting forwards and caches would gain nothing.
+            if inputs.naxGPU { return keep }
             return Decision(route: .stockOrder, reason: nativeMTPPerRequest, mixed: true)
         }
         if inputs.otherSwitchTargets { return Decision(route: .rowInvariant, reason: "switch_targets") }
@@ -580,6 +588,20 @@ struct SmallMRouteVerdictStore: Sendable {
         return stockOrderFallback(startupIdentity: startupIdentity) == nil ? .stockOrder : .rowInvariant
     }
 
+    /// The decision `SmallMRoute.decide` gives the next start of this
+    /// identity: `inputs` (this start's) with the verdict and the fallback
+    /// read back from the stores.
+    func nextStartDecision(
+        startupIdentity: String,
+        selfCheckStore: ContinuousBatchingSelfCheckStore,
+        inputs: SmallMRoute.Inputs
+    ) -> SmallMRoute.Decision {
+        var next = inputs
+        next.selfCheckVerdict = verdict(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore)
+        next.stockOrderFallback = stockOrderFallback(startupIdentity: startupIdentity)
+        return SmallMRoute.decide(next)
+    }
+
     /// The stored decision behind a `grantsNoBatching` verdict, for the
     /// refused self-check state a serial-only process reports.
     func oneRowDecision(
@@ -706,6 +728,10 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
     private let selfCheckStore: ContinuousBatchingSelfCheckStore
     private let startupIdentity: String
     private let route: SmallMRoute
+    /// This start's decide inputs; the logged next start is decided from
+    /// them (a `mixed` start's verdict keeps it native-MTP row-invariant,
+    /// never serial-only). Nil: `nextStartRoute`.
+    private let inputs: SmallMRoute.Inputs?
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var startupModelSHA256: String?
@@ -716,13 +742,23 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         selfCheckStore: ContinuousBatchingSelfCheckStore,
         startupIdentity: String,
         route: SmallMRoute = .rowInvariant,
+        inputs: SmallMRoute.Inputs? = nil,
         log: @escaping @Sendable (String) -> Void
     ) {
         self.store = store
         self.selfCheckStore = selfCheckStore
         self.startupIdentity = startupIdentity
         self.route = route
+        self.inputs = inputs
         self.log = log
+    }
+
+    /// The mode the next start of this identity takes.
+    private var nextStart: String {
+        guard let inputs else {
+            return store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore).rawValue
+        }
+        return store.nextStartDecision(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore, inputs: inputs).mode
     }
 
     func applied(key: ContinuousBatchingSelfCheckKey, decision: ContinuousBatchingSelfCheckDecision) {
@@ -743,8 +779,7 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
             )
             : nil
         store.record(startupIdentity: startupIdentity, key: key, decision: decision, route: route, stockOrderFallback: fallback)
-        let next = store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore)
-        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next.rawValue)\(fallback.map { " fallback=\($0)" } ?? "")")
+        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(nextStart)\(fallback.map { " fallback=\($0)" } ?? "")")
     }
 
     /// Records a stock order failure found outside a self-check decision
@@ -761,6 +796,6 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         }
         guard store.stockOrderFallback(startupIdentity: startupIdentity) == nil else { return }
         store.recordStockOrderFallback(startupIdentity: startupIdentity, reason: reason)
-        log("event=small_m_route action=stock_order_fallback_recorded reason=\(reason) next_start=\(store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore).rawValue)")
+        log("event=small_m_route action=stock_order_fallback_recorded reason=\(reason) next_start=\(nextStart)")
     }
 }

@@ -3505,7 +3505,9 @@ struct ServeCommand: AsyncParsableCommand {
             stockOrderFallback: smallMRouteStartupIdentity.flatMap {
                 smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
             },
-            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant
+            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant,
+            // Only `mixed` reads it, and only native MTP can take `mixed`.
+            naxGPU: resolved.nativeMTPMode != .off && SmallMRoute.processNAXAvailable()
         )
         #if MACPROVIDER_LAB_HARNESS
         // Lab measurement only: run the same serve on a chosen batching route
@@ -3554,6 +3556,7 @@ struct ServeCommand: AsyncParsableCommand {
                 selfCheckStore: cbSelfCheckStore,
                 startupIdentity: identity,
                 route: appliedSmallMRoute,
+                inputs: smallMRouteInputs,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
         }()
