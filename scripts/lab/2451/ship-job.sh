@@ -8,13 +8,15 @@
 # for affine bfloat16 group-64 4/6/8-bit weights from 1024 rows, on by default,
 # MLX_METAL_QMM_STOCK_TILE=1 restores stock) against the campaign's own pins (#2462's chain):
 #  1. preflight: nothing on :8080/:8000, no live agent, no serve, no com.flop agent, no
-#     Virtualization VM / limactl / mlx_service process; free disk >= MIN_FREE_GB; cmake present; the
-#     shipped mlx-swift tree (SRC/mlx-swift, make-mlx-swift-tree.sh) carries the fork core FORK_COMMIT
-#     with metal::qmm_t_block_rows;
-#  2. fork test: a CMake Release build of that core (SRC/mlx-swift/Source/Cmlx/mlx, non-JIT, so the
-#     quantized.metal instantiations are what runs) and doctest "test gpu qmm 64-row tile bit
-#     identity" on the GPU (must run, not skip: MLX_METAL_QMM_STOCK_TILE unset, a non-NAX GPU);
-#     a failure ends the job there (T2451_SHIP_VERDICT FAIL, JOB_FAIL);
+#     Virtualization VM / limactl / mlx_service process; free disk >= MIN_FREE_GB; the shipped
+#     mlx-swift tree (SRC/mlx-swift: mlx-swift macprovider/2451-dense-tile, make-mlx-swift-tree.sh)
+#     carries the fork core FORK_COMMIT with metal::qmm_t_block_rows and Tests/MLXTests/QmmTileTests;
+#  2. fork test, as #2462's FORK_TESTS step (no cmake on the Studio): a copy of that tree,
+#     `swift build --build-tests --build-system native` with DEVELOPER_DIR=TEST_DEV (full Xcode),
+#     the metallib copied into the .xctest bundle, `swift test --filter MLXTests.QmmTileTests`
+#     (JIT quantized kernels, as the provider runs them). The case must pass, not skip: it compares
+#     the 64-row tile with stock 512-row chunks and requires mlx_qmm_t_block_rows to report 64 for
+#     every compared product. A failure ends the job there (T2451_SHIP_VERDICT FAIL, JOB_FAIL);
 #  3. release lab-harness builds of phase3-binary: main on the campaign pins, the candidate with
 #     mlx-swift replaced by SRC/mlx-swift (swift package edit, its own copy of the tree);
 #  4. per model in MODELS, parity-grid TTFT A/B, main-a / candidate / main-b, one row, CONTEXTS x
@@ -60,8 +62,12 @@ TRIALS=${TRIALS:-3}
 MAX_REGRESS_PCT=${MAX_REGRESS_PCT:-1}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 E2E_EXTRA_GB=${E2E_EXTRA_GB:-40}
-FORK_TEST_NAME="test gpu qmm 64-row tile bit identity"
-CORE_BUILD=$LAB/core-build
+FORK_TEST_FILTER=MLXTests.QmmTileTests
+FORK_COPY=$LAB/fork-mlx-swift
+FORK_BUILD=$LAB/fork-mlx-swift-build
+# Swift tests need full Xcode (XCTest); the release builds keep the default toolchain.
+TEST_DEV=${TEST_DEV:-$HOME/Applications/Xcode.app/Contents/Developer}
+xc() { env DEVELOPER_DIR="$TEST_DEV" "$@"; }
 MAIN_BIN=$PKG/.build-lab-main/release
 CAND_PKG=$LAB/cand-$RUN_ID/phase3-binary
 CAND_BIN=$CAND_PKG/.build-lab-tiles/release
@@ -119,7 +125,8 @@ grid_args() {
 IFS=, read -r -a MODEL_LIST <<< "$MODELS"
 if [ "${JOB_CHECK:-0}" = 1 ]; then
   GLM_MODEL='<glm-dir>' QWEN_MODEL='<qwen-dir>'
-  printf 'FORK_TEST_ARGV %s/tests/tests -tc=%q\n' "$CORE_BUILD" "$FORK_TEST_NAME"
+  printf 'FORK_TEST_ARGV DEVELOPER_DIR=%s swift test --build-system native --skip-build --scratch-path %s --filter %s\n' \
+    "$TEST_DEV" "$FORK_BUILD" "$FORK_TEST_FILTER"
   for m in "${MODEL_LIST[@]}"; do
     for p in main-a cand main-b; do
       case $p in cand) grid_args "$m" "$p" "$CAND_BIN" ;; *) grid_args "$m" "$p" "$MAIN_BIN" ;; esac
@@ -147,6 +154,8 @@ log "DISK free_gb=$fg min=$MIN_FREE_GB"
 grep -q "^core=$FORK_COMMIT$" "$MLXSWIFT/Source/Cmlx/LAB_2451_CORE" 2>/dev/null \
   || die "the shipped mlx-swift tree is not on core $FORK_COMMIT: $(tr '\n' ' ' < "$MLXSWIFT/Source/Cmlx/LAB_2451_CORE" 2>/dev/null)" 11
 grep -q qmm_t_block_rows "$CORE/mlx/backend/metal/quantized.cpp" || die "the shipped core has no production dense tile" 11
+{ [ -f "$MLXSWIFT/Tests/MLXTests/QmmTileTests.swift" ] && grep -q mlx_qmm_t_block_rows "$MLXSWIFT/Source/Cmlx/macprovider/qmm_tile.cpp"; } \
+  || die "the shipped mlx-swift tree has no QmmTileTests / mlx_qmm_t_block_rows (not mlx-swift macprovider/2451-dense-tile)" 11
 grep -q MLX_LAB_2451 "$CORE/mlx/backend/metal/quantized.cpp" && die "the shipped core still carries the lab tile hook" 11
 log "MLX_SWIFT_TREE $(tr '\n' ' ' < "$MLXSWIFT/Source/Cmlx/LAB_2451_CORE")"
 [ -n "${MLX_METAL_QMM_STOCK_TILE:-}" ] && die "MLX_METAL_QMM_STOCK_TILE is set in the job environment" 11
@@ -166,31 +175,45 @@ for m in "${MODEL_LIST[@]}"; do
   fi
 done
 if [ "${SKIP_FORK_TEST:-0}" != 1 ]; then
-  command -v cmake >/dev/null 2>&1 || die "no cmake on PATH ($PATH): the fork test cannot build" 14
+  [ -d "$TEST_DEV" ] || die "no Xcode developer dir at $TEST_DEV (TEST_DEV): the fork test cannot build" 14
 fi
 
-# 2. Fork test: the core's own doctest on the Studio GPU (non-JIT CMake build).
+# 2. Fork test: mlx-swift QmmTileTests on the Studio GPU (#2462's FORK_TESTS recipe).
 FORK_TEST=skipped
 if [ "${SKIP_FORK_TEST:-0}" != 1 ]; then
-  rm -rf "$CORE_BUILD"
-  log "BUILD_START core-tests"
-  { cmake -S "$CORE" -B "$CORE_BUILD" -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_TESTS=ON -DMLX_BUILD_EXAMPLES=OFF \
-      -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-    && nice -n 10 cmake --build "$CORE_BUILD" --target tests -j "$(sysctl -n hw.ncpu)"; } > "$RES/build-core-tests.log" 2>&1 \
-    || die "core test build failed: $(grep -m3 'error' "$RES/build-core-tests.log" | tr '\n' ' ' | cut -c1-400)" 14
-  [ -x "$CORE_BUILD/tests/tests" ] || die "no core test binary at $CORE_BUILD/tests/tests" 14
-  log "BUILD_DONE core-tests"
-  log "FORK_TEST_START $FORK_TEST_NAME"
-  "$CORE_BUILD/tests/tests" -tc="$FORK_TEST_NAME" > "$RES/fork-test.log" 2>&1
+  rm -rf "$FORK_BUILD"
+  rsync -a --delete --exclude '.build' --exclude '.swiftpm' "$MLXSWIFT/" "$FORK_COPY/" > "$RES/fork-copy.log" 2>&1 \
+    || die "mlx-swift tree copy failed" 14
+  log "BUILD_START fork-tests"
+  (cd "$FORK_COPY" && xc nice -n 10 swift build --build-tests --build-system native --scratch-path "$FORK_BUILD") \
+    > "$RES/fork-tests-build.log" 2>&1 \
+    || die "fork test build failed: $(grep -m3 'error:' "$RES/fork-tests-build.log" | tr '\n' ' ' | cut -c1-400)" 14
+  fbundle=""
+  for b in "$FORK_BUILD"/debug/*PackageTests.xctest "$FORK_BUILD"/debug/MLXTests.xctest; do
+    [ -d "$b" ] && { fbundle=$b; break; }
+  done
+  [ -n "$fbundle" ] || die "no test bundle under $FORK_BUILD/debug" 14
+  # MLX loads mlx.metallib from beside the test binary; without it no Metal test runs.
+  { cp "$METALLIB" "$fbundle/Contents/MacOS/mlx.metallib" && cp "$METALLIB" "$FORK_BUILD/debug/mlx.metallib"; } \
+    || die "metallib copy into the test bundle failed" 14
+  log "BUILD_DONE fork-tests"
+  log "FORK_TEST_START $FORK_TEST_FILTER"
+  (cd "$FORK_COPY" && env -u MLX_METAL_QMM_STOCK_TILE DEVELOPER_DIR="$TEST_DEV" swift test --build-system native \
+     --skip-build --scratch-path "$FORK_BUILD" --filter "$FORK_TEST_FILTER") > "$RES/fork-test.log" 2>&1
   rc=$?
-  tail -n 6 "$RES/fork-test.log"
-  if [ "$rc" = 0 ] && grep -Eq 'test cases: *1 [|] *1 passed [|] *0 failed' "$RES/fork-test.log" \
-     && ! grep -q 'test skipped' "$RES/fork-test.log"; then
+  grep -q "Failed to load the default metallib" "$RES/fork-test.log" \
+    && die "QmmTileTests could not load the metallib (no test ran): $RES/fork-test.log" 15
+  p=$(grep -cE "Test Case '-\[MLXTests\.QmmTileTests test[A-Za-z0-9_]+\]' passed" "$RES/fork-test.log")
+  f=$(grep -cE "Test Case '-\[MLXTests\.QmmTileTests test[A-Za-z0-9_]+\]' failed" "$RES/fork-test.log")
+  sk=$(grep -cE "Test Case '-\[MLXTests\.QmmTileTests test[A-Za-z0-9_]+\]' skipped" "$RES/fork-test.log")
+  log "FORK_TEST_DONE rc=$rc passed=$p failed=$f skipped=$sk"
+  grep -E "XCTAssert|error:" "$RES/fork-test.log" | head -n 10 | sed 's/^/FORK_TEST_FAILURE /'
+  if [ "$rc" = 0 ] && [ "$p" = 1 ] && [ "$f" = 0 ] && [ "$sk" = 0 ]; then
     FORK_TEST=PASS
   else
     FORK_TEST=FAIL
   fi
-  rm -rf "$CORE_BUILD"
+  rm -rf "$FORK_BUILD" "$FORK_COPY"
 fi
 echo "T2451_FORK_TEST $FORK_TEST" | tee "$RES/verdict.md"
 if [ "$FORK_TEST" = FAIL ]; then
