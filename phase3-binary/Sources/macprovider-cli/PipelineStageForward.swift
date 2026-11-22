@@ -179,7 +179,7 @@ final class PipelineStageModel {
         self.hiddenSize = hiddenSize
 
         var weights = try Self.loadStageWeights(directory: directory, plan: plan)
-        weights = model.sanitize(weights: weights, metadata: [:])
+        weights = try model.sanitize(weights: weights, metadata: [:])
 
         let base = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
         // `perLayerQuantization` also carries a uniform quantization as its default.

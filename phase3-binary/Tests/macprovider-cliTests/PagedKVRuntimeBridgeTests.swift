@@ -8813,6 +8813,8 @@ private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafter
     private var promptWidths: [Int] = []
     private var hiddenWidths: [Int] = []
 
+    func validateCompatibility(with target: any LanguageModel) throws {}
+
     func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])
     }
