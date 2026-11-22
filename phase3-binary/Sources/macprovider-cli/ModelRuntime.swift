@@ -9920,7 +9920,10 @@ maxTokens: 1,
         // the route of its key's stored entry, so its next turn hits.
         var storedSmallMRoute: SmallMRoute?
         if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
-            storedSmallMRoute = await conversationCache.storedSmallMRoute(conversationKey: request.conversationKey)
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(
+                conversationKey: request.conversationKey, modelID: request.model,
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
+            )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
@@ -10053,11 +10056,12 @@ maxTokens: 1,
                 )
             }
         } catch {
-            smallMRouteTicket.end()
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
+            // The row has left the scheduler only once its retirement is checked.
+            smallMRouteTicket.end()
             await Self.endContinuousBatchLeaseAfterFailure(
                 lease,
                 cancelled: !drainCancelled.isFired && (error is CancellationError || shouldCancel()),
@@ -10540,7 +10544,10 @@ maxTokens: 1,
         // the route of its key's stored entry, so its next turn hits.
         var storedSmallMRoute: SmallMRoute?
         if !tokenBoundedNativeMTPAdmission.usesNativeMTP {
-            storedSmallMRoute = await conversationCache.storedSmallMRoute(conversationKey: request.conversationKey)
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(
+                conversationKey: request.conversationKey, modelID: request.model,
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
+            )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
@@ -10686,11 +10693,12 @@ maxTokens: 1,
                 }, onStarted: { timeline.markStarted() })
             }
         } catch {
-            smallMRouteTicket.end()
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
+            // The row has left the scheduler only once its retirement is checked.
+            smallMRouteTicket.end()
             await Self.endContinuousBatchLeaseAfterFailure(
                 lease,
                 cancelled: !drainCancelled.isFired
@@ -11141,6 +11149,9 @@ maxTokens: boundedMaxTokens,
         ) {
             return (completion, snapshot)
         }
+        // The request runs serial from here: it is no longer a row-invariant
+        // CB request that ordinary admissions should join.
+        smallMRouteReservation?.end()
         CBTrace.log(request.requestID, "rt_serial_path")
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
@@ -12169,6 +12180,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         if let completion = batchedCompletion {
             return completion
         }
+        // The request runs serial from here (see the non-streaming path).
+        smallMRouteReservation?.end()
         if speculativeCacheWrapValidated,
            let testSpeculativeStream,
            Self.speculativeRoute(

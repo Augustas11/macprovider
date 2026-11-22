@@ -553,13 +553,22 @@ actor ConversationCache {
 
     /// SPEC-038 FR-CB9 (v0.3.63): the small-row route of the hot entry stored
     /// for `conversationKey`, read at admission so a keyed conversation's next
-    /// turn can take the route its KV was written on. Nil: no hot entry (an
-    /// entry leased to an in-flight turn is not stored).
-    func storedSmallMRoute(conversationKey: String?) -> SmallMRoute? {
-        guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+    /// turn can take the route its KV was written on. Nil when `begin` could
+    /// not reuse the entry anyway: no hot entry (an entry leased to an
+    /// in-flight turn is not stored), an expired one, or one of another model
+    /// or KV bit width.
+    func storedSmallMRoute(
+        conversationKey: String?, modelID: String, kvBits: Int?, now: Date = Date()
+    ) -> SmallMRoute? {
+        guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+              let entry = entries[key],
+              now.timeIntervalSince(entry.storedAt) <= config.ttlSeconds,
+              entry.modelID == modelID,
+              entry.kvBits == kvBits
+        else {
             return nil
         }
-        return entries[key]?.smallMRoute
+        return entry.smallMRoute
     }
 
     func begin(

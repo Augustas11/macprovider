@@ -453,7 +453,11 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// takes the route of its key's stored conversation-cache entry
     /// (`storedRoute`), so a keyed conversation keeps its KV across turns,
     /// and otherwise the stock order process route. It never takes stock
-    /// order while a `rowInvariant` request is in flight.
+    /// order while a joinable `rowInvariant` request is in flight.
+    /// `rowInvariantInFlight` counts only joinable requests: native ones and
+    /// ordinary ones that joined them, never one on `rowInvariant` for its own
+    /// conversation-cache entry, which would otherwise pull every later
+    /// ordinary request (and so every keyed conversation) onto `rowInvariant`.
     static func admissionRoute(
         nativeAdmitted: Bool,
         rowInvariantInFlight: Int,

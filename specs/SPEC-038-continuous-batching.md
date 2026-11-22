@@ -13,7 +13,8 @@ or decided native at registration and not yet admitted, is admitted on
 `row_invariant` for its whole life. With none in flight it takes the route of
 the hot conversation-cache entry stored for its key, so a keyed
 conversation's next turn reuses its KV, and otherwise `stock_order` as
-before. The lab window measured two forwards
+before. A request on `row_invariant` only for its own conversation-cache
+entry does not pull other ordinary requests onto `row_invariant`. The lab window measured two forwards
 per step (one per route) at 1 native + 2 ordinary rows on Qwen3.8-27B: mix
 aggregate output 34.7 against 44.7 tok/s on a process-wide `row_invariant`
 (-22%), because each step read the weights twice. The rule keeps such a step
@@ -2172,8 +2173,13 @@ role, another warm-swap target, a configured further model, and a recorded
   reason `native_active`; for an ordinary request admitted with none in
   flight, the route of the hot conversation-cache entry stored for its
   conversation key (reason `conversation_cache`), else `stock_order` (reason
-  `idle`). An ordinary request is never admitted on `stock_order` while a
-  `row_invariant` request is in flight. The check and the count of the new
+  `idle`). Only a native request (reserved or admitted) and an ordinary
+  request admitted `native_active` count as in flight for this rule; a
+  request admitted `row_invariant` for `conversation_cache` does not, so one
+  keyed conversation never moves other requests, keyed or not, off
+  `stock_order`, and it may decode in its own `row_invariant` forward beside
+  them. An ordinary request is never admitted on `stock_order` while a
+  native or `native_active` request is in flight. The check and the count of the new
   request are one atomic step, so concurrent admissions see each other. A native
   request keeps `row_invariant` for its whole life: every prefill chunk
   (only chunks of 16 rows or fewer reach the small-row kernels), every
@@ -2220,7 +2226,8 @@ role, another warm-swap target, a configured further model, and a recorded
   per reason (`native_admitted`, `native_active`, `conversation_cache`,
   `idle`). Each admission
   logs `event=small_m_route_admission route=<route> reason=<reason>
-  in_flight_row_invariant=<n> in_flight_stock_order=<n>`. Every other mode
+  in_flight_row_invariant=<n> in_flight_stock_order=<n>
+  joinable_row_invariant=<n>`. Every other mode
   omits `small_m_route_requests` and `small_m_route_admissions` and logs no
   admission line.
 
