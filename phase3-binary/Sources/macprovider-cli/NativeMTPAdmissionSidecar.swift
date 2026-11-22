@@ -571,6 +571,10 @@ enum NativeMTPAdmissionSidecar {
         }
     }
 
+    /// True when `snapshotRoot` is a provider model store root or lies below
+    /// one. The static-feed admission path validates with the store root
+    /// itself as the artifact root (`NativeMTPStoreProjection.prepare`); the
+    /// seal still touches only manifested relative paths there.
     static func isUnderOwnedModelStore(_ snapshotRoot: URL) -> Bool {
         let roots: [URL]
         if let override = testingOwnedModelStoreRootsOverride {
@@ -583,7 +587,7 @@ enum NativeMTPAdmissionSidecar {
         let candidate = snapshotRoot.standardizedFileURL.resolvingSymlinksInPath().path
         return roots.contains { root in
             let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
-            return candidate.hasPrefix(rootPath + "/")
+            return candidate == rootPath || candidate.hasPrefix(rootPath + "/")
         }
     }
 
@@ -2187,6 +2191,9 @@ enum NativeMTPAdmissionSidecar {
                 relativePaths: Set(artifacts.values.map(\.path)),
                 rootFD: rootFD
             )
+            if let hook = testingDescriptorCaptureMutationHook {
+                try hook("after_seal")
+            }
         }
         var manifestedDirectories: Set<String> = []
         var validatedByName: [String: ValidatedArtifactHandle] = [:]
