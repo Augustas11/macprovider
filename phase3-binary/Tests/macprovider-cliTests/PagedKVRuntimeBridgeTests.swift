@@ -4172,9 +4172,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
     /// The retained head byte cap: summed logical bytes at most the cap.
     func testNativeMTPRetainedDrafterByteCap() {
-        let arrays = [MLXArray.zeros([4], dtype: .float32), MLXArray.zeros([2], dtype: .float16)]
-        XCTAssertTrue(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 20))
-        XCTAssertFalse(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 19))
+        // CPU device: CI test hosts have no default metallib.
+        Device.withDefaultDevice(.cpu) {
+            let arrays = [MLXArray.zeros([4], dtype: .float32), MLXArray.zeros([2], dtype: .float16)]
+            XCTAssertTrue(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 20))
+            XCTAssertFalse(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 19))
+        }
         XCTAssertEqual(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterByteCap, 1 << 30)
     }
 

@@ -1606,6 +1606,10 @@ decision = os.environ["FAKE_DECISION"]
 t0 = time.time()
 sys.stderr.write("event=served_slots action=planned rows=22 served=1 reason=self_check_pending configured=4\n")
 sys.stderr.write("event=served_slots action=applied slots=1 rows=22 reason=self_check_pending\n")
+# The startup cached-turns probe verdict a two-turn grid waits for before its client.
+if os.environ.get("FAKE_CACHED_TURNS", "passed") != "none":
+    sys.stderr.write("event=cb_self_check action=cached_turns_decided result=%s\n"
+                     % os.environ.get("FAKE_CACHED_TURNS", "passed"))
 sys.stderr.flush()
 COUNT = [0]
 SEEN, CACHE, LOOKUPS = set(), [0], [0]
@@ -2195,6 +2199,16 @@ class Turn2ContinueTests(unittest.TestCase):
             self.assertEqual(r["cached_prompt_tokens"], 7)
             self.assertEqual(r["conversation_cache_turn2"],
                              {"valid": True, "lookups": 1, "hits": 1, "cached_prompt_tokens": 7})
+
+    def test_two_turn_grid_fails_loudly_on_a_failed_or_missing_cached_turns_verdict(self):
+        proc, _ = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                env_extra={"FAKE_CACHED_TURNS": "failed"})
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("the cached-turns self-check failed", proc.stderr)
+        proc, _ = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                env_extra={"FAKE_CACHED_TURNS": "none", "CACHED_TURNS_WAIT_S": "5"})
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("no cached-turns verdict", proc.stderr)
 
     def test_turn2_header_sticky_keeps_todays_headers(self):
         log = Path(tempfile.mkdtemp()) / "headers.jsonl"
