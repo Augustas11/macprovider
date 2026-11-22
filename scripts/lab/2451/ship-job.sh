@@ -247,6 +247,19 @@ for side in main cand; do
   log "BUILD_DONE $side $("$bin/macprovider-cli" --version 2>&1 | head -n 1) cli_sha256=$(cut -c1-16 "$RES/e2e/identity-$side.sha256" | head -n 1)"
 done
 cmp -s "$MAIN_BIN/macprovider-cli" "$CAND_BIN/macprovider-cli" && die "the main and candidate binaries are identical: the fork core did not reach the candidate build" 14
+# 3b. Metallib kernel manifests for the two pins this window builds (PR 2472's mlx-swift on the
+# campaign pins, PR 2473's tree): `derive` compiles each kernel unit with the Metal toolchain, so
+# it runs here, not on the operator Mac. Informational: a failure is logged, never a verdict input.
+mkdir -p "$RES/metallib"
+for side in main cand; do
+  ck="$PKG/.build-lab-main/checkouts/mlx-swift"; [ $side = cand ] && ck="$MLXSWIFT"
+  if (xc python3 "$SRC/scripts/mlx-metallib-kernels.py" derive --mlx-swift-checkout "$ck" \
+        --output "$RES/metallib/required-kernels-$side.json") > "$RES/metallib/derive-$side.log" 2>&1; then
+    log "METALLIB_DERIVE $side ok rev=$(git -C "$ck" rev-parse HEAD 2>/dev/null) out=$RES/metallib/required-kernels-$side.json"
+  else
+    log "METALLIB_DERIVE $side failed: $(tail -n 2 "$RES/metallib/derive-$side.log" | tr '\n' ' ' | cut -c1-200)"
+  fi
+done
 
 # 4./5. Per model: CB tuple (GLM), control / candidate / control, gate.
 # Per-model results in RESULT_glm / RESULT_qwen (the Studio's /bin/bash 3.2 has no associative arrays).
