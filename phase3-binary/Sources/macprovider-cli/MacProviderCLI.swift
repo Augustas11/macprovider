@@ -1327,6 +1327,7 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        NativeMTPAdmissionSidecar.registerOwnedModelStoreRoot(artifactResolver.durableRoot)
         guard let expected = resolved.modelArtifactSHA256 else {
             if resolved.modelArtifactPath != nil {
                 FileHandle.standardError.write(Data("model_artifact_path requires model_artifact_sha256 for a verified local snapshot\n".utf8))

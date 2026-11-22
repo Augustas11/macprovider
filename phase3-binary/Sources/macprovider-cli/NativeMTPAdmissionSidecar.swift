@@ -552,6 +552,45 @@ enum NativeMTPAdmissionSidecar {
     }
     nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
     nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?
+    /// Replaces the provider model store roots in tests.
+    nonisolated(unsafe) static var testingOwnedModelStoreRootsOverride: [URL]?
+    /// Receives each capture log line in tests, in addition to stderr.
+    nonisolated(unsafe) static var testingCaptureLogSink: ((String) -> Void)?
+
+    private static let ownedModelStoreRootsLock = NSLock()
+    nonisolated(unsafe) private static var registeredOwnedModelStoreRoots: [URL] = []
+
+    /// Serve preflight registers the configured `model_artifact_root`; the
+    /// default store root is always included.
+    static func registerOwnedModelStoreRoot(_ root: URL) {
+        let standardized = root.standardizedFileURL
+        ownedModelStoreRootsLock.lock()
+        defer { ownedModelStoreRootsLock.unlock() }
+        if !registeredOwnedModelStoreRoots.contains(standardized) {
+            registeredOwnedModelStoreRoots.append(standardized)
+        }
+    }
+
+    static func isUnderOwnedModelStore(_ snapshotRoot: URL) -> Bool {
+        let roots: [URL]
+        if let override = testingOwnedModelStoreRootsOverride {
+            roots = override
+        } else {
+            ownedModelStoreRootsLock.lock()
+            roots = [DurableModelArtifactStore.defaultRoot] + registeredOwnedModelStoreRoots
+            ownedModelStoreRootsLock.unlock()
+        }
+        let candidate = snapshotRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        return roots.contains { root in
+            let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+            return candidate.hasPrefix(rootPath + "/")
+        }
+    }
+
+    private static func emitCaptureLog(_ message: String) {
+        _ = message.withCString { fputs($0, stderr) }
+        testingCaptureLogSink?(message)
+    }
 
     struct RuntimeContext: Equatable, Sendable {
         let modelID: String
@@ -2143,6 +2182,12 @@ enum NativeMTPAdmissionSidecar {
               openedRootStat.st_ino == rootStat.st_ino else {
             throw NativeMTPAdmissionSidecarError.pathRejected(".")
         }
+        if captureArtifacts, isUnderOwnedModelStore(root) {
+            sealOwnedStoreArtifactsReadOnly(
+                relativePaths: Set(artifacts.values.map(\.path)),
+                rootFD: rootFD
+            )
+        }
         var manifestedDirectories: Set<String> = []
         var validatedByName: [String: ValidatedArtifactHandle] = [:]
         var validatedByPath: [String: ValidatedArtifactHandle] = [:]
@@ -2193,6 +2238,105 @@ enum NativeMTPAdmissionSidecar {
             sourceDevice: rootStat.st_dev,
             fileManager: fileManager
         )
+    }
+
+    /// #2468: make the provider's own stored artifacts mode `0400` before
+    /// they are validated, so the capture can clone them.
+    ///
+    /// Why this keeps the capture guarantee (the captured bytes cannot change
+    /// after validation, and no writable descriptor to them exists):
+    /// - It runs before the first `fstat` that validation records. Every
+    ///   later check (`sameRegularIdentity`, `sameArtifactEntryIdentity`,
+    ///   the directory stamps) compares against that post-seal stat,
+    ///   including `ctime`. A chmod after the seal moves `ctime`, so the
+    ///   existing identity checks reject the capture.
+    /// - The clone gate is unchanged: it clones only when the validated mode
+    ///   is exactly `0400`, and it still requires the clone's birth mode to
+    ///   be `0400`. A seal that fails, or a mode restored before validation,
+    ///   leaves a non-`0400` stat, which takes the exclusive byte copy.
+    /// - A writable descriptor to the source opened before the seal stays
+    ///   valid, but it writes the source inode, not the clone: the clone is a
+    ///   separate copy-on-write inode, and its bytes are hashed after the
+    ///   clone. Such a write also moves `mtime`/`ctime` and fails validation.
+    /// - Only files this process owns, with one link and no group/other write
+    ///   bit, are touched; anything else is left alone and is rejected or
+    ///   copied by the checks that follow. Components are opened with
+    ///   `O_NOFOLLOW`, so a symlink is never followed into another tree.
+    /// Errors are ignored: validation that follows is the authority.
+    private static func sealOwnedStoreArtifactsReadOnly(relativePaths: Set<String>, rootFD: Int32) {
+        var budget = maxSnapshotTreeFiles
+        for relativePath in relativePaths.sorted() {
+            let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+                continue
+            }
+            var currentFD = dup(rootFD)
+            guard currentFD >= 0 else { continue }
+            var opened = true
+            for component in components.dropLast() {
+                let nextFD = openat(currentFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                close(currentFD)
+                guard nextFD >= 0 else {
+                    opened = false
+                    break
+                }
+                currentFD = nextFD
+            }
+            guard opened else { continue }
+            sealOwnedEntryReadOnly(parentFD: currentFD, name: components[components.count - 1], depth: 0, budget: &budget)
+            close(currentFD)
+        }
+    }
+
+    private static func sealOwnedEntryReadOnly(parentFD: Int32, name: String, depth: Int, budget: inout Int) {
+        guard budget > 0, depth <= 64 else { return }
+        budget -= 1
+        var info = stat()
+        guard fstatat(parentFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+              info.st_uid == geteuid(),
+              (info.st_mode & 0o022) == 0 else {
+            return
+        }
+        switch info.st_mode & S_IFMT {
+        case S_IFREG:
+            guard info.st_nlink == 1, (info.st_mode & 0o7777) != 0o400 else { return }
+            let fd = openat(parentFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard fd >= 0 else { return }
+            defer { close(fd) }
+            var live = stat()
+            guard fstat(fd, &live) == 0,
+                  (live.st_mode & S_IFMT) == S_IFREG,
+                  live.st_ino == info.st_ino,
+                  live.st_dev == info.st_dev,
+                  live.st_uid == geteuid(),
+                  live.st_nlink == 1 else {
+                return
+            }
+            _ = fchmod(fd, 0o400)
+        case S_IFDIR:
+            let dirFD = openat(parentFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard dirFD >= 0 else { return }
+            defer { close(dirFD) }
+            let scanFD = openat(dirFD, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard scanFD >= 0 else { return }
+            guard let dir = fdopendir(scanFD) else {
+                close(scanFD)
+                return
+            }
+            var names: [String] = []
+            while let entry = readdir(dir) {
+                let child = direntName(entry)
+                if child == "." || child == ".." { continue }
+                names.append(child)
+                if names.count > budget { break }
+            }
+            closedir(dir)
+            for child in names {
+                sealOwnedEntryReadOnly(parentFD: dirFD, name: child, depth: depth + 1, budget: &budget)
+            }
+        default:
+            return
+        }
     }
 
     private final class ValidatedArtifactHandle {
@@ -2828,7 +2972,8 @@ enum NativeMTPAdmissionSidecar {
     }
 
     /// Share the validated file's blocks with the capture tree when that
-    /// file is already mode `0400`. `fclonefileat` copies the source mode
+    /// file is already mode `0400` (the provider's model store seals its
+    /// files to `0400`; see `sealOwnedStoreArtifactsReadOnly`). `fclonefileat` copies the source mode
     /// and has no destination-mode flag. A later `fchmodat` does not revoke
     /// a descriptor opened while the new inode was still owner-writable, so
     /// any other mode takes the exclusive `0400` byte copy. A byte copy also
@@ -2855,12 +3000,18 @@ enum NativeMTPAdmissionSidecar {
             throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
         }
         if (before.st_mode & 0o777) != 0o400 {
-            return try copyRegularFileDescriptorNoClose(
+            let copied = try copyRegularFileDescriptorNoClose(
                 from: inputFD,
                 expected: before,
                 to: destination,
                 relativePath: relativePath
             )
+            // #2468: this copy was silent and doubled the model on disk.
+            let mode = String(before.st_mode & 0o7777, radix: 8)
+            emitCaptureLog(
+                "event=native_mtp_capture_clone_fallback bytes=\(copied) reason=mode mode=0\(mode) path=\(String(reflecting: relativePath))\n"
+            )
+            return copied
         }
         let parentFD = open(
             destination.deletingLastPathComponent().path,
@@ -2916,8 +3067,9 @@ enum NativeMTPAdmissionSidecar {
                 relativePath: relativePath
             )
             // Quoted and escaped: manifest and directory names may hold newlines.
-            let message = "event=native_mtp_capture_clone_fallback bytes=\(copied) errno=\(cloneErrno) path=\(String(reflecting: relativePath))\n"
-            _ = message.withCString { fputs($0, stderr) }
+            emitCaptureLog(
+                "event=native_mtp_capture_clone_fallback bytes=\(copied) errno=\(cloneErrno) path=\(String(reflecting: relativePath))\n"
+            )
             return copied
         }
         throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
