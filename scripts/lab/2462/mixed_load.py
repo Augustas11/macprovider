@@ -3,7 +3,7 @@
 
 usage: mixed_load.py --port P --model ID --label A1 --out rows.jsonl
                      [--trials 6] [--ctx 1000] [--ord-rows 2] [--ord-out 512] [--nat-out 1024]
-                     [--cells ord1,nat1,mix,mix_late,conv2] [--late-after 128]
+                     [--cells ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread] [--late-after 128]
                      [--conv-turn2-out 64] [--idle-timeout-s 300]
                      [--ordinary-field x_lab_2462_ordinary]
 
@@ -40,7 +40,17 @@ Cells, each trial in this order, one trial of every cell before the next trial:
         (prompts.build_turn2_messages with the turn-1 content, --conv-turn2-out tokens) runs
         alone. On a `mixed` serve turn 1 is admitted row_invariant (native_active) and turn 2
         on its entry's route (conversation_cache), so turn 2 reuses turn 1's KV. Roles native,
-        conv1, conv2; turn-2 rows carry cached_prompt_tokens.
+        conv1, conv2; turn-2 rows carry cached_prompt_tokens;
+  conv_flip  prompt row ord_rows + 2: turn 1 alone, then (idle) the native prompt and turn 2
+        (--conv-turn2-out tokens) once the native row streams. On a `mixed` serve turn 1 stores a
+        stock order entry and turn 2 is admitted row_invariant (native_active), so it misses that
+        entry and re-prefills: the documented flip cost. Roles conv1, native, conv2;
+  conv_spread  prompt row ord_rows + 3: turn 1 beside a native row (row_invariant entry), then
+        from idle turn 2 (continue follow-up, --ord-out tokens) and, after its first token, an
+        unkeyed ordinary prompt (row ord_rows + 4, --ord-out tokens). On a `mixed` serve turn 2
+        is admitted row_invariant (conversation_cache) and must not pull the unkeyed row: that
+        row is admitted stock_order (idle). The trial's aggregate_tps covers these two phase-2
+        rows only, and its peaks come from phase 2 alone. Roles native, conv1, conv2, unkeyed.
 Native prompt: prompts.build_messages(ctx, 0); ordinary prompt j: build_messages(ctx, j), j >= 1.
 Every prompt asks for a long story, so rows normally stop at max_tokens (finish=length).
 
@@ -95,6 +105,7 @@ def busy(status):
 
 
 IDLE_TIMEOUT_S = 300.0
+CELLS = ("ord1", "nat1", "mix", "mix_late", "conv2", "conv_flip", "conv_spread")
 
 
 def wait_idle(port, poll_s, settle_s=1.0, timeout_s=None):
@@ -236,6 +247,7 @@ def trial(args, cell, t, out):
     ordinary_extra = {args.ordinary_field: "2462"}
     rows = []
     poller = None
+    phase2_tps = None
     t0 = time.perf_counter()
     if cell == "ord1":
         for j in range(1, args.ord_rows + 1):
@@ -247,29 +259,58 @@ def trial(args, cell, t, out):
         res = run_request(args.port, args.model, prompts.build_messages(args.ctx, 0), args.nat_out)
         rows.append(record(res, {**base, "kind": "row", "role": "native", "prompt_row": 0,
                                  "max_tokens": args.nat_out}, t0))
-    elif cell == "conv2":
+    elif cell in ("conv2", "conv_flip", "conv_spread"):
         poller = Poller(args.port, args.poll_s)
         poller.start()
-        first = threading.Event()
         results = {}
-        row = args.ord_rows + 1
-        conv = {CONVERSATION_HEADER: f"lab2462-{args.label}-{t}-{uuid.uuid4().hex[:8]}"}
+        row = args.ord_rows + {"conv2": 1, "conv_flip": 2, "conv_spread": 3}[cell]
+        conv = {CONVERSATION_HEADER: f"lab2462-{args.label}-{cell}-{t}-{uuid.uuid4().hex[:8]}"}
 
         def go(key, messages, max_tokens, extra=None, ev=None, headers=None):
             results[key] = run_request(args.port, args.model, messages, max_tokens, extra, ev, headers=headers)
 
-        nat = threading.Thread(target=go, args=("native", prompts.build_messages(args.ctx, 0), args.nat_out, None, first))
-        nat.start()
-        first.wait()
-        turn1 = threading.Thread(target=go, args=("conv1", prompts.build_messages(args.ctx, row), args.ord_out,
-                                                  ordinary_extra, None, conv))
-        turn1.start()
-        turn1.join()
-        nat.join()
-        wait_idle(args.port, args.poll_s, settle_s=0.5)
-        t2_offset = time.perf_counter()
-        go("conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or ""),
-           args.conv_turn2_out, ordinary_extra, None, conv)
+        def beside_native(key, messages, max_tokens, headers):
+            """The native prompt, then `key` once the native row has streamed; both joined."""
+            first = threading.Event()
+            nat = threading.Thread(target=go, args=("native", prompts.build_messages(args.ctx, 0), args.nat_out,
+                                                    None, first))
+            nat.start()
+            first.wait()
+            go(key, messages, max_tokens, ordinary_extra, None, headers)
+            nat.join()
+
+        turn1 = prompts.build_messages(args.ctx, row)
+        if cell == "conv_flip":
+            # Turn 1 alone (stock order entry on a mixed serve), turn 2 beside a native row.
+            go("conv1", turn1, args.ord_out, ordinary_extra, None, conv)
+            wait_idle(args.port, args.poll_s, settle_s=0.5)
+            t2 = time.perf_counter()
+            beside_native("conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or ""),
+                          args.conv_turn2_out, conv)
+        else:
+            # Turn 1 beside a native row (row-invariant entry on a mixed serve), turn 2 from idle.
+            beside_native("conv1", turn1, args.ord_out, conv)
+            wait_idle(args.port, args.poll_s, settle_s=0.5)
+            t2 = time.perf_counter()
+            if cell == "conv2":
+                go("conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or ""),
+                   args.conv_turn2_out, ordinary_extra, None, conv)
+            else:
+                # Turn 2 decodes to --ord-out (continue follow-up); an unkeyed ordinary row joins
+                # after its first token. Phase-2 peaks come from their own poller.
+                poller.stop.set()
+                poller.join()
+                poller = Poller(args.port, args.poll_s)
+                poller.start()
+                first = threading.Event()
+                keyed = threading.Thread(target=go, args=(
+                    "conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or "",
+                                                          followup="continue"),
+                    args.ord_out, ordinary_extra, first, conv))
+                keyed.start()
+                first.wait()
+                go("unkeyed", prompts.build_messages(args.ctx, row + 1), args.ord_out, ordinary_extra)
+                keyed.join()
         poller.stop.set()
         poller.join()
         native = record(results["native"], {**base, "kind": "row", "role": "native", "prompt_row": 0,
@@ -280,9 +321,20 @@ def trial(args, cell, t, out):
         r1["native_overlap_share"] = overlap_share(r1, native)
         rows.append(r1)
         r2 = record(results["conv2"], {**base, "kind": "row", "role": "conv2", "prompt_row": row,
-                                       "max_tokens": args.conv_turn2_out}, t0)
-        r2["turn2_start_offset_s"] = round(t2_offset - t0, 4)
+                                       "max_tokens": args.ord_out if cell == "conv_spread" else args.conv_turn2_out}, t0)
+        r2["turn2_start_offset_s"] = round(t2 - t0, 4)
         rows.append(r2)
+        if cell == "conv_spread":
+            ru = record(results["unkeyed"], {**base, "kind": "row", "role": "unkeyed", "prompt_row": row + 1,
+                                             "max_tokens": args.ord_out}, t0)
+            rows.append(ru)
+            # Output tok/s of the two phase-2 rows from the turn-2 start to the last token.
+            start = t2 - t0
+            ends = [r.get("t_last_offset_s") for r in (r2, ru)]
+            if all(e is not None for e in ends) and max(ends) > start:
+                phase2_tps = round(sum(r.get("completion_tokens") or 0 for r in (r2, ru)) / (max(ends) - start), 3)
+            else:
+                phase2_tps = None
     elif cell == "mix":
         poller = Poller(args.port, args.poll_s)
         poller.start()
@@ -351,7 +403,8 @@ def trial(args, cell, t, out):
                "native_mtp": native_mtp_delta(native_mtp_of(before), native_mtp_of(after)),
                "small_m_route": cb_of(after).get("small_m_route"),
                "small_m_route_admissions": admissions_delta(before, after),
-               "aggregate_tps": round(tokens / last, 3) if last else None,
+               "aggregate_tps": (phase2_tps if cell == "conv_spread"
+                                 else (round(tokens / last, 3) if last else None)),
                "wall_s": round(t_end - t0, 3),
                "errors": [r["error"] for r in rows if r.get("error")]}
     if poller is not None:
@@ -379,7 +432,7 @@ def main(argv=None):
     p.add_argument("--ord-rows", type=int, default=2)
     p.add_argument("--ord-out", type=int, default=512)
     p.add_argument("--nat-out", type=int, default=1024)
-    p.add_argument("--cells", default="ord1,nat1,mix,mix_late,conv2")
+    p.add_argument("--cells", default="ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread")
     p.add_argument("--conv-turn2-out", type=int, default=64, help="conv2: turn-2 max_tokens")
     p.add_argument("--idle-timeout-s", type=float, default=IDLE_TIMEOUT_S,
                    help="a serve still busy this long before a trial fails the run")
@@ -389,8 +442,8 @@ def main(argv=None):
     p.add_argument("--poll-s", type=float, default=0.5)
     args = p.parse_args(argv)
     cells = [c for c in args.cells.split(",") if c]
-    if not cells or any(c not in ("ord1", "nat1", "mix", "mix_late", "conv2") for c in cells):
-        p.error("--cells takes ord1,nat1,mix,mix_late,conv2")
+    if not cells or any(c not in CELLS for c in cells):
+        p.error("--cells takes " + ",".join(CELLS))
     if args.idle_timeout_s <= 0 or args.conv_turn2_out < 1:
         p.error("--idle-timeout-s and --conv-turn2-out must be > 0")
     IDLE_TIMEOUT_S = args.idle_timeout_s

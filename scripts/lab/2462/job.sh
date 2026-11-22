@@ -28,15 +28,18 @@
 #       B = no override: FR-CB9 decides `mixed` (reason native_mtp_per_request); an ordinary
 #           request admitted while a row-invariant one is in flight joins row_invariant for life
 #           (SPEC-038 v0.3.63), so the `mix` cell runs one forward per decode kind as on A, and a
-#           keyed turn admitted idle takes its stored entry's route (`conv2`).
+#           keyed turn admitted idle takes its stored entry's route (`conv2`). A
+#           conversation_cache row_invariant turn does not pull an unkeyed row (`conv_spread`,
+#           gated); a stock order entry whose next turn runs beside a native row (`conv_flip`)
+#           reports its TTFT as INFO.
 #     Each serve: ready, idle CB self-check verdict (route_status.py gate), the cached-turns probe
 #     decided, startup event and /v1/status route checked, batching active, native MTP on, then
-#     mixed_load.py (cells ord1, nat1, mix, mix_late, conv2; its header says how rows become
+#     mixed_load.py (cells ord1, nat1, mix, mix_late, conv2, conv_flip, conv_spread; its header says how rows become
 #     native or ordinary).
 #     A later serve of the same mode starts with the earlier one's stored self-check verdict;
 #  5. verdict.py: gates, medians, `T2462_VERDICT PASS|FAIL ...`.
 # Knobs: TRIALS (6) CTX (1000) ORD_ROWS (2) ORD_OUT (512) NAT_OUT (1024) LATE_AFTER (128)
-#        CONV_TURN2_OUT (64) IDLE_TIMEOUT_S (300) CELLS (ord1,nat1,mix,mix_late,conv2) SERVES
+#        CONV_TURN2_OUT (64) IDLE_TIMEOUT_S (300) CELLS (all seven) SERVES
 #        MIN_FREE_GB (60)
 #        SKIP_BUILD SKIP_TESTS SKIP_FORK_TESTS PORT (18462) SERVE_ENV ("K=V ...").
 # Watchdogs are stall detectors only (STALL_S without progress), never wall-clock cuts.
@@ -65,7 +68,7 @@ NAT_OUT=${NAT_OUT:-1024}
 LATE_AFTER=${LATE_AFTER:-128}
 CONV_TURN2_OUT=${CONV_TURN2_OUT:-64}
 IDLE_TIMEOUT_S=${IDLE_TIMEOUT_S:-300}
-CELLS=${CELLS:-ord1,nat1,mix,mix_late,conv2}
+CELLS=${CELLS:-ord1,nat1,mix,mix_late,conv2,conv_flip,conv_spread}
 SERVES=${SERVES:-A1:A B:B A2:A}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 STALL_S=${STALL_S:-1800}
@@ -81,7 +84,9 @@ testNativeArrivingDuringStockRowsSplitsSessionsUntilTheStockRowsFinish
 testSmallMRouteTransientSplitDrainsToOneRouteOnceStockRowsFinish
 testNativeDecidedAtRegistrationCountsBeforeItIsAdmitted
 testNativeReservationIsReleasedOnRejectionAndOnTurningOrdinary
-testOrdinaryTurnTakesTheStoredEntryRouteUnlessRowInvariantIsInFlight'
+testOrdinaryTurnTakesTheStoredEntryRouteUnlessRowInvariantIsInFlight
+testConversationCacheRowInvariantDoesNotPullOtherRequests
+testNativeRowStillPullsKeyedStockOrderConversationsOntoRowInvariant'
 # Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
 # Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
 # job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps
