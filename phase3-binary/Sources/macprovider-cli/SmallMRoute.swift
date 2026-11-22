@@ -41,6 +41,16 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// noticing, so only lab builds keep it.
     static let partialSumsEnvironmentKey = "MLX_METAL_QMV_MMA_WK"
 
+    /// Whether this process keeps an inherited `partialSumsEnvironmentKey`:
+    /// only a lab build does (`removeInheritedPartialSums`).
+    static var keepsInheritedPartialSums: Bool {
+        #if MACPROVIDER_LAB_HARNESS
+        return getenv(partialSumsEnvironmentKey) != nil
+        #else
+        return false
+        #endif
+    }
+
     /// Removes an inherited `partialSumsEnvironmentKey` outside lab builds.
     /// Returns true when a value was removed.
     @discardableResult
@@ -68,6 +78,9 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// SPEC-038 FR-CB9 (v0.3.61): the mode name of a `mixed` process and its reason.
     static let mixedMode = "mixed"
     static let nativeMTPPerRequest = "native_mtp_per_request"
+    /// SPEC-038 FR-CB9 (v0.3.62): why a lab process with an inherited
+    /// `MLX_METAL_QMV_MMA_WK` keeps the row-invariant route process-wide.
+    static let inheritedPartialSumsReason = "native_mtp_qmv_mma_wk_inherited"
 
     /// The persisted FR-CB10 self-check verdict for the startup model, as
     /// `SmallMRouteVerdictStore` reads it before MLX starts.
@@ -158,6 +171,10 @@ enum SmallMRoute: String, Sendable, Equatable {
         /// matmul kernels on this GPU (`SmallMRoute.processNAXAvailable`),
         /// which are the same on both small-row routes.
         var naxGPU: Bool = false
+        /// SPEC-038 FR-CB9 (v0.3.62): a lab build kept an inherited
+        /// `MLX_METAL_QMV_MMA_WK`, which the core applies to both routes'
+        /// ops (`keepsInheritedPartialSums`).
+        var inheritedPartialSums: Bool = false
 
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
@@ -168,6 +185,7 @@ enum SmallMRoute: String, Sendable, Equatable {
                 + (stockOrderFallback.map { " stock_order_fallback=\($0)" } ?? "")
                 + (operatorForcesRowInvariant ? " operator_small_m_route=row_invariant" : "")
                 + (naxGPU ? " nax=true" : "")
+                + (inheritedPartialSums ? " qmv_mma_wk=inherited" : "")
         }
     }
 
@@ -236,11 +254,14 @@ enum SmallMRoute: String, Sendable, Equatable {
                 || inputs.selfCheckVerdict == .grantsNoBatching {
                 return keep
             }
-            if let fallback = inputs.stockOrderFallback { return Decision(route: .rowInvariant, reason: fallback) }
-            if inputs.operatorForcesRowInvariant { return Decision(route: .rowInvariant, reason: operatorRowInvariant) }
             // v0.3.62: on a NAX GPU both routes select the same kernels, so
             // splitting forwards and caches would gain nothing.
             if inputs.naxGPU { return keep }
+            // v0.3.62: an inherited partial-sum count would change the
+            // native requests' row-invariant ops too.
+            if inputs.inheritedPartialSums { return Decision(route: .rowInvariant, reason: inheritedPartialSumsReason) }
+            if let fallback = inputs.stockOrderFallback { return Decision(route: .rowInvariant, reason: fallback) }
+            if inputs.operatorForcesRowInvariant { return Decision(route: .rowInvariant, reason: operatorRowInvariant) }
             return Decision(route: .stockOrder, reason: nativeMTPPerRequest, mixed: true)
         }
         if inputs.otherSwitchTargets { return Decision(route: .rowInvariant, reason: "switch_targets") }
@@ -353,13 +374,37 @@ enum SmallMRoute: String, Sendable, Equatable {
     nonisolated(unsafe) private static var applied: SmallMRoute?
     nonisolated(unsafe) private static var appliedReason: String?
     nonisolated(unsafe) private static var appliedMixed = false
+    #if DEBUG
+    nonisolated(unsafe) private static var mixedOverride = false
+    #endif
 
     /// SPEC-038 FR-CB9 (v0.3.61): whether this process runs `mixed`.
     static var processMixed: Bool {
         lock.lock()
         defer { lock.unlock() }
+        #if DEBUG
+        if mixedOverride { return true }
+        #endif
         return applied != nil && appliedMixed
     }
+
+    #if DEBUG
+    /// Tests: runs `body` as a `mixed` process (process route stock order)
+    /// without touching the environment the MLX core read. Restores after.
+    nonisolated(nonsending) static func asMixedProcessForTest<R>(
+        _ body: nonisolated(nonsending) () async throws -> R
+    ) async rethrows -> R {
+        lock.lock()
+        mixedOverride = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            mixedOverride = false
+            lock.unlock()
+        }
+        return try await body()
+    }
+    #endif
 
     /// The mode `/v1/status` reports: `mixed`, or the process route.
     static var processMode: String {
@@ -385,6 +430,9 @@ enum SmallMRoute: String, Sendable, Equatable {
     static var processRoute: SmallMRoute {
         lock.lock()
         defer { lock.unlock() }
+        #if DEBUG
+        if mixedOverride { return .stockOrder }
+        #endif
         return applied ?? route(environmentValue: ProcessInfo.processInfo.environment[environmentKey])
     }
 

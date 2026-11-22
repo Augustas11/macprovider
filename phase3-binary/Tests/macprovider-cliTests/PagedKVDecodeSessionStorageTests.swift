@@ -1021,6 +1021,49 @@ final class PagedKVPerRouteDecodeSessionTests: XCTestCase {
     }
 }
 
+/// SPEC-038 FR-CB9 / SPEC-039 (Related: #2462): the attach isolation probe
+/// runs outside any request route. In a `mixed` process it must build on the
+/// process route (stock order), never fail closed for a missing route, or
+/// attach is refused on every start.
+extension PagedKVPerRouteDecodeSessionTests {
+    func testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen-Test"),
+            model: target,
+            processor: StandInUserInputProcessor(),
+            tokenizer: SessionStorageTokenizer()
+        ))
+        let promptA = PagedKVDecodeSessionStorageTests.tinyPrompt(length: 12, salt: 81)
+        let promptB = PagedKVDecodeSessionStorageTests.tinyPrompt(length: 17, salt: 82)
+        let parityTokens = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+        let parityA = PagedKVDecodeSessionStorageTests.tinyPrompt(length: parityTokens, salt: 83)
+        let parityB = PagedKVDecodeSessionStorageTests.tinyPrompt(length: parityTokens, salt: 84)
+        let builds = RouteBuildLog()
+        SmallMRouteScope.buildObserverForTest = { builds.append($0) }
+        defer { SmallMRouteScope.buildObserverForTest = nil }
+
+        let result = try await SmallMRoute.asMixedProcessForTest {
+            XCTAssertTrue(SmallMRoute.processMixed)
+            // Without a route a mixed build fails closed: the probe must set one.
+            XCTAssertThrowsError(try SmallMRouteScope.build { 0 })
+            return await PagedKVRuntimeProber.live.moe(
+                container, 16, 1024, 1, 2, promptA, promptB, parityA, parityB,
+                [.pagedAttention, .pagedAttention], .mambaTwoSlot
+            )
+        }
+        XCTAssertFalse(SmallMRoute.processMixed)
+        XCTAssertNotEqual(result, .failClosed, "the probe failed closed in a mixed process")
+        XCTAssertEqual(result.rowsDecodedInSharedForward, 2)
+        XCTAssertEqual(result.rowFailures, 0)
+        XCTAssertEqual(result.crossRowDivergences, 0)
+        XCTAssertTrue(result.sharedForwardParityProven)
+        let seen = builds.all
+        XCTAssertFalse(seen.isEmpty)
+        XCTAssertEqual(Set(seen.map { $0.map { "\($0)" } ?? "none" }), ["stockOrder"], "a probe build left the process route")
+    }
+}
+
 private final class RouteBuildLog: @unchecked Sendable {
     private let lock = NSLock()
     private var routes: [MLX.SmallMRoute?] = []
