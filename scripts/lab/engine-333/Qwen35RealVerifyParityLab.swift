@@ -71,6 +71,11 @@ final class Qwen35RealVerifyParityLab: XCTestCase {
             next = top(row)
         }
 
+        if let dump = env["QWEN35_VERIFY_DUMP"] {
+            // Path A's float32 logits, [steps, vocab], as .npy: two builds are bitwise equal
+            // on this decode exactly when the files are byte-identical.
+            try MLX.save(array: stacked(logitsA, axis: 0), url: URL(fileURLWithPath: dump))
+        }
         print("VERIFY tokens=\(tokens.map(String.init).joined(separator: ","))")
 
         var bitMismatchColumns = 0

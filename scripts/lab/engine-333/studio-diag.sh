@@ -25,7 +25,7 @@ fork_probe() { # tag checkout_dir metallib
   cp "$lib" "$dir/.build/arm64-apple-macosx/debug/mlx-swift-lmPackageTests.xctest/Contents/MacOS/mlx.metallib"
   for v in "3 1" "2 1"; do
     local w=${v% *} c=${v#* } log="$D/fork-$tag-w${v% *}.log"
-    ( cd "$dir" && QWEN35_VERIFY_WIDTH=$w QWEN35_VERIFY_CHECKPOINT=$c swift test --skip-build --filter "$FILTER" ) > "$log" 2>&1
+    ( cd "$dir" && QWEN35_VERIFY_DUMP="$D/logits-$tag-w$w.npy" QWEN35_VERIFY_WIDTH=$w QWEN35_VERIFY_CHECKPOINT=$c swift test --skip-build --filter "$FILTER" ) > "$log" 2>&1
     echo "probe $tag width=$w rc=$?"; grep -E "VERIFY (summary|prefill)|Failed to load" "$log" | head -3
   done
   rm -f "$dir/Tests/MLXLMTests/Qwen35RealVerifyParityLab.swift"
@@ -42,9 +42,11 @@ if [ ! -d "$L/mlx-swift-lm-no633" ]; then
 fi
 [ -d "$L/mlx-swift-lm-no633" ] && fork_probe no633 "$L/mlx-swift-lm-no633" "$NEW/mlx.metallib"
 tok() { grep -h "VERIFY tokens=" "$D/fork-$1-w3.log" 2>/dev/null | head -1; }
-if [ -n "$(tok old)" ] && [ "$(tok old)" = "$(tok no633)" ]; then echo "TOKENS old == new-minus-#633"
-else echo "TOKENS_DIFFER old vs new-minus-#633"; failed=1; fi
-[ "$(tok new)" = "$(tok old)" ] && echo "TOKENS new == old" || echo "TOKENS new != old (expected from #633)"
+lsha() { [ -s "$D/logits-$1-w3.npy" ] && shasum -a 256 "$D/logits-$1-w3.npy" | cut -d' ' -f1; }
+if [ -n "$(lsha old)" ] && [ "$(lsha old)" = "$(lsha no633)" ]; then echo "LOGITS old == new-minus-#633 (bitwise)"
+else echo "LOGITS_DIFFER old vs new-minus-#633"; failed=1; fi
+[ "$(lsha new)" = "$(lsha old)" ] && echo "LOGITS new == old (bitwise)" || echo "LOGITS new != old (expected from #633)"
+[ "$(tok new)" = "$(tok old)" ] && echo "TOKENS new == old" || echo "TOKENS new != old"
 
 echo "#### provider tests $(date +%T)"
 P="$L/macprovider/phase3-binary"
