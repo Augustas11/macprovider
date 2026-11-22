@@ -173,6 +173,44 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertEqual(counters.models.first { $0.modelID == "model-a" }?.misses["kvbits_swap"], 1)
     }
 
+    /// SPEC-037 v0.2.8 (SPEC-038 FR-CB9 v0.3.61, Related: #2462): KV written
+    /// on one small-row route is a miss on the other and a hit on its own.
+    func testSmallMRouteSwapMiss() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let tokens = int32Range(0..<64)
+        let seedValue = await cache.begin(
+            conversationKey: "conv:route", incomingTokens: tokens, modelID: "model-a", kvBits: nil,
+            smallMRoute: .rowInvariant)
+        let seed = try XCTUnwrap(seedValue)
+        XCTAssertEqual(seed.smallMRoute, .rowInvariant)
+        await cache.commit(seed, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count)]), fullTokens: tokens)
+
+        let sameValue = await cache.begin(
+            conversationKey: "conv:route", incomingTokens: tokens + [99], modelID: "model-a", kvBits: nil,
+            smallMRoute: .rowInvariant)
+        let same = try XCTUnwrap(sameValue)
+        XCTAssertEqual(same.cachedPromptTokens, tokens.count)
+        await cache.commit(same, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count + 1)]), fullTokens: tokens + [99])
+
+        let swapValue = await cache.begin(
+            conversationKey: "conv:route", incomingTokens: tokens + [99, 100], modelID: "model-a", kvBits: nil,
+            smallMRoute: .stockOrder)
+        let swap = try XCTUnwrap(swapValue)
+        XCTAssertEqual(swap.cachedPromptTokens, 0)
+        XCTAssertEqual(swap.smallMRoute, .stockOrder)
+        await cache.commit(swap, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count + 2)]), fullTokens: tokens + [99, 100])
+
+        // The entry now holds stock order KV: a row-invariant turn misses.
+        let backValue = await cache.begin(
+            conversationKey: "conv:route", incomingTokens: tokens + [99, 100, 101], modelID: "model-a", kvBits: nil,
+            smallMRoute: .rowInvariant)
+        let back = try XCTUnwrap(backValue)
+        XCTAssertEqual(back.cachedPromptTokens, 0)
+        await cache.abort(back)
+        let counters = await cache.countersSnapshot()
+        XCTAssertEqual(counters.models.first { $0.modelID == "model-a" }?.misses["small_m_route_mismatch"], 2)
+    }
+
     func testTTLAndNonTrimmableMiss() async {
         let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
         let tokens = int32Range(0..<64)

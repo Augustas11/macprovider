@@ -39,6 +39,7 @@ final class SmallMRouteTests: XCTestCase {
         var serialCount = 0
         var stockOrderCount = 0
         var operatorCount = 0
+        var mixedCount = 0
         for mode in [ContinuousBatchingMode.off, .canary, .on] {
             for explicit in [false, true] {
                 for nativeMTP in [NativeMTPMode.off, .auto] {
@@ -64,14 +65,22 @@ final class SmallMRouteTests: XCTestCase {
                                                     let decision = SmallMRoute.decide(value)
                                                     XCTAssertEqual(decision.route == .serialOnly, expected, "\(value.logFields) -> \(decision.reason)")
                                                     if expected { serialCount += 1 }
-                                                    // Anything that needs the row-invariant pair keeps it; a
-                                                    // stock order fallback or the operator key sends a batching
-                                                    // process there too; every other one takes stock order.
-                                                    let needsInvariant = draft || shard || autotune || switchTargets || !mtpInactive
+                                                    // Anything that needs the row-invariant pair process-wide
+                                                    // keeps it; native MTP alone takes `mixed` (v0.3.61) when
+                                                    // batching can activate with no fallback or operator key;
+                                                    // a stock order fallback or the operator key sends a
+                                                    // batching process to the pair; every other one takes
+                                                    // stock order.
+                                                    let otherInvariant = draft || shard || autotune || switchTargets
+                                                    let expectedMixed = !mtpInactive && !otherInvariant && !cbCannotActivate
+                                                        && fallback == nil && !operatorRowInvariant
+                                                    let needsInvariant = otherInvariant || (!mtpInactive && !expectedMixed)
                                                     let expectedRoute: SmallMRoute = needsInvariant
                                                         ? .rowInvariant
                                                         : (expected ? .serialOnly : (fallback != nil || operatorRowInvariant ? .rowInvariant : .stockOrder))
                                                     XCTAssertEqual(decision.route, expectedRoute, "\(value.logFields) -> \(decision.reason)")
+                                                    XCTAssertEqual(decision.mixed, expectedMixed, "\(value.logFields) -> \(decision.reason)")
+                                                    if expectedMixed { mixedCount += 1 }
                                                     if expectedRoute == .stockOrder { stockOrderCount += 1 }
                                                     // The operator key only ever replaces a stock order decision.
                                                     var withoutOperator = value
@@ -97,6 +106,7 @@ final class SmallMRouteTests: XCTestCase {
         XCTAssertGreaterThan(serialCount, 0)
         XCTAssertGreaterThan(stockOrderCount, 0)
         XCTAssertEqual(operatorCount, stockOrderCount)
+        XCTAssertGreaterThan(mixedCount, 0)
     }
 
     /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant` turns
@@ -118,12 +128,14 @@ final class SmallMRouteTests: XCTestCase {
             (inputs(explicit: false, verdict: .staleKey), .init(route: .rowInvariant, reason: "operator_row_invariant")),
             (inputs(explicit: false, verdict: .recheckPending), .init(route: .rowInvariant, reason: "operator_row_invariant")),
             (inputs(mode: .on, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "operator_row_invariant")),
+            // v0.3.61: the override replaces `mixed` too.
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "operator_row_invariant")),
             // Serial-only stays serial-only.
             (inputs(), .init(route: .serialOnly, reason: "continuous_batching_off_by_configuration")),
             (inputs(explicit: false, verdict: .grantsNoBatching), .init(route: .serialOnly, reason: "self_check_no_batching")),
             // Row-invariant decisions keep their own reason.
             (inputs(explicit: false, verdict: .grantsBatching, fallback: SmallMRoute.stockOrderCrash), .init(route: .rowInvariant, reason: "stock_order_crash")),
-            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "native_mtp_entry_for_model")),
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, switchTargets: true, verdict: .grantsBatching), .init(route: .rowInvariant, reason: "native_mtp_entry_for_model")),
             (inputs(explicit: false, draft: true), .init(route: .rowInvariant, reason: "draft_model")),
             (inputs(explicit: false, shard: true), .init(route: .rowInvariant, reason: "shard_group")),
             (inputs(explicit: false, autotune: true), .init(route: .rowInvariant, reason: "autotune_candidate")),
@@ -145,21 +157,35 @@ final class SmallMRouteTests: XCTestCase {
 
     /// Native MTP's verify window (depth + 1 rows of one request) must equal
     /// that request's one-row decode (SPEC-048 R015/R016), which only the
-    /// row-invariant pair gives from three rows: a process whose native MTP
-    /// may activate never takes stock order, and one that does refuses the
-    /// drafter.
+    /// row-invariant pair gives from three rows: a native request never runs
+    /// stock order. A process whose native MTP may activate takes the
+    /// row-invariant route or `mixed` (v0.3.61), where every native request
+    /// runs the row-invariant route; a plain stock order process refuses the
+    /// drafter, a `mixed` one loads it.
     func testNativeMTPThatMayActivateNeverRunsStockOrder() {
         for admission in SmallMRoute.NativeMTPAdmission.allCases where admission.mayActivate {
             for mode in [ContinuousBatchingMode.off, .canary, .on] {
                 for explicit in [false, true] {
                     for verdict in SmallMRoute.SelfCheckVerdict.allCases {
                         let value = inputs(mode: mode, explicit: explicit, nativeMTP: .auto, admission: admission, verdict: verdict)
-                        XCTAssertEqual(SmallMRoute.decide(value).route, .rowInvariant, value.logFields)
+                        let decision = SmallMRoute.decide(value)
+                        if decision.mixed {
+                            XCTAssertEqual(decision.route, .stockOrder, value.logFields)
+                            XCTAssertEqual(decision.reason, "native_mtp_per_request", value.logFields)
+                        } else {
+                            XCTAssertEqual(decision.route, .rowInvariant, value.logFields)
+                        }
+                        let nativeRoute = SmallMRoute.requestRoute(
+                            nativeAdmitted: true, processRoute: decision.route, mixed: decision.mixed)
+                        XCTAssertEqual(nativeRoute, .rowInvariant, value.logFields)
                     }
                 }
             }
         }
-        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder), "small_m_route_stock_order")
+        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder, mixed: false), "small_m_route_stock_order")
+        XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder, mixed: true))
+        XCTAssertEqual(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .serialOnly, mixed: true), "small_m_route_serial_only")
+        XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .rowInvariant, mixed: false))
     }
 
     func testDecisionReasons() {
@@ -191,8 +217,8 @@ final class SmallMRouteTests: XCTestCase {
             (inputs(shard: true), .rowInvariant, "shard_group"),
             (inputs(autotune: true), .rowInvariant, "autotune_candidate"),
             (inputs(switchTargets: true), .rowInvariant, "switch_targets"),
-            // Batching is possible, but native MTP or another need keeps the pair.
-            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching), .rowInvariant, "native_mtp_entry_for_model"),
+            // Batching is possible, but another need keeps the pair.
+            (inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, switchTargets: true, verdict: .grantsBatching), .rowInvariant, "native_mtp_entry_for_model"),
             (inputs(explicit: false, draft: true, verdict: .grantsBatching), .rowInvariant, "draft_model"),
             (inputs(explicit: false, switchTargets: true, verdict: .grantsBatching), .rowInvariant, "switch_targets"),
         ]
@@ -862,5 +888,145 @@ extension SmallMRouteTests {
         XCTAssertNil(getenv(SmallMRoute.partialSumsEnvironmentKey))
         #endif
         XCTAssertEqual(SmallMRoute.partialSumsEnvironmentKey, "MLX_METAL_QMV_MMA_WK")
+    }
+}
+
+/// SPEC-038 FR-CB9 (v0.3.61, Related: #2462): `mixed` runs each native request
+/// on the row-invariant route and every other request on stock order.
+extension SmallMRouteTests {
+    func testNativeMTPWithNoOtherNeedDecidesMixed() {
+        for admission in [SmallMRoute.NativeMTPAdmission.entryForModel, .unverifiable] {
+            for verdict in [SmallMRoute.SelfCheckVerdict.absent, .grantsBatching, .recheckPending, .staleKey] {
+                let value = inputs(explicit: false, nativeMTP: .auto, admission: admission, verdict: verdict)
+                XCTAssertEqual(
+                    SmallMRoute.decide(value),
+                    SmallMRoute.Decision(route: .stockOrder, reason: "native_mtp_per_request", mixed: true),
+                    value.logFields
+                )
+                XCTAssertEqual(SmallMRoute.decide(value).mode, "mixed")
+            }
+        }
+        let explicitOn = inputs(mode: .on, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching)
+        XCTAssertTrue(SmallMRoute.decide(explicitOn).mixed)
+    }
+
+    func testMixedFallsBackToProcessWideRowInvariant() {
+        let admitted = { (value: SmallMRoute.Inputs) -> SmallMRoute.Inputs in
+            var value = value
+            value.nativeMTPMode = .auto
+            value.nativeMTPAdmission = .entryForModel
+            return value
+        }
+        let cases: [(SmallMRoute.Inputs, String)] = [
+            // E4: another need keeps the pair process-wide.
+            (admitted(inputs(explicit: false, switchTargets: true)), "native_mtp_entry_for_model"),
+            (admitted(inputs(explicit: false, draft: true)), "draft_model"),
+            (admitted(inputs(explicit: false, shard: true)), "shard_group"),
+            (admitted(inputs(explicit: false, autotune: true)), "autotune_candidate"),
+            // No batching: no row ever shares a forward on another route.
+            (admitted(inputs(mode: .off, explicit: true)), "native_mtp_entry_for_model"),
+            (admitted(inputs(explicit: false, verdict: .grantsNoBatching)), "native_mtp_entry_for_model"),
+            // A measured stock order failure disables mixed.
+            (admitted(inputs(explicit: false, fallback: "stock_order_row_divergence_at_3")), "stock_order_row_divergence_at_3"),
+            (admitted(inputs(explicit: false, operatorRowInvariant: true)), "operator_row_invariant"),
+        ]
+        for (value, reason) in cases {
+            let decision = SmallMRoute.decide(value)
+            XCTAssertEqual(decision, SmallMRoute.Decision(route: .rowInvariant, reason: reason), value.logFields)
+            XCTAssertFalse(decision.mixed, value.logFields)
+            XCTAssertEqual(decision.mode, "row_invariant", value.logFields)
+        }
+        // Native MTP that cannot activate never takes mixed.
+        for admission in [SmallMRoute.NativeMTPAdmission.none, .noEntryForModel] {
+            XCTAssertFalse(SmallMRoute.decide(inputs(explicit: false, nativeMTP: .auto, admission: admission)).mixed)
+        }
+        XCTAssertFalse(SmallMRoute.decide(inputs(explicit: false, nativeMTP: .off, admission: .entryForModel)).mixed)
+    }
+
+    func testRequestRouteFollowsAdmissionOnlyInMixed() {
+        XCTAssertEqual(SmallMRoute.requestRoute(nativeAdmitted: true, processRoute: .stockOrder, mixed: true), .rowInvariant)
+        XCTAssertEqual(SmallMRoute.requestRoute(nativeAdmitted: false, processRoute: .stockOrder, mixed: true), .stockOrder)
+        for route in [SmallMRoute.rowInvariant, .stockOrder, .serialOnly] {
+            for native in [false, true] {
+                XCTAssertEqual(SmallMRoute.requestRoute(nativeAdmitted: native, processRoute: route, mixed: false), route)
+            }
+        }
+        // The test process is not mixed: every request takes the process route.
+        XCTAssertFalse(SmallMRoute.processMixed)
+        XCTAssertEqual(SmallMRoute.requestRoute(nativeAdmitted: true), SmallMRoute.processRoute)
+        XCTAssertEqual(SmallMRoute.requestRoute(nativeAdmitted: false), SmallMRoute.processRoute)
+    }
+
+    func testMixedStartupEventAndStatusFields() {
+        XCTAssertEqual(
+            SmallMRoute.event(.init(route: .stockOrder, reason: "native_mtp_per_request", mixed: true)),
+            "event=small_m_route mode=mixed reason=native_mtp_per_request\n"
+        )
+        let mixed = RouterHandler.continuousBatchingStatusFields(
+            nil, smallMRoute: .stockOrder, smallMRouteReason: "native_mtp_per_request",
+            smallMRouteMixed: true, smallMRouteRequests: ["stock_order": 3, "row_invariant": 1]
+        )
+        XCTAssertEqual(mixed["small_m_route"] as? String, "mixed")
+        XCTAssertEqual(mixed["small_m_route_reason"] as? String, "native_mtp_per_request")
+        XCTAssertEqual(mixed["small_m_route_requests"] as? [String: Int], ["stock_order": 3, "row_invariant": 1])
+        let plain = RouterHandler.continuousBatchingStatusFields(
+            nil, smallMRoute: .stockOrder, smallMRouteReason: "self_check_grants_batching", smallMRouteMixed: false
+        )
+        XCTAssertEqual(plain["small_m_route"] as? String, "stock_order")
+        XCTAssertNil(plain["small_m_route_requests"])
+    }
+
+    func testRequestCounterTracksInFlightRequestsPerRoute() async {
+        let counter = SmallMRouteRequestCounter()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+        counter.begin(.rowInvariant)
+        counter.begin(.stockOrder)
+        counter.begin(.stockOrder)
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 2, "row_invariant": 1])
+        let inside = await counter.tracking(.rowInvariant) { counter.snapshot() }
+        XCTAssertEqual(inside, ["stock_order": 2, "row_invariant": 2])
+        counter.end(.stockOrder)
+        counter.end(.rowInvariant)
+        counter.end(.rowInvariant)
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 1, "row_invariant": 0])
+    }
+
+    func testScopeCarriesTheRequestRouteAndGroupsRows() async {
+        XCTAssertNil(SmallMRouteScope.current)
+        let seen = await SmallMRouteScope.run(.rowInvariant) {
+            await Task.yield()
+            return SmallMRouteScope.current
+        }
+        XCTAssertEqual(seen, .rowInvariant)
+        XCTAssertNil(SmallMRouteScope.current)
+        XCTAssertEqual(SmallMRoute.rowInvariant.mlxRoute, .rowInvariant)
+        XCTAssertEqual(SmallMRoute.stockOrder.mlxRoute, .stockOrder)
+        XCTAssertNil(SmallMRoute.serialOnly.mlxRoute)
+
+        let rows: [(String, SmallMRoute)] = [("a", .stockOrder), ("b", .rowInvariant), ("c", .stockOrder), ("d", .rowInvariant)]
+        let groups = SmallMRouteScope.groups(rows) { $0.1 }.map { $0.map(\.0) }
+        XCTAssertEqual(groups, [["a", "c"], ["b", "d"]])
+        XCTAssertEqual(SmallMRouteScope.uniformRoute([.stockOrder, .stockOrder]), .stockOrder)
+        XCTAssertNil(SmallMRouteScope.uniformRoute([.stockOrder, .rowInvariant]))
+        XCTAssertNil(SmallMRouteScope.uniformRoute([]))
+    }
+
+    func testColdTierIdentityTakesTheRequestRoute() {
+        let context = ConversationColdContext(
+            eligible: true,
+            identity: KVIdentityCore(
+                requestModel: "m", servedModelID: "m", modelSHA256: String(repeating: "b", count: 64),
+                catalogRevision: "r", tokenizerID: "m", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+                chatTemplateSHA256: String(repeating: "d", count: 64),
+                kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil
+            )
+        )
+        XCTAssertEqual(context.identity.decodePath, SmallMRoute.processRoute.kvDecodePath)
+        let native = context.onSmallMRoute(.rowInvariant)
+        let ordinary = context.onSmallMRoute(.stockOrder)
+        XCTAssertEqual(native.identity.decodePath, "ordinary")
+        XCTAssertEqual(ordinary.identity.decodePath, "ordinary+stock_order_small_m")
+        XCTAssertNotEqual(native.identity, ordinary.identity)
+        XCTAssertEqual(native.eligible, context.eligible)
     }
 }
