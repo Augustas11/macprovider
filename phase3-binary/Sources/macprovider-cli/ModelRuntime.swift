@@ -9434,14 +9434,14 @@ maxTokens: 1,
         }
     }
 
-    /// A batched row's token event on its request timeline: the first event
-    /// is the row's first sampled token, or, for a waiter that attached to a
-    /// row already in flight, its first replayed delivery.
     /// SPEC-038 FR-CB9 (v0.3.65): whether admission reads the stored entry's
-    /// route: only for an ordinary request that may take a conversation-cache
-    /// lease, since no other request can hit the entry.
-    static func admissionReadsStoredSmallMRoute(conversationCacheAllowed: Bool, nativeAdmitted: Bool) -> Bool {
-        conversationCacheAllowed && !nativeAdmitted
+    /// route: only in a `mixed` process (no other mode reads it) and only for
+    /// an ordinary request that may take a conversation-cache lease, since no
+    /// other request can hit the entry.
+    static func admissionReadsStoredSmallMRoute(
+        conversationCacheAllowed: Bool, nativeAdmitted: Bool, mixed: Bool = SmallMRoute.processMixed
+    ) -> Bool {
+        mixed && conversationCacheAllowed && !nativeAdmitted
     }
 
     /// SPEC-038 FR-CB9 (v0.3.65): a request admitted on its stored entry's
@@ -9457,6 +9457,9 @@ maxTokens: 1,
         log("event=small_m_route_admission_miss route=\(ticket.route.rawValue) reason=stored_route_stale\n")
     }
 
+    /// A batched row's token event on its request timeline: the first event
+    /// is the row's first sampled token, or, for a waiter that attached to a
+    /// row already in flight, its first replayed delivery.
     static func noteContinuousBatchTokenEvent(_ event: ContinuousBatchSchedulerTokenEvent, on timeline: RequestTimeline) {
         if event.replayTokens != nil {
             timeline.markReplayAttach()
@@ -9954,7 +9957,11 @@ maxTokens: 1,
             storedSmallMRoute = await conversationCache.storedSmallMRoute(
                 conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
-                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey),
+                // The same arguments `beginLease` passes for an ordinary row.
+                allowRetainedPagedKVHandoff: true,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
@@ -10590,7 +10597,11 @@ maxTokens: 1,
             storedSmallMRoute = await conversationCache.storedSmallMRoute(
                 conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
-                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey)
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey),
+                // The same arguments `beginLease` passes for an ordinary row.
+                allowRetainedPagedKVHandoff: true,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(

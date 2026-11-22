@@ -1326,12 +1326,18 @@ extension SmallMRouteTests {
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
     }
 
-    /// v0.3.65: admission reads the stored route only for an ordinary request
-    /// that may take a conversation-cache lease.
+    /// v0.3.65: admission reads the stored route only in a mixed process and
+    /// only for an ordinary request that may take a conversation-cache lease.
     func testStoredRouteIsReadOnlyWhenTheLeaseIsAllowed() {
-        XCTAssertTrue(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: true, nativeAdmitted: false))
-        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: false, nativeAdmitted: false))
-        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(conversationCacheAllowed: true, nativeAdmitted: true))
+        XCTAssertTrue(ModelRuntime.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: true, nativeAdmitted: false, mixed: true))
+        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: false, nativeAdmitted: false, mixed: true))
+        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: true, nativeAdmitted: true, mixed: true))
+        // Not mixed: no lookup at all.
+        XCTAssertFalse(ModelRuntime.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: true, nativeAdmitted: false, mixed: false))
     }
 
     func testConcurrentAdmissionsBesideANativeRowAllJoinRowInvariant() async {

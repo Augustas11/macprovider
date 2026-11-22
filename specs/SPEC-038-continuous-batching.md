@@ -8,11 +8,10 @@ Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security /
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.65 (2026-11-23, FR-CB9 `mixed`: the stored route is read only for a turn that can hit, and a stock order entry beside `row_invariant` takes the cheaper of re-prefill and split, Related: #2462):**
 Admission reads the stored conversation-cache entry only for an ordinary
-request that may take a conversation-cache lease, and only when its prompt
-extends the entry under the `begin` prefix rule (a shared prefix of at least
-the lcp threshold with new tokens after it, the whole stored prompt for a
-prompt snapshot, a recurrent checkpoint inside the prefix); the lookup also
-returns the prompt tokens the hit would reuse. A request whose entry is
+request that may take a conversation-cache lease in a `mixed` process, and
+only when `begin`'s own reuse predicate (one function both call, so they
+cannot drift) accepts it for that prompt with the request's own arguments;
+the lookup also returns the prompt tokens the hit would reuse. A request whose entry is
 `stock_order` admitted while a `row_invariant` request is in flight keeps
 `stock_order` (reason `conversation_cache`, two forwards per step while both
 decode) only when reused tokens x prefill cost per token exceed expected
@@ -21,8 +20,10 @@ overlap tokens x the cost of the extra forward per step; otherwise it joins
 `stock_order` conversation overlapping `row_invariant` therefore pays at
 most min(re-prefill, split) instead of either one unconditionally. A
 `conversation_cache` admission whose lease then misses logs
-`event=small_m_route_admission_miss reason=stored_route_stale`. Every other
-case is unchanged.
+`event=small_m_route_admission_miss reason=stored_route_stale`. A request
+without `max_tokens`, or one beside a native request reserved but not yet
+admitted (its budget unknown), takes its overlap from a budget near the
+context limit, so it nearly always joins. Every other case is unchanged.
 
 **Change log v0.3.64 (2026-11-23, FR-CB9 `mixed`: a stored conversation-cache entry decides first; every `row_invariant` request is joinable, Related: #2462):**
 In a `mixed` process an ordinary request whose conversation key has a hot
@@ -2220,19 +2221,21 @@ role, another warm-swap target, a configured further model, and a recorded
   `conversation_cache` included. An ordinary request without a reusable
   stored entry is never admitted on `stock_order` while a `row_invariant`
   request is in flight;
-- (v0.3.65) the stored entry is read at admission only for an ordinary
-  request whose conversation-cache lease is allowed, and only when the
-  request's prompt extends it under the `begin` prefix rule: a shared prefix
-  of at least the lcp threshold (32 tokens) with new tokens after it, the
-  whole stored prompt for a prompt snapshot, and a recurrent checkpoint
-  inside the prefix for a recurrent entry. The lookup returns the entry's
+- (v0.3.65) the stored entry is read at admission only in a `mixed`
+  process, only for an ordinary request whose conversation-cache lease is
+  allowed, and only when `begin`'s reuse predicate accepts it for the
+  request's prompt with the arguments `begin` gets (model, KV bits, prefix of
+  at least the lcp threshold with new tokens after it, retained handoff,
+  recurrent checkpoint, prompt snapshot extension and resume boundary,
+  window and trimmable layer classes): `begin` and the lookup call one
+  non-mutating function. The lookup returns the entry's
   route and the prompt tokens the hit would reuse (`reusable`). It reads the
   hot tier only: a cold-tier lookup is disk I/O on the admission path, so a
   turn whose entry lives only on disk is admitted as if it had none, and a
   cold promotion serves it only when the envelope's route class matches the
-  admitted route (SPEC-037 v0.2.8). `begin`'s other checks (layer class,
-  retained handoff) and an eviction or expiry between admission and `begin`
-  can still miss: the request then logs
+  admitted route (SPEC-037 v0.2.8). A trim underflow (found only by
+  trimming) and an eviction or expiry between admission and `begin` can
+  still miss: the request then logs
   `event=small_m_route_admission_miss route=<route> reason=stored_route_stale`
   and prefills fully on its admitted route, and its own commit stores a
   fresh entry, so the miss is bounded to that turn;
@@ -2243,7 +2246,10 @@ role, another warm-swap target, a configured further model, and a recorded
   output budget and the largest remaining output budget (budget less tokens
   produced) among the `row_invariant` requests in flight; a native request
   reserved but not yet admitted has an unknown budget, which leaves
-  `overlap` the request's own budget, and with neither known it joins.
+  `overlap` the request's own budget, and with neither known it joins. A
+  request without `max_tokens` has a budget near the context limit, so with
+  an unknown in-flight budget or none of its own the overlap is large and
+  the request nearly always joins.
   Otherwise it is admitted `row_invariant` and re-prefills (reason
   `conversation_cache_join`). The cost ratio is one constant,
   `splitStepPrefillTokens = 8` prompt tokens per extra single-row decode

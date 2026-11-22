@@ -1936,6 +1936,60 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
     }
 
+    /// v0.3.65: the admission lookup and `begin` run one predicate
+    /// (`reusePlan`), so they agree on every entry class `commit` stores.
+    func testStoredRouteLookupAgreesWithBeginOnEveryEntryClass() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 16, maxTokens: 200_000, ttlSeconds: 900))
+        let tokens: [Int32] = (0 ..< 64).map(Int32.init)
+        let incoming = tokens + [500, 501, 502]
+        func simple(_ offset: Int) -> KVCacheSimple {
+            let layer = KVCacheSimple()
+            layer.offset = offset
+            return layer
+        }
+        /// Stores `layers` under `key`, then returns (lookup reusable tokens, begin cached tokens).
+        func agree(_ key: String, _ layers: ConversationCacheLayers, boundaries: [Int]? = nil) async throws -> (Int?, Int) {
+            let seedValue = await cache.begin(
+                conversationKey: key, incomingTokens: tokens, modelID: "model-a", kvBits: nil,
+                allowRetainedPagedKVHandoff: true, smallMRoute: .stockOrder)
+            let seed = try XCTUnwrap(seedValue)
+            await cache.commit(seed, cache: layers, fullTokens: tokens)
+            let looked = await cache.storedSmallMRoute(
+                conversationKey: key, incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+                allowRetainedPagedKVHandoff: true, promptSnapshotResumeBoundaries: boundaries)
+            let leaseValue = await cache.begin(
+                conversationKey: key, incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+                allowRetainedPagedKVHandoff: true, promptSnapshotResumeBoundaries: boundaries,
+                smallMRoute: .stockOrder)
+            let lease = try XCTUnwrap(leaseValue)
+            await cache.abort(lease)
+            if let looked { XCTAssertEqual(looked.route, .stockOrder, key) }
+            XCTAssertEqual(looked?.reusableCachedTokens ?? 0, lease.cachedPromptTokens, key)
+            return (looked?.reusableCachedTokens, lease.cachedPromptTokens)
+        }
+        // An ordinary hit: both reuse the whole stored prompt.
+        let hit = try await agree("conv:agree-hit", ConversationCacheLayers([simple(tokens.count)]))
+        XCTAssertEqual(hit.0, tokens.count)
+        XCTAssertEqual(hit.1, tokens.count)
+        // A sliding-window entry: both miss (rotating_window_cache).
+        let rotating = RotatingKVCache(maxSize: 256, keep: 0)
+        rotating.offset = tokens.count
+        let windowed = try await agree("conv:agree-window", ConversationCacheLayers([rotating]))
+        XCTAssertNil(windowed.0)
+        XCTAssertEqual(windowed.1, 0)
+        // A recurrent entry with no checkpoint: the two agree (cache_not_trimmable unless the
+        // recurrent layer trims).
+        _ = try await agree("conv:agree-recurrent", ConversationCacheLayers([simple(tokens.count), ArraysCache(size: 1)]))
+        // A prompt snapshot off the request's resume boundaries: both miss
+        // (prompt_snapshot_off_resume_boundary).
+        let offBoundary = try await agree(
+            "conv:agree-snapshot",
+            ConversationCacheLayers([simple(tokens.count)], promptSnapshot: true, resumeBoundaryPlan: true),
+            boundaries: [32])
+        XCTAssertNil(offBoundary.0)
+        XCTAssertEqual(offBoundary.1, 0)
+    }
+
     /// v0.3.65 L3: a conversation_cache admission whose lease missed logs
     /// `stored_route_stale`; a hit or another reason logs nothing.
     func testStoredRouteStaleIsLoggedOnlyForAConversationCacheMiss() {
