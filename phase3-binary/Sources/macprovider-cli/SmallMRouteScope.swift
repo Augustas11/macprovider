@@ -26,21 +26,35 @@ enum SmallMRouteScope {
     /// Builds `body`'s graph on the task's request route. `body` must build
     /// synchronously (calling a compiled function counts); it need not
     /// evaluate inside.
-    static func build<R>(_ body: () throws -> R) rethrows -> R {
-        guard let route = current?.mlxRoute else { return try body() }
-        return try withSmallMRoute(route, body)
+    ///
+    /// Fails closed in a `mixed` process when the task carries no request
+    /// route: the build would otherwise take the process route (stock
+    /// order) whatever the rows are. Any other process runs one route, so no
+    /// route means the process route.
+    static func build<R>(mixed: Bool = SmallMRoute.processMixed, _ body: () throws -> R) throws -> R {
+        guard let route = current?.mlxRoute else {
+            if mixed { throw ContinuousBatchSchedulerError.unsupported(missingRouteCode) }
+            #if DEBUG
+            buildObserverForTest?(currentSmallMRoute())
+            #endif
+            return try body()
+        }
+        return try withSmallMRoute(route) {
+            #if DEBUG
+            buildObserverForTest?(currentSmallMRoute())
+            #endif
+            return try body()
+        }
     }
 
-    /// The route of rows built in one forward. Nil when they hold two routes,
-    /// which a forward never may.
-    static func uniformRoute(_ routes: some Sequence<SmallMRoute>) -> SmallMRoute? {
-        var iterator = routes.makeIterator()
-        guard let first = iterator.next() else { return nil }
-        while let next = iterator.next() {
-            if next != first { return nil }
-        }
-        return first
-    }
+    #if DEBUG
+    /// Tests: called in every build, just before its graph is built, with the
+    /// route MLX captures on this thread there.
+    nonisolated(unsafe) static var buildObserverForTest: (@Sendable (MLX.SmallMRoute?) -> Void)?
+    #endif
+
+    /// The failure a `mixed` build with no request route throws.
+    static let missingRouteCode = "small_m_route_scope_missing"
 
     /// Splits items into runs of one route each, in first-appearance order
     /// of the routes, keeping the items' order inside each group.
@@ -66,6 +80,36 @@ enum SmallMRouteScope {
 }
 
 extension SmallMRoute {
+    /// Port of core `metal::is_nax_available` (`mlx/backend/metal/device.cpp`):
+    /// macOS 26.2 or later and architecture generation 17 or later (18 for a
+    /// phone, `p`), the generation read from the two digits before the last
+    /// character of the architecture name exactly as core reads it.
+    static func naxAvailable(architecture: String, osSupportsNAX: Bool) -> Bool {
+        guard osSupportsNAX else { return false }
+        let bytes = Array(architecture.utf8)
+        func digit(_ index: Int) -> Int {
+            guard index >= 0, index < bytes.count else { return 0 }
+            let value = Int(bytes[index]) - 48
+            return (0 ..< 10).contains(value) ? value : 0
+        }
+        let generation = bytes.count >= 3 ? digit(bytes.count - 3) * 10 + digit(bytes.count - 2) : 0
+        return generation >= (bytes.last == UInt8(ascii: "p") ? 18 : 17)
+    }
+
+    /// Whether this process's GPU takes the NAX kernels. Reads the Metal
+    /// device (or `MLX_METAL_GPU_ARCH`), not the MLX core, so it is safe
+    /// before MLX is first used.
+    static func processNAXAvailable() -> Bool {
+        let osSupportsNAX: Bool
+        if #available(macOS 26.2, *) {
+            osSupportsNAX = true
+        } else {
+            osSupportsNAX = false
+        }
+        return naxAvailable(
+            architecture: ModelRuntime.metalArchitectureForQuantizedRoutes(), osSupportsNAX: osSupportsNAX)
+    }
+
     /// The MLX core route this route selects; nil for serial-only, which no
     /// scope can select.
     var mlxRoute: MLX.SmallMRoute? {
