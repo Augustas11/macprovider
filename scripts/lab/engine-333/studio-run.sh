@@ -5,6 +5,8 @@
 # heavy suites, resolves provider model dirs and runs window.sh.
 #
 # usage: studio-run.sh LAB_DIR   (LAB_DIR holds macprovider/, the worktree of this branch)
+# env: WINDOW (output dir window-N, default 4); DIAG=1 runs studio-diag.sh first; ONLY="name ..."
+# limits the models; SKIP_HEAVY=1 skips the heavy fork suites (they passed in window 3).
 set -uo pipefail
 L="${1:?usage: studio-run.sh LAB_DIR}"
 LM_REV=748d330d213c673637617f29bd863020f4565fd4
@@ -27,6 +29,12 @@ rm -rf base && cp -R /Users/a1/macprovider base || exit 3
 if [ ! -d mlx-swift-lm ]; then git clone -q https://github.com/Augustas11/mlx-swift-lm.git mlx-swift-lm || exit 4; fi
 git -C mlx-swift-lm fetch -q origin && git -C mlx-swift-lm checkout -q "$LM_REV" || exit 4
 
+if [ "${DIAG:-0}" = 1 ]; then
+  echo "== diagnostics $(date +%T)"
+  WINDOW="${WINDOW:-4}" bash macprovider/scripts/lab/engine-333/studio-diag.sh "$L" "$NEW" "$L/base" "$LM_REV"
+  echo "diag rc=$?"
+fi
+
 # name|org--model|catalog key|mtp ; GDN Qwen rows first (gatedDeltaUpdate routing changed in 3.33.0).
 # mtp = the key has a native-MTP admission entry (native-mtp-admission.json): a 1-row native-MTP pass.
 SPECS=(
@@ -43,15 +51,19 @@ SPECS=(
 ARGS=()
 for s in "${SPECS[@]}"; do
   IFS='|' read -r name dir key mtp <<< "$s"
+  if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $name "* ]]; then continue; fi
   p=$(ls -d "$MODELS_ROOT/$dir"/*/* 2>/dev/null | head -1)
   [ -n "$p" ] || { echo "MODEL_MISSING $dir"; continue; }
   ARGS+=("$name=$p@$key${mtp:+:$mtp}")
   echo "model $name -> $p ($key${mtp:+, native MTP})"
 done
 
+# mlx-swift-lm #633 (c408452) fixes the gated delta q/k L2-norm eps to the transformers
+# reference: every GDN Qwen key's text changes on purpose (studio-diag.sh proves it is the only change).
+export TEXT_CHANGE_KEYS="qwen/qwen3.5-27b=mlx-swift-lm#633 qwen/qwen3.6-27b=mlx-swift-lm#633 qwen/qwen3.6-35b-a3b=mlx-swift-lm#633 qwen/qwen3.8-27b=mlx-swift-lm#633 qwen/qwen3.5-35b-a3b=mlx-swift-lm#633"
 echo "== window $(date +%T)"
 bash macprovider/scripts/lab/engine-333/window.sh --base-bin "$L/base" --new-bin "$NEW" \
-  --out "$L/window-${WINDOW:-3}" --lm-dir "$L/mlx-swift-lm" "${ARGS[@]}"
+  --out "$L/window-${WINDOW:-4}" --lm-dir "$L/mlx-swift-lm" "${ARGS[@]}"
 rc=$?
 echo "== studio-run done rc=$rc $(date +%T)"
 exit $rc

@@ -32,6 +32,8 @@
 #  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on) and its text equals new's
 #    own ordinary decode in the cb pass (SPEC-048 R015: native MTP is lossless). Base runs that
 #    cannot admit native MTP on this loopback are reported, not gated.
+# TEXT_CHANGE_KEYS="key=reason ...": catalog keys whose numerics the engine changes on purpose;
+# their text differences from base1 are reported, not gated (gate.py --text-change-expected).
 # Exit 0 = every new grid ran and every gate passed.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -63,7 +65,7 @@ HW="apple-silicon:$(sysctl -n machdep.cpu.brand_string):ram-$(( $(sysctl -n hw.m
 echo "hardware_class $HW"
 failed=0
 
-if [ -n "$LM" ]; then
+if [ -n "$LM" ] && [ "${SKIP_HEAVY:-0}" != 1 ]; then
   echo "#### heavy mlx-swift-lm suites $(date +%T)"
   ( export DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}"
     cd "$LM" && git rev-parse HEAD && swift build --build-tests \
@@ -152,7 +154,8 @@ for spec in "${MODELS[@]}"; do
         echo "compare $name new native MTP vs new ordinary rc=$?"; cat "$M/compare-new-mtp-vs-new-ordinary.md"
       fi
     fi
-    /usr/bin/python3 -I "$HERE/gate.py" --pass "$pass" "$M" | tee "$M/gate.txt"
+    tce=""; for kv in ${TEXT_CHANGE_KEYS:-}; do [ "${kv%%=*}" = "$key" ] && tce="${kv#*=}"; done
+    /usr/bin/python3 -I "$HERE/gate.py" --pass "$pass" ${tce:+--text-change-expected "$tce"} "$M" | tee "$M/gate.txt"
     [ "${PIPESTATUS[0]}" -eq 0 ] || failed=1
   done
 done

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """engine-333 window gate for one model pass directory (see window.sh).
 
-usage: gate.py --pass cb|mtp PASS_DIR
+usage: gate.py --pass cb|mtp [--text-change-expected REASON] PASS_DIR
+--text-change-expected: the engine changes this model's numerics on purpose (REASON names the
+upstream change), so a text difference from base1 is reported as INFO, not a failure.
 Reads PASS_DIR/compare-new.json and compare-base2.json (compare.py --baseline base1) and, for
 the mtp pass, compare-new-mtp-vs-new-ordinary.json. Prints one line per failed check and a
 GATE line; exits 0 when every check passes, 1 otherwise.
@@ -21,9 +23,10 @@ def cells(doc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pass", dest="pass_", choices=("cb", "mtp"), required=True)
+    ap.add_argument("--text-change-expected", default="")
     ap.add_argument("dir")
     a = ap.parse_args()
-    problems = []
+    problems, info = [], []
     new = load(os.path.join(a.dir, "compare-new.json"))
     base2 = cells(load(os.path.join(a.dir, "compare-base2.json")))
     if a.pass_ == "cb" and new is None:
@@ -33,7 +36,9 @@ def main():
         tag = f"ctx{ctx}|out{out}|rows{rows}"
         if not c.get("identical"):
             b = base2.get(key)
-            if rows == 1 or b is None or b.get("identical"):
+            if a.text_change_expected:
+                info.append(f"{tag}: new text differs from base1 (expected: {a.text_change_expected})")
+            elif rows == 1 or b is None or b.get("identical"):
                 problems.append(f"{tag}: new text differs from base1"
                                 + ("" if rows == 1 else " (base2 is identical there)"))
         delta, band = c.get("request_delta"), c.get("band", 0.03)
@@ -46,6 +51,8 @@ def main():
         for key, c in sorted(cells(m).items()):
             if not c.get("identical"):
                 problems.append(f"ctx{key[0]}|out{key[1]}|rows{key[2]}: native MTP text differs from ordinary decode")
+    for i in info:
+        print("GATE_INFO", i)
     for p in problems:
         print("GATE_FAIL", p)
     print(f"GATE {'PASS' if not problems else 'FAIL'} {a.dir} problems={len(problems)}")
