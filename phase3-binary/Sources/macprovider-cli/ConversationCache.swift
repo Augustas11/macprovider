@@ -215,6 +215,9 @@ final class ConversationCacheLease: @unchecked Sendable {
     /// paged-KV hit resumes from (`cachedPromptTokens == tokenCount`). Nil for
     /// every other lease; the batched scheduler installs it into the row.
     let recurrentCheckpoint: RecurrentStateCheckpoint?
+    /// SPEC-037 v0.2.8: the small-row route of the request holding the lease;
+    /// an entry it commits carries it.
+    let smallMRoute: SmallMRoute
 
     init(
         key: String,
@@ -233,8 +236,10 @@ final class ConversationCacheLease: @unchecked Sendable {
         reusableCanonicalPromptTokens: [Int32]? = nil,
         recurrentCheckpoint: RecurrentStateCheckpoint? = nil,
         fleetGrant: FleetConversationCacheGrant? = nil,
-        originalStoredAt: Date? = nil
+        originalStoredAt: Date? = nil,
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) {
+        self.smallMRoute = smallMRoute
         self.key = key
         self.keyHash = keyHash
         self.incomingTokens = incomingTokens
@@ -514,6 +519,8 @@ actor ConversationCache {
         var storedAt: Date
         var lastUsedAt: Date
         var tokenCount: Int
+        /// SPEC-037 v0.2.8: the small-row route of the request that wrote it.
+        var smallMRoute: SmallMRoute
     }
 
     private let config: Config
@@ -554,7 +561,8 @@ actor ConversationCache {
         allowRetainedPagedKVHandoff: Bool = false,
         fleetGrant: FleetConversationCacheGrant? = nil,
         requireNativeMTPDrafterSnapshot: Bool = false,
-        promptSnapshotResumeBoundaries: [Int]? = nil
+        promptSnapshotResumeBoundaries: [Int]? = nil,
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
@@ -598,7 +606,7 @@ actor ConversationCache {
                 globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold,
                 reusableCanonicalPromptTokens: reusableCanonicalPromptTokens,
                 recurrentCheckpoint: recurrentCheckpoint, fleetGrant: fleetGrant,
-                originalStoredAt: originalStoredAt)
+                originalStoredAt: originalStoredAt, smallMRoute: smallMRoute)
         }
 
         // Acquire a candidate entry from the hot tier, or — for a gated key that
@@ -643,7 +651,9 @@ actor ConversationCache {
                 kvBits: kvBits,
                 storedAt: originalStoredAt,
                 lastUsedAt: now,
-                tokenCount: candidate.canonicalTokens.count)
+                tokenCount: candidate.canonicalTokens.count,
+                // The tier promotes only an envelope of this request's class.
+                smallMRoute: smallMRoute)
             log("event=conv_cache action=promote key_hash=\(keyHash) canonical_tokens=\(candidate.canonicalTokens.count)")
         } else {
             // FR-KVP12: a gated request whose live identity is unavailable emits
@@ -675,6 +685,12 @@ actor ConversationCache {
         guard entry.kvBits == kvBits else {
             log("event=conv_cache action=miss key_hash=\(keyHash) reason=kvbits_swap")
             return await predicateMiss("kvbits_swap")
+        }
+        // SPEC-037 v0.2.8: KV written on one small-row route is a miss for a
+        // request on the other, before the prefix predicate runs.
+        guard entry.smallMRoute == smallMRoute else {
+            log("event=conv_cache action=miss key_hash=\(keyHash) reason=small_m_route_mismatch stored_route=\(entry.smallMRoute.rawValue) incoming_route=\(smallMRoute.rawValue)")
+            return await predicateMiss("small_m_route_mismatch")
         }
 
         let lcp = Self.longestCommonPrefix(entry.canonicalPromptTokens, incomingTokens)
@@ -852,7 +868,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: now,
             lastUsedAt: now,
-            tokenCount: fullTokens.count
+            tokenCount: fullTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         guard !Task.isCancelled, !isFenced(lease) else {
@@ -989,7 +1006,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: now,
             lastUsedAt: now,
-            tokenCount: snapshotTokens.count
+            tokenCount: snapshotTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         if isFenced(lease), let current = entries[lease.key], current.kvCache === snapshot {
@@ -1024,7 +1042,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: lease.originalStoredAt ?? now,
             lastUsedAt: now,
-            tokenCount: reusableCanonicalPromptTokens.count
+            tokenCount: reusableCanonicalPromptTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         if isFenced(lease), let current = entries[lease.key], current.kvCache === reusableCache {
