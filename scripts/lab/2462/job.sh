@@ -94,7 +94,9 @@ testStoredStockOrderEntryKeepsStockOrderBesideANativeRow
 testStoredStockOrderEntryJoinsWhenTheSplitCostsMore
 testStoredRouteIsReadOnlyWhenTheLeaseIsAllowed
 testStoredRouteStaleIsLoggedOnlyForAConversationCacheMiss
-testStoredRouteLookupAgreesWithBeginOnEveryEntryClass'
+testStoredRouteLookupAgreesWithBeginOnEveryEntryClass
+testStoredRouteLookupAgreesOnRetainedEntriesAndAppliesTheCachedHitFence
+testStoredRouteLookupAppliesTheFleetGrantCheck'
 # Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
 # Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
 # job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps

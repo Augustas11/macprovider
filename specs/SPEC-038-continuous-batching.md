@@ -2233,9 +2233,15 @@ role, another warm-swap target, a configured further model, and a recorded
   hot tier only: a cold-tier lookup is disk I/O on the admission path, so a
   turn whose entry lives only on disk is admitted as if it had none, and a
   cold promotion serves it only when the envelope's route class matches the
-  admitted route (SPEC-037 v0.2.8). A trim underflow (found only by
-  trimming) and an eviction or expiry between admission and `begin` can
-  still miss: the request then logs
+  admitted route (SPEC-037 v0.2.8). Admission also applies the request's fleet
+  grant check and the AC-26 cached-hit fence (`cachedHitFenceReason`, on the
+  same handoff facts the lease path reads: CB mode, cached turns enabled and
+  accepted, a usable retained paged-KV handoff or attachable prompt
+  snapshot), so an entry the lease path would re-begin cold gives no stored
+  route. What can still miss: a trim underflow (found only by trimming), an
+  eviction or expiry between admission and `begin`, and two turns of one key
+  admitted before either begins (the second waits for the first and finds
+  the entry it stored, or none). Each such turn logs
   `event=small_m_route_admission_miss route=<route> reason=stored_route_stale`
   and prefills fully on its admitted route, and its own commit stores a
   fresh entry, so the miss is bounded to that turn;

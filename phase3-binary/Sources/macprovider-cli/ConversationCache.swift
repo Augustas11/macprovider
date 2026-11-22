@@ -557,6 +557,14 @@ actor ConversationCache {
     struct StoredSmallMRoute: Sendable, Equatable {
         let route: SmallMRoute
         let reusableCachedTokens: Int
+        /// The lease's handoff, for the admission AC-26 cached-hit fence
+        /// (ModelRuntime.storedRouteCachedHitFenceReason): the facts
+        /// `leaseHasUsableRetainedHandoff` and `leaseHasAttachablePromptSnapshot`
+        /// read from the lease `begin` would return.
+        var hasRetainedPagedKV = false
+        var retainedCheckpointTokens: Int?
+        var promptSnapshot = false
+        var resumeBoundaryPlan = false
     }
 
     /// SPEC-038 FR-CB9 (v0.3.63, v0.3.65): the hot entry stored for
@@ -569,16 +577,24 @@ actor ConversationCache {
     /// and trimmable layer classes), with the request's own
     /// `allowRetainedPagedKVHandoff` and `promptSnapshotResumeBoundaries`. An
     /// ordinary request is the only caller, so the native drafter check never
-    /// applies. Only a trim underflow, or an eviction or expiry before
-    /// `begin`, can still miss (logged `stored_route_stale`). The cold tier
+    /// applies. `fleetGrant` is checked as `begin` checks it. The caller
+    /// applies the AC-26 cached-hit fence to the returned handoff facts
+    /// (`ModelRuntime.storedRouteCachedHitFenceReason`, the same
+    /// `cachedHitFenceReason` the lease path runs). What can still miss
+    /// (logged `stored_route_stale`, one turn each): a trim underflow, an
+    /// eviction or expiry before `begin`, and two turns of one key admitted
+    /// before either begins (the second waits for the first and finds the
+    /// entry it stored, or none). The cold tier
     /// is not read here: its lookup is disk I/O on the admission path, so a
     /// turn whose entry lives only on disk is admitted as if it had none.
     func storedSmallMRoute(
         conversationKey: String?, incomingTokens: [Int32], modelID: String, kvBits: Int?,
         allowRetainedPagedKVHandoff: Bool = true, promptSnapshotResumeBoundaries: [Int]? = nil,
-        now: Date = Date()
+        fleetGrant: FleetConversationCacheGrant? = nil, now: Date = Date()
     ) -> StoredSmallMRoute? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+              // `begin` returns no lease for an invalid grant or one for another key.
+              fleetGrant.map({ $0.isValid && $0.conversationKey == key }) ?? true,
               let entry = entries[key],
               now.timeIntervalSince(entry.storedAt) <= config.ttlSeconds
         else {
@@ -591,8 +607,12 @@ actor ConversationCache {
         ) {
         case .miss:
             return nil
-        case let .reuse(_, reuseLength, _, _):
-            return StoredSmallMRoute(route: entry.smallMRoute, reusableCachedTokens: min(reuseLength, incomingTokens.count))
+        case let .reuse(_, reuseLength, _, retainedCheckpoint):
+            return StoredSmallMRoute(
+                route: entry.smallMRoute, reusableCachedTokens: min(reuseLength, incomingTokens.count),
+                hasRetainedPagedKV: entry.kvCache.retainedPagedKVSequence != nil,
+                retainedCheckpointTokens: retainedCheckpoint?.tokenCount,
+                promptSnapshot: entry.kvCache.promptSnapshot, resumeBoundaryPlan: entry.kvCache.resumeBoundaryPlan)
         }
     }
 

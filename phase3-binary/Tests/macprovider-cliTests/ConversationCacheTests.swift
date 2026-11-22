@@ -1977,9 +1977,13 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
         let windowed = try await agree("conv:agree-window", ConversationCacheLayers([rotating]))
         XCTAssertNil(windowed.0)
         XCTAssertEqual(windowed.1, 0)
-        // A recurrent entry with no checkpoint: the two agree (cache_not_trimmable unless the
-        // recurrent layer trims).
-        _ = try await agree("conv:agree-recurrent", ConversationCacheLayers([simple(tokens.count), ArraysCache(size: 1)]))
+        // A recurrent entry with no checkpoint: both miss (cache_not_trimmable), because a
+        // recurrent layer does not trim today; if that changes this case must be revisited.
+        XCTAssertFalse(ArraysCache(size: 1).isTrimmable)
+        let recurrent = try await agree(
+            "conv:agree-recurrent", ConversationCacheLayers([simple(tokens.count), ArraysCache(size: 1)]))
+        XCTAssertNil(recurrent.0)
+        XCTAssertEqual(recurrent.1, 0)
         // A prompt snapshot off the request's resume boundaries: both miss
         // (prompt_snapshot_off_resume_boundary).
         let offBoundary = try await agree(
@@ -1988,6 +1992,113 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
             boundaries: [32])
         XCTAssertNil(offBoundary.0)
         XCTAssertEqual(offBoundary.1, 0)
+    }
+
+    /// v0.3.65: a retained paged-KV entry: the lookup and `begin` agree with
+    /// and without the retained handoff, and the admission AC-26 fence
+    /// (`storedRouteCachedHitFenceReason`) drops a hit the lease path would
+    /// re-begin cold.
+    func testStoredRouteLookupAgreesOnRetainedEntriesAndAppliesTheCachedHitFence() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let tokens: [Int32] = (0 ..< 64).map(Int32.init)
+        let incoming = tokens + [500]
+        func storeRetained(_ key: String) async throws {
+            let handle = try await allocator.allocate(
+                conversationKey: key, initialCapacityTokens: tokens.count, maxLogicalTokens: tokens.count + 16,
+                initialTokens: tokens.count)
+            let retained = try await allocator.retain(handle)
+            let seedValue = await cache.begin(conversationKey: key, incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+            let seed = try XCTUnwrap(seedValue)
+            let layer = KVCacheSimple()
+            layer.offset = tokens.count
+            await cache.commit(seed, cache: ConversationCacheLayers(
+                [layer], retainedPagedKVSequence: retained,
+                discardRetainedPagedKVSequence: { retained, key in
+                    try? await allocator.discardRetained(retained, conversationKey: key)
+                }), fullTokens: tokens)
+        }
+        // Without the retained handoff both miss (retained_paged_kv_requires_handoff).
+        try await storeRetained("conv:retained-no-handoff")
+        let withHandoff = await cache.storedSmallMRoute(
+            conversationKey: "conv:retained-no-handoff", incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+            allowRetainedPagedKVHandoff: true)
+        XCTAssertEqual(withHandoff?.hasRetainedPagedKV, true)
+        let noHandoff = await cache.storedSmallMRoute(
+            conversationKey: "conv:retained-no-handoff", incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+            allowRetainedPagedKVHandoff: false)
+        XCTAssertNil(noHandoff)
+        let missValue = await cache.begin(
+            conversationKey: "conv:retained-no-handoff", incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+            allowRetainedPagedKVHandoff: false)
+        let miss = try XCTUnwrap(missValue)
+        XCTAssertEqual(miss.cachedPromptTokens, 0)
+        await cache.abort(miss)
+        // With it both hit the whole stored prompt.
+        try await storeRetained("conv:retained-handoff")
+        let lookedValue = await cache.storedSmallMRoute(
+            conversationKey: "conv:retained-handoff", incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+            allowRetainedPagedKVHandoff: true)
+        let looked = try XCTUnwrap(lookedValue)
+        let hitValue = await cache.begin(
+            conversationKey: "conv:retained-handoff", incomingTokens: incoming, modelID: "model-a", kvBits: nil,
+            allowRetainedPagedKVHandoff: true)
+        let hit = try XCTUnwrap(hitValue)
+        XCTAssertEqual(looked.reusableCachedTokens, hit.cachedPromptTokens)
+        XCTAssertEqual(hit.cachedPromptTokens, tokens.count)
+        XCTAssertEqual(looked.hasRetainedPagedKV, true)
+        let prepared = ContinuousBatchPreparedRequest(
+            promptTokens: incoming.map(Int.init), stopTokenSequences: [], modelStopTokenIDs: [],
+            recurrentCheckpointPositions: [], modelHasRecurrentLayers: false, toolCallPrefill: nil)
+        // The fence on the lookup equals the fence on the lease.
+        for (enabled, accepted) in [(true, true), (true, false), (false, true)] {
+            XCTAssertEqual(
+                ModelRuntime.storedRouteCachedHitFenceReason(
+                    looked, mode: .canary, prepared: prepared, cachedTurnsEnabled: enabled, cachedTurnsAccepted: accepted),
+                ModelRuntime.cachedHitFenceReason(
+                    mode: .canary, cachedPromptTokens: hit.cachedPromptTokens,
+                    hasRetainedPagedKVHandoff: ModelRuntime.leaseHasUsableRetainedHandoff(hit, modelHasRecurrentLayers: false),
+                    cachedTurnsEnabled: enabled, cachedTurnsAccepted: accepted))
+        }
+        XCTAssertNil(ModelRuntime.storedRouteCachedHitFenceReason(
+            looked, mode: .canary, prepared: prepared, cachedTurnsEnabled: true, cachedTurnsAccepted: true))
+        await cache.abort(hit)
+        // A plain KVCacheSimple hit has no handoff: the fence drops it, so admission takes no stored route.
+        let plain = ConversationCache.StoredSmallMRoute(route: .stockOrder, reusableCachedTokens: tokens.count)
+        XCTAssertEqual(ModelRuntime.storedRouteCachedHitFenceReason(
+            plain, mode: .canary, prepared: prepared, cachedTurnsEnabled: true, cachedTurnsAccepted: true),
+            .stickyCacheHandoffUnavailable)
+        XCTAssertEqual(ModelRuntime.storedRouteCachedHitFenceReason(
+            looked, mode: .canary, prepared: prepared, cachedTurnsEnabled: true, cachedTurnsAccepted: false),
+            .cachedTurnsNotAccepted)
+        XCTAssertNil(ModelRuntime.storedRouteCachedHitFenceReason(
+            plain, mode: .off, prepared: prepared, cachedTurnsEnabled: false, cachedTurnsAccepted: false))
+    }
+
+    /// v0.3.65: an invalid fleet grant, or one for another key, gives no stored route, as `begin` gives no lease.
+    func testStoredRouteLookupAppliesTheFleetGrantCheck() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let tokens: [Int32] = (0 ..< 64).map(Int32.init)
+        let seedValue = await cache.begin(conversationKey: "conv:granted", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+        let layer = KVCacheSimple()
+        layer.offset = tokens.count
+        let seed = try XCTUnwrap(seedValue)
+        await cache.commit(seed, cache: ConversationCacheLayers([layer]), fullTokens: tokens)
+        let ungranted = await cache.storedSmallMRoute(
+            conversationKey: "conv:granted", incomingTokens: tokens + [1], modelID: "model-a", kvBits: nil)
+        XCTAssertNotNil(ungranted)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
+        let grant = try authority.authorize(conversationKey: "conv:other", generation: 1)
+        let otherKey = await cache.storedSmallMRoute(
+            conversationKey: "conv:granted", incomingTokens: tokens + [1], modelID: "model-a", kvBits: nil,
+            fleetGrant: grant)
+        XCTAssertNil(otherKey)
+        let lease = await cache.begin(
+            conversationKey: "conv:granted", incomingTokens: tokens + [1], modelID: "model-a", kvBits: nil,
+            fleetGrant: grant)
+        XCTAssertNil(lease)
     }
 
     /// v0.3.65 L3: a conversation_cache admission whose lease missed logs

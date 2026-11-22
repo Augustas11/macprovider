@@ -9773,9 +9773,50 @@ maxTokens: 1,
         _ lease: ConversationCacheLease,
         modelHasRecurrentLayers: Bool
     ) -> Bool {
-        guard lease.reusableCache?.retainedPagedKVSequence != nil else { return false }
+        hasUsableRetainedHandoff(
+            retainedPagedKV: lease.reusableCache?.retainedPagedKVSequence != nil,
+            retainedCheckpointTokens: lease.recurrentCheckpoint?.tokenCount,
+            cachedPromptTokens: lease.cachedPromptTokens,
+            modelHasRecurrentLayers: modelHasRecurrentLayers)
+    }
+
+    /// `leaseHasUsableRetainedHandoff` on the facts it reads, shared with the
+    /// admission lookup (SPEC-038 FR-CB9 v0.3.65).
+    nonisolated static func hasUsableRetainedHandoff(
+        retainedPagedKV: Bool, retainedCheckpointTokens: Int?, cachedPromptTokens: Int, modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        guard retainedPagedKV else { return false }
         guard modelHasRecurrentLayers else { return true }
-        return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
+        return retainedCheckpointTokens == cachedPromptTokens
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): the AC-26 cached-hit fence
+    /// (`cachedHitFenceReason`, as `coldLeaseIfCachedHitFenced` runs it on the
+    /// lease) applied to the stored entry admission found. Non-nil means the
+    /// lease would be re-begun cold, so admission treats the entry as absent.
+    nonisolated static func storedRouteCachedHitFenceReason(
+        _ stored: ConversationCache.StoredSmallMRoute,
+        mode: ContinuousBatchingMode,
+        prepared: ContinuousBatchPreparedRequest,
+        cachedTurnsEnabled: Bool,
+        cachedTurnsAccepted: Bool
+    ) -> ContinuousBatchingUnsupportedReason? {
+        // A hit's reusable canonical prefix is exactly its cached tokens (`begin`).
+        let attachableSnapshot = hasAttachablePromptSnapshot(
+            promptSnapshotAttaches: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
+            cachedPromptTokens: stored.reusableCachedTokens,
+            promptSnapshot: stored.promptSnapshot, resumeBoundaryPlan: stored.resumeBoundaryPlan,
+            retainedPagedKV: stored.hasRetainedPagedKV, reusableCanonicalTokenCount: stored.reusableCachedTokens)
+        return cachedHitFenceReason(
+            mode: mode,
+            cachedPromptTokens: stored.reusableCachedTokens,
+            hasRetainedPagedKVHandoff: attachableSnapshot || hasUsableRetainedHandoff(
+                retainedPagedKV: stored.hasRetainedPagedKV, retainedCheckpointTokens: stored.retainedCheckpointTokens,
+                cachedPromptTokens: stored.reusableCachedTokens,
+                modelHasRecurrentLayers: prepared.modelHasRecurrentLayers),
+            cachedTurnsEnabled: cachedTurnsEnabled,
+            cachedTurnsAccepted: cachedTurnsAccepted)
     }
 
     /// SPEC-001-R013 (v1.9.50): ends a CB row's cache lease after the row
@@ -9961,8 +10002,17 @@ maxTokens: 1,
                 // The same arguments `beginLease` passes for an ordinary row.
                 allowRetainedPagedKVHandoff: true,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                fleetGrant: request.fleetCacheGrant
             )
+            // A hit the AC-26 fence would re-begin cold is no hit for the route.
+            if let stored = storedSmallMRoute, Self.storedRouteCachedHitFenceReason(
+                stored, mode: capability.mode, prepared: prepared,
+                cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
+                cachedTurnsAccepted: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
+            ) != nil {
+                storedSmallMRoute = nil
+            }
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
@@ -10601,8 +10651,17 @@ maxTokens: 1,
                 // The same arguments `beginLease` passes for an ordinary row.
                 allowRetainedPagedKVHandoff: true,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                fleetGrant: request.fleetCacheGrant
             )
+            // A hit the AC-26 fence would re-begin cold is no hit for the route.
+            if let stored = storedSmallMRoute, Self.storedRouteCachedHitFenceReason(
+                stored, mode: capability.mode, prepared: prepared,
+                cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
+                cachedTurnsAccepted: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
+            ) != nil {
+                storedSmallMRoute = nil
+            }
         }
         let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
             nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
@@ -15829,16 +15888,26 @@ maxTokens: maxTokens,
         _ lease: ConversationCacheLease?,
         prepared: ContinuousBatchPreparedRequest
     ) -> Bool {
-        guard prepared.promptSnapshotAttachesToContinuousBatchRow,
-              let lease, lease.cachedPromptTokens > 0,
-              prepared.promptResumeBoundaries.contains(lease.cachedPromptTokens),
-              let reusable = lease.reusableCache,
-              reusable.promptSnapshot,
-              reusable.resumeBoundaryPlan,
-              reusable.retainedPagedKVSequence == nil,
-              lease.reusableCanonicalPromptTokens?.count == lease.cachedPromptTokens
-        else { return false }
-        return true
+        guard let lease, let reusable = lease.reusableCache else { return false }
+        return hasAttachablePromptSnapshot(
+            promptSnapshotAttaches: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
+            cachedPromptTokens: lease.cachedPromptTokens,
+            promptSnapshot: reusable.promptSnapshot, resumeBoundaryPlan: reusable.resumeBoundaryPlan,
+            retainedPagedKV: reusable.retainedPagedKVSequence != nil,
+            reusableCanonicalTokenCount: lease.reusableCanonicalPromptTokens?.count)
+    }
+
+    /// `leaseHasAttachablePromptSnapshot` on the facts it reads, shared with
+    /// the admission lookup (SPEC-038 FR-CB9 v0.3.65).
+    nonisolated static func hasAttachablePromptSnapshot(
+        promptSnapshotAttaches: Bool, promptResumeBoundaries: [Int], cachedPromptTokens: Int,
+        promptSnapshot: Bool, resumeBoundaryPlan: Bool, retainedPagedKV: Bool, reusableCanonicalTokenCount: Int?
+    ) -> Bool {
+        promptSnapshotAttaches && cachedPromptTokens > 0
+            && promptResumeBoundaries.contains(cachedPromptTokens)
+            && promptSnapshot && resumeBoundaryPlan && !retainedPagedKV
+            && reusableCanonicalTokenCount == cachedPromptTokens
     }
 
     /// The snapshot a CB row installs for `lease`, or nil.
