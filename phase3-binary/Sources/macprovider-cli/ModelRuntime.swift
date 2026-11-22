@@ -5800,19 +5800,38 @@ maxTokens: 1,
                 attempt: attempt
             )
             let start = Date()
-            let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+            let result = try await scheduler.submit(Self.nativeMTPOrdinaryReferenceRequest(
                 id: id,
-                conversationKey: "",
                 promptTokens: challenge.promptTokenIDs,
-                maxOutputTokens: challenge.maxCompletionTokens,
-                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
-                temperature: 0,
-                topP: 1
+                maxOutputTokens: challenge.maxCompletionTokens
             ))
             seconds = min(seconds, Date().timeIntervalSince(start))
             tokens = result.generatedTokens
         }
         return (tokens, seconds)
+    }
+
+    /// One ordinary reference run of the MTP self-check. SPEC-048 R003
+    /// (0.1.120): the reference is the request's own one-row decode on the
+    /// route its native probe runs, row-invariant in a `mixed` process, so
+    /// the token match and the speed gate compare like with like.
+    static func nativeMTPOrdinaryReferenceRequest(
+        id: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> ContinuousBatchSchedulerRequest {
+        ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: 0,
+            topP: 1,
+            smallMRoute: SmallMRoute.requestRoute(nativeAdmitted: true, processRoute: processRoute, mixed: mixed)
+        )
     }
 
     func runNativeMTPCanary(_ request: CoordinatorClient.NativeMTPCanaryRequestPayload) async -> CoordinatorClient.NativeMTPCanaryResultPayload {
