@@ -4171,14 +4171,13 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     /// The retained head byte cap: summed logical bytes at most the cap.
-    func testNativeMTPRetainedDrafterByteCap() {
-        // CPU device: CI test hosts have no default metallib.
-        Device.withDefaultDevice(.cpu) {
-            let arrays = [MLXArray.zeros([4], dtype: .float32), MLXArray.zeros([2], dtype: .float16)]
-            XCTAssertTrue(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 20))
-            XCTAssertFalse(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 19))
-        }
+    func testNativeMTPRetainedDrafterByteCap() throws {
         XCTAssertEqual(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterByteCap, 1 << 30)
+        // Building MLX arrays needs MLX's Metal library, even on the CPU device.
+        try requireMetal()
+        let arrays = [MLXArray.zeros([4], dtype: .float32), MLXArray.zeros([2], dtype: .float16)]
+        XCTAssertTrue(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 20))
+        XCTAssertFalse(PagedKVSharedForwardBackend.nativeMTPRetainedDrafterFits(arrays, cap: 19))
     }
 
     /// End to end through the scheduler with a real (tiny, random-weight)
