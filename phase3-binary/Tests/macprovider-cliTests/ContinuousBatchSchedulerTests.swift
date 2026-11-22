@@ -8955,11 +8955,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxOutputTokens: 220, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
         let ordinary = Task { try await scheduler.submit(ContinuousBatchSchedulerRequest(id: "ordinary",
             conversationKey: "", promptTokens: [1], maxOutputTokens: 220, temperature: 0, topP: 1)) }
-        // All four rows known to the scheduler (decoding, prefilling or queued).
-        try await eventually {
-            let m = await scheduler.metrics()
-            return m.waitingCount + m.activeDecodeRows + m.activePromptRows >= 4
-        }
+        try await eventually { await scheduler.metrics().waitingCount >= 2 }
         await gate.open()
         let lowResult = try await low.value
         let highResult = try await high.value
