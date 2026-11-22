@@ -3,7 +3,8 @@
 
 usage: mixed_load.py --port P --model ID --label A1 --out rows.jsonl
                      [--trials 6] [--ctx 1000] [--ord-rows 2] [--ord-out 512] [--nat-out 1024]
-                     [--cells ord1,nat1,mix] [--ordinary-field x_lab_2462_ordinary]
+                     [--cells ord1,nat1,mix,mix_late] [--late-after 128]
+                     [--ordinary-field x_lab_2462_ordinary]
 
 How a request becomes native or ordinary (NativeMTP.swift `NativeMTPDecodeSelector.reason`):
 a greedy text request with only admitted top-level keys is native-eligible on a serve whose
@@ -15,21 +16,29 @@ sampler, no conversation key, no cache lease). This is a property of the request
 at any arrival order and at one row, where the active-row cap cannot apply.
 A native row is admitted only when no other request is in flight (`resolvingActiveRows`,
 signed max_native_active_rows = 1), so a `mix` trial sends the native row first and starts the
-ordinary rows only after its first streamed token.
+ordinary rows only after its first streamed token. On a `mixed` serve (SPEC-038 v0.3.63) those
+ordinary rows are admitted on row_invariant (reason native_active), so the step is one forward
+per decode kind, as on a process-wide row_invariant serve.
 
 Cells, each trial in this order, one trial of every cell before the next trial:
   ord1  every ordinary prompt alone, one after another (1-row ordinary; on a `mixed` serve this
         is the 1-row stock-order serial reference of the `mix` ordinary rows: same prompts, same
         max_tokens);
   nat1  the native prompt alone (1-row native);
-  mix   the native prompt, then --ord-rows ordinary prompts at once while it decodes.
+  mix   the native prompt, then --ord-rows ordinary prompts at once while it decodes;
+  mix_late  --ord-rows ordinary prompts at once, then the native prompt (no ordinary field) once
+        every ordinary row has streamed --late-after content/reasoning chunks (each chunk is at
+        least one token). With the signed max_native_active_rows = 1 that late request is
+        admitted ordinary (capacity_above_native_bound) on the route the in-flight rows hold;
+        its native admissions are recorded, not assumed. Role `late`.
 Native prompt: prompts.build_messages(ctx, 0); ordinary prompt j: build_messages(ctx, j), j >= 1.
 Every prompt asks for a long story, so rows normally stop at max_tokens (finish=length).
 
 Each trial waits for an idle serve (no active decode row, nothing waiting, no in-flight route
 request) and records the /v1/status native_mtp counter change over the trial. A `mix` trial
 also samples /v1/status every --poll-s seconds and records the peak active decode rows and,
-on a `mixed` serve, the peak `small_m_route_requests` per route.
+on a `mixed` serve, the peak `small_m_route_requests` per route; every trial on a `mixed` serve
+records the `small_m_route_admissions` change (admissions per reason) over the trial.
 
 Output: one JSON line per row (kind=row) and per trial (kind=trial). Exit 0 when every request
 returned a usage frame and no error, else 1.
@@ -93,22 +102,37 @@ def wait_idle(port, poll_s, settle_s=1.0):
         time.sleep(poll_s)
 
 
-def first_token_marker(lines, event):
-    """Passes SSE lines through and sets `event` at the first content or reasoning delta."""
+def first_token_marker(lines, event, reached=None, after=0):
+    """Passes SSE lines through; sets `event` at the first content or reasoning delta and
+    `reached` (if given) at the `after`-th one."""
+    chunks = 0
     for raw in lines:
-        if not event.is_set() and raw.startswith(b"data:") and b"[DONE]" not in raw:
+        if (not event.is_set() or (reached is not None and not reached.is_set())) \
+                and raw.startswith(b"data:") and b"[DONE]" not in raw:
             try:
                 obj = json.loads(raw[5:].strip())
                 for ch in obj.get("choices") or []:
                     d = ch.get("delta") or {}
                     if d.get("content") or d.get("reasoning_content"):
+                        chunks += 1
                         event.set()
+                        if reached is not None and chunks >= after:
+                            reached.set()
             except ValueError:
                 pass
         yield raw
 
 
-def run_request(port, model, messages, max_tokens, extra=None, first=None, timeout=3600):
+def run_request(port, model, messages, max_tokens, extra=None, first=None, timeout=3600, reached=None, after=0):
+    """One streamed request. `first` and `reached` are always set when it returns."""
+    try:
+        return _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after)
+    finally:
+        if reached is not None:
+            reached.set()
+
+
+def _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after):
     body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0,
             "stream": True, "stream_options": {"include_usage": True}, **(extra or {})}
     first = first or threading.Event()
@@ -124,7 +148,7 @@ def run_request(port, model, messages, max_tokens, extra=None, first=None, timeo
             first.set()
             return {"error": f"http {resp.status}: {resp.read(2000).decode('utf-8', 'replace')}",
                     "t0": t0, "t_end": time.perf_counter()}
-        result = consume_stream(first_token_marker(iter(resp.readline, b""), first))
+        result = consume_stream(first_token_marker(iter(resp.readline, b""), first, reached, after))
     except (OSError, http.client.HTTPException) as exc:
         first.set()
         return {"error": f"{type(exc).__name__}: {exc}", "t0": t0, "t_end": time.perf_counter()}
@@ -168,13 +192,22 @@ class Poller(threading.Thread):
             self.stop.wait(self.poll_s)
 
 
-def overlap_share(row, native):
-    """Share of an ordinary row's decode span during which the native row was still decoding."""
+def overlap_share(row, other):
+    """Share of `row`'s decode span during which `other` was also decoding."""
     a, b = row.get("t_first_offset_s"), row.get("t_last_offset_s")
-    n_end = native.get("t_last_offset_s")
-    if a is None or b is None or n_end is None or b <= a:
+    o_start, o_end = other.get("t_first_offset_s"), other.get("t_last_offset_s")
+    if a is None or b is None or o_end is None or b <= a:
         return None
-    return round(max(0.0, min(b, n_end) - a) / (b - a), 4)
+    start = a if o_start is None else max(a, o_start)
+    return round(max(0.0, min(b, o_end) - start) / (b - a), 4)
+
+
+def admissions_delta(before, after):
+    """Change of `small_m_route_admissions` per reason; None when either read lacks it."""
+    b, a = cb_of(before).get("small_m_route_admissions"), cb_of(after).get("small_m_route_admissions")
+    if not isinstance(b, dict) or not isinstance(a, dict):
+        return None
+    return {k: (a.get(k) or 0) - (b.get(k) or 0) for k in sorted(set(a) | set(b))}
 
 
 def trial(args, cell, t, out):
@@ -195,7 +228,7 @@ def trial(args, cell, t, out):
         res = run_request(args.port, args.model, prompts.build_messages(args.ctx, 0), args.nat_out)
         rows.append(record(res, {**base, "kind": "row", "role": "native", "prompt_row": 0,
                                  "max_tokens": args.nat_out}, t0))
-    else:
+    elif cell == "mix":
         poller = Poller(args.port, args.poll_s)
         poller.start()
         first = threading.Event()
@@ -223,6 +256,38 @@ def trial(args, cell, t, out):
                                     "max_tokens": args.ord_out}, t0)
             r["native_overlap_share"] = overlap_share(r, native)
             rows.append(r)
+    else:
+        poller = Poller(args.port, args.poll_s)
+        poller.start()
+        results = {}
+        reached = {j: threading.Event() for j in range(1, args.ord_rows + 1)}
+
+        def go_ord(j):
+            results[j] = run_request(args.port, args.model, prompts.build_messages(args.ctx, j), args.ord_out,
+                                     ordinary_extra, reached=reached[j], after=args.late_after)
+
+        def go_late():
+            results["late"] = run_request(args.port, args.model, prompts.build_messages(args.ctx, 0), args.nat_out)
+
+        workers = [threading.Thread(target=go_ord, args=(j,)) for j in range(1, args.ord_rows + 1)]
+        for w in workers:
+            w.start()
+        for ev in reached.values():
+            ev.wait()
+        late = threading.Thread(target=go_late)
+        late.start()
+        for w in workers + [late]:
+            w.join()
+        poller.stop.set()
+        poller.join()
+        late_row = record(results["late"], {**base, "kind": "row", "role": "late", "prompt_row": 0,
+                                            "max_tokens": args.nat_out}, t0)
+        rows.append(late_row)
+        for j in range(1, args.ord_rows + 1):
+            r = record(results[j], {**base, "kind": "row", "role": "ordinary", "prompt_row": j,
+                                    "max_tokens": args.ord_out}, t0)
+            r["late_overlap_share"] = overlap_share(r, late_row)
+            rows.append(r)
     t_end = time.perf_counter()
     after = fetch_status(args.port)
     tokens = sum(r.get("completion_tokens") or 0 for r in rows)
@@ -230,6 +295,7 @@ def trial(args, cell, t, out):
     summary = {**base, "kind": "trial", "rows": len(rows),
                "native_mtp": native_mtp_delta(native_mtp_of(before), native_mtp_of(after)),
                "small_m_route": cb_of(after).get("small_m_route"),
+               "small_m_route_admissions": admissions_delta(before, after),
                "aggregate_tps": round(tokens / last, 3) if last else None,
                "wall_s": round(t_end - t0, 3),
                "errors": [r["error"] for r in rows if r.get("error")]}
@@ -241,7 +307,7 @@ def trial(args, cell, t, out):
     out.flush()
     print(f"TRIAL label={args.label} cell={cell} trial={t} rows={len(rows)} tokens={tokens} "
           f"agg_tps={summary['aggregate_tps']} native_admissions={summary['native_mtp'].get('requests_since_reset')} "
-          f"errors={len(summary['errors'])}"
+          f"errors={len(summary['errors'])} admissions={summary['small_m_route_admissions']}"
           + (f" peak_rows={poller.peak_rows} peak_routes={poller.peak_routes}" if poller else ""), flush=True)
     return not summary["errors"]
 
@@ -257,15 +323,19 @@ def main(argv=None):
     p.add_argument("--ord-rows", type=int, default=2)
     p.add_argument("--ord-out", type=int, default=512)
     p.add_argument("--nat-out", type=int, default=1024)
-    p.add_argument("--cells", default="ord1,nat1,mix")
+    p.add_argument("--cells", default="ord1,nat1,mix,mix_late")
+    p.add_argument("--late-after", type=int, default=128,
+                   help="mix_late: chunks every ordinary row streams before the late request starts")
     p.add_argument("--ordinary-field", default="x_lab_2462_ordinary")
     p.add_argument("--poll-s", type=float, default=0.5)
     args = p.parse_args(argv)
     cells = [c for c in args.cells.split(",") if c]
-    if not cells or any(c not in ("ord1", "nat1", "mix") for c in cells):
-        p.error("--cells takes ord1,nat1,mix")
+    if not cells or any(c not in ("ord1", "nat1", "mix", "mix_late") for c in cells):
+        p.error("--cells takes ord1,nat1,mix,mix_late")
     if args.ord_rows < 1 or args.trials < 1:
         p.error("--ord-rows and --trials must be >= 1")
+    if "mix_late" in cells and not 1 <= args.late_after < args.ord_out:
+        p.error("--late-after must be in [1, --ord-out)")
     ok = True
     with open(args.out, "a") as out:
         for t in range(1, args.trials + 1):

@@ -14,8 +14,9 @@
 #     `swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS`;
 #  3. filtered tests only, on Metal (the metallib is copied into the test bundle, so a Metal test
 #     that skips is a failure): SmallMRouteScopeTests|SmallMRouteTests|
-#     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests, which must include a
-#     passed testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute; then the mlx-swift
+#     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests and the scheduler's
+#     ContinuousBatchSchedulerTests/testSmallMRoute* (v0.3.63 sticky admission), which must
+#     include every REQUIRED_TESTS case passed; then the mlx-swift
 #     fork's MLXTests SmallMRouteTests from a copy of the package's own checkout
 #     (.build-tests/checkouts/mlx-swift), FORK_TESTS_UNAVAILABLE when that copy cannot build;
 #  4. serves in SERVES order (default "A1:A B:B A2:A", control-candidate-control), one at a time,
@@ -23,13 +24,17 @@
 #     signed native-MTP admission via native_mtp_mode auto + model_catalog_* provenance):
 #       A = config `small_m_route: row_invariant` (operatorForcesRowInvariant: today's
 #           process-wide row_invariant, reason operator_row_invariant),
-#       B = no override: FR-CB9 decides `mixed` (reason native_mtp_per_request).
+#       B = no override: FR-CB9 decides `mixed` (reason native_mtp_per_request); an ordinary
+#           request admitted while a row-invariant one is in flight joins row_invariant for life
+#           (SPEC-038 v0.3.63), so the `mix` cell runs one forward per decode kind as on A.
 #     Each serve: ready, idle CB self-check verdict (route_status.py gate), the cached-turns probe
 #     decided, startup event and /v1/status route checked, batching active, native MTP on, then
-#     mixed_load.py (cells ord1, nat1, mix; its header says how rows become native or ordinary).
+#     mixed_load.py (cells ord1, nat1, mix, mix_late; its header says how rows become native or
+#     ordinary).
 #     A later serve of the same mode starts with the earlier one's stored self-check verdict;
 #  5. verdict.py: gates, medians, `T2462_VERDICT PASS|FAIL ...`.
-# Knobs: TRIALS (6) CTX (1000) ORD_ROWS (2) ORD_OUT (512) NAT_OUT (1024) SERVES MIN_FREE_GB (60)
+# Knobs: TRIALS (6) CTX (1000) ORD_ROWS (2) ORD_OUT (512) NAT_OUT (1024) LATE_AFTER (128)
+#        CELLS (ord1,nat1,mix,mix_late) SERVES MIN_FREE_GB (60)
 #        SKIP_BUILD SKIP_TESTS SKIP_FORK_TESTS PORT (18462) SERVE_ENV ("K=V ...").
 # Watchdogs are stall detectors only (STALL_S without progress), never wall-clock cuts.
 # Every failure prints a `BLOCKER:` line; the job ends with JOB_PASS (every step ran; the
@@ -54,11 +59,21 @@ CTX=${CTX:-1000}
 ORD_ROWS=${ORD_ROWS:-2}
 ORD_OUT=${ORD_OUT:-512}
 NAT_OUT=${NAT_OUT:-1024}
+LATE_AFTER=${LATE_AFTER:-128}
+CELLS=${CELLS:-ord1,nat1,mix,mix_late}
 SERVES=${SERVES:-A1:A B:B A2:A}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 STALL_S=${STALL_S:-1800}
-TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests'
-REQUIRED_TEST=testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute
+TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|ContinuousBatchSchedulerTests/testSmallMRoute'
+# Each must have passed (the v0.3.63 sticky-admission tests and the mixed attach probe).
+REQUIRED_TESTS='testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute
+testAdmissionRouteJoinsRowInvariantWhileOneIsInFlight
+testOrdinaryAdmittedWhenIdleGetsStockOrder
+testOrdinaryAdmittedWithANativeRowActiveStaysRowInvariantAfterItFinishes
+testNativeAdmittedDuringStockOrderRowsTakesRowInvariantAndLaterArrivalsJoinIt
+testConcurrentAdmissionsBesideANativeRowAllJoinRowInvariant
+testNativeArrivingDuringStockRowsSplitsSessionsUntilTheStockRowsFinish
+testSmallMRouteTransientSplitDrainsToOneRouteOnceStockRowsFinish'
 # Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
 # Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
 # job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps
@@ -95,7 +110,7 @@ stop_serve() {
 }
 trap stop_serve EXIT
 mkdir -p "$RES"
-log "JOB_START run=$RUN_ID commit=$COMMIT src=$SRC serves=\"$SERVES\" trials=$TRIALS ctx=$CTX ord_rows=$ORD_ROWS ord_out=$ORD_OUT nat_out=$NAT_OUT port=$PORT"
+log "JOB_START run=$RUN_ID commit=$COMMIT src=$SRC serves=\"$SERVES\" cells=$CELLS trials=$TRIALS ctx=$CTX ord_rows=$ORD_ROWS ord_out=$ORD_OUT nat_out=$NAT_OUT late_after=$LATE_AFTER port=$PORT"
 
 # 1. Preflight.
 listening 8080 && die "a server listens on :8080; the Studio is not paused" 3
@@ -150,13 +165,20 @@ cp "$METALLIB" "$BIN/mlx.metallib" || die "metallib copy failed" 14
 shasum -a 256 "$BIN/macprovider-cli" "$BIN/mlx.metallib" > "$RES/identity.sha256"
 log "BUILD_DONE release $("$BIN/macprovider-cli" --version 2>&1 | head -n 1) cli_sha256=$(cut -c1-16 "$RES/identity.sha256" | head -n 1)"
 
-# count_cases LOG CLASSES_REGEX: prints "passed failed skipped" of XCTest cases in LOG.
+# case_names LOG STATUS: `Module.Class/testName` of every XCTest case in LOG with STATUS.
+case_names() {
+  grep -oE "Test Case '-\[[^] ]+ test[A-Za-z0-9_]+\]' $2" "$1" \
+    | sed -E "s/^Test Case '-\[([^ ]+) ([A-Za-z0-9_]+)\]' .*/\1\/\2/"
+}
+# count_cases LOG FILTER: prints "passed failed skipped" of XCTest cases in LOG that FILTER (a
+# `swift test --filter` regex over `Module.Class/testName`) selects.
 count_cases() {
-  local p f s
-  p=$(grep -cE "Test Case '-\[[^ ]*($2) test[A-Za-z0-9_]+\]' passed" "$1")
-  f=$(grep -cE "Test Case '-\[[^ ]*($2) test[A-Za-z0-9_]+\]' failed" "$1")
-  s=$(grep -cE "Test Case '-\[[^ ]*($2) test[A-Za-z0-9_]+\]' skipped" "$1")
-  echo "$p $f $s"
+  local st n out=""
+  for st in passed failed skipped; do
+    n=$(case_names "$1" "$st" | grep -cE "$2")
+    out="$out${out:+ }$n"
+  done
+  echo "$out"
 }
 
 # 3. Filtered tests on Metal.
@@ -174,11 +196,14 @@ if [ "${SKIP_TESTS:-0}" != 1 ]; then
   grep -q "Failed to load the default metallib" "$RES/tests.log" \
     && die "provider tests could not load the metallib (no Metal test ran): $RES/tests.log" 15
   read -r p f s <<< "$(count_cases "$RES/tests.log" "$TEST_FILTER")"
-  req=$(grep -cE "Test Case '-\[[^ ]* $REQUIRED_TEST\]' passed" "$RES/tests.log")
-  log "TESTS_DONE rc=$rc passed=$p failed=$f skipped=$s $REQUIRED_TEST=$([ "$req" -ge 1 ] && echo passed || echo not_passed)"
+  missing=""
+  for t in $REQUIRED_TESTS; do
+    case_names "$RES/tests.log" passed | grep -qE "/$t\$" || missing="$missing${missing:+,}$t"
+  done
+  log "TESTS_DONE rc=$rc passed=$p failed=$f skipped=$s required_not_passed=${missing:-none}"
   grep -E "Test Case '-\[.*\]' (failed|skipped)" "$RES/tests.log" | head -n 20 | sed 's/^/TESTS_CASE /'
-  if [ "$rc" != 0 ] || [ "$f" != 0 ] || [ "$s" != 0 ] || [ "$p" = 0 ] || [ "$req" -lt 1 ]; then
-    TESTS_OK=0; blocker "filtered tests did not all pass on Metal (rc=$rc passed=$p failed=$f skipped=$s required=$req)"
+  if [ "$rc" != 0 ] || [ "$f" != 0 ] || [ "$s" != 0 ] || [ "$p" = 0 ] || [ -n "$missing" ]; then
+    TESTS_OK=0; blocker "filtered tests did not all pass on Metal (rc=$rc passed=$p failed=$f skipped=$s required_not_passed=${missing:-none})"
   fi
   FORK_SRC=$TEST_BUILD/checkouts/mlx-swift
   FORK=$LAB/fork-mlx-swift
@@ -326,7 +351,7 @@ PY
   log "CELLS_START $label"
   /usr/bin/python3 -I "$HERE/mixed_load.py" --port "$PORT" --model "$MODEL_KEY" --label "$label" --out "$d/rows.jsonl" \
     --trials "$TRIALS" --ctx "$CTX" --ord-rows "$ORD_ROWS" --ord-out "$ORD_OUT" --nat-out "$NAT_OUT" \
-    > "$d/cells.log" 2>&1; rc=$?
+    --cells "$CELLS" --late-after "$LATE_AFTER" > "$d/cells.log" 2>&1; rc=$?
   grep '^TRIAL ' "$d/cells.log" | sed 's/^/CELL /'
   log "CELLS_DONE $label rc=$rc"
   [ $rc = 0 ] || blocker "$label: a request failed: $(grep -v '^TRIAL ' "$d/cells.log" | tail -n 3 | tr '\n' ' ' | cut -c1-300)"

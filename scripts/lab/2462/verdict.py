@@ -11,22 +11,30 @@ Path checks (a failure means the cells did not measure what they claim):
   every request returned usage and no error; per trial the native_mtp admissions are 0 in ord1
   and 1 in nat1 and mix, with no pre-output fallback or post-output failure and counters not
   reset; every A trial reports small_m_route row_invariant and every B trial mixed; a mix trial
-  peaks at 1 + ord_rows active decode rows, and on B at row_invariant=1 / stock_order=ord_rows
-  in-flight route requests; native proposals > 0 in nat1 and mix.
+  peaks at 1 + ord_rows active decode rows, and on B at row_invariant=1+ord_rows / stock_order=0
+  in-flight route requests (SPEC-038 v0.3.63: the ordinary rows join row_invariant); on B the
+  small_m_route_admissions change is idle=ord_rows in ord1, native_admitted=1 in nat1, and
+  native_admitted=1 / native_active=ord_rows in mix; native proposals > 0 in nat1 and mix.
+  mix_late (INFO cell) is checked only for errors and counter resets.
 Gates:
   native_identity  every native row (nat1 and mix) of B has the same output (content + reasoning)
                    and token count as the native row of the same cell and trial on each A serve;
-  ordinary_serial  on B, each mix ordinary row equals the ord1 row of the same prompt and trial
-                   (output and token count): SPEC-038 FR-CB9 stock order, a lone row equals the
-                   same row of a 1- or 2-row forward. Gated only for ord_rows <= 2 (3+ rows MAY
-                   differ in low bits); reported otherwise;
+  ordinary_route_identity  on B each mix ordinary row (row_invariant by v0.3.63) equals the mix
+                   row of the same prompt and trial on each A serve (output and token count):
+                   same route, row-invariant kernels, so the same bits;
   token_counts     every pair compared for speed has equal token counts: native rows across
-                   serves, and ordinary rows of the same cell, prompt and trial across serves.
+                   serves, and ordinary rows of the same cell, prompt and trial across serves
+                   (ord1 and mix).
+  INFO ordinary_serial: on B, mix ordinary rows (row_invariant) against the ord1 rows (stock
+  order); a lone stock order row MAY differ in low bits from a row-invariant one.
 Speed (AGENTS.md Swarm Runs step 3), medians per serve:
-  goal: ordinary decode tok/s in ord1 and in mix; B must beat both neighbouring A serves;
-  cost: native decode tok/s (nat1, mix), native acceptance (nat1, mix), mix aggregate output
-  tok/s: B >= (1 - cost) x each A; TTFT medians (ord1 ordinary, nat1 native, mix native):
-  B <= (1 + cost) x each A + 0.05 s.
+  goal: ordinary decode tok/s in ord1; B must beat both neighbouring A serves;
+  cost: ordinary decode tok/s in mix, native decode tok/s (nat1, mix), native acceptance (nat1,
+  mix), mix aggregate output tok/s: B >= (1 - cost) x each A; TTFT medians (ord1 ordinary,
+  nat1 native, mix native): B <= (1 + cost) x each A + 0.05 s.
+  INFO: the mix_late cell (2 ordinary rows, then the late request after --late-after chunks):
+  aggregate, ordinary and late-row decode tok/s, late-row TTFT, its native admissions and the
+  peak route requests: the transient split cost.
   Every goal median needs at least --min-samples samples per serve.
 Prints T2462_* lines and one `T2462_VERDICT PASS|FAIL ...` line. Exit 0 PASS, 1 FAIL, 2 unusable input.
 """
@@ -78,14 +86,25 @@ def metrics(rows, trials):
         "mix_native_overlap_share": med(sel("mix", "ordinary", "native_overlap_share")),
         "nat1_acceptance": acceptance(trials, "nat1"),
         "mix_acceptance": acceptance(trials, "mix"),
+        "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
+        "mix_late_ordinary_decode_tps": med(sel("mix_late", "ordinary", "decode_tps")),
+        "mix_late_late_decode_tps": med(sel("mix_late", "late", "decode_tps")),
+        "mix_late_late_ttft_s": med(sel("mix_late", "late", "ttft_s")),
+        "mix_late_late_overlap_share": med(sel("mix_late", "ordinary", "late_overlap_share")),
+        "mix_late_native_admissions": med([(t.get("native_mtp") or {}).get("requests_since_reset")
+                                           for t in trials if t["cell"] == "mix_late"]),
     }
     return m
 
 
-GOAL = ("ord1_ordinary_decode_tps", "mix_ordinary_decode_tps")
-HIGHER = ("nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance", "mix_acceptance", "mix_aggregate_tps")
+GOAL = ("ord1_ordinary_decode_tps",)
+HIGHER = ("mix_ordinary_decode_tps", "nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance",
+          "mix_acceptance", "mix_aggregate_tps")
 LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s")
-INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share")
+INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_tps", "mix_late_ordinary_decode_tps",
+        "mix_late_late_decode_tps", "mix_late_late_ttft_s", "mix_late_late_overlap_share",
+        "mix_late_native_admissions")
+GATED_CELLS = ("ord1", "nat1", "mix")
 
 
 def path_checks(label, mode, rows, trials, ord_rows):
@@ -100,6 +119,10 @@ def path_checks(label, mode, rows, trials, ord_rows):
         if not nm.get("acceptance_valid"):
             bad.append(f"{label} {t['cell']} t{t['trial']}: native_mtp counters unreadable or reset")
             continue
+        if t["cell"] not in GATED_CELLS:
+            if t.get("small_m_route") != want_route:
+                bad.append(f"{label} {t['cell']} t{t['trial']}: small_m_route {t.get('small_m_route')} != {want_route}")
+            continue
         if nm.get("requests_since_reset") != want:
             bad.append(f"{label} {t['cell']} t{t['trial']}: native admissions {nm.get('requests_since_reset')} != {want}")
         if nm.get("preoutput_fallbacks") or nm.get("postoutput_failures"):
@@ -113,8 +136,15 @@ def path_checks(label, mode, rows, trials, ord_rows):
                 bad.append(f"{label} mix t{t['trial']}: peak active decode rows {t.get('peak_active_decode_rows')} != {1 + ord_rows}")
             if mode == "B":
                 pk = t.get("peak_small_m_route_requests") or {}
-                if pk.get("row_invariant") != 1 or pk.get("stock_order") != ord_rows:
-                    bad.append(f"{label} mix t{t['trial']}: peak route requests {pk} != row_invariant=1 stock_order={ord_rows}")
+                if pk.get("row_invariant") != 1 + ord_rows or pk.get("stock_order"):
+                    bad.append(f"{label} mix t{t['trial']}: peak route requests {pk} != row_invariant={1 + ord_rows} stock_order=0")
+        if mode == "B":
+            want_adm = {"ord1": {"idle": ord_rows, "native_active": 0, "native_admitted": 0},
+                        "nat1": {"idle": 0, "native_active": 0, "native_admitted": 1},
+                        "mix": {"idle": 0, "native_active": ord_rows, "native_admitted": 1}}[t["cell"]]
+            adm = t.get("small_m_route_admissions")
+            if adm is None or any(adm.get(k) != v for k, v in want_adm.items()):
+                bad.append(f"{label} {t['cell']} t{t['trial']}: route admissions {adm} != {want_adm}")
     return bad
 
 
@@ -161,7 +191,7 @@ def main(argv=None):
     # Gate: native identity A vs B, and token counts.
     nat_mismatch = tok_mismatch = 0
     for k, rb in by[b].items():
-        if k[2] != "native":
+        if k[2] != "native" or k[0] not in GATED_CELLS:
             continue
         for ctl in (a1, a2):
             ra = by[ctl].get(k)
@@ -170,20 +200,29 @@ def main(argv=None):
                 print(f"T2462_NATIVE_DIFF {ctl} vs {b} cell={k[0]} trial={k[1]}")
             if ra is None or ra.get("completion_tokens") != rb.get("completion_tokens"):
                 tok_mismatch += 1
-    # Gate: B mix ordinary rows equal the B ord1 serial reference.
-    ser_mismatch = 0
+    # Gate: B mix ordinary rows (row_invariant, v0.3.63) equal the A mix rows.
+    route_mismatch = 0
+    for k, rb in by[b].items():
+        if k[0] != "mix" or k[2] != "ordinary":
+            continue
+        for ctl in (a1, a2):
+            ra = by[ctl].get(k)
+            if ra is None or ra["output_sha256"] != rb["output_sha256"] or ra.get("completion_tokens") != rb.get("completion_tokens"):
+                route_mismatch += 1
+                print(f"T2462_ORDINARY_ROUTE_DIFF {ctl} vs {b} trial={k[1]} prompt_row={k[3]} "
+                      f"tokens={rb.get('completion_tokens')}/{ra.get('completion_tokens') if ra else None}")
+    # INFO: B mix ordinary rows (row_invariant) against the B ord1 rows (stock order).
+    ser_diff = 0
     for k, rb in by[b].items():
         if k[0] != "mix" or k[2] != "ordinary":
             continue
         ref = by[b].get(("ord1", k[1], "ordinary", k[3]))
         if ref is None or ref["output_sha256"] != rb["output_sha256"] or ref.get("completion_tokens") != rb.get("completion_tokens"):
-            ser_mismatch += 1
-            print(f"T2462_ORDINARY_SERIAL_DIFF {b} trial={k[1]} prompt_row={k[3]} "
-                  f"tokens={rb.get('completion_tokens')}/{ref.get('completion_tokens') if ref else None}")
+            ser_diff += 1
     # Token counts of ordinary rows across serves (equal work for the speed comparison).
     ord_text_diff = 0
     for k, rb in by[b].items():
-        if k[2] != "ordinary":
+        if k[2] != "ordinary" or k[0] not in GATED_CELLS:
             continue
         for ctl in (a1, a2):
             ra = by[ctl].get(k)
@@ -197,17 +236,17 @@ def main(argv=None):
                 if k[0] == "mix" and k[2] == "ordinary"
                 and (by[ctl].get(("ord1", k[1], "ordinary", k[3])) or {}).get("output_sha256") != ra["output_sha256"])
     finish = collections.Counter(r.get("finish") for label in labels for r in data[label][0])
-    print(f"T2462_INFO a_mix_vs_ord1_diffs={a_ser} ordinary_a_vs_b_text_diffs={ord_text_diff} finish={dict(finish)}")
+    print(f"T2462_INFO a_mix_vs_ord1_diffs={a_ser} b_mix_vs_ord1_diffs={ser_diff} "
+          f"ordinary_a_vs_b_text_diffs={ord_text_diff} finish={dict(finish)}")
 
     gates = {
         "native_identity": nat_mismatch == 0,
-        "ordinary_serial": ser_mismatch == 0 if a.ord_rows <= 2 else None,
+        "ordinary_route_identity": route_mismatch == 0,
         "token_counts": tok_mismatch == 0,
     }
     for g, ok in gates.items():
-        print(f"T2462_GATE {g} {'PASS' if ok else ('INFO' if ok is None else 'FAIL')}"
-              + (f" mismatches={ser_mismatch} (ord_rows={a.ord_rows} > 2: not gated)" if ok is None else ""))
-        if ok is False:
+        print(f"T2462_GATE {g} {'PASS' if ok else 'FAIL'}")
+        if not ok:
             failures.append(g)
 
     # Speed.
@@ -249,7 +288,9 @@ def main(argv=None):
             f"acceptance nat1={s['nat1_acceptance']['B']} mix={s['mix_acceptance']['B']} "
             f"mix_aggregate_tps={s['mix_aggregate_tps']['A1']}/{s['mix_aggregate_tps']['B']}/{s['mix_aggregate_tps']['A2']} "
             f"({gain('mix_aggregate_tps')}) ttft_ord1={s['ord1_ordinary_ttft_s']['B']}s ttft_native={s['nat1_native_ttft_s']['B']}s "
-            f"gates native_identity={gates['native_identity']} ordinary_serial={gates['ordinary_serial']} "
+            f"mix_late_aggregate_tps={s['mix_late_aggregate_tps']['A1']}/{s['mix_late_aggregate_tps']['B']}/"
+            f"{s['mix_late_aggregate_tps']['A2']} ({gain('mix_late_aggregate_tps')}, INFO) "
+            f"gates native_identity={gates['native_identity']} ordinary_route_identity={gates['ordinary_route_identity']} "
             f"token_counts={gates['token_counts']}"
             + (f" failed={','.join(sorted(set(failures)))}" if failures else ""))
     print(line, flush=True)
