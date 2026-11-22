@@ -652,7 +652,8 @@ extension ModelRuntime {
         promptResumeBoundaries: [Int] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         grammarConstraint: GrammarConstraintState? = nil,
-        nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
+        nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil,
+        smallMRoute: SmallMRoute? = nil
     ) throws -> ContinuousBatchSubmission {
         guard let requestID = schedulerRequestID(for: request) else {
             throw attachedPagedKVUnavailableError(
@@ -693,7 +694,8 @@ extension ModelRuntime {
                 nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
                 nativeMTPAdaptationConfig: nativeMTPAdmission?.adaptationConfig,
-                ingestProvenance: request.ingestProvenance
+                ingestProvenance: request.ingestProvenance,
+                smallMRoute: smallMRoute
             )
         )
     }

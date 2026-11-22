@@ -9889,7 +9889,11 @@ maxTokens: 1,
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         configureConversationCacheMemoryBudget()
-        let coldContext = coldContext(for: request, snapshot: snapshot)
+        // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
+        // here from its native admission before any cache is read. A native
+        // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
+        let requestSmallMRoute = SmallMRoute.requestRoute(nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP)
+        let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -9915,7 +9919,8 @@ maxTokens: 1,
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
                     && prepared.promptSnapshotAttachesToContinuousBatchRow,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                smallMRoute: requestSmallMRoute
             )
         }
         var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
@@ -9994,9 +9999,11 @@ maxTokens: 1,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
-            nativeMTPAdmission: nativeMTPAdmission
+            nativeMTPAdmission: nativeMTPAdmission,
+            smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
+        SmallMRouteRequestCounter.shared.begin(requestSmallMRoute)
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=complete")
             // Non-streaming receipts report full generation latency as TTFT
@@ -10011,6 +10018,7 @@ maxTokens: 1,
                 )
             }
         } catch {
+            SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
@@ -10030,6 +10038,7 @@ maxTokens: 1,
             throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
+        SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             try drainCancelled.check()
@@ -10484,7 +10493,11 @@ maxTokens: 1,
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         configureConversationCacheMemoryBudget()
-        let coldContext = coldContext(for: request, snapshot: snapshot)
+        // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
+        // here from its native admission before any cache is read. A native
+        // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
+        let requestSmallMRoute = SmallMRoute.requestRoute(nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP)
+        let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -10510,7 +10523,8 @@ maxTokens: 1,
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
                     && prepared.promptSnapshotAttachesToContinuousBatchRow,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                smallMRoute: requestSmallMRoute
             )
         }
         var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
@@ -10581,9 +10595,11 @@ maxTokens: 1,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
-            nativeMTPAdmission: nativeMTPAdmission
+            nativeMTPAdmission: nativeMTPAdmission,
+            smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
+        SmallMRouteRequestCounter.shared.begin(requestSmallMRoute)
         let timeline = RequestTimeline.current ?? RequestTimeline()
         do {
             CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=stream")
@@ -10619,6 +10635,7 @@ maxTokens: 1,
                 }, onStarted: { timeline.markStarted() })
             }
         } catch {
+            SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
             let submissionError = await Self.continuousBatchFailureAfterRetirement(
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
@@ -10637,6 +10654,7 @@ maxTokens: 1,
             // streaming and non-streaming paths cannot drift.
             throw error
         }
+        SmallMRouteRequestCounter.shared.end(requestSmallMRoute)
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             if let error = streamState.error() {
@@ -13869,14 +13887,20 @@ maxTokens: maxTokens,
     /// process refuses it too: a verify window of three or more rows takes
     /// the batch kernel, which may differ from the request's own one-row
     /// decode (SPEC-048 R015/R016). `SmallMRoute.decide` keeps any process
-    /// whose native MTP may activate on the row-invariant route, so this is
-    /// reached only if an admission set appears after startup.
-    nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
+    /// whose native MTP may activate on the row-invariant route or `mixed`,
+    /// so this is reached only if an admission set appears after startup. A
+    /// `mixed` process (v0.3.61) allows it: each native-admitted request
+    /// runs the row-invariant route.
+    nonisolated static func nativeMTPActivationRefusal(
+        mode: NativeMTPMode,
+        route: SmallMRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
         switch route {
         case .rowInvariant: return nil
         case .serialOnly: return "small_m_route_serial_only"
-        case .stockOrder: return "small_m_route_stock_order"
+        case .stockOrder: return mixed ? nil : "small_m_route_stock_order"
         }
     }
 
