@@ -8955,7 +8955,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxOutputTokens: 220, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
         let ordinary = Task { try await scheduler.submit(ContinuousBatchSchedulerRequest(id: "ordinary",
             conversationKey: "", promptTokens: [1], maxOutputTokens: 220, temperature: 0, topP: 1)) }
-        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        // All four rows known to the scheduler (decoding, prefilling or queued).
+        try await eventually {
+            let m = await scheduler.metrics()
+            return m.waitingCount + m.activeDecodeRows + m.activePromptRows >= 4
+        }
         await gate.open()
         let lowResult = try await low.value
         let highResult = try await high.value
@@ -12530,6 +12534,62 @@ extension ContinuousBatchSchedulerTests {
         XCTAssertEqual(riRoute, .some(.rowInvariant))
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.63): a native row (and the ordinary row
+    /// admitted beside it on row-invariant) arriving while stock order rows
+    /// decode splits each step into one forward per route; once the stock
+    /// order rows finish every forward is row-invariant. No forward ever
+    /// holds rows of two routes.
+    func testSmallMRouteTransientSplitDrainsToOneRouteOnceStockRowsFinish() async throws {
+        let routes: [String: macprovider_cli.SmallMRoute] = [
+            "so-a": .stockOrder, "so-b": .stockOrder, "ri-n": .rowInvariant, "ri-o": .rowInvariant,
+        ]
+        let gate = AsyncGate()
+        let backend = SmallMRouteRecordingBackend(firstDecodeGate: gate)
+        let scheduler = try await makeScheduler(maxActiveRows: 4, maxPrefillRowsPerIteration: 4, backend: backend)
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for id in ["so-a", "so-b"] {
+            tasks.append(Task {
+                try await scheduler.submit(.init(
+                    id: id, conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 6, smallMRoute: routes[id]
+                ))
+            })
+        }
+        try await eventually { await backend.firstDecodeIsHeld() }
+        tasks.append(Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "ri-n", promptTokens: [1, 2], maxOutputTokens: 9, proposals: Array(repeating: 5, count: 8),
+                maximumDepth: 1, smallMRoute: .rowInvariant
+            ))
+        })
+        tasks.append(Task {
+            try await scheduler.submit(.init(
+                id: "ri-o", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 30, smallMRoute: .rowInvariant
+            ))
+        })
+        // All four rows known to the scheduler (decoding, prefilling or queued).
+        try await eventually {
+            let m = await scheduler.metrics()
+            return m.waitingCount + m.activeDecodeRows + m.activePromptRows >= 4
+        }
+        await gate.open()
+        for task in tasks { _ = try await task.value }
+
+        let calls = await backend.recordedCalls()
+        try Self.assertOneRoutePerForward(calls, routes: routes)
+        let forwards = calls.enumerated().filter { ["decode", "verify"].contains($0.element.kind) }
+        let lastStock = try XCTUnwrap(forwards.last { $0.element.scope == .stockOrder }?.offset)
+        // The split: a row-invariant forward ran while stock order rows still decoded.
+        XCTAssertTrue(
+            forwards.contains { $0.element.scope == .rowInvariant && $0.offset < lastStock },
+            "no row-invariant forward ran beside the stock order rows"
+        )
+        // Then one route: every forward after the last stock order one is row-invariant.
+        let after = forwards.filter { $0.offset > lastStock }
+        XCTAssertFalse(after.isEmpty, "the row-invariant rows ended with the stock order rows")
+        XCTAssertTrue(after.allSatisfy { $0.element.scope == .rowInvariant })
+        XCTAssertTrue(after.contains { $0.element.requestIDs.contains("ri-o") }, "ri-o left row-invariant")
+    }
+
     private static func assertOneRoutePerForward(
         _ calls: [SmallMRouteRecordingBackend.Call],
         routes: [String: macprovider_cli.SmallMRoute],
@@ -12556,10 +12616,19 @@ private actor SmallMRouteRecordingBackend: ContinuousBatchSchedulerBackend {
     }
 
     private var calls: [Call] = []
+    /// When set, the first decode call waits for it to open.
+    private let firstDecodeGate: AsyncGate?
+    private var firstDecodeHeld = false
+
+    init(firstDecodeGate: AsyncGate? = nil) {
+        self.firstDecodeGate = firstDecodeGate
+    }
 
     func recordedCalls() -> [Call] {
         calls
     }
+
+    func firstDecodeIsHeld() -> Bool { firstDecodeHeld }
 
     private func record(_ kind: String, _ ids: [String]) {
         calls.append(Call(kind: kind, scope: SmallMRouteScope.current, requestIDs: ids))
@@ -12574,6 +12643,10 @@ private actor SmallMRouteRecordingBackend: ContinuousBatchSchedulerBackend {
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
         record("decode", rows.map(\.requestID))
+        if let firstDecodeGate, !firstDecodeHeld {
+            firstDecodeHeld = true
+            await firstDecodeGate.wait()
+        }
         return rows.map { .output(ContinuousBatchDecodeOutput(requestID: $0.requestID, token: 5)) }
     }
 

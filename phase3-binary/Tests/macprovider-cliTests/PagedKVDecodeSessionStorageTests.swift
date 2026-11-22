@@ -1021,6 +1021,72 @@ final class PagedKVPerRouteDecodeSessionTests: XCTestCase {
     }
 }
 
+/// SPEC-038 FR-CB9 (v0.3.63, Related: #2462): a native row admitted while
+/// stock order rows decode splits the step into one session per route; once
+/// the stock order rows finish only the row-invariant session is left, and
+/// the ordinary row admitted beside the native one stays on it.
+extension PagedKVPerRouteDecodeSessionTests {
+    func testNativeArrivingDuringStockRowsSplitsSessionsUntilTheStockRowsFinish() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "so-a": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 91),
+            "so-b": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 92),
+            "ri-n": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 93),
+            "ri-o": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 94),
+        ]
+        let rows = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        let backend = rows.backend
+        let builds = RouteBuildLog()
+        SmallMRouteScope.buildObserverForTest = { builds.append($0) }
+        defer { SmallMRouteScope.buildObserverForTest = nil }
+
+        func on(_ route: macprovider_cli.SmallMRoute, _ id: String, _ body: () async throws -> Void) async throws {
+            builds.reset()
+            try await SmallMRouteScope.run(route) { try await body() }
+            let seen = builds.all
+            XCTAssertFalse(seen.isEmpty, "\(id): no graph built")
+            XCTAssertEqual(Set(seen.map { $0.map { "\($0)" } ?? "none" }), ["\(route.mlxRoute!)"], "\(id) built off its route")
+        }
+
+        // Two ordinary rows admitted idle: stock order, one session.
+        try await on(.stockOrder, "prefill so-a") { try await rows.prefillAll("so-a") }
+        try await on(.stockOrder, "prefill so-b") { try await rows.prefillAll("so-b") }
+        try await on(.stockOrder, "decode so") { try await rows.decode(["so-a", "so-b"], steps: 2) }
+        XCTAssertEqual(backend.decodeSessionRoutesForTest(), [.stockOrder])
+
+        // A native row arrives, then an ordinary row admitted beside it
+        // (`native_active`): both row-invariant, so the split is two sessions.
+        try await on(.rowInvariant, "prefill ri-n") { try await rows.prefillAll("ri-n") }
+        try await on(.rowInvariant, "prefill ri-o") { try await rows.prefillAll("ri-o") }
+        for round in 0 ..< 2 {
+            try await on(.stockOrder, "decode so \(round)") { try await rows.decode(["so-a", "so-b"], steps: 2) }
+            try await on(.rowInvariant, "decode ri \(round)") { try await rows.decode(["ri-n", "ri-o"], steps: 2) }
+        }
+        XCTAssertEqual(backend.decodeSessionRoutesForTest(), [.stockOrder, .rowInvariant])
+
+        // The stock order rows finish: one session is left.
+        backend.finish(requestID: "so-a")
+        backend.finish(requestID: "so-b")
+        XCTAssertEqual(backend.decodeSessionRoutesForTest(), [.rowInvariant])
+
+        // The native row finishes; the ordinary row admitted beside it keeps
+        // decoding on row-invariant, and no stock order session comes back.
+        backend.finish(requestID: "ri-n")
+        try await on(.rowInvariant, "decode ri-o alone") { try await rows.decode(["ri-o"], steps: 2) }
+        XCTAssertEqual(backend.decodeSessionRoutesForTest(), [.rowInvariant])
+
+        // Every row's tokens equal its serial run: no row rode the other route's batch.
+        for id in ["so-a", "so-b", "ri-n", "ri-o"] {
+            let count = rows.generated[id]!.count
+            XCTAssertEqual(
+                rows.generated[id],
+                try PagedKVDecodeSessionStorageTests.serialGreedy(target: target, prompt: prompts[id]!, tokens: count),
+                "\(id) diverged from serial KVCacheSimple"
+            )
+        }
+    }
+}
+
 /// SPEC-038 FR-CB9 / SPEC-039 (Related: #2462): the attach isolation probe
 /// runs outside any request route. In a `mixed` process it must build on the
 /// process route (stock order), never fail closed for a missing route, or

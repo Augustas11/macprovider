@@ -5295,6 +5295,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// target lock; a throw fails the fold there.
     var nativeMTPBoundaryFoldHookForTest: (() throws -> Void)?
 
+    /// Tests (SPEC-038 FR-CB9 v0.3.63): the routes holding a stored decode session.
+    func decodeSessionRoutesForTest() -> Set<SmallMRoute> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(decodeSessions.keys)
+    }
+
     /// Whether some caller holds this backend's target `container.perform`.
     func targetLockHeldForTest() -> Bool {
         lock.lock()
