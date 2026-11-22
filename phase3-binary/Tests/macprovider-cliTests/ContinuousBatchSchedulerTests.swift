@@ -10572,7 +10572,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maximumActiveRows: Int = Int.max,
         adaptationConfig: NativeMTPAdaptationConfig? = nil,
         integrityProbe: Bool = false,
-        familyAdapter: String? = nil
+        familyAdapter: String? = nil,
+        smallMRoute: macprovider_cli.SmallMRoute? = nil
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -10593,7 +10594,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeMTPIntegrityProbe: integrityProbe,
             nativeMTPProposalTokens: proposals,
             nativeMTPAdaptationDirective: directive,
-            nativeMTPAdaptationConfig: adaptationConfig
+            nativeMTPAdaptationConfig: adaptationConfig,
+            smallMRoute: smallMRoute
         )
     }
 
@@ -12363,4 +12365,155 @@ private actor KernelRouteBackend: ContinuousBatchSchedulerBackend {
     func cancelInFlight() async {}
 
     func decodeForwardRows() -> [Int] { forwardRows }
+}
+
+/// SPEC-038 FR-CB9 (v0.3.61, #2462): in a `mixed` process each forward holds
+/// the rows of one small-M route and is built under that route's scope.
+extension ContinuousBatchSchedulerTests {
+    func testRequestRouteDefaultsFromDecodePathAndStaysExplicit() {
+        let ordinary = ContinuousBatchSchedulerRequest(
+            id: "o", conversationKey: "", promptTokens: [1], maxOutputTokens: 1
+        )
+        XCTAssertEqual(ordinary.smallMRoute, macprovider_cli.SmallMRoute.requestRoute(nativeAdmitted: false))
+        let native = Self.nativeRequest(id: "n", promptTokens: [1], maxOutputTokens: 1, proposals: [], maximumDepth: 1)
+        XCTAssertEqual(native.smallMRoute, macprovider_cli.SmallMRoute.requestRoute(nativeAdmitted: true))
+        // An admitted-native request that runs ordinary keeps its route.
+        let downgraded = ContinuousBatchSchedulerRequest(
+            id: "d", conversationKey: "", promptTokens: [1], maxOutputTokens: 1,
+            decodePath: .ordinary, smallMRoute: .rowInvariant
+        )
+        XCTAssertEqual(downgraded.decodePath, .ordinary)
+        XCTAssertEqual(downgraded.smallMRoute, .rowInvariant)
+    }
+
+    func testOrdinaryForwardsSplitBySmallMRoute() async throws {
+        let ids = ["ri-a", "so-a", "ri-b", "so-b"]
+        let routes: [String: macprovider_cli.SmallMRoute] = [
+            "ri-a": .rowInvariant, "ri-b": .rowInvariant, "so-a": .stockOrder, "so-b": .stockOrder,
+        ]
+        let backend = SmallMRouteRecordingBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 4, maxPrefillRowsPerIteration: 4, backend: backend)
+        let installed = await scheduler.installLabBatchComposition(ids)
+        XCTAssertTrue(installed)
+        let tasks = ids.map { id in
+            Task {
+                try await scheduler.submit(.init(
+                    id: id, conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 3,
+                    smallMRoute: routes[id]
+                ))
+            }
+        }
+        for task in tasks {
+            let result = try await task.value
+            XCTAssertEqual(result.outputTokens, [5, 5, 5])
+        }
+        let calls = await backend.recordedCalls()
+        try Self.assertOneRoutePerForward(calls, routes: routes)
+        XCTAssertEqual(Set(calls.filter { $0.kind == "decode" }.map(\.scope)), [.rowInvariant, .stockOrder])
+        XCTAssertEqual(Set(calls.filter { $0.kind == "prefill" }.map(\.scope)), [.rowInvariant, .stockOrder])
+    }
+
+    func testNativeMTPRoundsSplitBySmallMRoute() async throws {
+        let ids = ["ri-a", "so-a", "ri-b", "so-b"]
+        let routes: [String: macprovider_cli.SmallMRoute] = [
+            "ri-a": .rowInvariant, "ri-b": .rowInvariant, "so-a": .stockOrder, "so-b": .stockOrder,
+        ]
+        let backend = SmallMRouteRecordingBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 4, maxPrefillRowsPerIteration: 4, backend: backend)
+        let installed = await scheduler.installLabBatchComposition(ids)
+        XCTAssertTrue(installed)
+        let tasks = ids.map { id in
+            Task {
+                try await scheduler.submit(Self.nativeRequest(
+                    id: id, promptTokens: [1, 2], maxOutputTokens: 9, proposals: Array(repeating: 5, count: 8),
+                    maximumDepth: 1,
+                    smallMRoute: routes[id]
+                ))
+            }
+        }
+        for task in tasks {
+            let result = try await task.value
+            XCTAssertEqual(result.outputTokens, Array(repeating: 5, count: 9))
+        }
+        let calls = await backend.recordedCalls()
+        try Self.assertOneRoutePerForward(calls, routes: routes)
+        XCTAssertEqual(Set(calls.filter { $0.kind == "verify" }.map(\.scope)), [.rowInvariant, .stockOrder])
+        XCTAssertEqual(Set(calls.filter { $0.kind == "finalize" }.map(\.scope)), [.rowInvariant, .stockOrder])
+    }
+
+    private static func assertOneRoutePerForward(
+        _ calls: [SmallMRouteRecordingBackend.Call],
+        routes: [String: macprovider_cli.SmallMRoute],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        XCTAssertFalse(calls.isEmpty, file: file, line: line)
+        for call in calls {
+            let scope = try XCTUnwrap(call.scope, "\(call.kind) ran with no request route", file: file, line: line)
+            for id in call.requestIDs {
+                XCTAssertEqual(routes[id], scope, "\(call.kind) row \(id) built on the wrong route", file: file, line: line)
+            }
+        }
+    }
+}
+
+/// Records the task-local request route of every backend call and the rows
+/// it carried. Every row samples token 5.
+private actor SmallMRouteRecordingBackend: ContinuousBatchSchedulerBackend {
+    struct Call: Sendable {
+        let kind: String
+        let scope: macprovider_cli.SmallMRoute?
+        let requestIDs: [String]
+    }
+
+    private var calls: [Call] = []
+
+    func recordedCalls() -> [Call] {
+        calls
+    }
+
+    private func record(_ kind: String, _ ids: [String]) {
+        calls.append(Call(kind: kind, scope: SmallMRouteScope.current, requestIDs: ids))
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        record("prefill", rows.map(\.requestID))
+        return rows.map {
+            ContinuousBatchPrefillOutput(requestID: $0.requestID, sampledToken: $0.sampleFirstToken ? 5 : nil)
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        record("decode", rows.map(\.requestID))
+        return rows.map { .output(ContinuousBatchDecodeOutput(requestID: $0.requestID, token: 5)) }
+    }
+
+    nonisolated func finish(requestID: String) {}
+
+    func cancelInFlight() async {}
+
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        record("propose", rows.map(\.requestID))
+        return nil
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        record("verify", rows.map(\.requestID))
+        return rows.map { row in
+            NativeMTPVerifiedRow(
+                schedulerRowID: row.requestID,
+                packedRowIndex: row.packedRowIndex,
+                proposedTokenIDs: row.proposalTokens,
+                targetTopTokenIDs: Array(repeating: 5, count: row.proposalTokens.count + 1)
+            )
+        }
+    }
+
+    func finalizeNativeMTPPackedRound(rows: [ContinuousBatchNativeMTPFinalizeInput]) async throws {
+        record("finalize", rows.map(\.requestID))
+    }
 }
