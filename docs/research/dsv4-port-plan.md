@@ -7,6 +7,9 @@ References (read-only):
 - mlx-vlm 0.7.10 (PyPI wheel): `mlx_vlm/models/deepseek_v4/*`, `mlx_vlm/models/deepseek_v41/*`,
   `mlx_vlm/speculative/drafters/deepseek_v4_{mtp,dspark}/*`
 - mlx-lm `main` at `72be8c955d9a0d3099bd01865af288e0e947c3fa`: `mlx_lm/models/deepseek_v41.py`.
+  Every `L:` line number below refers to that commit. mlx-lm #2082 (`2d4df8d94a`) later moved each
+  model into its own folder: on newer main this file is `mlx_lm/models/deepseek_v41/model.py`, split
+  across `config.py`, `layers.py`, `kernels.py` and `checkpoint.py`, so the line numbers no longer apply there.
   There is no `deepseek_v4.py` on main. It exists only in open PRs #1195 and #1797.
 - mlx-lm open PRs: #1195 "Implement DSV4" (model plus `chat_templates/deepseek_v4.py`),
   #1797 "Add DeepSeek-V4-Flash without MTP (yet)", #1337 "Add deepseek_dsml tool parser".

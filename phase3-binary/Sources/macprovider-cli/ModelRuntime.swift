@@ -5812,7 +5812,7 @@ maxTokens: 1,
     }
 
     /// One ordinary reference run of the MTP self-check. SPEC-048 R003
-    /// (0.1.120): the reference is the request's own one-row decode on the
+    /// (0.1.121): the reference is the request's own one-row decode on the
     /// route its native probe runs, row-invariant in a `mixed` process, so
     /// the token match and the speed gate compare like with like.
     static func nativeMTPOrdinaryReferenceRequest(

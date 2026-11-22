@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.120
+**Version:** 0.1.121
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.120",
+  "version": "0.1.121",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -600,9 +600,18 @@ staging file created exclusively below a `0700` directory. That file MAY be a
 that descriptor's mode is already `0400`, so the new inode is created without
 owner write. `fclonefileat` copies the source mode and a later chmod does not
 revoke a descriptor opened in between, so any other mode uses the exclusive
-`0400` byte copy. A byte copy is also the fallback when the volume cannot
+`0400` byte copy. **(0.1.120)** The provider model store keeps adopted
+files at mode `0400`, and before validation the capture sets mode `0400` on
+each manifested regular file it owns (single link, no group/other write) that
+lies at or under a provider model store root (the static-feed path uses the
+store root itself as the artifact root); files elsewhere are never changed.
+This runs before the first stat validation records, so every later identity
+check (including `ctime`) compares against the sealed mode. A byte copy is
+also the fallback when the volume cannot
 clone (`ENOTSUP`) or the capture tree is on another volume (`EXDEV`); any
-other clone failure rejects the capture. The loader then closes every write
+other clone failure rejects the capture. Every byte copy, including the
+mode-based one, logs `event=native_mtp_capture_clone_fallback` with the
+bytes copied. The loader then closes every write
 handle, removes write
 permission, and hashes and loads only that staged inode. The capture-tree
 stamp and digest checks stay as they are. Lazy or mapped reads MUST retain
@@ -821,7 +830,7 @@ FR-KVP4 item 10). The route and every condition are printed as
 `event=small_m_route` at startup, and local `/v1/status` reports
 `continuous_batching.small_m_route` and `small_m_route_reason`.
 
-**(0.1.120) Per-request route.** Native MTP requires the row-invariant
+**(0.1.121) Per-request route.** Native MTP requires the row-invariant
 small-row route for the native request, not for the whole process. In a
 `row_invariant` process every request runs on it, as before. In a SPEC-038
 FR-CB9 `mixed` process (a process that would keep `row_invariant` only
@@ -2151,7 +2160,7 @@ listed file is missing or changes without a regenerated digest.
   evidence. A Metal-library change follows the same behavior test. A
   behavior change that slips through without requalification is caught on
   the device by the MTP-16 self-check at load and by the R033 canary.
-  **(0.1.120)** Moving a native request from a process-wide row-invariant
+  **(0.1.121)** Moving a native request from a process-wide row-invariant
   route to a per-request one (SPEC-038 FR-CB9 `mixed`) needs no
   requalification: the request's matmuls are captured on the row-invariant
   route with its partial-sum count of 4, so its verify windows, drafter
@@ -3059,7 +3068,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.120 (2026-11-22, Related: #2462)** — R003: native MTP requires the
+- **0.1.121 (2026-11-22, Related: #2462)** — R003: native MTP requires the
   row-invariant small-row route for the native request, per request in a
   SPEC-038 FR-CB9 `mixed` process (process route `stock_order`) and process
   wide otherwise. A native request keeps the route from admission to its
@@ -3075,6 +3084,13 @@ requests.
   models to `stock_order`. The R003 fork rows
   are unchanged by this text; the fork tag that carries the per-op route is
   named when it is cut.
+- **0.1.120 (2026-11-22, Related: #2468)** — MTP-2: the provider model
+  store keeps adopted files at mode `0400`, and the capture sets mode `0400`
+  on owned manifested files at or under the store root before validation, so a
+  store-held model is cloned rather than byte-copied. The clone gate (source
+  and clone birth mode `0400`) and all identity checks are unchanged. The
+  mode-based byte copy now logs `event=native_mtp_capture_clone_fallback`
+  with `reason=mode`.
 - **0.1.119 (2026-11-21, Related: #2459)** — R009 (MTP-9): a length-stopped
   row keeps the target hidden from its terminal-token forward next to the
   retained head, so a turn-2 hit at the full-turn reply end `r`, one past the

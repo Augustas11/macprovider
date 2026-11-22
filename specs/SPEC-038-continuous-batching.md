@@ -65,7 +65,7 @@ process pinned to `row_invariant` for native MTP, ordinary rows ran at
 benchmark for a 27B model (26.45 against 30.38 ms per pass), and native
 requests measured 0.85-0.88x of stock-order ordinary decode at about 30K
 tokens of context, one row. Native requests are unchanged (SPEC-048 R003
-0.1.120).
+0.1.121).
 
 **Change log v0.3.60 (2026-11-18, FR-CB14 width selection uses a 3% noise band instead of the calibrator's 15% tie band, Related: #2409):**
 The self-check prefers the lowest k within 3% of the best gain, not 15%.

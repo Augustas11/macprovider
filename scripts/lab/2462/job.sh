@@ -3,7 +3,7 @@
 # live, the runner's Studio target and the FLOP miner and holds the Studio GPU lock. This job
 # never pauses, restores or restarts any of them; it refuses to start when anything still runs.
 #
-# #2462 measures the FR-CB9 `mixed` small-row route (SPEC-038 v0.3.61/v0.3.62, SPEC-048 0.1.120
+# #2462 measures the FR-CB9 `mixed` small-row route (SPEC-038 v0.3.61/v0.3.62, SPEC-048 0.1.121
 # R003) on Qwen3.8-27B (catalog row qwen/qwen3.8-27b, durable store snapshot 8a8786e9, native MTP
 # admitted by the signed baked feed) against today's process-wide `row_invariant`:
 #  1. preflight: nothing on :8080/:8000/:$PORT, no live agent, no serve, no FLOP agent, no VM

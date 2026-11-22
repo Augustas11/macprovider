@@ -1327,6 +1327,7 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        NativeMTPAdmissionSidecar.registerOwnedModelStoreRoot(artifactResolver.durableRoot)
         guard let expected = resolved.modelArtifactSHA256 else {
             if resolved.modelArtifactPath != nil {
                 FileHandle.standardError.write(Data("model_artifact_path requires model_artifact_sha256 for a verified local snapshot\n".utf8))
@@ -2172,6 +2173,7 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = config.modelArtifactRoot, root.hasPrefix("/") {
             artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        NativeMTPAdmissionSidecar.registerOwnedModelStoreRoot(artifactResolver.durableRoot)
         defer { try? FileManager.default.removeItem(at: probeRoot) }
         let resolution: NativeMTPAdmissionResolution
         if let resolve {
@@ -3354,6 +3356,7 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             targetResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        NativeMTPAdmissionSidecar.registerOwnedModelStoreRoot(targetResolver.durableRoot)
         // #1689 FR-20b: a recommendation-generated context is recomputed for
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB

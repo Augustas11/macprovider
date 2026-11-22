@@ -1351,7 +1351,7 @@ extension SmallMRouteTests {
         XCTAssertEqual(grantLines.all, ["event=small_m_route action=verdict_recorded decision=granted slots=2 next_start=mixed"])
     }
 
-    /// SPEC-048 R003 (0.1.120): the MTP-16 self-check's ordinary reference
+    /// SPEC-048 R003 (0.1.121): the MTP-16 self-check's ordinary reference
     /// runs on the route its native probe runs.
     func testNativeMTPOrdinaryReferenceRunsOnTheNativeRoute() {
         let mixed = ModelRuntime.nativeMTPOrdinaryReferenceRequest(
