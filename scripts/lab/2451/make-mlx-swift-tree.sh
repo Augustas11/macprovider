@@ -8,7 +8,9 @@
 #   OUT_DIR      gets OUT_DIR/mlx-swift (SwiftPM names a path dependency after its directory)
 #   CORE_COMMIT  the fork commit to place at Source/Cmlx/mlx
 # Env: MLX_SWIFT_GIT (git dir holding mlx-swift MLX_SWIFT_REV), MLX_C_GIT (mlx-c), MLX_GIT (mlx
-#   fork), MLX_SWIFT_REV (default 12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7, SPEC048_MLX_SWIFT_REVISION).
+#   fork), MLX_SWIFT_REV (default 12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7, SPEC048_MLX_SWIFT_REVISION),
+#   CORE_MARKER (default MLX_LAB_2451_QMM_TILE, the lab hook; the ship window passes qmm_t_block_rows,
+#   the production tile of macprovider/2451-dense-tile).
 # Writes OUT_DIR/mlx-swift/Source/Cmlx/LAB_2451_CORE (the three revisions). Exit 2 on a missing
 # object or a core without the hook.
 set -euo pipefail
@@ -18,6 +20,7 @@ MLX_SWIFT_GIT=${MLX_SWIFT_GIT:-/Users/augstar/mlx-swift-2462/.git}
 MLX_C_GIT=${MLX_C_GIT:-/Users/augstar/mlx-swift-2462/.git/modules/submodules/mlx-c}
 MLX_GIT=${MLX_GIT:-/Users/augstar/mlx-upstream-753/.git}
 MLX_SWIFT_REV=${MLX_SWIFT_REV:-12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7}
+CORE_MARKER=${CORE_MARKER:-MLX_LAB_2451_QMM_TILE}
 die() { echo "BLOCKER: make-mlx-swift-tree: $*" >&2; exit 2; }
 
 git --git-dir="$MLX_SWIFT_GIT" cat-file -e "$MLX_SWIFT_REV^{commit}" 2>/dev/null \
@@ -30,8 +33,8 @@ git --git-dir="$MLX_GIT" cat-file -e "$CORE^{commit}" 2>/dev/null || die "no cor
 git --git-dir="$MLX_GIT" merge-base --is-ancestor "$PIN_CORE" "$CORE" 2>/dev/null \
   || die "core $CORE does not descend from the pin's core $PIN_CORE"
 # grep -c reads all input: grep -q would close the pipe early and fail the pipeline (pipefail).
-[ "$(git --git-dir="$MLX_GIT" show "$CORE:mlx/backend/metal/quantized.cpp" | grep -c MLX_LAB_2451_QMM_TILE)" -gt 0 ] \
-  || die "core $CORE has no MLX_LAB_2451 tile hook"
+[ "$(git --git-dir="$MLX_GIT" show "$CORE:mlx/backend/metal/quantized.cpp" | grep -c "$CORE_MARKER")" -gt 0 ] \
+  || die "core $CORE has no $CORE_MARKER in quantized.cpp"
 
 T=$OUT/mlx-swift
 rm -rf "$T"
