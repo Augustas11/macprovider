@@ -265,7 +265,7 @@ def trial(args, cell, t, out):
         poller.start()
         results = {}
         row = args.ord_rows + {"conv2": 1, "conv_flip": 2, "conv_spread": 3}[cell]
-        conv = {CONVERSATION_HEADER: f"lab2462-{args.label}-{cell}-{t}-{uuid.uuid4().hex[:8]}"}
+        conv = {CONVERSATION_HEADER: f"conv:lab2462-{args.label}-{cell}-{t}-{uuid.uuid4().hex[:8]}"}
 
         def go(key, messages, max_tokens, extra=None, ev=None, headers=None):
             results[key] = run_request(args.port, args.model, messages, max_tokens, extra, ev, headers=headers)
