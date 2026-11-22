@@ -244,9 +244,14 @@ let package = Package(
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage. 10.10 batches GLM MTP indexer projections and
         // compatible per-column attention while retaining row-owned caches.
+        // #2462: branch macprovider/2462-route-on-main (bcffd492) is
+        // 3.32.3-macprovider.85 (8aa564db) with only the mlx-swift pin moved to
+        // aaa8265, .25 plus a per-op small-M route (core dd68f1d2d on .15, mlx-c
+        // 70f188c on v0.6.0-macprovider.2): QuantizedMatmul captures the route at
+        // graph build from a thread scope (withSmallMRoute).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "8aa564dbf780cb4bd88e3fb591981eae868780f4"
+            revision: "bcffd492b1d89d009e57278defd258e76ac78ab3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
