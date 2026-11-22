@@ -18,16 +18,21 @@ import MacProviderCore
 /// whose rows equal each other across 3-16-row forwards but may differ from
 /// the lone row in low bits. A process that may batch ordinary rows but has
 /// no native MTP, draft model, shard-group role, autotune child or other
-/// switch target runs it; native MTP keeps `rowInvariant` because its verify
-/// window of depth + 1 rows must equal the request's own one-row decode.
+/// switch target runs it; native MTP needs `rowInvariant` because its verify
+/// window of depth + 1 rows must equal the request's own one-row decode. A
+/// process that would keep `rowInvariant` only for native MTP runs `mixed`
+/// (v0.3.61, #2462): stock order for the process, `rowInvariant` for each
+/// native-admitted request (`SmallMRouteScope`).
 enum SmallMRoute: String, Sendable, Equatable {
     case rowInvariant = "row_invariant"
     case serialOnly = "serial_only"
     case stockOrder = "stock_order"
 
-    /// Read once per process by the MLX core at its first small-row dispatch;
-    /// unset, or a value `atoi` parses to neither 0 nor 2, keeps the
-    /// row-invariant window (`route(environmentValue:)`).
+    /// Read once per process by the MLX core when the first quantized matmul
+    /// is added to a graph (each op captures its route at graph build, from
+    /// a thread scope or else this value); unset, or a value `atoi` parses
+    /// to neither 0 nor 2, keeps the row-invariant window
+    /// (`route(environmentValue:)`).
     static let environmentKey = "MLX_METAL_SMALL_M_ROW_INVARIANT"
     /// The core's qmv_mma partial-sum count over K, also read once per
     /// process. Its default follows the route (4 on the row-invariant route,
@@ -52,7 +57,17 @@ enum SmallMRoute: String, Sendable, Equatable {
     struct Decision: Sendable, Equatable {
         let route: SmallMRoute
         let reason: String
+        /// SPEC-038 FR-CB9 (v0.3.61) `mixed`: `route` is the process route
+        /// (`stockOrder`) and native-admitted requests run `rowInvariant`.
+        var mixed = false
+
+        /// The mode the startup event and `/v1/status` name.
+        var mode: String { mixed ? SmallMRoute.mixedMode : route.rawValue }
     }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): the mode name of a `mixed` process and its reason.
+    static let mixedMode = "mixed"
+    static let nativeMTPPerRequest = "native_mtp_per_request"
 
     /// The persisted FR-CB10 self-check verdict for the startup model, as
     /// `SmallMRouteVerdictStore` reads it before MLX starts.
@@ -154,8 +169,11 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// SPEC-038 FR-CB9: the route a `serve` process runs, decided once before
     /// MLX is first used, from state that cannot turn batching on later in
     /// the same process. A draft model, shard-group role, autotune child,
-    /// native MTP that may activate, or another switch target keeps the
-    /// row-invariant route. Otherwise serial-only needs all of:
+    /// or another switch target keeps the row-invariant route. Native MTP
+    /// that may activate takes `mixed` (v0.3.61: stock order process route,
+    /// row-invariant native requests) when batching can activate and no
+    /// stock order fallback or operator override applies, and keeps the
+    /// row-invariant route otherwise. Otherwise serial-only needs all of:
     /// - native MTP inactive: mode `off`, or `auto` with no verified entry
     ///   for the loaded model and artifact digest (its rounds batch target
     ///   rows); an unreadable or unverifiable set keeps the invariant route;
@@ -203,7 +221,19 @@ enum SmallMRoute: String, Sendable, Equatable {
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }
         if inputs.autotuneCandidate { return Decision(route: .rowInvariant, reason: "autotune_candidate") }
         if inputs.nativeMTPMode != .off, inputs.nativeMTPAdmission.mayActivate {
-            return Decision(route: .rowInvariant, reason: "native_mtp_\(inputs.nativeMTPAdmission.rawValue)")
+            // SPEC-038 FR-CB9 (v0.3.61): native MTP needs the row-invariant
+            // route only for its own requests. With every other stock order
+            // condition met the process takes `mixed`; any other reason to
+            // keep the pair keeps it process-wide, as before.
+            let keep = Decision(route: .rowInvariant, reason: "native_mtp_\(inputs.nativeMTPAdmission.rawValue)")
+            if inputs.otherSwitchTargets
+                || (inputs.continuousBatchingExplicitlyConfigured && inputs.continuousBatching == .off)
+                || inputs.selfCheckVerdict == .grantsNoBatching {
+                return keep
+            }
+            if let fallback = inputs.stockOrderFallback { return Decision(route: .rowInvariant, reason: fallback) }
+            if inputs.operatorForcesRowInvariant { return Decision(route: .rowInvariant, reason: operatorRowInvariant) }
+            return Decision(route: .stockOrder, reason: nativeMTPPerRequest, mixed: true)
         }
         if inputs.otherSwitchTargets { return Decision(route: .rowInvariant, reason: "switch_targets") }
         if inputs.continuousBatchingExplicitlyConfigured, inputs.continuousBatching == .off {
@@ -314,6 +344,33 @@ enum SmallMRoute: String, Sendable, Equatable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var applied: SmallMRoute?
     nonisolated(unsafe) private static var appliedReason: String?
+    nonisolated(unsafe) private static var appliedMixed = false
+
+    /// SPEC-038 FR-CB9 (v0.3.61): whether this process runs `mixed`.
+    static var processMixed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return applied != nil && appliedMixed
+    }
+
+    /// The mode `/v1/status` reports: `mixed`, or the process route.
+    static var processMode: String {
+        processMixed ? mixedMode : processRoute.rawValue
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): the route a request's forwards are built
+    /// on, fixed once at admission. In `mixed` a native-admitted request runs
+    /// the row-invariant route for its whole life, ordinary fallback
+    /// included, and every other request the stock order process route; in
+    /// every other mode each request runs the process route.
+    static func requestRoute(
+        nativeAdmitted: Bool,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> SmallMRoute {
+        guard mixed else { return processRoute }
+        return nativeAdmitted ? .rowInvariant : .stockOrder
+    }
 
     /// The route this process runs: the one `apply` set, else the one the
     /// inherited environment gives the MLX core.
@@ -330,12 +387,17 @@ enum SmallMRoute: String, Sendable, Equatable {
         return appliedReason ?? "environment"
     }
 
-    /// Sets the environment for this process before MLX's first small-row
-    /// dispatch. Row-invariant removes any inherited value, so a stray "0" or
-    /// "2" never reaches a process that needs the invariant route. The first
-    /// call wins; a later call returns the route already applied.
+    /// Sets the environment for this process before MLX first builds a
+    /// small-row quantized matmul: the core reads the process route once,
+    /// when the first such op is added to a graph, and each op keeps the
+    /// route it was built on. Row-invariant removes any inherited value, so
+    /// a stray "0" or "2" never reaches a process that needs the invariant
+    /// route. `mixed` (v0.3.61) applies the stock order route and marks the
+    /// process so native-admitted requests scope their forwards to the
+    /// row-invariant route. The first call wins; a later call returns the
+    /// route already applied.
     @discardableResult
-    static func apply(_ route: SmallMRoute, reason: String = "applied") -> SmallMRoute {
+    static func apply(_ route: SmallMRoute, reason: String = "applied", mixed: Bool = false) -> SmallMRoute {
         lock.lock()
         defer { lock.unlock() }
         if removeInheritedPartialSums() {
@@ -351,12 +413,13 @@ enum SmallMRoute: String, Sendable, Equatable {
         }
         applied = route
         appliedReason = reason
+        appliedMixed = mixed && route == .stockOrder
         return route
     }
 
     /// The startup event serve and decode-bench print.
     static func event(_ decision: Decision, fields: String? = nil) -> String {
-        "event=small_m_route mode=\(decision.route.rawValue) reason=\(decision.reason)\(fields.map { " " + $0 } ?? "")\n"
+        "event=small_m_route mode=\(decision.mode) reason=\(decision.reason)\(fields.map { " " + $0 } ?? "")\n"
     }
 
     /// Nil when a process on `route` may batch rows, else why `entry` refuses.
