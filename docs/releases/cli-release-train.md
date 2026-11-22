@@ -158,6 +158,7 @@ The exploratory goal matrix does not constitute admission qualification.
 
 | Change | What it is |
 | --- | --- |
+| PR 2471 (`d8348ba9a`), #2468 | The model store seals provider-owned weight files to mode 0400, both when a model is adopted and before native-MTP capture validation, so the capture APFS-clones them instead of byte-copying (about 176 GB per GLM start). A remaining mode-based copy is logged as `native_mtp_capture_clone_fallback reason=mode`. SPEC-048 0.1.120. Live step after the cut: on the next GLM native-MTP start on the lab Mac, free disk falls by much less than the model size and no `reason=mode` line is logged. The first start after the upgrade re-hashes once. |
 
 ## CLI release — 1.8.296 (published 2026-11-22 17:56 WITA; tracked from 2026-11-18)
 
