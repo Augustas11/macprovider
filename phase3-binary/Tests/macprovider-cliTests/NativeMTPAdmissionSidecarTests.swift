@@ -577,7 +577,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
         XCTAssertEqual(
             try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
-            .artifactNotRegularFile("target.safetensors")
+            .pathRejected("target.safetensors")
         )
         XCTAssertEqual(try permissions(outside) & 0o7777, 0o600)
     }
