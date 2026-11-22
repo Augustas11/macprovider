@@ -3507,7 +3507,8 @@ struct ServeCommand: AsyncParsableCommand {
             },
             operatorForcesRowInvariant: resolved.smallMRouteRowInvariant,
             // Only `mixed` reads it, and only native MTP can take `mixed`.
-            naxGPU: resolved.nativeMTPMode != .off && SmallMRoute.processNAXAvailable()
+            naxGPU: resolved.nativeMTPMode != .off && SmallMRoute.processNAXAvailable(),
+            inheritedPartialSums: SmallMRoute.keepsInheritedPartialSums
         )
         #if MACPROVIDER_LAB_HARNESS
         // Lab measurement only: run the same serve on a chosen batching route

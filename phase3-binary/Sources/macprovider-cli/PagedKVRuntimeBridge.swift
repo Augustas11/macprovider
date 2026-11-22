@@ -1907,8 +1907,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         // Outside the model container: a window may be repacking the rows.
-        // A session of other rows (the other route's group) stays.
-        retireDecodeSessions(containingAnyOf: inputs.map(\.requestID))
+        // In `mixed` the other route's session (other rows) stays; any other
+        // process retires its one session, as before.
+        if SmallMRoute.processMixed {
+            retireDecodeSessions(containingAnyOf: inputs.map(\.requestID))
+        } else {
+            retireAllDecodeSessions()
+        }
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
         let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
@@ -5133,6 +5138,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// caller repacks them or releases it (`releaseRetiredDecodeSessions`).
     private func retireDecodeSession(containing requestID: String) {
         retireDecodeSessions(containingAnyOf: [requestID])
+    }
+
+    /// `retireDecodeSession` for every route's session.
+    private func retireAllDecodeSessions() {
+        lock.lock()
+        retiredDecodeSessions.append(contentsOf: decodeSessions.values)
+        decodeSessions.removeAll()
+        lock.unlock()
     }
 
     /// `retireDecodeSession` for every route's session that holds one of
