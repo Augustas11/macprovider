@@ -11232,6 +11232,7 @@ private actor PrefillPauseBackend: ContinuousBatchSchedulerBackend {
     private var pauseCalls = 0
     private var armedIDs: [[String]] = []
     private var prefillLog: [(id: String, tokens: Int)] = []
+    private var prefillRouteLog: [String: macprovider_cli.SmallMRoute?] = [:]
 
     init(
         scripts: [String: [Int]],
@@ -11259,6 +11260,7 @@ private actor PrefillPauseBackend: ContinuousBatchSchedulerBackend {
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
         prefillLog.append(contentsOf: rows.map { ($0.requestID, $0.promptTokens.count) })
+        for row in rows { prefillRouteLog[row.requestID] = SmallMRouteScope.current }
         if let sink, !armed.isEmpty {
             armedIDs.append(armed.map(\.input.requestID))
             var current = armed
@@ -11309,6 +11311,7 @@ private actor PrefillPauseBackend: ContinuousBatchSchedulerBackend {
 
     func pauseCallCount() -> Int { pauseCalls }
     func armedRequestIDs() -> [[String]] { armedIDs }
+    func prefillRoute(id: String) -> macprovider_cli.SmallMRoute?? { prefillRouteLog[id] }
     func prefillChunks(id: String) -> [Int] { prefillLog.filter { $0.id == id }.map(\.tokens) }
 }
 
@@ -11614,6 +11617,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var retainedInstallLog: [String: Int] = [:]
     private var retainedCheckpointInstallLog: [String: Int] = [:]
     private var terminalCommitLog: [String: Int] = [:]
+    /// SPEC-038 FR-CB9: (call, request, task request route) per single-row call.
+    private var routeLog: [(call: String, requestID: String, route: macprovider_cli.SmallMRoute?)] = []
     private var promptChunks: [[Int]] = []
     private var promptChunksByCall: [[[Int]]] = []
     private var eventLog: [String] = []
@@ -11863,6 +11868,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
 
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
         terminalCommitLog[input.requestID] = input.targetKVTokenCount
+        routeLog.append(("commit_terminal_kv", input.requestID, SmallMRouteScope.current))
         guard let terminalCommitBridge else { return }
         for (layerIndex, cache) in terminalCommitCaches.enumerated() {
             let tokenCount = input.targetKVTokenCount
@@ -11895,6 +11901,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         binding: PagedKVStorageBinding,
         restoreNativeMTPDrafter: Bool
     ) async throws {
+        routeLog.append(("install_prompt_snapshot", requestID, SmallMRouteScope.current))
         guard promptSnapshotBackend, binding.currentTable.logicalTokenCount == snapshot.tokenCount else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
         }
@@ -11966,6 +11973,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func events() -> [String] { eventLog }
     func retainedInstalls() -> [String: Int] { retainedInstallLog }
     func terminalCommits() -> [String: Int] { terminalCommitLog }
+    func routeEvents() -> [String] {
+        routeLog.map { "\($0.call):\($0.requestID):\($0.route?.rawValue ?? "none")" }
+    }
     func finishedRequests() -> [String] { finishRecorder.snapshot() }
     func terminalCommitTargets() -> [String: Int] { terminalCommitLog }
 
@@ -12439,6 +12449,85 @@ extension ContinuousBatchSchedulerTests {
         try Self.assertOneRoutePerForward(calls, routes: routes)
         XCTAssertEqual(Set(calls.filter { $0.kind == "verify" }.map(\.scope)), [.rowInvariant, .stockOrder])
         XCTAssertEqual(Set(calls.filter { $0.kind == "finalize" }.map(\.scope)), [.rowInvariant, .stockOrder])
+    }
+
+    /// An admission install (prompt snapshot) and the terminal KV commit run
+    /// on the row's own route.
+    func testAdmissionInstallAndTerminalCommitRunOnTheRequestRoute() async throws {
+        let backend = ScriptedBackend(scripts: ["warm": [7, 8]], promptSnapshotBackend: true)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let scheduler = try await makeScheduler(descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64),
+                                                maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend,
+                                                allocator: allocator)
+        let stored = ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 36, promptSnapshot: true)
+        let result = try await scheduler.submit(.init(
+            id: "warm", conversationKey: "conv:warm", promptTokens: Array(1...60),
+            maxOutputTokens: 2, temperature: 0.0, cachedPromptTokens: 36,
+            promptSnapshotTokenCount: 56, promptSnapshotCache: stored, smallMRoute: .stockOrder
+        ))
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        let installs = await backend.routeEvents()
+        XCTAssertEqual(installs, ["install_prompt_snapshot:warm:stock_order"])
+
+        let terminalBackend = ScriptedBackend(scripts: ["keyed": [5, 6]])
+        let terminalScheduler = try await makeScheduler(
+            maxActiveRows: 1, backend: terminalBackend,
+            contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge()
+        )
+        _ = try await terminalScheduler.submit(.init(
+            id: "keyed", conversationKey: "conv:keyed", promptTokens: [1, 2], maxOutputTokens: 2,
+            smallMRoute: .stockOrder
+        ))
+        let commits = await terminalBackend.terminalCommits()
+        XCTAssertNotNil(commits["keyed"])
+        let events = await terminalBackend.routeEvents()
+        XCTAssertEqual(events, ["commit_terminal_kv:keyed:stock_order"])
+    }
+
+    /// SPEC-038 FR-CB4/FR-CB9 (v0.3.62): a DeepSeek V4 prefill pause serves
+    /// only decoding rows on the prefill's route, and the prefill runs on it.
+    func testDeepseekV4PrefillPauseServesOnlyTheRowsOfThePrefillRoute() async throws {
+        let script = [11, 22, 33, 44, 55, 66, 77, 88]
+        let backend = PrefillPauseBackend(scripts: ["ri-run": script, "so-run": script, "long": [77]])
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(), maxActiveRows: 3, decodeHeadroomTokens: 1,
+            maxPrefillTokensPerIteration: 128, maxPromptChunkTokens: 64,
+            referencePrefillStepSize: DeepseekV4ContinuousBatchBackend.prefillChunkTokens,
+            tokenDeliveryBufferLimit: 64,
+            snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            backend: backend, replayAuthority: TestReplayAuthority()
+        )
+        let installed = await scheduler.installLabBatchComposition(["ri-run", "so-run", "long"])
+        XCTAssertTrue(installed)
+        let rows: [(String, [Int], Int, macprovider_cli.SmallMRoute)] = [
+            ("ri-run", [1], script.count, .rowInvariant),
+            ("so-run", [1], script.count, .stockOrder),
+            ("long", Array(repeating: 3, count: 256), 1, .stockOrder),
+        ]
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for (queued, row) in rows.enumerated() {
+            tasks.append(Task {
+                try await scheduler.submit(.init(
+                    id: row.0, conversationKey: "", promptTokens: row.1, maxOutputTokens: row.2,
+                    smallMRoute: row.3))
+            })
+            if queued < rows.count - 1 {
+                try await eventually { await scheduler.metrics().waitingCount == queued + 1 }
+            }
+        }
+        for task in tasks { _ = try await task.value }
+        let armed = await backend.armedRequestIDs()
+        XCTAssertEqual(armed, [["so-run"]])
+        let longRoute = await backend.prefillRoute(id: "long")
+        XCTAssertEqual(longRoute, .some(.stockOrder))
+        let riRoute = await backend.prefillRoute(id: "ri-run")
+        XCTAssertEqual(riRoute, .some(.rowInvariant))
     }
 
     private static func assertOneRoutePerForward(

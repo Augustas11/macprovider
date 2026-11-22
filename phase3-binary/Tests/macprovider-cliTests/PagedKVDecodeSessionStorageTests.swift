@@ -917,3 +917,114 @@ private struct SessionStorageTokenizer: Tokenizer {
         []
     }
 }
+
+/// SPEC-038 FR-CB9 (v0.3.61, Related: #2462): in a `mixed` process the
+/// scheduler alternates the two route groups. Every graph the real backend
+/// builds for a group takes that group's route, and each route keeps its own
+/// decode session, so alternating groups repack nothing. Rows still leave a
+/// session with their exact history.
+///
+/// CPU device, random two-layer weights; a host without the default metallib
+/// skips, like `PagedKVDecodeSessionFinishTests`.
+final class PagedKVPerRouteDecodeSessionTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        guard MLXTestDevice.metallibAvailable else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
+    override func invokeTest() {
+        guard MLXTestDevice.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.cpu)) {
+            super.invokeTest()
+        }
+    }
+
+    func testEachRouteBuildsOnItsRouteAndKeepsItsOwnDecodeSession() async throws {
+        let target = try PagedKVDecodeSessionStorageTests.tinyQwen3()
+        let prompts: [String: [Int]] = [
+            "ri": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 71),
+            "so": PagedKVDecodeSessionStorageTests.tinyPrompt(length: 40, salt: 72),
+        ]
+        let rows = try PagedKVDecodeSessionStorageTests.Rows(target: target, prompts: prompts)
+        let backend = rows.backend
+        let builds = RouteBuildLog()
+        SmallMRouteScope.buildObserverForTest = { builds.append($0) }
+        let packs = RouteBuildLog()
+        backend.rebuildObserverForTest = { point in
+            if point == "packed" { packs.append(nil) }
+        }
+        defer {
+            SmallMRouteScope.buildObserverForTest = nil
+            backend.rebuildObserverForTest = nil
+        }
+
+        func on(_ route: macprovider_cli.SmallMRoute, _ id: String, _ body: () async throws -> Void) async throws {
+            builds.reset()
+            try await SmallMRouteScope.run(route) { try await body() }
+            let seen = builds.all
+            XCTAssertFalse(seen.isEmpty, "\(id): no graph built")
+            XCTAssertEqual(Set(seen.map { $0.map { "\($0)" } ?? "none" }), ["\(route.mlxRoute!)"], "\(id) built off its route")
+        }
+
+        try await on(.rowInvariant, "prefill ri") { try await rows.prefillAll("ri") }
+        try await on(.stockOrder, "prefill so") { try await rows.prefillAll("so") }
+        for round in 0 ..< 3 {
+            try await on(.rowInvariant, "decode ri \(round)") { try await rows.decode(["ri"], steps: 2) }
+            try await on(.stockOrder, "decode so \(round)") { try await rows.decode(["so"], steps: 2) }
+        }
+        // One pack per route; a single shared session repacked on every switch.
+        XCTAssertEqual(packs.all.count, 2, "alternating route groups repacked their sessions")
+        XCTAssertEqual(backend.rowHoldsOwnKVForTest(requestID: "ri"), false, "ri rides its route's session")
+        XCTAssertEqual(backend.rowHoldsOwnKVForTest(requestID: "so"), false, "so rides its route's session")
+
+        // ri finishes: it leaves its session with its history; so keeps its own.
+        let finishedLayers = backend.rowPagedCachesForTest(requestID: "ri")
+        let finishedTokens = rows.committed("ri")
+        backend.finish(requestID: "ri")
+        try await on(.stockOrder, "decode so after ri finished") { try await rows.decode(["so"], steps: 2) }
+        XCTAssertEqual(packs.all.count, 2, "the other route's finish repacked so's session")
+        XCTAssertTrue(finishedLayers.allSatisfy(\.holdsOwnKVBuffers), "ri still rides its retired batch")
+        XCTAssertEqual(finishedLayers.map(\.offset), [finishedTokens, finishedTokens])
+
+        // The terminal KV commit builds on the row's route too.
+        let handle = rows.handles["so"]!
+        _ = try await rows.allocator.extend(handle, by: 1)
+        let binding = try await rows.allocator.binding(for: handle)
+        let committed = rows.committed("so")
+        try await on(.stockOrder, "terminal commit so") {
+            try await backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                requestID: "so",
+                currentToken: rows.generated["so"]!.last!,
+                binding: binding,
+                blockTable: binding.currentTable,
+                committedKVTokenCount: committed,
+                targetKVTokenCount: committed + 1
+            ))
+        }
+
+        // Each row's tokens equal its serial run: no row ever rode the other's batch.
+        for id in ["ri", "so"] {
+            let count = rows.generated[id]!.count
+            XCTAssertEqual(
+                rows.generated[id],
+                try PagedKVDecodeSessionStorageTests.serialGreedy(target: target, prompt: prompts[id]!, tokens: count),
+                "\(id) diverged from serial KVCacheSimple"
+            )
+        }
+    }
+}
+
+private final class RouteBuildLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var routes: [MLX.SmallMRoute?] = []
+    func append(_ route: MLX.SmallMRoute?) { lock.lock(); routes.append(route); lock.unlock() }
+    func reset() { lock.lock(); routes.removeAll(); lock.unlock() }
+    var all: [MLX.SmallMRoute?] { lock.lock(); defer { lock.unlock() }; return routes }
+}

@@ -1006,9 +1006,6 @@ extension SmallMRouteTests {
         let rows: [(String, SmallMRoute)] = [("a", .stockOrder), ("b", .rowInvariant), ("c", .stockOrder), ("d", .rowInvariant)]
         let groups = SmallMRouteScope.groups(rows) { $0.1 }.map { $0.map(\.0) }
         XCTAssertEqual(groups, [["a", "c"], ["b", "d"]])
-        XCTAssertEqual(SmallMRouteScope.uniformRoute([.stockOrder, .stockOrder]), .stockOrder)
-        XCTAssertNil(SmallMRouteScope.uniformRoute([.stockOrder, .rowInvariant]))
-        XCTAssertNil(SmallMRouteScope.uniformRoute([]))
     }
 
     func testColdTierIdentityTakesTheRequestRoute() {
@@ -1028,5 +1025,78 @@ extension SmallMRouteTests {
         XCTAssertEqual(ordinary.identity.decodePath, "ordinary+stock_order_small_m")
         XCTAssertNotEqual(native.identity, ordinary.identity)
         XCTAssertEqual(native.eligible, context.eligible)
+    }
+
+    /// v0.3.62: on a NAX GPU both routes run the same kernels, so the process
+    /// keeps row_invariant process-wide.
+    func testNAXGPUKeepsNativeMTPOnProcessWideRowInvariant() {
+        for admission in [SmallMRoute.NativeMTPAdmission.entryForModel, .unverifiable] {
+            var value = inputs(explicit: false, nativeMTP: .auto, admission: admission, verdict: .grantsBatching)
+            XCTAssertTrue(SmallMRoute.decide(value).mixed)
+            value.naxGPU = true
+            XCTAssertEqual(
+                SmallMRoute.decide(value),
+                SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_\(admission.rawValue)"),
+                value.logFields
+            )
+            XCTAssertTrue(value.logFields.hasSuffix(" nax=true"))
+        }
+        // NAX changes nothing without native MTP.
+        var plain = inputs(explicit: false, verdict: .grantsBatching)
+        let before = SmallMRoute.decide(plain)
+        plain.naxGPU = true
+        XCTAssertEqual(SmallMRoute.decide(plain), before)
+    }
+
+    /// v0.3.62: a one-row verdict recorded by a `mixed` start logs the next
+    /// start that `decide` gives it, native-MTP row_invariant, not serial-only.
+    func testMixedRecorderLogsTheNextStartFromDecide() throws {
+        let (directory, selfCheck, store) = Self.temporaryStores()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let startInputs = inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .absent)
+        XCTAssertTrue(SmallMRoute.decide(startInputs).mixed)
+        let noGain = ContinuousBatchingSelfCheckDecision(slots: 1, reason: "no_net_gain", verifiedSlots: 3)
+        try selfCheck.store(Self.record(Self.stockKey(), decision: noGain))
+        let identity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "mixed": "1"])
+        let lines = LockedLines()
+        let recorder = SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: identity, route: .stockOrder,
+            inputs: startInputs, log: { lines.append($0) }
+        )
+        recorder.applied(key: Self.stockKey(), decision: noGain)
+        XCTAssertEqual(lines.all, ["event=small_m_route action=verdict_recorded decision=no_net_gain slots=1 next_start=row_invariant"])
+        XCTAssertEqual(store.nextStartDecision(startupIdentity: identity, selfCheckStore: selfCheck, inputs: startInputs),
+                       SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_entry_for_model"))
+
+        // A grant keeps the next start mixed.
+        let grantIdentity = SmallMRouteVerdictStore.startupIdentity(["model": "m", "mixed": "2"])
+        let granted = ContinuousBatchingSelfCheckDecision(slots: 2, reason: "granted", verifiedSlots: 2)
+        let grantLines = LockedLines()
+        SmallMRouteVerdictRecorder(
+            store: store, selfCheckStore: selfCheck, startupIdentity: grantIdentity, route: .stockOrder,
+            inputs: startInputs, log: { grantLines.append($0) }
+        ).applied(key: Self.stockKey(), decision: granted)
+        XCTAssertEqual(grantLines.all, ["event=small_m_route action=verdict_recorded decision=granted slots=2 next_start=mixed"])
+    }
+
+    /// SPEC-048 R003 (0.1.120): the MTP-16 self-check's ordinary reference
+    /// runs on the route its native probe runs.
+    func testNativeMTPOrdinaryReferenceRunsOnTheNativeRoute() {
+        let mixed = ModelRuntime.nativeMTPOrdinaryReferenceRequest(
+            id: "ref", promptTokens: [1, 2], maxOutputTokens: 4, processRoute: .stockOrder, mixed: true)
+        XCTAssertEqual(mixed.smallMRoute, .rowInvariant)
+        XCTAssertEqual(mixed.decodePath, .ordinary)
+        XCTAssertEqual(mixed.promptTokens, [1, 2])
+        XCTAssertEqual(mixed.maxOutputTokens, 4)
+        let probe = ContinuousBatchSchedulerRequest(
+            id: "probe", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 4, decodePath: .nativeMTP)
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPOrdinaryReferenceRequest(id: "ref", promptTokens: [1, 2], maxOutputTokens: 4).smallMRoute,
+            probe.smallMRoute
+        )
+        for route in [SmallMRoute.rowInvariant, .stockOrder] {
+            XCTAssertEqual(ModelRuntime.nativeMTPOrdinaryReferenceRequest(
+                id: "ref", promptTokens: [1], maxOutputTokens: 1, processRoute: route, mixed: false).smallMRoute, route)
+        }
     }
 }
