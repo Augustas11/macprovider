@@ -1163,7 +1163,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             var request = try ChatCompletionRequest.parse(data: data)
-                .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
+                .withConversationKey(
+                    requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"),
+                    cacheOnly: Self.directHTTPConversationCacheOnly(requestHead?.headers ?? HTTPHeaders())
+                )
                 .withRequestID(Self.effectiveRequestID(inbound: inboundRequestID, audit: auditRequestID, origin: origin))
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
             if request.topLevelKeys.contains("privacy_class") {
@@ -2166,6 +2169,20 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let receiptHeaderName = "X-MacProvider-Receipt"
     static let settlementMetadataHeaderName = "X-MacProvider-Settlement-Metadata"
     static let maxOutputTokensHeaderName = "X-MacProvider-Max-Output-Tokens"
+    static let conversationCacheOnlyHeaderName = "X-MacProvider-Provider-Conversation-Cache-Only"
+
+    /// Lab builds only: `X-MacProvider-Provider-Conversation-Cache-Only: 1`
+    /// marks the direct-HTTP conversation key cache-only, as the relay does
+    /// for the coordinator's SPEC-006-R012 auto-prefix key, so a lab probe
+    /// reproduces the live cached-turn path. Release builds ignore the header.
+    static func directHTTPConversationCacheOnly(_ headers: HTTPHeaders) -> Bool {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        return headers.first(name: conversationCacheOnlyHeaderName)?
+            .trimmingCharacters(in: .whitespaces) == "1"
+        #else
+        return false
+        #endif
+    }
     static let receiptTerminalStateTSHeaderName = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
     static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
     static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"

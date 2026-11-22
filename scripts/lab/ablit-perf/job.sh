@@ -82,8 +82,30 @@
 #   grid pass per entry, each its own serve and output directory results/<run>/<name>/NAME, scored
 #   against the REUSE_REFERENCE rows (required, no reference runs). Keys: rows (default 1,4),
 #   native_mtp, slots (the two knobs above for this pass only), contexts, outputs, trials (default
-#   CONTEXTS, OUTPUTS, TRIALS). Example, the abliterated GLM native-MTP and 4-slot passes:
+#   CONTEXTS, OUTPUTS, TRIALS), turn2_header (0|1|cache_only, TURN2_HEADER for this pass only; 0
+#   sends no conversation header on either turn, the keyless cold control), small_m_route
+#   (row_invariant: the kernel every request of a native-MTP process runs, for an ordinary control
+#   that differs from the native pass only in the mode). Example, the abliterated GLM native-MTP and 4-slot passes:
 #   GLM_PASSES='mtp rows=1 native_mtp=auto; slots4 rows=4 slots=4'.
+#   native_mtp=off writes the same catalog provenance and durable store path as auto with
+#   native_mtp_mode off (the kill switch): the ordinary-decode control of a native pass, the same
+#   build, weights and config but the mode. Without REUSE_REFERENCE a pass runs no reference and
+#   no compare (run-grid.sh --skip-reference --skip-compare): provider-only cells.
+# TURNS=2: every grid sends the two-turn cell (run-grid.sh --turns 2); TURN2_HEADER, TURN2_HISTORY
+#   and TURN2_FOLLOWUP pass to run-grid.sh through the environment (its header). TURN2_HEADER=1 sends
+#   the sticky conversation key (native MTP then decodes turn 2 ordinarily); TURN2_HEADER=cache_only
+#   sends it cache-only, the live cached-turn path (needs this lab-harness build).
+# MTP_T2_COMPARE="NATIVE ORDINARY" (two pass names): after a model's passes, mtp_turn2_compare.py
+#   scores pass NATIVE against pass ORDINARY on the turn-2 rows (text, reasoning and token parity,
+#   decode tok/s and TTFT medians, cached tokens, native-MTP proposals on turn 2) into
+#   RES/<name>/mtp-turn2.{md,json}, `T2_*` lines in the log. A parity or cache failure is a finding
+#   (T2_VERDICT FAIL); unusable input (rc 2) is a BLOCKER. One name alone checks that pass only. A
+#   third name COLD (a keyless pass, turn2_header=0) also requires every turn-1 and turn-2 pair of
+#   ORDINARY (keyed, cache-only) to equal COLD: the keyed snapshot path keeps cold output.
+# #2459 (native MTP vs ordinary decode on the cached-prefix turn-2 path at ~30K prompt tokens): model
+#   keys qwen38-27b and qwen36-27b serve the signed catalog rows qwen/qwen3.8-27b and qwen/qwen3.6-27b
+#   from their durable store snapshots (the job-qwen-mtp-cap.sh target identities); the launcher
+#   command is in studio-ablit-perf.sh's usage.
 #
 # REFERENCE_ONLY=<run id>: add a reference to an already measured provider grid. No build, no
 # provider serve, no CB check, base pass, noise pass or MTP bench: per model, staging (the
@@ -161,6 +183,18 @@ store_dir() {
 : "${MINIMAX_REF:=mlx-vlm}"
 : "${MINIMAX_REF_PATH:=$MINIMAX_BASE_PATH}"
 : "${MINIMAX_REF_ARGS:=--refusal-ablation $MINIMAX_PATH}"
+: "${QWEN38_27B_NAME:=qwen3.8-27b}"
+: "${QWEN38_27B_ID:=qwen/qwen3.8-27b}"
+: "${QWEN38_27B_SHA256:=8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05}"
+: "${QWEN38_27B_PATH:=$(store_dir mlx-community--Qwen3.8-27B-4bit "$QWEN38_27B_SHA256")}"
+: "${QWEN38_27B_REF:=mlx-lm}"
+: "${QWEN38_27B_REF_PY:=/usr/bin/python3}"  # its passes run no reference: no venv
+: "${QWEN36_27B_NAME:=qwen3.6-27b}"
+: "${QWEN36_27B_ID:=qwen/qwen3.6-27b}"
+: "${QWEN36_27B_SHA256:=518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931}"
+: "${QWEN36_27B_PATH:=$(store_dir mlx-community--Qwen3.6-27B-4bit "$QWEN36_27B_SHA256")}"
+: "${QWEN36_27B_REF:=mlx-lm}"
+: "${QWEN36_27B_REF_PY:=/usr/bin/python3}"
 : "${DSV4ABL_NAME:=deepseek-v4-flash-abliterated}"
 : "${DSV4ABL_PATH:=$LAB/models/DeepSeek-V4-Flash-0731-abliterated-MXFP4-MLX}"  # made by job-dsv4-abliterated.sh
 : "${DSV4ABL_REF:=mlx-vlm}"
@@ -178,7 +212,7 @@ under_models() { case $1 in "$LAB"/models/?*) return 0 ;; *) return 1 ;; esac; }
 # serve_knob_check K NATIVE_MTP SLOTS: sets KNOB_ERR and fails on a value the serve cannot take.
 serve_knob_check() {
   local k=$1 nm=$2 sl=$3
-  case "$nm" in ""|auto) ;; *) KNOB_ERR="NATIVE_MTP must be auto"; return 1 ;; esac
+  case "$nm" in ""|auto|off) ;; *) KNOB_ERR="NATIVE_MTP must be auto or off"; return 1 ;; esac
   case "$sl" in ""|[1-9]|[1-2][0-9]|3[0-2]) ;; *) KNOB_ERR="SERVED_SLOTS must be 1..32"; return 1 ;; esac
   if [ -n "$nm" ]; then
     [ -n "$(v "$k" ID)" ] || { KNOB_ERR="NATIVE_MTP needs ID (the catalog key)"; return 1; }
@@ -187,27 +221,32 @@ serve_knob_check() {
   return 0
 }
 
-# parse_pass K "NAME key=val ...": sets P_NAME P_ROWS P_NM P_SL P_CTX P_OUTS P_TRIALS (PASSES header).
+# parse_pass K "NAME key=val ...": sets P_NAME P_ROWS P_NM P_SL P_CTX P_OUTS P_TRIALS P_T2H (PASSES header).
 parse_pass() {
   local k=$1 w key val
   set -- $2
   P_NAME=${1:-}; shift
-  P_ROWS=1,4 P_NM="" P_SL="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS
+  P_ROWS=1,4 P_NM="" P_SL="" P_SMR="" P_CTX=$CONTEXTS P_OUTS=$OUTPUTS P_TRIALS=$TRIALS P_T2H=""
   case "$P_NAME" in ""|*[!a-z0-9_-]*) KNOB_ERR="pass name must be [a-z0-9_-]+"; return 1 ;; esac
   for w in "$@"; do
     key=${w%%=*}; val=${w#*=}
     [ "$key" != "$w" ] && [ -n "$val" ] || { KNOB_ERR="bad word $w (key=value)"; return 1; }
     case $key in
       rows) P_ROWS=$val ;; native_mtp) P_NM=$val ;; slots) P_SL=$val ;;
-      contexts) P_CTX=$val ;; outputs) P_OUTS=$val ;; trials) P_TRIALS=$val ;;
+      contexts) P_CTX=$val ;; outputs) P_OUTS=$val ;; trials) P_TRIALS=$val ;; turn2_header) P_T2H=$val ;;
+      small_m_route) P_SMR=$val ;;
       *) KNOB_ERR="unknown key $key"; return 1 ;;
     esac
   done
   case "$P_ROWS" in *[!0-9,]*) KNOB_ERR="rows must be a comma list of numbers"; return 1 ;; esac
   case "$P_TRIALS" in ""|*[!0-9]*) KNOB_ERR="trials must be a number"; return 1 ;; esac
+  case "$P_T2H" in ""|0|1|cache_only) ;; *) KNOB_ERR="turn2_header must be 0|1|cache_only"; return 1 ;; esac
+  case "$P_SMR" in ""|row_invariant) ;; *) KNOB_ERR="small_m_route must be row_invariant"; return 1 ;; esac
   serve_knob_check "$k" "$P_NM" "$P_SL"
 }
 
+TURNS=${TURNS:-1}
+case "$TURNS" in 1|2) ;; *) die "TURNS must be 1 or 2" 64 ;; esac
 log "JOB_START run=$RUN_ID commit=${COMMIT:-unknown} models=\"$MODELS\" outputs=$OUTPUTS contexts=$CONTEXTS trials=$TRIALS${REFERENCE_ONLY:+ reference_only=$REFERENCE_ONLY}"
 if [ -n "$REFERENCE_ONLY" ]; then
   echo "$REFERENCE_ONLY" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || die "REFERENCE_ONLY=$REFERENCE_ONLY is not a run id" 64
@@ -272,11 +311,14 @@ for k in $MODELS; do
   serve_knob_check "$k" "$(v "$k" NATIVE_MTP)" "$(v "$k" SERVED_SLOTS)" || die "model $k: $KNOB_ERR" 64
   if [ -n "$(v "$k" PASSES)" ]; then
     [ -z "$REFERENCE_ONLY" ] || die "model $k: PASSES and REFERENCE_ONLY exclude each other" 64
-    [ -n "$REUSE_REFERENCE" ] || die "model $k: PASSES needs REUSE_REFERENCE (a pass runs no reference)" 64
     setv "$k" MTP_BENCH 0  # passes replace the baseline steps, the MTP bench included
     IFS=';' read -r -a PASS_SPECS <<< "$(v "$k" PASSES)"
     for spec in "${PASS_SPECS[@]}"; do
       parse_pass "$k" "$spec" || die "model $k: PASSES entry \"$spec\": $KNOB_ERR" 64
+    done
+    for p in ${MTP_T2_COMPARE:-}; do
+      case ";$(v "$k" PASSES);" in *";$p "*|*"; $p "*|*";$p;"*|*"; $p;"*) ;;
+        *) die "model $k: MTP_T2_COMPARE names $p, which is not a pass of <K>_PASSES" 64 ;; esac
     done
   fi
   if [ -n "${SEED_SELF_CHECK_RUN:-}" ]; then
@@ -576,7 +618,7 @@ done
 grid() {
   local k=$1 out=$2; shift 2
   local args=(--model-name "$(v "$k" NAME)" --bin-dir "$BIN" --out-dir "$out" --cb auto
-              --no-autotune-candidate --outputs "$OUTPUTS" --trials "$TRIALS" "$@")
+              --no-autotune-candidate --outputs "$OUTPUTS" --trials "$TRIALS" --turns "$TURNS" "$@")
   mkdir -p "$out"
   bash "$GRID/run-grid.sh" "${args[@]}" > "$out/run.log" 2>&1
   local rc=$?
@@ -597,12 +639,13 @@ expect_route() { if [ "$(v "$1" CB_FROM_POLICY)" = 1 ]; then echo batched; else 
 route_failed() { grep -q '^ROUTE_FAIL ' "$1/run.log" 2>/dev/null; }
 
 # native_mtp_extra K FILE: writes the serve config lines of <K>'s native-MTP admission (native_mtp_mode
-# auto and model_catalog_* from the committed autotune-candidates.json row whose key is <K>_ID) to FILE
+# <K>_NATIVE_MTP, auto or off, and model_catalog_* from the committed autotune-candidates.json row whose key is <K>_ID) to FILE
 # and prints the model's durable store path, which the catalog preflight requires as the artifact path.
 native_mtp_extra() {
-  /usr/bin/python3 -I - "$JOB/catalog/autotune-candidates.json" "$(v "$1" ID)" "$(v "$1" SHA256)" "$STORE" "$2" <<'PY'
+  /usr/bin/python3 -I - "$JOB/catalog/autotune-candidates.json" "$(v "$1" ID)" "$(v "$1" SHA256)" "$STORE" "$2" \
+    "$(v "$1" NATIVE_MTP)" <<'PY'
 import hashlib, json, os, sys
-cand, key, sha, store, out = sys.argv[1:6]
+cand, key, sha, store, out, mode = sys.argv[1:7]
 raw = open(cand, "rb").read()
 doc = json.loads(raw)
 row = doc["rows"].get(key)
@@ -615,7 +658,7 @@ if not os.path.isfile(os.path.join(path, "config.json")):
     sys.exit(f"no durable artifact at {path}")
 q = json.dumps
 open(out, "w").write("\n".join([
-    "native_mtp_mode: auto", f"model_catalog_key: {q(key)}", f"model_catalog_model_id: {q(row['model_id'])}",
+    f"native_mtp_mode: {mode}", f"model_catalog_key: {q(key)}", f"model_catalog_model_id: {q(row['model_id'])}",
     f"model_catalog_revision: {q(row['model_revision'])}", f"model_catalog_sha256: {q(sha)}",
     f"model_catalog_version: {q(doc['version'])}", f"model_catalog_hash: {q(hashlib.sha256(raw).hexdigest())}"]) + "\n")
 print(path)
@@ -632,7 +675,7 @@ serve_args() {
   [ -z "$(v "$k" ID)" ] || SERVE+=(--model-id "$(v "$k" ID)" --model-sha256 "$(v "$k" SHA256)")
   if [ -f "$RES/$name/cb-tuple.yaml" ]; then extra=$RES/$name/cb-tuple.yaml
   elif [ -n "$(v "$k" CONFIG_EXTRA)" ]; then extra=$(v "$k" CONFIG_EXTRA); fi
-  if [ -n "$(v "$k" NATIVE_MTP)$(v "$k" SERVED_SLOTS)" ]; then
+  if [ -n "$(v "$k" NATIVE_MTP)$(v "$k" SERVED_SLOTS)$(v "$k" SMALL_M_ROUTE)" ]; then
     f=$RES/$name/serve-extra-${SERVE_TAG:-main}.yaml
     mkdir -p "$RES/$name"
     { [ -z "$extra" ] || cat "$extra"; } > "$f"
@@ -644,6 +687,9 @@ serve_args() {
     if [ -n "$(v "$k" SERVED_SLOTS)" ]; then
       printf 'max_concurrency_override: %s\nmax_concurrency_source: owner\n' "$(v "$k" SERVED_SLOTS)" >> "$f"
     fi
+    # small_m_route=row_invariant: the kernel a native-MTP process forces on every request, so an
+    # ordinary-decode control on it isolates native MTP from the stock-order kernel.
+    [ -z "$(v "$k" SMALL_M_ROUTE)" ] || printf 'small_m_route: %s\n' "$(v "$k" SMALL_M_ROUTE)" >> "$f"
     extra=$f
   fi
   [ -z "$extra" ] || SERVE+=(--config-extra "$extra")
@@ -775,16 +821,20 @@ run_pass() {
   parse_pass "$k" "$2" || { blocker "model $k: PASSES entry \"$2\": $KNOB_ERR"; return 1; }
   pdir=$RES/$name/$P_NAME
   mkdir -p "$pdir"
-  cp "$LAB/results/$REUSE_REFERENCE/$name/main/reference.jsonl" "$pdir/" \
-    || { blocker "model $k: reference copy from run $REUSE_REFERENCE failed"; return 1; }
-  old_nm=$(v "$k" NATIVE_MTP); old_sl=$(v "$k" SERVED_SLOTS)
-  setv "$k" NATIVE_MTP "$P_NM"; setv "$k" SERVED_SLOTS "$P_SL"
+  if [ -n "$REUSE_REFERENCE" ]; then
+    cp "$LAB/results/$REUSE_REFERENCE/$name/main/reference.jsonl" "$pdir/" \
+      || { blocker "model $k: reference copy from run $REUSE_REFERENCE failed"; return 1; }
+  else
+    extra+=(--skip-compare)
+  fi
+  old_nm=$(v "$k" NATIVE_MTP); old_sl=$(v "$k" SERVED_SLOTS); old_smr=$(v "$k" SMALL_M_ROUTE)
+  setv "$k" NATIVE_MTP "$P_NM"; setv "$k" SERVED_SLOTS "$P_SL"; setv "$k" SMALL_M_ROUTE "$P_SMR"
   SERVE_TAG=$P_NAME serve_args "$k"; rc=$?
-  setv "$k" NATIVE_MTP "$old_nm"; setv "$k" SERVED_SLOTS "$old_sl"
+  setv "$k" NATIVE_MTP "$old_nm"; setv "$k" SERVED_SLOTS "$old_sl"; setv "$k" SMALL_M_ROUTE "$old_smr"
   [ $rc = 0 ] || return 1
-  [ -z "$P_NM" ] || extra+=(--expect-native-mtp on)
-  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-off} served_slots=${P_SL:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS reference=reused from $REUSE_REFERENCE seed=${SEED_SELF_CHECK_RUN:-none}"
-  OUTPUTS=$P_OUTS TRIALS=$P_TRIALS grid "$k" "$pdir" "${SERVE[@]}" --rows "$P_ROWS" --contexts "$P_CTX" \
+  [ "$P_NM" != auto ] || extra+=(--expect-native-mtp on)
+  log "PASS_START $name $P_NAME rows=$P_ROWS native_mtp=${P_NM:-unset} served_slots=${P_SL:-auto} small_m_route=${P_SMR:-auto} contexts=$P_CTX outputs=$P_OUTS trials=$P_TRIALS turns=$TURNS turn2_header=${P_T2H:-${TURN2_HEADER:-0}} reference=${REUSE_REFERENCE:+reused from }${REUSE_REFERENCE:-none, no compare} seed=${SEED_SELF_CHECK_RUN:-none}"
+  OUTPUTS=$P_OUTS TRIALS=$P_TRIALS TURN2_HEADER=${P_T2H:-${TURN2_HEADER:-0}} grid "$k" "$pdir" "${SERVE[@]}" --rows "$P_ROWS" --contexts "$P_CTX" \
     --skip-reference --expect-route "$(expect_route "$k")" ${extra[@]+"${extra[@]}"}
   rc=$?
   log "PASS_DONE $name $P_NAME rc=$rc (0 all cells pass, 1 a cell fails the ratio/text gates: a finding, 10 the route was serial where production batches, 11 native MTP was not on)"
@@ -792,7 +842,7 @@ run_pass() {
     0|1) [ ! -f "$pdir/summary.md" ] || sed -n '/^| model/,/^$/p' "$pdir/summary.md" ;;
     *) blocker "model $k: pass $P_NAME rc=$rc: $(tail -n 3 "$pdir/run.log" | tr '\n' ' ')"; ok=1 ;;
   esac
-  [ -z "$P_NM" ] || [ ! -f "$pdir/provider.jsonl" ] || mtp_summary "$pdir" | sed "s/^/PASS_MTP $name $P_NAME /"
+  [ "$P_NM" != auto ] || [ ! -f "$pdir/provider.jsonl" ] || mtp_summary "$pdir" | sed "s/^/PASS_MTP $name $P_NAME /"
   if [ -n "$P_SL" ] && [ -f "$pdir/grid.json" ]; then
     slots_check "$pdir" "$P_SL" | sed "s/^/$name $P_NAME /" | tee -a "$pdir/slots.txt"
     [ "${PIPESTATUS[0]}" = 0 ] || { blocker "model $k: pass $P_NAME served other slots than the pin $P_SL (verified_k above is the width the self-check verified)"; ok=1; }
@@ -801,11 +851,23 @@ run_pass() {
   return $ok
 }
 
-# run_passes K: every <K>_PASSES entry in order; a failed pass does not stop the next one.
+# run_passes K: every <K>_PASSES entry in order; a failed pass does not stop the next one. Then
+# MTP_T2_COMPARE (header), which scores whatever the passes wrote.
 run_passes() {
-  local k=$1 spec ok=0 specs
+  local k=$1 spec ok=0 specs name rc dirs=()
   IFS=';' read -r -a specs <<< "$(v "$k" PASSES)"
   for spec in "${specs[@]}"; do run_pass "$k" "$spec" || ok=1; done
+  [ -n "${MTP_T2_COMPARE:-}" ] || return $ok
+  name=$(v "$k" NAME)
+  set -- $MTP_T2_COMPARE
+  dirs=(--native "$RES/$name/$1"); [ -z "${2:-}" ] || dirs+=(--ordinary "$RES/$name/$2")
+  [ -z "${3:-}" ] || dirs+=(--cold "$RES/$name/$3")
+  /usr/bin/python3 -I "$JOB/ablit-perf/mtp_turn2_compare.py" "${dirs[@]}" --json "$RES/$name/mtp-turn2.json" \
+    > "$RES/$name/mtp-turn2.md"
+  rc=$?
+  sed "s/^/$name /" "$RES/$name/mtp-turn2.md" | grep -E "^$name T2_"
+  case $rc in 0) ;; 1) log "T2_FINDING $name: parity, cache or native-MTP check failed (mtp-turn2.md)" ;;
+    *) blocker "model $k: mtp_turn2_compare.py rc=$rc: $(tail -n 2 "$RES/$name/mtp-turn2.md" | tr '\n' ' ')"; ok=1 ;; esac
   return $ok
 }
 

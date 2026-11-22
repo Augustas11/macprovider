@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.117
+**Version:** 0.1.119
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.117",
+  "version": "0.1.119",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1554,9 +1554,17 @@ target hidden state that produced it. These are exactly the columns per-round
 depth-zero finalizes would have fed the MTP adapter. Only before the row's
 next native proposal do they advance its proposal state, in one packed step,
 so a restored row proposes from the same committed prefix as one that was
-never gated. A held row MUST NOT advance its proposal state inside the shared
-ordinary rounds, except at the column cap: a row held until it finishes within
-1024 committed columns adds no MTP-adapter forward to them. A held row MUST
+never gated. **(0.1.119)** The one exception is the bounded terminal flush:
+a keyed row that retains its head under R009 and ends a normal terminal with
+at most 16 buffered columns (the deepest qualifiable proposal depth, so the
+flush costs no more than one native round at that depth; the `remaining - 1`
+depth cap's last ordinary step leaves one) advances its proposal state over
+them once, in one packed step, before its head is captured. A row ending with
+more than 16 buffered columns, as a load-gated row held for its completion,
+runs no MTP-adapter forward at terminal and retains no head. A held row MUST
+NOT advance its proposal state inside the shared ordinary rounds, except at
+the column cap: a row held until it finishes within 1024 committed columns
+adds no MTP-adapter forward to them. A held row MUST
 NOT buffer more than 1024 columns; one whose next ordinary window would pass
 the cap advances its proposal state first, in one packed step, so a long held
 completion pays one catch-up per 1024 tokens and its buffer stays bounded.
@@ -1747,6 +1755,46 @@ mutation, so the change is a selection and never a fallback:
   prefills from zero instead of reselecting ordinary. Under that grant a keyed
   GLM-5-Next row publishes only its prompt snapshot, or nothing when its prompt
   is too short for one, so a cache miss stays native whatever its length;
+- **(0.1.118)** on a hybrid (recurrent-layer) runtime with SPEC-038 cached
+  turns, which hands back the ordinary CB retained paged-KV entry, a miss
+  stays `native_mtp`, keeps the lease and reports `cached_prompt_tokens = 0`.
+  The native row MAY commit that retained entry because it is built from
+  committed state only: the paged attention KV of the accepted prefix (a
+  verify round's staged K/V never enters the committed table), the recurrent
+  state each round selects with `stageCommit` from the states stored for the
+  accepted input count (never recomputed from rejected drafts), the prompt
+  recurrent checkpoints captured during the shared prefill, and the terminal
+  covered-token checkpoint. It MUST equal the ordinary row's retained entry
+  for the same request: token count, checkpoint positions, attention KV and
+  recurrent checkpoint states, bit for bit. The entry MAY also carry the
+  row's committed MTP head state: the head cache after its last committed
+  round (no tentative proposal, no buffered depth-zero column), never past
+  the retained length, with the committed token at each retained checkpoint
+  the head covers. It is draft-side only. A hit at checkpoint `r` stays
+  `native_mtp` and keeps the hit and its discount only when that head covers
+  `r` and the incoming prompt carries the recorded token at `r`: the CB row
+  installs the retained target state, then a copy of the head trimmed to `r`
+  entries, and resumes prefill at `r`. **(0.1.119)** A row that ends with
+  buffered depth-zero columns flushes them into its head first only within the
+  MTP-6 bounded terminal flush (at most 16 columns); with more it retains no
+  head. A row whose terminal
+  commit forwards its last sampled token (a length stop, where the retained
+  length is one past the head) keeps the target hidden state from that
+  forward, the hidden at position `r - 1` for the full-turn reply end `r`,
+  as an owned copy next to the head; it counts toward the head's byte cap. A
+  hit at exactly `r = nextPosition + 1` stays `native_mtp` when that hidden
+  is present and the incoming prompt's token at `r - 1` equals the head's
+  last folded token: after installing the retained target state, the CB row
+  folds that hidden paired with the prompt's token at `r` into a copy of the
+  head with one drafter advance, under the target lock and as one GPU turn,
+  before the first prompt chunk, so the head reaches `r` and prefill resumes
+  there. A failed fold runs the row `ordinary` before any output and keeps
+  the hit; it never fails the request. Any other hit on such an entry (no head
+  state, `r` past the head without that hidden or by more than one, or a
+  different token at `r` or `r - 1`) reselects `ordinary` with reason
+  `conversation_key` and keeps the hit. The head bytes count toward the
+  entry's retained bytes, so the conversation-cache memory budget reserves
+  them with the entry;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1785,6 +1833,37 @@ that amendment for GLM-5-Next: its proof is the SPEC-038 v0.3.31 AC-26 GLM
 proof (resumed native rows match ordinary CB tokens at the same row count,
 with tokens/s, acceptance and TTFT reported in the R015 cells), recorded
 before the signed `cached_turns_accepted` grant.
+**(0.1.118)** The retained-entry grant above is that amendment for hybrid
+Qwen rows under cached turns. Its proof is
+`PagedKVRuntimeBridgeTests.testKeyedNativeHybridRowRetainsTheOrdinaryRetainedEntryAndTurnTwoHitMatches`
+(real tiny hybrid Qwen3.5 target and MTP head behind the production paged
+backend and contiguous cache bridge: turn 1 native and ordinary retain equal
+entries bit for bit, maximum absolute difference 0, and turn 2 hits both at
+the same `cached_prompt_tokens` with the same greedy tokens),
+`PagedKVRuntimeBridgeTests.testKeyedNativeTurnTwoHitRestoresTheRetainedHeadAndMatchesColdSerialGreedy`
+(turn 2 hits natively from the restored head, trimmed inside it and at a
+model-stop reply end, and every turn emits the keyless cold serial greedy
+tokens),
+`PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnlyAtACoveredCheckpointWithItsToken`,
+**(0.1.119)**
+`PagedKVRuntimeBridgeTests.testKeyedNativeLengthStoppedTurnTwoResumesNativelyAtTheFullTurnReplyEnd`
+(a max_tokens turn 1, with and without depth adaptation, hits turn 2 at the
+full-turn reply end; the folded head entry matches a whole-prompt drafter
+prefill with turn 2's token, turn 2 verifies proposals and both turns emit
+the keyless cold serial greedy tokens; the same entry without the hidden does
+not restore),
+`PagedKVRuntimeBridgeTests.testKeyedNativeTurnEndingOnADepthZeroStepRetainsTheFlushedHeadAndTurnTwoResumesNatively`
+(buffered depth-zero columns are flushed into the head before the terminal
+snapshot),
+`PagedKVRuntimeBridgeTests.testKeyedNativeRowHeldAtDepthZeroPastTheFlushCapRetainsNoHead`
+(a row held at depth zero past the 16-column cap retains no head and its next
+turn is served ordinary),
+`PagedKVRuntimeBridgeTests.testTerminalFlushAndBoundaryFoldInterleaveWithACoRunningNativeRow`
+(the flush and the fold run beside a decoding native row; every row emits its
+serial greedy tokens),
+`PagedKVRuntimeMixedCacheTests.testRetainedNativeMTPDrafterResumesOnePastTheHeadOnlyWithTheTerminalHidden`,
+`PagedKVRuntimeBridgeTests.testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry`
+and `NativeMTPSelectorTests.testCacheOnlyNativeAdmissionResolvesOnTheLease`.
 
 ### MTP-10 — observability and warm-swap isolation (SPEC-048-R010)
 
@@ -2415,7 +2494,11 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   largest at bound + 1, and `qualified_slots` adds the full-load scheduling
   and memory point. A runtime change that adds per-row native work above the
   bound (for example drafting for downgraded rows) invalidates the model and
-  requires every gated slot count to be measured.
+  requires every gated slot count to be measured. **(0.1.119)** The MTP-6
+  bounded terminal flush leaves the model unchanged: a load-gated row held
+  for more than 16 columns, as every gated-cell row holding its 512 tokens,
+  keeps no head and runs no drafter forward at terminal, and a flush within
+  the cap is at most one 16-column catch-up per completion.
 - *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
   prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
   production-shaped full load. It is a separate bench phase on the same frozen
@@ -2948,6 +3031,31 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.119 (2026-11-21, Related: #2459)** — R009 (MTP-9): a length-stopped
+  row keeps the target hidden from its terminal-token forward next to the
+  retained head, so a turn-2 hit at the full-turn reply end `r`, one past the
+  head, stays native: the install folds that hidden with the prompt's token
+  at `r` in one drafter advance under the target lock, before the prompt
+  chunk, when the prompt's token at `r - 1` is the head's last folded token.
+  A failed fold runs the row ordinary before output. MTP-6 gains one
+  exception, the bounded terminal flush: a row ending a normal terminal with
+  at most 16 buffered depth-zero columns (the deepest qualifiable depth)
+  flushes them into its head once before the snapshot; a row with more, as a
+  load-gated row held for its completion, runs no drafter forward at terminal
+  and retains no head. R015's gated cost model is unchanged: load-gated rows
+  above the cap keep no head and add no terminal work, and a flush within the
+  cap is at most one 16-column catch-up per completion, bounded like the
+  catch-up the model already counts when a held row's depth returns. Names
+  the tests that prove it.
+- **0.1.118 (2026-11-21, Related: #2459)** — R009 (MTP-9): on a hybrid
+  runtime with cached turns, a keyed cache-only native row that misses stays
+  native and commits the ordinary CB retained paged-KV entry, built only from
+  committed state (accepted-prefix paged KV, `stageCommit`-selected recurrent
+  state, prompt and terminal checkpoints) and equal to the ordinary row's
+  entry bit for bit. The entry may carry the row's committed MTP head
+  state; a hit stays native when that head covers the resume checkpoint and
+  the prompt's token there matches, and otherwise stays ordinary. Head bytes
+  count toward the retained entry. Names the tests that prove it.
 - **0.1.117 (2026-11-21, Related: #2451)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.85` (`8aa564dbf780cb4bd88e3fb591981eae868780f4`) on
   `3.32.3-macprovider.84` (#2451, #2448): Three GLM5Next commits on

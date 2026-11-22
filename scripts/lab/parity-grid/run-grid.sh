@@ -89,9 +89,17 @@
 # adds a turn-2 section and fails a cell whose provider reports 0 cached tokens. Default 1:
 # nothing changes. With --turns 2, env TURN2_HEADER=1 makes the provider client send
 # X-MacProvider-Provider-Conversation (one id per trial and row, on both turns; a --no-join
-# serve keys its prefix cache only on it) and TURN2_HISTORY=verbatim re-sends the turn-1
+# serve keys its prefix cache only on it; the key is sticky, so native MTP decodes turn 2
+# ordinarily, SPEC-048-R009). TURN2_HEADER=cache_only sends the same id plus
+# X-MacProvider-Provider-Conversation-Cache-Only: 1, which a lab-harness serve maps to a
+# cache-only key as the relay does for live cached turns (native MTP stays eligible). TURN2_HISTORY=verbatim re-sends the turn-1
 # reasoning as reasoning_content in the turn-2 history (default content: content only). Both
-# are provider-client only; the reference is unchanged.
+# are provider-client only; the reference is unchanged. TURN2_FOLLOWUP=continue (default restate)
+# makes user2 ask to keep writing, so turn 2 decodes to its output budget (#2459); the reference
+# replays only the restate follow-up, so continue needs --skip-reference.
+#
+# --contexts takes grid.json context names or token counts; a token count grid.json lacks
+# (e.g. 34000) becomes one more context of that many target tokens, named by the number.
 #
 # --no-autotune-candidate drops the lab autotune flag from the serve command;
 # with --cb off (and native MTP off for a model that has an admission entry)
@@ -136,6 +144,7 @@ SERVE_ARGS=()
 TURNS=1
 TURN2_HEADER=${TURN2_HEADER:-0}
 TURN2_HISTORY=${TURN2_HISTORY:-content}
+TURN2_FOLLOWUP=${TURN2_FOLLOWUP:-restate}
 REFERENCE=mlx-lm
 REF_ARGS=()
 REF_MODEL_PATH=""
@@ -217,8 +226,11 @@ fi
 REF_MODEL_PATH="${REF_MODEL_PATH:-$MODEL_PATH}"
 case "$CB" in off|on|canary|auto) ;; *) echo "--cb must be off|on|canary|auto" >&2; exit 64 ;; esac
 case "$TURNS" in 1|2) ;; *) echo "--turns must be 1|2" >&2; exit 64 ;; esac
-case "$TURN2_HEADER" in 0|1) ;; *) echo "TURN2_HEADER must be 0|1" >&2; exit 64 ;; esac
+case "$TURN2_HEADER" in 0|1|cache_only) ;; *) echo "TURN2_HEADER must be 0|1|cache_only" >&2; exit 64 ;; esac
 case "$TURN2_HISTORY" in content|verbatim) ;; *) echo "TURN2_HISTORY must be content|verbatim" >&2; exit 64 ;; esac
+case "$TURN2_FOLLOWUP" in restate) ;; continue)
+  [ "$SKIP_REF" = 1 ] || { echo "TURN2_FOLLOWUP=continue needs --skip-reference (the reference replays restate)" >&2; exit 64; } ;;
+  *) echo "TURN2_FOLLOWUP must be restate|continue" >&2; exit 64 ;; esac
 case "$EXPECT_MTP" in on|any) ;; *) echo "--expect-native-mtp must be on|any" >&2; exit 64 ;; esac
 case "$EXPECT_ROUTE" in batched|any) ;; *) echo "--expect-route must be batched|any" >&2; exit 64 ;; esac
 [ -z "$SEED_SELF_CHECK" ] || [ -f "$SEED_SELF_CHECK" ] || { echo "no --seed-self-check file $SEED_SELF_CHECK" >&2; exit 64; }
@@ -243,6 +255,8 @@ if outs: g["outputs"] = [int(x) for x in outs.split(",")]
 if ctxs:
     want = ctxs.split(",")
     g["contexts"] = [c for c in g["contexts"] if c["name"] in want or str(c["tokens"]) in want]
+    known = {c["name"] for c in g["contexts"]} | {str(c["tokens"]) for c in g["contexts"]}
+    g["contexts"] += [{"name": w, "tokens": int(w)} for w in want if w not in known and w.isdigit() and int(w) > 0]
     if len(g["contexts"]) != len(want): sys.exit("unknown context in %s" % ctxs)
 json.dump(g, open(sys.argv[2], "w"), indent=2)' "$HERE/grid.json" "$GRID" "$OUTPUTS" "$CONTEXTS" \
     || { echo "bad --outputs/--contexts" >&2; exit 64; }
@@ -257,8 +271,11 @@ REF_COMMON=("${COMMON[@]}")
 [ "$TURNS" = 1 ] || REF_COMMON+=(--provider-jsonl "$OURS")
 CLIENT_ARGS=()
 if [ "$TURNS" = 2 ]; then
-  [ "$TURN2_HEADER" = 0 ] || CLIENT_ARGS+=(--conversation-header)
-  CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY")
+  case "$TURN2_HEADER" in
+    1) CLIENT_ARGS+=(--conversation-header) ;;
+    cache_only) CLIENT_ARGS+=(--conversation-header --conversation-cache-only) ;;
+  esac
+  CLIENT_ARGS+=(--turn2-history "$TURN2_HISTORY" --turn2-followup "$TURN2_FOLLOWUP")
 fi
 
 if [ -z "$MAX_CONTEXT" ] && [ -f "$REF_MODEL_PATH/config.json" ]; then
@@ -339,6 +356,20 @@ case $warm_rc in
   5) echo "serve exited during the batching warm-up" >&2; tail -20 "$D/serve.err" >&2; exit 5 ;;
   *) echo "batching warm-up failed rc=$warm_rc; measuring the route that serves" >&2 ;;
 esac
+# A two-turn grid measures the cached-prefix path, which serves only after the
+# startup cached-turns probe passes. That probe defers while any request is in
+# flight, and the client sends back to back, so wait for its verdict first.
+if [ "$TURNS" = 2 ]; then
+  ct_wait=0
+  until grep -q "action=cached_turns_decided" "$D/serve.err" 2>/dev/null; do
+    kill -0 "$SP" 2>/dev/null || { echo "serve exited before the cached-turns verdict" >&2; tail -20 "$D/serve.err" >&2; exit 5; }
+    [ "$ct_wait" -lt "${CACHED_TURNS_WAIT_S:-900}" ] || { echo "BLOCKER: no cached-turns verdict after ${ct_wait}s; turn 2 would cold-prefill" >&2; exit 12; }
+    sleep 5; ct_wait=$((ct_wait + 5))
+  done
+  grep "action=cached_turns_decided" "$D/serve.err" | tail -1 | grep -q "result=passed" \
+    || { echo "BLOCKER: the cached-turns self-check failed: $(grep 'action=cached_turns_decided' "$D/serve.err" | tail -1)" >&2; exit 12; }
+  echo "== cached turns accepted after ${ct_wait}s"
+fi
 route_rc=0
 curl -s "http://127.0.0.1:$PORT/v1/status" > "$D/status.json"
 /usr/bin/python3 -I "$HERE/route_status.py" record --status "$D/status.json" --serve-err "$D/serve.err" \

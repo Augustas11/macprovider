@@ -18,6 +18,9 @@ struct NativeMTPAdaptationConfig: Sendable, Equatable {
     static let breakerCooldownRequests: UInt64 = 64
     static let maximumCircuitBreakerPositionsPerCommittedMilli: UInt64 = 4_000
 
+    /// The deepest proposal depth a native tuple may qualify.
+    static let maximumQualifiedDepth = 16
+
     let qualifiedMaximumDepth: Int
     let decreaseThresholdPPM: UInt64
     let increaseThresholdPPM: UInt64
@@ -29,7 +32,7 @@ struct NativeMTPAdaptationConfig: Sendable, Equatable {
         increaseThresholdPPM: UInt64,
         maxVerificationPositionsPerCommittedMilli: UInt64
     ) throws {
-        guard (0...16).contains(qualifiedMaximumDepth) else {
+        guard (0...Self.maximumQualifiedDepth).contains(qualifiedMaximumDepth) else {
             throw NativeMTPAdaptationError.invalidMaximumDepth
         }
         guard decreaseThresholdPPM < increaseThresholdPPM,

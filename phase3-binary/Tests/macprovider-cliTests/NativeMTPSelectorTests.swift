@@ -890,6 +890,24 @@ final class NativeMTPSelectorTests: XCTestCase {
             XCTAssertEqual(downgraded.selection.nativeMTPReason, .conversationKey)
             XCTAssertTrue(downgraded.allowsConversationCacheLease)
         }
+        // SPEC-048-R009 0.1.118: a hybrid runtime with cached turns hands back
+        // the CB retained entry, which a native row builds from committed
+        // state only. A miss stays native; a hit stays ordinary unless the
+        // retained entry restores the MTP head at the resume point.
+        func retained(cached: Int?, restores: Bool = false) -> NativeMTPRuntimeAdmission {
+            native.resolvingConversationCacheLease(
+                hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: cached,
+                keyedRowsCommitSerialFormat: false, keyedRowsCommitProvenRetainedEntry: true,
+                cachedPrefixRestoresNativeMTPDrafter: restores
+            )
+        }
+        XCTAssertTrue(retained(cached: 0).usesNativeMTP)
+        XCTAssertTrue(retained(cached: 48, restores: true).usesNativeMTP)
+        for downgraded in [retained(cached: 48), retained(cached: nil), retained(cached: nil, restores: true)] {
+            XCTAssertFalse(downgraded.usesNativeMTP)
+            XCTAssertEqual(downgraded.selection.nativeMTPReason, .conversationKey)
+            XCTAssertTrue(downgraded.allowsConversationCacheLease)
+        }
         let ordinary = ModelRuntime.nativeMTPRuntimeAdmission(
             for: try makeRequest().withConversationKey("conv:sticky"),
             draftConfigured: false,

@@ -1606,8 +1606,13 @@ decision = os.environ["FAKE_DECISION"]
 t0 = time.time()
 sys.stderr.write("event=served_slots action=planned rows=22 served=1 reason=self_check_pending configured=4\n")
 sys.stderr.write("event=served_slots action=applied slots=1 rows=22 reason=self_check_pending\n")
+# The startup cached-turns probe verdict a two-turn grid waits for before its client.
+if os.environ.get("FAKE_CACHED_TURNS", "passed") != "none":
+    sys.stderr.write("event=cb_self_check action=cached_turns_decided result=%s\n"
+                     % os.environ.get("FAKE_CACHED_TURNS", "passed"))
 sys.stderr.flush()
 COUNT = [0]
+SEEN, CACHE, LOOKUPS = set(), [0], [0]
 def decided():
     return time.time() - t0 > 1.5
 class H(BaseHTTPRequestHandler):
@@ -1624,16 +1629,31 @@ class H(BaseHTTPRequestHandler):
                                   "proposal_depth": 3, "proposed_tokens": COUNT[0] * 6,
                                   "accepted_tokens": COUNT[0] * 4, "mtp_forwards": COUNT[0] * 2,
                                   "reset_generation": 1, "last_reason": "active"}
+        body["conversation_cache"] = {"process_id": "p", "models": [
+            {"model_id": "m", "lookups": LOOKUPS[0], "hits": CACHE[0], "cached_prompt_tokens": CACHE[0] * 7}]}
         self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode())
     def do_POST(self):
         COUNT[0] += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        conv = self.headers.get("X-MacProvider-Provider-Conversation")
+        if os.environ.get("FAKE_HEADER_LOG"):
+            with open(os.environ["FAKE_HEADER_LOG"], "a") as f:
+                f.write(json.dumps({"conv": conv, "cache_only":
+                                    self.headers.get("X-MacProvider-Provider-Conversation-Cache-Only")}) + "\n")
+        cached = 0
+        if conv and conv in SEEN:
+            cached = 7
+            CACHE[0] += 1
+        if conv:
+            SEEN.add(conv)
+        LOOKUPS[0] += 1 if conv else 0
         if not decided():
             self.send_response(500); self.end_headers(); self.wfile.write(b"request before the verdict"); return
         self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
         n = min(body["max_tokens"], 3)
         for obj in ([{"choices": [{"index": 0, "delta": {"content": "ab"}, "finish_reason": None}]}] * n
-                    + [{"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": n, "macprovider_queue_ms": 4}}]):
+                    + [{"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": n, "macprovider_queue_ms": 4,
+                                                  "cached_prompt_tokens": cached}}]):
             self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n")
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
@@ -2109,6 +2129,136 @@ class LayerTraceTests(unittest.TestCase):
         recorded = out[3]
         self.assertEqual(layer_trace.distance(recorded, out[3])["rel_l2"], 0.0)
         self.assertGreater(layer_trace.distance(recorded, out[1])["rel_l2"], 0.1)
+
+
+class Turn2ContinueTests(unittest.TestCase):
+    """#2459: the `continue` turn-2 follow-up, turn-2-only native-MTP counters, numeric --contexts."""
+
+    def run_grid(self, *extra, env_extra=None):
+        import socket
+        import subprocess
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (d / "bin").mkdir()
+        (d / "fake").mkdir()
+        (d / "serve.py").write_text(_FAKE_CB_SERVE)
+        cli = d / "bin" / "macprovider-cli"
+        cli.write_text(f'#!/bin/bash\nexec /usr/bin/python3 -I {d / "serve.py"} "$@"\n')
+        lsof = d / "fake" / "lsof"
+        lsof.write_text("#!/bin/bash\nexit 1\n")
+        for p in (cli, lsof):
+            p.chmod(0o755)
+        out = d / "out"
+        env = dict(os.environ, PATH=f"{d / 'fake'}:/usr/bin:/bin:/usr/sbin", FAKE_DECISION="granted", FAKE_MTP="on",
+                   TURN2_HEADER="1", TURN2_FOLLOWUP="continue")
+        env.update(env_extra or {})
+        proc = subprocess.run(
+            ["bash", str(HARNESS / "run-grid.sh"), "--model-path", str(d), "--model-name", MODEL,
+             "--bin-dir", str(d / "bin"), "--out-dir", str(out), "--port", str(port), "--outputs", "4",
+             "--rows", "1", "--trials", "2", "--warmup-poll-s", "0.5", "--turns", "2", *extra],
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc, out
+
+    def test_continue_followup_numeric_context_and_turn2_counters(self):
+        proc, out = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short,300",
+                                  "--expect-native-mtp", "on")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        grid = json.loads((out / "grid.json").read_text())
+        self.assertEqual([c["tokens"] for c in grid["contexts"]], [200, 300])
+        rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        t2 = [r for r in rows if r.get("turn") == 2]
+        self.assertEqual(sorted({r["ctx_target"] for r in t2}), [200, 300])
+        self.assertEqual(len(t2), 4)
+        for r in t2:
+            self.assertEqual(r["turn2_followup"], "continue")
+            self.assertTrue(r["conversation_key_sent"])
+            # one turn-2 request per trial: the fake serve adds 6 proposed / 4 accepted per request
+            self.assertEqual((r["native_mtp_turn2"]["proposed_tokens"], r["native_mtp_turn2"]["accepted_tokens"]), (6, 4))
+        for a in (r for r in rows if r["kind"] == "aggregate"):
+            self.assertEqual(a["native_mtp"]["proposed_tokens"], 12)  # the trial: both turns
+
+    def test_turn2_header_cache_only_sends_the_cache_only_header_and_records_cache_hits(self):
+        log = Path(tempfile.mkdtemp()) / "headers.jsonl"
+        self.addCleanup(lambda: shutil.rmtree(log.parent, ignore_errors=True))
+        proc, out = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                  "--expect-native-mtp", "on",
+                                  env_extra={"TURN2_HEADER": "cache_only", "FAKE_HEADER_LOG": str(log)})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        sent = [json.loads(x) for x in log.read_text().splitlines()]
+        keyed = [h for h in sent if h["conv"]]
+        self.assertEqual(len(keyed), 4)  # 2 trials x (turn 1 + turn 2); the warmup sends no key
+        self.assertTrue(all(h["cache_only"] == "1" for h in keyed), sent)
+        rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        for r in (r for r in rows if r["kind"] == "row"):
+            self.assertTrue(r["conversation_key_sent"])
+            self.assertTrue(r["conversation_cache_only"])
+        for r in (r for r in rows if r.get("turn") == 2):
+            self.assertEqual(r["cached_prompt_tokens"], 7)
+            self.assertEqual(r["conversation_cache_turn2"],
+                             {"valid": True, "lookups": 1, "hits": 1, "cached_prompt_tokens": 7})
+
+    def test_two_turn_grid_fails_loudly_on_a_failed_or_missing_cached_turns_verdict(self):
+        proc, _ = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                env_extra={"FAKE_CACHED_TURNS": "failed"})
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("the cached-turns self-check failed", proc.stderr)
+        proc, _ = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                env_extra={"FAKE_CACHED_TURNS": "none", "CACHED_TURNS_WAIT_S": "5"})
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("no cached-turns verdict", proc.stderr)
+
+    def test_turn2_header_sticky_keeps_todays_headers(self):
+        log = Path(tempfile.mkdtemp()) / "headers.jsonl"
+        self.addCleanup(lambda: shutil.rmtree(log.parent, ignore_errors=True))
+        proc, out = self.run_grid("--skip-reference", "--skip-compare", "--contexts", "short",
+                                  env_extra={"FAKE_HEADER_LOG": str(log)})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        keyed = [h for h in map(json.loads, log.read_text().splitlines()) if h["conv"]]
+        self.assertEqual(len(keyed), 4)
+        self.assertTrue(all(h["cache_only"] is None for h in keyed), keyed)
+        rows = [json.loads(x) for x in (out / "provider.jsonl").read_text().splitlines()]
+        self.assertTrue(all(r["conversation_cache_only"] is False for r in rows if r["kind"] == "row"))
+
+    def test_turn2_header_rejects_unknown_values(self):
+        proc, _ = self.run_grid("--skip-reference", "--contexts", "short", env_extra={"TURN2_HEADER": "2"})
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("TURN2_HEADER must be 0|1|cache_only", proc.stderr)
+
+    def test_conversation_headers_and_cache_delta(self):
+        self.assertIsNone(client.conversation_headers(None, 0, cache_only=True))
+        self.assertEqual(client.conversation_headers(["c0"], 0),
+                         {client.CONVERSATION_HEADER: "c0"})
+        self.assertEqual(client.conversation_headers(["c0"], 0, cache_only=True),
+                         {client.CONVERSATION_HEADER: "c0",
+                          client.CONVERSATION_CACHE_ONLY_HEADER: "1"})
+        snap = lambda pid, hits: {"conversation_cache": {"process_id": pid, "models": [
+            {"lookups": hits, "hits": hits, "cached_prompt_tokens": hits * 10},
+            {"lookups": 1, "hits": 0, "cached_prompt_tokens": 0}]}}
+        self.assertEqual(client.conversation_cache_delta(snap("p", 1), snap("p", 3)),
+                         {"valid": True, "lookups": 2, "hits": 2, "cached_prompt_tokens": 20})
+        self.assertEqual(client.conversation_cache_delta(snap("p", 1), snap("q", 3))["reason"],
+                         "serve_restarted")
+        self.assertEqual(client.conversation_cache_delta(None, snap("p", 3))["reason"],
+                         "status_unreadable")
+
+    def test_continue_needs_skip_reference(self):
+        proc, _ = self.run_grid("--python", "/usr/bin/python3", "--contexts", "short")
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("TURN2_FOLLOWUP=continue needs --skip-reference", proc.stderr)
+
+    def test_unknown_named_context_still_fails(self):
+        proc, _ = self.run_grid("--skip-reference", "--contexts", "huge")
+        self.assertEqual(proc.returncode, 64)
+
+    def test_build_turn2_messages_followups(self):
+        restate = prompts.build_turn2_messages(200, 0, "a1")
+        cont = prompts.build_turn2_messages(200, 0, "a1", followup="continue")
+        self.assertEqual(restate[-1]["content"], prompts.FOLLOWUP)
+        self.assertEqual(cont[-1]["content"], prompts.FOLLOWUP_CONTINUE)
+        self.assertEqual(restate[:-1], cont[:-1])
 
 
 if __name__ == "__main__":

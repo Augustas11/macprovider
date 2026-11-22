@@ -112,7 +112,34 @@
 #          $POC/scratchpad/ablit-perf/results/<run id> when the Studio no longer has it); one serve
 #          cannot do both (native MTP admits one active row, the 4-slot pass needs the pin), so two loads.
 #          Per-pass knobs are documented in the job.sh header (<K>_PASSES, <K>_NATIVE_MTP, <K>_SERVED_SLOTS).
-# Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS METALLIB DET_ROWS DET_CONTEXTS
+#        MODELS=qwen38-27b TURNS=2 TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512,2048 TRIALS=3 \
+#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto; off rows=1 native_mtp=off; cold rows=1 native_mtp=off turn2_header=0' \
+#          MTP_T2_COMPARE='mtp off cold' studio-ablit-perf.sh
+#          #2459 native MTP vs ordinary decode on the cached-prefix turn-2 path, Qwen3.8-27B (catalog row
+#          qwen/qwen3.8-27b, durable store snapshot), one build, three serves: pass `mtp` (native_mtp_mode auto,
+#          exit 11 when native MTP is off), pass `off` (the same config with native_mtp_mode off) and pass
+#          `cold` (native MTP off, no conversation header on either turn: the keyless cold control; every
+#          turn-1/turn-2 pair of `off` must equal `cold`, cold_parity_t1/t2 on T2_CELL). Each
+#          trial: turn 1 at ~29.7K prompt tokens (34000 target x 0.873 measured for Qwen3.8-27B at 16000 ->
+#          13965 in run 20261117T064439Z), then turn 2 with the conv: conversation header sent cache-only
+#          (TURN2_HEADER=cache_only: the live cached-turn key; TURN2_HEADER=1 is sticky and SPEC-048-R009
+#          decodes it ordinarily, so native MTP would measure nothing), history = the
+#          turn-1 content (<= 2048 tokens) + the `continue` follow-up, so turn 2 is <= ~31.8K < the 32,768
+#          native-MTP prompt cap and decodes to its budget. mtp_turn2_compare.py writes
+#          results/<run>/qwen3.8-27b/mtp-turn2.{md,json}: per cell parity (text, reasoning, token count) of
+#          turns 1 and 2, decode tok/s and TTFT medians, cached tokens, turn-2 prompt vs the cap, native
+#          proposals on turn 2; T2_CELL / T2_VERDICT lines in the log. Add Qwen3.6-27B with
+#          MODELS="qwen38-27b qwen36-27b" and QWEN36_27B_PASSES set the same (three more serves).
+#          Preflight probe first (one cell, one trial, native pass only): MODELS=qwen38-27b TURNS=2
+#          TURN2_HEADER=cache_only TURN2_FOLLOWUP=continue CONTEXTS=34000 OUTPUTS=512 TRIALS=1
+#          QWEN38_27B_PASSES='mtp rows=1 native_mtp=auto' MTP_T2_COMPARE=mtp studio-ablit-perf.sh; the full
+#          run then adds SKIP_BUILD=1. Estimated duration (an estimate, not measured): probe ~20 min (build
+#          ~8 min as in run 20261117T064439Z, one load + idle self-check ~6 min, one trial ~2.5 min); full
+#          Qwen3.8-27B ~75 min with SKIP_BUILD=1 (three passes; per pass: turn-1 TTFT ~110 s at 29.7K from 44 s at 14K,
+#          decode ~35 tok/s, 3 trials x (512 + 2048) tokens x 2 turns ~19 min, plus load and self-check
+#          ~6 min); Qwen3.6-27B adds ~75 min.
+# Job settings pass through by name: MODELS OUTPUTS CONTEXTS TRIALS BASE_TRIALS TURNS TURN2_HEADER TURN2_HISTORY
+# TURN2_FOLLOWUP MTP_T2_COMPARE METALLIB DET_ROWS DET_CONTEXTS
 # SERVED_CONTEXTS SERVED_STEPS STEPS RUN_DETERMINISM RUN_PARITY LAB_FENCE
 # QMTP_* SKIP_BUILD REFERENCE_ONLY REUSE_REFERENCE SEED_SELF_CHECK_RUN SERVE_ENV PROMPT_TOKENS STEP_SIZES PROFILE_RUNS GENERATE_TOKENS and every <KEY>_<FIELD> model variable job.sh reads (see its header).
 # Exit 0 only when the job printed JOB_PASS; every failure prints a `BLOCKER:` line.
@@ -185,7 +212,7 @@ KEYS=$(echo "qwen27 glm minimax ${MODELS:-}" | tr 'a-z-' 'A-Z_' | tr -s ' ' '\n'
 ENVS=""
 while IFS= read -r name; do
   ENVS="$ENVS $name=$(printf %q "${!name}")"
-done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
+done < <(compgen -e | grep -E "^(MODELS|OUTPUTS|CONTEXTS|TRIALS|BASE_TRIALS|TURNS|TURN2_HEADER|TURN2_HISTORY|TURN2_FOLLOWUP|MTP_T2_COMPARE|METALLIB|SKIP_BUILD|REFERENCE_ONLY|REUSE_REFERENCE|SEED_SELF_CHECK_RUN|SERVE_ENV|SKIP_REFERENCE|SKIP_FORK_TESTS|PARITY_MIN_MATCH|REFUSAL_DATA|KEEP_SOURCE|DSV4_PUBLISH|DSV4_PUBLISH_ARGS|CB_ROWS|CB_SLOTS|LAB_FENCE|DET_ROWS|DET_CONTEXTS|SERVED_CONTEXTS|SERVED_STEPS|STEPS|RUN_DETERMINISM|RUN_PARITY|REF_PREFILL_BATCH_SIZE|QWEN4_PATH|QWEN4_REPO|QWEN4_REVISION|QWEN4_ID|QWEN4_SHA256|PROMPT_TOKENS|STEP_SIZES|PROFILE_RUNS|GENERATE_TOKENS|GQMM_SEED|GQMM_TARGETS|MEM_CONTEXTS|MEM_OUTPUT|BUX_SAMPLES|BUX_EXTRA_MODELS|QMTP_MODELS|QMTP_PROMPTS|QMTP_OUTPUTS|QMTP_BLOCKS|QMTP_PROBE|QMTP_SHAPE|QMTP_FORMAL|QMTP_CAP|QMTP_FORMAL_BLOCKS|QMTP_EXCLUSION|($KEYS)_(NAME|PATH|ID|SHA256|REF|REF_PY|REF_PATH|REF_ARGS|OMLX_DIR|ROWS|CB_FROM_POLICY|CONFIG_EXTRA|BASE_PATH|BASE_ID|BASE_SHA256|BASE_REFERENCE|NATIVE_MTP|SERVED_SLOTS|PASSES|STAGE_REPO|STAGE_REVISION|CLONE_FROM|BASE_CLONE_FROM|HF_REPO|HF_REVISION|HF_SUBFOLDER|TRIALS_BY_ROWS|MTP_BENCH|MTP_TEMPLATE))\$")
 say "ABLIT_START run=$RUN_ID job=$JOB_SCRIPT commit=$COMMIT${FORK_HEAD:+ fork_head=$FORK_HEAD}${MAIN_BASE:+ main_base=$MAIN_BASE} env:${ENVS:- (defaults)}"
 
 "${SSH[@]}" 'mkdir -p ~/lab-ablit-perf/job/minimax ~/lab-ablit-perf/job/dsv4 ~/lab-ablit-perf/job/cb-studio ~/lab-ablit-perf/job/catalog ~/lab-ablit-perf/job/mtp ~/lab-ablit-perf/job/bux ~/lab-ablit-perf/job/pins ~/lab-ablit-perf/src ~/lab-ablit-perf/logs ~/lab-ablit-perf/results' \
@@ -242,8 +269,9 @@ if [ -n "$MAIN_BASE" ]; then
   [ "$rc" = 0 ] || { blocker "main tree copy to the Studio failed"; exit 2; }
 fi
 
-HAVE_GPU=0; PID=""
+HAVE_GPU=0; PID=""; STREAM_PID=""
 finish() {
+  [ -z "$STREAM_PID" ] || kill "$STREAM_PID" 2>/dev/null
   if [ -n "$PID" ] && "${SSH[@]}" "kill -0 $PID 2>/dev/null"; then
     say "remote job still running at exit; killing its process group $PID"
     "${SSH[@]}" "kill -TERM -- -$PID 2>/dev/null; sleep 15; kill -KILL -- -$PID 2>/dev/null"
@@ -276,11 +304,57 @@ PID=$("${SSH[@]}" "bash -s" <<REMOTE
 set -m
 cd ~/lab-ablit-perf
 env RUN_ID=$RUN_ID COMMIT=$COMMIT $ENVS nohup bash ./job/ablit-perf/$JOB_SCRIPT > ./logs/job-$RUN_ID.log 2>&1 < /dev/null &
-echo \$!
+JP=\$!
+# Memory guard, on the Studio so it works with ssh down: the box has no swap and hangs
+# outright when RAM fills (four freezes on 2026-11-21). Samples system free memory every
+# 2 s and stops the whole job process group below MEMGUARD_FLOOR_PCT (default 10).
+mkdir -p ./results/$RUN_ID
+nohup bash -c '
+  jp=\$1; floor=\$2; log=\$3; n=0
+  while kill -0 "\$jp" 2>/dev/null; do
+    free=\$(memory_pressure 2>/dev/null | awk "/free percentage/ {gsub(\"%\",\"\",\\\$NF); print \\\$NF}")
+    [ -n "\$free" ] || { sleep 2; continue; }
+    if [ \$((n % 15)) -eq 0 ] || [ "\$free" -lt \$((floor + 10)) ]; then
+      echo "\$(date +%H:%M:%S) free_pct=\$free top_rss_kb=\$(ps -axco rss=,command= | sort -nr | head -3 | tr -s " \\n" " ")" >> "\$log"
+    fi
+    if [ "\$free" -lt "\$floor" ]; then
+      echo "\$(date +%H:%M:%S) MEMGUARD_KILL free_pct=\$free floor=\$floor" >> "\$log"
+      kill -TERM -- -"\$jp" 2>/dev/null; sleep 5; kill -KILL -- -"\$jp" 2>/dev/null
+      pkill -KILL -f "lab-ablit-perf/.*macprovider-cli[ ]serve" 2>/dev/null
+      exit 0
+    fi
+    n=\$((n + 1)); sleep 2
+  done' memguard "\$JP" "${MEMGUARD_FLOOR_PCT:-10}" "\$HOME/lab-ablit-perf/results/$RUN_ID/memguard.log" > /dev/null 2>&1 < /dev/null &
+echo \$JP
 REMOTE
 )
 say "remote job pid=$PID"
 [ -n "$PID" ] || { blocker "remote job did not start"; exit 4; }
+# Every serve.err of the run streams live into this Mac's results dir, one line
+# prefixed with its path, so a Studio reboot cannot lose the serve log. Each
+# remote tail stops 2 s after the job exits; finish() kills the local ssh.
+mkdir -p "$RES/$RUN_ID"
+"${SSH[@]}" "bash -s $PID $RUN_ID" > "$RES/$RUN_ID/serve-err.live.log" 2>/dev/null <<'STREAM' &
+seen=" "
+while kill -0 "$1" 2>/dev/null; do
+  for f in $(find ~/lab-ablit-perf/results/"$2" -name serve.err 2>/dev/null); do
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    { tail -F -n +1 "$f" 2>/dev/null & t=$!
+      while kill -0 "$1" 2>/dev/null; do sleep 2; done
+      sleep 2; kill "$t"; } | awk -v f="${f#$HOME/lab-ablit-perf/results/}" '{ print f ": " $0; fflush() }' &
+  done
+  sleep 2
+done
+wait
+STREAM
+STREAM_PID=$!
+"${SSH[@]}" "bash -s $PID $RUN_ID" > "$RES/$RUN_ID/memguard.live.log" 2>/dev/null <<'MEMSTREAM' &
+f=~/lab-ablit-perf/results/"$2"/memguard.log
+{ tail -F -n +1 "$f" 2>/dev/null & t=$!; while kill -0 "$1" 2>/dev/null; do sleep 2; done; sleep 4; kill "$t"; }
+MEMSTREAM
+MEMSTREAM_PID=$!
+say "serve.err live stream -> $RES/$RUN_ID/serve-err.live.log"
 
 seen=0; stalled=0
 while :; do

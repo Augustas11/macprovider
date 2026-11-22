@@ -61,10 +61,15 @@ def build_messages(ctx_tokens, row):
 
 # Turn 2 of the two-turn cell: a short fixed follow-up (about 20 tokens).
 FOLLOWUP = "Thanks. Now restate your answer in one sentence, then name one thing I should check next."
+# The `continue` follow-up (#2459): turn 2 decodes to its output budget, so a turn-2 cell
+# measures decode speed at long outputs instead of a one-sentence answer.
+FOLLOWUP_CONTINUE = ("Continue the story from exactly where you stopped. Keep writing new chapters; "
+                     "do not summarize, do not repeat earlier text, and do not stop early.")
+FOLLOWUPS = {"restate": FOLLOWUP, "continue": FOLLOWUP_CONTINUE}
 
 
-def build_turn2_messages(ctx_tokens, row, assistant1, reasoning=None):
-    """Turn-2 chat: the turn-1 prompt, the assistant's turn-1 text, the fixed follow-up.
+def build_turn2_messages(ctx_tokens, row, assistant1, reasoning=None, followup="restate"):
+    """Turn-2 chat: the turn-1 prompt, the assistant's turn-1 text, the follow-up (FOLLOWUPS key).
 
     With `reasoning` (not None) the assistant message also carries it as reasoning_content,
     as an OpenAI client that keeps the reasoning re-sends it.
@@ -72,7 +77,7 @@ def build_turn2_messages(ctx_tokens, row, assistant1, reasoning=None):
     assistant = {"role": "assistant", "content": assistant1}
     if reasoning is not None:
         assistant["reasoning_content"] = reasoning
-    return build_messages(ctx_tokens, row) + [assistant, {"role": "user", "content": FOLLOWUP}]
+    return build_messages(ctx_tokens, row) + [assistant, {"role": "user", "content": FOLLOWUPS[followup]}]
 
 
 def load_assistant1(provider_jsonl):

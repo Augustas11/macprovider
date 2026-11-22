@@ -44,12 +44,91 @@ struct NativeMTPDrafterPrefixSnapshot: @unchecked Sendable {
     let cache: [KVCache]
     let nextPosition: Int
     let foldedNextToken: Int
+    /// SPEC-048-R009 (0.1.119): nil, or the `[1, 1, hidden]` target hidden
+    /// state at `nextPosition - 1` that the install still folds. Then `cache`
+    /// sits at `nextPosition - 1`, and the install pairs this hidden with
+    /// `foldedNextToken` in one drafter advance to reach `nextPosition`.
+    var boundaryHidden: MLXArray? = nil
 
     /// The token check a restoring prompt must pass.
     func restores(into incomingTokens: [Int32], at tokenCount: Int) -> Bool {
         nextPosition == tokenCount
             && incomingTokens.indices.contains(tokenCount)
             && Int(incomingTokens[tokenCount]) == foldedNextToken
+    }
+}
+
+/// Identity equality, as `RecurrentStateCheckpoint`: a scheduler request that
+/// carries head state to install stays `Equatable` without comparing tensors.
+extension NativeMTPDrafterPrefixSnapshot: Equatable {
+    static func == (lhs: NativeMTPDrafterPrefixSnapshot, rhs: NativeMTPDrafterPrefixSnapshot) -> Bool {
+        lhs.nextPosition == rhs.nextPosition
+            && lhs.foldedNextToken == rhs.foldedNextToken
+            && lhs.boundaryHidden.map(ObjectIdentifier.init) == rhs.boundaryHidden.map(ObjectIdentifier.init)
+            && lhs.cache.count == rhs.cache.count
+            && zip(lhs.cache, rhs.cache).allSatisfy { ($0 as AnyObject) === ($1 as AnyObject) }
+    }
+}
+
+/// SPEC-048-R009 (0.1.118): the native-MTP head state a native hybrid CB row
+/// hands back with its retained paged-KV entry. `head` is the head's committed
+/// cache after the row's last committed round (no tentative proposal, no
+/// buffered columns): entry `p` pairs target hidden `p` with committed token
+/// `p + 1`. A later turn resumes at a recurrent checkpoint `r`, so
+/// `foldedTokens` records the committed token at every retained checkpoint
+/// position the head covers; a resume at `r` trims the head to `r` entries
+/// and requires the incoming prompt to carry that token at `r`.
+/// **(0.1.119)** `terminalHidden`, when present, is the target hidden state
+/// at `head.nextPosition` from the terminal-token forward of a length-stopped
+/// row (an owned `[1, 1, hidden]` copy). It lets a resume at
+/// `r = head.nextPosition + 1`, the full turn, fold one more entry: that
+/// hidden paired with the incoming prompt's token at `r`.
+struct NativeMTPRetainedDrafter: @unchecked Sendable {
+    let head: NativeMTPDrafterPrefixSnapshot
+    let foldedTokens: [Int: Int]
+    var terminalHidden: MLXArray? = nil
+
+    /// The head state at resume point `tokenCount`, or nil when the head
+    /// does not cover it or the incoming prompt's token there differs. The
+    /// stored cache is never mutated: the result trims fresh copies.
+    /// **(0.1.119)** One past the head, with `terminalHidden` present and
+    /// the incoming token at `tokenCount - 1` equal to the head's folded
+    /// token, the result is an untrimmed copy at `head.nextPosition` whose
+    /// install folds `terminalHidden` with the incoming token at `tokenCount`.
+    func resumed(at tokenCount: Int, incomingTokens: [Int32]) -> NativeMTPDrafterPrefixSnapshot? {
+        if tokenCount == head.nextPosition + 1 {
+            guard let terminalHidden,
+                  head.nextPosition > 0,
+                  incomingTokens.indices.contains(tokenCount),
+                  Int(incomingTokens[tokenCount - 1]) == head.foldedNextToken,
+                  !head.cache.isEmpty,
+                  head.cache.allSatisfy({ $0.offset == head.nextPosition })
+            else { return nil }
+            return NativeMTPDrafterPrefixSnapshot(
+                cache: head.cache.map { $0.copy() },
+                nextPosition: tokenCount,
+                foldedNextToken: Int(incomingTokens[tokenCount]),
+                boundaryHidden: terminalHidden
+            )
+        }
+        guard tokenCount > 0, tokenCount <= head.nextPosition,
+              let folded = foldedTokens[tokenCount],
+              incomingTokens.indices.contains(tokenCount),
+              Int(incomingTokens[tokenCount]) == folded,
+              !head.cache.isEmpty,
+              head.cache.allSatisfy({ $0.offset == head.nextPosition })
+        else { return nil }
+        let excess = head.nextPosition - tokenCount
+        var caches: [KVCache] = []
+        for layer in head.cache {
+            let copy = layer.copy()
+            if excess > 0 {
+                guard copy.isTrimmable, copy.trim(excess) == excess else { return nil }
+            }
+            guard copy.offset == tokenCount else { return nil }
+            caches.append(copy)
+        }
+        return NativeMTPDrafterPrefixSnapshot(cache: caches, nextPosition: tokenCount, foldedNextToken: folded)
     }
 }
 
@@ -71,6 +150,9 @@ final class ConversationCacheLayers: @unchecked Sendable {
     /// boundary chunk plan. Only such an entry may resume a CB row; a serial
     /// snapshot ran another chunk plan. False for every other entry.
     let resumeBoundaryPlan: Bool
+    /// SPEC-048-R009 (0.1.118): the native-MTP head state a native hybrid CB
+    /// row handed back with this retained paged-KV entry. Nil otherwise.
+    let retainedNativeMTPDrafter: NativeMTPRetainedDrafter?
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
     init(
@@ -80,9 +162,11 @@ final class ConversationCacheLayers: @unchecked Sendable {
         recurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshot: Bool = false,
         nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil,
-        resumeBoundaryPlan: Bool = false
+        resumeBoundaryPlan: Bool = false,
+        retainedNativeMTPDrafter: NativeMTPRetainedDrafter? = nil
     ) {
         self.layers = layers
+        self.retainedNativeMTPDrafter = retainedPagedKVSequence == nil ? nil : retainedNativeMTPDrafter
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
         self.recurrentCheckpoints = recurrentCheckpoints.sorted { $0.tokenCount < $1.tokenCount }
@@ -213,6 +297,8 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         var arrays = layers.layers.flatMap { $0.innerState() }
         arrays += layers.recurrentCheckpoints.flatMap { $0.states.values.flatMap { $0 } }
         arrays += layers.nativeMTPDrafter?.cache.flatMap { $0.innerState() } ?? []
+        arrays += layers.retainedNativeMTPDrafter?.head.cache.flatMap { $0.innerState() } ?? []
+        arrays += layers.retainedNativeMTPDrafter?.terminalHidden.map { [$0] } ?? []
         return arrays.reduce(0) { saturatedAdd($0, $1.nbytes) }
     }
 
@@ -251,6 +337,7 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         guard tokenCount > 0 else { return }
         var geometry = Geometry()
         let targetAndDraft = layers.layers + (layers.nativeMTPDrafter?.cache ?? [])
+            + (layers.retainedNativeMTPDrafter?.head.cache ?? [])
         for layer in targetAndDraft {
             let backing = layer.innerState().reduce(0) { Self.saturatedAdd($0, $1.nbytes) }
             let part: Geometry
