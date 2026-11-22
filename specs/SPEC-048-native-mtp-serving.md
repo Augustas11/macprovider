@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.119
+**Version:** 0.1.120
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.119",
+  "version": "0.1.120",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -600,9 +600,17 @@ staging file created exclusively below a `0700` directory. That file MAY be a
 that descriptor's mode is already `0400`, so the new inode is created without
 owner write. `fclonefileat` copies the source mode and a later chmod does not
 revoke a descriptor opened in between, so any other mode uses the exclusive
-`0400` byte copy. A byte copy is also the fallback when the volume cannot
+`0400` byte copy. **(0.1.120)** The provider model store keeps adopted
+files at mode `0400`, and before validation the capture sets mode `0400` on
+each manifested regular file it owns (single link, no group/other write) that
+lies under the provider model store root; files elsewhere are never changed.
+This runs before the first stat validation records, so every later identity
+check (including `ctime`) compares against the sealed mode. A byte copy is
+also the fallback when the volume cannot
 clone (`ENOTSUP`) or the capture tree is on another volume (`EXDEV`); any
-other clone failure rejects the capture. The loader then closes every write
+other clone failure rejects the capture. Every byte copy, including the
+mode-based one, logs `event=native_mtp_capture_clone_fallback` with the
+bytes copied. The loader then closes every write
 handle, removes write
 permission, and hashes and loads only that staged inode. The capture-tree
 stamp and digest checks stay as they are. Lazy or mapped reads MUST retain
@@ -3031,6 +3039,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.120 (2026-11-22, Related: #2468)** — MTP-2: the provider model
+  store keeps adopted files at mode `0400`, and the capture sets mode `0400`
+  on owned manifested files under the store root before validation, so a
+  store-held model is cloned rather than byte-copied. The clone gate (source
+  and clone birth mode `0400`) and all identity checks are unchanged. The
+  mode-based byte copy now logs `event=native_mtp_capture_clone_fallback`
+  with `reason=mode`.
 - **0.1.119 (2026-11-21, Related: #2459)** — R009 (MTP-9): a length-stopped
   row keeps the target hidden from its terminal-token forward next to the
   retained head, so a turn-2 hit at the full-turn reply end `r`, one past the
