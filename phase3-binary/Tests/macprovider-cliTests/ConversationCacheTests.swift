@@ -1809,3 +1809,80 @@ private final class FakeConversationColdTier: ConversationColdTier, @unchecked S
         keyEpoch: 1
     )
 }
+
+/// SPEC-038 FR-CB9 v0.3.63 (Related: #2462): an ordinary turn with no
+/// row-invariant request in flight takes the route of its key's stored entry,
+/// so a keyed conversation whose first turn ran beside a native row keeps
+/// its KV on the next turn; with a row-invariant request in flight it never
+/// takes stock order.
+final class SmallMRouteConversationAdmissionTests: XCTestCase {
+    func testOrdinaryTurnTakesTheStoredEntryRouteUnlessRowInvariantIsInFlight() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let counter = SmallMRouteRequestCounter()
+        let tokens: [Int32] = (0 ..< 64).map(Int32.init)
+        func admit(_ key: String?, native: Bool = false) async -> SmallMRouteRequestCounter.Ticket {
+            var stored: macprovider_cli.SmallMRoute?
+            if !native { stored = await cache.storedSmallMRoute(conversationKey: key) }
+            return counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true,
+                                 log: { _ in })
+        }
+        func layers(_ offset: Int) -> ConversationCacheLayers {
+            let layer = KVCacheSimple()
+            layer.offset = offset
+            return ConversationCacheLayers([layer])
+        }
+        let none = await cache.storedSmallMRoute(conversationKey: "conv:turns")
+        XCTAssertNil(none)
+
+        // Turn 1 runs beside a native row: row-invariant, and so is its entry.
+        let native = await admit(nil, native: true)
+        let turn1 = await admit("conv:turns")
+        XCTAssertEqual(turn1.route, .rowInvariant)
+        XCTAssertEqual(turn1.reason, .nativeActive)
+        let lease1Value = await cache.begin(
+            conversationKey: "conv:turns", incomingTokens: tokens, modelID: "model-a", kvBits: nil,
+            smallMRoute: turn1.route)
+        let lease1 = try XCTUnwrap(lease1Value)
+        await cache.commit(lease1, cache: layers(tokens.count), fullTokens: tokens)
+        turn1.end()
+        native.end()
+        let storedAfterTurn1 = await cache.storedSmallMRoute(conversationKey: " conv:turns ")
+        XCTAssertEqual(storedAfterTurn1, .rowInvariant)
+
+        // Turn 2 runs idle: it takes the entry's route and hits.
+        let turn2 = await admit("conv:turns")
+        XCTAssertEqual(turn2.route, .rowInvariant)
+        XCTAssertEqual(turn2.reason, .conversationCache)
+        let lease2Value = await cache.begin(
+            conversationKey: "conv:turns", incomingTokens: tokens + [99], modelID: "model-a", kvBits: nil,
+            smallMRoute: turn2.route)
+        let lease2 = try XCTUnwrap(lease2Value)
+        XCTAssertEqual(lease2.cachedPromptTokens, tokens.count)
+        await cache.abort(lease2)
+        turn2.end()
+
+        // A key with no entry is idle on stock order.
+        let fresh = await admit("conv:fresh")
+        XCTAssertEqual(fresh.route, .stockOrder)
+        XCTAssertEqual(fresh.reason, .idle)
+        let soLeaseValue = await cache.begin(
+            conversationKey: "conv:fresh", incomingTokens: tokens, modelID: "model-a", kvBits: nil,
+            smallMRoute: fresh.route)
+        let soLease = try XCTUnwrap(soLeaseValue)
+        await cache.commit(soLease, cache: layers(tokens.count), fullTokens: tokens)
+        fresh.end()
+
+        // Its stock order entry never puts it on stock order beside a row-invariant request.
+        let nativeAgain = await admit(nil, native: true)
+        let beside = await admit("conv:fresh")
+        XCTAssertEqual(beside.route, .rowInvariant)
+        XCTAssertEqual(beside.reason, .nativeActive)
+        beside.end()
+        nativeAgain.end()
+        let idle = await admit("conv:fresh")
+        XCTAssertEqual(idle.route, .stockOrder)
+        XCTAssertEqual(idle.reason, .conversationCache)
+        idle.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+}

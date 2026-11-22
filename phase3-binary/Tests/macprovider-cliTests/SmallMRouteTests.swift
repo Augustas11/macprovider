@@ -1007,6 +1007,21 @@ extension SmallMRouteTests {
         XCTAssertTrue(route(false, 0) == (.stockOrder, .idle))
         XCTAssertTrue(route(false, 1) == (.rowInvariant, .nativeActive))
         XCTAssertTrue(route(false, 3) == (.rowInvariant, .nativeActive))
+        // A stored conversation-cache entry decides only with nothing row-invariant in flight.
+        func stored(_ inFlight: Int, _ entry: SmallMRoute?) -> (SmallMRoute, SmallMRoute.AdmissionReason) {
+            let r = SmallMRoute.admissionRoute(
+                nativeAdmitted: false, rowInvariantInFlight: inFlight, storedRoute: entry,
+                processRoute: .stockOrder, mixed: true)
+            return (r.route, r.reason)
+        }
+        XCTAssertTrue(stored(0, .rowInvariant) == (.rowInvariant, .conversationCache))
+        XCTAssertTrue(stored(0, .stockOrder) == (.stockOrder, .conversationCache))
+        XCTAssertTrue(stored(0, .serialOnly) == (.stockOrder, .idle))
+        XCTAssertTrue(stored(1, .stockOrder) == (.rowInvariant, .nativeActive))
+        XCTAssertTrue(stored(2, .rowInvariant) == (.rowInvariant, .nativeActive))
+        XCTAssertTrue(SmallMRoute.admissionRoute(
+            nativeAdmitted: true, rowInvariantInFlight: 0, storedRoute: .stockOrder, processRoute: .stockOrder, mixed: true
+        ) == (.rowInvariant, .nativeAdmitted))
         // Outside mixed every request takes the process route.
         for process in [SmallMRoute.rowInvariant, .stockOrder, .serialOnly] {
             for native in [false, true] {
@@ -1035,7 +1050,7 @@ extension SmallMRouteTests {
         a.end()
         b.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
-        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 0, "native_active": 0, "idle": 2])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 0, "native_active": 0, "conversation_cache": 0, "idle": 2])
         // Not mixed: the process route, counted, and no admission line.
         let quiet = AdmissionLogLines()
         let c = counter.admit(nativeAdmitted: true, processRoute: .rowInvariant, mixed: false, log: quiet.append)
@@ -1079,7 +1094,7 @@ extension SmallMRouteTests {
         XCTAssertEqual(later.route, .stockOrder)
         XCTAssertEqual(later.reason, .idle)
         later.end()
-        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 2, "idle": 1])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 2, "conversation_cache": 0, "idle": 1])
         XCTAssertEqual(lines.all.map { $0.split(separator: " ").prefix(3).joined(separator: " ") }, [
             "event=small_m_route_admission route=row_invariant reason=native_admitted",
             "event=small_m_route_admission route=row_invariant reason=native_active",
@@ -1107,6 +1122,57 @@ extension SmallMRouteTests {
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 2])
         native.end()
         arrival.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+
+    /// M1: a request decided native at registration counts before it reaches
+    /// admission, so an ordinary request admitted in between joins it.
+    func testNativeDecidedAtRegistrationCountsBeforeItIsAdmitted() throws {
+        let counter = SmallMRouteRequestCounter()
+        let lines = AdmissionLogLines()
+        XCTAssertNil(counter.reserveNative(mixed: false))
+        let reservation = try XCTUnwrap(counter.reserveNative(mixed: true))
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 1])
+        // The ordinary request finishes prepare first.
+        let ordinary = counter.admit(nativeAdmitted: false, processRoute: .stockOrder, mixed: true, log: lines.append)
+        XCTAssertEqual(ordinary.route, .rowInvariant)
+        XCTAssertEqual(ordinary.reason, .nativeActive)
+        // The native request then takes its reservation over: counted once.
+        let native = counter.admit(
+            nativeAdmitted: true, reservation: reservation, processRoute: .stockOrder, mixed: true, log: lines.append)
+        XCTAssertTrue(native === reservation)
+        XCTAssertEqual(native.reason, .nativeAdmitted)
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 2])
+        XCTAssertEqual(lines.all.last, "event=small_m_route_admission route=row_invariant reason=native_admitted "
+            + "in_flight_row_invariant=1 in_flight_stock_order=0\n")
+        // Both exit paths end the same ticket; the count drops once.
+        native.end()
+        reservation.end()
+        ordinary.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+        XCTAssertEqual(counter.admissionSnapshot(), ["native_admitted": 1, "native_active": 1, "conversation_cache": 0, "idle": 0])
+    }
+
+    /// M1: a reservation released on early rejection, and one whose request
+    /// turned ordinary before admission, leave no row-invariant count behind.
+    func testNativeReservationIsReleasedOnRejectionAndOnTurningOrdinary() throws {
+        let counter = SmallMRouteRequestCounter()
+        let rejected = try XCTUnwrap(counter.reserveNative(mixed: true))
+        rejected.end()
+        rejected.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+
+        let downgraded = try XCTUnwrap(counter.reserveNative(mixed: true))
+        // Token bounds sent it ordinary: it does not count as its own
+        // row-invariant request in flight, so it is admitted idle.
+        let ticket = counter.admit(
+            nativeAdmitted: false, reservation: downgraded, processRoute: .stockOrder, mixed: true, log: { _ in })
+        XCTAssertFalse(ticket === downgraded)
+        XCTAssertEqual(ticket.route, .stockOrder)
+        XCTAssertEqual(ticket.reason, .idle)
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 1, "row_invariant": 0])
+        downgraded.end()
+        ticket.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
     }
 
