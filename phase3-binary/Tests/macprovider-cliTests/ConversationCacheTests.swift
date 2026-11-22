@@ -1822,7 +1822,7 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
         let tokens: [Int32] = (0 ..< 64).map(Int32.init)
         func admit(_ key: String?, native: Bool = false) async -> SmallMRouteRequestCounter.Ticket {
             var stored: macprovider_cli.SmallMRoute?
-            if !native { stored = await cache.storedSmallMRoute(conversationKey: key) }
+            if !native { stored = await cache.storedSmallMRoute(conversationKey: key, modelID: "model-a", kvBits: nil) }
             return counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true,
                                  log: { _ in })
         }
@@ -1831,7 +1831,7 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
             layer.offset = offset
             return ConversationCacheLayers([layer])
         }
-        let none = await cache.storedSmallMRoute(conversationKey: "conv:turns")
+        let none = await cache.storedSmallMRoute(conversationKey: "conv:turns", modelID: "model-a", kvBits: nil)
         XCTAssertNil(none)
 
         // Turn 1 runs beside a native row: row-invariant, and so is its entry.
@@ -1846,8 +1846,16 @@ final class SmallMRouteConversationAdmissionTests: XCTestCase {
         await cache.commit(lease1, cache: layers(tokens.count), fullTokens: tokens)
         turn1.end()
         native.end()
-        let storedAfterTurn1 = await cache.storedSmallMRoute(conversationKey: " conv:turns ")
+        let storedAfterTurn1 = await cache.storedSmallMRoute(conversationKey: " conv:turns ", modelID: "model-a", kvBits: nil)
         XCTAssertEqual(storedAfterTurn1, .rowInvariant)
+        // The same checks as `begin`: another model, KV bit width or an expired entry decides nothing.
+        let otherModel = await cache.storedSmallMRoute(conversationKey: "conv:turns", modelID: "model-b", kvBits: nil)
+        XCTAssertNil(otherModel)
+        let otherBits = await cache.storedSmallMRoute(conversationKey: "conv:turns", modelID: "model-a", kvBits: 8)
+        XCTAssertNil(otherBits)
+        let expired = await cache.storedSmallMRoute(
+            conversationKey: "conv:turns", modelID: "model-a", kvBits: nil, now: Date().addingTimeInterval(1_000))
+        XCTAssertNil(expired)
 
         // Turn 2 runs idle: it takes the entry's route and hits.
         let turn2 = await admit("conv:turns")

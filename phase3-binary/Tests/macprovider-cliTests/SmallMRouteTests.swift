@@ -1044,8 +1044,8 @@ extension SmallMRouteTests {
         XCTAssertEqual(b.reason, .idle)
         XCTAssertEqual(counter.snapshot(), ["stock_order": 2, "row_invariant": 0])
         XCTAssertEqual(lines.all, [
-            "event=small_m_route_admission route=stock_order reason=idle in_flight_row_invariant=0 in_flight_stock_order=0\n",
-            "event=small_m_route_admission route=stock_order reason=idle in_flight_row_invariant=0 in_flight_stock_order=1\n",
+            "event=small_m_route_admission route=stock_order reason=idle in_flight_row_invariant=0 in_flight_stock_order=0 joinable_row_invariant=0\n",
+            "event=small_m_route_admission route=stock_order reason=idle in_flight_row_invariant=0 in_flight_stock_order=1 joinable_row_invariant=0\n",
         ])
         a.end()
         b.end()
@@ -1144,7 +1144,7 @@ extension SmallMRouteTests {
         XCTAssertEqual(native.reason, .nativeAdmitted)
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 2])
         XCTAssertEqual(lines.all.last, "event=small_m_route_admission route=row_invariant reason=native_admitted "
-            + "in_flight_row_invariant=1 in_flight_stock_order=0\n")
+            + "in_flight_row_invariant=1 in_flight_stock_order=0 joinable_row_invariant=1\n")
         // Both exit paths end the same ticket; the count drops once.
         native.end()
         reservation.end()
@@ -1173,6 +1173,64 @@ extension SmallMRouteTests {
         XCTAssertEqual(counter.snapshot(), ["stock_order": 1, "row_invariant": 0])
         downgraded.end()
         ticket.end()
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+
+    /// A request on row-invariant only for its own conversation-cache entry
+    /// never pulls another ordinary request off stock order: no drift of
+    /// keyed conversations onto row-invariant without native traffic.
+    func testConversationCacheRowInvariantDoesNotPullOtherRequests() {
+        let counter = SmallMRouteRequestCounter()
+        func admit(_ stored: SmallMRoute?, native: Bool = false) -> SmallMRouteRequestCounter.Ticket {
+            counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true, log: { _ in })
+        }
+        let keyedRI = admit(.rowInvariant)
+        XCTAssertEqual(keyedRI.route, .rowInvariant)
+        XCTAssertEqual(keyedRI.reason, .conversationCache)
+        XCTAssertFalse(keyedRI.joinable)
+        // Counted in flight for status, but not joined.
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 1])
+        let unkeyed = admit(nil)
+        XCTAssertEqual(unkeyed.route, .stockOrder)
+        XCTAssertEqual(unkeyed.reason, .idle)
+        let keyedStock = admit(.stockOrder)
+        XCTAssertEqual(keyedStock.route, .stockOrder)
+        XCTAssertEqual(keyedStock.reason, .conversationCache)
+        let secondKeyedRI = admit(.rowInvariant)
+        XCTAssertEqual(secondKeyedRI.route, .rowInvariant)
+        XCTAssertEqual(secondKeyedRI.reason, .conversationCache)
+        let stillUnkeyed = admit(nil)
+        XCTAssertEqual(stillUnkeyed.route, .stockOrder)
+        [keyedRI, unkeyed, keyedStock, secondKeyedRI, stillUnkeyed].forEach { $0.end() }
+        XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
+    }
+
+    /// The other direction: a native row (and an ordinary row that joined it)
+    /// still pulls every ordinary admission onto row-invariant, a keyed one
+    /// whose entry is stock order included, and such a joined row is
+    /// joinable itself.
+    func testNativeRowStillPullsKeyedStockOrderConversationsOntoRowInvariant() {
+        let counter = SmallMRouteRequestCounter()
+        func admit(_ stored: SmallMRoute?, native: Bool = false) -> SmallMRouteRequestCounter.Ticket {
+            counter.admit(nativeAdmitted: native, storedRoute: stored, processRoute: .stockOrder, mixed: true, log: { _ in })
+        }
+        let native = admit(nil, native: true)
+        XCTAssertTrue(native.joinable)
+        let keyedStock = admit(.stockOrder)
+        XCTAssertEqual(keyedStock.route, .rowInvariant)
+        XCTAssertEqual(keyedStock.reason, .nativeActive)
+        XCTAssertTrue(keyedStock.joinable)
+        native.end()
+        // The joined keyed row keeps later arrivals on row-invariant.
+        let later = admit(.stockOrder)
+        XCTAssertEqual(later.route, .rowInvariant)
+        XCTAssertEqual(later.reason, .nativeActive)
+        keyedStock.end()
+        later.end()
+        let idle = admit(.stockOrder)
+        XCTAssertEqual(idle.route, .stockOrder)
+        XCTAssertEqual(idle.reason, .conversationCache)
+        idle.end()
         XCTAssertEqual(counter.snapshot(), ["stock_order": 0, "row_invariant": 0])
     }
 
