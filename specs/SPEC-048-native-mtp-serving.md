@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.121
+**Version:** 0.1.122
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.121",
+  "version": "0.1.122",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -653,12 +653,30 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.85` | `8aa564dbf780cb4bd88e3fb591981eae868780f4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
-| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.86` | `bcffd492b1d89d009e57278defd258e76ac78ab3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.26` | `aaa826550ca59184a5884b099f1d640714804fc5` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.16` | `dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.85` is on `3.32.3-macprovider.84`
+The mlx-swift-lm row `3.32.3-macprovider.86` is on `3.32.3-macprovider.85`
+(`8aa564dbf780cb4bd88e3fb591981eae868780f4`) (#2462), at
+`bcffd492b1d89d009e57278defd258e76ac78ab3`: one commit that only moves its
+mlx-swift pin to `0.32.3-macprovider.26`
+(`aaa826550ca59184a5884b099f1d640714804fc5`), `0.32.3-macprovider.25` plus one
+commit that adds the per-op small-M route: the Swift API `SmallMRoute` and
+`withSmallMRoute` (a thread scope that QuantizedMatmul captures at graph
+build), the core gitlink moved to `v0.32.4-macprovider.16`
+(`dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80`, three commits on
+`v0.32.4-macprovider.15`: the thread-scoped route captured on
+QuantizedMatmul and carried through its vjp/jvp, and a discriminating 2-row
+GPU route test), mlx-c moved to `v0.6.0-macprovider.4`
+(`70f188c0c19b36823e7c7b30c30ae6e8514509c3`, one commit on
+`v0.6.0-macprovider.2` binding the route scope; tag `.3` is a separate line
+that was never pinned) and the quantized jit sources regenerated. With no
+scope set an op takes the process route, as before. The four tags are cut
+from these revisions at the campaign freeze. No model source changes.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.85` is on `3.32.3-macprovider.84`
 (`ddc6f974355982773e1440957f16e998835408d0`) (#2451, #2448), at
 `8aa564dbf780cb4bd88e3fb591981eae868780f4`: Three GLM5Next commits on
 3.32.3-macprovider.84 add prefill slices (`glm5NextPrefillSlicesKey`): the
@@ -3068,6 +3086,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.122 (2026-11-23, Related: #2462)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.86` (`bcffd492b1d89d009e57278defd258e76ac78ab3`) on
+  `3.32.3-macprovider.85`, mlx-swift `0.32.3-macprovider.26`
+  (`aaa826550ca59184a5884b099f1d640714804fc5`) on `0.32.3-macprovider.25`,
+  MLX core `v0.32.4-macprovider.16`
+  (`dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80`) on `v0.32.4-macprovider.15`
+  and mlx-c `v0.6.0-macprovider.4`
+  (`70f188c0c19b36823e7c7b30c30ae6e8514509c3`) on `v0.6.0-macprovider.2`
+  (#2462): the per-op small-M route (`withSmallMRoute`, a thread scope
+  QuantizedMatmul captures at graph build) that the 0.1.121 per-request route
+  runs on. The LM commit only moves the mlx-swift pin; no model source
+  changes. The tags are cut from these revisions at the campaign freeze.
 - **0.1.121 (2026-11-22, Related: #2462)** — R003: native MTP requires the
   row-invariant small-row route for the native request, per request in a
   SPEC-038 FR-CB9 `mixed` process (process route `stock_order`) and process
