@@ -1,0 +1,35 @@
+{
+  "schema": "macprovider.lab.coding-quality-rubric.v1",
+  "workload": {"workload_id": "coding-agent-revenue", "version": 1, "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"},
+  "rule": "A case passes when finish_reason is stop, the final answer (content after any reasoning) is non-empty, every `all` pattern matches it (Python re, IGNORECASE|MULTILINE) and every `min_count` pattern matches at least that many times. Frozen before any inference of #2465 / #2466; a change is a new version file.",
+  "cases": {
+    "debug-python-pagination-off-by-one": {
+      "all": ["rows\\[\\s*start\\s*:\\s*(end|start\\s*\\+\\s*page_size)\\s*\\]", "end\\s*<\\s*len\\(\\s*rows\\s*\\)", "def\\s+test_\\w+"]
+    },
+    "debug-go-data-race-worker-pool": {
+      "all": ["^package\\s+pool", "sync\\.(Mutex|RWMutex|Once)|atomic\\.", "func\\s+Test\\w*\\(\\s*t\\s+\\*testing\\.T\\s*\\)", "t\\.Run\\(|\\[\\]struct\\s*\\{"]
+    },
+    "write-tests-token-bucket-limiter": {
+      "all": ["import\\s+pytest|from\\s+\\w+\\s+import", "clock", "thread", "retry_after|inf"],
+      "min_count": {"def\\s+test_\\w+": 6}
+    },
+    "implement-ttl-lru-cache-typescript": {
+      "all": ["class\\s+TtlLruCache", "node:test", "RangeError", "[\"']capacity[\"']", "[\"']expired[\"']", "new\\s+Map\\b|Map<"]
+    },
+    "harden-bash-release-script": {
+      "all": ["set\\s+-[a-z]*e[a-z]*u[a-z]*o?\\s*pipefail|set\\s+-euo\\s+pipefail", "\\btrap\\b", "mktemp", "sha256sum|shasum", "usage"]
+    },
+    "review-sql-migration-backfill": {
+      "all": ["ADD\\s+CONSTRAINT|CHECK", "batch|LIMIT", "not\\s+unique|duplicate|MAX\\(|LIMIT\\s+1|GROUP\\s+BY|SUM\\(", "lock|block|long[- ]running|transaction"]
+    },
+    "explain-swift-actor-reentrancy-crash": {
+      "all": ["reentran", "Task\\s*<", "actor\\s+TokenStore", "await"]
+    },
+    "fix-failing-ci-node-stream-parser": {
+      "all": ["indexOf\\(\\s*[\"']:[\"']\\s*\\)|split\\(\\s*/|slice\\(", "\\\\r", "startsWith\\(\\s*[\"']:[\"']|\\[0\\]\\s*===\\s*[\"']:[\"']", "\\\\n", "(test|it)\\(\\s*[\"'`]"]
+    },
+    "agent-loop-multi-file-inventory-fix": {
+      "all": ["def\\s+reserve", "def\\s+release", "def\\s+commit", "BEGIN|rollback|with\\s+self\\.\\w*conn\\w*|with\\s+conn", "class\\s+InsufficientStock|InsufficientStock\\("]
+    }
+  }
+}
