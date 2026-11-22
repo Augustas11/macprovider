@@ -11,7 +11,11 @@ On a GPU where the MLX core takes its NAX quantized-matmul kernels (macOS
 26.2 or later, architecture generation 17 or later, 18 for a phone), both
 small-row routes select the same kernels, so `mixed` would split forwards
 and caches for no gain: such a process keeps `row_invariant` process-wide,
-as before v0.3.61. A DeepSeek V4 prefill decode pause (FR-CB4) serves only
+as before v0.3.61, with its native reason, checked before a fallback or
+the operator override. So does a lab build that kept an inherited
+`MLX_METAL_QMV_MMA_WK` (reason `native_mtp_qmv_mma_wk_inherited`): the core
+applies it to both routes' ops. The SPEC-039 attach isolation probe runs on
+the process route. A DeepSeek V4 prefill decode pause (FR-CB4) serves only
 decoding rows on the prefill's route. A one-row verdict recorded by a
 `mixed` process logs the next start's mode from the same decision as
 startup. No other behaviour changes.
@@ -2125,7 +2129,10 @@ not take the MLX core's NAX quantized-matmul kernels (v0.3.62: core
 `is_nax_available`, macOS 26.2 or later and architecture generation 17 or
 later, 18 for a phone; there both routes select the same kernels). Its
 reason is `native_mtp_per_request`. A NAX process whose native MTP may
-activate keeps `row_invariant` process-wide with its native reason. A process whose native MTP may activate and that
+activate keeps `row_invariant` process-wide with its native reason, and a
+lab build that kept an inherited `MLX_METAL_QMV_MMA_WK` keeps it with
+reason `native_mtp_qmv_mma_wk_inherited`; both are checked before the
+fallback and the operator override. A process whose native MTP may activate and that
 would otherwise take `serial_only` (item 2 holds) keeps `row_invariant` as
 before. Every condition that keeps a process on `row_invariant` today still
 keeps it there process-wide: the operator override

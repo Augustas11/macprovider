@@ -1040,6 +1040,14 @@ extension SmallMRouteTests {
                 value.logFields
             )
             XCTAssertTrue(value.logFields.hasSuffix(" nax=true"))
+            // NAX is checked first: the native reason, not the fallback's or
+            // the operator's.
+            var fallback = value
+            fallback.stockOrderFallback = "stock_order_row_divergence_at_3"
+            XCTAssertEqual(SmallMRoute.decide(fallback).reason, "native_mtp_\(admission.rawValue)")
+            var forced = value
+            forced.operatorForcesRowInvariant = true
+            XCTAssertEqual(SmallMRoute.decide(forced).reason, "native_mtp_\(admission.rawValue)")
         }
         // NAX changes nothing without native MTP.
         var plain = inputs(explicit: false, verdict: .grantsBatching)
@@ -1098,5 +1106,34 @@ extension SmallMRouteTests {
             XCTAssertEqual(ModelRuntime.nativeMTPOrdinaryReferenceRequest(
                 id: "ref", promptTokens: [1], maxOutputTokens: 1, processRoute: route, mixed: false).smallMRoute, route)
         }
+    }
+
+    /// v0.3.62: a lab process that kept an inherited `MLX_METAL_QMV_MMA_WK`
+    /// keeps row_invariant process-wide, with its own reason.
+    func testInheritedPartialSumsKeepNativeMTPOnProcessWideRowInvariant() {
+        var value = inputs(explicit: false, nativeMTP: .auto, admission: .entryForModel, verdict: .grantsBatching)
+        XCTAssertTrue(SmallMRoute.decide(value).mixed)
+        value.inheritedPartialSums = true
+        XCTAssertEqual(
+            SmallMRoute.decide(value),
+            SmallMRoute.Decision(route: .rowInvariant, reason: "native_mtp_qmv_mma_wk_inherited")
+        )
+        XCTAssertTrue(value.logFields.hasSuffix(" qmv_mma_wk=inherited"))
+        // Before the fallback and the operator override, after NAX.
+        var fallback = value
+        fallback.stockOrderFallback = "stock_order_row_divergence_at_3"
+        XCTAssertEqual(SmallMRoute.decide(fallback).reason, "native_mtp_qmv_mma_wk_inherited")
+        var nax = value
+        nax.naxGPU = true
+        XCTAssertEqual(SmallMRoute.decide(nax).reason, "native_mtp_entry_for_model")
+        // Without native MTP it changes nothing.
+        var plain = inputs(explicit: false, verdict: .grantsBatching)
+        let before = SmallMRoute.decide(plain)
+        plain.inheritedPartialSums = true
+        XCTAssertEqual(SmallMRoute.decide(plain), before)
+        // Non-lab builds remove the variable, so they never keep it.
+        #if !MACPROVIDER_LAB_HARNESS
+        XCTAssertFalse(SmallMRoute.keepsInheritedPartialSums)
+        #endif
     }
 }
