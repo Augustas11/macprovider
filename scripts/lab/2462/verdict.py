@@ -33,7 +33,8 @@ Gates:
                    both serves) equals the same row on each A serve (output and token count);
   conv_spread_no_pull  in every B conv_spread trial the unkeyed row is admitted idle on
                    stock_order beside the conversation_cache row_invariant turn (admissions idle=1,
-                   phase-2 peak route requests row_invariant=1 / stock_order=1);
+                   phase-2 peak route requests row_invariant=1 / stock_order=1), and the unkeyed
+                   row's turn2_overlap_share is > 0 (the two rows decoded together);
   token_counts     every pair compared for speed has equal token counts: native rows across
                    serves, and ordinary rows of the same cell, prompt and trial across serves
                    (ord1 and mix).
@@ -294,9 +295,13 @@ def main(argv=None):
     for t in spread_trials:
         adm = t.get("small_m_route_admissions") or {}
         pk = t.get("peak_small_m_route_requests") or {}
-        if adm.get("idle") != 1 or pk.get("stock_order") != 1 or pk.get("row_invariant") != 1:
+        unkeyed = by[b].get(("conv_spread", t["trial"], "unkeyed", a.ord_rows + 4)) or {}
+        overlap = unkeyed.get("turn2_overlap_share")
+        if (adm.get("idle") != 1 or pk.get("stock_order") != 1 or pk.get("row_invariant") != 1
+                or not (overlap or 0) > 0):
             spread_bad.append(t["trial"])
-            print(f"T2462_CONV_SPREAD_PULL {b} trial={t['trial']} admissions={adm} phase2_peak_routes={pk}")
+            print(f"T2462_CONV_SPREAD_PULL {b} trial={t['trial']} admissions={adm} phase2_peak_routes={pk} "
+                  f"unkeyed_turn2_overlap_share={overlap}")
     gates = {
         "native_identity": nat_mismatch == 0,
         "ordinary_route_identity": route_mismatch == 0,

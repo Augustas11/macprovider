@@ -50,7 +50,8 @@ Cells, each trial in this order, one trial of every cell before the next trial:
         unkeyed ordinary prompt (row ord_rows + 4, --ord-out tokens). On a `mixed` serve turn 2
         is admitted row_invariant (conversation_cache) and must not pull the unkeyed row: that
         row is admitted stock_order (idle). The trial's aggregate_tps covers these two phase-2
-        rows only, and its peaks come from phase 2 alone. Roles native, conv1, conv2, unkeyed.
+        rows only, and its peaks come from phase 2 alone; the unkeyed row carries
+        turn2_overlap_share. Roles native, conv1, conv2, unkeyed.
 Native prompt: prompts.build_messages(ctx, 0); ordinary prompt j: build_messages(ctx, j), j >= 1.
 Every prompt asks for a long story, so rows normally stop at max_tokens (finish=length).
 
@@ -327,6 +328,9 @@ def trial(args, cell, t, out):
         if cell == "conv_spread":
             ru = record(results["unkeyed"], {**base, "kind": "row", "role": "unkeyed", "prompt_row": row + 1,
                                              "max_tokens": args.ord_out}, t0)
+            # Share of the unkeyed row's decode span during which turn 2 also decoded; the
+            # no-pull gate needs it > 0, or the two rows never shared a step.
+            ru["turn2_overlap_share"] = overlap_share(ru, r2)
             rows.append(ru)
             # Output tok/s of the two phase-2 rows from the turn-2 start to the last token.
             start = t2 - t0
