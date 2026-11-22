@@ -3,7 +3,8 @@
 
 usage: mixed_load.py --port P --model ID --label A1 --out rows.jsonl
                      [--trials 6] [--ctx 1000] [--ord-rows 2] [--ord-out 512] [--nat-out 1024]
-                     [--cells ord1,nat1,mix,mix_late] [--late-after 128]
+                     [--cells ord1,nat1,mix,mix_late,conv2] [--late-after 128]
+                     [--conv-turn2-out 64] [--idle-timeout-s 300]
                      [--ordinary-field x_lab_2462_ordinary]
 
 How a request becomes native or ordinary (NativeMTP.swift `NativeMTPDecodeSelector.reason`):
@@ -28,14 +29,23 @@ Cells, each trial in this order, one trial of every cell before the next trial:
   mix   the native prompt, then --ord-rows ordinary prompts at once while it decodes;
   mix_late  --ord-rows ordinary prompts at once, then the native prompt (no ordinary field) once
         every ordinary row has streamed --late-after content/reasoning chunks (each chunk is at
-        least one token). With the signed max_native_active_rows = 1 that late request is
-        admitted ordinary (capacity_above_native_bound) on the route the in-flight rows hold;
-        its native admissions are recorded, not assumed. Role `late`.
+        least one token). It measures no transient route split: with the signed
+        max_native_active_rows = 1 the late request is admitted ordinary
+        (capacity_above_native_bound), on stock order beside the stock order rows (SPEC-038
+        v0.3.63), so the cell is three ordinary rows, one of them late. Its native admissions are
+        recorded, not assumed. Role `late`;
+  conv2 a keyed two-turn conversation (prompt row ord_rows + 1, header X-MacProvider-Provider-
+        Conversation, one id per trial and serve): the native prompt, then turn 1 (--ord-out
+        tokens) while the native row decodes; after the serve is idle, turn 2
+        (prompts.build_turn2_messages with the turn-1 content, --conv-turn2-out tokens) runs
+        alone. On a `mixed` serve turn 1 is admitted row_invariant (native_active) and turn 2
+        on its entry's route (conversation_cache), so turn 2 reuses turn 1's KV. Roles native,
+        conv1, conv2; turn-2 rows carry cached_prompt_tokens.
 Native prompt: prompts.build_messages(ctx, 0); ordinary prompt j: build_messages(ctx, j), j >= 1.
 Every prompt asks for a long story, so rows normally stop at max_tokens (finish=length).
 
 Each trial waits for an idle serve (no active decode row, nothing waiting, no in-flight route
-request) and records the /v1/status native_mtp counter change over the trial. A `mix` trial
+request; a serve not idle within --idle-timeout-s raises and the run exits 1) and records the /v1/status native_mtp counter change over the trial. A `mix` trial
 also samples /v1/status every --poll-s seconds and records the peak active decode rows and,
 on a `mixed` serve, the peak `small_m_route_requests` per route; every trial on a `mixed` serve
 records the `small_m_route_admissions` change (admissions per reason) over the trial.
@@ -55,7 +65,7 @@ import uuid
 
 sys.path.insert(0, os.environ.get("PARITY_GRID_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "parity-grid")))
 import prompts  # noqa: E402
-from provider_client import consume_stream, native_mtp_delta, native_mtp_of, row_record  # noqa: E402
+from provider_client import CONVERSATION_HEADER, consume_stream, native_mtp_delta, native_mtp_of, row_record  # noqa: E402
 
 
 def fetch_status(port, timeout=5):
@@ -84,10 +94,18 @@ def busy(status):
     return bool(sch.get("active_decode_rows") or sch.get("waiting_count") or any(routes.values()))
 
 
-def wait_idle(port, poll_s, settle_s=1.0):
-    """Waits for an idle serve; the only bound is the serve answering (a dead serve raises)."""
+IDLE_TIMEOUT_S = 300.0
+
+
+def wait_idle(port, poll_s, settle_s=1.0, timeout_s=None):
+    """Waits for an idle serve. Raises when the serve stops answering or is still busy after
+    `timeout_s` (default IDLE_TIMEOUT_S, set by --idle-timeout-s)."""
     misses = 0
+    deadline = time.monotonic() + (IDLE_TIMEOUT_S if timeout_s is None else timeout_s)
     while True:
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"serve not idle after {IDLE_TIMEOUT_S if timeout_s is None else timeout_s:.0f} s: "
+                               f"{json.dumps(cb_of(fetch_status(port)).get('scheduler'))}")
         st = fetch_status(port)
         if st is None:
             misses += 1
@@ -123,16 +141,17 @@ def first_token_marker(lines, event, reached=None, after=0):
         yield raw
 
 
-def run_request(port, model, messages, max_tokens, extra=None, first=None, timeout=3600, reached=None, after=0):
+def run_request(port, model, messages, max_tokens, extra=None, first=None, timeout=3600, reached=None, after=0,
+                headers=None):
     """One streamed request. `first` and `reached` are always set when it returns."""
     try:
-        return _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after)
+        return _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after, headers)
     finally:
         if reached is not None:
             reached.set()
 
 
-def _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after):
+def _run_request(port, model, messages, max_tokens, extra, first, timeout, reached, after, headers):
     body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0,
             "stream": True, "stream_options": {"include_usage": True}, **(extra or {})}
     first = first or threading.Event()
@@ -141,7 +160,7 @@ def _run_request(port, model, messages, max_tokens, extra, first, timeout, reach
     try:
         # The provider batches only requests that carry a stable id.
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
-                     headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                     headers={**(headers or {}), "Content-Type": "application/json", "Accept": "text/event-stream",
                               "X-Request-ID": uuid.uuid4().hex})
         resp = conn.getresponse()
         if resp.status != 200:
@@ -228,6 +247,42 @@ def trial(args, cell, t, out):
         res = run_request(args.port, args.model, prompts.build_messages(args.ctx, 0), args.nat_out)
         rows.append(record(res, {**base, "kind": "row", "role": "native", "prompt_row": 0,
                                  "max_tokens": args.nat_out}, t0))
+    elif cell == "conv2":
+        poller = Poller(args.port, args.poll_s)
+        poller.start()
+        first = threading.Event()
+        results = {}
+        row = args.ord_rows + 1
+        conv = {CONVERSATION_HEADER: f"lab2462-{args.label}-{t}-{uuid.uuid4().hex[:8]}"}
+
+        def go(key, messages, max_tokens, extra=None, ev=None, headers=None):
+            results[key] = run_request(args.port, args.model, messages, max_tokens, extra, ev, headers=headers)
+
+        nat = threading.Thread(target=go, args=("native", prompts.build_messages(args.ctx, 0), args.nat_out, None, first))
+        nat.start()
+        first.wait()
+        turn1 = threading.Thread(target=go, args=("conv1", prompts.build_messages(args.ctx, row), args.ord_out,
+                                                  ordinary_extra, None, conv))
+        turn1.start()
+        turn1.join()
+        nat.join()
+        wait_idle(args.port, args.poll_s, settle_s=0.5)
+        t2_offset = time.perf_counter()
+        go("conv2", prompts.build_turn2_messages(args.ctx, row, results["conv1"].get("text") or ""),
+           args.conv_turn2_out, ordinary_extra, None, conv)
+        poller.stop.set()
+        poller.join()
+        native = record(results["native"], {**base, "kind": "row", "role": "native", "prompt_row": 0,
+                                            "max_tokens": args.nat_out}, t0)
+        rows.append(native)
+        r1 = record(results["conv1"], {**base, "kind": "row", "role": "conv1", "prompt_row": row,
+                                       "max_tokens": args.ord_out}, t0)
+        r1["native_overlap_share"] = overlap_share(r1, native)
+        rows.append(r1)
+        r2 = record(results["conv2"], {**base, "kind": "row", "role": "conv2", "prompt_row": row,
+                                       "max_tokens": args.conv_turn2_out}, t0)
+        r2["turn2_start_offset_s"] = round(t2_offset - t0, 4)
+        rows.append(r2)
     elif cell == "mix":
         poller = Poller(args.port, args.poll_s)
         poller.start()
@@ -313,6 +368,7 @@ def trial(args, cell, t, out):
 
 
 def main(argv=None):
+    global IDLE_TIMEOUT_S
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--model", required=True)
@@ -323,15 +379,21 @@ def main(argv=None):
     p.add_argument("--ord-rows", type=int, default=2)
     p.add_argument("--ord-out", type=int, default=512)
     p.add_argument("--nat-out", type=int, default=1024)
-    p.add_argument("--cells", default="ord1,nat1,mix,mix_late")
+    p.add_argument("--cells", default="ord1,nat1,mix,mix_late,conv2")
+    p.add_argument("--conv-turn2-out", type=int, default=64, help="conv2: turn-2 max_tokens")
+    p.add_argument("--idle-timeout-s", type=float, default=IDLE_TIMEOUT_S,
+                   help="a serve still busy this long before a trial fails the run")
     p.add_argument("--late-after", type=int, default=128,
                    help="mix_late: chunks every ordinary row streams before the late request starts")
     p.add_argument("--ordinary-field", default="x_lab_2462_ordinary")
     p.add_argument("--poll-s", type=float, default=0.5)
     args = p.parse_args(argv)
     cells = [c for c in args.cells.split(",") if c]
-    if not cells or any(c not in ("ord1", "nat1", "mix", "mix_late") for c in cells):
-        p.error("--cells takes ord1,nat1,mix,mix_late")
+    if not cells or any(c not in ("ord1", "nat1", "mix", "mix_late", "conv2") for c in cells):
+        p.error("--cells takes ord1,nat1,mix,mix_late,conv2")
+    if args.idle_timeout_s <= 0 or args.conv_turn2_out < 1:
+        p.error("--idle-timeout-s and --conv-turn2-out must be > 0")
+    IDLE_TIMEOUT_S = args.idle_timeout_s
     if args.ord_rows < 1 or args.trials < 1:
         p.error("--ord-rows and --trials must be >= 1")
     if "mix_late" in cells and not 1 <= args.late_after < args.ord_out:

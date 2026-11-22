@@ -9,32 +9,39 @@ small_m_route: row_invariant), mode B = mixed. The B serve must sit between two 
 
 Path checks (a failure means the cells did not measure what they claim):
   every request returned usage and no error; per trial the native_mtp admissions are 0 in ord1
-  and 1 in nat1 and mix, with no pre-output fallback or post-output failure and counters not
+  and 1 in nat1, mix and conv2, with no pre-output fallback or post-output failure and counters not
   reset; every A trial reports small_m_route row_invariant and every B trial mixed; a mix trial
   peaks at 1 + ord_rows active decode rows, and on B at row_invariant=1+ord_rows / stock_order=0
   in-flight route requests (SPEC-038 v0.3.63: the ordinary rows join row_invariant); on B the
-  small_m_route_admissions change is idle=ord_rows in ord1, native_admitted=1 in nat1, and
-  native_admitted=1 / native_active=ord_rows in mix; native proposals > 0 in nat1 and mix.
-  mix_late (INFO cell) is checked only for errors and counter resets.
+  small_m_route_admissions change is idle=ord_rows in ord1, native_admitted=1 in nat1,
+  native_admitted=1 / native_active=ord_rows in mix, and native_admitted=1 / native_active=1 /
+  conversation_cache=1 in conv2 (turn 1 beside the native row, turn 2 idle on its entry's
+  route); native proposals > 0 in nat1, mix and conv2.
+  mix_late (INFO cell) is checked only for errors, counter resets and the route mode.
 Gates:
-  native_identity  every native row (nat1 and mix) of B has the same output (content + reasoning)
+  native_identity  every native row (nat1, mix and conv2) of B has the same output (content + reasoning)
                    and token count as the native row of the same cell and trial on each A serve;
   ordinary_route_identity  on B each mix ordinary row (row_invariant by v0.3.63) equals the mix
                    row of the same prompt and trial on each A serve (output and token count):
                    same route, row-invariant kernels, so the same bits;
+  conv2_cache_reuse  every B conv2 turn-2 row reports cached_prompt_tokens > 0: the keyed turn
+                   after a turn beside a native row reuses its KV (v0.3.63 conversation_cache);
   token_counts     every pair compared for speed has equal token counts: native rows across
                    serves, and ordinary rows of the same cell, prompt and trial across serves
                    (ord1 and mix).
   INFO ordinary_serial: on B, mix ordinary rows (row_invariant) against the ord1 rows (stock
   order); a lone stock order row MAY differ in low bits from a row-invariant one.
 Speed (AGENTS.md Swarm Runs step 3), medians per serve:
-  goal: ordinary decode tok/s in ord1; B must beat both neighbouring A serves;
+  goal: ordinary decode tok/s in ord1 (rows admitted from idle, so stock order on B); B must
+  beat both neighbouring A serves;
   cost: ordinary decode tok/s in mix, native decode tok/s (nat1, mix), native acceptance (nat1,
   mix), mix aggregate output tok/s: B >= (1 - cost) x each A; TTFT medians (ord1 ordinary,
-  nat1 native, mix native): B <= (1 + cost) x each A + 0.05 s.
+  nat1 native, mix native, conv2 turn 2): B <= (1 + cost) x each A + 0.05 s.
   INFO: the mix_late cell (2 ordinary rows, then the late request after --late-after chunks):
-  aggregate, ordinary and late-row decode tok/s, late-row TTFT, its native admissions and the
-  peak route requests: the transient split cost.
+  aggregate, ordinary and late-row decode tok/s, late-row TTFT and its native admissions. With
+  the signed max_native_active_rows = 1 the late request runs ordinary, so the cell measures
+  three ordinary rows, not a transient route split. conv2: turn-1 decode tok/s and turn-2
+  cached prompt tokens.
   Every goal median needs at least --min-samples samples per serve.
 Prints T2462_* lines and one `T2462_VERDICT PASS|FAIL ...` line. Exit 0 PASS, 1 FAIL, 2 unusable input.
 """
@@ -86,6 +93,9 @@ def metrics(rows, trials):
         "mix_native_overlap_share": med(sel("mix", "ordinary", "native_overlap_share")),
         "nat1_acceptance": acceptance(trials, "nat1"),
         "mix_acceptance": acceptance(trials, "mix"),
+        "conv2_turn2_ttft_s": med(sel("conv2", "conv2", "ttft_s")),
+        "conv2_turn2_cached_prompt_tokens": med(sel("conv2", "conv2", "cached_prompt_tokens")),
+        "conv2_turn1_decode_tps": med(sel("conv2", "conv1", "decode_tps")),
         "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
         "mix_late_ordinary_decode_tps": med(sel("mix_late", "ordinary", "decode_tps")),
         "mix_late_late_decode_tps": med(sel("mix_late", "late", "decode_tps")),
@@ -100,11 +110,12 @@ def metrics(rows, trials):
 GOAL = ("ord1_ordinary_decode_tps",)
 HIGHER = ("mix_ordinary_decode_tps", "nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance",
           "mix_acceptance", "mix_aggregate_tps")
-LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s")
+LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s", "conv2_turn2_ttft_s")
 INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_tps", "mix_late_ordinary_decode_tps",
         "mix_late_late_decode_tps", "mix_late_late_ttft_s", "mix_late_late_overlap_share",
-        "mix_late_native_admissions")
-GATED_CELLS = ("ord1", "nat1", "mix")
+        "mix_late_native_admissions", "conv2_turn2_cached_prompt_tokens",
+        "conv2_turn1_decode_tps")
+GATED_CELLS = ("ord1", "nat1", "mix", "conv2")
 
 
 def path_checks(label, mode, rows, trials, ord_rows):
@@ -139,9 +150,12 @@ def path_checks(label, mode, rows, trials, ord_rows):
                 if pk.get("row_invariant") != 1 + ord_rows or pk.get("stock_order"):
                     bad.append(f"{label} mix t{t['trial']}: peak route requests {pk} != row_invariant={1 + ord_rows} stock_order=0")
         if mode == "B":
-            want_adm = {"ord1": {"idle": ord_rows, "native_active": 0, "native_admitted": 0},
-                        "nat1": {"idle": 0, "native_active": 0, "native_admitted": 1},
-                        "mix": {"idle": 0, "native_active": ord_rows, "native_admitted": 1}}[t["cell"]]
+            want_adm = {
+                "ord1": {"idle": ord_rows, "native_active": 0, "native_admitted": 0, "conversation_cache": 0},
+                "nat1": {"idle": 0, "native_active": 0, "native_admitted": 1, "conversation_cache": 0},
+                "mix": {"idle": 0, "native_active": ord_rows, "native_admitted": 1, "conversation_cache": 0},
+                "conv2": {"idle": 0, "native_active": 1, "native_admitted": 1, "conversation_cache": 1},
+            }[t["cell"]]
             adm = t.get("small_m_route_admissions")
             if adm is None or any(adm.get(k) != v for k, v in want_adm.items()):
                 bad.append(f"{label} {t['cell']} t{t['trial']}: route admissions {adm} != {want_adm}")
@@ -239,9 +253,15 @@ def main(argv=None):
     print(f"T2462_INFO a_mix_vs_ord1_diffs={a_ser} b_mix_vs_ord1_diffs={ser_diff} "
           f"ordinary_a_vs_b_text_diffs={ord_text_diff} finish={dict(finish)}")
 
+    # Gate: the keyed turn 2 on B reuses turn 1's KV.
+    conv_turn2 = [r for r in data[b][0] if r["cell"] == "conv2" and r["role"] == "conv2"]
+    conv_misses = [r["trial"] for r in conv_turn2 if not (r.get("cached_prompt_tokens") or 0) > 0]
+    for trial in conv_misses:
+        print(f"T2462_CONV2_CACHE_MISS {b} trial={trial}")
     gates = {
         "native_identity": nat_mismatch == 0,
         "ordinary_route_identity": route_mismatch == 0,
+        "conv2_cache_reuse": bool(conv_turn2) and not conv_misses,
         "token_counts": tok_mismatch == 0,
     }
     for g, ok in gates.items():
@@ -278,7 +298,7 @@ def main(argv=None):
 
     verdict = "PASS" if not failures else "FAIL"
     s = speed
-    line = (f"T2462_VERDICT {verdict} ord1_ordinary_tps A1/B/A2={s['ord1_ordinary_decode_tps']['A1']}/"
+    line = (f"T2462_VERDICT {verdict} ord1_ordinary_tps(admitted from idle) A1/B/A2={s['ord1_ordinary_decode_tps']['A1']}/"
             f"{s['ord1_ordinary_decode_tps']['B']}/{s['ord1_ordinary_decode_tps']['A2']} ({gain('ord1_ordinary_decode_tps')}) "
             f"mix_ordinary_tps={s['mix_ordinary_decode_tps']['A1']}/{s['mix_ordinary_decode_tps']['B']}/"
             f"{s['mix_ordinary_decode_tps']['A2']} ({gain('mix_ordinary_decode_tps')}) "
@@ -290,7 +310,10 @@ def main(argv=None):
             f"({gain('mix_aggregate_tps')}) ttft_ord1={s['ord1_ordinary_ttft_s']['B']}s ttft_native={s['nat1_native_ttft_s']['B']}s "
             f"mix_late_aggregate_tps={s['mix_late_aggregate_tps']['A1']}/{s['mix_late_aggregate_tps']['B']}/"
             f"{s['mix_late_aggregate_tps']['A2']} ({gain('mix_late_aggregate_tps')}, INFO) "
+            f"conv2_turn2_ttft={s['conv2_turn2_ttft_s']['A1']}/{s['conv2_turn2_ttft_s']['B']}/{s['conv2_turn2_ttft_s']['A2']}s "
+            f"conv2_turn2_cached={s['conv2_turn2_cached_prompt_tokens']['B']} "
             f"gates native_identity={gates['native_identity']} ordinary_route_identity={gates['ordinary_route_identity']} "
+            f"conv2_cache_reuse={gates['conv2_cache_reuse']} "
             f"token_counts={gates['token_counts']}"
             + (f" failed={','.join(sorted(set(failures)))}" if failures else ""))
     print(line, flush=True)

@@ -14,7 +14,8 @@
 #     `swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS`;
 #  3. filtered tests only, on Metal (the metallib is copied into the test bundle, so a Metal test
 #     that skips is a failure): SmallMRouteScopeTests|SmallMRouteTests|
-#     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests and the scheduler's
+#     PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|
+#     SmallMRouteConversationAdmissionTests and the scheduler's
 #     ContinuousBatchSchedulerTests/testSmallMRoute* (v0.3.63 sticky admission), which must
 #     include every REQUIRED_TESTS case passed; then the mlx-swift
 #     fork's MLXTests SmallMRouteTests from a copy of the package's own checkout
@@ -26,15 +27,17 @@
 #           process-wide row_invariant, reason operator_row_invariant),
 #       B = no override: FR-CB9 decides `mixed` (reason native_mtp_per_request); an ordinary
 #           request admitted while a row-invariant one is in flight joins row_invariant for life
-#           (SPEC-038 v0.3.63), so the `mix` cell runs one forward per decode kind as on A.
+#           (SPEC-038 v0.3.63), so the `mix` cell runs one forward per decode kind as on A, and a
+#           keyed turn admitted idle takes its stored entry's route (`conv2`).
 #     Each serve: ready, idle CB self-check verdict (route_status.py gate), the cached-turns probe
 #     decided, startup event and /v1/status route checked, batching active, native MTP on, then
-#     mixed_load.py (cells ord1, nat1, mix, mix_late; its header says how rows become native or
-#     ordinary).
+#     mixed_load.py (cells ord1, nat1, mix, mix_late, conv2; its header says how rows become
+#     native or ordinary).
 #     A later serve of the same mode starts with the earlier one's stored self-check verdict;
 #  5. verdict.py: gates, medians, `T2462_VERDICT PASS|FAIL ...`.
 # Knobs: TRIALS (6) CTX (1000) ORD_ROWS (2) ORD_OUT (512) NAT_OUT (1024) LATE_AFTER (128)
-#        CELLS (ord1,nat1,mix,mix_late) SERVES MIN_FREE_GB (60)
+#        CONV_TURN2_OUT (64) IDLE_TIMEOUT_S (300) CELLS (ord1,nat1,mix,mix_late,conv2) SERVES
+#        MIN_FREE_GB (60)
 #        SKIP_BUILD SKIP_TESTS SKIP_FORK_TESTS PORT (18462) SERVE_ENV ("K=V ...").
 # Watchdogs are stall detectors only (STALL_S without progress), never wall-clock cuts.
 # Every failure prints a `BLOCKER:` line; the job ends with JOB_PASS (every step ran; the
@@ -60,11 +63,13 @@ ORD_ROWS=${ORD_ROWS:-2}
 ORD_OUT=${ORD_OUT:-512}
 NAT_OUT=${NAT_OUT:-1024}
 LATE_AFTER=${LATE_AFTER:-128}
-CELLS=${CELLS:-ord1,nat1,mix,mix_late}
+CONV_TURN2_OUT=${CONV_TURN2_OUT:-64}
+IDLE_TIMEOUT_S=${IDLE_TIMEOUT_S:-300}
+CELLS=${CELLS:-ord1,nat1,mix,mix_late,conv2}
 SERVES=${SERVES:-A1:A B:B A2:A}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 STALL_S=${STALL_S:-1800}
-TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|ContinuousBatchSchedulerTests/testSmallMRoute'
+TEST_FILTER='SmallMRouteScopeTests|SmallMRouteTests|PagedKVPerRouteDecodeSessionTests|PagedKVDecodeSessionFinishTests|SmallMRouteConversationAdmissionTests|ContinuousBatchSchedulerTests/testSmallMRoute'
 # Each must have passed (the v0.3.63 sticky-admission tests and the mixed attach probe).
 REQUIRED_TESTS='testAttachIsolationProbeInAMixedProcessRunsOnTheProcessRoute
 testAdmissionRouteJoinsRowInvariantWhileOneIsInFlight
@@ -73,7 +78,10 @@ testOrdinaryAdmittedWithANativeRowActiveStaysRowInvariantAfterItFinishes
 testNativeAdmittedDuringStockOrderRowsTakesRowInvariantAndLaterArrivalsJoinIt
 testConcurrentAdmissionsBesideANativeRowAllJoinRowInvariant
 testNativeArrivingDuringStockRowsSplitsSessionsUntilTheStockRowsFinish
-testSmallMRouteTransientSplitDrainsToOneRouteOnceStockRowsFinish'
+testSmallMRouteTransientSplitDrainsToOneRouteOnceStockRowsFinish
+testNativeDecidedAtRegistrationCountsBeforeItIsAdmitted
+testNativeReservationIsReleasedOnRejectionAndOnTurningOrdinary
+testOrdinaryTurnTakesTheStoredEntryRouteUnlessRowInvariantIsInFlight'
 # Test builds and runs need the full Xcode (XCTest; the Studio's xcode-select is the Command Line
 # Tools, run 20261122T105458Z: "no such module 'XCTest'") and the native build system, as
 # job-glm-wide-prefill.sh does. They build in their own scratch path, so the release build keeps
@@ -110,7 +118,7 @@ stop_serve() {
 }
 trap stop_serve EXIT
 mkdir -p "$RES"
-log "JOB_START run=$RUN_ID commit=$COMMIT src=$SRC serves=\"$SERVES\" cells=$CELLS trials=$TRIALS ctx=$CTX ord_rows=$ORD_ROWS ord_out=$ORD_OUT nat_out=$NAT_OUT late_after=$LATE_AFTER port=$PORT"
+log "JOB_START run=$RUN_ID commit=$COMMIT src=$SRC serves=\"$SERVES\" cells=$CELLS trials=$TRIALS ctx=$CTX ord_rows=$ORD_ROWS ord_out=$ORD_OUT nat_out=$NAT_OUT late_after=$LATE_AFTER conv_turn2_out=$CONV_TURN2_OUT idle_timeout_s=$IDLE_TIMEOUT_S port=$PORT"
 
 # 1. Preflight.
 listening 8080 && die "a server listens on :8080; the Studio is not paused" 3
@@ -351,7 +359,8 @@ PY
   log "CELLS_START $label"
   /usr/bin/python3 -I "$HERE/mixed_load.py" --port "$PORT" --model "$MODEL_KEY" --label "$label" --out "$d/rows.jsonl" \
     --trials "$TRIALS" --ctx "$CTX" --ord-rows "$ORD_ROWS" --ord-out "$ORD_OUT" --nat-out "$NAT_OUT" \
-    --cells "$CELLS" --late-after "$LATE_AFTER" > "$d/cells.log" 2>&1; rc=$?
+    --cells "$CELLS" --late-after "$LATE_AFTER" --conv-turn2-out "$CONV_TURN2_OUT" \
+    --idle-timeout-s "$IDLE_TIMEOUT_S" > "$d/cells.log" 2>&1; rc=$?
   grep '^TRIAL ' "$d/cells.log" | sed 's/^/CELL /'
   log "CELLS_DONE $label rc=$rc"
   [ $rc = 0 ] || blocker "$label: a request failed: $(grep -v '^TRIAL ' "$d/cells.log" | tail -n 3 | tr '\n' ' ' | cut -c1-300)"
