@@ -3306,7 +3306,10 @@ def require_native_mtp_variant_fit_evidence(variant: dict, donor: dict, label: s
         fail(f"{plabel}: target_sha256 does not name the variant's artifact_hash")
     if policy.get("model_id") != variant["model_key"]:
         fail(f"{plabel}: model_id does not name the variant's model_key")
-    if policy.get("mtp_sha256") != variant.get("mtp_artifact_sha256"):
+    mtp_head = variant.get("mtp_artifact_sha256")
+    if not isinstance(mtp_head, str) or not HEX64.fullmatch(mtp_head):
+        fail(f"{label}: a variant with fit_evidence must declare a hex mtp_artifact_sha256")
+    if policy.get("mtp_sha256") != mtp_head:
         fail(f"{plabel}: mtp_sha256 does not name the variant's mtp_artifact_sha256")
     if policy.get("tokenizer_sha256") != variant.get("tokenizer_sha256"):
         fail(f"{plabel}: tokenizer_sha256 does not name the variant's tokenizer_sha256")

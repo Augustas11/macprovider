@@ -220,7 +220,7 @@ class NativeMTPVariantWeightFitTests(unittest.TestCase):
     """R012: served safetensors bytes, read from the hash-bound snapshot manifest."""
 
     def fit(self, variant_files: dict[str, int], donor_files: dict[str, int], write=None, evidence=None,
-            donor_edit=None):
+            donor_edit=None, variant_edit=None):
         donor_bytes, variant_bytes = snapshot_manifest(donor_files), snapshot_manifest(variant_files)
         donor_hash, variant_hash = catalog_release.sha256(donor_bytes), catalog_release.sha256(variant_bytes)
         artifact_obj = {"models": {
@@ -233,6 +233,8 @@ class NativeMTPVariantWeightFitTests(unittest.TestCase):
                  "qualified_slots": 4, "ram_bytes": 256 * 2**30}
         if donor_edit:
             donor_edit(donor)
+        if variant_edit:
+            variant_edit(variant)
         donors = {DONOR: donor}
         with tempfile.TemporaryDirectory() as tmp:
             directory = pathlib.Path(tmp)
@@ -370,6 +372,15 @@ class NativeMTPVariantWeightFitTests(unittest.TestCase):
         for message, evidence in cases.items():
             with self.subTest(message), self.assertRaisesRegex(catalog_release.CatalogError, message):
                 self.fit(*self.LARGER, evidence=evidence)
+
+    def test_fit_evidence_needs_the_variant_mtp_head(self):
+        # Without this, a variant with no mtp_artifact_sha256 and a policy with no mtp_sha256
+        # would match on None == None.
+        def drop_head(policy):
+            policy.pop("mtp_sha256")
+        with self.assertRaisesRegex(catalog_release.CatalogError, "must declare a hex mtp_artifact_sha256"):
+            self.fit(*self.LARGER, evidence=self.evidence(policy_edit=drop_head),
+                     variant_edit=lambda v: v.pop("mtp_artifact_sha256"))
 
     def test_fit_evidence_needs_the_donor_bounds(self):
         for key, message in (("max_prompt_tokens", "no max_prompt_tokens bound"),
