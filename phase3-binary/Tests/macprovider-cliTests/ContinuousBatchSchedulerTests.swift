@@ -12542,10 +12542,12 @@ extension ContinuousBatchSchedulerTests {
         let gate = AsyncGate()
         let backend = SmallMRouteRecordingBackend(firstDecodeGate: gate)
         // The gate holds the first decode until all four rows are known; on a
-        // slow runner that can outlast the default 5 s delivery timeout.
+        // slow runner that can outlast the default 5 s delivery timeout. The
+        // backend decodes instantly, so a slow runner can also starve the
+        // delivery drain: the buffer holds every row's whole output (30 max).
         let scheduler = try await makeScheduler(
-            maxActiveRows: 4, tokenDeliveryTimeoutNanoseconds: 60_000_000_000, maxPrefillRowsPerIteration: 4,
-            backend: backend
+            maxActiveRows: 4, tokenDeliveryTimeoutNanoseconds: 60_000_000_000, tokenDeliveryBufferLimit: 64,
+            maxPrefillRowsPerIteration: 4, backend: backend
         )
         var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
         for id in ["so-a", "so-b"] {
