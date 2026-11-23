@@ -79,6 +79,9 @@ QWEN_KEY=qwen/qwen3.8-27b
 QWEN_SHA=8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05
 QWEN_MTP_SHA=25d2e7e3846c6a95201b13a0299eb65527b8146541af3b1eb626eaac95fefb30
 DAISY_ID=mlx-community/DaisyRose-27B-4bit
+# Serving identity for native MTP: the e2e harness runs the production SPEC-039 FR-PKV12
+# per-identity hybrid allowlist, which names this key, not the mlx-community artifact id.
+DAISY_KEY=radixark/daisyrose-27b
 INC=qwen38 CAND=daisy
 RUN_SLUG=t2465-$(echo "$RUN_ID" | tr '[:upper:]' '[:lower:]')
 FAILED=0
@@ -291,7 +294,7 @@ cell_mtp() {
     formal) mtp_model "$INC" "$QWEN_KEY" "$QWEN_SHA" "$QWEN_TOK" 1 1536,4096,32768 ;;
     reuse) log "MTP_REUSE $INC docs/evidence/qwen27b-mtp-cap-2026-11-20/qwen38 (no same-window incumbent run)" ;;
   esac
-  mtp_model "$CAND" "$DAISY_ID" "$DAISY_SHA" "$DAISY_TOK" 1 1536,4096,32768
+  mtp_model "$CAND" "$DAISY_KEY" "$DAISY_SHA" "$DAISY_TOK" 1 1536,4096,32768
 }
 
 model_loaded() {
