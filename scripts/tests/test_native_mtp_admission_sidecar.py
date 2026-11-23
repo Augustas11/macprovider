@@ -492,14 +492,15 @@ class NativeMTPProjectionManifestTests(unittest.TestCase):
         # The decode-path-bound set (CLI 1.8.261+) carries GLM-5.3-Flash and
         # Qwen3.6 (the abliterated GLM-5.3-Flash build is retired), plus the
         # uncensored GLM-5.3-Flash variant (SPEC-048 MTP-13, #2382) and the
-        # Qwen3.6-27B and Qwen3.8-27B tuples (#2383), so the committed
-        # projection is the v2 keyed manifest.
+        # Qwen3.6-27B and Qwen3.8-27B tuples (#2383) and the DaisyRose-27B
+        # variant (#2465), so the committed projection is the v2 keyed manifest.
         committed = PROJECTION.read_bytes()
         body = json.loads(committed)
         self.assertEqual(body["schema_version"], PROJECTION_V2_SCHEMA)
         models = body["models"]
         self.assertEqual(sorted(models), sorted([GLM_KEY, f"{GLM_KEY}-uncensored", QWEN_KEY,
-                                                 "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]))
+                                                 "qwen/qwen3.6-27b", "qwen/qwen3.8-27b",
+                                                 "radixark/daisyrose-27b"]))
         self.assertEqual(build_projection(models), committed)
         for key in models:
             self.assertEqual(read_projection(committed, sorted(models), key), models[key])

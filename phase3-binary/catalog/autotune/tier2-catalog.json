@@ -272,6 +272,15 @@
       "notes": "Buyer-serving candidate thinkingmachines/inkling-2-mini; identity from signed SPEC-023 row.",
       "sha256": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34",
       "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "mlx-community/DaisyRose-27B-4bit",
+      "min_ram_gb": 24,
+      "notes": "Buyer-serving candidate radixark/daisyrose-27b; identity from signed SPEC-023 row.",
+      "sha256": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f",
+      "source": "operator-curated"
     }
   ],
   "signature": {

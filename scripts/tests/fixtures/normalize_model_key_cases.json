@@ -126,6 +126,10 @@
     {"input": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored", "expected": "openuncensored/inkling-2-mini-uncensored"},
     {"input": "inkling-2-mini-uncensored", "expected": "openuncensored/inkling-2-mini-uncensored"},
     {"input": "mlx-community/Inkling-2-Mini-oQ4e-mtp-uncensored", "expected": "inkling-2-mini-oq4e-mtp-uncensored"},
+    {"input": "mlx-community/DaisyRose-27B-4bit", "expected": "radixark/daisyrose-27b"},
+    {"input": "daisyrose-27b", "expected": "radixark/daisyrose-27b"},
+    {"input": "radixark/daisyrose-27b", "expected": "radixark/daisyrose-27b"},
+    {"input": "RadixArk/DaisyRose-27B", "expected": "radixark/daisyrose-27b"},
     {"input": "google/glm-5.3-flash", "expected": "glm-5.3-flash"},
     {"input": "z-ai/glm-4.7-flash", "expected": "z-ai/glm-4.7-flash"},
     {"input": "", "expected": ""}

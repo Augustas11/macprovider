@@ -645,6 +645,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
     },
+    "radixark/daisyrose-27b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 24,
+          "notes": "DaisyRose-27B (#2465), Apache-2.0, RadixArk reinforcement-learning post-train of Qwen/Qwen3.8-27B with the same qwen3_5 architecture; mlx-community 4-bit affine g64 build, 16 files, the same format and geometry as the qwen/qwen3.8-27b artifact (config.json differs only in dtype; chat template byte-identical). The build carries no MTP tensors. min_ram_gb is the Qwen3.8-27B row's.",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 16074323781,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/DaisyRose-27B-4bit",
+            "revision": "895983ea8d4244e855f6fbde2c3fa8261af202ef"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-24"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-32b"
+    },
     "ricursiveai/ripple-65b-preview": {
       "artifacts": {
         "mlx-4bit": {

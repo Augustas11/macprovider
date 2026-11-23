@@ -155,6 +155,11 @@
       "completion_rate_per_mtok": 88000,
       "prompt_cache_hit_rate_per_mtok": 5500,
       "prompt_rate_per_mtok": 18500
+    },
+    "radixark/daisyrose-27b": {
+      "completion_rate_per_mtok": 1584000,
+      "prompt_cache_hit_rate_per_mtok": 30000,
+      "prompt_rate_per_mtok": 120000
     }
   },
   "schema_version": "macprovider.rate-card-source.v1",

@@ -121,6 +121,16 @@
       "model": "thinkingmachines/inkling-2-mini",
       "from_row": "default",
       "to_row": "thinkingmachines/inkling-2-mini"
+    },
+    {
+      "model": "mlx-community/DaisyRose-27B-4bit",
+      "from_row": "default",
+      "to_row": "radixark/daisyrose-27b"
+    },
+    {
+      "model": "radixark/daisyrose-27b",
+      "from_row": "default",
+      "to_row": "radixark/daisyrose-27b"
     }
   ]
 }

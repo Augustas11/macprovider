@@ -1,0 +1,408 @@
+{
+  "issue": "2465",
+  "incumbent": "qwen38",
+  "candidate": "daisy",
+  "models": {
+    "qwen38": {
+      "decode": {},
+      "aggregate": {},
+      "parity": {
+        "pass": true,
+        "oneRowMatch": true,
+        "firstDivergenceIndex": null
+      },
+      "ref": {
+        "1024": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 6.53125,
+          "decode_tps": 34.41778610275407,
+          "top1_ok": true
+        },
+        "32768": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 2.9375,
+          "decode_tps": 30.23507596384334,
+          "top1_ok": true
+        },
+        "8192": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 6.78125,
+          "decode_tps": 33.100001943513575,
+          "top1_ok": true
+        }
+      },
+      "mtp": {
+        "overall_status": "EXPLORATORY_NO_VERDICT",
+        "cells": {
+          "s1-p1536-o128": {
+            "proposed": 863,
+            "accepted": 653,
+            "acceptance": 0.7566628041714948,
+            "status": "PASS",
+            "throughput_median": 0.22590311284329323
+          },
+          "s1-p1536-o512": {
+            "proposed": 2521,
+            "accepted": 2052,
+            "acceptance": 0.813962713209044,
+            "status": "PASS",
+            "throughput_median": 0.28539137918126534
+          },
+          "s1-p4096-o128": {
+            "proposed": 776,
+            "accepted": 619,
+            "acceptance": 0.7976804123711341,
+            "status": "PASS",
+            "throughput_median": 0.2284365082823525
+          },
+          "s1-p4096-o512": {
+            "proposed": 3161,
+            "accepted": 2672,
+            "acceptance": 0.8453021195824106,
+            "status": "PASS",
+            "throughput_median": 0.23276441395055913
+          }
+        }
+      },
+      "quality": {
+        "label": "qwen38",
+        "path": "reference",
+        "passed": 1,
+        "cases": 9,
+        "workload": {
+          "workload_id": "coding-agent-revenue",
+          "version": 1,
+          "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+        },
+        "rubric": "macprovider.lab.coding-quality-rubric.v1",
+        "results": [
+          {
+            "case_id": "debug-python-pagination-off-by-one",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "debug-go-data-race-worker-pool",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:func\\s+Test\\w*\\(\\s*t\\s+\\*testing\\.T\\s*\\)",
+              "missing:t\\.Run\\(|\\[\\]struct\\s*\\{"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "write-tests-token-bucket-limiter",
+            "pass": false,
+            "reasons": [
+              "missing:import\\s+pytest|from\\s+\\w+\\s+import",
+              "missing:clock",
+              "missing:thread",
+              "missing:retry_after|inf",
+              "count<6:def\\s+test_\\w+"
+            ],
+            "completion_tokens": 93
+          },
+          {
+            "case_id": "implement-ttl-lru-cache-typescript",
+            "pass": false,
+            "reasons": [
+              "missing:class\\s+TtlLruCache",
+              "missing:node:test",
+              "missing:RangeError",
+              "missing:[\"']capacity[\"']",
+              "missing:[\"']expired[\"']",
+              "missing:new\\s+Map\\b|Map<"
+            ],
+            "completion_tokens": 102
+          },
+          {
+            "case_id": "harden-bash-release-script",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "review-sql-migration-backfill",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:batch|LIMIT"
+            ],
+            "completion_tokens": 768
+          },
+          {
+            "case_id": "explain-swift-actor-reentrancy-crash",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "fix-failing-ci-node-stream-parser",
+            "pass": false,
+            "reasons": [
+              "missing:startsWith\\(\\s*[\"']:[\"']|\\[0\\]\\s*===\\s*["
+            ],
+            "completion_tokens": 891
+          },
+          {
+            "case_id": "agent-loop-multi-file-inventory-fix",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1822
+          }
+        ]
+      }
+    },
+    "daisy": {
+      "decode": {},
+      "aggregate": {},
+      "parity": {
+        "pass": true,
+        "oneRowMatch": true,
+        "firstDivergenceIndex": null
+      },
+      "ref": {
+        "1024": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 3.5625,
+          "decode_tps": 34.417683654109375,
+          "top1_ok": true
+        },
+        "32768": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 3.25,
+          "decode_tps": 30.125139678179504,
+          "top1_ok": true
+        },
+        "8192": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 7.4375,
+          "decode_tps": 32.971905069486475,
+          "top1_ok": true
+        }
+      },
+      "mtp": {
+        "overall_status": "FAIL",
+        "cells": {
+          "s1-p1536-o128": {
+            "proposed": 855,
+            "accepted": 639,
+            "acceptance": 0.7473684210526316,
+            "status": "PASS",
+            "throughput_median": 0.2260066515030208
+          },
+          "s1-p1536-o512": {
+            "proposed": 2764,
+            "accepted": 2264,
+            "acceptance": 0.8191027496382055,
+            "status": "PASS",
+            "throughput_median": 0.2791914305743405
+          },
+          "s1-p32768-o128": {
+            "proposed": 752,
+            "accepted": 603,
+            "acceptance": 0.8018617021276596,
+            "status": "PASS",
+            "throughput_median": 0.026002760599858066
+          },
+          "s1-p32768-o512": {
+            "proposed": 2230,
+            "accepted": 1832,
+            "acceptance": 0.8215246636771301,
+            "status": "PASS",
+            "throughput_median": 0.03626085302251281
+          },
+          "s1-p4096-o128": {
+            "proposed": 857,
+            "accepted": 661,
+            "acceptance": 0.7712952158693116,
+            "status": "PASS",
+            "throughput_median": 0.19924505371584278
+          },
+          "s1-p4096-o512": {
+            "proposed": 2899,
+            "accepted": 2447,
+            "acceptance": 0.8440841669541221,
+            "status": "PASS",
+            "throughput_median": 0.24188786795599326
+          },
+          "s2-p1536-o512": {
+            "proposed": 272,
+            "accepted": 225,
+            "acceptance": 0.8272058823529411,
+            "status": "PASS",
+            "throughput_median": -0.027098295645801962
+          },
+          "s4-p1536-o512": {
+            "proposed": 43,
+            "accepted": 34,
+            "acceptance": 0.7906976744186046,
+            "status": "FAIL",
+            "throughput_median": -0.0447335811262517
+          }
+        }
+      },
+      "quality": {
+        "label": "daisy",
+        "path": "reference",
+        "passed": 1,
+        "cases": 9,
+        "workload": {
+          "workload_id": "coding-agent-revenue",
+          "version": 1,
+          "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+        },
+        "rubric": "macprovider.lab.coding-quality-rubric.v1",
+        "results": [
+          {
+            "case_id": "debug-python-pagination-off-by-one",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "debug-go-data-race-worker-pool",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:func\\s+Test\\w*\\(\\s*t\\s+\\*testing\\.T\\s*\\)",
+              "missing:t\\.Run\\(|\\[\\]struct\\s*\\{"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "write-tests-token-bucket-limiter",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 1536
+          },
+          {
+            "case_id": "implement-ttl-lru-cache-typescript",
+            "pass": false,
+            "reasons": [
+              "missing:class\\s+TtlLruCache",
+              "missing:node:test",
+              "missing:RangeError",
+              "missing:[\"']capacity[\"']",
+              "missing:[\"']expired[\"']",
+              "missing:new\\s+Map\\b|Map<"
+            ],
+            "completion_tokens": 99
+          },
+          {
+            "case_id": "harden-bash-release-script",
+            "pass": false,
+            "reasons": [
+              "finish_length"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "review-sql-migration-backfill",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:batch|LIMIT"
+            ],
+            "completion_tokens": 768
+          },
+          {
+            "case_id": "explain-swift-actor-reentrancy-crash",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:Task\\s*<"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "fix-failing-ci-node-stream-parser",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "missing:\\\\r"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "agent-loop-multi-file-inventory-fix",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1779
+          }
+        ]
+      }
+    }
+  },
+  "verdict": "FAIL",
+  "reasons": [
+    "candidate native MTP analyzer FAIL"
+  ],
+  "ref_notes": [],
+  "acceptance_common_cells": {
+    "s1-p1536-o128": [
+      0.7566628041714948,
+      0.7473684210526316
+    ],
+    "s1-p1536-o512": [
+      0.813962713209044,
+      0.8191027496382055
+    ],
+    "s1-p4096-o128": [
+      0.7976804123711341,
+      0.7712952158693116
+    ],
+    "s1-p4096-o512": [
+      0.8453021195824106,
+      0.8440841669541221
+    ]
+  },
+  "acceptance_pooled": {
+    "qwen38": 0.8190137959295178,
+    "daisy": 0.8150508474576271
+  },
+  "quality_state": "PASS",
+  "line": "T2465_VERDICT FAIL parity=PASS msb_parity=True ref_top1[1024:16/16m256,32768:16/16m256,8192:16/16m256] mtp=FAIL acceptance=0.815(6011/7375) vs qwen38=0.819(5996/7321) quality=PASS daisy=1/9 qwen38=1/9 reasons=\"candidate native MTP analyzer FAIL\""
+}

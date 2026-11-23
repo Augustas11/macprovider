@@ -421,6 +421,9 @@ class EffectiveDiffTests(unittest.TestCase):
         # artifact and its nvidia/ served id onto the nemotron-3.5-bolt-74b-a9b row.
         # #2467: the Inkling-2-Mini listed cut moves its served oQ4e artifact
         # and its served id onto the thinkingmachines/inkling-2-mini row.
+        # #2465: the DaisyRose-27B listed cut moves its served 4-bit artifact
+        # onto the daisyrose-27b row and its catalog key onto its own row, both
+        # at the qwen3.8-27b price.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -448,6 +451,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("minimaxai/minimax-m3.1-flash-abliterated", "default", "minimaxai/minimax-m3.1-flash-abliterated"),
                 ("mlx-community/Inkling-2-Mini-oQ4e-mtp", "default", "thinkingmachines/inkling-2-mini"),
                 ("thinkingmachines/inkling-2-mini", "default", "thinkingmachines/inkling-2-mini"),
+                ("mlx-community/DaisyRose-27B-4bit", "default", "radixark/daisyrose-27b"),
+                ("radixark/daisyrose-27b", "default", "radixark/daisyrose-27b"),
             },
         )
         for bad in (
