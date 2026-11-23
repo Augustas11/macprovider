@@ -6,8 +6,9 @@
 #
 # usage: studio-run.sh LAB_DIR   (LAB_DIR holds macprovider/, the worktree of this branch)
 # env: WINDOW (output dir window-N, default 4); DIAG=1 runs studio-diag.sh first; ONLY="name ..."
-# limits the models; NO_MTP="name ..." drops their native-MTP pass (the admission capture byte-copies
-# the whole model, #2468: GLM-5.3-Flash needs 176 GB free per start); SKIP_HEAVY=1 skips the heavy fork suites (they passed in window 3).
+# limits the models; SKIP_HEAVY=1 skips the heavy fork suites (they passed in window 3). The native-MTP
+# admission capture byte-copies the whole model (#2468: GLM-5.3-Flash needs 176 GB free per start): low
+# disk means the queue owner cleans rule-14 leftovers first, never a dropped pass.
 set -uo pipefail
 L="${1:?usage: studio-run.sh LAB_DIR}"
 LM_REV=73eb9cf7663df03476c568f907bcadd829488c45
@@ -53,7 +54,6 @@ ARGS=()
 for s in "${SPECS[@]}"; do
   IFS='|' read -r name dir key mtp <<< "$s"
   if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $name "* ]]; then continue; fi
-  if [[ " ${NO_MTP:-} " == *" $name "* ]]; then mtp=""; fi
   p=$(ls -d "$MODELS_ROOT/$dir"/*/* 2>/dev/null | head -1)
   [ -n "$p" ] || { echo "MODEL_MISSING $dir"; continue; }
   ARGS+=("$name=$p@$key${mtp:+:$mtp}")
