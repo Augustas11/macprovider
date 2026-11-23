@@ -59,8 +59,10 @@ Speed (AGENTS.md Swarm Runs step 3), medians per serve:
   goal: ordinary decode tok/s in ord1 (rows admitted from idle, so stock order on B); B must
   beat both neighbouring A serves;
   cost: ordinary decode tok/s in mix, native decode tok/s (nat1, mix), native acceptance (nat1,
-  mix), mix aggregate output tok/s, conv_spread and conv_flip_long phase-2 aggregate output
-  tok/s: B >= (1 - cost) x each A; TTFT medians (ord1 ordinary, nat1 native, mix native,
+  mix), mix aggregate output tok/s, conv_spread phase-2 aggregate output tok/s, conv_flip_long
+  turn-2 decode tok/s: B >= (1 - cost) x each A; conv_flip_long re-prefill bound: B's phase-2
+  wall exceeds each A's by at most the turn-2 TTFT difference plus cost x A's wall (the join
+  re-prefills its stock_order entry by design, so the only loss allowed is that one prefill); TTFT medians (ord1 ordinary, nat1 native, mix native,
   conv2 turn 2, conv_flip turn 2, a hit on B): B <= (1 + cost) x each A + 0.05 s. Every gated
   speed median (goal, cost and TTFT) needs at least --min-samples samples per serve.
   INFO: the mix_late cell (2 ordinary rows, then the late request after --late-after chunks):
@@ -69,8 +71,8 @@ Speed (AGENTS.md Swarm Runs step 3), medians per serve:
   three ordinary rows, not a transient route split. conv2: turn-1 decode tok/s and turn-2
   cached prompt tokens. conv_flip: turn-2 cached prompt tokens and the phase-2 aggregate output
   tok/s of the native row and turn 2 (on B a split: turn 2 hits its stock_order entry and
-  decodes in its own forward beside the row_invariant native row). conv_flip_long: turn-2 TTFT
-  and cached prompt tokens (on B it re-prefills by design).
+  decodes in its own forward beside the row_invariant native row). conv_flip_long: turn-2 TTFT,
+  cached prompt tokens, phase-2 aggregate tok/s and wall (on B it re-prefills by design).
   Every goal median needs at least --min-samples samples per serve.
 Prints T2462_* lines and one `T2462_VERDICT PASS|FAIL ...` line. Exit 0 PASS, 1 FAIL, 2 unusable input.
 """
@@ -130,6 +132,8 @@ def metrics(rows, trials):
         "conv_flip_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_flip"]),
         "conv_flip_long_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_flip_long"]),
         "conv_flip_long_turn2_ttft_s": med(sel("conv_flip_long", "conv2", "ttft_s")),
+        "conv_flip_long_turn2_decode_tps": med(sel("conv_flip_long", "conv2", "decode_tps")),
+        "conv_flip_long_phase2_s": med(phase2_wall(trials, rows, "conv_flip_long")),
         "conv_flip_long_turn2_cached_prompt_tokens": med(sel("conv_flip_long", "conv2", "cached_prompt_tokens")),
         "conv_spread_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_spread"]),
         "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
@@ -143,16 +147,30 @@ def metrics(rows, trials):
     return m
 
 
+def phase2_wall(trials, rows, cell):
+    """Per trial: phase-2 output tokens (native row and turn 2) over the trial's phase-2 aggregate tok/s."""
+    out = []
+    for t in trials:
+        if t["cell"] != cell or not t.get("aggregate_tps"):
+            continue
+        toks = sum(r.get("completion_tokens") or 0 for r in rows
+                   if r.get("cell") == cell and r.get("trial") == t["trial"] and r.get("role") in ("native", "conv2"))
+        if toks:
+            out.append(toks / t["aggregate_tps"])
+    return out
+
+
 GOAL = ("ord1_ordinary_decode_tps",)
 HIGHER = ("mix_ordinary_decode_tps", "nat1_native_decode_tps", "mix_native_decode_tps", "nat1_acceptance",
-          "mix_acceptance", "mix_aggregate_tps", "conv_spread_aggregate_tps", "conv_flip_long_aggregate_tps")
+          "mix_acceptance", "mix_aggregate_tps", "conv_spread_aggregate_tps", "conv_flip_long_turn2_decode_tps")
 LOWER = ("ord1_ordinary_ttft_s", "nat1_native_ttft_s", "mix_native_ttft_s", "conv2_turn2_ttft_s",
          "conv_flip_turn2_ttft_s")
 INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_tps", "mix_late_ordinary_decode_tps",
         "mix_late_late_decode_tps", "mix_late_late_ttft_s", "mix_late_late_overlap_share",
         "mix_late_native_admissions", "conv2_turn2_cached_prompt_tokens",
         "conv2_turn1_decode_tps", "conv_flip_turn2_cached_prompt_tokens", "conv_flip_aggregate_tps",
-        "conv_flip_long_turn2_ttft_s", "conv_flip_long_turn2_cached_prompt_tokens")
+        "conv_flip_long_turn2_ttft_s", "conv_flip_long_turn2_cached_prompt_tokens", "conv_flip_long_aggregate_tps",
+        "conv_flip_long_phase2_s")
 GATED_CELLS = ("ord1", "nat1", "mix", "conv2", "conv_flip", "conv_flip_long", "conv_spread")
 CONV_IDENTITY_CELLS = ("conv2", "conv_spread")
 
@@ -382,6 +400,20 @@ def main(argv=None):
               f"B/A1={ratios[0]} B/A2={ratios[1]} {'PASS' if ok else ('INFO' if ok is None else 'FAIL')}")
         if ok is False:
             failures.append(name)
+
+    # conv_flip_long joins and re-prefills its stock_order entry by design (v0.3.65 cost rule), so
+    # its phase-2 aggregate is INFO. Gate instead: B's phase-2 wall exceeds each A's by at most the
+    # turn-2 TTFT difference plus `cost` x A's wall, i.e. the only loss is the one re-prefill, and
+    # turn-2 decode tok/s (HIGHER) holds.
+    wb = speed["conv_flip_long_phase2_s"]["B"]; tb = speed["conv_flip_long_turn2_ttft_s"]["B"]
+    bound_ok = wb is not None and tb is not None
+    for al in ("A1", "A2"):
+        wa = speed["conv_flip_long_phase2_s"][al]; ta = speed["conv_flip_long_turn2_ttft_s"][al]
+        bound_ok = bound_ok and wa is not None and ta is not None and wb - wa <= (tb - ta) + cost * wa
+    gates["conv_flip_long_reprefill_bound"] = bool(bound_ok)
+    print(f"T2462_GATE conv_flip_long_reprefill_bound {'PASS' if bound_ok else 'FAIL'}")
+    if not bound_ok:
+        failures.append("conv_flip_long_reprefill_bound")
 
     def gain(name):
         r = speed[name]["B_over_A"]
