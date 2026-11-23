@@ -6336,6 +6336,61 @@ enum PagedKVAttentionTrace {
     }
 }
 
+#if MACPROVIDER_LAB_HARNESS && MACPROVIDER_SECTION_TIMING
+/// Lab profiles only (#2469): one stderr line per distinct (query columns,
+/// mask kind, kernel) of the batch cache's attention calls, naming the MLX
+/// core SDPA kernel the call's shape takes by `PagedKVVectorAttentionRoute`
+/// (the ported dispatch). Only while the engine's lab timing is on.
+enum PagedKVLabSDPARouteTrace {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var seen = Set<String>()
+
+    static func kernelName(
+        queryTokens: Int, keyTokens: Int, queryHeads: Int, kvHeads: Int,
+        headDim: Int, valueDim: Int, hasArrayMask: Bool
+    ) -> (name: String, partitions: Int?) {
+        // More than 8 query columns: core's full-attention (prefill) kernel or
+        // its composite fallback, never a vector kernel.
+        guard queryTokens <= 8 else { return ("full_or_fallback", nil) }
+        guard let route = PagedKVVectorAttentionRoute.route(
+            keyTokens: keyTokens, queryTokens: queryTokens, queryHeads: queryHeads,
+            kvHeads: kvHeads, headDim: headDim, valueDim: valueDim, hasArrayMask: hasArrayMask,
+            architecture: PagedKVVectorAttentionRoute.deviceArchitecture,
+            partitionOverride: PagedKVVectorAttentionRoute.partitionOverride
+        ) else { return ("composite_fallback", nil) }
+        guard route.twoPass else { return ("sdpa_vector", nil) }
+        return (route.gqaKernel ? "sdpa_vector_2pass_1_gqa" : "sdpa_vector_2pass_1", route.partitions)
+    }
+
+    static func record(
+        queries: MLXArray, keys: MLXArray, values: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) {
+        guard LabSectionTimer.enabled, queries.ndim == 4, keys.ndim == 4, values.ndim == 4 else { return }
+        let maskKind: String
+        switch mask {
+        case .none: maskKind = "none"
+        case .causal: maskKind = "causal"
+        case .array: maskKind = "array"
+        default: maskKind = "other"
+        }
+        let kernel = kernelName(
+            queryTokens: queries.dim(2), keyTokens: keys.dim(2), queryHeads: queries.dim(1),
+            kvHeads: keys.dim(1), headDim: queries.dim(3), valueDim: values.dim(3),
+            hasArrayMask: maskKind == "array"
+        )
+        let key = "\(queries.dim(2))/\(maskKind)/\(kernel.name)"
+        guard lock.withLock({ seen.insert(key).inserted }) else { return }
+        let line = "event=lab_sdpa_route rows=\(queries.dim(0)) q_tokens=\(queries.dim(2)) "
+            + "key_tokens=\(keys.dim(2)) q_heads=\(queries.dim(1)) kv_heads=\(keys.dim(1)) "
+            + "head_dim=\(queries.dim(3)) value_dim=\(values.dim(3)) mask=\(maskKind) "
+            + "arch=\(PagedKVVectorAttentionRoute.deviceArchitecture) kernel=\(kernel.name) "
+            + "partitions=\(kernel.partitions.map(String.init) ?? "-")\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+#endif
+
 enum PagedKVRowAttention {
     /// Whether MLX core reduces a row attended alone in another order than
     /// the same row inside one batched call of equal-length rows, so each row
@@ -6915,7 +6970,17 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         let window = presentationWindowTokens
         let windowed = rowCaches.contains { $0.attentionWindowTokens != nil }
         insideUpdateAndAttend = true
+        #if MACPROVIDER_LAB_HARNESS && MACPROVIDER_SECTION_TIMING
+        // Lab profiles only (#2469): the cache write as its own section, and
+        // the SDPA route of this call's shape. Pass-throughs unless the
+        // engine's lab timing is on (`MLX_LM_SECTION_TIMING=1`).
+        let (keys, values) = LabSectionTimer.run("fa.cache_update", outputs: { [$0.0, $0.1] }) {
+            update(keys: incomingKeys, values: incomingValues)
+        }
+        PagedKVLabSDPARouteTrace.record(queries: queries, keys: keys, values: values, mask: mask)
+        #else
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
+        #endif
         insideUpdateAndAttend = false
         updated(keys, values)
         if columnExactVerification, sinks == nil,
@@ -7170,14 +7235,19 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         stagedValues.reserveCapacity(rowCaches.count)
         pendingResolutions.reserveCapacity(rowCaches.count)
         for (rowIndex, cache) in rowCaches.enumerated() {
-            let state = cache.state
             let map = rowMaps[rowIndex]
             let inputRange = 0 ..< map.inputCount
             let inputKeys = incomingKeys[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
             let inputValues = incomingValues[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
             let resolvedKeys: MLXArray
             let resolvedValues: MLXArray
-            if state.count == 2 {
+            // #2475: write the verify columns past the row's stored tokens in
+            // its own buffer instead of concatenating a full copy of its
+            // history per layer; same values, same shape.
+            if let staged = cache.stageUncommitted(keys: inputKeys, values: inputValues) {
+                resolvedKeys = staged.0
+                resolvedValues = staged.1
+            } else if case let state = cache.state, state.count == 2 {
                 resolvedKeys = concatenated([state[0], inputKeys], axis: 2)
                 resolvedValues = concatenated([state[1], inputValues], axis: 2)
             } else if cache.storedTokens == 0 {

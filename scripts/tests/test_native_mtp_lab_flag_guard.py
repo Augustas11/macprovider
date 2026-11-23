@@ -43,6 +43,9 @@ LAB_BUILD_SURFACES = {
     # cells; never a release or signing path.
     ROOT / "scripts" / "lab" / "2451" / "job.sh",
     ROOT / "scripts" / "lab" / "2451" / "ship-job.sh",
+    # Native-MTP verify profile window (#2469, #2475): builds the lab binary on the
+    # Studio for loopback verify-step timing; never a release or signing path.
+    ROOT / "scripts" / "lab" / "2469" / "job.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
