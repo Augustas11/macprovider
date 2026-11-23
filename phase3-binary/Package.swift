@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: Dense
+        // qmm_t in the MLX core takes a 64-row tile from 1024 rows for affine
+        // bfloat16 group-64 weights. No model source changes.
         // Tag 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85: The
         // small-M route is set per request (SPEC-038 FR-CB9 `mixed`): native
         // MTP graphs build under a row_invariant scope while ordinary requests
@@ -254,9 +257,13 @@ let package = Package(
         // aaa8265, .25 plus a per-op small-M route (core dd68f1d2d on .15, mlx-c
         // 70f188c on v0.6.0-macprovider.2): QuantizedMatmul captures the route at
         // graph build from a thread scope (withSmallMRoute).
+        // #2451: branch macprovider/2451-dense-tile (0efe0402) is
+        // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
+        // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
+        // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "bcffd492b1d89d009e57278defd258e76ac78ab3"
+            revision: "0efe0402707951016ed695d11f359df669b26c09"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

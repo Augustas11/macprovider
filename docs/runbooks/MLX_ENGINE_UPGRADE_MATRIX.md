@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.86` | `bcffd492b1d89d009e57278defd258e76ac78ab3` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.26` | `aaa826550ca59184a5884b099f1d640714804fc5` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.16` | `dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.87` | `0efe0402707951016ed695d11f359df669b26c09` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.27` | `e7243b3d792ea39da0a653990fba06630cc6ada6` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.17` | `6c2ac790c038dd43acbae5e0c99f94c49d94b771` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
@@ -46,6 +46,15 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-23 the LM row is `3.32.3-macprovider.87` (`0efe040`), on
+`3.32.3-macprovider.86` (#2451): one commit that only moves the mlx-swift pin
+to `0.32.3-macprovider.27` (`e7243b3`), `.26` plus one commit that moves the
+core gitlink and adds the QmmTileTests bit-identity test. The core row moves to
+`v0.32.4-macprovider.17` (`6c2ac79`, one commit on `.16`: dense qmm_t takes a
+64-row tile from 1024 rows for affine bfloat16 group-64 weights). The C row is
+unchanged. The three tags are cut from these revisions at the campaign freeze.
+No model source changes.
 
 As of 2026-11-23 the LM row is `3.32.3-macprovider.86` (`bcffd49`), on
 `3.32.3-macprovider.85` (#2462): one commit that only moves the mlx-swift pin

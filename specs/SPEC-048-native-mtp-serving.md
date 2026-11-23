@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.122
+**Version:** 0.1.123
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.122",
+  "version": "0.1.123",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -653,12 +653,24 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.86` | `bcffd492b1d89d009e57278defd258e76ac78ab3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.26` | `aaa826550ca59184a5884b099f1d640714804fc5` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.16` | `dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.87` | `0efe0402707951016ed695d11f359df669b26c09` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.27` | `e7243b3d792ea39da0a653990fba06630cc6ada6` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.17` | `6c2ac790c038dd43acbae5e0c99f94c49d94b771` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.86` is on `3.32.3-macprovider.85`
+The mlx-swift-lm row `3.32.3-macprovider.87` is on `3.32.3-macprovider.86`
+(`bcffd492b1d89d009e57278defd258e76ac78ab3`) (#2451), at
+`0efe0402707951016ed695d11f359df669b26c09`: one commit that only moves its
+mlx-swift pin to `0.32.3-macprovider.27`
+(`e7243b3d792ea39da0a653990fba06630cc6ada6`), `0.32.3-macprovider.26` plus one
+commit that moves the MLX core gitlink and adds a QmmTileTests bit-identity
+test. The core row moves to `v0.32.4-macprovider.17`
+(`6c2ac790c038dd43acbae5e0c99f94c49d94b771`, one commit on
+`v0.32.4-macprovider.16`): dense qmm_t takes a 64-row tile from 1024 rows for
+affine bfloat16 group-64 weights. The C row is unchanged. No model source
+changes; the tags are cut from these revisions at the campaign freeze.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.86` is on `3.32.3-macprovider.85`
 (`8aa564dbf780cb4bd88e3fb591981eae868780f4`) (#2462), at
 `bcffd492b1d89d009e57278defd258e76ac78ab3`: one commit that only moves its
 mlx-swift pin to `0.32.3-macprovider.26`
@@ -3086,6 +3098,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.123 (2026-11-23, Related: #2451)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.87` (`0efe0402707951016ed695d11f359df669b26c09`) on
+  `3.32.3-macprovider.86`, mlx-swift `0.32.3-macprovider.27`
+  (`e7243b3d792ea39da0a653990fba06630cc6ada6`) on `0.32.3-macprovider.26` and
+  MLX core `v0.32.4-macprovider.17` (`6c2ac790c038dd43acbae5e0c99f94c49d94b771`)
+  on `v0.32.4-macprovider.16`: dense qmm_t takes a 64-row tile from 1024 rows
+  for affine bfloat16 group-64 weights. The C row and model sources are
+  unchanged.
 - **0.1.122 (2026-11-23, Related: #2462)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.86` (`bcffd492b1d89d009e57278defd258e76ac78ab3`) on
   `3.32.3-macprovider.85`, mlx-swift `0.32.3-macprovider.26`

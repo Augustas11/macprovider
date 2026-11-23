@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at aaa82655 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at dd68f1d2 (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at e7243b3d the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 6c2ac790 (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,25 +42,31 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85 (8aa564db): one
-# commit that only moves its mlx-swift pin to aaa82655 (the per-op small-M
-# route below). No model source changes. The tag is cut from this revision at
+# 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: One commit that only
+# moves its mlx-swift pin to 0.32.3-macprovider.27
+# (e7243b3d792ea39da0a653990fba06630cc6ada6), 0.32.3-macprovider.26 plus the
+# MLX core dense qmm_t 64-row tile from 1024 rows for affine bfloat16 group-64
+# weights. No model source changes; the tags are cut from these revisions at
 # the campaign freeze.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.86"
-SPEC048_MLX_SWIFT_LM_REVISION = "bcffd492b1d89d009e57278defd258e76ac78ab3"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.87"
+SPEC048_MLX_SWIFT_LM_REVISION = "0efe0402707951016ed695d11f359df669b26c09"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.26"
-# Fork tag 0.32.3-macprovider.26 (#2462): .25 (12d26ef6) plus one commit that
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.27"
+# Fork tag 0.32.3-macprovider.27 (#2451): .26 (aaa82655) plus one commit that
+# moves the MLX core gitlink to the dense qmm_t 64-row tile below and adds the
+# QmmTileTests bit-identity test. .26 (#2462) is .25 (12d26ef6) plus one commit that
 # moves the MLX core gitlink to the per-op small-M route below and mlx-c to its
 # C binding, adds the Swift API (SmallMRoute, withSmallMRoute: a thread scope
 # QuantizedMatmul captures at graph build) and regenerates the quantized jit
 # sources. .25 is .24 (7fbcada9) plus a synchronous eval that waits for the
 # device without holding the process-wide evalLock. The tag is cut from this
 # revision at the campaign freeze.
-SPEC048_MLX_SWIFT_REVISION = "aaa826550ca59184a5884b099f1d640714804fc5"
+SPEC048_MLX_SWIFT_REVISION = "e7243b3d792ea39da0a653990fba06630cc6ada6"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.16 (#2462): v0.32.4-macprovider.15 (4e9a71dc)
+# Fork tag v0.32.4-macprovider.17 (#2451): v0.32.4-macprovider.16 (dd68f1d2)
+# plus one commit: dense qmm_t takes a 64-row tile from 1024 rows for affine
+# bfloat16 group-64 weights. .16 (#2462) is v0.32.4-macprovider.15 (4e9a71dc)
 # plus three commits that add a thread-scoped per-op small-row route captured
 # on QuantizedMatmul (carried through its vjp/jvp) and a discriminating 2-row
 # GPU route test; .15 is seven commits on v0.32.4-macprovider.14 (upstream MLX
@@ -73,8 +79,8 @@ SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.16"
-SPEC048_MLX_CORE_REVISION = "dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.17"
+SPEC048_MLX_CORE_REVISION = "6c2ac790c038dd43acbae5e0c99f94c49d94b771"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
 # v0.6.0-macprovider.4 (#2462): v0.6.0-macprovider.2 (2b1ff2b5) plus one commit
