@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85: The
+        // small-M route is set per request (SPEC-038 FR-CB9 `mixed`): native
+        // MTP graphs build under a row_invariant scope while ordinary requests
+        // keep stock order; the MLX core captures the route per quantized
+        // matmul at graph build. Other paths are unchanged.
         // Tag 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84:
         // GLM5Next prefill slices (`glm5NextPrefillSlicesKey`): the routed and
         // shared experts and dense MLPs run once over consecutive balanced

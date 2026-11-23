@@ -36,6 +36,9 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-listing.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen-mtp-cap.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-wide-prefill.sh",
+    # Mixed small-M route window (#2462): builds the lab binary on the Studio for
+    # A/B/A loopback cells; never a release or signing path.
+    ROOT / "scripts" / "lab" / "2462" / "job.sh",
 }
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
