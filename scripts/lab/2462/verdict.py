@@ -134,6 +134,10 @@ def metrics(rows, trials):
         "conv_flip_long_turn2_ttft_s": med(sel("conv_flip_long", "conv2", "ttft_s")),
         "conv_flip_long_turn2_decode_tps": med(sel("conv_flip_long", "conv2", "decode_tps")),
         "conv_flip_long_phase2_s": med(phase2_wall(trials, rows, "conv_flip_long")),
+        "conv_flip_long_native_decode_tps": med(sel("conv_flip_long", "native", "decode_tps")),
+        "conv_flip_long_native_completion_tokens": med(sel("conv_flip_long", "native", "completion_tokens")),
+        "conv_flip_long_turn2_prompt_tokens": med(sel("conv_flip_long", "conv2", "prompt_tokens")),
+        "conv_flip_long_turn2_completion_tokens": med(sel("conv_flip_long", "conv2", "completion_tokens")),
         "conv_flip_long_turn2_cached_prompt_tokens": med(sel("conv_flip_long", "conv2", "cached_prompt_tokens")),
         "conv_spread_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "conv_spread"]),
         "mix_late_aggregate_tps": med([t.get("aggregate_tps") for t in trials if t["cell"] == "mix_late"]),
@@ -170,7 +174,8 @@ INFO = ("mix_ordinary_ttft_s", "mix_native_overlap_share", "mix_late_aggregate_t
         "mix_late_native_admissions", "conv2_turn2_cached_prompt_tokens",
         "conv2_turn1_decode_tps", "conv_flip_turn2_cached_prompt_tokens", "conv_flip_aggregate_tps",
         "conv_flip_long_turn2_ttft_s", "conv_flip_long_turn2_cached_prompt_tokens", "conv_flip_long_aggregate_tps",
-        "conv_flip_long_phase2_s")
+        "conv_flip_long_phase2_s", "conv_flip_long_native_decode_tps", "conv_flip_long_native_completion_tokens",
+        "conv_flip_long_turn2_prompt_tokens", "conv_flip_long_turn2_completion_tokens")
 GATED_CELLS = ("ord1", "nat1", "mix", "conv2", "conv_flip", "conv_flip_long", "conv_spread")
 CONV_IDENTITY_CELLS = ("conv2", "conv_spread")
 
@@ -405,11 +410,27 @@ def main(argv=None):
     # its phase-2 aggregate is INFO. Gate instead: B's phase-2 wall exceeds each A's by at most the
     # turn-2 TTFT difference plus `cost` x A's wall, i.e. the only loss is the one re-prefill, and
     # turn-2 decode tok/s (HIGHER) holds.
-    wb = speed["conv_flip_long_phase2_s"]["B"]; tb = speed["conv_flip_long_turn2_ttft_s"]["B"]
-    bound_ok = wb is not None and tb is not None
-    for al in ("A1", "A2"):
-        wa = speed["conv_flip_long_phase2_s"][al]; ta = speed["conv_flip_long_turn2_ttft_s"][al]
-        bound_ok = bound_ok and wa is not None and ta is not None and wb - wa <= (tb - ta) + cost * wa
+    # The native row gets the same allowance: its decode time over its own tokens may exceed A's
+    # by at most that TTFT difference plus `cost` x A's. Turn 2 must do the same work as on A
+    # (prompt and completion tokens), and every input needs --min-samples per serve.
+    def v(name, label):
+        return speed[name][label]
+    inputs = ("conv_flip_long_phase2_s", "conv_flip_long_turn2_ttft_s", "conv_flip_long_native_decode_tps",
+              "conv_flip_long_native_completion_tokens", "conv_flip_long_turn2_prompt_tokens",
+              "conv_flip_long_turn2_completion_tokens")
+    bound_ok = all(v(n, l) is not None for n in inputs for l in ("A1", "B", "A2")) and \
+        all(min(speed[n]["n"]) >= a.min_samples for n in inputs)
+    if bound_ok:
+        wb, tb = v("conv_flip_long_phase2_s", "B"), v("conv_flip_long_turn2_ttft_s", "B")
+        nt = v("conv_flip_long_native_completion_tokens", "B")
+        db = nt / v("conv_flip_long_native_decode_tps", "B")
+        for al in ("A1", "A2"):
+            wa, ta = v("conv_flip_long_phase2_s", al), v("conv_flip_long_turn2_ttft_s", al)
+            da = v("conv_flip_long_native_completion_tokens", al) / v("conv_flip_long_native_decode_tps", al)
+            bound_ok = (bound_ok and wb - wa <= (tb - ta) + cost * wa and db - da <= (tb - ta) + cost * da
+                        and v("conv_flip_long_native_completion_tokens", al) == nt
+                        and v("conv_flip_long_turn2_prompt_tokens", al) == v("conv_flip_long_turn2_prompt_tokens", "B")
+                        and v("conv_flip_long_turn2_completion_tokens", al) == v("conv_flip_long_turn2_completion_tokens", "B"))
     gates["conv_flip_long_reprefill_bound"] = bool(bound_ok)
     print(f"T2462_GATE conv_flip_long_reprefill_bound {'PASS' if bound_ok else 'FAIL'}")
     if not bound_ok:
