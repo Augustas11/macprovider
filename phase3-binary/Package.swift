@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: Dense
+        // qmm_t in the MLX core takes a 64-row tile from 1024 rows for affine
+        // bfloat16 group-64 weights. No model source changes.
+        // Tag 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85: The
+        // small-M route is set per request (SPEC-038 FR-CB9 `mixed`): native
+        // MTP graphs build under a row_invariant scope while ordinary requests
+        // keep stock order; the MLX core captures the route per quantized
+        // matmul at graph build. Other paths are unchanged.
         // Tag 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84:
         // GLM5Next prefill slices (`glm5NextPrefillSlicesKey`): the routed and
         // shared experts and dense MLPs run once over consecutive balanced
@@ -244,9 +252,23 @@ let package = Package(
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage. 10.10 batches GLM MTP indexer projections and
         // compatible per-column attention while retaining row-owned caches.
+        // #2462: branch macprovider/2462-route-on-main (bcffd492) is
+        // 3.32.3-macprovider.85 (8aa564db) with only the mlx-swift pin moved to
+        // aaa8265, .25 plus a per-op small-M route (core dd68f1d2d on .15, mlx-c
+        // 70f188c on v0.6.0-macprovider.2): QuantizedMatmul captures the route at
+        // graph build from a thread scope (withSmallMRoute).
+        // #2451: branch macprovider/2451-dense-tile (0efe0402) is
+        // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
+        // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
+        // dd68f1d2d; mlx-c unchanged).
+        // engine-333: branch macprovider/engine-333-r2 (73eb9cf7) is the 3.33.0
+        // rebase (748d330) with the mlx-swift pin moved to 52ae025: mlx-swift
+        // 0.33.0 plus the #2462 small-M route and the #2451 dense qmm tile, core
+        // cde15ff75 (v0.32.4-macprovider.17 plus mlx #4883, #4881, #4930), mlx-c
+        // 33d88bf (v0.8.0 plus the reference-prefill and small-M route scopes).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "748d330d213c673637617f29bd863020f4565fd4"
+            revision: "73eb9cf7663df03476c568f907bcadd829488c45"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

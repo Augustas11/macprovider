@@ -10,7 +10,7 @@
 # the whole model, #2468: GLM-5.3-Flash needs 176 GB free per start); SKIP_HEAVY=1 skips the heavy fork suites (they passed in window 3).
 set -uo pipefail
 L="${1:?usage: studio-run.sh LAB_DIR}"
-LM_REV=748d330d213c673637617f29bd863020f4565fd4
+LM_REV=73eb9cf7663df03476c568f907bcadd829488c45
 MODELS_ROOT="$HOME/Library/Application Support/macprovider/models"
 cd "$L" || exit 64
 
