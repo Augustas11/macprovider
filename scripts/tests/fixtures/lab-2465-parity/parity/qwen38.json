@@ -1,0 +1,144 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    49.096038187721966
+  ],
+  "aggregateTPSp50" : 49.096038187721966,
+  "aggregateUpliftVsPagedSingleRow" : 1.5263524990333857,
+  "aggregateVsProductionSerial" : 1.4359927550110851,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 16,
+  "leftovers" : {
+    "parity" : {
+      "batchedRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ],
+      "batchedTokenSHA256" : "648b5ae5fea9ab8c7578fe72b5fec866a5703a5e117bf1e1b80450a40a023d32",
+      "comparedTokens" : 256,
+      "oneRowMatch" : true,
+      "pass" : true,
+      "rows" : [
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "648b5ae5fea9ab8c7578fe72b5fec866a5703a5e117bf1e1b80450a40a023d32",
+          "serialTokenCount" : 257,
+          "serialTokenSHA256" : "648b5ae5fea9ab8c7578fe72b5fec866a5703a5e117bf1e1b80450a40a023d32",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "648b5ae5fea9ab8c7578fe72b5fec866a5703a5e117bf1e1b80450a40a023d32"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "e13da89bf4c468a805d57a6abd2e72c83b35aff3408305a306213131dfdc53eb",
+          "serialTokenCount" : 34,
+          "serialTokenSHA256" : "e72e618e54508cd2d663e94493713781301661da7023977ccc95b2333170d580",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "e13da89bf4c468a805d57a6abd2e72c83b35aff3408305a306213131dfdc53eb"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "3d1a93a5b6fd302b9bffc8d8dd6303a23c76e853cec17ad29f73e7377fb22b48",
+          "serialTokenCount" : 30,
+          "serialTokenSHA256" : "22eac46aaa5cdddfc3a28d222c856d7a3bba673812e9a3f33f9529e959398c1e",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "3d1a93a5b6fd302b9bffc8d8dd6303a23c76e853cec17ad29f73e7377fb22b48"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931",
+          "serialTokenCount" : 257,
+          "serialTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931"
+        }
+      ],
+      "serialTokenSHA256" : "648b5ae5fea9ab8c7578fe72b5fec866a5703a5e117bf1e1b80450a40a023d32",
+      "standaloneRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-0-B47785CC-D9A9-4577-8940-31FB6C5A4771",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-C802C61B-0BC2-4959-81D5-48D4930FCCEA",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-2-10B17222-31BE-4A9E-BE8A-509DFDED6CE7",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-3-DB89C8BA-C47F-4312-880B-8DE86D5A7B3D",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 12500,
+  "mlxSwiftLMPin" : "mlxlm-8aa564dbf780",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.8-27B-4bit\/10c35caafbb80f7dc6a7a432cdd11af10a6d4818\/8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+  "modelTag" : "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    32.16559622945138
+  ],
+  "pagedSingleRowTPSp50" : 32.16559622945138,
+  "peakRSSMB" : 14725,
+  "perRowFractionOfPagedSingleRow" : 0.3815881247583464,
+  "perRowTPSp50" : 12.274009546930492,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    34.18961413029063
+  ],
+  "productionSerialTPSp50" : 34.18961413029063,
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "94e5485180408ca87b57844c5fce957c529a0bcb0e9dbe6ddf2de5dcb7ce8941",
+    "778b0062dd4fc0c6f0a06fc481eafd7c3a8df431fd30bdd2c0fc0c5f72eaced0",
+    "6a044580190e5d5480fc0689a7c3d7e9ff25e4cfb03567d69a963b51572656d7",
+    "d4b16221a25de451fadd0beb3f94b521688cec1779573d5aa0e827f339fbc538"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 5,
+  "scenario" : "parity",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-23T03:28:06Z"
+}

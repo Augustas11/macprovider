@@ -5,7 +5,7 @@ usage: intake_verdict.py --issue N --res RES --incumbent LABEL --candidate LABEL
 Reads RES/<cell>/<label>... as the #2465 / #2466 jobs write them:
   decode/<label>-<ctx>.json       decode-bench (samples[].decodeTPS, prefillTPS, ttftSeconds)
   aggregate/<label>-*.json        msb-throughput throughput / msb03 (only #2466)
-  parity/<label>.json             msb-throughput --scenario parity (pass, firstDivergenceIndex)
+  parity/<label>.json             msb-throughput --scenario parity (leftovers.parity.pass, oneRowMatch)
   ref/<label>/glm-parity.json     glm-parity against the reference oracles
   mtp/<label>/{bench.jsonl,analysis.json}   native-mtp-bench + scripts/native_mtp_r015_analyze.py
   quality/<label>-score.json      quality.py score
@@ -77,6 +77,8 @@ def parity_cell(res, label):
     doc = load(os.path.join(res, "parity", f"{label}.json"))
     if doc is None:
         return None
+    # msb-throughput --scenario parity nests the verdict under leftovers.parity.
+    doc = g(g(doc, "leftovers"), "parity") or doc
     return {"pass": g(doc, "pass"), "oneRowMatch": g(doc, "oneRowMatch", "one_row_match"),
             "firstDivergenceIndex": g(doc, "firstDivergenceIndex", "first_divergence_index")}
 
