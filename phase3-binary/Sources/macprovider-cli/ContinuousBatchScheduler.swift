@@ -671,6 +671,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// excluded from the idempotency fingerprint, so ordinary fingerprints
     /// are unchanged.
     let ingestProvenance: KVIngestProvenance
+    /// SPEC-038 FR-CB9 (v0.3.61): the small-row route every forward of this
+    /// request is built on, fixed at admission (`SmallMRoute.requestRoute`).
+    /// A forward never holds rows of two routes. Runtime-only; excluded from
+    /// the idempotency fingerprint.
+    let smallMRoute: SmallMRoute
 
     init(
         id: String,
@@ -709,7 +714,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPAdaptationConfig: NativeMTPAdaptationConfig? = nil,
         selfCheckProbe: Bool = false,
         selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil,
-        ingestProvenance: KVIngestProvenance = .unknown
+        ingestProvenance: KVIngestProvenance = .unknown,
+        smallMRoute: SmallMRoute? = nil
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -753,6 +759,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.selfCheckProbe = selfCheckProbe
         self.selfCheckCohort = selfCheckProbe ? selfCheckCohort : nil
         self.ingestProvenance = ingestProvenance
+        self.smallMRoute = smallMRoute ?? SmallMRoute.requestRoute(nativeAdmitted: self.decodePath == .nativeMTP)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -4625,6 +4632,18 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.61): one native round per small-row route, each
+    /// with every backend call on that route. In a `mixed` process native
+    /// rows are all row-invariant; any other process has one route.
+    private func runNativeMTPRoundsPerRoute(rows: [Row]) async {
+        for group in SmallMRouteScope.groups(rows, route: \.request.smallMRoute) {
+            let current = group.compactMap { activeDecode[$0.request.id] }
+            guard let route = current.first?.request.smallMRoute else { continue }
+            await onRoute(route) { await runNativeMTPDecodeStep(rows: current) }
+            guard !cleanupFailedClosed else { return }
+        }
+    }
+
     private func runNativeMTPDecodeStep(rows: [Row]) async {
         let nativeMTPStatusSink = configuration.nativeMTPStatusSink
         var nativeMTPStatusRoundStarted = false
@@ -5667,21 +5686,41 @@ actor ContinuousBatchScheduler {
             labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
         }
         guard !nativeRows.isEmpty else {
-            await runOrdinaryDecodeStep(rows: rows.compactMap { activeDecode[$0.request.id] })
+            await runOrdinaryForwardsPerRoute(rows: rows.compactMap { activeDecode[$0.request.id] })
             return
         }
         let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
-            await runNativeMTPDecodeStep(rows: nativeRows)
+            await runNativeMTPRoundsPerRoute(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
             let remainingOrdinary = ordinaryRows.compactMap { activeDecode[$0.request.id] }
-            await runOrdinaryDecodeStep(rows: remainingOrdinary)
+            await runOrdinaryForwardsPerRoute(rows: remainingOrdinary)
         } else {
-            await runOrdinaryDecodeStep(rows: ordinaryRows)
+            await runOrdinaryForwardsPerRoute(rows: ordinaryRows)
             guard !cleanupFailedClosed else { return }
             let remainingNative = nativeRows.compactMap { activeDecode[$0.request.id] }
-            await runNativeMTPDecodeStep(rows: remainingNative)
+            await runNativeMTPRoundsPerRoute(rows: remainingNative)
         }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): no forward holds rows of two small-row
+    /// routes. With both active (a `mixed` process: native rows riding the
+    /// ordinary forward, or a native request's ordinary fallback, beside
+    /// ordinary requests) each route decodes in its own forwards this step,
+    /// and each forward's row count counts only its own route's rows.
+    private func runOrdinaryForwardsPerRoute(rows: [Row]) async {
+        for group in SmallMRouteScope.groups(rows, route: \.request.smallMRoute) {
+            let current = group.compactMap { activeDecode[$0.request.id] }
+            guard let route = current.first?.request.smallMRoute else { continue }
+            await onRoute(route) { await runOrdinaryDecodeStep(rows: current) }
+            guard !cleanupFailedClosed else { return }
+        }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): runs a backend call whose forwards hold
+    /// rows of `route` only; each graph build reads it (`SmallMRouteScope.build`).
+    private func onRoute<R>(_ route: SmallMRoute, _ operation: () async throws -> R) async rethrows -> R {
+        try await SmallMRouteScope.run(route, operation)
     }
 
     private func runOrdinaryDecodeStep(rows: [Row]) async {
@@ -6066,10 +6105,15 @@ actor ContinuousBatchScheduler {
     /// Ordinary rows already decoding, in admission order, capped at the V4
     /// decode width. Native MTP, grammar, and penalty rows stay on the
     /// official decode step: a pause samples one ordinary forward only.
-    private func prefillPauseDecodeInputs() async -> [ContinuousBatchPrefillPauseRow] {
+    /// SPEC-038 FR-CB9 (v0.3.62): the pause forward runs inside the prefill's
+    /// route scope, so only rows on the prefill's small-M route take it; a
+    /// row on the other route waits for its own decode step after the
+    /// prefill, as a native row does.
+    private func prefillPauseDecodeInputs(route: SmallMRoute) async -> [ContinuousBatchPrefillPauseRow] {
         guard configuration.referencePrefillStepSize != nil else { return [] }
         let rows = activeDecode.values.filter { row in
             !row.usesNativeMTP
+                && row.request.smallMRoute == route
                 && row.request.grammarConstraint == nil
                 && row.request.presencePenalty == 0
                 && row.request.frequencyPenalty == 0
@@ -6644,16 +6688,19 @@ actor ContinuousBatchScheduler {
                     )
                     admissionHandle = handle
                     let binding = try await allocator.binding(for: handle)
-                    let handoff = try contiguousCacheBridge.reattachPagedKVCache(
-                        handle: handle,
-                        table: binding.currentTable
-                    )
-                    try await backend.installRetainedPagedKVCache(
-                        requestID: request.id,
-                        handoff: handoff,
-                        binding: binding,
-                        recurrentCheckpoint: recurrentCheckpoint
-                    )
+                    let reattachedHandle = handle
+                    try await onRoute(request.smallMRoute) {
+                        let handoff = try contiguousCacheBridge.reattachPagedKVCache(
+                            handle: reattachedHandle,
+                            table: binding.currentTable
+                        )
+                        try await backend.installRetainedPagedKVCache(
+                            requestID: request.id,
+                            handoff: handoff,
+                            binding: binding,
+                            recurrentCheckpoint: recurrentCheckpoint
+                        )
+                    }
                     // SPEC-048-R009 (0.1.118): a native row resumes its MTP
                     // head at exactly the cached length, or fails admission.
                     if request.decodePath == .nativeMTP {
@@ -6665,13 +6712,17 @@ actor ContinuousBatchScheduler {
                             )
                         }
                         if drafter.boundaryHidden == nil {
-                            try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                            try await onRoute(request.smallMRoute) {
+                                try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                            }
                         } else {
                             // SPEC-048-R009 (0.1.119): a failed boundary fold
                             // leaves the installed target state, which ordinary
                             // decode serves; the row runs ordinary, before output.
                             do {
-                                try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                                try await onRoute(request.smallMRoute) {
+                                    try await backend.installNativeMTPDrafter(requestID: request.id, snapshot: drafter)
+                                }
                             } catch {
                                 ContinuousBatchingPolicy.logForwardFailed(error)
                                 admittedOrdinaryAfterFoldFailure = true
@@ -6691,12 +6742,14 @@ actor ContinuousBatchScheduler {
                     )
                     admissionHandle = handle
                     let binding = try await allocator.binding(for: handle)
-                    try await backend.installPromptSnapshotCache(
-                        requestID: request.id,
-                        snapshot: snapshot,
-                        binding: binding,
-                        restoreNativeMTPDrafter: request.decodePath == .nativeMTP
-                    )
+                    try await onRoute(request.smallMRoute) {
+                        try await backend.installPromptSnapshotCache(
+                            requestID: request.id,
+                            snapshot: snapshot,
+                            binding: binding,
+                            restoreNativeMTPDrafter: request.decodePath == .nativeMTP
+                        )
+                    }
                     prefillCursor = request.cachedPromptTokens
                 } else {
                     handle = try await allocator.allocate(
@@ -6820,9 +6873,9 @@ actor ContinuousBatchScheduler {
 
         let turnBudget = prefillTurnTokenBudget()
         let candidateOrder = prefillCandidateOrder()
-        let selected = configuration.allowsRaggedPrefillOffsets
+        let selected = Self.sameRouteAsHead(configuration.allowsRaggedPrefillOffsets
             ? selectRaggedPrefillGroup(order: candidateOrder, tokenBudget: turnBudget)
-            : selectEqualOffsetPrefillGroup(order: candidateOrder, tokenBudget: turnBudget)
+            : selectEqualOffsetPrefillGroup(order: candidateOrder, tokenBudget: turnBudget))
         guard let head = selected.first else { return madeProgress }
         for id in ContinuousBatchPrefillOrder.bypassed(
             roundRobinOrder: promptOrder.filter { activePrompt[$0] != nil },
@@ -6908,9 +6961,9 @@ actor ContinuousBatchScheduler {
                group.contains(where: { $0.row.request.id == headID }),
                activePrompt[headID] != nil {
                 let order = [headID] + prefillCandidateOrder().filter { $0 != headID }
-                let next = configuration.allowsRaggedPrefillOffsets
+                let next = Self.sameRouteAsHead(configuration.allowsRaggedPrefillOffsets
                     ? selectRaggedPrefillGroup(order: order, tokenBudget: continuationTokens)
-                    : selectEqualOffsetPrefillGroup(order: order, tokenBudget: continuationTokens)
+                    : selectEqualOffsetPrefillGroup(order: order, tokenBudget: continuationTokens))
                 if next.first?.row.request.id == headID,
                    Self.prefillTokens(next) <= continuationTokens {
                     let (lead, peers) = splitSerialCohort(next)
@@ -6941,6 +6994,14 @@ actor ContinuousBatchScheduler {
             promptOrder.append(id)
         }
         return madeProgress
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): a prefill forward holds rows of one
+    /// small-row route. Peers on another route than the group's head wait
+    /// for a later turn, counted as bypassed like any row left out.
+    private static func sameRouteAsHead(_ group: [(row: Row, end: Int)]) -> [(row: Row, end: Int)] {
+        guard let route = group.first?.row.request.smallMRoute else { return group }
+        return group.filter { $0.row.request.smallMRoute == route }
     }
 
     private static func prefillTokens(_ group: [(row: Row, end: Int)]) -> Int {
@@ -7035,7 +7096,10 @@ actor ContinuousBatchScheduler {
         guard !prepared.isEmpty else { return false }
 
         prefillCalls += 1
-        let pauseInputs = await prefillPauseDecodeInputs()
+        // SPEC-038 FR-CB9 (v0.3.61): the group holds rows of one route
+        // (`sameRouteAsHead`), and so do the decode rows paused into it.
+        let prefillRoute = prepared[0].row.request.smallMRoute
+        let pauseInputs = await prefillPauseDecodeInputs(route: prefillRoute)
         let (pauseStream, pauseContinuation) = AsyncStream<[ContinuousBatchPrefillPauseStep]>.makeStream(
             bufferingPolicy: .unbounded
         )
@@ -7050,7 +7114,7 @@ actor ContinuousBatchScheduler {
         let outputs: [ContinuousBatchPrefillOutput]
         do {
             let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
-            outputs = try await backend.prefill(rows: prepared.map(\.input))
+            outputs = try await onRoute(prefillRoute) { try await backend.prefill(rows: prepared.map(\.input)) }
             CBTrace.log(nil, "hop_prefill rows=\(prepared.count) tokens=\(prepared.reduce(0) { $0 + $1.chunkCount }) ms=\((DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000) decode_rows=\(activeDecode.count)")
             try validatePrefillOutputStructure(outputs, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
@@ -7096,12 +7160,15 @@ actor ContinuousBatchScheduler {
                    let checkpoint = await backend.snapshotRecurrentState(requestID: id, tokenCount: row.prefillCursor) {
                     row.recurrentCheckpoints.append(checkpoint)
                 }
+                let snapshotTokenCount = row.prefillCursor
                 if promptSnapshotDue,
-                   let snapshot = await backend.snapshotPromptCacheAndHead(
-                       requestID: id,
-                       tokenCount: row.prefillCursor,
-                       nextPromptToken: row.request.promptTokens[row.prefillCursor]
-                   ),
+                   let snapshot = await onRoute(row.request.smallMRoute, {
+                       await backend.snapshotPromptCacheAndHead(
+                           requestID: id,
+                           tokenCount: snapshotTokenCount,
+                           nextPromptToken: row.request.promptTokens[snapshotTokenCount]
+                       )
+                   }),
                    snapshot.promptSnapshot, snapshot.tokenCount == row.prefillCursor {
                     row.promptSnapshot = snapshot
                 }
@@ -7889,14 +7956,18 @@ actor ContinuousBatchScheduler {
                 guard let terminalToken = row.generatedTokens.last else {
                     throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_terminal_kv_commit_missing_token")
                 }
-                try await backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
-                    requestID: row.request.id,
-                    currentToken: terminalToken,
-                    binding: targetBinding,
-                    blockTable: targetBinding.currentTable,
-                    committedKVTokenCount: binding.currentTable.logicalTokenCount,
-                    targetKVTokenCount: targetLogicalTokens
-                ))
+                // The terminal token's forward runs on the row's own route.
+                let committedKVTokenCount = binding.currentTable.logicalTokenCount
+                try await onRoute(row.request.smallMRoute) {
+                    try await backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                        requestID: row.request.id,
+                        currentToken: terminalToken,
+                        binding: targetBinding,
+                        blockTable: targetBinding.currentTable,
+                        committedKVTokenCount: committedKVTokenCount,
+                        targetKVTokenCount: targetLogicalTokens
+                    ))
+                }
             } else if targetLogicalTokens < binding.currentTable.logicalTokenCount {
                 _ = try await allocator.trim(row.handle, toLogicalTokens: targetLogicalTokens)
             }
@@ -7918,11 +7989,13 @@ actor ContinuousBatchScheduler {
                     || row.request.cachedPromptTokens > 0
             ) == 0
             let nativeMTPDrafter: NativeMTPRetainedDrafter? = row.usesNativeMTP && headAtAbsolutePositions
-                ? await backend.snapshotNativeMTPDrafter(
-                    requestID: row.request.id,
-                    committedTokens: Array((row.request.promptTokens + row.generatedTokens).prefix(targetLogicalTokens + 1)),
-                    checkpointPositions: recurrentCheckpoints.map(\.tokenCount).filter { $0 <= targetLogicalTokens }
-                ).flatMap { $0.head.nextPosition <= targetLogicalTokens ? $0 : nil }
+                ? await onRoute(row.request.smallMRoute, {
+                    await backend.snapshotNativeMTPDrafter(
+                        requestID: row.request.id,
+                        committedTokens: Array((row.request.promptTokens + row.generatedTokens).prefix(targetLogicalTokens + 1)),
+                        checkpointPositions: recurrentCheckpoints.map(\.tokenCount).filter { $0 <= targetLogicalTokens }
+                    )
+                }).flatMap { $0.head.nextPosition <= targetLogicalTokens ? $0 : nil }
                 : nil
             let retained = try await allocator.retain(row.handle)
             retainedSequence = retained
@@ -7986,12 +8059,14 @@ actor ContinuousBatchScheduler {
                 return nil
             }
             guard !recurrentCheckpoints.isEmpty else { return nil }
-            return try await backend.materializeSerialConversationCache(
-                requestID: row.request.id,
-                binding: binding,
-                tokenCount: tokenCount,
-                recurrentCheckpoints: recurrentCheckpoints
-            )
+            return try await onRoute(row.request.smallMRoute) {
+                try await backend.materializeSerialConversationCache(
+                    requestID: row.request.id,
+                    binding: binding,
+                    tokenCount: tokenCount,
+                    recurrentCheckpoints: recurrentCheckpoints
+                )
+            }
         } catch {
             return nil
         }

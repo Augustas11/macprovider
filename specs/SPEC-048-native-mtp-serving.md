@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.120
+**Version:** 0.1.122
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.120",
+  "version": "0.1.122",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -653,12 +653,30 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.85` | `8aa564dbf780cb4bd88e3fb591981eae868780f4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
-| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.86` | `bcffd492b1d89d009e57278defd258e76ac78ab3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.26` | `aaa826550ca59184a5884b099f1d640714804fc5` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.16` | `dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.85` is on `3.32.3-macprovider.84`
+The mlx-swift-lm row `3.32.3-macprovider.86` is on `3.32.3-macprovider.85`
+(`8aa564dbf780cb4bd88e3fb591981eae868780f4`) (#2462), at
+`bcffd492b1d89d009e57278defd258e76ac78ab3`: one commit that only moves its
+mlx-swift pin to `0.32.3-macprovider.26`
+(`aaa826550ca59184a5884b099f1d640714804fc5`), `0.32.3-macprovider.25` plus one
+commit that adds the per-op small-M route: the Swift API `SmallMRoute` and
+`withSmallMRoute` (a thread scope that QuantizedMatmul captures at graph
+build), the core gitlink moved to `v0.32.4-macprovider.16`
+(`dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80`, three commits on
+`v0.32.4-macprovider.15`: the thread-scoped route captured on
+QuantizedMatmul and carried through its vjp/jvp, and a discriminating 2-row
+GPU route test), mlx-c moved to `v0.6.0-macprovider.4`
+(`70f188c0c19b36823e7c7b30c30ae6e8514509c3`, one commit on
+`v0.6.0-macprovider.2` binding the route scope; tag `.3` is a separate line
+that was never pinned) and the quantized jit sources regenerated. With no
+scope set an op takes the process route, as before. The four tags are cut
+from these revisions at the campaign freeze. No model source changes.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.85` is on `3.32.3-macprovider.84`
 (`ddc6f974355982773e1440957f16e998835408d0`) (#2451, #2448), at
 `8aa564dbf780cb4bd88e3fb591981eae868780f4`: Three GLM5Next commits on
 3.32.3-macprovider.84 add prefill slices (`glm5NextPrefillSlicesKey`): the
@@ -829,6 +847,26 @@ snapshots written on one route are a clean miss on the other (SPEC-037
 FR-KVP4 item 10). The route and every condition are printed as
 `event=small_m_route` at startup, and local `/v1/status` reports
 `continuous_batching.small_m_route` and `small_m_route_reason`.
+
+**(0.1.121) Per-request route.** Native MTP requires the row-invariant
+small-row route for the native request, not for the whole process. In a
+`row_invariant` process every request runs on it, as before. In a SPEC-038
+FR-CB9 `mixed` process (a process that would keep `row_invariant` only
+because native MTP may activate) the process route is `stock_order`, and a
+request admitted native runs on `row_invariant`, fixed at admission for its
+whole life: every prefill chunk, decode step and verify window, its MTP head
+forwards, and any ordinary fallback before or after output. A forward never
+holds rows of two routes, and conversation-cache and disk-tier entries are
+reused only by a request of the same route (SPEC-037 v0.2.8). Native
+exactness under R015 and R016 is unchanged: a native request's tokens MUST
+still equal that request's own one-row ordinary decode on `row_invariant`,
+the reference it was qualified against. The drafter load is allowed in a
+`mixed` process and still refused in a `stock_order` or `serial_only`
+process. The MTP-16 self-check runs on `row_invariant`. A native request and
+an ordinary request of the same prompt in one `mixed` process MAY differ at
+a near-tied greedy token (SPEC-038 FR-CB6); the native request's parity
+reference is not the ordinary request beside it but its own one-row
+ordinary decode on `row_invariant`.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.49` is `3.32.3-macprovider.48`
 (`e246b8fd6`) plus one tests-only commit (#2307): the GLM-5-Next row-invariance
@@ -2140,6 +2178,14 @@ listed file is missing or changes without a regenerated digest.
   evidence. A Metal-library change follows the same behavior test. A
   behavior change that slips through without requalification is caught on
   the device by the MTP-16 self-check at load and by the R033 canary.
+  **(0.1.121)** Moving a native request from a process-wide row-invariant
+  route to a per-request one (SPEC-038 FR-CB9 `mixed`) needs no
+  requalification: the request's matmuls are captured on the row-invariant
+  route with its partial-sum count of 4, so its verify windows, drafter
+  forwards and ordinary fallback run the same kernels with the same bits as
+  in the qualified runs, and no forward holds rows of another route. The
+  existing R005 and R015 records and their ordinary-CB comparison basis are
+  reused as they stand.
 - **Same-architecture variant (0.1.78, inherits admission from 0.1.81).** A
   tuple (the variant: new weights of an admitted model's architecture)
   inherits the admission of an admitted, unrevoked tuple (the donor),
@@ -3040,6 +3086,34 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.122 (2026-11-23, Related: #2462)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.86` (`bcffd492b1d89d009e57278defd258e76ac78ab3`) on
+  `3.32.3-macprovider.85`, mlx-swift `0.32.3-macprovider.26`
+  (`aaa826550ca59184a5884b099f1d640714804fc5`) on `0.32.3-macprovider.25`,
+  MLX core `v0.32.4-macprovider.16`
+  (`dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80`) on `v0.32.4-macprovider.15`
+  and mlx-c `v0.6.0-macprovider.4`
+  (`70f188c0c19b36823e7c7b30c30ae6e8514509c3`) on `v0.6.0-macprovider.2`
+  (#2462): the per-op small-M route (`withSmallMRoute`, a thread scope
+  QuantizedMatmul captures at graph build) that the 0.1.121 per-request route
+  runs on. The LM commit only moves the mlx-swift pin; no model source
+  changes. The tags are cut from these revisions at the campaign freeze.
+- **0.1.121 (2026-11-22, Related: #2462)** — R003: native MTP requires the
+  row-invariant small-row route for the native request, per request in a
+  SPEC-038 FR-CB9 `mixed` process (process route `stock_order`) and process
+  wide otherwise. A native request keeps the route from admission to its
+  end, including prefill chunks, verify windows and ordinary fallback; a
+  forward never holds rows of two routes, and cache entries carry the
+  request's route class (SPEC-037 v0.2.8). R015/R016 exactness is unchanged
+  and needs no requalification: native requests run the same verify kernels
+  with the same partial-sum count (4) they were qualified on. The drafter
+  load is allowed in `mixed`. Measured basis: native requests ran at
+  0.85-0.88x of stock-order ordinary decode at about 30K tokens of context,
+  one row, and ordinary rows pinned to `row_invariant` ran at 0.87-0.90x of
+  `stock_order`; `mixed` returns ordinary requests on native-admitted
+  models to `stock_order`. The R003 fork rows
+  are unchanged by this text; the fork tag that carries the per-op route is
+  named when it is cut.
 - **0.1.120 (2026-11-22, Related: #2468)** — MTP-2: the provider model
   store keeps adopted files at mode `0400`, and the capture sets mode `0400`
   on owned manifested files at or under the store root before validation, so a

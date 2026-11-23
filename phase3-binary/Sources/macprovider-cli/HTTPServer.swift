@@ -3047,14 +3047,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         _ snapshot: RuntimeContinuousBatchingSnapshot?,
         admissionHold: ContinuousBatchingAdmissionHoldStatus? = nil,
         smallMRoute: SmallMRoute = SmallMRoute.processRoute,
-        smallMRouteReason: String = SmallMRoute.processReason
+        smallMRouteReason: String = SmallMRoute.processReason,
+        smallMRouteMixed: Bool = SmallMRoute.processMixed,
+        smallMRouteRequests: @autoclosure () -> [String: Int] = SmallMRouteRequestCounter.shared.snapshot(),
+        smallMRouteAdmissions: @autoclosure () -> [String: Int] = SmallMRouteRequestCounter.shared.admissionSnapshot()
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
         let policy = snapshot?.policy
-        return [
+        var fields: [String: Any] = [
             "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
-            // SPEC-038 FR-CB9: the MLX small-row route this process runs.
-            "small_m_route": smallMRoute.rawValue,
+            // SPEC-038 FR-CB9: the MLX small-row route this process runs,
+            // or `mixed` (v0.3.61).
+            "small_m_route": smallMRouteMixed ? SmallMRoute.mixedMode : smallMRoute.rawValue,
             "small_m_route_reason": smallMRouteReason,
             "active": snapshot?.active ?? false,
             "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
@@ -3087,6 +3091,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "shared_forward_calls": scheduler?.sharedForwardCalls ?? 0,
             ],
         ]
+        // SPEC-038 FR-CB9 (v0.3.61): in-flight requests per route, `mixed`
+        // only; v0.3.63: admissions per route reason since start.
+        if smallMRouteMixed {
+            fields["small_m_route_requests"] = smallMRouteRequests()
+            fields["small_m_route_admissions"] = smallMRouteAdmissions()
+        }
+        return fields
     }
 
     private static func build1LaneAStatusEvidence(

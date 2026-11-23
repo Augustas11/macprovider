@@ -894,7 +894,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
     #endif
     private var rows: [String: RowState] = [:]
-    private var decodeSession: DecodeSession?
+    /// One decode session per small-M route (SPEC-038 FR-CB9 v0.3.61): in a
+    /// `mixed` process the scheduler alternates the two route groups, and
+    /// each keeps its own packed batch and compiled step instead of
+    /// repacking every window. A request's route never changes, so a row
+    /// rides at most one of them, and the routes' rows together hold no
+    /// more K/V than one session over all of them.
+    private var decodeSessions: [SmallMRoute: DecodeSession] = [:]
     /// Sessions dropped off the model container (`finish`, the native-MTP
     /// verify entry) whose rows may still ride their buffers. The next
     /// container caller releases them (`releaseRetiredDecodeSessions`).
@@ -1254,8 +1260,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         emit[mtpEmitFlagKey] = true
                         sharedState = emit
                     }
-                    let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
-                        context.model(text, cache: cachesAsKV, state: sharedState)
+                    let output = try withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                        try SmallMRouteScope.build { context.model(text, cache: cachesAsKV, state: sharedState) }
                     }
                     let promptHidden = hasNativeRows
                         ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
@@ -1384,8 +1390,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             modelState = modelState ?? LMOutput.State()
                             modelState?[glm5NextPrefillSlicesKey] = slices
                         }
-                        let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                            context.model(text, cache: state.caches, state: modelState)
+                        let output = try withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                            try SmallMRouteScope.build { context.model(text, cache: state.caches, state: modelState) }
                         }
                         // A model that ran the slices returns the last
                         // slice's logits only; full-width logits mean it ran
@@ -1596,11 +1602,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel,
                   !drafter.requiresPromptPrefill, drafter.requiresSharedTargetKV
             else { return nil }
-            let advance = try drafter.advanceAndProposePacked(
-                target: targetModel,
-                rows: [row],
-                sampler: GenerateParameters(temperature: 0).sampler()
-            )
+            let advance = try SmallMRouteScope.build {
+                try drafter.advanceAndProposePacked(
+                    target: targetModel,
+                    rows: [row],
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+            }
             let seeds = advance.proposals.asType(.int32)
             eval(advance.states.flatMap { $0.cache.flatMap(\.state) } + [seeds])
             guard let state = advance.states.first, let seed = seeds.asArray(Int32.self).first else { return nil }
@@ -1899,7 +1907,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         // Outside the model container: a window may be repacking the rows.
-        retireDecodeSession()
+        // In `mixed` the other route's session (other rows) stays; any other
+        // process retires its one session, as before.
+        if SmallMRoute.processMixed {
+            retireDecodeSessions(containingAnyOf: inputs.map(\.requestID))
+        } else {
+            retireAllDecodeSessions()
+        }
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
         let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
@@ -1983,13 +1997,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     proposalCount: $0.proposalTokens.count
                 )
             }
-            let output = try verifyMTPPackedTargets(
+            let output = try SmallMRouteScope.build { try verifyMTPPackedTargets(
                 model: context.model,
                 tokens: tokens,
                 rowMaps: rowMaps,
                 cache: batchedCaches.map(\.cache),
                 requireContinuationState: true
-            )
+            ) }
             if self.notePaddedAttentionBypass(batchedCaches, phase: "verify") {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_padded_attention_bypassed")
             }
@@ -2429,8 +2443,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 modelState = modelState ?? LMOutput.State()
                 modelState?[mtpEmitFlagKey] = true
             }
-            let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                context.model(text, cache: state.caches, state: modelState)
+            let output = try withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                try SmallMRouteScope.build { context.model(text, cache: state.caches, state: modelState) }
             }
             var terminalHidden: MLXArray?
             if emitHidden, output.state?[mtpPositionDeltasKey] == nil,
@@ -2764,11 +2778,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 #if DEBUG
                 try self.nativeMTPBoundaryFoldHookForTest?()
                 #endif
-                let result = try drafter.advanceAndProposePacked(
-                    target: targetModel,
-                    rows: [row],
-                    sampler: GenerateParameters(temperature: 0).sampler()
-                )
+                let result = try SmallMRouteScope.build {
+                    try drafter.advanceAndProposePacked(
+                        target: targetModel,
+                        rows: [row],
+                        sampler: GenerateParameters(temperature: 0).sampler()
+                    )
+                }
                 let seeds = result.proposals.asType(.int32)
                 eval(result.states.flatMap { $0.cache.flatMap(\.state) } + [seeds])
                 guard result.states.count == 1, let seed = seeds.asArray(Int32.self).first else { throw unavailable }
@@ -2902,7 +2918,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         await withCheckedContinuation { continuation in
             lock.lock()
             cancelRequested = true
-            decodeSession = nil
+            decodeSessions.removeAll()
             retiredDecodeSessions.removeAll()
             let handlesToDiscard = rows.compactMap { Self.storageHandle(in: $0.value.caches) }
             rows.removeAll()
@@ -3149,6 +3165,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         var capturedColumns: [Int: [(token: Int, hidden: MLXArray)]] = [:]
 
         let requestIDs = supportedInputs.map(\.requestID)
+        // A row rides at most one session: one of these rows in another
+        // route's session leaves it first.
+        invalidateDecodeSession(containingAnyOf: requestIDs, exceptRoute: decodeSessionRoute)
         var session = copyDecodeSession()
         let batchedCaches: [PagedKVSharedLayerBatch]
         if let existing = session, existing.requestIDs == requestIDs {
@@ -3261,7 +3280,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var collected: [[Int]] = supportedInputs.map { _ in [] }
             for stepIndex in 0 ..< decodeSteps {
                 gpuTurn?.begin(decodeTurn)
-                let logits = step.step(current)
+                let logits = try SmallMRouteScope.build { step.step(current) }
                 current = ContinuousBatchRowSampler.sample(
                     logits: logits[0..., -1, 0...],
                     rows: Self.samplerRows(supportedInputs, step: stepIndex)
@@ -3434,8 +3453,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let stateBefore = checkpointStops && pipelined && stepIndex == 0
                     ? recurrentBatchStates(batchedCaches) : [:]
-                let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
-                    model(text, cache: cachesAsKV, state: stepState)
+                let output = try withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                    try SmallMRouteScope.build { model(text, cache: cachesAsKV, state: stepState) }
                 }
                 let stepRecurrent = checkpointStops ? recurrentBatchStates(batchedCaches) : [:]
                 if !stateBefore.isEmpty, Self.recurrentStateReused(before: stateBefore, after: stepRecurrent) {
@@ -3657,10 +3676,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         recurrentStateArrays(caches).map(ObjectIdentifier.init)
     }
 
+    /// The route of the decode session a window on this task uses: the
+    /// request route the scheduler set, else the process route.
+    private var decodeSessionRoute: SmallMRoute {
+        SmallMRouteScope.current ?? SmallMRoute.processRoute
+    }
+
     private func copyDecodeSession() -> DecodeSession? {
+        let route = decodeSessionRoute
         lock.lock()
         defer { lock.unlock() }
-        return decodeSession
+        return decodeSessions[route]
     }
 
     /// Per-row target top-1 IDs (`proposalCount` proposal positions, then the
@@ -3883,15 +3909,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 drafter = served
             }
             var state = drafter.makeState(parameters: nil)
-            drafter.prepareDrafterState(
-                target: targetModel,
-                promptTokens: prompt,
-                targetHidden: targetHidden,
-                firstBonus: MLXArray([Int32(targetBonus)]),
-                positionDeltas: nil,
-                state: &state,
-                sampler: GenerateParameters(temperature: 0).sampler()
-            )
+            try SmallMRouteScope.build {
+                drafter.prepareDrafterState(
+                    target: targetModel,
+                    promptTokens: prompt,
+                    targetHidden: targetHidden,
+                    firstBonus: MLXArray([Int32(targetBonus)]),
+                    positionDeltas: nil,
+                    state: &state,
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+            }
             eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
             return (
                 state: state,
@@ -3977,15 +4005,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             let sampler = GenerateParameters(temperature: 0).sampler()
             var state = statefulDrafter.makeState(parameters: nil)
-            statefulDrafter.prepareDrafterState(
-                target: targetModel,
-                promptTokens: prompt,
-                targetHidden: targetHidden,
-                firstBonus: MLXArray([Int32(firstBonusToken)]),
-                positionDeltas: positionDeltas,
-                state: &state,
-                sampler: sampler
-            )
+            try SmallMRouteScope.build {
+                statefulDrafter.prepareDrafterState(
+                    target: targetModel,
+                    promptTokens: prompt,
+                    targetHidden: targetHidden,
+                    firstBonus: MLXArray([Int32(firstBonusToken)]),
+                    positionDeltas: positionDeltas,
+                    state: &state,
+                    sampler: sampler
+                )
+            }
             eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
             return (
                 state: state,
@@ -4089,17 +4119,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
-            let result = try drafter.advanceAndProposePacked(
-                target: targetModel,
-                rows: [MTPPackedDrafterAdvanceRow(
-                    targetHidden: row.hidden,
-                    acceptedTokens: row.acceptedTokens,
-                    finalToken: tailToken,
-                    positionDeltas: row.positionDeltas,
-                    state: priorState ?? drafter.makeState(parameters: nil)
-                )],
-                sampler: GenerateParameters(temperature: 0).sampler()
-            )
+            let result = try SmallMRouteScope.build {
+                try drafter.advanceAndProposePacked(
+                    target: targetModel,
+                    rows: [MTPPackedDrafterAdvanceRow(
+                        targetHidden: row.hidden,
+                        acceptedTokens: row.acceptedTokens,
+                        finalToken: tailToken,
+                        positionDeltas: row.positionDeltas,
+                        state: priorState ?? drafter.makeState(parameters: nil)
+                    )],
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+            }
             guard let state = result.states.first else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
             }
@@ -4286,11 +4318,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
-            let result = try drafter.advanceAndProposePacked(
-                target: targetModel,
-                rows: advanceRows,
-                sampler: GenerateParameters(temperature: 0).sampler()
-            )
+            let result = try SmallMRouteScope.build {
+                try drafter.advanceAndProposePacked(
+                    target: targetModel,
+                    rows: advanceRows,
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+            }
             eval(result.states.flatMap { $0.cache.flatMap(\.state) } + [result.proposals])
             return (
                 states: result.states,
@@ -4400,11 +4434,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
-            return try drafter.advanceAndProposePacked(
-                target: targetModel,
-                rows: advanceRows,
-                sampler: GenerateParameters(temperature: 0).sampler()
-            )
+            return try SmallMRouteScope.build {
+                try drafter.advanceAndProposePacked(
+                    target: targetModel,
+                    rows: advanceRows,
+                    sampler: GenerateParameters(temperature: 0).sampler()
+                )
+            }
         }
     }
 
@@ -5081,8 +5117,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
 
     private func storeDecodeSession(_ session: DecodeSession?) {
+        let route = decodeSessionRoute
         lock.lock()
-        decodeSession = session
+        decodeSessions[route] = session
         lock.unlock()
     }
 
@@ -5099,10 +5136,24 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// started an empty one-token lockstep buffer. The session's rows stay
     /// attached to its buffers (synced at its window end) until a container
     /// caller repacks them or releases it (`releaseRetiredDecodeSessions`).
-    private func retireDecodeSession(containing requestID: String? = nil) {
+    private func retireDecodeSession(containing requestID: String) {
+        retireDecodeSessions(containingAnyOf: [requestID])
+    }
+
+    /// `retireDecodeSession` for every route's session.
+    private func retireAllDecodeSessions() {
         lock.lock()
-        if let current = decodeSession, requestID.map(current.requestIDs.contains) ?? true {
-            decodeSession = nil
+        retiredDecodeSessions.append(contentsOf: decodeSessions.values)
+        decodeSessions.removeAll()
+        lock.unlock()
+    }
+
+    /// `retireDecodeSession` for every route's session that holds one of
+    /// `requestIDs`.
+    private func retireDecodeSessions(containingAnyOf requestIDs: [String]) {
+        lock.lock()
+        for (route, current) in decodeSessions where requestIDs.contains(where: current.requestIDs.contains) {
+            decodeSessions[route] = nil
             retiredDecodeSessions.append(current)
         }
         lock.unlock()
@@ -5116,11 +5167,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// meanwhile stores it back; it is released when replaced).
     private func releaseRetiredDecodeSessions(inUse: UUID? = nil) {
         lock.lock()
-        let storedID = decodeSession?.id
+        let storedIDs = Set(decodeSessions.values.map(\.id))
         let retired = retiredDecodeSessions
         retiredDecodeSessions.removeAll()
         lock.unlock()
-        for session in retired where session.id != storedID && session.id != inUse {
+        for session in retired where !storedIDs.contains(session.id) && session.id != inUse {
             session.batchedCaches.forEach { $0.releaseRows() }
         }
     }
@@ -5130,18 +5181,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// caches untouched, so their packed batch stays valid; dropping it made
     /// every decode hop between two prompt chunks repack all decoding rows
     /// (a full copy of their KV) and then copy it again to grow.
-    private func invalidateDecodeSession(containingAnyOf requestIDs: [String]) {
+    /// Every route's session is checked; `exceptRoute`'s is left alone.
+    private func invalidateDecodeSession(containingAnyOf requestIDs: [String], exceptRoute: SmallMRoute? = nil) {
         lock.lock()
-        let session: DecodeSession?
-        if let current = decodeSession, requestIDs.contains(where: current.requestIDs.contains) {
-            session = decodeSession
-            decodeSession = nil
-        } else {
-            session = nil
+        var sessions: [DecodeSession] = []
+        for (route, current) in decodeSessions
+        where route != exceptRoute && requestIDs.contains(where: current.requestIDs.contains) {
+            sessions.append(current)
+            decodeSessions[route] = nil
         }
         lock.unlock()
+        // Inside a window (`exceptRoute`) with nothing to drop, retired
+        // sessions wait for the window's own release after packing.
+        if sessions.isEmpty, exceptRoute != nil { return }
         releaseRetiredDecodeSessions()
-        session?.batchedCaches.forEach { $0.releaseRows() }
+        for session in sessions {
+            session.batchedCaches.forEach { $0.releaseRows() }
+        }
     }
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -5151,7 +5207,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard PagedKVLabTrace.enabled else { return }
         lock.lock()
         let live = rows.keys.sorted()
-        let sessionIDs = decodeSession?.requestIDs
+        let sessionIDs = decodeSessions.isEmpty ? nil : decodeSessions.values.flatMap(\.requestIDs)
         let operations = activeOperations
         lock.unlock()
         PagedKVLabTrace.emit(event, [
@@ -5239,6 +5295,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// target lock; a throw fails the fold there.
     var nativeMTPBoundaryFoldHookForTest: (() throws -> Void)?
 
+    /// Tests (SPEC-038 FR-CB9 v0.3.63): the routes holding a stored decode session.
+    func decodeSessionRoutesForTest() -> Set<SmallMRoute> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(decodeSessions.keys)
+    }
+
     /// Whether some caller holds this backend's target `container.perform`.
     func targetLockHeldForTest() -> Bool {
         lock.lock()
@@ -5280,9 +5343,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     func lockstepInnerStateNonEmptyForTest() -> Bool {
+        let route = decodeSessionRoute
         lock.lock()
         defer { lock.unlock() }
-        guard let session = decodeSession else { return false }
+        guard let session = decodeSessions[route] else { return false }
         return session.batchedCaches.allSatisfy { !$0.innerState().isEmpty }
     }
 
@@ -5362,8 +5426,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var perStep: [[[Float]]] = []
             for _ in 0 ..< max(1, steps) {
                 let text = LMInput.Text(tokens: MLXArray(current.map(Int32.init)).reshaped([current.count, 1]))
-                let output = withPreparedCache(caches, lengths: text.sequenceLengths) {
-                    context.model(text, cache: caches, state: nil)
+                let output = try withPreparedCache(caches, lengths: text.sequenceLengths) {
+                    try SmallMRouteScope.build { context.model(text, cache: caches, state: nil) }
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
                 let logits = output.logits[0..., -1, 0...].asType(.float32)
@@ -5407,12 +5471,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     proposalCount: row.count - 1
                 )
             }
-            let output = try verifyMTPPackedTargets(
+            let output = try SmallMRouteScope.build { try verifyMTPPackedTargets(
                 model: context.model,
                 tokens: tokens,
                 rowMaps: rowMaps,
                 cache: batchedCaches.map(\.cache)
-            )
+            ) }
             let perRow = output.rows.sorted { $0.map.rowIndex < $1.map.rowIndex }.map {
                 concatenated([$0.proposalLogits, $0.bonusLogits], axis: 0).asType(.float32)
             }

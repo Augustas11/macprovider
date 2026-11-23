@@ -1,11 +1,113 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.60
+Version: v0.3.65
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.65 (2026-11-23, FR-CB9 `mixed`: the stored route is read only for a turn that can hit, and a stock order entry beside `row_invariant` takes the cheaper of re-prefill and split, Related: #2462):**
+Admission reads the stored conversation-cache entry only for an ordinary
+request that may take a conversation-cache lease in a `mixed` process, and
+only when `begin`'s own reuse predicate (one function both call, so they
+cannot drift) accepts it for that prompt with the request's own arguments;
+the lookup also returns the prompt tokens the hit would reuse. A request whose entry is
+`stock_order` admitted while a `row_invariant` request is in flight keeps
+`stock_order` (reason `conversation_cache`, two forwards per step while both
+decode) only when reused tokens x prefill cost per token exceed expected
+overlap tokens x the cost of the extra forward per step; otherwise it joins
+`row_invariant` and re-prefills (new reason `conversation_cache_join`). A
+`stock_order` conversation overlapping `row_invariant` therefore pays at
+most min(re-prefill, split) instead of either one unconditionally. A
+`conversation_cache` admission whose lease then misses logs
+`event=small_m_route_admission_miss reason=stored_route_stale`. A request
+without `max_tokens`, or one beside a native request reserved but not yet
+admitted (its budget unknown), takes its overlap from a budget near the
+context limit, so it nearly always joins. Every other case is unchanged.
+
+**Change log v0.3.64 (2026-11-23, FR-CB9 `mixed`: a stored conversation-cache entry decides first; every `row_invariant` request is joinable, Related: #2462):**
+In a `mixed` process an ordinary request whose conversation key has a hot
+stored conversation-cache entry is admitted on that entry's route (reason
+`conversation_cache`) even while requests of the other route are in flight,
+so the turn reuses its KV instead of re-prefilling on the other route; the
+scheduler runs one forward per route while both routes are active (v0.3.65
+bounds that cost). Otherwise an
+ordinary request joins `row_invariant` while any `row_invariant` request is
+in flight, now including one admitted `conversation_cache` (reason
+`native_active`), else takes `stock_order` (reason `idle`). The worst case
+equals the process-wide `row_invariant` serve (every row one route, every
+turn hits) except for a split while a `stock_order` conversation turn
+overlaps a `row_invariant` row: a hit beats a re-prefill, whose cost grows
+with the context (v0.3.65 replaces this with a cost rule). The v0.3.63 lab window measured both
+gaps: an unkeyed row beside a keyed `row_invariant` turn ran its own
+forward (aggregate 31.39 against 40.99 tok/s process-wide, -23.4%), and a
+keyed turn with a `stock_order` entry admitted beside a native row
+re-prefilled on `row_invariant` (TTFT 5.38 s against 0.71 s). An entry is
+still never reused across routes (AC-26, SPEC-037 v0.2.8 route class). The
+`joinable_row_invariant` log field now counts every `row_invariant` request
+in flight. No other behaviour changes.
+
+**Change log v0.3.63 (2026-11-22, FR-CB9 `mixed`: ordinary requests join `row_invariant` while one is in flight, Related: #2462):**
+In a `mixed` process an ordinary request admitted while any `row_invariant`
+request (native, or ordinary admitted this way) is in flight, active, queued
+or decided native at registration and not yet admitted, is admitted on
+`row_invariant` for its whole life. With none in flight it takes the route of
+the hot conversation-cache entry stored for its key, so a keyed
+conversation's next turn reuses its KV, and otherwise `stock_order` as
+before. A request on `row_invariant` only for its own conversation-cache
+entry does not pull other ordinary requests onto `row_invariant`. The lab window measured two forwards
+per step (one per route) at 1 native + 2 ordinary rows on Qwen3.8-27B: mix
+aggregate output 34.7 against 44.7 tok/s on a process-wide `row_invariant`
+(-22%), because each step read the weights twice. The rule keeps such a step
+one forward per decode kind. A native request admitted while `stock_order`
+rows are in flight still splits forwards per route until those rows finish;
+later ordinary arrivals join `row_invariant`, so the `stock_order` set
+drains. Each admission logs `event=small_m_route_admission route=...
+reason=native_admitted|native_active|conversation_cache|idle`, and local
+`/v1/status` adds
+`continuous_batching.small_m_route_admissions`. No other behaviour changes.
+
+**Change log v0.3.62 (2026-11-22, FR-CB9 `mixed` keeps out of NAX GPUs; prefill pauses stay on one route, Related: #2462):**
+On a GPU where the MLX core takes its NAX quantized-matmul kernels (macOS
+26.2 or later, architecture generation 17 or later, 18 for a phone), both
+small-row routes select the same kernels, so `mixed` would split forwards
+and caches for no gain: such a process keeps `row_invariant` process-wide,
+as before v0.3.61, with its native reason, checked before a fallback or
+the operator override. So does a lab build that kept an inherited
+`MLX_METAL_QMV_MMA_WK` (reason `native_mtp_qmv_mma_wk_inherited`): the core
+applies it to both routes' ops. The SPEC-039 attach isolation probe runs on
+the process route. A DeepSeek V4 prefill decode pause (FR-CB4) serves only
+decoding rows on the prefill's route. A one-row verdict recorded by a
+`mixed` process logs the next start's mode from the same decision as
+startup. No other behaviour changes.
+
+**Change log v0.3.61 (2026-11-22, FR-CB9 `mixed` small-row route: stock order process, row-invariant native requests, Related: #2462):**
+FR-CB9 adds a fourth process mode, `mixed`. A `serve` process that today
+keeps `row_invariant` only because native MTP may activate (no draft model,
+no shard-group role, no other warm-swap target, no further model, not an
+autotune child, batching can activate, no `stock_order_fallback` and no
+operator override) now runs on `stock_order`, and each native-admitted
+request runs on `row_invariant`, fixed at admission for its whole life
+(prefill chunks, decode, native verify, ordinary fallback before or after
+output). A forward never holds rows of two routes: when both kinds are
+active the scheduler runs one forward per route, so every existing
+`row_invariant` and `stock_order` guarantee holds for its rows unchanged.
+The MLX core captures the route and its `qmv_mma` partial-sum count per
+quantized-matmul op at graph build from a thread-scoped value (default: the
+process value, read once); both are part of primitive equivalence and of the
+compile cache key. FR-CB10 verdicts stay keyed by the process route
+(`+small_m_stock_order`); a `stock_order_fallback` for the startup identity
+disables `mixed` (the process takes `row_invariant` as before). The
+v0.3.56 drafter-load refusal becomes: refused on `stock_order`, allowed in
+`mixed`. The SPEC-039 two-row attach probe runs within one route. SPEC-037
+v0.2.8 tags cache entries with the request's route class. Basis: on a
+process pinned to `row_invariant` for native MTP, ordinary rows ran at
+0.90x of `stock_order` in the CB self-check and 0.87x in the lab layer
+benchmark for a 27B model (26.45 against 30.38 ms per pass), and native
+requests measured 0.85-0.88x of stock-order ordinary decode at about 30K
+tokens of context, one row. Native requests are unchanged (SPEC-048 R003
+0.1.121).
+
 **Change log v0.3.60 (2026-11-18, FR-CB14 width selection uses a 3% noise band instead of the calibrator's 15% tie band, Related: #2409):**
 The self-check prefers the lowest k within 3% of the best gain, not 15%.
 Candidate widths are already memory-bounded and verified exact, so the band
@@ -1365,7 +1467,10 @@ While that chunk is one forward, ordinary rows already decoding may take one
 decode step between evaluated prefill tiles. Each such step is its own decode
 forward: its tokens are not mixed into the prefill, and the prefill token
 span is unchanged. Grammar rows, native-MTP rows, and rows with a non-zero
-presence or frequency penalty do not take these steps.
+presence or frequency penalty do not take these steps. In a FR-CB9 `mixed`
+process (v0.3.62) only rows on the prefill's small-row route take them, so
+the step forward holds one route; a row on the other route decodes after
+the prefill forward.
 
 DeepSeek decode MUST share model projections across compatible rows while
 each row retains its own absolute token offset, compression-ratio-4 and
@@ -1839,7 +1944,13 @@ row count of a forward follows the requests in the batch, a near-tied token
 MAY differ when a third request joins or leaves. The FR-CB10 self-check
 enforces this rule with its exact-tie tolerance against a same-order
 reference. The tolerance does not relax the SPEC-039 single-row parity gate
-or its two-row attach probe, which stay exact on every route.
+or its two-row attach probe, which stay exact on every route. (v0.3.61) In
+a FR-CB9 `mixed` process this rule applies to the stock-order rows only, and
+the forward size that decides a row's kernel counts only rows of its route;
+native-admitted requests run on `row_invariant`. A native request and an
+ordinary request of the same prompt in one `mixed` process MAY therefore
+differ at a near-tied greedy token, the same accumulation-order difference
+this tolerance already accepts.
 
 ### FR-CB7 - single-owner actor isolation (SPEC-038-R007)
 
@@ -1981,6 +2092,7 @@ of 1-16 rows on one of three routes:
 | `row_invariant` | unset, or parses to neither 0 nor 2 | one row: a single-row kernel with the batch kernel's reduction order; 2-16 rows: the batch kernel | a row computes the same bits alone and in any forward of 1-16 rows |
 | `serial_only` | parses to 0 | the fork's pre-window per-row `qmv` below the `qmm` limit | none across row counts; only for a process that can never batch |
 | `stock_order` | parses to 2 | one row: upstream's one-row kernel; exactly two rows: an exact two-row kernel; 3-16 rows: the batch kernel | a lone row equals the same row of a two-row forward bit for bit; rows of 3-16-row forwards equal each other bit for bit; a row MAY differ in low bits between a lone or two-row forward and a forward of three or more rows, so a near-tied greedy token MAY differ when a third request joins or leaves |
+| `mixed` (v0.3.61) | parses to 2; native-admitted requests scoped to the row-invariant route per op | ordinary requests admitted on a stored `stock_order` entry, or (no entry) with no `row_invariant` request in flight: the `stock_order` kernels; native-admitted requests, ordinary requests admitted on a stored `row_invariant` entry, and (v0.3.63) ordinary requests without an entry admitted while one is in flight: the `row_invariant` kernels; never both in one forward | each request keeps its own route's guarantee above for its whole life |
 
 A `serve` process MUST take `stock_order` when items 1 and 3 above hold and
 item 2 does not: native MTP cannot activate, there is no draft model, no
@@ -1990,13 +2102,16 @@ and continuous batching can activate (the self-check verdict is absent, on a
 changed key, pending a re-check, or grants batching). Its reason is the
 self-check verdict (`self_check_verdict_absent`, `self_check_key_changed`,
 `self_check_recheck_pending`, `self_check_grants_batching`). Every other
-process that can batch keeps `row_invariant` with its existing reason. In
-particular a process whose native MTP may activate keeps `row_invariant`: a
-native-MTP verify window is depth + 1 rows of one request and MUST equal that
-request's own ordinary one-row decode (SPEC-048 R015/R016), which from three
-rows only the row-invariant pair gives. A `stock_order` process refuses the
+process that can batch keeps `row_invariant` with its existing reason, except
+a process that takes `mixed` (below, v0.3.61). A native-MTP verify window is
+depth + 1 rows of one request and MUST equal that request's own ordinary
+one-row decode (SPEC-048 R015/R016), which from three rows only the
+row-invariant pair gives, so every native-admitted request runs on
+`row_invariant`: process-wide in a `row_invariant` process, per request in a
+`mixed` process. A `stock_order` process refuses the
 native-MTP drafter load (`small_m_route_stock_order`) if an admission set
-appears after startup, as a serial-only process does. In a `stock_order`
+appears after startup, as a serial-only process does; a `mixed` process
+allows it (v0.3.61). In a `stock_order`
 process the scheduler is built, the FR-CB10 self-check runs (item 3 of its
 exactness probe names the reference it uses) under a key that carries the
 route, served output follows FR-CB6 (v0.3.56), SPEC-037 disk KV and prompt
@@ -2057,11 +2172,177 @@ with `fallback=<reason>`).
 **Operator row-invariant override (v0.3.56).** The provider config key
 `small_m_route` accepts exactly one value, `row_invariant`; any other value
 MUST fail config validation, and an absent key decides the route as above. In
-every build, a `serve` process whose decision would be `stock_order` takes
+every build, a `serve` process whose decision would be `stock_order` or
+`mixed` (v0.3.61) takes
 `row_invariant` instead, with reason `operator_row_invariant`. The key MUST
 NOT change a `serial_only` decision or any other `row_invariant` decision or
 its reason, and it does not turn continuous batching off: only the small-row
 kernel route changes.
+
+**Mixed route (v0.3.61, #2462).** A `serve` process MUST take `mixed` when
+it would take `row_invariant` only because native MTP may activate (item 1
+does not hold) and every other condition for `stock_order` holds: item 3
+holds (no draft model, no shard-group role, no other warm-swap target, no
+configured further model, not an autotune child), item 2 does not
+(continuous batching can activate), the startup identity has no
+`stock_order_fallback`, the operator override is absent, and the GPU does
+not take the MLX core's NAX quantized-matmul kernels (v0.3.62: core
+`is_nax_available`, macOS 26.2 or later and architecture generation 17 or
+later, 18 for a phone; there both routes select the same kernels). Its
+reason is `native_mtp_per_request`. A NAX process whose native MTP may
+activate keeps `row_invariant` process-wide with its native reason, and a
+lab build that kept an inherited `MLX_METAL_QMV_MMA_WK` keeps it with
+reason `native_mtp_qmv_mma_wk_inherited`; both are checked before the
+fallback and the operator override. A process whose native MTP may activate and that
+would otherwise take `serial_only` (item 2 holds) keeps `row_invariant` as
+before. Every condition that keeps a process on `row_invariant` today still
+keeps it there process-wide: the operator override
+(`operator_row_invariant`), an autotune child, a draft model, a shard-group
+role, another warm-swap target, a configured further model, and a recorded
+`stock_order_fallback`. In a `mixed` process:
+
+- the process route is `stock_order`: the provider sets
+  `MLX_METAL_SMALL_M_ROW_INVARIANT=2` before any model loads, and every
+  ordinary request runs on it exactly as in a `stock_order` process;
+- each request's route is fixed once, at admission, and never changes. In
+  order (v0.3.64): `row_invariant` when the request is admitted native (its
+  SPEC-048 native admission selects the native path, reason
+  `native_admitted`); for an ordinary request whose conversation key has a
+  hot stored conversation-cache entry it can reuse (v0.3.65, below), that entry's route
+  (`row_invariant` or `stock_order`, reason `conversation_cache`), so the
+  turn reuses its KV, except that a `stock_order` entry with a
+  `row_invariant` request in flight follows the cost rule below; else `row_invariant` for an ordinary request
+  admitted while any `row_invariant` request is in flight (admitted and not
+  yet returned by the scheduler, decoding or queued, or decided native at
+  registration and not yet admitted: such a request is counted from its
+  native decision, and released on every exit path), with reason
+  `native_active`; else `stock_order` (reason `idle`). Every `row_invariant`
+  request counts as in flight for this rule, one admitted
+  `conversation_cache` included. An ordinary request without a reusable
+  stored entry is never admitted on `stock_order` while a `row_invariant`
+  request is in flight;
+- (v0.3.65) the stored entry is read at admission only in a `mixed`
+  process, only for an ordinary request whose conversation-cache lease is
+  allowed, and only when `begin`'s reuse predicate accepts it for the
+  request's prompt with the arguments `begin` gets (model, KV bits, prefix of
+  at least the lcp threshold with new tokens after it, retained handoff,
+  recurrent checkpoint, prompt snapshot extension and resume boundary,
+  window and trimmable layer classes): `begin` and the lookup call one
+  non-mutating function. The lookup returns the entry's
+  route and the prompt tokens the hit would reuse (`reusable`). It reads the
+  hot tier only: a cold-tier lookup is disk I/O on the admission path, so a
+  turn whose entry lives only on disk is admitted as if it had none, and a
+  cold promotion serves it only when the envelope's route class matches the
+  admitted route (SPEC-037 v0.2.8). Admission also applies the request's fleet
+  grant check and the AC-26 cached-hit fence (`cachedHitFenceReason`, on the
+  same handoff facts the lease path reads: CB mode, cached turns enabled and
+  accepted, a usable retained paged-KV handoff or attachable prompt
+  snapshot), so an entry the lease path would re-begin cold gives no stored
+  route. What can still miss: a trim underflow (found only by trimming), an
+  eviction or expiry between admission and `begin`, and two turns of one key
+  admitted before either begins (the second waits for the first and finds
+  the entry it stored, or none). Each such turn logs
+  `event=small_m_route_admission_miss route=<route> reason=stored_route_stale`
+  and prefills fully on its admitted route, and its own commit stores a
+  fresh entry, so the miss is bounded to that turn;
+- (v0.3.65) cost rule: a request whose reusable entry is `stock_order`,
+  admitted while a `row_invariant` request is in flight, keeps `stock_order`
+  (reason `conversation_cache`) only when `reusable x prefill cost per token
+  > overlap x split cost per step`, where `overlap` is the smaller of its own
+  output budget and the largest remaining output budget (budget less tokens
+  produced) among the `row_invariant` requests in flight; a native request
+  reserved but not yet admitted has an unknown budget, which leaves
+  `overlap` the request's own budget, and with neither known it joins. A
+  request without `max_tokens` has a budget near the context limit, so with
+  an unknown in-flight budget or none of its own the overlap is large and
+  the request nearly always joins.
+  Otherwise it is admitted `row_invariant` and re-prefills (reason
+  `conversation_cache_join`). The cost ratio is one constant,
+  `splitStepPrefillTokens = 8` prompt tokens per extra single-row decode
+  forward, from lab rerun `20261122T165705Z` (re-prefill 4.67 s for 1384
+  tokens = 3.37 ms per token; the extra forward is about one single-row
+  decode step, 26 ms at 38 tok/s): the runtime measures a prefill rate but
+  not a model's single-row decode step time. A `stock_order` conversation
+  overlapping `row_invariant` rows therefore pays at most min(re-prefill,
+  split). A `row_invariant` entry, or a `stock_order` entry with nothing
+  `row_invariant` in flight, keeps its route as in v0.3.64. Under
+  continuous `row_invariant` overlap the rule drifts one way: each
+  `conversation_cache_join` stores the conversation's next entry on
+  `row_invariant`, and no rule moves a `row_invariant` conversation back to
+  `stock_order` (its entry keeps it there), so under sustained native
+  traffic keyed conversations converge on `row_invariant`, the route of the
+  process-wide serve. The check and
+  the count of the new request are one atomic step, so concurrent admissions
+  see each other. A native
+  request keeps `row_invariant` for its whole life: every prefill chunk
+  (only chunks of 16 rows or fewer reach the small-row kernels), every
+  decode step and native verify window, and any ordinary fallback, before or
+  after output. A request never changes route after admission: an ordinary
+  request admitted on `row_invariant` stays on it after every native request
+  finishes, and one admitted on `stock_order` never moves to `row_invariant`.
+  A native request takes `row_invariant` even when it is the only native row
+  at depth 1;
+- a forward (prefill, decode or native verify) MUST hold rows of one route
+  only. When rows of both routes are active, the scheduler runs one forward
+  per route for that step, and the row count of each forward counts only
+  that route's rows. The `row_invariant` and `stock_order` guarantees in the
+  table above and in FR-CB6 (v0.3.56) therefore hold for every row as they
+  do in a process on that route alone: a native request's tokens equal its
+  own one-row ordinary decode on `row_invariant` (SPEC-048 R015/R016), and an
+  ordinary row's forwards of one or two rows equal its serial path on its
+  route. Running two forwards reads the weights twice in that step; with the
+  v0.3.63 admission rule it applies only while `stock_order` rows admitted
+  before the first `row_invariant` request, or (v0.3.64) admitted
+  `conversation_cache` on a `stock_order` entry under the v0.3.65 cost
+  rule, are in flight beside `row_invariant` rows;
+- the FR-CB10 self-check runs on the process route, under the
+  `+small_m_stock_order` key (FR-CB10 item 5); its verdict decides batching
+  for the process, and its grant bounds the process's concurrent rows across
+  both routes. A failure it finds records a `stock_order_fallback` exactly
+  as in a `stock_order` process, and a start whose identity has one takes
+  `row_invariant` with the fallback as its reason, never `mixed`. The
+  SPEC-048 MTP-16 self-check runs on `row_invariant`. The SPEC-039 two-row
+  attach probe compares a two-row shared forward of one route with serial
+  decode on the same route, so it never pairs rows of two routes;
+- the native-MTP drafter load is allowed (the v0.3.56 refusal applies to
+  `stock_order` only), and a further model loaded later (`models warm
+  load`) follows the same per-request rule;
+- SPEC-037 in-memory conversation-cache entries and disk KV and prompt
+  snapshots carry the class of the request that wrote them (`ordinary` for a
+  `row_invariant` request, `ordinary+stock_order_small_m` for a `stock_order`
+  request, SPEC-037 v0.2.8), and a lookup by a request of the other route is
+  a miss;
+- startup prints `event=small_m_route mode=mixed
+  reason=native_mtp_per_request`, and local `/v1/status` reports
+  `continuous_batching.small_m_route: mixed` and
+  `continuous_batching.small_m_route_requests`, the count of in-flight
+  requests per route (`stock_order`, `row_invariant`), and (v0.3.63)
+  `continuous_batching.small_m_route_admissions`, the admissions since start
+  per reason (`native_admitted`, `native_active`, `conversation_cache`,
+  (v0.3.65) `conversation_cache_join`, `idle`). Each admission
+  logs `event=small_m_route_admission route=<route> reason=<reason>
+  in_flight_row_invariant=<n> in_flight_stock_order=<n>
+  joinable_row_invariant=<n>` (v0.3.64: every `row_invariant` request in
+  flight other than this one), and (v0.3.65) for a request with a reusable
+  stored entry ` stored_route=<route> cached_tokens=<n>
+  overlap_tokens=<n|unknown>`; `route` is the route chosen. Every other mode
+  omits `small_m_route_requests` and `small_m_route_admissions` and logs no
+  admission line.
+
+**MLX core per-op route (v0.3.61).** The core captures the small-row route
+and the `qmv_mma` partial-sum count (4 on `row_invariant`; on `stock_order` 8 on
+GPU generations 13 and 15 and 4 elsewhere) on each
+affine quantized-matmul op when the op is added to the graph, not when it is
+dispatched, from a value scoped to the current thread. With no scope set
+the value is the process route, which the core still reads once from the
+variable. Both values are part of the op's primitive equivalence and of the
+compile cache key, so a compiled trace or a simplified graph never merges
+ops of two routes, and a compiled function holds one trace per route. The
+provider sets the scope for a forward and clears it in synchronous code,
+with no suspension point between, and each forward is built under exactly
+one scope. Ops that do not read the route (`gather_qmm`, `gather_qmv` and
+the fused MoE kernels) are unchanged, and on a GPU that does not use the
+small-row `qmv_mma` kernels the route selects no different kernel.
 
 The MLX core reads the variable once with C `atoi` semantics: unset, or a
 value that parses to neither 0 nor 2, keeps the invariant route; any value
@@ -2540,7 +2821,9 @@ from 2 runs an exactness probe through the production scheduler:
    item 2 continuation rule, within item 4's shape bound. (v0.3.56) On the
    FR-CB9 `stock_order` route the key also ends in `+small_m_stock_order`, so
    no result measured on the row-invariant route qualifies a stock order
-   process; every row-invariant key is unchanged.
+   process; every row-invariant key is unchanged. (v0.3.61) A FR-CB9
+   `mixed` process measures and stores under its process route's key
+   (`+small_m_stock_order`); it runs no self-check on `row_invariant`.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 
@@ -2982,6 +3265,9 @@ that mapping. It MUST NOT infer ownership from rectangular `[B, 1]` row order.
 Rows may propose unequal lengths and may accept unequal prefixes; a row with
 depth zero contributes no verification position and remains independently
 runnable on its ordinary one-token target step under the same served snapshot.
+(v0.3.61) In a FR-CB9 `mixed` process a shared verification forward holds
+only `row_invariant` rows; a depth-zero native row's one-token step runs in a
+`row_invariant` forward, never beside `stock_order` rows.
 
 **(v0.3.36)** A native-MTP round's complete-window reservation MUST also fit
 under the FR-CB2 MLX memory limit. MLX's active memory plus every outstanding

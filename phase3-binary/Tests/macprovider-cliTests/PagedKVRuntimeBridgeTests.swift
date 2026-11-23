@@ -8901,6 +8901,8 @@ private final class RuntimeBridgePromptFreePackedMTPDrafter: Module, MTPPackedSt
     private let lock = NSLock()
     private var packedAdvances = 0
 
+    func validateCompatibility(with target: any LanguageModel) throws {}
+
     func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])
     }
@@ -8966,6 +8968,8 @@ private final class RuntimeBridgeOracleGemmaDrafter: Module, MTPPackedStatefulDr
     private let promptLength: Int
     private let vocabulary: Int
     private let wrongEvery: Int
+
+    func validateCompatibility(with target: any LanguageModel) throws {}
 
     init(reference: [Int], promptLength: Int, vocabulary: Int, wrongEvery: Int) {
         self.reference = reference

@@ -215,6 +215,9 @@ final class ConversationCacheLease: @unchecked Sendable {
     /// paged-KV hit resumes from (`cachedPromptTokens == tokenCount`). Nil for
     /// every other lease; the batched scheduler installs it into the row.
     let recurrentCheckpoint: RecurrentStateCheckpoint?
+    /// SPEC-037 v0.2.8: the small-row route of the request holding the lease;
+    /// an entry it commits carries it.
+    let smallMRoute: SmallMRoute
 
     init(
         key: String,
@@ -233,8 +236,10 @@ final class ConversationCacheLease: @unchecked Sendable {
         reusableCanonicalPromptTokens: [Int32]? = nil,
         recurrentCheckpoint: RecurrentStateCheckpoint? = nil,
         fleetGrant: FleetConversationCacheGrant? = nil,
-        originalStoredAt: Date? = nil
+        originalStoredAt: Date? = nil,
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) {
+        self.smallMRoute = smallMRoute
         self.key = key
         self.keyHash = keyHash
         self.incomingTokens = incomingTokens
@@ -514,6 +519,8 @@ actor ConversationCache {
         var storedAt: Date
         var lastUsedAt: Date
         var tokenCount: Int
+        /// SPEC-037 v0.2.8: the small-row route of the request that wrote it.
+        var smallMRoute: SmallMRoute
     }
 
     private let config: Config
@@ -544,6 +551,180 @@ actor ConversationCache {
         coldTier = tier
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.65): the hot entry a keyed turn could reuse at
+    /// admission: its small-row route and the prompt tokens `begin` would
+    /// reuse from it.
+    struct StoredSmallMRoute: Sendable, Equatable {
+        let route: SmallMRoute
+        let reusableCachedTokens: Int
+        /// The lease's handoff, for the admission AC-26 cached-hit fence
+        /// (ModelRuntime.storedRouteCachedHitFenceReason): the facts
+        /// `leaseHasUsableRetainedHandoff` and `leaseHasAttachablePromptSnapshot`
+        /// read from the lease `begin` would return.
+        var hasRetainedPagedKV = false
+        var retainedCheckpointTokens: Int?
+        var promptSnapshot = false
+        var resumeBoundaryPlan = false
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63, v0.3.65): the hot entry stored for
+    /// `conversationKey`, read at admission so a keyed conversation's next
+    /// turn can take the route its KV was written on. Nil when `begin` would
+    /// not reuse the entry: no hot entry (an entry leased to an in-flight
+    /// turn is not stored), an expired one, or any miss of `reusePlan`, the
+    /// same predicate `begin` runs (model, KV bits, prefix, retained handoff,
+    /// recurrent checkpoint, prompt snapshot and its resume boundary, window
+    /// and trimmable layer classes), with the request's own
+    /// `allowRetainedPagedKVHandoff` and `promptSnapshotResumeBoundaries`. An
+    /// ordinary request is the only caller, so the native drafter check never
+    /// applies. `fleetGrant` is checked as `begin` checks it. The caller
+    /// applies the AC-26 cached-hit fence to the returned handoff facts
+    /// (`ModelRuntime.storedRouteCachedHitFenceReason`, the same
+    /// `cachedHitFenceReason` the lease path runs). What can still miss
+    /// (logged `stored_route_stale`, one turn each): a trim underflow, an
+    /// eviction or expiry before `begin`, and two turns of one key admitted
+    /// before either begins (the second waits for the first and finds the
+    /// entry it stored, or none). The cold tier
+    /// is not read here: its lookup is disk I/O on the admission path, so a
+    /// turn whose entry lives only on disk is admitted as if it had none.
+    func storedSmallMRoute(
+        conversationKey: String?, incomingTokens: [Int32], modelID: String, kvBits: Int?,
+        allowRetainedPagedKVHandoff: Bool = true, promptSnapshotResumeBoundaries: [Int]? = nil,
+        fleetGrant: FleetConversationCacheGrant? = nil, now: Date = Date()
+    ) -> StoredSmallMRoute? {
+        guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+              // `begin` returns no lease for an invalid grant or one for another key.
+              fleetGrant.map({ $0.isValid && $0.conversationKey == key }) ?? true,
+              let entry = entries[key],
+              now.timeIntervalSince(entry.storedAt) <= config.ttlSeconds
+        else {
+            return nil
+        }
+        switch Self.reusePlan(
+            entry: entry, incomingTokens: incomingTokens, modelID: modelID, kvBits: kvBits,
+            smallMRoute: entry.smallMRoute, allowRetainedPagedKVHandoff: allowRetainedPagedKVHandoff,
+            requireNativeMTPDrafterSnapshot: false, promptSnapshotResumeBoundaries: promptSnapshotResumeBoundaries
+        ) {
+        case .miss:
+            return nil
+        case let .reuse(_, reuseLength, _, retainedCheckpoint):
+            return StoredSmallMRoute(
+                route: entry.smallMRoute, reusableCachedTokens: min(reuseLength, incomingTokens.count),
+                hasRetainedPagedKV: entry.kvCache.retainedPagedKVSequence != nil,
+                retainedCheckpointTokens: retainedCheckpoint?.tokenCount,
+                promptSnapshot: entry.kvCache.promptSnapshot, resumeBoundaryPlan: entry.kvCache.resumeBoundaryPlan)
+        }
+    }
+
+    /// What `begin` would do with `entry` for this request, without touching
+    /// it: the miss reason (and its log detail) or the reuse length and the
+    /// recurrent checkpoint to restore. `begin` and the admission lookup
+    /// (`storedSmallMRoute`, SPEC-038 FR-CB9 v0.3.65) both call it, so they
+    /// cannot disagree. A trim underflow is only found by trimming, in `begin`.
+    private enum ReusePlan {
+        case miss(reason: String, detail: String)
+        case reuse(lcp: Int, reuseLength: Int, restoreCheckpoint: RecurrentStateCheckpoint?,
+                   retainedCheckpoint: RecurrentStateCheckpoint?)
+    }
+
+    private static func reusePlan(
+        entry: Entry, incomingTokens: [Int32], modelID: String, kvBits: Int?, smallMRoute: SmallMRoute,
+        allowRetainedPagedKVHandoff: Bool, requireNativeMTPDrafterSnapshot: Bool,
+        promptSnapshotResumeBoundaries: [Int]?
+    ) -> ReusePlan {
+        guard entry.modelID == modelID else {
+            return .miss(reason: "model_swap", detail: " stored_model=\(entry.modelID) incoming_model=\(modelID)")
+        }
+        guard entry.kvBits == kvBits else {
+            return .miss(reason: "kvbits_swap", detail: "")
+        }
+        // SPEC-037 v0.2.8: KV written on one small-row route is a miss for a
+        // request on the other, before the prefix predicate runs.
+        guard entry.smallMRoute == smallMRoute else {
+            return .miss(reason: "small_m_route_mismatch", detail: " stored_route=\(entry.smallMRoute.rawValue) incoming_route=\(smallMRoute.rawValue)")
+        }
+
+        let lcp = longestCommonPrefix(entry.canonicalPromptTokens, incomingTokens)
+        guard lcp >= lcpThreshold else {
+            return .miss(reason: "prefix_diverged", detail: " lcp=\(lcp) threshold=\(lcpThreshold)")
+        }
+        guard lcp < incomingTokens.count else {
+            return .miss(reason: "nothing_new", detail: " lcp=\(lcp) prompt_tokens=\(incomingTokens.count)")
+        }
+
+        let retainedPagedKV = entry.kvCache.retainedPagedKVSequence != nil
+        if retainedPagedKV && !allowRetainedPagedKVHandoff {
+            return .miss(reason: "retained_paged_kv_requires_handoff", detail: "")
+        }
+        // Tokens of the stored prefix actually reused: `lcp`, or the chosen recurrent
+        // checkpoint's length for a hybrid entry.
+        var reuseLength = lcp
+        var restoreCheckpoint: RecurrentStateCheckpoint?
+        var retainedCheckpoint: RecurrentStateCheckpoint?
+        if retainedPagedKV, !entry.kvCache.recurrentCheckpoints.isEmpty {
+            // SPEC-038 AC-26 hybrid retained entry: its recurrent state is only
+            // reusable at a checkpoint, so the hit resumes from the largest one
+            // within the shared prefix. The scheduler's reattach trims the paged
+            // attention KV to exactly that length.
+            guard let checkpoint = selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
+                return .miss(reason: "recurrent_checkpoint_diverged", detail: " lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
+            }
+            reuseLength = checkpoint.tokenCount
+            retainedCheckpoint = checkpoint
+        }
+        if !retainedPagedKV, entry.kvCache.promptSnapshot {
+            // SPEC-024 FR-CI2a: a prompt snapshot is reused only by extension. Its
+            // window, pool or recurrent layers cannot be rewound, so any prompt
+            // that diverges inside the stored tokens misses.
+            guard lcp == entry.canonicalPromptTokens.count else {
+                return .miss(reason: "prompt_snapshot_diverged", detail: " lcp=\(lcp) snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+            }
+            // SPEC-024-R005: a native-MTP row reuses a snapshot only together
+            // with the MTP head state taken at it; otherwise it stays native
+            // and prefills from zero (never an ordinary reselection).
+            if requireNativeMTPDrafterSnapshot,
+               entry.kvCache.nativeMTPDrafter?.restores(into: incomingTokens, at: lcp) != true {
+                return .miss(reason: "prompt_snapshot_drafter_unavailable", detail: " snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+            }
+            // SPEC-024-R005: a CB row resumes only a snapshot another CB row
+            // took on the resume-boundary plan, and only on one of its own
+            // prompt's boundaries, so the resumed and a cold prefill of this
+            // prompt run the same chunks (bit-identical state).
+            if let promptSnapshotResumeBoundaries,
+               !entry.kvCache.resumeBoundaryPlan || !promptSnapshotResumeBoundaries.contains(lcp) {
+                return .miss(reason: "prompt_snapshot_off_resume_boundary", detail: " snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+            }
+        } else if !retainedPagedKV {
+            // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,
+            // and even then trim is windowed — not full-prefix reuse. Reject the class
+            // rather than treating a temporarily-trimmable rotating cache as a hit.
+            if entry.kvCache.layers.contains(where: { $0 is RotatingKVCache }) {
+                return .miss(reason: "rotating_window_cache", detail: "")
+            }
+            if !entry.kvCache.recurrentCheckpoints.isEmpty,
+               ConversationCacheLayers.hasRecurrentLayers(entry.kvCache.layers) {
+                guard let checkpoint = selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
+                    return .miss(reason: "recurrent_checkpoint_diverged", detail: " lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
+                }
+                let covered = entry.kvCache.layers.indices.allSatisfy { index in
+                    let layer = entry.kvCache.layers[index]
+                    return layer.isTrimmable || (layer is ArraysCache && checkpoint.states[index] != nil)
+                }
+                guard covered else {
+                    return .miss(reason: "cache_not_trimmable", detail: "")
+                }
+                reuseLength = checkpoint.tokenCount
+                restoreCheckpoint = checkpoint
+            } else {
+                guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
+                    return .miss(reason: "cache_not_trimmable", detail: "")
+                }
+            }
+        }
+        return .reuse(lcp: lcp, reuseLength: reuseLength, restoreCheckpoint: restoreCheckpoint,
+                      retainedCheckpoint: retainedCheckpoint)
+    }
+
     func begin(
         conversationKey: String?,
         incomingTokens: [Int32],
@@ -554,7 +735,8 @@ actor ConversationCache {
         allowRetainedPagedKVHandoff: Bool = false,
         fleetGrant: FleetConversationCacheGrant? = nil,
         requireNativeMTPDrafterSnapshot: Bool = false,
-        promptSnapshotResumeBoundaries: [Int]? = nil
+        promptSnapshotResumeBoundaries: [Int]? = nil,
+        smallMRoute: SmallMRoute = SmallMRoute.processRoute
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
@@ -598,7 +780,7 @@ actor ConversationCache {
                 globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold,
                 reusableCanonicalPromptTokens: reusableCanonicalPromptTokens,
                 recurrentCheckpoint: recurrentCheckpoint, fleetGrant: fleetGrant,
-                originalStoredAt: originalStoredAt)
+                originalStoredAt: originalStoredAt, smallMRoute: smallMRoute)
         }
 
         // Acquire a candidate entry from the hot tier, or — for a gated key that
@@ -643,7 +825,9 @@ actor ConversationCache {
                 kvBits: kvBits,
                 storedAt: originalStoredAt,
                 lastUsedAt: now,
-                tokenCount: candidate.canonicalTokens.count)
+                tokenCount: candidate.canonicalTokens.count,
+                // The tier promotes only an envelope of this request's class.
+                smallMRoute: smallMRoute)
             log("event=conv_cache action=promote key_hash=\(keyHash) canonical_tokens=\(candidate.canonicalTokens.count)")
         } else {
             // FR-KVP12: a gated request whose live identity is unavailable emits
@@ -668,103 +852,26 @@ actor ConversationCache {
             return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
         }
 
-        guard entry.modelID == modelID else {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=model_swap stored_model=\(entry.modelID) incoming_model=\(modelID)")
-            return await predicateMiss("model_swap")
+        let reuseLength: Int
+        let restoreCheckpoint: RecurrentStateCheckpoint?
+        let retainedCheckpoint: RecurrentStateCheckpoint?
+        let lcp: Int
+        switch Self.reusePlan(
+            entry: entry, incomingTokens: incomingTokens, modelID: modelID, kvBits: kvBits, smallMRoute: smallMRoute,
+            allowRetainedPagedKVHandoff: allowRetainedPagedKVHandoff,
+            requireNativeMTPDrafterSnapshot: requireNativeMTPDrafterSnapshot,
+            promptSnapshotResumeBoundaries: promptSnapshotResumeBoundaries
+        ) {
+        case let .miss(reason, detail):
+            log("event=conv_cache action=miss key_hash=\(keyHash) reason=\(reason)\(detail)")
+            return await predicateMiss(reason)
+        case let .reuse(planLCP, planReuseLength, planRestore, planRetained):
+            lcp = planLCP
+            reuseLength = planReuseLength
+            restoreCheckpoint = planRestore
+            retainedCheckpoint = planRetained
         }
-        guard entry.kvBits == kvBits else {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=kvbits_swap")
-            return await predicateMiss("kvbits_swap")
-        }
-
-        let lcp = Self.longestCommonPrefix(entry.canonicalPromptTokens, incomingTokens)
-        guard lcp >= Self.lcpThreshold else {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=prefix_diverged lcp=\(lcp) threshold=\(Self.lcpThreshold)")
-            return await predicateMiss("prefix_diverged")
-        }
-        guard lcp < incomingTokens.count else {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=nothing_new lcp=\(lcp) prompt_tokens=\(incomingTokens.count)")
-            return await predicateMiss("nothing_new")
-        }
-
         let retainedPagedKV = entry.kvCache.retainedPagedKVSequence != nil
-        if retainedPagedKV && !allowRetainedPagedKVHandoff {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=retained_paged_kv_requires_handoff")
-            return await predicateMiss("retained_paged_kv_requires_handoff")
-        }
-        // Tokens of the stored prefix actually reused: `lcp`, or the chosen recurrent
-        // checkpoint's length for a hybrid entry.
-        var reuseLength = lcp
-        var restoreCheckpoint: RecurrentStateCheckpoint?
-        var retainedCheckpoint: RecurrentStateCheckpoint?
-        if retainedPagedKV, !entry.kvCache.recurrentCheckpoints.isEmpty {
-            // SPEC-038 AC-26 hybrid retained entry: its recurrent state is only
-            // reusable at a checkpoint, so the hit resumes from the largest one
-            // within the shared prefix. The scheduler's reattach trims the paged
-            // attention KV to exactly that length.
-            guard let checkpoint = Self.selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=recurrent_checkpoint_diverged lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
-                return await predicateMiss("recurrent_checkpoint_diverged")
-            }
-            reuseLength = checkpoint.tokenCount
-            retainedCheckpoint = checkpoint
-        }
-        if !retainedPagedKV, entry.kvCache.promptSnapshot {
-            // SPEC-024 FR-CI2a: a prompt snapshot is reused only by extension. Its
-            // window, pool or recurrent layers cannot be rewound, so any prompt
-            // that diverges inside the stored tokens misses.
-            guard lcp == entry.canonicalPromptTokens.count else {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_diverged lcp=\(lcp) snapshot_tokens=\(entry.canonicalPromptTokens.count)")
-                return await predicateMiss("prompt_snapshot_diverged")
-            }
-            // SPEC-024-R005: a native-MTP row reuses a snapshot only together
-            // with the MTP head state taken at it; otherwise it stays native
-            // and prefills from zero (never an ordinary reselection).
-            if requireNativeMTPDrafterSnapshot,
-               entry.kvCache.nativeMTPDrafter?.restores(into: incomingTokens, at: lcp) != true {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_drafter_unavailable snapshot_tokens=\(entry.canonicalPromptTokens.count)")
-                return await predicateMiss("prompt_snapshot_drafter_unavailable")
-            }
-            // SPEC-024-R005: a CB row resumes only a snapshot another CB row
-            // took on the resume-boundary plan, and only on one of its own
-            // prompt's boundaries, so the resumed and a cold prefill of this
-            // prompt run the same chunks (bit-identical state).
-            if let promptSnapshotResumeBoundaries,
-               !entry.kvCache.resumeBoundaryPlan || !promptSnapshotResumeBoundaries.contains(lcp) {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_off_resume_boundary snapshot_tokens=\(entry.canonicalPromptTokens.count)")
-                return await predicateMiss("prompt_snapshot_off_resume_boundary")
-            }
-        } else if !retainedPagedKV {
-            // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,
-            // and even then trim is windowed — not full-prefix reuse. Reject the class
-            // rather than treating a temporarily-trimmable rotating cache as a hit.
-            if entry.kvCache.layers.contains(where: { $0 is RotatingKVCache }) {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=rotating_window_cache")
-                return await predicateMiss("rotating_window_cache")
-            }
-            if !entry.kvCache.recurrentCheckpoints.isEmpty,
-               ConversationCacheLayers.hasRecurrentLayers(entry.kvCache.layers) {
-                guard let checkpoint = Self.selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
-                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=recurrent_checkpoint_diverged lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
-                    return await predicateMiss("recurrent_checkpoint_diverged")
-                }
-                let covered = entry.kvCache.layers.indices.allSatisfy { index in
-                    let layer = entry.kvCache.layers[index]
-                    return layer.isTrimmable || (layer is ArraysCache && checkpoint.states[index] != nil)
-                }
-                guard covered else {
-                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
-                    return await predicateMiss("cache_not_trimmable")
-                }
-                reuseLength = checkpoint.tokenCount
-                restoreCheckpoint = checkpoint
-            } else {
-                guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
-                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
-                    return await predicateMiss("cache_not_trimmable")
-                }
-            }
-        }
         let trimBy = entry.canonicalPromptTokens.count - reuseLength
         if trimBy > 0 && !retainedPagedKV {
             for layer in entry.kvCache.layers where layer.isTrimmable || restoreCheckpoint == nil {
@@ -852,7 +959,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: now,
             lastUsedAt: now,
-            tokenCount: fullTokens.count
+            tokenCount: fullTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         guard !Task.isCancelled, !isFenced(lease) else {
@@ -989,7 +1097,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: now,
             lastUsedAt: now,
-            tokenCount: snapshotTokens.count
+            tokenCount: snapshotTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         if isFenced(lease), let current = entries[lease.key], current.kvCache === snapshot {
@@ -1024,7 +1133,8 @@ actor ConversationCache {
             kvBits: lease.kvBits,
             storedAt: lease.originalStoredAt ?? now,
             lastUsedAt: now,
-            tokenCount: reusableCanonicalPromptTokens.count
+            tokenCount: reusableCanonicalPromptTokens.count,
+            smallMRoute: lease.smallMRoute
         )
         await enforceLimits()
         if isFenced(lease), let current = entries[lease.key], current.kvCache === reusableCache {

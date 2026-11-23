@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 12d26ef6 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 4e9a71dc (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at aaa82655 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at dd68f1d2 (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,43 +42,48 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84: Three
-# GLM5Next commits on 3.32.3-macprovider.84 add prefill slices
-# (`glm5NextPrefillSlicesKey`): the routed and shared experts and dense MLPs
-# run once over consecutive balanced chunks, while router, hyper-connections
-# and attention stay per chunk, bit-identical to separate forwards; on NAX
-# GPUs slices join only when the wide gather_qmm call keeps their row tile.
-# Plus a Qwen4Exp join/leave test and a GLM5NextTests type-check split. Other
-# model families and decode are unchanged.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.85"
-SPEC048_MLX_SWIFT_LM_REVISION = "8aa564dbf780cb4bd88e3fb591981eae868780f4"
+# 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85 (8aa564db): one
+# commit that only moves its mlx-swift pin to aaa82655 (the per-op small-M
+# route below). No model source changes. The tag is cut from this revision at
+# the campaign freeze.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.86"
+SPEC048_MLX_SWIFT_LM_REVISION = "bcffd492b1d89d009e57278defd258e76ac78ab3"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.25"
-# Fork tag 0.32.3-macprovider.25: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below (.22 plus three commits that move the core
-# gitlink to the stock-order route and regenerate the quantized jit sources);
-# .25 is .24 (7fbcada9) plus a synchronous eval that waits for the device
-# without holding the process-wide evalLock (Swift layer only, core gitlink
-# unchanged).
-SPEC048_MLX_SWIFT_REVISION = "12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.26"
+# Fork tag 0.32.3-macprovider.26 (#2462): .25 (12d26ef6) plus one commit that
+# moves the MLX core gitlink to the per-op small-M route below and mlx-c to its
+# C binding, adds the Swift API (SmallMRoute, withSmallMRoute: a thread scope
+# QuantizedMatmul captures at graph build) and regenerates the quantized jit
+# sources. .25 is .24 (7fbcada9) plus a synchronous eval that waits for the
+# device without holding the process-wide evalLock. The tag is cut from this
+# revision at the campaign freeze.
+SPEC048_MLX_SWIFT_REVISION = "aaa826550ca59184a5884b099f1d640714804fc5"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.15, seven commits on v0.32.4-macprovider.14
-# (upstream MLX v0.32.4) that add the stock-order small-row route
-# (MLX_METAL_SMALL_M_ROW_INVARIANT=2) and its qmv_mma partial-sum count: the
-# reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# Fork tag v0.32.4-macprovider.16 (#2462): v0.32.4-macprovider.15 (4e9a71dc)
+# plus three commits that add a thread-scoped per-op small-row route captured
+# on QuantizedMatmul (carried through its vjp/jvp) and a discriminating 2-row
+# GPU route test; .15 is seven commits on v0.32.4-macprovider.14 (upstream MLX
+# v0.32.4) that add the stock-order small-row route
+# (MLX_METAL_SMALL_M_ROW_INVARIANT=2) and its qmv_mma partial-sum count. This
+# is the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION; the
+# tag is cut from it at the campaign freeze. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.15"
-SPEC048_MLX_CORE_REVISION = "4e9a71dc9e765f739003868f38d3aca05871e70d"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.16"
+SPEC048_MLX_CORE_REVISION = "dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
+# v0.6.0-macprovider.4 (#2462): v0.6.0-macprovider.2 (2b1ff2b5) plus one commit
+# that binds the per-op small-M route scope (mlx/c/small_m_route.h). Tag .3
+# (07f7ae44) is a separate line on .2 and was never pinned; .4 is cut from
+# this revision at the campaign freeze.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"
-SPEC048_MLX_C_TAG = "v0.6.0-macprovider.2"
-SPEC048_MLX_C_REVISION = "2b1ff2b5b5129a6115771da32e1bac3b6b01ab01"
+SPEC048_MLX_C_TAG = "v0.6.0-macprovider.4"
+SPEC048_MLX_C_REVISION = "70f188c0c19b36823e7c7b30c30ae6e8514509c3"
 SPEC048_MLX_C_UPSTREAM_BASE = "ebc88f10caa1b625e6b581437a8dea6df8a70085"
 
 # #2028 audit carry: every reviewed revision and upstream base is a full

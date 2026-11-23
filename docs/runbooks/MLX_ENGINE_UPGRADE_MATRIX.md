@@ -34,10 +34,10 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.85` | `8aa564dbf780cb4bd88e3fb591981eae868780f4` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.25` | `12d26ef6c6d65ba3a265a2b65c3c9380d9c22bd7` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.15` | `4e9a71dc9e765f739003868f38d3aca05871e70d` | `v0.32.4` (`36969c09…`) |
-| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.86` | `bcffd492b1d89d009e57278defd258e76ac78ab3` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.26` | `aaa826550ca59184a5884b099f1d640714804fc5` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.16` | `dd68f1d2d2ad2b8e24938a440fdce9b78b05ba80` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm, its manifest
@@ -46,6 +46,18 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-23 the LM row is `3.32.3-macprovider.86` (`bcffd49`), on
+`3.32.3-macprovider.85` (#2462): one commit that only moves the mlx-swift pin
+to `0.32.3-macprovider.26` (`aaa8265`), `.25` plus the per-op small-M route:
+`SmallMRoute` and `withSmallMRoute`, a thread scope that QuantizedMatmul
+captures at graph build, with no scope meaning the process route as before.
+The core row moves to `v0.32.4-macprovider.16` (`dd68f1d`, three commits on
+`.15`: the thread-scoped route on QuantizedMatmul, carried through vjp/jvp,
+and a 2-row GPU route test) and the C row to `v0.6.0-macprovider.4`
+(`70f188c`, one commit on `.2` binding the route scope; `.3` is a separate,
+never-pinned line). The four tags are cut from these revisions at the
+campaign freeze. No model source changes.
 
 As of 2026-11-21 the LM row is `3.32.3-macprovider.85` (`8aa564d`), on
 `3.32.3-macprovider.84` (#2451, #2448): Three GLM5Next commits on

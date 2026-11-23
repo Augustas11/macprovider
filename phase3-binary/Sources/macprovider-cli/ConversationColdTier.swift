@@ -144,6 +144,15 @@ struct ConversationColdContext: Sendable {
             chatTemplateSHA256: chatTemplateSHA256)
         return ConversationColdContext(eligible: true, identity: identity)
     }
+
+    /// SPEC-037 v0.2.8: this context for a request on `route`, whose KV the
+    /// tier writes and reads under that route's decode path class.
+    func onSmallMRoute(_ route: SmallMRoute) -> ConversationColdContext {
+        var identity = identity
+        identity.smallMRoute = route
+        return ConversationColdContext(
+            eligible: eligible, identity: identity, identityUnavailableReason: identityUnavailableReason)
+    }
 }
 
 /// The per-request model + tokenizer identity that ModelRuntime can supply
@@ -165,6 +174,13 @@ struct KVIdentityCore: Sendable, Equatable {
     let kvGroupSize: Int?
     let kvQuantMode: String?
     let kvQuantPolicy: String?
+    /// SPEC-037 v0.2.8: the small-row route of the request this identity
+    /// belongs to (SPEC-038 FR-CB9 v0.3.61), written into the decode path
+    /// class (FR-KVP4 item 10) and checked on promotion. Nil: the process route.
+    var smallMRoute: SmallMRoute? = nil
+
+    /// The decode path class of KV this request writes or reads.
+    var decodePath: String { (smallMRoute ?? SmallMRoute.processRoute).kvDecodePath }
 }
 
 /// A validated cold entry restored into hot-tier layers, pending the hot

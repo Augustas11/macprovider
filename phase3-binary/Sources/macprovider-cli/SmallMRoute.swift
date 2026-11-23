@@ -18,16 +18,21 @@ import MacProviderCore
 /// whose rows equal each other across 3-16-row forwards but may differ from
 /// the lone row in low bits. A process that may batch ordinary rows but has
 /// no native MTP, draft model, shard-group role, autotune child or other
-/// switch target runs it; native MTP keeps `rowInvariant` because its verify
-/// window of depth + 1 rows must equal the request's own one-row decode.
+/// switch target runs it; native MTP needs `rowInvariant` because its verify
+/// window of depth + 1 rows must equal the request's own one-row decode. A
+/// process that would keep `rowInvariant` only for native MTP runs `mixed`
+/// (v0.3.61, #2462): stock order for the process, `rowInvariant` for each
+/// native-admitted request (`SmallMRouteScope`).
 enum SmallMRoute: String, Sendable, Equatable {
     case rowInvariant = "row_invariant"
     case serialOnly = "serial_only"
     case stockOrder = "stock_order"
 
-    /// Read once per process by the MLX core at its first small-row dispatch;
-    /// unset, or a value `atoi` parses to neither 0 nor 2, keeps the
-    /// row-invariant window (`route(environmentValue:)`).
+    /// Read once per process by the MLX core when the first quantized matmul
+    /// is added to a graph (each op captures its route at graph build, from
+    /// a thread scope or else this value); unset, or a value `atoi` parses
+    /// to neither 0 nor 2, keeps the row-invariant window
+    /// (`route(environmentValue:)`).
     static let environmentKey = "MLX_METAL_SMALL_M_ROW_INVARIANT"
     /// The core's qmv_mma partial-sum count over K, also read once per
     /// process. Its default follows the route (4 on the row-invariant route,
@@ -35,6 +40,16 @@ enum SmallMRoute: String, Sendable, Equatable {
     /// change a process's output bits with no self-check or cache key
     /// noticing, so only lab builds keep it.
     static let partialSumsEnvironmentKey = "MLX_METAL_QMV_MMA_WK"
+
+    /// Whether this process keeps an inherited `partialSumsEnvironmentKey`:
+    /// only a lab build does (`removeInheritedPartialSums`).
+    static var keepsInheritedPartialSums: Bool {
+        #if MACPROVIDER_LAB_HARNESS
+        return getenv(partialSumsEnvironmentKey) != nil
+        #else
+        return false
+        #endif
+    }
 
     /// Removes an inherited `partialSumsEnvironmentKey` outside lab builds.
     /// Returns true when a value was removed.
@@ -52,7 +67,20 @@ enum SmallMRoute: String, Sendable, Equatable {
     struct Decision: Sendable, Equatable {
         let route: SmallMRoute
         let reason: String
+        /// SPEC-038 FR-CB9 (v0.3.61) `mixed`: `route` is the process route
+        /// (`stockOrder`) and native-admitted requests run `rowInvariant`.
+        var mixed = false
+
+        /// The mode the startup event and `/v1/status` name.
+        var mode: String { mixed ? SmallMRoute.mixedMode : route.rawValue }
     }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): the mode name of a `mixed` process and its reason.
+    static let mixedMode = "mixed"
+    static let nativeMTPPerRequest = "native_mtp_per_request"
+    /// SPEC-038 FR-CB9 (v0.3.62): why a lab process with an inherited
+    /// `MLX_METAL_QMV_MMA_WK` keeps the row-invariant route process-wide.
+    static let inheritedPartialSumsReason = "native_mtp_qmv_mma_wk_inherited"
 
     /// The persisted FR-CB10 self-check verdict for the startup model, as
     /// `SmallMRouteVerdictStore` reads it before MLX starts.
@@ -139,6 +167,14 @@ enum SmallMRoute: String, Sendable, Equatable {
         var stockOrderFallback: String? = nil
         /// SPEC-038 FR-CB9 (v0.3.56): config `small_m_route: row_invariant`.
         var operatorForcesRowInvariant: Bool = false
+        /// SPEC-038 FR-CB9 (v0.3.62): the MLX core takes its NAX quantized
+        /// matmul kernels on this GPU (`SmallMRoute.processNAXAvailable`),
+        /// which are the same on both small-row routes.
+        var naxGPU: Bool = false
+        /// SPEC-038 FR-CB9 (v0.3.62): a lab build kept an inherited
+        /// `MLX_METAL_QMV_MMA_WK`, which the core applies to both routes'
+        /// ops (`keepsInheritedPartialSums`).
+        var inheritedPartialSums: Bool = false
 
         /// `key=value` pairs naming each condition, for the startup event.
         var logFields: String {
@@ -148,14 +184,19 @@ enum SmallMRoute: String, Sendable, Equatable {
                 + "switch_targets=\(otherSwitchTargets) self_check=\(selfCheckVerdict.rawValue)"
                 + (stockOrderFallback.map { " stock_order_fallback=\($0)" } ?? "")
                 + (operatorForcesRowInvariant ? " operator_small_m_route=row_invariant" : "")
+                + (naxGPU ? " nax=true" : "")
+                + (inheritedPartialSums ? " qmv_mma_wk=inherited" : "")
         }
     }
 
     /// SPEC-038 FR-CB9: the route a `serve` process runs, decided once before
     /// MLX is first used, from state that cannot turn batching on later in
     /// the same process. A draft model, shard-group role, autotune child,
-    /// native MTP that may activate, or another switch target keeps the
-    /// row-invariant route. Otherwise serial-only needs all of:
+    /// or another switch target keeps the row-invariant route. Native MTP
+    /// that may activate takes `mixed` (v0.3.61: stock order process route,
+    /// row-invariant native requests) when batching can activate and no
+    /// stock order fallback or operator override applies and the GPU is not
+    /// NAX (v0.3.62), and keeps the row-invariant route otherwise. Otherwise serial-only needs all of:
     /// - native MTP inactive: mode `off`, or `auto` with no verified entry
     ///   for the loaded model and artifact digest (its rounds batch target
     ///   rows); an unreadable or unverifiable set keeps the invariant route;
@@ -203,7 +244,25 @@ enum SmallMRoute: String, Sendable, Equatable {
         if inputs.shardGroupRole { return Decision(route: .rowInvariant, reason: "shard_group") }
         if inputs.autotuneCandidate { return Decision(route: .rowInvariant, reason: "autotune_candidate") }
         if inputs.nativeMTPMode != .off, inputs.nativeMTPAdmission.mayActivate {
-            return Decision(route: .rowInvariant, reason: "native_mtp_\(inputs.nativeMTPAdmission.rawValue)")
+            // SPEC-038 FR-CB9 (v0.3.61): native MTP needs the row-invariant
+            // route only for its own requests. With every other stock order
+            // condition met the process takes `mixed`; any other reason to
+            // keep the pair keeps it process-wide, as before.
+            let keep = Decision(route: .rowInvariant, reason: "native_mtp_\(inputs.nativeMTPAdmission.rawValue)")
+            if inputs.otherSwitchTargets
+                || (inputs.continuousBatchingExplicitlyConfigured && inputs.continuousBatching == .off)
+                || inputs.selfCheckVerdict == .grantsNoBatching {
+                return keep
+            }
+            // v0.3.62: on a NAX GPU both routes select the same kernels, so
+            // splitting forwards and caches would gain nothing.
+            if inputs.naxGPU { return keep }
+            // v0.3.62: an inherited partial-sum count would change the
+            // native requests' row-invariant ops too.
+            if inputs.inheritedPartialSums { return Decision(route: .rowInvariant, reason: inheritedPartialSumsReason) }
+            if let fallback = inputs.stockOrderFallback { return Decision(route: .rowInvariant, reason: fallback) }
+            if inputs.operatorForcesRowInvariant { return Decision(route: .rowInvariant, reason: operatorRowInvariant) }
+            return Decision(route: .stockOrder, reason: nativeMTPPerRequest, mixed: true)
         }
         if inputs.otherSwitchTargets { return Decision(route: .rowInvariant, reason: "switch_targets") }
         if inputs.continuousBatchingExplicitlyConfigured, inputs.continuousBatching == .off {
@@ -314,12 +373,164 @@ enum SmallMRoute: String, Sendable, Equatable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var applied: SmallMRoute?
     nonisolated(unsafe) private static var appliedReason: String?
+    nonisolated(unsafe) private static var appliedMixed = false
+    #if DEBUG
+    nonisolated(unsafe) private static var mixedOverride = false
+    #endif
+
+    /// SPEC-038 FR-CB9 (v0.3.61): whether this process runs `mixed`.
+    static var processMixed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        #if DEBUG
+        if mixedOverride { return true }
+        #endif
+        return applied != nil && appliedMixed
+    }
+
+    #if DEBUG
+    /// Tests: runs `body` as a `mixed` process (process route stock order)
+    /// without touching the environment the MLX core read. Restores after.
+    nonisolated(nonsending) static func asMixedProcessForTest<R>(
+        _ body: nonisolated(nonsending) () async throws -> R
+    ) async rethrows -> R {
+        lock.lock()
+        mixedOverride = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            mixedOverride = false
+            lock.unlock()
+        }
+        return try await body()
+    }
+    #endif
+
+    /// The mode `/v1/status` reports: `mixed`, or the process route.
+    static var processMode: String {
+        processMixed ? mixedMode : processRoute.rawValue
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.61): the route a request's forwards are built
+    /// on when nothing else is in flight. In `mixed` a native-admitted
+    /// request runs the row-invariant route for its whole life, ordinary
+    /// fallback included, and an ordinary request the stock order process
+    /// route; in every other mode each request runs the process route.
+    /// Serving admissions use `admissionRoute` (v0.3.63), which also sees the
+    /// requests in flight.
+    static func requestRoute(
+        nativeAdmitted: Bool,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> SmallMRoute {
+        guard mixed else { return processRoute }
+        return nativeAdmitted ? .rowInvariant : .stockOrder
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.63, #2462): why an admission took its route.
+    enum AdmissionReason: String, Sendable, CaseIterable {
+        /// The request is admitted native.
+        case nativeAdmitted = "native_admitted"
+        /// An ordinary request with no reusable conversation-cache entry for
+        /// its key, admitted while a `rowInvariant` request (any reason) was
+        /// in flight.
+        case nativeActive = "native_active"
+        /// An ordinary request admitted with no `rowInvariant` request in
+        /// flight and no reusable conversation-cache entry for its key.
+        case idle
+        /// An ordinary request admitted on the route of the hot
+        /// conversation-cache entry stored for its key, so the turn reuses
+        /// that entry's KV (v0.3.64; v0.3.65: beside `rowInvariant` requests
+        /// only when the cost rule keeps it).
+        case conversationCache = "conversation_cache"
+        /// (v0.3.65) An ordinary request whose stored entry is `stockOrder`,
+        /// admitted `rowInvariant` beside a `rowInvariant` request because the
+        /// cost rule found the re-prefill cheaper than the split.
+        case conversationCacheJoin = "conversation_cache_join"
+        /// Not `mixed`: every request takes the process route.
+        case processRoute = "process_route"
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): prompt tokens one extra single-row forward
+    /// per decode step costs, as a prefill of that many tokens. The runtime
+    /// measures prefill tokens/s (FirstTokenStallWatchdog) but not a model's
+    /// single-row decode step time, so the ratio is one constant.
+    /// rerun 20261122T165705Z: re-prefill 4.67 s for 1384 tokens = 3.37 ms/token;
+    /// extra forward ≈ one single-row decode step ≈ 26 ms (38 tok/s), so ratio ≈ 8
+    static let splitStepPrefillTokens = 8
+
+    /// SPEC-038 FR-CB9 (v0.3.65): decode steps a `stockOrder` conversation
+    /// turn would run in its own forward beside the `rowInvariant` requests in
+    /// flight: the shorter of its own output budget and the largest remaining
+    /// output budget among them. Nil when neither is known.
+    static func expectedOverlapTokens(maxOutputTokens: Int?, rowInvariantRemainingTokens: Int?) -> Int? {
+        switch (maxOutputTokens, rowInvariantRemainingTokens) {
+        case let (own?, other?): return max(0, min(own, other))
+        case let (own?, nil): return max(0, own)
+        case let (nil, other?): return max(0, other)
+        case (nil, nil): return nil
+        }
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): whether a `stockOrder` conversation turn
+    /// keeps its entry's route beside `rowInvariant` requests (a split for
+    /// the overlap) rather than joining them and re-prefilling: the reused
+    /// prefill must cost more than the extra forwards,
+    /// `reusable x prefill cost/token > overlap x split cost/step`. An
+    /// unknown overlap joins.
+    static func keepsStoredRouteBesideRowInvariant(reusableCachedTokens: Int, overlapTokens: Int?) -> Bool {
+        guard let overlapTokens else { return false }
+        let (splitCost, overflow) = overlapTokens.multipliedReportingOverflow(by: splitStepPrefillTokens)
+        return !overflow && reusableCachedTokens > splitCost
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): the route a request is admitted on, for
+    /// its whole life. In `mixed`, in order: a native request takes
+    /// `rowInvariant`. An ordinary request whose key has a reusable hot
+    /// conversation-cache entry (`storedRoute`, `reusableCachedTokens` > 0)
+    /// takes that entry's route, so the turn keeps its KV, except that a
+    /// `stockOrder` entry with a `rowInvariant` request in flight takes the
+    /// cheaper of two costs: keep `stockOrder` (two forwards per step for the
+    /// overlap) only when `keepsStoredRouteBesideRowInvariant`, else join
+    /// `rowInvariant` and re-prefill (`conversationCacheJoin`). So a
+    /// `stockOrder` conversation overlapping `rowInvariant` pays at most
+    /// min(re-prefill, split). Otherwise an ordinary request joins
+    /// `rowInvariant` while any `rowInvariant` request is in flight (active,
+    /// queued, or decided native and not yet admitted), so the scheduler
+    /// keeps one forward per step; otherwise it takes the stock order process
+    /// route. An entry is never reused across routes (AC-26, SPEC-037 route
+    /// class).
+    static func admissionRoute(
+        nativeAdmitted: Bool,
+        rowInvariantInFlight: Int,
+        storedRoute: SmallMRoute? = nil,
+        reusableCachedTokens: Int = 0,
+        maxOutputTokens: Int? = nil,
+        rowInvariantRemainingTokens: Int? = nil,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> (route: SmallMRoute, reason: AdmissionReason) {
+        guard mixed else { return (processRoute, .processRoute) }
+        if nativeAdmitted { return (.rowInvariant, .nativeAdmitted) }
+        if let storedRoute, storedRoute == .rowInvariant || storedRoute == .stockOrder, reusableCachedTokens > 0 {
+            guard storedRoute == .stockOrder, rowInvariantInFlight > 0 else { return (storedRoute, .conversationCache) }
+            let overlap = expectedOverlapTokens(
+                maxOutputTokens: maxOutputTokens, rowInvariantRemainingTokens: rowInvariantRemainingTokens)
+            return keepsStoredRouteBesideRowInvariant(reusableCachedTokens: reusableCachedTokens, overlapTokens: overlap)
+                ? (.stockOrder, .conversationCache) : (.rowInvariant, .conversationCacheJoin)
+        }
+        if rowInvariantInFlight > 0 { return (.rowInvariant, .nativeActive) }
+        return (.stockOrder, .idle)
+    }
 
     /// The route this process runs: the one `apply` set, else the one the
     /// inherited environment gives the MLX core.
     static var processRoute: SmallMRoute {
         lock.lock()
         defer { lock.unlock() }
+        #if DEBUG
+        if mixedOverride { return .stockOrder }
+        #endif
         return applied ?? route(environmentValue: ProcessInfo.processInfo.environment[environmentKey])
     }
 
@@ -330,12 +541,17 @@ enum SmallMRoute: String, Sendable, Equatable {
         return appliedReason ?? "environment"
     }
 
-    /// Sets the environment for this process before MLX's first small-row
-    /// dispatch. Row-invariant removes any inherited value, so a stray "0" or
-    /// "2" never reaches a process that needs the invariant route. The first
-    /// call wins; a later call returns the route already applied.
+    /// Sets the environment for this process before MLX first builds a
+    /// small-row quantized matmul: the core reads the process route once,
+    /// when the first such op is added to a graph, and each op keeps the
+    /// route it was built on. Row-invariant removes any inherited value, so
+    /// a stray "0" or "2" never reaches a process that needs the invariant
+    /// route. `mixed` (v0.3.61) applies the stock order route and marks the
+    /// process so native-admitted requests scope their forwards to the
+    /// row-invariant route. The first call wins; a later call returns the
+    /// route already applied.
     @discardableResult
-    static func apply(_ route: SmallMRoute, reason: String = "applied") -> SmallMRoute {
+    static func apply(_ route: SmallMRoute, reason: String = "applied", mixed: Bool = false) -> SmallMRoute {
         lock.lock()
         defer { lock.unlock() }
         if removeInheritedPartialSums() {
@@ -351,12 +567,13 @@ enum SmallMRoute: String, Sendable, Equatable {
         }
         applied = route
         appliedReason = reason
+        appliedMixed = mixed && route == .stockOrder
         return route
     }
 
     /// The startup event serve and decode-bench print.
     static func event(_ decision: Decision, fields: String? = nil) -> String {
-        "event=small_m_route mode=\(decision.route.rawValue) reason=\(decision.reason)\(fields.map { " " + $0 } ?? "")\n"
+        "event=small_m_route mode=\(decision.mode) reason=\(decision.reason)\(fields.map { " " + $0 } ?? "")\n"
     }
 
     /// Nil when a process on `route` may batch rows, else why `entry` refuses.
@@ -517,6 +734,20 @@ struct SmallMRouteVerdictStore: Sendable {
         return stockOrderFallback(startupIdentity: startupIdentity) == nil ? .stockOrder : .rowInvariant
     }
 
+    /// The decision `SmallMRoute.decide` gives the next start of this
+    /// identity: `inputs` (this start's) with the verdict and the fallback
+    /// read back from the stores.
+    func nextStartDecision(
+        startupIdentity: String,
+        selfCheckStore: ContinuousBatchingSelfCheckStore,
+        inputs: SmallMRoute.Inputs
+    ) -> SmallMRoute.Decision {
+        var next = inputs
+        next.selfCheckVerdict = verdict(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore)
+        next.stockOrderFallback = stockOrderFallback(startupIdentity: startupIdentity)
+        return SmallMRoute.decide(next)
+    }
+
     /// The stored decision behind a `grantsNoBatching` verdict, for the
     /// refused self-check state a serial-only process reports.
     func oneRowDecision(
@@ -643,6 +874,10 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
     private let selfCheckStore: ContinuousBatchingSelfCheckStore
     private let startupIdentity: String
     private let route: SmallMRoute
+    /// This start's decide inputs; the logged next start is decided from
+    /// them (a `mixed` start's verdict keeps it native-MTP row-invariant,
+    /// never serial-only). Nil: `nextStartRoute`.
+    private let inputs: SmallMRoute.Inputs?
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var startupModelSHA256: String?
@@ -653,13 +888,23 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         selfCheckStore: ContinuousBatchingSelfCheckStore,
         startupIdentity: String,
         route: SmallMRoute = .rowInvariant,
+        inputs: SmallMRoute.Inputs? = nil,
         log: @escaping @Sendable (String) -> Void
     ) {
         self.store = store
         self.selfCheckStore = selfCheckStore
         self.startupIdentity = startupIdentity
         self.route = route
+        self.inputs = inputs
         self.log = log
+    }
+
+    /// The mode the next start of this identity takes.
+    private var nextStart: String {
+        guard let inputs else {
+            return store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore).rawValue
+        }
+        return store.nextStartDecision(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore, inputs: inputs).mode
     }
 
     func applied(key: ContinuousBatchingSelfCheckKey, decision: ContinuousBatchingSelfCheckDecision) {
@@ -680,8 +925,7 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
             )
             : nil
         store.record(startupIdentity: startupIdentity, key: key, decision: decision, route: route, stockOrderFallback: fallback)
-        let next = store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore)
-        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(next.rawValue)\(fallback.map { " fallback=\($0)" } ?? "")")
+        log("event=small_m_route action=verdict_recorded decision=\(decision.reason) slots=\(decision.slots) next_start=\(nextStart)\(fallback.map { " fallback=\($0)" } ?? "")")
     }
 
     /// Records a stock order failure found outside a self-check decision
@@ -698,6 +942,6 @@ final class SmallMRouteVerdictRecorder: @unchecked Sendable {
         }
         guard store.stockOrderFallback(startupIdentity: startupIdentity) == nil else { return }
         store.recordStockOrderFallback(startupIdentity: startupIdentity, reason: reason)
-        log("event=small_m_route action=stock_order_fallback_recorded reason=\(reason) next_start=\(store.nextStartRoute(startupIdentity: startupIdentity, selfCheckStore: selfCheckStore).rawValue)")
+        log("event=small_m_route action=stock_order_fallback_recorded reason=\(reason) next_start=\(nextStart)")
     }
 }

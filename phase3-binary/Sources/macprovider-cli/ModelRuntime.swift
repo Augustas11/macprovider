@@ -5800,19 +5800,38 @@ maxTokens: 1,
                 attempt: attempt
             )
             let start = Date()
-            let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+            let result = try await scheduler.submit(Self.nativeMTPOrdinaryReferenceRequest(
                 id: id,
-                conversationKey: "",
                 promptTokens: challenge.promptTokenIDs,
-                maxOutputTokens: challenge.maxCompletionTokens,
-                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
-                temperature: 0,
-                topP: 1
+                maxOutputTokens: challenge.maxCompletionTokens
             ))
             seconds = min(seconds, Date().timeIntervalSince(start))
             tokens = result.generatedTokens
         }
         return (tokens, seconds)
+    }
+
+    /// One ordinary reference run of the MTP self-check. SPEC-048 R003
+    /// (0.1.121): the reference is the request's own one-row decode on the
+    /// route its native probe runs, row-invariant in a `mixed` process, so
+    /// the token match and the speed gate compare like with like.
+    static func nativeMTPOrdinaryReferenceRequest(
+        id: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> ContinuousBatchSchedulerRequest {
+        ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: 0,
+            topP: 1,
+            smallMRoute: SmallMRoute.requestRoute(nativeAdmitted: true, processRoute: processRoute, mixed: mixed)
+        )
     }
 
     func runNativeMTPCanary(_ request: CoordinatorClient.NativeMTPCanaryRequestPayload) async -> CoordinatorClient.NativeMTPCanaryResultPayload {
@@ -9415,6 +9434,29 @@ maxTokens: 1,
         }
     }
 
+    /// SPEC-038 FR-CB9 (v0.3.65): whether admission reads the stored entry's
+    /// route: only in a `mixed` process (no other mode reads it) and only for
+    /// an ordinary request that may take a conversation-cache lease, since no
+    /// other request can hit the entry.
+    static func admissionReadsStoredSmallMRoute(
+        conversationCacheAllowed: Bool, nativeAdmitted: Bool, mixed: Bool = SmallMRoute.processMixed
+    ) -> Bool {
+        mixed && conversationCacheAllowed && !nativeAdmitted
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): a request admitted on its stored entry's
+    /// route (`conversation_cache`) whose lease then missed: the entry was
+    /// evicted, expired or failed a `begin` check between admission and
+    /// `begin`. The turn runs on that route with a full prefill; its own
+    /// commit stores a fresh entry, so the cost is bounded to this turn.
+    static func logSmallMRouteStoredRouteStale(
+        ticket: SmallMRouteRequestCounter.Ticket, lease: ConversationCacheLease?,
+        log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) {
+        guard ticket.reason == .conversationCache, (lease?.cachedPromptTokens ?? 0) == 0 else { return }
+        log("event=small_m_route_admission_miss route=\(ticket.route.rawValue) reason=stored_route_stale\n")
+    }
+
     /// A batched row's token event on its request timeline: the first event
     /// is the row's first sampled token, or, for a waiter that attached to a
     /// row already in flight, its first replayed delivery.
@@ -9731,9 +9773,50 @@ maxTokens: 1,
         _ lease: ConversationCacheLease,
         modelHasRecurrentLayers: Bool
     ) -> Bool {
-        guard lease.reusableCache?.retainedPagedKVSequence != nil else { return false }
+        hasUsableRetainedHandoff(
+            retainedPagedKV: lease.reusableCache?.retainedPagedKVSequence != nil,
+            retainedCheckpointTokens: lease.recurrentCheckpoint?.tokenCount,
+            cachedPromptTokens: lease.cachedPromptTokens,
+            modelHasRecurrentLayers: modelHasRecurrentLayers)
+    }
+
+    /// `leaseHasUsableRetainedHandoff` on the facts it reads, shared with the
+    /// admission lookup (SPEC-038 FR-CB9 v0.3.65).
+    nonisolated static func hasUsableRetainedHandoff(
+        retainedPagedKV: Bool, retainedCheckpointTokens: Int?, cachedPromptTokens: Int, modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        guard retainedPagedKV else { return false }
         guard modelHasRecurrentLayers else { return true }
-        return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
+        return retainedCheckpointTokens == cachedPromptTokens
+    }
+
+    /// SPEC-038 FR-CB9 (v0.3.65): the AC-26 cached-hit fence
+    /// (`cachedHitFenceReason`, as `coldLeaseIfCachedHitFenced` runs it on the
+    /// lease) applied to the stored entry admission found. Non-nil means the
+    /// lease would be re-begun cold, so admission treats the entry as absent.
+    nonisolated static func storedRouteCachedHitFenceReason(
+        _ stored: ConversationCache.StoredSmallMRoute,
+        mode: ContinuousBatchingMode,
+        prepared: ContinuousBatchPreparedRequest,
+        cachedTurnsEnabled: Bool,
+        cachedTurnsAccepted: Bool
+    ) -> ContinuousBatchingUnsupportedReason? {
+        // A hit's reusable canonical prefix is exactly its cached tokens (`begin`).
+        let attachableSnapshot = hasAttachablePromptSnapshot(
+            promptSnapshotAttaches: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
+            cachedPromptTokens: stored.reusableCachedTokens,
+            promptSnapshot: stored.promptSnapshot, resumeBoundaryPlan: stored.resumeBoundaryPlan,
+            retainedPagedKV: stored.hasRetainedPagedKV, reusableCanonicalTokenCount: stored.reusableCachedTokens)
+        return cachedHitFenceReason(
+            mode: mode,
+            cachedPromptTokens: stored.reusableCachedTokens,
+            hasRetainedPagedKVHandoff: attachableSnapshot || hasUsableRetainedHandoff(
+                retainedPagedKV: stored.hasRetainedPagedKV, retainedCheckpointTokens: stored.retainedCheckpointTokens,
+                cachedPromptTokens: stored.reusableCachedTokens,
+                modelHasRecurrentLayers: prepared.modelHasRecurrentLayers),
+            cachedTurnsEnabled: cachedTurnsEnabled,
+            cachedTurnsAccepted: cachedTurnsAccepted)
     }
 
     /// SPEC-001-R013 (v1.9.50): ends a CB row's cache lease after the row
@@ -9804,6 +9887,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
@@ -9817,7 +9901,8 @@ maxTokens: 1,
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
                 return try await self.admittedContinuousBatchCompletion(request: request, snapshot: snapshot, capability: capability,
-                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        nativeMTPAdmission: nativeMTPAdmission, smallMRouteReservation: smallMRouteReservation,
+                        completionStartedAt: completionStartedAt,
                         shouldCancel: shouldCancel, drainCancelled: drainCancelled)
             }
         }
@@ -9828,6 +9913,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
@@ -9889,16 +9975,58 @@ maxTokens: 1,
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         configureConversationCacheMemoryBudget()
-        let coldContext = coldContext(for: request, snapshot: snapshot)
-        let batchKVBits = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey
-        )
+        // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
+        // here from its native admission before any cache is read. A native
+        // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
+        // v0.3.63: an ordinary request admitted while a row-invariant one is
+        // in flight joins row-invariant, so each step stays one forward.
+        // v0.3.64: an ordinary request whose key has a hot stored entry takes
+        // that entry's route first, so the turn hits. v0.3.65: only an entry
+        // this request may lease and whose prefix it extends, and beside
+        // row-invariant requests only when the hit costs less than the split.
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
             nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
                 cacheOnlyKey: request.conversationCacheOnly
             )
+        )
+        var storedSmallMRoute: ConversationCache.StoredSmallMRoute?
+        if Self.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: conversationCacheAllowed,
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        ) {
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(
+                conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey),
+                // The same arguments `beginLease` passes for an ordinary row.
+                allowRetainedPagedKVHandoff: true,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil,
+                fleetGrant: request.fleetCacheGrant
+            )
+            // A hit the AC-26 fence would re-begin cold is no hit for the route.
+            if let stored = storedSmallMRoute, Self.storedRouteCachedHitFenceReason(
+                stored, mode: capability.mode, prepared: prepared,
+                cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
+                cachedTurnsAccepted: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
+            ) != nil {
+                storedSmallMRoute = nil
+            }
+        }
+        let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
+            reservation: smallMRouteReservation,
+            storedRoute: storedSmallMRoute?.route,
+            reusableCachedTokens: storedSmallMRoute?.reusableCachedTokens ?? 0,
+            maxOutputTokens: maxOutputTokens
+        )
+        defer { smallMRouteTicket.end() }
+        let requestSmallMRoute = smallMRouteTicket.route
+        let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
+        let batchKVBits = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey
         )
         func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
             await conversationCache.begin(
@@ -9915,7 +10043,8 @@ maxTokens: 1,
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
                     && prepared.promptSnapshotAttachesToContinuousBatchRow,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                smallMRoute: requestSmallMRoute
             )
         }
         var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
@@ -9936,6 +10065,7 @@ maxTokens: 1,
                 rebeginCold: { await beginLease(cold: nil) }
             )
         }
+        Self.logSmallMRouteStoredRouteStale(ticket: smallMRouteTicket, lease: lease)
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -9994,7 +10124,8 @@ maxTokens: 1,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
-            nativeMTPAdmission: nativeMTPAdmission
+            nativeMTPAdmission: nativeMTPAdmission,
+            smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
         do {
@@ -10006,7 +10137,10 @@ maxTokens: 1,
                 try await scheduler.submit(
                     submission.schedulerRequest,
                     admissionWaitPolicy: .callerBounded,
-                    tokenSink: { event in Self.noteContinuousBatchTokenEvent(event, on: timeline) },
+                    tokenSink: { event in
+                        smallMRouteTicket.noteOutputToken(index: event.tokenIndex)
+                        Self.noteContinuousBatchTokenEvent(event, on: timeline)
+                    },
                     onStarted: { timeline.markStarted() }
                 )
             }
@@ -10015,6 +10149,8 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
+            // The row has left the scheduler only once its retirement is checked.
+            smallMRouteTicket.end()
             await Self.endContinuousBatchLeaseAfterFailure(
                 lease,
                 cancelled: !drainCancelled.isFired && (error is CancellationError || shouldCancel()),
@@ -10030,6 +10166,7 @@ maxTokens: 1,
             throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
+        smallMRouteTicket.end()
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             try drainCancelled.check()
@@ -10380,6 +10517,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
@@ -10397,7 +10535,8 @@ maxTokens: 1,
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
                 return try await self.admittedContinuousBatchStreamingCompletion(request: request, snapshot: snapshot, capability: capability,
-                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        nativeMTPAdmission: nativeMTPAdmission, smallMRouteReservation: smallMRouteReservation,
+                        completionStartedAt: completionStartedAt,
                         shouldCancel: shouldCancel, drainCancelled: drainCancelled, structuredAccumulator: structuredAccumulator,
                         idleState: idleState, idleCancellation: idleCancellation, onChunk: onChunk)
             }
@@ -10409,6 +10548,7 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
         nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        smallMRouteReservation: SmallMRouteRequestCounter.Ticket? = nil,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
@@ -10484,16 +10624,58 @@ maxTokens: 1,
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         configureConversationCacheMemoryBudget()
-        let coldContext = coldContext(for: request, snapshot: snapshot)
-        let batchKVBits = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey
-        )
+        // SPEC-038 FR-CB9 (v0.3.61): the request's small-row route, fixed
+        // here from its native admission before any cache is read. A native
+        // row a cached prefix later sends ordinary keeps it (SPEC-048 R003).
+        // v0.3.63: an ordinary request admitted while a row-invariant one is
+        // in flight joins row-invariant, so each step stays one forward.
+        // v0.3.64: an ordinary request whose key has a hot stored entry takes
+        // that entry's route first, so the turn hits. v0.3.65: only an entry
+        // this request may lease and whose prefix it extends, and beside
+        // row-invariant requests only when the hit costs less than the split.
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
             nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
                 cacheOnlyKey: request.conversationCacheOnly
             )
+        )
+        var storedSmallMRoute: ConversationCache.StoredSmallMRoute?
+        if Self.admissionReadsStoredSmallMRoute(
+            conversationCacheAllowed: conversationCacheAllowed,
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP
+        ) {
+            storedSmallMRoute = await conversationCache.storedSmallMRoute(
+                conversationKey: request.conversationKey, incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
+                kvBits: Self.effectiveKVBits(configured: kvBitsOverride, conversationKey: request.conversationKey),
+                // The same arguments `beginLease` passes for an ordinary row.
+                allowRetainedPagedKVHandoff: true,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil,
+                fleetGrant: request.fleetCacheGrant
+            )
+            // A hit the AC-26 fence would re-begin cold is no hit for the route.
+            if let stored = storedSmallMRoute, Self.storedRouteCachedHitFenceReason(
+                stored, mode: capability.mode, prepared: prepared,
+                cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
+                cachedTurnsAccepted: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
+            ) != nil {
+                storedSmallMRoute = nil
+            }
+        }
+        let smallMRouteTicket = SmallMRouteRequestCounter.shared.admit(
+            nativeAdmitted: tokenBoundedNativeMTPAdmission.usesNativeMTP,
+            reservation: smallMRouteReservation,
+            storedRoute: storedSmallMRoute?.route,
+            reusableCachedTokens: storedSmallMRoute?.reusableCachedTokens ?? 0,
+            maxOutputTokens: maxOutputTokens
+        )
+        defer { smallMRouteTicket.end() }
+        let requestSmallMRoute = smallMRouteTicket.route
+        let coldContext = coldContext(for: request, snapshot: snapshot)?.onSmallMRoute(requestSmallMRoute)
+        let batchKVBits = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey
         )
         func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
             await conversationCache.begin(
@@ -10510,7 +10692,8 @@ maxTokens: 1,
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
                     && prepared.promptSnapshotAttachesToContinuousBatchRow,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
-                    ? prepared.promptResumeBoundaries : nil
+                    ? prepared.promptResumeBoundaries : nil,
+                smallMRoute: requestSmallMRoute
             )
         }
         var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
@@ -10530,6 +10713,7 @@ maxTokens: 1,
                 rebeginCold: { await beginLease(cold: nil) }
             )
         }
+        Self.logSmallMRouteStoredRouteStale(ticket: smallMRouteTicket, lease: lease)
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         let retainedNativeMTPDrafter = Self.retainedNativeMTPDrafterResume(for: lease)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -10581,7 +10765,8 @@ maxTokens: 1,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
-            nativeMTPAdmission: nativeMTPAdmission
+            nativeMTPAdmission: nativeMTPAdmission,
+            smallMRoute: requestSmallMRoute
         )
         let result: ContinuousBatchSchedulerResult
         let timeline = RequestTimeline.current ?? RequestTimeline()
@@ -10594,6 +10779,7 @@ maxTokens: 1,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
+                    smallMRouteTicket.noteOutputToken(index: event.tokenIndex)
                     Self.noteContinuousBatchTokenEvent(event, on: timeline)
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
@@ -10623,6 +10809,8 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
+            // The row has left the scheduler only once its retirement is checked.
+            smallMRouteTicket.end()
             await Self.endContinuousBatchLeaseAfterFailure(
                 lease,
                 cancelled: !drainCancelled.isFired
@@ -10637,6 +10825,7 @@ maxTokens: 1,
             // streaming and non-streaming paths cannot drift.
             throw error
         }
+        smallMRouteTicket.end()
         Self.noteContinuousBatchRowReturned(result, on: timeline)
         do {
             if let error = streamState.error() {
@@ -11048,6 +11237,12 @@ maxTokens: boundedMaxTokens,
             emitTelemetry: true
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
+        // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
+        // row-invariant in flight from now, so an ordinary request that
+        // reaches admission first still joins row-invariant.
+        let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
+            ? SmallMRouteRequestCounter.shared.reserveNative() : nil
+        defer { smallMRouteReservation?.end() }
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -11059,12 +11254,16 @@ maxTokens: boundedMaxTokens,
             snapshot: snapshot,
             capability: continuousBatchingCapability,
             nativeMTPAdmission: nativeMTPAdmission,
+            smallMRouteReservation: smallMRouteReservation,
             completionStartedAt: completionStartedAt,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
         ) {
             return (completion, snapshot)
         }
+        // The request runs serial from here: it is no longer a row-invariant
+        // CB request that ordinary admissions should join.
+        smallMRouteReservation?.end()
         CBTrace.log(request.requestID, "rt_serial_path")
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
@@ -12043,6 +12242,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             emitTelemetry: false
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
+        // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
+        // row-invariant in flight from now, so an ordinary request that
+        // reaches admission first still joins row-invariant.
+        let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
+            ? SmallMRouteRequestCounter.shared.reserveNative() : nil
+        defer { smallMRouteReservation?.end() }
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -12074,6 +12279,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 snapshot: snapshot,
                 capability: continuousBatchingCapability,
                 nativeMTPAdmission: nativeMTPAdmission,
+                smallMRouteReservation: smallMRouteReservation,
                 completionStartedAt: batchedCompletionStartedAt,
                 shouldCancel: shouldCancel,
                 drainCancelled: drainCancelled,
@@ -12086,6 +12292,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         if let completion = batchedCompletion {
             return completion
         }
+        // The request runs serial from here (see the non-streaming path).
+        smallMRouteReservation?.end()
         if speculativeCacheWrapValidated,
            let testSpeculativeStream,
            Self.speculativeRoute(
@@ -13869,14 +14077,20 @@ maxTokens: maxTokens,
     /// process refuses it too: a verify window of three or more rows takes
     /// the batch kernel, which may differ from the request's own one-row
     /// decode (SPEC-048 R015/R016). `SmallMRoute.decide` keeps any process
-    /// whose native MTP may activate on the row-invariant route, so this is
-    /// reached only if an admission set appears after startup.
-    nonisolated static func nativeMTPActivationRefusal(mode: NativeMTPMode, route: SmallMRoute) -> String? {
+    /// whose native MTP may activate on the row-invariant route or `mixed`,
+    /// so this is reached only if an admission set appears after startup. A
+    /// `mixed` process (v0.3.61) allows it: each native-admitted request
+    /// runs the row-invariant route.
+    nonisolated static func nativeMTPActivationRefusal(
+        mode: NativeMTPMode,
+        route: SmallMRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
         switch route {
         case .rowInvariant: return nil
         case .serialOnly: return "small_m_route_serial_only"
-        case .stockOrder: return "small_m_route_stock_order"
+        case .stockOrder: return mixed ? nil : "small_m_route_stock_order"
         }
     }
 
@@ -15674,16 +15888,26 @@ maxTokens: maxTokens,
         _ lease: ConversationCacheLease?,
         prepared: ContinuousBatchPreparedRequest
     ) -> Bool {
-        guard prepared.promptSnapshotAttachesToContinuousBatchRow,
-              let lease, lease.cachedPromptTokens > 0,
-              prepared.promptResumeBoundaries.contains(lease.cachedPromptTokens),
-              let reusable = lease.reusableCache,
-              reusable.promptSnapshot,
-              reusable.resumeBoundaryPlan,
-              reusable.retainedPagedKVSequence == nil,
-              lease.reusableCanonicalPromptTokens?.count == lease.cachedPromptTokens
-        else { return false }
-        return true
+        guard let lease, let reusable = lease.reusableCache else { return false }
+        return hasAttachablePromptSnapshot(
+            promptSnapshotAttaches: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
+            cachedPromptTokens: lease.cachedPromptTokens,
+            promptSnapshot: reusable.promptSnapshot, resumeBoundaryPlan: reusable.resumeBoundaryPlan,
+            retainedPagedKV: reusable.retainedPagedKVSequence != nil,
+            reusableCanonicalTokenCount: lease.reusableCanonicalPromptTokens?.count)
+    }
+
+    /// `leaseHasAttachablePromptSnapshot` on the facts it reads, shared with
+    /// the admission lookup (SPEC-038 FR-CB9 v0.3.65).
+    nonisolated static func hasAttachablePromptSnapshot(
+        promptSnapshotAttaches: Bool, promptResumeBoundaries: [Int], cachedPromptTokens: Int,
+        promptSnapshot: Bool, resumeBoundaryPlan: Bool, retainedPagedKV: Bool, reusableCanonicalTokenCount: Int?
+    ) -> Bool {
+        promptSnapshotAttaches && cachedPromptTokens > 0
+            && promptResumeBoundaries.contains(cachedPromptTokens)
+            && promptSnapshot && resumeBoundaryPlan && !retainedPagedKV
+            && reusableCanonicalTokenCount == cachedPromptTokens
     }
 
     /// The snapshot a CB row installs for `lease`, or nil.

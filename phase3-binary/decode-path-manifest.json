@@ -31,7 +31,8 @@
     "Sources/macprovider-cli/PagedQwen4ExpCache.swift",
     "Sources/macprovider-cli/ReasoningOutput.swift",
     "Sources/macprovider-cli/ServeDecodePath.swift",
-    "Sources/macprovider-cli/SmallMRoute.swift"
+    "Sources/macprovider-cli/SmallMRoute.swift",
+    "Sources/macprovider-cli/SmallMRouteScope.swift"
   ],
   "dependencies": [
     "mlx-swift",

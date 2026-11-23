@@ -3508,7 +3508,10 @@ struct ServeCommand: AsyncParsableCommand {
             stockOrderFallback: smallMRouteStartupIdentity.flatMap {
                 smallMRouteVerdictStore.stockOrderFallback(startupIdentity: $0)
             },
-            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant
+            operatorForcesRowInvariant: resolved.smallMRouteRowInvariant,
+            // Only `mixed` reads it, and only native MTP can take `mixed`.
+            naxGPU: resolved.nativeMTPMode != .off && SmallMRoute.processNAXAvailable(),
+            inheritedPartialSums: SmallMRoute.keepsInheritedPartialSums
         )
         #if MACPROVIDER_LAB_HARNESS
         // Lab measurement only: run the same serve on a chosen batching route
@@ -3526,27 +3529,38 @@ struct ServeCommand: AsyncParsableCommand {
         // SPEC-048-R013 pickup: the slot count the startup loader matches an
         // admission tuple on, read before the self-check lowers the served count.
         let nativeMTPLoaderSlotCount = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
-        let appliedSmallMRoute = SmallMRoute.apply(smallMRoute.route, reason: smallMRoute.reason)
+        let appliedSmallMRoute = SmallMRoute.apply(smallMRoute.route, reason: smallMRoute.reason, mixed: smallMRoute.mixed)
         FileHandle.standardError.write(Data(SmallMRoute.event(
             SmallMRoute.Decision(
                 route: appliedSmallMRoute,
-                reason: appliedSmallMRoute == smallMRoute.route ? smallMRoute.reason : "already_applied"
+                reason: appliedSmallMRoute == smallMRoute.route ? smallMRoute.reason : "already_applied",
+                mixed: SmallMRoute.processMixed
             ),
             fields: smallMRouteInputs.logFields
         ).utf8))
+        // SPEC-038 FR-CB9 (v0.3.61): the MLX core's process route, read once,
+        // must be the route this process decided before any model loads.
+        if let mismatch = SmallMRouteScope.processRouteMismatch(applied: appliedSmallMRoute) {
+            FileHandle.standardError.write(Data((mismatch + "\n").utf8))
+            throw ExitCode(2)
+        }
         // A one-row verdict this batching process applies moves the next
         // start of the same configuration to the serial route; a failure
         // measured on stock order moves it to the row-invariant route.
         let smallMRouteVerdictRecorder: SmallMRouteVerdictRecorder? = {
+            // A `mixed` process records a stock order failure as a
+            // `stock_order` process does (v0.3.61): its next start then
+            // keeps the row-invariant route process-wide.
             guard appliedSmallMRoute != .serialOnly,
                   let identity = smallMRouteStartupIdentity,
-                  SmallMRoute.verdictDecidesNextStart(smallMRouteInputs)
+                  SmallMRoute.verdictDecidesNextStart(smallMRouteInputs) || SmallMRoute.processMixed
             else { return nil }
             return SmallMRouteVerdictRecorder(
                 store: smallMRouteVerdictStore,
                 selfCheckStore: cbSelfCheckStore,
                 startupIdentity: identity,
                 route: appliedSmallMRoute,
+                inputs: smallMRouteInputs,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
         }()

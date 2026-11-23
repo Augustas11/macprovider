@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.86 (#2462) on 3.32.3-macprovider.85: The
+        // small-M route is set per request (SPEC-038 FR-CB9 `mixed`): native
+        // MTP graphs build under a row_invariant scope while ordinary requests
+        // keep stock order; the MLX core captures the route per quantized
+        // matmul at graph build. Other paths are unchanged.
         // Tag 3.32.3-macprovider.85 (#2451, #2448) on 3.32.3-macprovider.84:
         // GLM5Next prefill slices (`glm5NextPrefillSlicesKey`): the routed and
         // shared experts and dense MLPs run once over consecutive balanced
@@ -244,9 +249,14 @@ let package = Package(
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage. 10.10 batches GLM MTP indexer projections and
         // compatible per-column attention while retaining row-owned caches.
+        // #2462: branch macprovider/2462-route-on-main (bcffd492) is
+        // 3.32.3-macprovider.85 (8aa564db) with only the mlx-swift pin moved to
+        // aaa8265, .25 plus a per-op small-M route (core dd68f1d2d on .15, mlx-c
+        // 70f188c on v0.6.0-macprovider.2): QuantizedMatmul captures the route at
+        // graph build from a thread scope (withSmallMRoute).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "8aa564dbf780cb4bd88e3fb591981eae868780f4"
+            revision: "bcffd492b1d89d009e57278defd258e76ac78ab3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
