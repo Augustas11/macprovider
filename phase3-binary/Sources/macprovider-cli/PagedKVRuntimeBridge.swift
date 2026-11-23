@@ -7170,14 +7170,19 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         stagedValues.reserveCapacity(rowCaches.count)
         pendingResolutions.reserveCapacity(rowCaches.count)
         for (rowIndex, cache) in rowCaches.enumerated() {
-            let state = cache.state
             let map = rowMaps[rowIndex]
             let inputRange = 0 ..< map.inputCount
             let inputKeys = incomingKeys[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
             let inputValues = incomingValues[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
             let resolvedKeys: MLXArray
             let resolvedValues: MLXArray
-            if state.count == 2 {
+            // #2475: write the verify columns past the row's stored tokens in
+            // its own buffer instead of concatenating a full copy of its
+            // history per layer; same values, same shape.
+            if let staged = cache.stageUncommitted(keys: inputKeys, values: inputValues) {
+                resolvedKeys = staged.0
+                resolvedValues = staged.1
+            } else if case let state = cache.state, state.count == 2 {
                 resolvedKeys = concatenated([state[0], inputKeys], axis: 2)
                 resolvedValues = concatenated([state[1], inputValues], axis: 2)
             } else if cache.storedTokens == 0 {

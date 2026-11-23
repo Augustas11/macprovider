@@ -322,6 +322,50 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return !overflow && projectedOffset <= maxResidentTokens
     }
 
+    /// Native-MTP verification (#2475): writes `keys`/`values` into this
+    /// row's own buffers at `[storedTokens ..< storedTokens + n]` without
+    /// committing them, and returns the row's history with them appended,
+    /// the same values `concatenated([state, incoming])` gives. The slice
+    /// write reuses the buffer, so the verify step does not copy the whole
+    /// history per layer. `storedTokens`, `offset` and `mutationCount` stay
+    /// put: nothing past `storedTokens` is ever presented, and the commit's
+    /// `update` writes the accepted columns to the same slots again.
+    /// Returns nil (the caller concatenates) for a row riding a batch, an
+    /// empty row, a capacity overflow, or a dtype/shape mismatch.
+    func stageUncommitted(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)? {
+        slotLock.lock()
+        defer { slotLock.unlock() }
+        guard batchSlot == nil,
+              storedTokens > 0,
+              let keyBuffer,
+              let valueBuffer,
+              keys.ndim == 4,
+              values.ndim == 4,
+              keys.dim(2) == values.dim(2),
+              keys.dim(2) > 0,
+              Self.writesInPlace(keys, into: keyBuffer),
+              Self.writesInPlace(values, into: valueBuffer)
+        else {
+            return nil
+        }
+        let start = storedTokens
+        let (end, overflow) = start.addingReportingOverflow(keys.dim(2))
+        guard !overflow, end <= maxResidentTokens else { return nil }
+        let nextKeys = Self.write(keys, into: keyBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
+        let nextValues = Self.write(values, into: valueBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
+        self.keyBuffer = nextKeys
+        self.valueBuffer = nextValues
+        return (Self.prefix(nextKeys, end), Self.prefix(nextValues, end))
+    }
+
+    private static func writesInPlace(_ incoming: MLXArray, into buffer: MLXArray) -> Bool {
+        buffer.ndim == 4
+            && buffer.dim(0) == incoming.dim(0)
+            && buffer.dim(1) == incoming.dim(1)
+            && buffer.dim(3) == incoming.dim(3)
+            && buffer.dtype == incoming.dtype
+    }
+
     /// Bookkeeping of `update` for an attached row whose batch already wrote
     /// the `incomingTokens` new tokens into its row of the batch buffers.
     func advanceInBatch(_ incomingTokens: Int) {
