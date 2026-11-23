@@ -8900,8 +8900,6 @@ private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafter
 private final class RuntimeBridgePromptFreePackedMTPDrafter: Module, MTPPackedStatefulDrafterModel {
     let maximumBlockSize: Int? = 2
     let requiresGreedySampling = true
-
-    func validateCompatibility(with target: any LanguageModel) throws {}
     private let lock = NSLock()
     private var packedAdvances = 0
 
@@ -8968,8 +8966,6 @@ private final class RuntimeBridgePromptFreePackedMTPDrafter: Module, MTPPackedSt
 private final class RuntimeBridgeOracleGemmaDrafter: Module, MTPPackedStatefulDrafterModel {
     let maximumBlockSize: Int? = 2
     let requiresGreedySampling = true
-
-    func validateCompatibility(with target: any LanguageModel) throws {}
     private let reference: [Int]
     private let promptLength: Int
     private let vocabulary: Int
