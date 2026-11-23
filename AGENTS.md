@@ -127,6 +127,24 @@ while sessions regenerated evidence instead of deploying. Each is binding.
       checkout to the operator.
     - Why: on 2026-11-12 a development Mac ran out of disk because merged
       campaigns had left worktrees, builds and model copies behind.
+15. **Speed is part of done for every port.** A new model or engine port is
+    done only when it matches the reference on output and on speed in the
+    same port PR.
+    - Output: greedy tokens match the reference oracle (`glm-parity`).
+    - Speed: 1-row decode tok/s and prefill tok/s are each at least 95% of
+      the reference (mlx-lm or mlx-vlm, or the family's reference in
+      `docs/runbooks/model-family-performance-intake.md`). Measure on the
+      same weights, prompt and token count, at 1K, 8K and 32K, in the same
+      Studio window.
+    - Port from the reference's fast path (its compiled step and fused
+      kernels), not only its portable path. Reuse the fork's shared fast
+      building blocks before writing new ones, and move new ones into shared
+      code.
+    - The catalog row waits for both checks. A speed shortfall is fixed in
+      the port PR, never filed as a later catch-up campaign.
+    - Why: GLM and others needed separate catch-up campaigns after their
+      ports (#2451, #2474), and Inkling 2 Mini reached exact parity at
+      17 tok/s against mlx-vlm's 29 (#2467).
 
 ## Project Overview
 
