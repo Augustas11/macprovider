@@ -136,6 +136,9 @@ var exactModelKeyAliases = map[string]string{
 	"inkling-2-mini":                           "thinkingmachines/inkling-2-mini",
 	"aug11/inkling-2-mini-oq4e-mtp-uncensored": "openuncensored/inkling-2-mini-uncensored",
 	"inkling-2-mini-uncensored":                "openuncensored/inkling-2-mini-uncensored",
+	// DaisyRose-27B's served mlx-community artifact normalizes to the bare
+	// name, which bills as its catalog key (#2465).
+	"daisyrose-27b": "radixark/daisyrose-27b",
 }
 
 func normalizeServedAlias(namespace, key string) string {

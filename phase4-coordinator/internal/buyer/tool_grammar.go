@@ -46,6 +46,9 @@ func toolGrammarFamily(model string) string {
 		return toolGrammarGemma4
 	case strings.Contains(id, "nemotron-3"), strings.Contains(id, "nemotron3"):
 		return toolGrammarQwen
+	case isDaisyRose27B(id):
+		// DaisyRose-27B (#2465) ships the Qwen3.8-27B template; exact ids only.
+		return toolGrammarQwen
 	case strings.Contains(id, "deepseek-v4"), strings.Contains(id, "deepseek_v4"):
 		return toolGrammarDSML
 	case strings.Contains(id, "lfm2.5-24b-a2b"):
@@ -59,6 +62,15 @@ func toolGrammarFamily(model string) string {
 		return toolGrammarInkling2
 	}
 	return ""
+}
+
+// isDaisyRose27B reports the exact DaisyRose-27B catalog identities (#2465).
+func isDaisyRose27B(model string) bool {
+	switch strings.ToLower(model) {
+	case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit":
+		return true
+	}
+	return false
 }
 
 // requestDeclaresTools reports a non-empty `tools` array in the raw body.

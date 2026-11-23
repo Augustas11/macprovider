@@ -131,8 +131,9 @@ func TestRateFor_NormalizesGLM53FlashAliasesExactly(t *testing.T) {
 // abliterated and uncensored builds (#2189, #2244), Ripple-65B Preview's
 // served artifact (#2270), LFM3 1.7B's MLX artifacts (#2231), Nemotron 3.5
 // Bolt's served artifact (#2329), DeepSeek-V4-Flash and the abliterated
-// DeepSeek-V4-Flash and Qwen3.8-Flash-Next artifacts and Inkling-2-Mini's and
-// its uncensored build's served artifacts and bare names (#2467) only, so no other model's normalization can
+// DeepSeek-V4-Flash and Qwen3.8-Flash-Next artifacts, Inkling-2-Mini's and
+// its uncensored build's served artifacts and bare names (#2467) and
+// DaisyRose-27B's served artifact (#2465) only, so no other model's normalization can
 // change through it.
 func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 	want := map[string]string{
@@ -157,6 +158,7 @@ func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 		"inkling-2-mini":                                        "thinkingmachines/inkling-2-mini",
 		"aug11/inkling-2-mini-oq4e-mtp-uncensored":              "openuncensored/inkling-2-mini-uncensored",
 		"inkling-2-mini-uncensored":                             "openuncensored/inkling-2-mini-uncensored",
+		"daisyrose-27b":                                         "radixark/daisyrose-27b",
 	}
 	if len(exactModelKeyAliases) != len(want) {
 		t.Fatalf("exactModelKeyAliases = %v, want %v", exactModelKeyAliases, want)

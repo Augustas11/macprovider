@@ -54,6 +54,7 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
             || id.contains("llama3.1") || id.contains("llama3.2") || id.contains("llama3.3") { return .llama3 }
         if id.contains("gemma-4") || id.contains("gemma4") { return .gemma4 }
         if id.contains("nemotron-3") || id.contains("nemotron3") { return .qwen }
+        if isDaisyRose27B(id) { return .qwen }
         if id.contains("deepseek-v4") || id.contains("deepseek_v4") { return .dsml }
         if id.contains("lfm2.5-24b-a2b") { return .lfm2 }
         if isMiniMaxM3(id) { return .minimax }
@@ -65,6 +66,15 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     /// and the uncensored rows.
     static func isInkling2(_ lowercasedID: String) -> Bool {
         lowercasedID.contains("inkling-2") || lowercasedID.contains("inkling2")
+    }
+
+    /// DaisyRose-27B (#2465) ships the Qwen3.8-27B chat template byte for
+    /// byte. Exact catalog identities only.
+    static func isDaisyRose27B(_ lowercasedID: String) -> Bool {
+        switch lowercasedID {
+        case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit": return true
+        default: return false
+        }
     }
 
     /// MiniMax M3 and M3.1 (`MiniMax-M3.1-Flash`). Earlier MiniMax

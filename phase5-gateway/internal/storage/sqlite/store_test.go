@@ -1933,6 +1933,20 @@ func TestValidDemandModelIDKnowsInkling2MiniIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2465: the stored allowlist matches the router's for DaisyRose-27B.
+func TestValidDemandModelIDKnowsDaisyRoseIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"radixark/daisyrose-27b", "mlx-community/DaisyRose-27B-4bit"} {
+		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
+			t.Errorf("%q must be a known demand model id", model)
+		}
+	}
+	for _, model := range []string{"radixark/daisyrose-27bx", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit", "radixark/DaisyRose-27B"} {
+		if validDemandModelID(model) {
+			t.Errorf("%q must not be a known demand model id", model)
+		}
+	}
+}
+
 // #2236: the stored allowlist matches the router's for Nemotron 3.5 Lightning.
 func TestValidDemandModelIDKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {
 	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit"} {
