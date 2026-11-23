@@ -1263,12 +1263,15 @@ enum ContinuousBatchPrefillGrouping {
     /// with its next chunks in the same turn when no row is decoding, so it
     /// holds up to `min(remaining, tokenBudget)` tokens. A peer with a different number
     /// of tokens left joins only within what that leaves.
+    /// (v0.3.66, #2478) With `otherOffsetPeersFinishWithHead`, a peer at
+    /// another offset joins only when it finishes with the head.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
         tokenBudget: Int,
         cohortTokenBudget: Int? = nil,
-        minimumGroupedChunkTokens: Int = 1
+        minimumGroupedChunkTokens: Int = 1,
+        otherOffsetPeersFinishWithHead: Bool = false
     ) -> ContinuousBatchPrefillGroup? {
         guard let head = candidates.first, head.naturalChunkTokens > 0 else { return nil }
         let length = head.naturalChunkTokens
@@ -1288,6 +1291,7 @@ enum ContinuousBatchPrefillGrouping {
                 continue
             }
             let atHeadOffset = candidate.promptOffset == head.promptOffset
+            if otherOffsetPeersFinishWithHead, !atHeadOffset, !finishesWithHead { continue }
             guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
                 continue
             }
@@ -7337,12 +7341,22 @@ actor ContinuousBatchScheduler {
             ))
             rowsByID[id] = row
         }
+        // #2478 (v0.3.66): with no row decoding, a row that arrived after the
+        // head began its prompt and cannot finish with it waits for the head's
+        // first token. In a shared forward its chunk only delays that token
+        // (no decode is stalled to save), and it would leave the head's turn
+        // at an offset the rows arriving after it never reach, so they could
+        // not coalesce. Rows arriving during one prompt then prefill
+        // together, at one offset, after it. A serial-cohort backend
+        // (`prefillForwardTokenCap`) already runs such peers after the head
+        // (`splitSerialCohort`) and keeps its rule.
         guard let group = ContinuousBatchPrefillGrouping.select(
             candidates,
             maxRows: configuration.maxPrefillRowsPerIteration,
             tokenBudget: min(tokenBudget, configuration.maxPrefillTokensPerIteration),
             cohortTokenBudget: tokenBudget,
-            minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens
+            minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens,
+            otherOffsetPeersFinishWithHead: activeDecode.isEmpty && backend.prefillForwardTokenCap == nil
         ) else {
             return []
         }

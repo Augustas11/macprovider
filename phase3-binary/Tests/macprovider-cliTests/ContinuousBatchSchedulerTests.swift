@@ -7036,7 +7036,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
     }
 
-    func testRaggedPrefillGroupsRowsAtDifferentOffsetsWithOneChunkLength() async throws {
+    /// #2478 (SPEC-038 v0.3.66): rows that arrive while the head's prompt
+    /// prefills with no row decoding do not join the head's forwards at
+    /// their offset 0. The head's first token pays for no peer chunk, and
+    /// the arrivals stay at one offset and prefill together after it.
+    func testIdleRaggedArrivalsWaitForTheHeadAndCoalesceAtOneOffset() async throws {
         let prefillGate = AsyncGate()
         let backend = ScriptedBackend(
             scripts: ["row-1": [101], "row-2": [102], "row-3": [103]],
@@ -7093,11 +7097,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let committed = await backend.prefillCommittedCounts()
         let targets = await backend.prefillTargetCounts()
         XCTAssertEqual(committed.count, targets.count)
-        // The FCFS head at offset 2 leads the two new rows at offset 0.
-        XCTAssertTrue(
-            committed.contains(["row-1": 2, "row-2": 0, "row-3": 0]),
-            "\(committed)"
-        )
+        // The head prefills alone; the two arrivals share one forward at
+        // offset 0 once the head's prompt is done.
+        XCTAssertEqual(Array(committed.prefix(3)), [["row-1": 0], ["row-1": 2], ["row-2": 0, "row-3": 0]])
+        XCTAssertFalse(committed.contains { $0["row-1"] != nil && $0.count > 1 }, "\(committed)")
         // Every call advances all of its rows by one shared chunk length.
         for (callCommitted, callTargets) in zip(committed, targets) {
             let lengths = Set(callCommitted.map { id, start in (callTargets[id] ?? start) - start })
@@ -7241,11 +7244,53 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
-    func testNativePromptRowJoinsARaggedGroupOnlyWithBackendCapability() async throws {
-        // SPEC-048 R015 gated cells: kept out of ragged groups, a native row
-        // prefilled alone, ahead of the rows arriving with it, whose prefill
-        // then stalled its decode. With the backend capability it takes its
-        // FCFS turn in the group.
+    /// #2478 (SPEC-038 v0.3.66): the R015 `s4-p1536-o512` gated shape. The
+    /// head is one 385-token chunk into its 1540-token prompt when three rows
+    /// arrive at offset 0. Without the flag (rows decoding) the leftover
+    /// budget takes two of them into the head's forward and leaves the third
+    /// behind; with it (no row decoding) none joins, so all three stay at
+    /// offset 0. Rows at the head's offset, and a row at another offset that
+    /// finishes with the head, are unaffected.
+    func testIdleRaggedPeersJoinTheHeadOnlyWhenTheyFinishWithIt() {
+        func candidate(_ id: String, offset: Int, remaining: Int) -> ContinuousBatchPrefillCandidate {
+            .init(requestID: id, promptOffset: offset, naturalChunkTokens: 385,
+                  sharesRaggedOffsets: true, remainingPromptTokens: remaining)
+        }
+        let arrivals = [
+            candidate("head", offset: 385, remaining: 1_155),
+            candidate("r1", offset: 0, remaining: 1_540),
+            candidate("r2", offset: 0, remaining: 1_540),
+            candidate("r3", offset: 0, remaining: 1_540),
+        ]
+        func select(_ candidates: [ContinuousBatchPrefillCandidate], idle: Bool) -> [String]? {
+            ContinuousBatchPrefillGrouping.select(
+                candidates, maxRows: 4, tokenBudget: 2_048, cohortTokenBudget: 2_048,
+                otherOffsetPeersFinishWithHead: idle
+            )?.requestIDs
+        }
+        XCTAssertEqual(select(arrivals, idle: false), ["head", "r1", "r2"])
+        XCTAssertEqual(select(arrivals, idle: true), ["head"])
+        // Once the head is done the arrivals are one equal-offset cohort.
+        XCTAssertEqual(select(Array(arrivals.dropFirst()), idle: true), ["r1", "r2", "r3"])
+        // Same-offset peers keep the v0.3.46 leftover rule; a ragged peer
+        // that finishes with the head still shares its forward.
+        let mixed = [
+            candidate("head", offset: 385, remaining: 1_155),
+            candidate("same-offset", offset: 385, remaining: 1_540),
+            candidate("finishes", offset: 770, remaining: 1_155),
+            candidate("ragged", offset: 200, remaining: 1_340),
+        ]
+        XCTAssertEqual(select(mixed, idle: true), ["head", "same-offset", "finishes"])
+        XCTAssertEqual(select(mixed, idle: false), ["head", "same-offset", "finishes", "ragged"])
+    }
+
+    /// #2478 (SPEC-038 v0.3.66): with no row decoding, rows arriving while
+    /// a native row's prompt prefills (the R015 gated cells' first native
+    /// row) wait for its first token, with or without the Qwen capability,
+    /// exactly as ordinary arrivals behind an ordinary head do. They then
+    /// prefill together at offset 0 instead of one of them riding the
+    /// native head's forwards and leaving the others behind.
+    func testIdleArrivalsBehindANativeHeadCoalesceAfterItWithOrWithoutTheCapability() async throws {
         for joins in [true, false] {
             let prefillGate = AsyncGate()
             let backend = ScriptedBackend(
@@ -7290,13 +7335,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             for task in ordinary { _ = try await task.value }
 
             let committed = await backend.prefillCommittedCounts()
-            if joins {
-                // The native head at offset 2 leads the two new rows at offset 0.
-                XCTAssertTrue(committed.contains(["native": 2, "ordinary-1": 0, "ordinary-2": 0]), "\(committed)")
-            } else {
-                XCTAssertTrue(committed.contains(["native": 2]), "\(committed)")
-                XCTAssertFalse(committed.contains { $0["native"] != nil && $0.count > 1 }, "\(committed)")
-            }
+            XCTAssertEqual(
+                Array(committed.prefix(3)),
+                [["native": 0], ["native": 2], ["ordinary-1": 0, "ordinary-2": 0]],
+                "joins=\(joins) \(committed)"
+            )
+            XCTAssertFalse(committed.contains { $0["native"] != nil && $0.count > 1 }, "\(committed)")
             let prefills = await backend.prefillInputs()
             XCTAssertTrue(prefills.filter { $0.requestID == "native" }.allSatisfy(\.nativeMTPPromptPrefill))
             XCTAssertFalse(prefills.filter { $0.requestID != "native" }.contains(where: \.nativeMTPPromptPrefill))
@@ -7305,63 +7349,104 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
-    func testAFailedPeerInARaggedGroupWithANativeRowFailsAlone() async throws {
-        let prefillGate = AsyncGate()
+    /// A row decodes throughout while a native row ("native", 8 tokens) and
+    /// a longer ordinary row ("o1", 16 tokens) prefill in 2-token chunks
+    /// under an 8-token budget: the shape of
+    /// `testBudgetGoesToTheHeadPromptFirstAcrossFourK8K16KArrivals` with a
+    /// native head.
+    private func nativeHeadBesideADecodingRow(
+        joins: Bool,
+        prefillRowFailures: Set<String> = []
+    ) async throws -> (backend: ScriptedBackend, results: [String: ContinuousBatchSchedulerResult]) {
+        let runningOutputTokens = 64
         let backend = ScriptedBackend(
-            scripts: ["ordinary-1": [102], "ordinary-2": [103]],
-            prefillGate: prefillGate,
-            prefillRowFailures: ["ordinary-1"],
+            scripts: ["running": Array(repeating: 1, count: runningOutputTokens), "o1": [103]],
+            prefillRowFailures: prefillRowFailures,
             nativeTargetTopTokens: ["native": [5]]
         )
         let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 64),
             maxActiveRows: 3,
             maxPromptChunkTokens: 2,
+            tokenDeliveryBufferLimit: runningOutputTokens,
+            maxDecodeStepsWhilePrefilling: 2,
             maxPrefillRowsPerIteration: 3,
-            maxPrefillTokensPerIteration: 6,
+            maxPrefillTokensPerIteration: 8,
             allowsRaggedPrefillOffsets: true,
-            nativeMTPPromptRowsJoinRaggedPrefill: true,
-            backend: backend
+            nativeMTPPromptRowsJoinRaggedPrefill: joins,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
         )
-        let native = Task {
-            try await scheduler.submit(Self.nativeRequest(
-                id: "native",
-                promptTokens: [1, 2, 3, 4],
-                maxOutputTokens: 1,
-                proposals: [5],
-                maximumDepth: 1
-            ))
-        }
-        try await eventually { await backend.prefillCallCount() == 1 }
-        let ordinary = (1...2).map { index in
-            Task {
-                try await scheduler.submit(.init(
-                    id: "ordinary-\(index)",
-                    conversationKey: "",
-                    promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3, index * 10 + 4],
-                    maxOutputTokens: 1,
-                    temperature: 0.0,
-                    topP: 1.0
-                ))
+        let ids = ["running", "native", "o1"]
+        let installed = await scheduler.installLabBatchComposition(ids)
+        XCTAssertTrue(installed)
+        var tasks: [(String, Task<ContinuousBatchSchedulerResult, Error>)] = []
+        for (index, id) in ids.enumerated() {
+            let request: ContinuousBatchSchedulerRequest
+            switch id {
+            case "native":
+                request = Self.nativeRequest(
+                    id: id, promptTokens: Array(1 ... 8), maxOutputTokens: 1, proposals: [5], maximumDepth: 1
+                )
+            case "o1":
+                request = .init(id: id, conversationKey: "", promptTokens: Array(1 ... 16), maxOutputTokens: 1)
+            default:
+                request = .init(id: id, conversationKey: "", promptTokens: [1], maxOutputTokens: runningOutputTokens)
+            }
+            tasks.append((id, Task { try await scheduler.submit(request) }))
+            if index < ids.count - 1 {
+                try await eventually { await scheduler.metrics().waitingCount == index + 1 }
             }
         }
-        try await eventually { await scheduler.metrics().waitingCount >= 2 }
-        await prefillGate.open()
-
-        let nativeResult = try await native.value
-        let failed = try await ordinary[0].value
-        let peer = try await ordinary[1].value
-        let committed = await backend.prefillCommittedCounts()
-        XCTAssertTrue(committed.contains(["native": 2, "ordinary-1": 0, "ordinary-2": 0]), "\(committed)")
-        XCTAssertEqual(nativeResult.terminalStatus, .length)
-        XCTAssertEqual(nativeResult.outputTokens.count, 1)
-        XCTAssertEqual(failed.terminalStatus, .requestFailed)
-        XCTAssertEqual(failed.errorCode, "continuous_batching_prefill_failed")
-        XCTAssertEqual(peer.terminalStatus, .length)
-        XCTAssertEqual(peer.outputTokens, [103])
-        let finished = await backend.finishedRequests()
-        XCTAssertEqual(Set(finished), ["native", "ordinary-1", "ordinary-2"])
+        var results: [String: ContinuousBatchSchedulerResult] = [:]
+        for (id, task) in tasks { results[id] = try await task.value }
         let metrics = await scheduler.metrics()
         XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+        return (backend, results)
+    }
+
+    func testNativePromptRowJoinsARaggedGroupWhileRowsDecodeOnlyWithBackendCapability() async throws {
+        // SPEC-048 R015 gated cells: kept out of ragged groups, a native row
+        // prefilled alone, ahead of the rows arriving with it, whose prefill
+        // then stalled its decode. While a row decodes, the backend
+        // capability lets it take its FCFS turn in the group; the longer
+        // peer shares only the head's last budget of chunks.
+        for joins in [true, false] {
+            let (backend, results) = try await nativeHeadBesideADecodingRow(joins: joins)
+            XCTAssertEqual(results["native"]?.terminalStatus, .length)
+            XCTAssertEqual(results["o1"]?.outputTokens, [103])
+            let order = await backend.prefillOrder()
+            if joins {
+                XCTAssertEqual(
+                    order,
+                    [["running"], ["native"]] + Array(repeating: ["native", "o1"], count: 3)
+                        + Array(repeating: ["o1"], count: 5),
+                    "\(order)"
+                )
+            } else {
+                XCTAssertEqual(
+                    order,
+                    [["running"]] + Array(repeating: ["native"], count: 4) + Array(repeating: ["o1"], count: 8),
+                    "\(order)"
+                )
+            }
+            let prefills = await backend.prefillInputs()
+            XCTAssertTrue(prefills.filter { $0.requestID == "native" }.allSatisfy(\.nativeMTPPromptPrefill))
+            XCTAssertFalse(prefills.filter { $0.requestID != "native" }.contains(where: \.nativeMTPPromptPrefill))
+        }
+    }
+
+    func testAFailedPeerInARaggedGroupWithANativeRowFailsAlone() async throws {
+        let (backend, results) = try await nativeHeadBesideADecodingRow(joins: true, prefillRowFailures: ["o1"])
+        let committed = await backend.prefillCommittedCounts()
+        XCTAssertTrue(committed.contains(["native": 2, "o1": 0]), "\(committed)")
+        XCTAssertEqual(results["native"]?.terminalStatus, .length)
+        XCTAssertEqual(results["native"]?.outputTokens.count, 1)
+        XCTAssertEqual(results["o1"]?.terminalStatus, .requestFailed)
+        XCTAssertEqual(results["o1"]?.errorCode, "continuous_batching_prefill_failed")
+        XCTAssertEqual(results["running"]?.terminalStatus, .length)
+        let finished = await backend.finishedRequests()
+        XCTAssertEqual(Set(finished), ["running", "native", "o1"])
     }
 
     func testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed() throws {

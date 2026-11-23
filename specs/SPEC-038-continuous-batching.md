@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.65
+Version: v0.3.66
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.66 (2026-11-24, FR-CB2: with no row decoding, a ragged peer joins the head only when it finishes with it, Related: #2478):**
+On a backend that shares a prefill group in one forward (no
+flattened-token cap), while no row decodes, a prompt row at another offset
+than the head joins the head's forward only when it has as many prompt tokens
+left as the head. Rows that arrive while a prompt prefills therefore wait for
+its first token and then prefill together at one offset. Before, the
+per-iteration leftover let some of them ride the head's forwards: the head's
+first token paid for their chunks, and the rows that rode left the others at
+offset 0, so the arrivals prefilled in two groups instead of one. In the
+SPEC-048 R015 `s4-p1536-o512` gated cell this happened only on the native arm,
+whose text preparation lane (`qwen3_5_mtp_v1`) admits arrivals during the
+head's forwards; it cost the native row about 1.2 s of first-token latency
+and the gated TTFT p95 about +6% against ordinary CB with no MTP drafting.
+While a row decodes, and on a serial-cohort backend (v0.3.24, v0.3.49), the
+rule is unchanged. Each row keeps its own chunk partition, so no token
+changes.
+
 **Change log v0.3.65 (2026-11-23, FR-CB9 `mixed`: the stored route is read only for a turn that can hit, and a stock order entry beside `row_invariant` takes the cheaper of re-prefill and split, Related: #2462):**
 Admission reads the stored conversation-cache entry only for an ordinary
 request that may take a conversation-cache lease in a `mixed` process, and
@@ -1378,7 +1395,9 @@ original-shaped chunk in that same turn while the cumulative prefill work
 stays within the per-iteration budget, never the idle cohort allowance, and
 MUST NOT when a request waits for admission with a free slot; a peer that cannot finish with the head MUST join the
 head's forward only within the budget left after `min(head tokens left,
-budget)`. (v0.3.49) On a backend that runs a group past its flattened-token cap
+budget)`; (v0.3.66) on a backend without a flattened-token cap, while no row
+decodes, such a peer at another offset than the head MUST NOT join it.
+(v0.3.49) On a backend that runs a group past its flattened-token cap
 as one forward per row, such a peer MUST prefill after the forwards of the
 head and the rows finishing with it, in the same turn, with its chunk
 unchanged. A row ending on a SPEC-024-R005 resume or snapshot
