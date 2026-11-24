@@ -91,7 +91,7 @@ fg=$(free_gb)
 log "DISK free_gb=$fg min=$MIN_FREE_GB"
 [ "${fg:-0}" -ge "$MIN_FREE_GB" ] || die "only ${fg} GB free; need $MIN_FREE_GB (build, native-MTP whole-model capture)" 13
 for f in "$PKG/Package.swift" "$HERE/snapshot_id.py" "$CAT/autotune-candidates.json" "$CAT/trusted-keys.json" \
-         "$FEEDS/native-mtp-admission.json" "$FEEDS/native-mtp-admission.json.sig" "$FEEDS/native-mtp-artifact-manifest.json" \
+         "$FEEDS/autotune-artifacts.json" "$FEEDS/autotune-artifacts.json.sig" "$FEEDS/native-mtp-admission.json" "$FEEDS/native-mtp-admission.json.sig" "$FEEDS/native-mtp-artifact-manifest.json" \
          "$FEEDS/native-mtp-selftest-bank.json" "$FEEDS/native-mtp-selftest-bank.json.sig"; do
   [ -f "$f" ] || die "source tree incomplete: no $f" 11
 done
@@ -157,6 +157,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not name.startswith("/v1/") or "/" in name[4:] or name[4:] in ("", ".", ".."):
             return self.send_error(404)
         name = name[4:]
+        # The coordinator serves /v1/catalog-artifacts(.sig) from autotune-artifacts.json(.sig)
+        # (phase4-coordinator/dist/deploy-pearl-vps.sh STATIC_SMOKE_SPECS). Without this alias the
+        # provider got production's artifact feed for another release, and the native-MTP admission
+        # resolve returned unavailable (MacProviderCLI.resolveNativeMTPAdmission release_id guard).
+        name = {"catalog-artifacts": "autotune-artifacts", "catalog-artifacts.sig": "autotune-artifacts.sig"}.get(name, name)
         candidates = [name, name + ".json"]
         if name.endswith(".sig"):
             candidates.append(name[:-4] + ".json.sig")
@@ -207,10 +212,11 @@ print("\n".join([f"model: {q(key)}", f"model_artifact_path: {q(path)}", f"model_
 PY
 cp "$S/config.yaml" "$RES/serve-config.yaml"
 log "SELFCHECK_SERVE_START model=$DAISY_KEY"
-# The small-M route verdict is recorded after the first load; until it exists native MTP is not admitted
-# (native_mtp_serve_path_admission rejected, small_m_route_stock_order). So: pass 1 serves until the
-# verdict is recorded and is stopped; pass 2 restarts on the persisted verdict, where native MTP is
-# admitted and the self-check runs at load. Any other admission refusal stops the job at once.
+# Native MTP needs a verified admission entry for the served artifact (small_m_route
+# mtp_admission=entry_for_model), which gives the `mixed` route; no self-check verdict is needed, and
+# a batching grant is never persisted as one (SmallMRouteVerdictStore.record keeps only one-row
+# verdicts and stock order fallbacks), so a restart cannot change the route. One pass: any admission
+# refusal, or a startup route with no admission entry, stops the job at once.
 start_serve() {
   ( export CFFIXED_USER_HOME=$S/home TMPDIR=$S/tmp/ MACPROVIDER_LIFECYCLE_ROOT=$S/home/lifecycle \
       MACPROVIDER_CTL_SOCKET_PATH=$S/tmp/ctl.sock MACPROVIDER_SWITCH_STATE_PATH=$S/tmp/last-switch.ts \
@@ -221,34 +227,24 @@ start_serve() {
     cd "$BIN" && exec ./macprovider-cli serve --config "$S/config.yaml" --no-join > "$RES/serve.out" 2> "$RES/serve.err" < /dev/null ) &
   SERVE_PID=$!
 }
-stop_serve() {
-  kill -TERM "$SERVE_PID" 2>/dev/null
-  for _ in $(seq 1 120); do kill -0 "$SERVE_PID" 2>/dev/null || break; sleep 0.5; done
-  kill -KILL "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null
-}
 admission() { grep -m1 '"event":"native_mtp_serve_path_admission"' "$RES/serve.err" 2>/dev/null; }
-for pass in 1 2; do
-  [ "$pass" = 2 ] && { cp "$RES/serve.err" "$RES/serve-pass1.err"; log "SELFCHECK_RESTART small-M verdict recorded; serving again for native MTP"; }
-  start_serve
-  last="" since=$(date +%s) restart=0
-  until grep -q 'event=native_mtp_self_check result=' "$RES/serve.err" 2>/dev/null; do
-    kill -0 "$SERVE_PID" 2>/dev/null || { FAILED=1; log "BLOCKER: serve exited before the self-check: $(tail -n 3 "$RES/serve.err" | tr '\n' ' ' | cut -c1-400)"; break; }
-    a=$(admission)
-    case "$a" in
-      *'"status":"rejected"'*)
-        if [ "$pass" = 1 ] && printf '%s' "$a" | grep -q small_m_route_stock_order; then
-          grep -q 'event=small_m_route action=verdict_recorded' "$RES/serve.err" && { restart=1; break; }
-        else
-          FAILED=1; log "BLOCKER: native MTP not admitted (pass $pass): $(printf '%s' "$a" | cut -c1-300)"; break
-        fi ;;
-    esac
-    cur=$(stat -f '%m %z' "$RES/serve.err" 2>/dev/null); now=$(date +%s)
-    if [ "$cur" != "$last" ]; then last=$cur; since=$now; fi
-    [ $((now - since)) -lt "$STALL_S" ] || { FAILED=1; log "BLOCKER: serve log stalled ${STALL_S}s before the self-check: $(grep -E 'native_mtp|lab_static_feed' "$RES/serve.err" | tail -n 3 | tr '\n' ' ' | cut -c1-400)"; break; }
-    sleep 5
-  done
-  [ "$restart" = 1 ] && [ "$FAILED" = 0 ] || break
-  stop_serve
+start_serve
+last="" since=$(date +%s)
+until grep -q 'event=native_mtp_self_check result=' "$RES/serve.err" 2>/dev/null; do
+  kill -0 "$SERVE_PID" 2>/dev/null || { FAILED=1; log "BLOCKER: serve exited before the self-check: $(tail -n 3 "$RES/serve.err" | tr '\n' ' ' | cut -c1-400)"; break; }
+  route=$(grep -m1 '^event=small_m_route mode=' "$RES/serve.err" 2>/dev/null)
+  case "$route" in
+    *mtp_admission=entry_for_model*|"") ;;
+    *) FAILED=1; log "BLOCKER: no native-MTP admission entry at startup: $(printf '%s' "$route" | cut -c1-300) feeds: $(grep -E 'catalog-artifacts|native-mtp' "$RES/feeds.log" | sort -u | tr '\n' ' ' | cut -c1-300)"; break ;;
+  esac
+  a=$(admission)
+  case "$a" in
+    *'"status":"rejected"'*) FAILED=1; log "BLOCKER: native MTP not admitted: $(printf '%s' "$a" | cut -c1-300)"; break ;;
+  esac
+  cur=$(stat -f '%m %z' "$RES/serve.err" 2>/dev/null); now=$(date +%s)
+  if [ "$cur" != "$last" ]; then last=$cur; since=$now; fi
+  [ $((now - since)) -lt "$STALL_S" ] || { FAILED=1; log "BLOCKER: serve log stalled ${STALL_S}s before the self-check: $(grep -E 'native_mtp|lab_static_feed' "$RES/serve.err" | tail -n 3 | tr '\n' ' ' | cut -c1-400)"; break; }
+  sleep 5
 done
 grep -E 'event=(native_mtp[a-z_]*|lab_static_feed_override)' "$RES/serve.err" | cut -c1-300 | sed 's/^/SELFCHECK_EVENT /'
 log "SELFCHECK_DONE $(grep -m1 'event=native_mtp_self_check result=' "$RES/serve.err" | cut -c1-200)"
