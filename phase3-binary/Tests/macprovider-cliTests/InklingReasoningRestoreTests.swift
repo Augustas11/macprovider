@@ -121,10 +121,10 @@ final class InklingReasoningRestoreTests: XCTestCase {
         XCTAssertEqual(history.count, 1)
         let followUp = firstTurn + [
             ["role": "assistant", "content": NSNull(), "tool_calls": [[
-                "id": "call_client", "type": "function",
+                "id": "call_clientWeatherOslo01", "type": "function",
                 "function": ["name": "weather", "arguments": #"{ "city": "Oslo" }"#],
             ]]],
-            ["role": "tool", "tool_call_id": "call_client", "content": "Clear"],
+            ["role": "tool", "tool_call_id": "call_clientWeatherOslo01", "content": "Clear"],
         ]
         let second = try request(followUp, history: history)
         let restored = try XCTUnwrap(second.outputState.reasoningHistory.restore(
