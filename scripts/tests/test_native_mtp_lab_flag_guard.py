@@ -30,15 +30,6 @@ LAB_BUILD_SURFACES = {
     # Dense qmm tile windows (#2451): build lab binaries on the Studio for TTFT A/B
     # cells; never a release or signing path.
     ROOT / "scripts" / "lab" / "2451" / "ship-job.sh",
-<<<<<<< HEAD
-=======
-    # Native-MTP verify profile window (#2469, #2475): builds the lab binary on the
-    # Studio for loopback verify-step timing; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2469" / "job.sh",
-    # Held native row prefill window (#2478): builds base and fix lab binaries on the
-    # Studio for A/B/A native-mtp-bench gated cells; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2478" / "job.sh",
->>>>>>> 9391ae832 (CB prefill: idle ragged arrivals wait for the head instead of riding its forwards)
 }
 LAB_ROOT = ROOT / "scripts" / "lab"
 
