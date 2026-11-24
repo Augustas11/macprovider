@@ -49,10 +49,10 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # controllers, short convolutions, router top-k, ring attention; new
 # MLXLMCommon kernel files and a read-only RotatingKVCache.ringRotation),
 # rebased unchanged from macprovider/2467-ollama-kernels (ea6f545c); no other
-# model's code changes. Measured on the 3.32.3 base (ea6f545c, Studio run
-# 20261124T062416Z): 64/64 greedy parity against mlx-vlm on both layouts; on
-# the oQ4e weights 46.4/45.6/41.0 decode tok/s at 1K/8K/32K, 160-166% of
-# mlx-vlm, prefill 98-107%; this revision is checked on the Studio next.
+# model's code changes. Measured on this revision (Studio run 20261124T073707Z):
+# 64/64 greedy parity against mlx-vlm on both layouts at 1K and 8K; on the oQ4e
+# weights 45.3/43.9/40.2 decode tok/s at 1K/8K/32K, 156-163% of mlx-vlm, prefill
+# 99-107%.
 SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.89"
 SPEC048_MLX_SWIFT_LM_REVISION = "10584fc0d79cf75b49115f0f42fd7b8c8f30c637"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"

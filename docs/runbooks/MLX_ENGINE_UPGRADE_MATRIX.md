@@ -55,10 +55,10 @@ residual mix, message controllers, short convolutions, router top-k, ring
 attention; new MLXLMCommon kernel files and a read-only
 RotatingKVCache.ringRotation), rebased unchanged from
 macprovider/2467-ollama-kernels (ea6f545c); no other model's code changes.
-Measured on the 3.32.3 base (ea6f545c, Studio run 20261124T062416Z): 64/64
-greedy parity against mlx-vlm on both layouts; on the oQ4e weights
-46.4/45.6/41.0 decode tok/s at 1K/8K/32K, 160-166% of mlx-vlm, prefill
-98-107%; this revision is checked on the Studio next. No Swift, core or C pin
+Measured on this revision (Studio run 20261124T073707Z): 64/64 greedy parity
+against mlx-vlm on both layouts at 1K and 8K; on the oQ4e weights 45.3/43.9/40.2
+decode tok/s at 1K/8K/32K, 156-163% of mlx-vlm, prefill 99-107%. No Swift, core
+or C pin
 changes.
 
 As of 2026-11-24 the LM row is `3.33.0-macprovider.88` (`73eb9cf`), the fork
