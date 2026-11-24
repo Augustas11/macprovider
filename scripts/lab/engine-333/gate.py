@@ -61,7 +61,7 @@ def main():
     ap.add_argument("dir")
     a = ap.parse_args()
     problems, info, warn = [], [], []
-    new = load(os.path.join(a.dir, "compare-new.json"))
+    new = None if a.new_only else load(os.path.join(a.dir, "compare-new.json"))
     # mtp pass: did base1 actually run native MTP? If it proposed no token, its cells are ordinary
     # decode and a new-vs-base1 speed delta compares native MTP against ordinary decode.
     base_mtp_ran = True
