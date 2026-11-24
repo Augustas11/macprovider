@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "704a461ee78daba6d5025efb6c7f89e18f5b6d1d161f63ff4e240ed2c8dfb26a",
-  "generated_at": "2026-11-24T17:15:00Z",
+  "autotune_candidates_sha256": "111e8f246a35201bd17d44c18af684f95c11de3a023b48deb20bbb65d906ea80",
+  "generated_at": "2026-11-24T23:33:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -74,7 +74,7 @@
     },
     {
       "catalog_key": "thinkingmachines/inkling-2-mini",
-      "min_ram_gb": 32,
+      "min_ram_gb": 28,
       "model_id": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
       "model_revision": "3eea042751cd296b7266628a8342c1749242e1fe",
       "sha256": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34"
@@ -221,6 +221,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-24-inkling-2-mini-recommendable-v296",
+  "release_id": "published-2026-11-25-inkling-2-mini-32gb-v296",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
