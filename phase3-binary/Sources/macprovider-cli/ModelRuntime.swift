@@ -17228,8 +17228,8 @@ maxTokens: maxTokens,
         let added = max(0, restoredCount - tokenCount(plain))
         // The restore must leave the request's whole output budget (and the
         // one free token a batched row needs) inside the context.
-        if let maxContextTokens,
-           restoredCount + max(1, request.maxTokens ?? 1) > maxContextTokens {
+        let needed = restoredCount.addingReportingOverflow(max(1, request.maxTokens ?? 1))
+        if let maxContextTokens, needed.overflow || needed.partialValue > maxContextTokens {
             state.withdraw()
             if state.claimReport() {
                 FileHandle.standardError.write(Data(
