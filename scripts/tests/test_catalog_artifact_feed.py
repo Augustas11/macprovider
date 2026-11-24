@@ -685,8 +685,6 @@ class RateCardSourceTest(unittest.TestCase):
             "nvidia/nemotron-3.5-bolt-74b-a9b",
             # #2376: the abliterated MiniMax M3.1-Flash build, class-120b-moe.
             "minimaxai/minimax-m3.1-flash-abliterated",
-            # #2467: Inkling-2-Mini is listed at its declared class rates.
-            "thinkingmachines/inkling-2-mini",
             # #2465: DaisyRose-27B, class-32b, priced by explicit rows at the
             # qwen3.8-27b rates.
             "radixark/daisyrose-27b",
@@ -708,6 +706,13 @@ class RateCardSourceTest(unittest.TestCase):
         self.assertEqual(demand["deepseek/deepseek-v4-flash-abliterated"]["demand_weight"], 0.15)
         self.assertLessEqual(demand["deepseek/deepseek-v4-flash-abliterated"]["demand_weight"],
                              demand["deepseek/deepseek-v4-flash"]["demand_weight"])
+        # #2467: Inkling-2-Mini is recommendable on its own class-30b-moe row
+        # at the gemma-4-26b-a4b-it rates, demand weight at the cold-start floor.
+        self.assertIn("thinkingmachines/inkling-2-mini", recommendable)
+        self.assertEqual(classes["thinkingmachines/inkling-2-mini"], "class-30b-moe")
+        self.assertEqual(demand["thinkingmachines/inkling-2-mini"]["demand_weight"], 0.15)
+        self.assertEqual(json.loads(RATE_CARD_SOURCE_BYTES)["rows"]["thinkingmachines/inkling-2-mini"],
+                         json.loads(RATE_CARD_SOURCE_BYTES)["rows"]["google-gemma-4-26b-a4b-it"])
         # #2189: MiniMax M3.1-Flash is recommendable at its class-120b-moe
         # class rate, with its demand weight at the cold-start floor.
         for key, rate_class in CLASS_ONLY_RECOMMENDABLE.items():
