@@ -1,11 +1,13 @@
-"""#2467: the staged Inkling-2-Mini catalog rows validate against the live tooling.
+"""#2467: the Inkling-2-Mini catalog rows validate against the live tooling.
 
-The rows in `docs/evidence/inkling-2-mini-intake-2026-11-24/staged-rows.json` are
-applied to the signed catalog inputs only at the cut, after the rule-15 speed
-gate passes. These tests keep them valid in the meantime: each staged fragment is
-merged into a copy of the committed input and run through the same validator
-`catalog-release.py generate` uses, and the artifact identity is checked
-against the committed snapshot manifest. The uncensored row's artifact is
+The base row is listed in the signed catalog inputs (release
+published-2026-11-24-inkling-2-mini-listed-v289); its fragments are read back
+from those inputs. The uncensored row stays in
+`docs/evidence/inkling-2-mini-intake-2026-11-24/staged-rows.json` until its
+artifact is published: each staged fragment is merged into a copy of the
+committed input and run through the same validator `catalog-release.py
+generate` uses, and the artifact identity is checked against the committed
+snapshot manifest. The uncensored row's artifact is
 published by `scripts/lab/2467/job-inkling2-uncensored.sh`; until then its
 revision, manifest hash and size are the placeholders its `placeholders` block
 names, and once filled its snapshot manifest must be committed and match.
@@ -35,7 +37,29 @@ def staged() -> dict:
     return json.loads(STAGED_PATH.read_text())
 
 
+def listed_base_row() -> dict:
+    """The base row's fragments as the signed catalog inputs carry them."""
+    def load(name: str) -> dict:
+        return json.loads((CATALOG / name).read_text())
+    candidate = load("autotune-candidates.json")["rows"][KEY]
+    sha = candidate["model_sha256"]
+    lines = catalog_release.COORDINATOR_YAML_PATH.read_text().splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"    {KEY}:"))
+    return {
+        "candidate_row": candidate,
+        "artifact_source_entry": load("autotune-artifacts-source.json")["models"][KEY],
+        "rate_card_row": load("rate-card-source.json")["rows"][KEY],
+        "acknowledged_pricing_moves": [m for m in load("acknowledged-pricing-moves.json")["moves"] if m["to_row"] == KEY],
+        "demand_rank_row": load("demand-rank.json")["rows"][KEY],
+        "tier2_catalog_model": next(m for m in load("tier2-catalog.json")["models"] if m["sha256"] == sha),
+        "tier2_identity_binding_model": next(m for m in load("tier2-identity-binding.json")["models"] if m["catalog_key"] == KEY),
+        "coordinator_rewards_row": "".join(lines[start:start + 4]),
+    }
+
+
 def staged_row(key: str = KEY) -> dict:
+    if key == KEY:
+        return listed_base_row()
     return staged()["rows"][key]
 
 
@@ -74,11 +98,13 @@ def check_manifest(case: unittest.TestCase, artifact: dict) -> list[str]:
 
 
 class StagedInkling2RowTests(unittest.TestCase):
-    def test_both_rows_are_staged_and_nothing_is_held(self):
+    def test_only_the_uncensored_row_is_staged_and_the_base_is_listed(self):
         value = staged()
         self.assertEqual(value["schema_version"], "macprovider.staged-catalog-rows.v1")
-        self.assertEqual(set(value["rows"]), {KEY, UNC_KEY})
+        self.assertEqual(set(value["rows"]), {UNC_KEY})
         self.assertNotIn("held", value)
+        self.assertEqual(staged_row()["candidate_row"]["runtime_status"], "listed")
+        self.assertEqual(primary(staged_row())["verification_status"], "verified")
 
     def test_identity_fragments_agree_within_each_row(self):
         for key in (KEY, UNC_KEY):
@@ -144,26 +170,28 @@ class StagedInkling2RowTests(unittest.TestCase):
         value = merged_candidates(KEY, UNC_KEY)
         catalog_release.validate_candidate(json.dumps(value).encode("utf-8"))
 
-    def test_artifact_entries_are_declared_now_and_valid_listed_at_the_cut(self):
+    def test_artifact_entries_are_valid_and_the_staged_one_is_declared_until_its_cut(self):
         source = json.loads((CATALOG / "autotune-artifacts-source.json").read_text())
         candidates = merged_candidates(KEY, UNC_KEY)
-        for key in (KEY, UNC_KEY):
-            row = staged_row(key)
-            entry = row["artifact_source_entry"]
-            catalog_release.validate_artifact_models({key: entry}, "staged", allow_unmeasured_size=False)
-            only = {"rows": {key: candidates["rows"][key]}}
-            with self.assertRaisesRegex(catalog_release.CatalogError, "requires a verified primary artifact"):
-                catalog_release.require_primary_artifact_consistency({key: entry}, only, "staged")
-            cut = at_cut(row)
-            catalog_release.validate_artifact_models({key: cut}, "staged", allow_unmeasured_size=False)
-            catalog_release.require_primary_artifact_consistency({key: cut}, only, "staged")
-            source["models"][key] = cut
+        base = staged_row()["artifact_source_entry"]
+        catalog_release.validate_artifact_models({KEY: base}, "listed", allow_unmeasured_size=False)
+        catalog_release.require_primary_artifact_consistency({KEY: base}, {"rows": {KEY: candidates["rows"][KEY]}}, "listed")
+        row = staged_row(UNC_KEY)
+        entry = row["artifact_source_entry"]
+        catalog_release.validate_artifact_models({UNC_KEY: entry}, "staged", allow_unmeasured_size=False)
+        only = {"rows": {UNC_KEY: candidates["rows"][UNC_KEY]}}
+        with self.assertRaisesRegex(catalog_release.CatalogError, "requires a verified primary artifact"):
+            catalog_release.require_primary_artifact_consistency({UNC_KEY: entry}, only, "staged")
+        cut = at_cut(row)
+        catalog_release.validate_artifact_models({UNC_KEY: cut}, "staged", allow_unmeasured_size=False)
+        catalog_release.require_primary_artifact_consistency({UNC_KEY: cut}, only, "staged")
+        source["models"][UNC_KEY] = cut
         catalog_release.require_unique_artifact_hashes(source["models"], "staged")
 
     def test_rate_row_validates_and_the_served_id_resolves_to_it(self):
         row = staged_row()
         source = json.loads((CATALOG / "rate-card-source.json").read_text())
-        self.assertNotIn(KEY, source["rows"])
+        self.assertIn(KEY, source["rows"])
         self.assertNotIn(UNC_KEY, source["rows"])
         source["rows"][KEY] = row["rate_card_row"]
         source["rows"][UNC_KEY] = staged_row(UNC_KEY)["rate_card_row"]

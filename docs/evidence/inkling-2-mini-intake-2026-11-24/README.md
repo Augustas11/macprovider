@@ -1,18 +1,23 @@
-# Inkling-2-Mini catalog intake (#2467), staged
+# Inkling-2-Mini catalog intake (#2467)
 
-Status: **staged, not listed.** The row lands only when the Swift port passes
-AGENTS.md rule 15: greedy parity, and 1-row decode and prefill each at least
-95% of mlx-vlm at 1K, 8K and 32K. The signed catalog inputs are unchanged.
+Status: **base row listed** in catalog release
+`published-2026-11-24-inkling-2-mini-listed-v289` (static feeds signed with
+`streamvc-autotune-static-v4`, Tier-2 pin signed with `catalog-key-2026q2`).
+The uncensored row stays in `staged-rows.json` until its artifact is
+published. `scripts/tests/test_inkling2_staged_rows.py` reads the base row
+back from the signed inputs and runs the staged row through the same
+validators `catalog-release.py generate` uses.
+
 Rule 15 passed on 2026-11-24 on the pinned engine (Studio run
 `20261124T073707Z`, fork `10584fc0`, `3.33.0-macprovider.89`, JOB_PASS):
 greedy parity 64/64 on both layouts at 1K and 8K; oQ4e decode 45.3/43.9/40.2
 tok/s at 1K/8K/32K with the levers on (26.1/25.2/22.4 off), 156-163% of
 mlx-vlm; prefill 99-107%. The earlier 3.32.3-base run `20261124T062416Z`
-(`ea6f545c`) measured 46.4/45.6/41.0 decode. `catalog-release.py` has no
-unsigned staged state (every row in the inputs is signed into the next
-`generate`), so the rows move into the inputs in a signing session. The
-row lives in `staged-rows.json`, and `scripts/tests/test_inkling2_staged_rows.py`
-runs it through the same validators `catalog-release.py generate` uses.
+(`ea6f545c`) measured 46.4/45.6/41.0 decode.
+
+At the cut the artifact entry became `verified` (2026-11-24) and the intake
+decision is `admit_listed` on the cold-start slot with tier target `<= 36 GB`
+(min_ram_gb 32 plus the 4 GB intake safety margin).
 
 ## Served artifact
 

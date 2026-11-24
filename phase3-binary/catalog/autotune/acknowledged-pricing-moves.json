@@ -111,6 +111,16 @@
       "model": "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
       "from_row": "default",
       "to_row": "deepseek/deepseek-v4-flash-abliterated"
+    },
+    {
+      "model": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+      "from_row": "default",
+      "to_row": "thinkingmachines/inkling-2-mini"
+    },
+    {
+      "model": "thinkingmachines/inkling-2-mini",
+      "from_row": "default",
+      "to_row": "thinkingmachines/inkling-2-mini"
     }
   ]
 }

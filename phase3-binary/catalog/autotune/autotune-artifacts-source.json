@@ -670,6 +670,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-120b-moe"
     },
+    "thinkingmachines/inkling-2-mini": {
+      "artifacts": {
+        "mlx-oq4e-mtp": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 32,
+          "notes": "Inkling-2-Mini (#2467), Apache-2.0; mlx-community oQ4e-mtp build (oMLX v0.8.1 oQ), 15 files, 4 weight shards plus mtp.safetensors (DSpark draft, 635,801,416 bytes). Snapshot manifest committed under snapshot-manifests/. Verified 2026-11-24: loaded through the inkling2 port on the pinned engine (Studio run 20261124T073707Z).",
+          "quantization": "oq4e-nvfp4-experts-affine4-affine8-mixed",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 16873811514,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+            "revision": "3eea042751cd296b7266628a8342c1749242e1fe"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-24"
+        }
+      },
+      "primary_artifact_id": "mlx-oq4e-mtp",
+      "rate_class": "class-30b-moe"
+    },
     "z-ai/glm-4.5-air": {
       "artifacts": {
         "mlx-4bit": {
