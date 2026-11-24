@@ -658,8 +658,8 @@ The authorized dependency tuple is exact:
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `ml-explore/mlx-c` `v0.8.0` (`a26f2d584a14ec619ae8db9a09be03becd47598a`) |
 
-The mlx-swift-lm row `3.33.0-macprovider.88` (engine-333), at
-`73eb9cf7663df03476c568f907bcadd829488c45`, is the fork patch stack (through
+The mlx-swift-lm row `3.33.0-macprovider.88` is the engine-333 rebase at
+`73eb9cf7663df03476c568f907bcadd829488c45`: the fork patch stack (through
 `3.32.3-macprovider.87`) rebased onto upstream `3.33.0`
 (`ca661dc6885f8603e911746838b60d312439a368`), which contains ml-explore/mlx-swift-lm #701 and #581, with its
 mlx-swift pin at `0.33.0-macprovider.28`

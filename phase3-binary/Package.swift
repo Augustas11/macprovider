@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.88 (engine-333) on 3.32.3-macprovider.87: The
+        // fork patch stack rebased onto upstream mlx-swift-lm 3.33.0, with the
+        // mlx-swift pin at 0.33.0-macprovider.28 (upstream 0.33.0 plus the
+        // small-M route and dense qmm tile), MLX core v0.32.4-macprovider.18
+        // (.17 plus upstream mlx 4883, 4881, 4930) and mlx-c v0.8.0-macprovider.5.
+        // Upstream 633 changes gated-delta Qwen text on purpose (q/k eps).
         // Tag 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: Dense
         // qmm_t in the MLX core takes a 64-row tile from 1024 rows for affine
         // bfloat16 group-64 weights. No model source changes.
@@ -261,13 +267,6 @@ let package = Package(
         // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
         // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
         // dd68f1d2d; mlx-c unchanged).
-        // engine-333: tags 3.33.0-macprovider.88 (mlx-swift-lm), 0.33.0-macprovider.28
-        // (mlx-swift), v0.32.4-macprovider.18 (core) and v0.8.0-macprovider.5 (mlx-c).
-        // Branch macprovider/engine-333-r2 (73eb9cf7) is the 3.33.0
-        // rebase (748d330) with the mlx-swift pin moved to 52ae025: mlx-swift
-        // 0.33.0 plus the #2462 small-M route and the #2451 dense qmm tile, core
-        // cde15ff75 (v0.32.4-macprovider.17 plus mlx #4883, #4881, #4930), mlx-c
-        // 33d88bf (v0.8.0 plus the reference-prefill and small-M route scopes).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
             revision: "73eb9cf7663df03476c568f907bcadd829488c45"
