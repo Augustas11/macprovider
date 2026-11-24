@@ -911,7 +911,7 @@ still equal that request's own one-row ordinary decode on `row_invariant`,
 the reference it was qualified against. The drafter load is allowed in a
 `mixed` process and still refused in a `stock_order` or `serial_only`
 process. The MTP-16 self-check's native probe and its token reference run on
-`row_invariant`; from 0.1.125 its speed reference runs on the route an
+`row_invariant`; from 0.1.127 its speed reference runs on the route an
 ordinary request takes with native MTP off (`stock_order` in a `mixed`
 process; MTP-16). A native request and
 an ordinary request of the same prompt in one `mixed` process MAY differ at
@@ -2983,7 +2983,7 @@ paged engine (same kernels, so near-tied logits resolve identically) at
 greedy, requires identical token IDs, and requires the native run to be
 strictly faster than the ordinary run (best of two runs each): speedup greater
 than 1.0 from 0.1.71, matching the R015 decode-throughput gate's positive lower
-bound, and at least 1.15x through 0.1.70; from 0.1.125, greater than 1.03 at
+bound, and at least 1.15x through 0.1.70; from 0.1.127, greater than 1.03 at
 every probe point against the ordinary route an ordinary request takes
 (below). The R015 PASS on the final
 mlx-swift-lm 3.32.3 stack is recorded in `docs/research/mlx-swift-lm-3.32.3/`
@@ -2995,7 +2995,7 @@ fails a tuple whose output differs from the signed bank record, so a release
 that changes MLX numerics MUST re-baseline the challenge bank on the new
 runtime through the normal signed release path.
 
-**(0.1.125) Served-shape probe points (Related: #2481).** One 64-token
+**(0.1.127) Served-shape probe points (Related: #2481).** One 64-token
 challenge does not measure the served one-row workload: Qwen3.6-35B-A3B
 passed it at 1.11 while one-row native MTP served 2.4% (200-token context)
 to 7.7% (4,000-token context, 512 output tokens) below ordinary decode in the
