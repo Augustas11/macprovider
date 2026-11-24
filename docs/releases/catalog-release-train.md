@@ -15,7 +15,9 @@ another gate.
 
 ## Current state — 2026-11-25
 
-- **Live (2026-11-25):** `published-2026-11-24-daisyrose-27b-listed-v296` (Inkling 2 Mini rows from
+- **Live (2026-11-25 03:53):** `published-2026-11-24-inkling-2-mini-recommendable-v296` ([PR 2492](https://github.com/Augustas11/macprovider/pull/2492); Related: #2467) promotes `thinkingmachines/inkling-2-mini` from `listed` to `recommendable`, activated through `scripts/ops/catalog-activate.sh` (canary admitted, 600 s watch clean, gateway proof passed). Prices, Tier-2 catalog and native-MTP tuples are unchanged. Owed once a provider on CLI 1.8.299 serves `mlx-community/Inkling-2-Mini-oQ4e-mtp`: evidence (e) (`buyer_serving_e2e`) and its buyer-UX conformance run (`buyer_ux_conformance_owed`). Still owed from earlier releases: buyer-UX conformance records for DeepSeek V4-Flash abliterated and MiniMax M3.1 Flash.
+- **Weight mirror (2026-11-25, Related: #2480):** the GLM-5.3-Flash pinned Hugging Face revision was deleted upstream. `models.malibu.tech` now serves that snapshot under its unchanged signed hash `7299b6a7…48f9` (manifest hosted on the site, files redirected to a byte-identical pinned copy), so fresh installs resolve through the CLI's mirror fallback. No catalog change. A revision sweep of the 32 pinned artifact revisions found no other missing one.
+- **Previous (2026-11-25):** `published-2026-11-24-daisyrose-27b-listed-v296` (Inkling 2 Mini rows from
   [PR 2486](https://github.com/Augustas11/macprovider/pull/2486), DaisyRose-27B row from
   [PR 2477](https://github.com/Augustas11/macprovider/pull/2477); Related: #2467, #2465), activated
   through `scripts/ops/catalog-activate.sh` on Pearl runtime v1.8.298 with the acknowledged price
@@ -23,14 +25,6 @@ another gate.
   rates, Inkling 2 Mini at 0.06/0.24/0.015 per M). The gateway proof passed. Both rows are
   `listed`; serving them needs provider CLI 1.8.299 (staging PR 2491). Still owed from earlier
   releases: buyer-UX conformance records for DeepSeek V4-Flash abliterated and MiniMax M3.1 Flash.
-- **Signed, in review:** `published-2026-11-24-inkling-2-mini-recommendable-v296` (Related: #2467)
-  promotes `thinkingmachines/inkling-2-mini` from `listed` to `recommendable` with its buyer-UX
-  conformance record owed (SPEC-023 §16.11 rule 4). Prices, Tier-2 catalog and native-MTP tuples are
-  unchanged; content-gate lane `catalog-content`. Live steps after merge:
-  `scripts/ops/catalog-activate.sh status`, then `next --run` (installs the owed record, then
-  activates). Owed after activation, once a provider on CLI 1.8.299 serves
-  `mlx-community/Inkling-2-Mini-oQ4e-mtp`: evidence (e) (`buyer_serving_e2e`) and the buyer-UX
-  conformance run (`buyer_ux_conformance_owed`).
 - **Previous (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
   (catalog release B of [PR 2456](https://github.com/Augustas11/macprovider/pull/2456), merged as
   `8e0814aed`; Related: #2452), activated through `scripts/ops/catalog-activate.sh` on top of
