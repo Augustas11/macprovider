@@ -127,6 +127,65 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
         XCTAssertGreaterThan(Set(reference.tokens.flatMap { $0 }).count, 2)
     }
 
+    /// #2489: held native rows (drafter hidden capture) ride a pipelined
+    /// window. Each step's captured column must be that step's own token and
+    /// target hidden state, so a 16-step window gives the same tokens and the
+    /// same buffered columns as one-step windows, which drain every step
+    /// before the next is queued. Held rows also leave every row's tokens as
+    /// a window without capture gives them.
+    func testHeldRowCaptureInAPipelinedWindowMatchesWindowOne() async throws {
+        try requireMetal()
+        let target = try Self.tinyQwen35()
+        let prompts = [513, 600, 777].enumerated().map { Self.tinyPrompt(length: $1, salt: $0) }
+        let captureRows: Set<Int> = [0, 2]
+        let decodeTokens = 2 * Self.window
+
+        func run(window: Int, capture: Set<Int>) async throws -> FixedBatch {
+            let batch = try await Self.prefill(
+                target: target,
+                prompts: prompts,
+                drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                    configuration: ModelConfiguration(id: "mtp"),
+                    model: HybridWindowPromptMTPDrafter()
+                ))
+            )
+            batch.captureRows = capture
+            var remaining = decodeTokens
+            while remaining > 0 {
+                let steps = min(window, remaining)
+                try await batch.decode(steps: steps)
+                remaining -= steps
+            }
+            return batch
+        }
+
+        let reference = try await run(window: 1, capture: captureRows)
+        let candidate = try await run(window: Self.window, capture: captureRows)
+        let uncaptured = try await run(window: Self.window, capture: [])
+        XCTAssertEqual(candidate.generated, reference.generated)
+        XCTAssertEqual(candidate.generated, uncaptured.generated)
+        XCTAssertGreaterThan(Set(reference.generated.flatMap { $0 }).count, 2)
+        for row in prompts.indices {
+            let id = reference.id(row)
+            let referenceColumns = reference.backend.nativeMTPPendingDrafterColumnsForTest(requestID: id)
+            let candidateColumns = candidate.backend.nativeMTPPendingDrafterColumnsForTest(requestID: id)
+            guard captureRows.contains(row) else {
+                XCTAssertTrue(candidateColumns.isEmpty, "row \(row) is not held")
+                continue
+            }
+            XCTAssertEqual(referenceColumns.count, decodeTokens, "row \(row)")
+            XCTAssertEqual(candidateColumns.map(\.token), referenceColumns.map(\.token), "row \(row) column tokens")
+            XCTAssertEqual(candidateColumns.map(\.token), Array(candidate.generated[row].dropFirst()), "row \(row)")
+            for (step, (lhs, rhs)) in zip(candidateColumns, referenceColumns).enumerated() {
+                XCTAssertEqual(lhs.hidden.shape, rhs.hidden.shape, "row \(row) step \(step)")
+                XCTAssertTrue(
+                    allClose(lhs.hidden, rhs.hidden, rtol: 1e-5, atol: 1e-5).item(Bool.self),
+                    "row \(row) step \(step) captured hidden differs"
+                )
+            }
+        }
+    }
+
     /// A row whose stop sequence matches mid-window keeps decoding to the end
     /// of the window, so its recurrent state ends past the stop. The backend
     /// must still hand back the state at exactly the stop boundary (model
@@ -411,6 +470,9 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
         let prompts: [[Int]]
         var handles: [PagedKVBlockTableHandle] = []
         var generated: [[Int]] = []
+        /// Rows that ride each window as load-gated (held) native rows,
+        /// buffering their drafter's depth-zero columns.
+        var captureRows: Set<Int> = []
 
         init(backend: PagedKVSharedForwardBackend, allocator: PagedKVBlockAllocator, prompts: [[Int]]) {
             self.backend = backend
@@ -447,6 +509,7 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
                     samplerStep: generated[row].count
                 )
                 input.stopTokenSequences = stops?[row] ?? []
+                input.captureNativeMTPDrafterColumns = captureRows.contains(row)
                 inputs.append(input)
             }
             let outcomes = try await backend.decodeLockstepWindow(rows: inputs, steps: steps)
@@ -465,7 +528,11 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
 
     /// Production prefill: each row in 512-token chunks, the final chunk
     /// sampling the first token.
-    private static func prefill(target: Qwen35TextModel, prompts: [[Int]]) async throws -> FixedBatch {
+    private static func prefill(
+        target: Qwen35TextModel,
+        prompts: [[Int]],
+        drafterContainer: MTPDrafterContainer? = nil
+    ) async throws -> FixedBatch {
         let batch = FixedBatch(
             backend: PagedKVSharedForwardBackend(
                 container: container(target),
@@ -473,7 +540,8 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
                 maxPhysicalBlocks: maxPhysicalBlocks,
                 poolEpoch: 1,
                 layerCount: 2,
-                cacheKinds: [.recurrentMamba, .pagedAttention]
+                cacheKinds: [.recurrentMamba, .pagedAttention],
+                drafterContainer: drafterContainer
             ),
             allocator: try PagedKVBlockAllocator(blockSizeTokens: blockSizeTokens, maxPhysicalBlocks: maxPhysicalBlocks),
             prompts: prompts
@@ -665,6 +733,70 @@ final class HybridDecodeWindowExactnessTests: XCTestCase {
         else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
+    }
+}
+
+/// A drafter that keeps the prompt (`requiresPromptPrefill`, as the Qwen3.5
+/// MTP head does), so its held rows buffer depth-zero columns.
+private final class HybridWindowPromptMTPDrafter: Module, StatefulMTPDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresSharedTargetKV = false
+    let requiresPromptPrefill = true
+    let requiresGreedySampling = true
+
+    func validateCompatibility(with target: any LanguageModel) throws {}
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func prepareDrafterState(
+        target: any LanguageModel,
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {}
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
     }
 }
 
