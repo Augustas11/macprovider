@@ -24,6 +24,7 @@ final class ReasoningEffortTests: XCTestCase {
             "zai-org/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
             "openai/gpt-oss-20b", "mlx-community/gpt-oss-120b-4bit",
             "qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit",
+            "radixark/daisyrose-27b", "mlx-community/DaisyRose-27B-4bit",
         ]
         for model in models {
             for effort in ChatCompletionRequest.acceptedReasoningEfforts {
@@ -109,6 +110,9 @@ final class ReasoningEffortTests: XCTestCase {
             ("zai-org/glm-5.3-flash", "glm53-chat-template/chat_template.jinja", "Reasoning Effort: Low"),
             ("openai/gpt-oss-20b", "chat-templates-2107/gpt-oss-20b.jinja", "Reasoning: low"),
             ("qwen/qwen3.8-27b", "chat-templates-2107/qwen3.8-27b.jinja", "Reasoning effort is set to low."),
+            // DaisyRose-27B (#2465) ships the Qwen3.8-27B template byte for byte.
+            ("radixark/daisyrose-27b", "chat-templates-2107/qwen3.8-27b.jinja", "Reasoning effort is set to low."),
+            ("mlx-community/DaisyRose-27B-4bit", "chat-templates-2107/qwen3.8-27b.jinja", "Reasoning effort is set to low."),
         ] {
             let low = try render(path, request: request(model: model, effort: "low"))
             XCTAssertTrue(low.contains(marker), model)

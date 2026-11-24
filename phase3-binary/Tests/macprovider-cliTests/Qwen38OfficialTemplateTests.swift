@@ -125,6 +125,21 @@ final class Qwen38OfficialTemplateTests: XCTestCase {
             catalogModelIDAlias: Self.officialModel))
     }
 
+    /// DaisyRose-27B (#2465) ships this template byte for byte: its exact ids
+    /// take the Qwen tool grammar and keep the Qwen3.8 reasoning history.
+    func testDaisyRoseUsesTheQwenToolGrammarAndReasoningHistory() throws {
+        for model in ["radixark/daisyrose-27b", "mlx-community/DaisyRose-27B-4bit", "daisyrose-27b"] {
+            XCTAssertEqual(ToolCallGrammar.family(modelID: model), .qwen, model)
+            XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: model), .qwen, model)
+            let rendered = try render(input(request(model: model, history: true)))
+            XCTAssertTrue(rendered.contains("<think>\nPRESERVED_TOOL_REASONING\n</think>"), model)
+            XCTAssertTrue(rendered.contains("<tool_call>\n<function=lookup>"), model)
+        }
+        for lookalike in ["radixark/daisyrose-27b-v2", "other/daisyrose", "daisyrose"] {
+            XCTAssertNil(ToolCallGrammar.family(modelID: lookalike), lookalike)
+        }
+    }
+
     func testToolLoopPreservesOfficialReasoningAndFunctionXML() throws {
         let rendered = try render(input(request(history: true)))
         XCTAssertEqual(rendered.components(separatedBy: "PRESERVED_TOOL_REASONING").count, 2)

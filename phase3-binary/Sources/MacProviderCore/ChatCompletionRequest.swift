@@ -108,6 +108,8 @@ public struct ChatCompletionRequest: Sendable {
     public static func usesQwen38Template(modelID: String) -> Bool {
         switch modelID.lowercased() {
         case "qwen/qwen3.8-27b", "qwen3.8-27b", "mlx-community/qwen3.8-27b-4bit": return true
+        // DaisyRose-27B (#2465) ships the Qwen3.8-27B chat template byte for byte.
+        case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit": return true
         default: return false
         }
     }
@@ -128,7 +130,8 @@ public struct ChatCompletionRequest: Sendable {
             }
             if reasoningEffort == "none" || reasoningEffort == "minimal" {
                 let id = modelID.lowercased()
-                if id.contains("glm-5.3") || id.contains("gpt-oss") || id.contains("qwen3.8") {
+                if id.contains("glm-5.3") || id.contains("gpt-oss") || id.contains("qwen3.8")
+                    || Self.usesQwen38Template(modelID: modelID) {
                     return "low"
                 }
             }

@@ -62,6 +62,12 @@ func legacyToolFamily(model string) bool {
 // capability derivation and request eligibility. A SPEC-051 shard group head
 // refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
+	if isDaisyRose27B(p.ModelID) && !providerAtLeast(p, daisyRoseProviderMinVersion) {
+		// A released CLI before the DaisyRose cut has no DaisyRose family, so
+		// it neither parses its Qwen tool calls by family nor keeps its
+		// reasoning history.
+		return false
+	}
 	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || splitsFamilyReasoning(family) {
 		// LFM, MiniMax and Inkling 2 shipped after the generic grammar floor.
 		// Require the exact loaded-model declaration, which old providers
@@ -176,22 +182,35 @@ func reasoningFamily(model string) bool {
 // both satisfy >= 1.8.285.
 const onRequestReasoningProviderMinVersion = "1.8.285"
 
+// daisyRoseProviderMinVersion is the first provider CLI that maps the
+// DaisyRose-27B ids to the Qwen3.8 template rules (tool grammar, reasoning
+// history, effort levels; #2465): the next cut after 1.8.296.
+const daisyRoseProviderMinVersion = "1.8.297"
+
+func providerAtLeast(p pool.Provider, floor string) bool {
+	cmp, ok := versionfloor.Compare(p.BinaryVersion, floor)
+	return ok && cmp >= 0
+}
+
 // onRequestReasoningFamily reports the thinking-switch families whose
 // thinking-on prompt opens `<think>`, so the provider splits the output.
-// Qwen3-8B and GLM-4.5 open none and Gemma-4 has an unparsed thought
+// DaisyRose-27B (#2465) ships the Qwen3.8-27B chat template byte for byte
+// (exact ids, with its own provider floor). Qwen3-8B and GLM-4.5 open none and Gemma-4 has an unparsed thought
 // channel; those stay thinking off.
 func onRequestReasoningFamily(model string) bool {
 	id := strings.ToLower(model)
 	return strings.Contains(id, "qwen3.5") || strings.Contains(id, "qwen3.6") || strings.Contains(id, "qwen3.8") ||
-		strings.Contains(id, "nemotron-3")
+		isDaisyRose27B(id) || strings.Contains(id, "nemotron-3")
 }
 
 func providerServesOnRequestReasoning(p pool.Provider) bool {
 	if p.ShardGroupHeadV1 || (p.RuntimeSource != "" && p.RuntimeSource != engineClassNative) || !onRequestReasoningFamily(p.ModelID) {
 		return false
 	}
-	cmp, ok := versionfloor.Compare(p.BinaryVersion, onRequestReasoningProviderMinVersion)
-	return ok && cmp >= 0
+	if isDaisyRose27B(p.ModelID) {
+		return providerAtLeast(p, daisyRoseProviderMinVersion)
+	}
+	return providerAtLeast(p, onRequestReasoningProviderMinVersion)
 }
 
 func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision bool) *modelCapabilities {

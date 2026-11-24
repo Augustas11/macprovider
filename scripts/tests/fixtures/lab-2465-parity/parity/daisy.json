@@ -1,0 +1,144 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    48.33805250549242
+  ],
+  "aggregateTPSp50" : 48.33805250549242,
+  "aggregateUpliftVsPagedSingleRow" : 1.4678645775733423,
+  "aggregateVsProductionSerial" : 1.4148908480246387,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 16,
+  "leftovers" : {
+    "parity" : {
+      "batchedRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ],
+      "batchedTokenSHA256" : "5043de9684edd5a09c43b9be7ecdfee4e12102dae2db9950cbae8bbcdade88f6",
+      "comparedTokens" : 256,
+      "oneRowMatch" : true,
+      "pass" : true,
+      "rows" : [
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "5043de9684edd5a09c43b9be7ecdfee4e12102dae2db9950cbae8bbcdade88f6",
+          "serialTokenCount" : 257,
+          "serialTokenSHA256" : "5043de9684edd5a09c43b9be7ecdfee4e12102dae2db9950cbae8bbcdade88f6",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "5043de9684edd5a09c43b9be7ecdfee4e12102dae2db9950cbae8bbcdade88f6"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "252359860c379225eecbf8810fd5f89b77d5e7871501548229344341f0a7ea07",
+          "serialTokenCount" : 63,
+          "serialTokenSHA256" : "a0c5aeb3c58d2966438ad4f86873766683bf6d0f552aa2444ee46ebd547b735f",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "252359860c379225eecbf8810fd5f89b77d5e7871501548229344341f0a7ea07"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "7c56fe2750cd1e10dc22791a825009103ebd2664fed693b6dbfdde297617018a",
+          "serialTokenCount" : 257,
+          "serialTokenSHA256" : "7c56fe2750cd1e10dc22791a825009103ebd2664fed693b6dbfdde297617018a",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "7c56fe2750cd1e10dc22791a825009103ebd2664fed693b6dbfdde297617018a"
+        },
+        {
+          "batchedTokenCount" : 256,
+          "batchedTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931",
+          "serialTokenCount" : 257,
+          "serialTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931",
+          "standaloneTokenCount" : 256,
+          "standaloneTokenSHA256" : "2ef613188f433ea64f59a778eb6f4338082d6d523c51f4f9513a9c764c0ba931"
+        }
+      ],
+      "serialTokenSHA256" : "5043de9684edd5a09c43b9be7ecdfee4e12102dae2db9950cbae8bbcdade88f6",
+      "standaloneRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-0-D1812043-79DE-4ED5-A080-DD34C9D10207",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-1CC83C89-C1D6-4D17-A144-14FD50E2BA74",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-2-226CF523-5A37-4C05-80A1-AA270FC12D36",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 256,
+        "emittedTokens" : 256,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-3-0AF7E665-BD15-42BB-AB20-0D55250B8DB4",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 12500,
+  "mlxSwiftLMPin" : "mlxlm-8aa564dbf780",
+  "modelID" : "\/Users\/a1\/lab-2465\/models\/DaisyRose-27B-4bit",
+  "modelTag" : "DaisyRose-27B-4bit",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    32.93086654179254
+  ],
+  "pagedSingleRowTPSp50" : 32.93086654179254,
+  "peakRSSMB" : 14659,
+  "perRowFractionOfPagedSingleRow" : 0.3669661443933356,
+  "perRowTPSp50" : 12.084513126373105,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    34.163803217031386
+  ],
+  "productionSerialTPSp50" : 34.163803217031386,
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "94e5485180408ca87b57844c5fce957c529a0bcb0e9dbe6ddf2de5dcb7ce8941",
+    "778b0062dd4fc0c6f0a06fc481eafd7c3a8df431fd30bdd2c0fc0c5f72eaced0",
+    "6a044580190e5d5480fc0689a7c3d7e9ff25e4cfb03567d69a963b51572656d7",
+    "d4b16221a25de451fadd0beb3f94b521688cec1779573d5aa0e827f339fbc538"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 5,
+  "scenario" : "parity",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-23T03:31:07Z"
+}

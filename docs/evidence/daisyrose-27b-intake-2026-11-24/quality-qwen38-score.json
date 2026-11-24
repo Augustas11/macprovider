@@ -1,0 +1,96 @@
+{
+  "label": "qwen38",
+  "path": "reference",
+  "passed": 1,
+  "cases": 9,
+  "workload": {
+    "workload_id": "coding-agent-revenue",
+    "version": 1,
+    "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+  },
+  "rubric": "macprovider.lab.coding-quality-rubric.v1",
+  "results": [
+    {
+      "case_id": "debug-python-pagination-off-by-one",
+      "pass": false,
+      "reasons": [
+        "finish_length"
+      ],
+      "completion_tokens": 512
+    },
+    {
+      "case_id": "debug-go-data-race-worker-pool",
+      "pass": false,
+      "reasons": [
+        "finish_length",
+        "missing:func\\s+Test\\w*\\(\\s*t\\s+\\*testing\\.T\\s*\\)",
+        "missing:t\\.Run\\(|\\[\\]struct\\s*\\{"
+      ],
+      "completion_tokens": 1024
+    },
+    {
+      "case_id": "write-tests-token-bucket-limiter",
+      "pass": false,
+      "reasons": [
+        "missing:import\\s+pytest|from\\s+\\w+\\s+import",
+        "missing:clock",
+        "missing:thread",
+        "missing:retry_after|inf",
+        "count<6:def\\s+test_\\w+"
+      ],
+      "completion_tokens": 93
+    },
+    {
+      "case_id": "implement-ttl-lru-cache-typescript",
+      "pass": false,
+      "reasons": [
+        "missing:class\\s+TtlLruCache",
+        "missing:node:test",
+        "missing:RangeError",
+        "missing:[\"']capacity[\"']",
+        "missing:[\"']expired[\"']",
+        "missing:new\\s+Map\\b|Map<"
+      ],
+      "completion_tokens": 102
+    },
+    {
+      "case_id": "harden-bash-release-script",
+      "pass": false,
+      "reasons": [
+        "finish_length"
+      ],
+      "completion_tokens": 1024
+    },
+    {
+      "case_id": "review-sql-migration-backfill",
+      "pass": false,
+      "reasons": [
+        "finish_length",
+        "missing:batch|LIMIT"
+      ],
+      "completion_tokens": 768
+    },
+    {
+      "case_id": "explain-swift-actor-reentrancy-crash",
+      "pass": false,
+      "reasons": [
+        "finish_length"
+      ],
+      "completion_tokens": 512
+    },
+    {
+      "case_id": "fix-failing-ci-node-stream-parser",
+      "pass": false,
+      "reasons": [
+        "missing:startsWith\\(\\s*[\"']:[\"']|\\[0\\]\\s*===\\s*["
+      ],
+      "completion_tokens": 891
+    },
+    {
+      "case_id": "agent-loop-multi-file-inventory-fix",
+      "pass": true,
+      "reasons": [],
+      "completion_tokens": 1822
+    }
+  ]
+}

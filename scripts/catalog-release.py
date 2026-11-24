@@ -637,6 +637,7 @@ EXACT_MODEL_KEY_ALIASES = {
     "inkling-2-mini": "thinkingmachines/inkling-2-mini",
     "aug11/inkling-2-mini-oq4e-mtp-uncensored": "openuncensored/inkling-2-mini-uncensored",
     "inkling-2-mini-uncensored": "openuncensored/inkling-2-mini-uncensored",
+    "daisyrose-27b": "radixark/daisyrose-27b",
 }
 
 
@@ -2957,7 +2958,16 @@ NATIVE_MTP_VARIANT_KEYS = {
     "model_key", "donor_model_key", "artifact_id", "artifact_hash", "tokenizer_sha256",
     "mtp_manifest_sha256", "projection_artifacts", "quantization",
 }
-NATIVE_MTP_VARIANT_OPTIONAL_KEYS = {"mtp_artifact_sha256", "self_check_record"}
+NATIVE_MTP_VARIANT_OPTIONAL_KEYS = {"mtp_artifact_sha256", "self_check_record", "fit_evidence"}
+# SPEC-048 0.1.126: a variant whose served weights exceed its donor's binds its
+# own R012 fit evidence: the R015 policy and analysis of a run on the variant
+# artifact, each committed under docs/evidence/ and named by SHA-256.
+NATIVE_MTP_FIT_EVIDENCE_KEYS = {"policy", "analysis"}
+NATIVE_MTP_FIT_EVIDENCE_DIR = "docs/evidence/"
+NATIVE_MTP_R015_POLICY_SCHEMA = "macprovider.native-mtp-r015-policy.v1"
+NATIVE_MTP_R015_ANALYSIS_SCHEMA = "macprovider.native-mtp-r015-analysis.v1"
+NATIVE_MTP_R012_FREE_MEMORY_FLOOR = 0.1
+NATIVE_MTP_R015_CELL_ID = re.compile(r"s([1-9][0-9]*)-p([1-9][0-9]*)-o([1-9][0-9]*)")
 NATIVE_MTP_SELF_CHECK_RECORD_KEYS = {
     "expected_token_ids", "expected_terminal_reason", "expected_counters", "expected_committed_state_sha256",
 }
@@ -3144,6 +3154,62 @@ def cmd_native_mtp_variants() -> None:
     print(f"catalog-release: native-MTP variants expanded into {', '.join(sorted(p.name for p in files))}")
 
 
+NATIVE_MTP_SELF_CHECK_EVENT = re.compile(
+    r"event=native_mtp_self_check_record challenge_id=(\S+) record=(\{.*\})\s*$"
+)
+
+
+def bind_native_mtp_self_check_record(model_key: str, source: pathlib.Path,
+                                      variants_path: pathlib.Path = NATIVE_MTP_VARIANTS_PATH,
+                                      bank_path: pathlib.Path = CATALOG_DIR / NATIVE_MTP_BANK_NAME) -> str:
+    """SPEC-048 MTP-16: bind a variant's captured on-device self-check output
+    as its `self_check_record`. SOURCE is the provider log (or a lab job log)
+    holding exactly one `event=native_mtp_self_check_record` line for the
+    variant's expanded challenge, or the job's JSON `{"challenge_id", "record"}`.
+    Returns the bound challenge id; the caller re-expands the variants."""
+    label = f"bind-native-mtp-self-check-record {model_key!r}"
+    text = source.read_text("utf-8")
+    found = []
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and set(body) == {"challenge_id", "record"}:
+        found.append((body["challenge_id"], body["record"]))
+    else:
+        for line in text.splitlines():
+            match = NATIVE_MTP_SELF_CHECK_EVENT.search(line)
+            if match:
+                found.append((match.group(1), strict_json(match.group(2).encode("utf-8"), label)))
+    bank = strict_json(bank_path.read_bytes(), bank_path.name)
+    challenges = [c["challenge_id"] for c in bank.get("entries", []) if c.get("model_id") == model_key]
+    if len(challenges) != 1:
+        fail(f"{label}: the expanded self-test bank needs exactly one challenge for it, found {len(challenges)}")
+    found = [(cid, record) for cid, record in found if cid == challenges[0]]
+    if len(found) != 1:
+        fail(f"{label}: {source} must hold exactly one self-check record for challenge "
+             f"{challenges[0]!r}, found {len(found)}")
+    record = found[0][1]
+    if not isinstance(record, dict):
+        fail(f"{label}: the record must be an object")
+    exact_keys(record, NATIVE_MTP_SELF_CHECK_RECORD_KEYS, NATIVE_MTP_SELF_CHECK_RECORD_KEYS, label)
+    tokens = record["expected_token_ids"]
+    if (not isinstance(tokens, list) or not tokens
+            or not all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in tokens)):
+        fail(f"{label}: expected_token_ids must be a non-empty list of token ids")
+    if not isinstance(record["expected_committed_state_sha256"], str) or not HEX64.fullmatch(
+            record["expected_committed_state_sha256"]):
+        fail(f"{label}: expected_committed_state_sha256 must be a lowercase SHA-256")
+    variants_obj = strict_json(variants_path.read_bytes(), variants_path.name)
+    matches = [v for v in variants_obj.get("variants", []) if v.get("model_key") == model_key]
+    if len(matches) != 1:
+        fail(f"{label}: {variants_path.name} declares {len(matches)} variants with that model_key")
+    matches[0]["self_check_record"] = copy.deepcopy(record)
+    variants_path.write_bytes((json.dumps(variants_obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+                              .encode("utf-8"))
+    return challenges[0]
+
+
 def native_mtp_weight_bytes(artifact_obj: dict, model_key: str, artifact_id: str,
                             manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR) -> int:
     """The served weight bytes of a feed artifact: the `.safetensors` sizes in
@@ -3177,17 +3243,158 @@ def native_mtp_weight_bytes(artifact_obj: dict, model_key: str, artifact_id: str
     return total
 
 
+def _native_mtp_fit_evidence_file(ref: object, label: str, evidence_root: pathlib.Path) -> dict:
+    if not isinstance(ref, dict):
+        fail(f"{label} must be an object")
+    exact_keys(ref, {"path", "sha256"}, {"path", "sha256"}, label)
+    path, digest = ref["path"], ref["sha256"]
+    if not isinstance(digest, str) or not HEX64.fullmatch(digest):
+        fail(f"{label}.sha256 must be a lowercase SHA-256")
+    parts = pathlib.PurePosixPath(path).parts if isinstance(path, str) else ()
+    if (not isinstance(path, str) or not path.startswith(NATIVE_MTP_FIT_EVIDENCE_DIR) or not path.endswith(".json")
+            or path.startswith("/") or "\\" in path or "//" in path
+            or any(part in ("", ".", "..") for part in parts)):
+        fail(f"{label}.path must be a .json file under {NATIVE_MTP_FIT_EVIDENCE_DIR}")
+    # Resolve strictly: no component may be a symlink, and the resolved file
+    # must sit inside the repository's evidence directory.
+    current = evidence_root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            fail(f"{label}: {path} has a symlinked component {part!r}")
+    file_path = evidence_root / path
+    if not file_path.is_file():
+        fail(f"{label}: {path} is not a committed file")
+    evidence_dir = (evidence_root / NATIVE_MTP_FIT_EVIDENCE_DIR).resolve()
+    resolved = file_path.resolve(strict=True)
+    if not resolved.is_relative_to(evidence_dir):
+        fail(f"{label}: {path} resolves outside {NATIVE_MTP_FIT_EVIDENCE_DIR}")
+    data = resolved.read_bytes()
+    if sha256(data) != digest:
+        fail(f"{label}: {path} does not hash to {digest}")
+    body = strict_json(data, label)
+    if not isinstance(body, dict):
+        fail(f"{label}: {path} must hold a JSON object")
+    return body
+
+
+def _native_mtp_fit_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _native_mtp_fit_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def require_native_mtp_variant_fit_evidence(variant: dict, donor: dict, label: str,
+                                            evidence_root: pathlib.Path = ROOT) -> None:
+    """SPEC-048 0.1.126 R012 own fit evidence: an R015 run on the variant's own
+    target, MTP head and tokenizer, on the donor's hardware RAM, that ran a cell
+    at the donor's prompt bound, a cell at the donor's qualified slots and the
+    full sustained run, and measured no memory failure, no hard failure and at
+    least the 10% free-memory floor in every cell."""
+    evidence = variant.get("fit_evidence")
+    if not isinstance(evidence, dict):
+        fail(f"{label}.fit_evidence must be an object")
+    exact_keys(evidence, NATIVE_MTP_FIT_EVIDENCE_KEYS, NATIVE_MTP_FIT_EVIDENCE_KEYS, f"{label}.fit_evidence")
+    policy = _native_mtp_fit_evidence_file(evidence["policy"], f"{label}.fit_evidence.policy", evidence_root)
+    analysis = _native_mtp_fit_evidence_file(evidence["analysis"], f"{label}.fit_evidence.analysis", evidence_root)
+    plabel, alabel = f"{label}.fit_evidence.policy", f"{label}.fit_evidence.analysis"
+    if policy.get("schema") != NATIVE_MTP_R015_POLICY_SCHEMA:
+        fail(f"{plabel}: schema must be {NATIVE_MTP_R015_POLICY_SCHEMA}")
+    if policy.get("target_sha256") != variant["artifact_hash"]:
+        fail(f"{plabel}: target_sha256 does not name the variant's artifact_hash")
+    if policy.get("model_id") != variant["model_key"]:
+        fail(f"{plabel}: model_id does not name the variant's model_key")
+    mtp_head = variant.get("mtp_artifact_sha256")
+    if not isinstance(mtp_head, str) or not HEX64.fullmatch(mtp_head):
+        fail(f"{label}: a variant with fit_evidence must declare a hex mtp_artifact_sha256")
+    if policy.get("mtp_sha256") != mtp_head:
+        fail(f"{plabel}: mtp_sha256 does not name the variant's mtp_artifact_sha256")
+    if policy.get("tokenizer_sha256") != variant.get("tokenizer_sha256"):
+        fail(f"{plabel}: tokenizer_sha256 does not name the variant's tokenizer_sha256")
+    ram_gb, ram_bytes = policy.get("ram_gb"), donor.get("ram_bytes")
+    if not _native_mtp_fit_int(ram_gb) or not _native_mtp_fit_int(ram_bytes) or ram_gb * 2**30 != ram_bytes:
+        fail(f"{plabel}: ram_gb {ram_gb!r} does not match the tuple's ram_bytes {ram_bytes!r}")
+    prompt_bound = donor.get("max_prompt_tokens")
+    if not _native_mtp_fit_int(prompt_bound) or prompt_bound <= 0:
+        fail(f"{label}: the donor has no max_prompt_tokens bound for own fit evidence to cover")
+    measured_bound = policy.get("maximum_prompt_tokens")
+    if not _native_mtp_fit_int(measured_bound) or measured_bound < prompt_bound:
+        fail(f"{plabel}: maximum_prompt_tokens {measured_bound!r} is below the donor's "
+             f"max_prompt_tokens {prompt_bound}")
+    qualified_slots = donor.get("qualified_slots")
+    if not _native_mtp_fit_int(qualified_slots) or qualified_slots <= 0:
+        fail(f"{label}: the donor has no qualified_slots for own fit evidence to cover")
+    sustained_seconds = policy.get("sustained_seconds")
+    if not _native_mtp_fit_number(sustained_seconds) or sustained_seconds <= 0:
+        fail(f"{plabel}: sustained_seconds {sustained_seconds!r} must be a positive number")
+    floor = (policy.get("thresholds") or {}).get("min_available_memory_fraction")
+    if not _native_mtp_fit_number(floor) or floor < NATIVE_MTP_R012_FREE_MEMORY_FLOOR:
+        fail(f"{plabel}: min_available_memory_fraction {floor!r} is below the R012 "
+             f"{NATIVE_MTP_R012_FREE_MEMORY_FLOOR} free-memory floor")
+    if analysis.get("schema") != NATIVE_MTP_R015_ANALYSIS_SCHEMA:
+        fail(f"{alabel}: schema must be {NATIVE_MTP_R015_ANALYSIS_SCHEMA}")
+    if analysis.get("policy_sha256") != evidence["policy"]["sha256"]:
+        fail(f"{alabel}: policy_sha256 does not name the bound policy")
+    cells = analysis.get("cells")
+    if not isinstance(cells, list) or not cells or not all(isinstance(c, dict) for c in cells):
+        fail(f"{alabel}: cells must be a non-empty list of objects")
+    shapes = {}
+    for cell in cells:
+        cell_id = cell.get("cell_id")
+        match = NATIVE_MTP_R015_CELL_ID.fullmatch(cell_id) if isinstance(cell_id, str) else None
+        if match is None or cell_id in shapes:
+            fail(f"{alabel}: cell_id {cell_id!r} must be a unique s<slots>-p<prompt>-o<output> id")
+        shapes[cell_id] = (int(match.group(1)), int(match.group(2)))
+        if cell.get("memory_failures") != []:
+            fail(f"{alabel}: cell {cell_id!r} records memory failures {cell.get('memory_failures')!r}")
+        if cell.get("hard_failures") != []:
+            fail(f"{alabel}: cell {cell_id!r} records hard failures {cell.get('hard_failures')!r}")
+        measured = cell.get("min_available_memory_fraction")
+        if not _native_mtp_fit_number(measured) or measured < NATIVE_MTP_R012_FREE_MEMORY_FLOOR:
+            fail(f"{alabel}: cell {cell_id!r} measured min_available_memory_fraction {measured!r} is below the "
+                 f"R012 {NATIVE_MTP_R012_FREE_MEMORY_FLOOR} free-memory floor")
+        runs = cell.get("sustained_runs", 0)
+        if not _native_mtp_fit_int(runs) or runs < 0:
+            fail(f"{alabel}: cell {cell_id!r} sustained_runs {runs!r} must be a non-negative integer")
+        if runs > 0:
+            sustained = cell.get("sustained_min_available_memory_fraction")
+            if not _native_mtp_fit_number(sustained) or sustained < NATIVE_MTP_R012_FREE_MEMORY_FLOOR:
+                fail(f"{alabel}: cell {cell_id!r} sustained min_available_memory_fraction {sustained!r} is below "
+                     f"the R012 {NATIVE_MTP_R012_FREE_MEMORY_FLOOR} free-memory floor")
+    if not any(prompt >= prompt_bound for _, prompt in shapes.values()):
+        fail(f"{alabel}: no cell ran at the donor's max_prompt_tokens {prompt_bound}")
+    if not any(slots >= qualified_slots for slots, _ in shapes.values()):
+        fail(f"{alabel}: no cell ran at the donor's qualified_slots {qualified_slots}")
+    sustained_id = policy.get("sustained_cell_id")
+    sustained_cell = next((c for c in cells if c.get("cell_id") == sustained_id), None)
+    if sustained_cell is None:
+        fail(f"{alabel}: the policy's sustained cell {sustained_id!r} has no analysed cell")
+    duration = sustained_cell.get("sustained_duration_seconds")
+    if (not _native_mtp_fit_number(duration) or duration < sustained_seconds
+            or not _native_mtp_fit_int(sustained_cell.get("sustained_runs")) or sustained_cell["sustained_runs"] <= 0):
+        fail(f"{alabel}: the sustained cell {sustained_id!r} ran {duration!r} s, short of the policy's "
+             f"sustained_seconds {sustained_seconds}")
+
+
 def require_native_mtp_variant_weight_fit(variants: list, donors: dict, artifact_obj: dict,
-                                          manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR) -> None:
+                                          manifests_dir: pathlib.Path = SNAPSHOT_MANIFESTS_DIR,
+                                          evidence_root: pathlib.Path = ROOT) -> None:
     """R012 (SPEC-048 0.1.103): a variant's served weights are no larger than
     its donor's, so the donor's fit evidence covers it. Non-weight snapshot
-    files (GGUF, mmproj, docs) are not loaded and do not count."""
+    files (GGUF, mmproj, docs) are not loaded and do not count. A larger
+    variant passes only on its own bound fit evidence (0.1.126); declared
+    evidence is checked whether or not it is needed."""
     for variant in variants:
         donor = donors[variant["donor_model_key"]]
+        label = f"generate: native-MTP variant {variant['model_key']!r}"
         own = native_mtp_weight_bytes(artifact_obj, variant["model_key"], variant["artifact_id"], manifests_dir)
         donor_bytes = native_mtp_weight_bytes(artifact_obj, donor["model_key"], donor["artifact_id"], manifests_dir)
-        if own > donor_bytes:
-            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 served weight bytes {own} exceed "
+        if "fit_evidence" in variant:
+            require_native_mtp_variant_fit_evidence(variant, donor, label, evidence_root)
+        elif own > donor_bytes:
+            fail(f"{label}: R012 served weight bytes {own} exceed "
                  f"its donor's {donor_bytes}; it needs its own fit evidence")
 
 
@@ -7927,6 +8134,15 @@ def main() -> int:
             "rule was not re-derived"
         ),
     )
+    bind_parser = sub.add_parser(
+        "bind-native-mtp-self-check-record",
+        help="SPEC-048 MTP-16: bind a variant's captured self-check output into native-mtp-variants.json "
+        "as self_check_record, then re-expand the variants",
+    )
+    bind_parser.add_argument("--model-key", required=True)
+    bind_parser.add_argument("--source", required=True, type=pathlib.Path,
+                             help="provider or lab job log with the event=native_mtp_self_check_record line, "
+                             "or the job's selfcheck-record.json")
     sub.add_parser(
         "status",
         help="print the artifact-feed activation state and its outstanding prerequisites",
@@ -8192,6 +8408,10 @@ def main() -> int:
         elif args.command == "restamp":
             restamp(args.release_id, args.generated_at)
         elif args.command == "native-mtp-variants":
+            cmd_native_mtp_variants()
+        elif args.command == "bind-native-mtp-self-check-record":
+            challenge_id = bind_native_mtp_self_check_record(args.model_key, args.source)
+            print(f"catalog-release: bound the self-check record of {challenge_id} to {args.model_key}")
             cmd_native_mtp_variants()
         elif args.command == "generate":
             market_args = (args.market_rate_proposal, args.market_demand_proposal, args.market_snapshot, args.market_policy)

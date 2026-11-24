@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.125
+**Version:** 0.1.126
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.125",
+  "version": "0.1.126",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -2269,7 +2269,29 @@ listed file is missing or changes without a regenerated digest.
      `phase3-binary/catalog/autotune/snapshot-manifests/<artifact hash>.manifest`.
      Its SHA-256 MUST equal the artifact feed's hash, so the file list is the
      one the provider verifies. A variant with larger served weights needs its
-     own fit evidence.
+     own fit evidence. **(0.1.126)** It binds that evidence in its
+     `native-mtp-variants.json` block as `fit_evidence`: the R015 policy and
+     analysis of a run on the variant artifact, each a `.json` file committed
+     under `docs/evidence/` and named by path and SHA-256. The path resolves
+     with no symlinked component to a file inside `docs/evidence/`.
+     `generate` accepts the larger weights only when all of these hold:
+     (a) the policy names the variant's `artifact_hash` (`target_sha256`),
+     `model_key` (`model_id`), `mtp_artifact_sha256` (`mtp_sha256`) and
+     `tokenizer_sha256`, and its `ram_gb` × 2^30 equals the donor tuple's
+     `ram_bytes`; (b) the donor has a `max_prompt_tokens` bound and a
+     `qualified_slots` count, and the policy's `maximum_prompt_tokens` is at
+     least that bound; (c) the policy's `min_available_memory_fraction`
+     threshold is at least R012's 0.1 floor; (d) the analysis binds that
+     policy (`policy_sha256`); every cell has an `s<slots>-p<prompt>-o<output>`
+     id, empty `memory_failures` and `hard_failures`, and a measured numeric
+     `min_available_memory_fraction` of at least 0.1 (and, for a cell with
+     sustained runs, a `sustained_min_available_memory_fraction` of at least
+     0.1); (e) some cell ran at a prompt of at least the donor's
+     `max_prompt_tokens` and some cell at no fewer than the donor's
+     `qualified_slots`; (f) the policy's sustained cell is analysed and ran
+     for at least the policy's `sustained_seconds`. Declared evidence is
+     checked even when the weights are not larger. The signed entry is
+     unchanged: it keeps the donor's evidence digests.
 - Publishing (0.1.81): R014 item 10 governs only what a released CLI can
   parse. The decode-path binding is not tied to the release CLI: an entry is
   published without comparing its `decode_path_digest` to any release, and
@@ -3134,6 +3156,15 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.126 (2026-11-24, Related: #2465)** — MTP-13 variant item 3: a
+  variant whose served weights exceed its donor's binds its own R012 fit
+  evidence (`fit_evidence`, an R015 policy and analysis on the variant
+  artifact under `docs/evidence/`, each by SHA-256 on a strictly resolved
+  path). `generate` checks that it names the variant's target, MTP head,
+  tokenizer and the tuple's RAM, covers the donor's prompt bound, qualified
+  slots and sustained duration, and measured no memory or hard failure and
+  at least the 0.1 free-memory floor in every cell; without it the larger
+  variant is refused as before.
 - **0.1.125 (2026-11-24)** — R003 names mlx-swift-lm `3.33.0-macprovider.89`
   (`10584fc0d79cf75b49115f0f42fd7b8c8f30c637`) on `3.33.0-macprovider.88`
   (#2467): 3.33.0-macprovider.88 plus the Inkling 2 Mini text model

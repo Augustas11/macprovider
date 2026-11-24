@@ -103,7 +103,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         // Every entry is an exact measured identity/architecture pair. Dense
         // identities require the dense architecture and the MoE identities
         // require the MoE architecture.
-        for modelID in ["qwen/qwen3.5-27b", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"] {
+        for modelID in ["qwen/qwen3.5-27b", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b", "radixark/daisyrose-27b"] {
             XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
                 modelID: modelID, configJSONData: dense
             ).hybridDecoderArchitectureVerified)

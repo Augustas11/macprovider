@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "35eca74b3522f452c3538e78498cb6682cc860345e186bbfecbc4b751f2f1302",
-  "generated_at": "2026-11-24T08:05:00Z",
+  "autotune_candidates_sha256": "93beb15bfa7869f7a332a6f0629cf8d06160d96b35db30dfbd2ada548bc54a71",
+  "generated_at": "2026-11-24T10:50:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -36,6 +36,13 @@
       "model_id": "LiquidAI/LFM3-1.7B-MLX-4bit",
       "model_revision": "91f34088d6946482cbcae11b85d4657093618c34",
       "sha256": "e6ef055b17601b009ea1a476c8a3c0bbab734ea82825d9cd23d8a63a90d9c8ea"
+    },
+    {
+      "catalog_key": "radixark/daisyrose-27b",
+      "min_ram_gb": 24,
+      "model_id": "mlx-community/DaisyRose-27B-4bit",
+      "model_revision": "895983ea8d4244e855f6fbde2c3fa8261af202ef",
+      "sha256": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f"
     },
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -214,6 +221,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-24-inkling-2-mini-listed-v289",
+  "release_id": "published-2026-11-24-daisyrose-27b-listed-v296",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

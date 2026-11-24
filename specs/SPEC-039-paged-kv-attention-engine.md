@@ -1,7 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.37
-Status: draft (normative design). v0.1.37 lifts the 8-flattened-token cap
+Version: v0.1.38
+Status: draft (normative design). v0.1.38 adds the FR-PKV12
+`radixark/daisyrose-27b` identity (dense `qwen3_5` hybrid). v0.1.37 lifts the 8-flattened-token cap
 from `qwen4_exp` decode: a decode forward over a `pagedQwen4ExpKV` topology
 takes the device decode-row bound (11 rows on the M3 Ultra), while its prefill
 keeps the 8-token cap. v0.1.36 adds the `qwen4_exp` paged
@@ -113,6 +114,17 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.38 (2026-11-23): FR-PKV12 gains the catalog key
+`radixark/daisyrose-27b` with `Qwen3_5ForConditionalGeneration` (Related:
+#2465). Its artifact `mlx-community/DaisyRose-27B-4bit` @ `895983ea` is an
+RL post-train of Qwen3.8-27B with the same `qwen3_5` architecture and
+affine 4-bit group-64 format as the `qwen/qwen3.8-27b` entry. Lab
+msb-throughput batched-versus-serial parity passed on that artifact (4 rows,
+256 tokens, every batched row matching). The attach parity and isolation
+probes still gate every attach; the identity's native-MTP admission is the
+SPEC-048 MTP-13 variant of `qwen/qwen3.8-27b`. No other code change. Refines
+SPEC-039-R012.
+
 Change log v0.1.37 (2026-11-19): the FR-PKV12 `qwen4_exp` entry
 (Related: #2409) drops the 8-flattened-token bound from its decode forwards.
 Qwen4-Exp decodes through its own fork kernels, not the GLM-5-Next fused
@@ -1094,6 +1106,10 @@ be individually measured before it is added. The v1 allowlist is:
   MUST additionally pass cross-row MoE expert-dispatch isolation);
 - `qwen/qwen3.8-27b` with `Qwen3_5ForConditionalGeneration` in the artifact's
   `config.json` architectures (dense hybrid decoder).
+- (v0.1.38) `radixark/daisyrose-27b` with
+  `Qwen3_5ForConditionalGeneration` in the artifact's `config.json`
+  architectures (dense hybrid decoder; artifact
+  `mlx-community/DaisyRose-27B-4bit`).
 - `openai/gpt-oss-120b` with `GptOssForCausalLM` in the artifact's
   `config.json` architectures (MoE sliding-window/full-attention decoder; the
   paged path MUST additionally pass cross-row shared-forward isolation).

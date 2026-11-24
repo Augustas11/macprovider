@@ -2,6 +2,132 @@
   "schema_version": "macprovider.native-mtp-variants.v1",
   "variants": [
     {
+      "artifact_hash": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f",
+      "artifact_id": "mlx-4bit",
+      "donor_model_key": "qwen/qwen3.8-27b",
+      "fit_evidence": {
+        "analysis": {
+          "path": "docs/evidence/daisyrose-27b-intake-2026-11-24/mtp-daisy-analysis.json",
+          "sha256": "8f6cfc391d08ab54898b115b89f5906c935c9f9cf873c5da6bdd6c3c9a51a8d6"
+        },
+        "policy": {
+          "path": "docs/evidence/daisyrose-27b-intake-2026-11-24/mtp-daisy-policy.json",
+          "sha256": "cbe1cae19e24457c191cc99525ae4a94b60d0044d0af86410acd608eefa59e0a"
+        }
+      },
+      "model_key": "radixark/daisyrose-27b",
+      "mtp_artifact_sha256": "25d2e7e3846c6a95201b13a0299eb65527b8146541af3b1eb626eaac95fefb30",
+      "mtp_manifest_sha256": "16094efa6177985ab3725a9d6d61d6ab248b71e4b42a114efddcdb2aaddc0a55",
+      "projection_artifacts": {
+        "manifest": {
+          "path": "mlx-community--Qwen3.8-27B-MTP-4bit/b643c01b6d3b094e325edb6ebd832e16c486c575/25d2e7e3846c6a95201b13a0299eb65527b8146541af3b1eb626eaac95fefb30/config.json",
+          "sha256": "16094efa6177985ab3725a9d6d61d6ab248b71e4b42a114efddcdb2aaddc0a55"
+        },
+        "mtp": {
+          "path": "mlx-community--Qwen3.8-27B-MTP-4bit/b643c01b6d3b094e325edb6ebd832e16c486c575/25d2e7e3846c6a95201b13a0299eb65527b8146541af3b1eb626eaac95fefb30",
+          "sha256": "25d2e7e3846c6a95201b13a0299eb65527b8146541af3b1eb626eaac95fefb30"
+        },
+        "target": {
+          "path": "mlx-community--DaisyRose-27B-4bit/895983ea8d4244e855f6fbde2c3fa8261af202ef/996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f",
+          "sha256": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f"
+        },
+        "tokenizer": {
+          "path": "mlx-community--DaisyRose-27B-4bit/895983ea8d4244e855f6fbde2c3fa8261af202ef/996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f/tokenizer.json",
+          "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+        }
+      },
+      "quantization": {
+        "alignment_bytes": null,
+        "block_size_elements": 64,
+        "kind": "mlx_affine",
+        "packed_data_dtype": "uint32",
+        "packed_layout": "mlx_array_native_v1",
+        "padding_rule": "none",
+        "per_layer_exceptions": [],
+        "representation_manifest_sha256": "7deae874e12e389e95e4b8b22bf4d5145a755b25d80a4add6c26e1aec9c6f92a",
+        "scale_dtype": "bfloat16",
+        "scale_layout": "per_block",
+        "unquantized_exceptions": []
+      },
+      "self_check_record": {
+        "expected_committed_state_sha256": "de1b59d2d826de0080a458f9857db72d4e1e0292a6f120aef38610d720e04d42",
+        "expected_counters": {
+          "accepted": 31,
+          "bonus": 31,
+          "committed": 63,
+          "rejected": 0
+        },
+        "expected_terminal_reason": "length",
+        "expected_token_ids": [
+          220,
+          16,
+          18,
+          11,
+          220,
+          16,
+          19,
+          11,
+          220,
+          16,
+          20,
+          11,
+          220,
+          16,
+          21,
+          11,
+          220,
+          16,
+          22,
+          11,
+          220,
+          16,
+          23,
+          11,
+          220,
+          16,
+          24,
+          11,
+          220,
+          17,
+          15,
+          11,
+          220,
+          17,
+          16,
+          11,
+          220,
+          17,
+          17,
+          11,
+          220,
+          17,
+          18,
+          11,
+          220,
+          17,
+          19,
+          11,
+          220,
+          17,
+          20,
+          11,
+          220,
+          17,
+          21,
+          11,
+          220,
+          17,
+          22,
+          11,
+          220,
+          17,
+          23,
+          11
+        ]
+      },
+      "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+    },
+    {
       "artifact_hash": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
       "artifact_id": "mlx-oq4e-uncensored-dflash2",
       "donor_model_key": "zai-org/glm-5.3-flash",

@@ -31,6 +31,13 @@ LAB_BUILD_SURFACES = {
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-dsv4-abliterated.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-parity.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-profile.sh",
+    # Catalog intake windows (#2465 DaisyRose-27B, #2466 Sage-S2.1-Flash): build the
+    # lab binary on the Studio for loopback MTP cells; never a release or signing path.
+    ROOT / "scripts" / "lab" / "2465" / "job.sh",
+    # #2465 MTP-16 self-check record capture for the DaisyRose-27B variant (lab build,
+    # loopback static-feed origin); never a release or signing path.
+    ROOT / "scripts" / "lab" / "2465" / "selfcheck.sh",
+    ROOT / "scripts" / "lab" / "2466" / "job.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-step-gate.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-cb.sh",
     ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-listing.sh",

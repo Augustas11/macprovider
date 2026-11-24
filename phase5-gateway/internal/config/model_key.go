@@ -50,6 +50,7 @@ var exactModelKeyAliases = map[string]string{
 	"inkling-2-mini":                                        "thinkingmachines/inkling-2-mini",
 	"aug11/inkling-2-mini-oq4e-mtp-uncensored":              "openuncensored/inkling-2-mini-uncensored",
 	"inkling-2-mini-uncensored":                             "openuncensored/inkling-2-mini-uncensored",
+	"daisyrose-27b":                                         "radixark/daisyrose-27b",
 }
 
 func normalizeServedModelAlias(namespace, key string) string {

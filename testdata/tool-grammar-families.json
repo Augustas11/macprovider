@@ -43,6 +43,11 @@
     {"model": "google/gemma4-12b", "family": "gemma4"},
     {"model": "local/nemotron3-nano", "family": "qwen"},
     {"model": "local/deepseek_v4_flash", "family": "dsml"},
+    {"model": "radixark/daisyrose-27b", "family": "qwen"},
+    {"model": "mlx-community/DaisyRose-27B-4bit", "family": "qwen"},
+    {"model": "daisyrose-27b", "family": "qwen"},
+    {"model": "radixark/daisyrose-27b-v2", "family": ""},
+    {"model": "other/daisyrose", "family": ""},
     {"model": "mistralai/Mistral-Small-3.2-24B-Instruct", "family": ""}
   ]
 }

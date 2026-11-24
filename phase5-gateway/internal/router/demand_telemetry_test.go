@@ -590,6 +590,21 @@ func TestDemandTelemetryKnowsInkling2MiniIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2465: the DaisyRose-27B catalog key and served artifact id are recorded as
+// themselves, never folded into Qwen3.8-27B.
+func TestDemandTelemetryKnowsDaisyRoseIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"radixark/daisyrose-27b", "mlx-community/DaisyRose-27B-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"radixark/daisyrose-27bx", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit", "radixark/DaisyRose-27B"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2236: the Nemotron 3.5 Lightning catalog key and served artifact id are
 // recorded as themselves, never folded into Nemotron 3 Nano.
 func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {

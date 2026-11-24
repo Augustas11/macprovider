@@ -687,6 +687,9 @@ class RateCardSourceTest(unittest.TestCase):
             "minimaxai/minimax-m3.1-flash-abliterated",
             # #2467: Inkling-2-Mini is listed at its declared class rates.
             "thinkingmachines/inkling-2-mini",
+            # #2465: DaisyRose-27B, class-32b, priced by explicit rows at the
+            # qwen3.8-27b rates.
+            "radixark/daisyrose-27b",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
