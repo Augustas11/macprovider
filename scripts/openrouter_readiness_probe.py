@@ -96,6 +96,8 @@ CATALOG_OPENROUTER_ROWS = (
     ("zai-org/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2", "z-ai/glm-5.3-flash-uncensored", False),
     # Epic #2189 native minimax_m3 engine; priced but not in OPENROUTER_LISTED_MODEL_IDS.
     ("minimaxai/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp", "minimax/minimax-m3.1-flash", False),
+    # #2467 Inkling-2-Mini (inkling2 port); priced but not in OPENROUTER_LISTED_MODEL_IDS.
+    ("thinkingmachines/inkling-2-mini", "mlx-community/Inkling-2-Mini-oQ4e-mtp", "thinkingmachines/inkling-2-mini", False),
     # #2016 native image input; priced but not in OPENROUTER_LISTED_MODEL_IDS.
     ("mlx-community/qwen2-vl-2b-instruct-4bit", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "qwen/qwen2-vl-2b-instruct", False),
 )

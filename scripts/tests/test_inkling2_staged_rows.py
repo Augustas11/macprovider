@@ -1,8 +1,9 @@
 """#2467: the Inkling-2-Mini catalog rows validate against the live tooling.
 
-The base row is listed in the signed catalog inputs (release
-published-2026-11-24-inkling-2-mini-listed-v289); its fragments are read back
-from those inputs. The uncensored row stays in
+The base row was listed in release
+published-2026-11-24-inkling-2-mini-listed-v289 and promoted to recommendable in
+published-2026-11-24-inkling-2-mini-recommendable-v296; its fragments are read
+back from the signed catalog inputs. The uncensored row stays in
 `docs/evidence/inkling-2-mini-intake-2026-11-24/staged-rows.json` until its
 artifact is published: each staged fragment is merged into a copy of the
 committed input and run through the same validator `catalog-release.py
@@ -98,12 +99,13 @@ def check_manifest(case: unittest.TestCase, artifact: dict) -> list[str]:
 
 
 class StagedInkling2RowTests(unittest.TestCase):
-    def test_only_the_uncensored_row_is_staged_and_the_base_is_listed(self):
+    def test_only_the_uncensored_row_is_staged_and_the_base_is_recommendable(self):
         value = staged()
         self.assertEqual(value["schema_version"], "macprovider.staged-catalog-rows.v1")
         self.assertEqual(set(value["rows"]), {UNC_KEY})
         self.assertNotIn("held", value)
-        self.assertEqual(staged_row()["candidate_row"]["runtime_status"], "listed")
+        self.assertEqual(staged_row()["candidate_row"]["runtime_status"], "recommendable")
+        self.assertIs(staged_row()["demand_rank_row"]["recommendable"], True)
         self.assertEqual(primary(staged_row())["verification_status"], "verified")
 
     def test_identity_fragments_agree_within_each_row(self):
@@ -144,14 +146,16 @@ class StagedInkling2RowTests(unittest.TestCase):
 
     def test_uncensored_row_mirrors_the_base_placement_and_price(self):
         base, unc = staged_row(), staged_row(UNC_KEY)
-        for field in ("min_bandwidth_tier", "min_ram_gb", "runtime_status"):
+        for field in ("min_bandwidth_tier", "min_ram_gb"):
             self.assertEqual(unc["candidate_row"][field], base["candidate_row"][field], field)
+        # SPEC-023 §16.3: a new key enters as `listed`; only a later release promotes it.
+        self.assertEqual(unc["candidate_row"]["runtime_status"], "listed")
         self.assertEqual(unc["artifact_source_entry"]["rate_class"], base["artifact_source_entry"]["rate_class"])
         for field in ("quantization", "runtime_format", "allowed_runtime_sources", "min_ram_gb", "hash_algorithm"):
             self.assertEqual(primary(unc)[field], primary(base)[field], field)
         # Abliterated and uncensored rows carry their base's price under their own labelled row.
         self.assertEqual(unc["rate_card_row"], base["rate_card_row"])
-        self.assertEqual(unc["demand_rank_row"], base["demand_rank_row"])
+        self.assertEqual(unc["demand_rank_row"], {**base["demand_rank_row"], "recommendable": False})
 
     def test_uncensored_licence_note(self):
         row = staged_row(UNC_KEY)

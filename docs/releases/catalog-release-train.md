@@ -23,6 +23,14 @@ another gate.
   rates, Inkling 2 Mini at 0.06/0.24/0.015 per M). The gateway proof passed. Both rows are
   `listed`; serving them needs provider CLI 1.8.299 (staging PR 2491). Still owed from earlier
   releases: buyer-UX conformance records for DeepSeek V4-Flash abliterated and MiniMax M3.1 Flash.
+- **Signed, in review:** `published-2026-11-24-inkling-2-mini-recommendable-v296` (Related: #2467)
+  promotes `thinkingmachines/inkling-2-mini` from `listed` to `recommendable` with its buyer-UX
+  conformance record owed (SPEC-023 §16.11 rule 4). Prices, Tier-2 catalog and native-MTP tuples are
+  unchanged; content-gate lane `catalog-content`. Live steps after merge:
+  `scripts/ops/catalog-activate.sh status`, then `next --run` (installs the owed record, then
+  activates). Owed after activation, once a provider on CLI 1.8.299 serves
+  `mlx-community/Inkling-2-Mini-oQ4e-mtp`: evidence (e) (`buyer_serving_e2e`) and the buyer-UX
+  conformance run (`buyer_ux_conformance_owed`).
 - **Previous (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
   (catalog release B of [PR 2456](https://github.com/Augustas11/macprovider/pull/2456), merged as
   `8e0814aed`; Related: #2452), activated through `scripts/ops/catalog-activate.sh` on top of

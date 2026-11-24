@@ -12,6 +12,10 @@
       "model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
       "release_id": "published-2026-11-13-minimax-m3.1-flash-recommendable-v287"
     },
+    "thinkingmachines/inkling-2-mini": {
+      "model": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+      "release_id": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+    },
     "zai-org/glm-5.3-flash-uncensored": {
       "model": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
       "release_id": "published-2026-11-09-glm53-flash-uncensored-recommendable-v281"
