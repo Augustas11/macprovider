@@ -25,7 +25,10 @@ import Jinja
 ///   `<|message_model|>`.
 /// - A history call is `<|message_model|>NAME<|content_invoke_tool_json|>`
 ///   then `{"name":NAME,"args":{…}}` with top-level argument keys sorted and
-///   nested values in their given order, then `<|end_message|>`.
+///   nested values semantically equal to the given ones (`Jinja.Value(any:)`
+///   sorts nested object keys, so a nested object the client sent in another
+///   key order renders sorted, where the template would keep its order),
+///   then `<|end_message|>`.
 ///
 /// Rendering runs inside `PromptControlTokenEncoder.encodePrompt`, so request
 /// text that spells a control token stays ordinary text (SPEC-018 §3.14).

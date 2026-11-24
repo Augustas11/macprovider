@@ -274,6 +274,42 @@ final class Inkling2OutputTests: XCTestCase {
         XCTAssertFalse(undeclared.cleanedContent?.contains("<|") ?? false)
     }
 
+    /// The next frame is searched for after the whole call object, blank
+    /// space before it included: marker text near the end of an argument
+    /// is never read as a frame (#2467).
+    func testCallAfterBlankSpaceResumesPastItsObject() throws {
+        let literal = "<|message_model|>x<|content_invoke_tool_json|>"
+        let padded = "<|message_model|>read_file<|content_invoke_tool_json|>" + String(repeating: " ", count: 60)
+            + "{\"name\":\"read_file\",\"args\":{\"path\":\"" + literal + "\"}}<|end_message|>"
+        let parsed = parse(padded + Self.readPasswd)
+        XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["read_file", "read_file"])
+        XCTAssertEqual(try StrictJSONParser.parse(parsed.toolCalls[0].arguments), .object(["path": .string(literal)]))
+        XCTAssertEqual(parsed.toolCalls[1].arguments, #"{"path":"/etc/passwd"}"#)
+    }
+
+    /// Without declared tools a call frame is an undeclared call: the prose
+    /// before it is content, streamed or not, and its markup never is.
+    func testCallFrameWithoutDeclaredToolsNeverReachesContent() throws {
+        for prose in ["Sure.", "Sure. "] {
+            let output = Self.thinking("t") + Self.text(prose) + Self.readHosts + Self.text("after")
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: makeRequest(tools: false, stream: false),
+                mode: .complete(finishReason: "stop"), defaultCompletionTokens: 9, toolCallPrefill: nil)
+            XCTAssertEqual(parsed.content, prose)
+            XCTAssertTrue(parsed.toolCalls.isEmpty)
+            let request = try makeRequest(tools: false)
+            for chunk in [1, 3, 7, output.count] {
+                for reference in [false, true] {
+                    let streamed = try stream(output, request: request, chunk: chunk, reference: reference)
+                    XCTAssertEqual(streamed.reasoning, "t", "chunk \(chunk)")
+                    XCTAssertEqual(streamed.content, prose, "chunk \(chunk)")
+                    XCTAssertTrue(streamed.calls.isEmpty, "chunk \(chunk)")
+                    XCTAssertFalse(streamed.sawMarkup, "chunk \(chunk)")
+                }
+            }
+        }
+    }
+
     func testCutCallKeepsOnlyCompleteCalls() {
         // finish_reason length inside the second call.
         let cut = parse(Self.readHosts + "<|message_model|>read_file<|content_invoke_tool_json|>{\"name\":\"read_file\",\"args\":{\"path\":\"/etc/pa")

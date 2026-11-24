@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.21 (2026-11-24, history reasoning restore; Related: #2467)
+**Version:** 0.3.22 (2026-11-24, history reasoning restore scoped to Inkling 2, not billed; Related: #2467)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,19 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.22 (2026-11-24, Related: #2467):** `SPEC-018-R011` history
+  reasoning restore applies to the `inkling2` grammar only; GLM, DeepSeek-V4,
+  LFM2 and Qwen3.8 render history reasoning exactly as sent, as before
+  v0.3.21. Restored reasoning is not billed: the prompt tokens it adds are
+  left out of the reported `prompt_tokens`, and `cached_prompt_tokens` never
+  exceeds the reported prompt. At most 256 KiB of reasoning is restored per
+  request, newest turns first; a restored prompt over the model's context
+  limit renders as sent. A turn records only when its conversation key was
+  not purged (and nothing was purged wholesale) since its request rendered.
+  The store belongs to one runtime and holds at most an eighth of its bytes
+  per conversation key. Without declared tools an Inkling 2 call frame never
+  reaches `content`. An empty `reasoning_content` no longer hides a
+  non-empty `reasoning` alias.
 - **v0.3.21 (2026-11-24, Related: #2467):** §3.12 history reasoning
   restore. Inkling 2's template replays every earlier assistant turn's
   reasoning, as GLM-5.3 (`clear_thinking` false) and Qwen3.8 do; a client
@@ -615,7 +628,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | `dsml` | family fallback `deepseek-v4` (the family has no Jinja template; §3.12) | `<｜DSML｜tool_calls>` holding one or more `<｜DSML｜invoke name="NAME">…</｜DSML｜invoke>`, each a list of `<｜DSML｜parameter name="KEY" string="true\|false">VALUE</｜DSML｜parameter>`; several blocks may follow each other; the last block may end at the end of output without its close when its invokes are complete; whitespace between markup is free. | `<｜DSML｜parameter>` names. A declared non-string type must parse strictly as that type under either string flag. Otherwise, `string="true"` values are literal text; `string="false"` values are typed as GLM values. Duplicate names, a flag other than `true`/`false`, an unclosed parameter or invoke, or a declared-type mismatch fail closed. | `ToolCallParser.parseDSMLCalls` |
 | `lfm2` | template format `lfm2`; family fallback `lfm2.5-24b-a2b` | `<|tool_call_start|>[NAME(key=value, ...), ...]<|tool_call_end|>`; complete nonempty list, ASCII Python identifiers for function names and keyword names; quoted strings and bounded JSON values, plus Python `True`, `False`, `None`; no expressions, positional arguments, duplicate keys, incomplete delimiters or trailing non-whitespace after the envelope. Preserve leading prose. | keyword arguments converted to a strict JSON object without rounding numeric literals; depth32 and existing per-call/per-response byte limits apply. | `LFMToolCallParser` |
 | `minimax` | family `minimax-m3` / `minimax_m3` (v0.3.18), which wins over the template format the runtime infers (`json`); no template format maps to it | `]<]minimax[>[<tool_call>` holding one or more `]<]minimax[>[<invoke name="NAME">…]<]minimax[>[</invoke>`, each a list of `]<]minimax[>[<KEY>VALUE]<]minimax[>[</KEY>`; a mapping value is nested elements and a list value is `]<]minimax[>[<item>` elements; then `]<]minimax[>[</tool_call>`. Whitespace between elements is free. As for `glm` (v0.3.12, v0.3.13, without the repairs): invokes parse one at a time and a failing, undeclared or schema-failing one is dropped while the rest stand; a byte-cap overflow fails the whole output closed; a wrapper whose opener repeats before its close starts at the last opener; a final wrapper without its close keeps only complete invokes and fails closed when it holds a second opener; text outside wrappers is prose; namespaced markup never reaches `content`, streamed or not. Calls inside a §3.12 reasoning block are not calls. | element keys (top level: the `<parameter=…>` charset). Scalars are typed as `glm` values; nested elements become an array when declared `array` (or, undeclared, when every child is `item`), else an object; an empty value is `""`, `[]` or `{}` by declared type. Depth over 32 and duplicate keys fail the call. | `ToolCallParser.parseMiniMaxCalls` |
-| `inkling2` | family `inkling-2` / `inkling2` (v0.3.20), which wins over the template format the runtime infers; no template format maps to it | One or more call frames `<|message_model|>NAME<|content_invoke_tool_json|>` + a JSON object `{"name":NAME,"args":{…}}` + `<|end_message|>`, as the template writes a history call; an empty header takes the JSON name. Frames parse one at a time: a frame whose JSON fails, whose name differs from a nonempty header, whose `args` is not an object, or whose name is undeclared is dropped while the rest stand; a frame cut before its JSON closes is dropped; a byte-cap overflow fails the whole output closed. Text frames before the first call are prose; frame markers never reach `content`, streamed or not. Calls inside a §3.12 thinking frame are not calls. | `args` (JSON object; the template sorts top-level keys in history) | `ToolCallParser.parseInklingCalls` |
+| `inkling2` | family `inkling-2` / `inkling2` (v0.3.20), which wins over the template format the runtime infers; no template format maps to it | One or more call frames `<|message_model|>NAME<|content_invoke_tool_json|>` + a JSON object `{"name":NAME,"args":{…}}` + `<|end_message|>`, as the template writes a history call; an empty header takes the JSON name. Frames parse one at a time: a frame whose JSON fails, whose name differs from a nonempty header, whose `args` is not an object, or whose name is undeclared is dropped while the rest stand; a frame cut before its JSON closes is dropped; a byte-cap overflow fails the whole output closed. Text frames before the first call are prose; frame markers never reach `content`, streamed or not. Calls inside a §3.12 thinking frame are not calls. | `args` (JSON object; the template sorts top-level keys in history, and the provider renders nested values semantically equal to those sent: nested object keys come out sorted) | `ToolCallParser.parseInklingCalls` |
 | `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
@@ -1280,38 +1293,57 @@ Registers `SPEC-018-R008`. **v0.3.21:** the LFM2.5 template and the Inkling 2
 encoder also receive it (Inkling 2 renders it as a `<|content_thinking|>`
 frame before the turn's content, for every assistant turn). An assistant
 message's string `reasoning` is read as `reasoning_content` when the message
-has no string `reasoning_content`.
+has no string `reasoning_content`; **v0.3.22:** an empty `reasoning_content`
+counts as absent, so a non-empty `reasoning` is read.
 
-**History reasoning restore (v0.3.21).** For the families above, the
-provider MUST keep the reasoning of each assistant turn it generates for a
-request that carries a conversation key, and MUST put it back on an
-assistant history message of a later request that has no (or empty)
-reasoning, when all of these match the generated turn: the request model,
-the conversation key, every message before that turn (role, content, tool
-calls and tool results; reasoning and tool-call IDs ignored), the turn's
-content (trimmed; null equals empty) and its tool calls (names, and
-arguments compared as canonical JSON with sorted keys). Reasoning a client
-sends is rendered as sent. The prompt then equals the one the client would
-have produced by sending the reasoning back, which is also the token
-sequence the model generated, so the conversation cache prefix extends
-through the restored turn. The store:
+**History reasoning restore (v0.3.21, v0.3.22).** For the `inkling2`
+grammar (v0.3.22; every other family renders history reasoning exactly as
+sent, per `SPEC-018-R008`), the provider MUST keep the reasoning of each
+assistant turn it generates for a request that carries a conversation key,
+and MUST put it back on an assistant history message of a later request that
+has no (or empty) reasoning, when all of these match the generated turn: the
+request model, the conversation key, every message before that turn (role,
+content, tool calls and tool results; reasoning and tool-call IDs ignored),
+the turn's content (trimmed; null equals empty) and its tool calls (names,
+and arguments compared as canonical JSON with sorted keys). Reasoning a
+client sends is rendered as sent. The prompt then equals the one the client
+would have produced by sending the reasoning back, which is the token
+sequence the model generated when the turn held one thinking frame, so the
+conversation cache prefix extends through the restored turn. The reasoning
+is kept as one string: a turn the model wrote as two or more thinking frames
+(their bodies joined without a separator) is restored as one frame, and the
+prompt diverges from the generated tokens at that frame. The store:
 
-- is in the serving process's memory only: never persisted, logged,
+- is in the serving runtime's memory only: never persisted, logged,
   sent to the coordinator or reused across conversation keys (which are
   account-scoped), so one buyer's reasoning never reaches another buyer's
   prompt;
-- is bounded (default 4096 turns, 32 MiB, 1 MiB per turn, 72 h idle) with
+- is bounded (default 4096 turns, 32 MiB, at most an eighth of that per
+  conversation key, 1 MiB of reasoning per turn, 72 h idle) with
   least-recently-used eviction;
-- is purged with the conversation cache: a per-key purge drops that key's
-  turns, a purge of every hot entry (model unload, swap) drops them all;
+- restores at most 256 KiB of reasoning per request, newest turns first; the
+  first turn past the cap ends the restore and older turns render as sent;
+- is purged with the conversation cache of the same runtime: a per-key purge
+  drops that key's turns, a purge of every hot entry (model unload, swap)
+  drops them all. A turn records only if neither happened since its request
+  was rendered (a per-key generation and a global epoch, read when the
+  prompt is first rendered);
+- is read once per request: every render of the request's prompt
+  (preflight, thinking probe, serving) uses that one restore;
 - is never consulted or written for a request without a conversation key or
   one that may not use reusable caches (a SPEC-049 privacy-class request,
   SPEC-049-R010).
 
-A restore logs one line per request, `event=reasoning_history
-action=restored turns=N bytes=B`, with counts only. Restored reasoning is
-prompt text billed in `prompt_tokens`, and receipts still bind the
-buyer-authored messages. Registers `SPEC-018-R011`.
+Restored reasoning is not billed: the provider renders the prompt with and
+without the restore, and the reported `prompt_tokens` is the served prompt
+minus the tokens the restore added; `cached_prompt_tokens` is clamped to the
+reported `prompt_tokens`. So reported usage stays within the bound the
+coordinator and gateway derive from the buyer's own body. When the restored
+prompt exceeds the model's context limit, the prompt renders as sent and
+nothing is restored. A restore logs one line per request,
+`event=reasoning_history action=restored turns=N bytes=B tokens=T` (or
+`action=withdrawn reason=context_limit tokens=T`), with counts only. Receipts
+still bind the buyer-authored messages. Registers `SPEC-018-R011`.
 
 **DeepSeek-V4 (v0.3.4).** The family ships no Jinja template; the provider
 renders prompts with `DeepseekV4Encoding`, a port of the model's

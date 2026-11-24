@@ -2486,11 +2486,15 @@
       "spec_id": "SPEC-018",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func userInput"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func userInput",
+        "phase3-binary/Sources/macprovider-cli/Inkling2ChatEncoding.swift:enum Inkling2Encoding",
+        "phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:public struct ChatMessage"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/GLMReasoningHistoryTests.swift:final class GLMReasoningHistoryTests",
-        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ReasoningHistoryTests.swift:final class DeepseekV4ReasoningHistoryTests"
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ReasoningHistoryTests.swift:final class DeepseekV4ReasoningHistoryTests",
+        "phase3-binary/Tests/macprovider-cliTests/Inkling2ChatEncodingTests.swift:func testAssistantReasoningAndContentAreTwoFrames",
+        "phase3-binary/Tests/MacProviderCoreTests/AssistantReasoningHistoryTests.swift:func testReasoningAliasParses"
       ],
       "journeys": [],
       "evidence": [],
@@ -2498,7 +2502,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2107",
-        "rationale": "GLM-5.3 history reasoning_content now reaches the template (DeepSeek-V4 already did), with fixture-template rendering tests; production remains pending the next signed CLI release."
+        "rationale": "GLM-5.3 history reasoning_content now reaches the template (DeepSeek-V4 already did), with fixture-template rendering tests. v0.3.21: the LFM2.5 template and the Inkling 2 encoder also receive it (Inkling 2 renders a <|content_thinking|> frame before the turn's content), and an assistant message's non-empty string reasoning alias is read when reasoning_content is absent or empty (v0.3.22). Production remains pending the next signed CLI release."
       }
     },
     {
@@ -2559,13 +2563,19 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/MacProviderCore/AssistantReasoningHistory.swift:public final class AssistantReasoningHistory",
+        "phase3-binary/Sources/MacProviderCore/AssistantReasoningHistory.swift:public final class ReasoningHistoryRequestState",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func restoringHistoryReasoning",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func renderingHistoryReasoning",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func finishingHistoryReasoning",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func recordHistoryReasoning",
-        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func purgeHot"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func excludingRestoredPromptTokens",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func purgeHot",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func purgeAllHot"
       ],
       "tests": [
         "phase3-binary/Tests/MacProviderCoreTests/AssistantReasoningHistoryTests.swift:final class AssistantReasoningHistoryTests",
         "phase3-binary/Tests/macprovider-cliTests/InklingReasoningRestoreTests.swift:final class InklingReasoningRestoreTests",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheReasoningHistoryPurgeTests.swift:final class ConversationCacheReasoningHistoryPurgeTests",
         "phase4-coordinator/internal/buyer/reasoning_history_passthrough_test.go:func TestChatRequestKeepsAssistantReasoningThroughDispatch",
         "phase5-gateway/internal/router/reasoning_history_passthrough_test.go:func TestChatCompletionsForwardsAssistantReasoningHistory",
         "phase5-gateway/internal/router/reasoning_history_passthrough_test.go:func TestAnthropicMessagesForwardsThinkingBlocksAsReasoningContent"
@@ -2576,7 +2586,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2467",
-        "rationale": "Provider keeps generated assistant reasoning in process memory, scoped by model and conversation key, and restores it on identical history turns that arrive without it, for families whose renderer reads history reasoning. Unit coverage for the store bounds and the Inkling 2 rendered prefix; a live multi-turn prefix-cache hit and a signed CLI release remain pending."
+        "rationale": "v0.3.22: for the Inkling 2 grammar only, the provider keeps generated assistant reasoning in process memory, scoped by model and conversation key, and restores it on identical history turns that arrive without it (newest first, at most 256 KiB per request). Restored prompt tokens are left out of reported prompt_tokens and cached_prompt_tokens (not billed); a restored prompt over the context limit renders as sent; records are fenced by per-key purge generations and a global epoch. Other families render exactly as before. Unit coverage for the store bounds, fences, billing subtraction, context fallback and the Inkling 2 rendered prefix; a live multi-turn prefix-cache hit and a signed CLI release remain pending."
       }
     },
     {

@@ -558,12 +558,19 @@ enum ToolCallParser {
         var total = 0
         while let frame = nextInklingCallFrame(in: rest) {
             let header = rest[rest.index(frame.lowerBound, offsetBy: Inkling.messageModel.count)..<frame.opener.lowerBound]
-            let body = String(rest[frame.opener.upperBound...])
-            guard let object = firstCompleteJSONObject(in: body) else {
+            // The object is scanned in place (no copy of the rest per frame),
+            // and the next frame is searched for after it and after the
+            // blank space before it.
+            var objectStart = frame.opener.upperBound
+            while objectStart < rawOutput.endIndex, rawOutput[objectStart].isWhitespace {
+                objectStart = rawOutput.index(after: objectStart)
+            }
+            guard objectStart < rawOutput.endIndex, rawOutput[objectStart] == "{",
+                  let object = scanJSONValue(in: rawOutput, from: objectStart, allowIncomplete: false) else {
                 glmWarning("dropped unclosed Inkling 2 tool call for \(modelID)", modelID: modelID)
                 break
             }
-            rest = rest[rest.index(frame.opener.upperBound, offsetBy: object.count)...]
+            rest = rawOutput[rawOutput.utf8.index(objectStart, offsetBy: object.utf8.count)...]
             do {
                 let call = try inklingCall(object, header: String(header))
                 if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {

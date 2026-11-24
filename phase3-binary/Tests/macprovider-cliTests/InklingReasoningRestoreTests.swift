@@ -7,18 +7,24 @@ import XCTest
 /// SPEC-018-R011 (#2467): Inkling 2's template replays every earlier
 /// assistant turn's reasoning. When a client drops it, the provider puts back
 /// the reasoning it generated for that turn, so the prompt is the one the
-/// model wrote and the conversation cache prefix still matches.
+/// model wrote and the conversation cache prefix still matches. Restored
+/// reasoning is not billed, never pushes a prompt past the context limit, and
+/// only Inkling 2 restores.
 final class InklingReasoningRestoreTests: XCTestCase {
+    private typealias Inkling = ReasoningOutput.Inkling
     private let model = "thinkingmachines/inkling-2-mini"
     private let reasoning = "17*23 = 17*20 + 17*3 = 340 + 51."
     private let answer = "391"
 
     private func request(
-        _ messages: [[String: Any]], model: String? = nil, key: String? = "conv:inkling-restore"
+        _ messages: [[String: Any]], model: String? = nil, key: String? = "conv:inkling-restore",
+        history: AssistantReasoningHistory? = nil
     ) throws -> ChatCompletionRequest {
-        try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
             "model": model ?? self.model, "messages": messages,
         ])).withConversationKey(key)
+        if let history { request.outputState.reasoningHistory.attach(history) }
+        return request
     }
 
     private var firstTurn: [[String: Any]] { [["role": "user", "content": "What is 17*23?"]] }
@@ -28,23 +34,31 @@ final class InklingReasoningRestoreTests: XCTestCase {
         firstTurn + [["role": "assistant", "content": answer], ["role": "user", "content": "And 17*24?"]]
     }
 
-    private func completion() -> CompletionResult {
+    private func completion(content: String? = nil, reasoning: String? = nil, toolCalls: [macprovider_cli.ToolCall]? = nil) -> CompletionResult {
         CompletionResult(
-            content: answer, finishReason: "stop", promptTokens: 1, completionTokens: 9,
-            settlementDisposition: .eligibleOwner, reasoningContent: reasoning, reasoningTokens: 6)
+            content: content ?? answer, finishReason: "stop", promptTokens: 1, completionTokens: 9,
+            toolCalls: toolCalls, settlementDisposition: .eligibleOwner,
+            reasoningContent: reasoning ?? self.reasoning, reasoningTokens: 6)
     }
 
-    private func prompt(_ request: ChatCompletionRequest, history: AssistantReasoningHistory) throws -> String {
-        let input = try ModelRuntime.userInput(for: request, reasoningHistory: history)
+    private static func prompt(_ request: ChatCompletionRequest, restoring: Bool = true) throws -> String {
+        let input = try ModelRuntime.userInput(for: request, restoresHistoryReasoning: restoring)
         return try Inkling2Encoding.render(
             messages: DefaultMessageGenerator().generate(from: input), tools: nil, additionalContext: nil)
     }
 
+    /// Renders the first turn (the lookup that pins the purge fence) and
+    /// records `completion` for it.
+    private func serveFirstTurn(_ history: AssistantReasoningHistory, _ completion: CompletionResult) throws -> String {
+        let first = try request(firstTurn, history: history)
+        let firstPrompt = try Self.prompt(first)
+        ModelRuntime.recordHistoryReasoning(completion, for: first, toolSelectionModelID: nil)
+        return firstPrompt
+    }
+
     func testRestoredTurnRendersAsGeneratedAndExtendsTheCachedPrefix() throws {
         let history = AssistantReasoningHistory()
-        let first = try request(firstTurn)
-        let firstPrompt = try prompt(first, history: history)
-        ModelRuntime.recordHistoryReasoning(completion(), for: first, toolSelectionModelID: nil, into: history)
+        let firstPrompt = try serveFirstTurn(history, completion())
         XCTAssertEqual(history.count, 1)
 
         // The frames the model writes after the first prompt
@@ -52,67 +66,228 @@ final class InklingReasoningRestoreTests: XCTestCase {
         let generated = "<|message_model|><|content_thinking|>" + reasoning + "<|end_message|>"
             + "<|message_model|><|content_text|>" + answer + "<|end_message|><|content_model_end_sampling|>"
 
-        let second = try request(secondTurn)
-        let restored = try prompt(second, history: history)
+        let second = try request(secondTurn, history: history)
+        let restored = try Self.prompt(second)
         XCTAssertTrue(restored.hasPrefix(firstPrompt + generated), restored)
         XCTAssertTrue(restored.hasSuffix("<|message_user|><|content_text|>And 17*24?<|end_message|>"), restored)
-        // One log line per request, however often its prompt renders.
-        XCTAssertFalse(second.outputState.claimReasoningRestoreReport())
+        XCTAssertTrue(second.outputState.reasoningHistory.isRestoring)
 
         // Without the store the rendered history diverges from the cached
         // tokens at the start of the assistant turn.
-        let dropped = try prompt(try request(secondTurn), history: AssistantReasoningHistory())
+        let dropped = try Self.prompt(try request(secondTurn, history: AssistantReasoningHistory()))
         XCTAssertFalse(dropped.hasPrefix(firstPrompt + generated))
         XCTAssertTrue(dropped.hasPrefix(firstPrompt + "<|message_model|><|content_text|>" + answer), dropped)
         XCTAssertFalse(dropped.contains("<|content_thinking|>"))
+        // Nor with no store attached, or with the restore turned off.
+        XCTAssertFalse(try Self.prompt(try request(secondTurn)).contains("<|content_thinking|>"))
+        XCTAssertFalse(try Self.prompt(second, restoring: false).contains("<|content_thinking|>"))
+    }
+
+    /// M3: the turn recorded is what the real frame split returns for the
+    /// model's output. One thinking frame restores to the generated bytes;
+    /// several are joined into one frame (the documented R011 limit).
+    func testRealSplitOutputRecordsAndRestores() throws {
+        let think = { (text: String) in "<|message_model|><|content_thinking|>" + text + "<|end_message|>" }
+        let text = "<|message_model|><|content_text|>" + answer + "<|end_message|>"
+        let eos = "<|content_model_end_sampling|>"
+
+        let single = Inkling.split(think(reasoning) + text)
+        XCTAssertEqual(single.reasoning, reasoning)
+        XCTAssertEqual(single.answer, answer)
+        let history = AssistantReasoningHistory()
+        let firstPrompt = try serveFirstTurn(history, completion(content: single.answer, reasoning: single.reasoning))
+        XCTAssertTrue(try Self.prompt(try request(secondTurn, history: history))
+            .hasPrefix(firstPrompt + think(reasoning) + text + eos))
+
+        let multiple = Inkling.split(think("Plan.") + think("Check.") + text)
+        XCTAssertEqual(multiple.reasoning, "Plan.Check.")
+        let joined = AssistantReasoningHistory()
+        _ = try serveFirstTurn(joined, completion(content: multiple.answer, reasoning: multiple.reasoning))
+        let restored = try Self.prompt(try request(secondTurn, history: joined))
+        XCTAssertTrue(restored.hasPrefix(firstPrompt + think("Plan.Check.") + text + eos), restored)
+        XCTAssertFalse(restored.hasPrefix(firstPrompt + think("Plan.") + think("Check.")))
+    }
+
+    /// A call turn: the parsed call (CLI `ToolCall`) is keyed as the client
+    /// sends it back, with a new call ID.
+    func testToolCallTurnRestoresFromParsedOutput() throws {
+        let output = "<|message_model|><|content_thinking|>Look it up.<|end_message|>"
+            + #"<|message_model|>weather<|content_invoke_tool_json|>{"name":"weather","args":{"city":"Oslo"}}<|end_message|>"#
+        let split = Inkling.split(output)
+        let parsed = try XCTUnwrap(ToolCallParser.parseInklingCalls(split.answer, modelID: model, allowedFunctionNames: ["weather"]))
+        XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["weather"])
+        let history = AssistantReasoningHistory()
+        _ = try serveFirstTurn(history, completion(content: "", reasoning: split.reasoning, toolCalls: parsed.toolCalls))
+        XCTAssertEqual(history.count, 1)
+        let followUp = firstTurn + [
+            ["role": "assistant", "content": NSNull(), "tool_calls": [[
+                "id": "call_client", "type": "function",
+                "function": ["name": "weather", "arguments": #"{ "city": "Oslo" }"#],
+            ]]],
+            ["role": "tool", "tool_call_id": "call_client", "content": "Clear"],
+        ]
+        let second = try request(followUp, history: history)
+        let restored = try XCTUnwrap(second.outputState.reasoningHistory.restore(
+            second.messages, model: model, conversationKey: second.conversationKey))
+        XCTAssertEqual(restored.messages[1].reasoningContent, "Look it up.")
     }
 
     func testClientReasoningIsRenderedAsSent() throws {
         let history = AssistantReasoningHistory()
-        ModelRuntime.recordHistoryReasoning(completion(), for: try request(firstTurn), toolSelectionModelID: nil, into: history)
+        _ = try serveFirstTurn(history, completion())
         var messages = secondTurn
         messages[1]["reasoning"] = "Client copy."
-        let rendered = try prompt(try request(messages), history: history)
+        let rendered = try Self.prompt(try request(messages, history: history))
         XCTAssertTrue(rendered.contains("<|content_thinking|>Client copy.<|end_message|>"), rendered)
         XCTAssertFalse(rendered.contains(reasoning))
     }
 
     func testNoRestoreWithoutConversationKeyOrOnThePrivacyPath() throws {
         let history = AssistantReasoningHistory()
-        ModelRuntime.recordHistoryReasoning(completion(), for: try request(firstTurn), toolSelectionModelID: nil, into: history)
-        XCTAssertFalse(try prompt(try request(secondTurn, key: nil), history: history).contains("<|content_thinking|>"))
+        _ = try serveFirstTurn(history, completion())
+        XCTAssertFalse(try Self.prompt(try request(secondTurn, key: nil, history: history)).contains("<|content_thinking|>"))
         let privacy = try request(secondTurn).withIngestProvenance(.privacy)
-        XCTAssertFalse(try prompt(privacy, history: history).contains("<|content_thinking|>"))
+        privacy.outputState.reasoningHistory.attach(history)
+        XCTAssertFalse(try Self.prompt(privacy).contains("<|content_thinking|>"))
         // Neither records either.
         let empty = AssistantReasoningHistory()
-        ModelRuntime.recordHistoryReasoning(completion(), for: try request(firstTurn, key: nil), toolSelectionModelID: nil, into: empty)
-        ModelRuntime.recordHistoryReasoning(
-            completion(), for: try request(firstTurn).withIngestProvenance(.privacy), toolSelectionModelID: nil, into: empty)
+        let keyless = try request(firstTurn, key: nil, history: empty)
+        _ = try Self.prompt(keyless)
+        ModelRuntime.recordHistoryReasoning(completion(), for: keyless, toolSelectionModelID: nil)
+        let privateFirst = try request(firstTurn).withIngestProvenance(.privacy)
+        privateFirst.outputState.reasoningHistory.attach(empty)
+        _ = try Self.prompt(privateFirst)
+        ModelRuntime.recordHistoryReasoning(completion(), for: privateFirst, toolSelectionModelID: nil)
         XCTAssertEqual(empty.count, 0)
     }
 
-    func testFamiliesWhoseRendererDropsHistoryReasoningAreLeftAlone() throws {
-        let llama = "meta-llama/llama-3.3-70b-instruct"
-        let history = AssistantReasoningHistory()
-        ModelRuntime.recordHistoryReasoning(
-            completion(), for: try request(firstTurn, model: llama), toolSelectionModelID: nil, into: history)
-        XCTAssertEqual(history.count, 0)
-        history.record(model: llama, conversationKey: "conv:inkling-restore",
-                       prefix: try request(firstTurn, model: llama).messages,
-                       content: answer, toolCalls: nil, reasoning: reasoning)
-        let input = try ModelRuntime.userInput(for: try request(secondTurn, model: llama), reasoningHistory: history)
-        guard case .chat = input.prompt else {
-            return XCTFail("A family without history reasoning keeps the structured chat path")
+    /// Item 1: GLM, Qwen3.8, LFM2 and DeepSeek-V4 keep their pre-R011
+    /// behaviour: nothing recorded, nothing restored, and a GLM request
+    /// without history reasoning keeps the structured chat input.
+    func testOtherFamiliesNeitherRecordNorRestore() throws {
+        for other in ["zai-org/glm-5.3-flash", "qwen/qwen3.8-27b", "liquidai/lfm2.5-24b-a2b",
+                      "deepseek-ai/deepseek-v4-flash", "meta-llama/llama-3.3-70b-instruct"] {
+            let history = AssistantReasoningHistory()
+            let first = try request(firstTurn, model: other, history: history)
+            _ = try ModelRuntime.userInput(for: first)
+            ModelRuntime.recordHistoryReasoning(completion(), for: first, toolSelectionModelID: nil)
+            XCTAssertEqual(history.count, 0, other)
+            // Even a turn put in the store directly is not restored.
+            history.record(model: other, conversationKey: "conv:inkling-restore", prefix: first.messages,
+                           content: answer, toolCalls: nil, reasoning: reasoning,
+                           fence: history.fence(conversationKey: "conv:inkling-restore"))
+            let second = try request(secondTurn, model: other, history: history)
+            let input = try ModelRuntime.userInput(for: second)
+            XCTAssertFalse(second.outputState.reasoningHistory.isRestoring, other)
+            XCTAssertNil(second.outputState.reasoningHistory.recordTarget(), other)
+            if other.hasPrefix("zai-org") || other.hasPrefix("meta-llama") {
+                guard case .chat = input.prompt else {
+                    return XCTFail("\(other) without history reasoning keeps the structured chat path")
+                }
+            }
         }
     }
 
-    func testHistoryReasoningFamilies() {
-        for grammar: ToolCallGrammar in [.inkling2, .glm, .lfm2, .dsml] {
-            XCTAssertTrue(ModelRuntime.rendersHistoryReasoning(grammar: grammar, modelID: "any"), "\(grammar)")
+    func testOnlyInklingRestores() {
+        XCTAssertTrue(ModelRuntime.restoresHistoryReasoning(grammar: .inkling2))
+        for grammar: ToolCallGrammar? in [.glm, .lfm2, .dsml, .qwen, .llama3, .minimax, nil] {
+            XCTAssertFalse(ModelRuntime.restoresHistoryReasoning(grammar: grammar), "\(String(describing: grammar))")
         }
-        XCTAssertTrue(ModelRuntime.rendersHistoryReasoning(grammar: .qwen, modelID: "qwen/qwen3.8-27b"))
-        XCTAssertFalse(ModelRuntime.rendersHistoryReasoning(grammar: .qwen, modelID: "qwen/qwen3.6-35b-a3b"))
-        XCTAssertFalse(ModelRuntime.rendersHistoryReasoning(grammar: .llama3, modelID: "any"))
-        XCTAssertFalse(ModelRuntime.rendersHistoryReasoning(grammar: nil, modelID: "any"))
+    }
+
+    // MARK: Context limit and billing
+
+    /// Item 3: a restored prompt over the context limit renders as sent, and
+    /// the request stays unrestored on every later render.
+    func testRestoredPromptOverTheContextLimitRendersAsSent() async throws {
+        let history = AssistantReasoningHistory()
+        _ = try serveFirstTurn(history, completion())
+        let plain = try Self.prompt(try request(secondTurn, history: AssistantReasoningHistory()))
+        let second = try request(secondTurn, history: history)
+        let rendered = try await ModelRuntime.renderingHistoryReasoning(
+            for: second, maxContextTokens: plain.utf8.count,
+            render: { (restoring: Bool) async throws -> String in try Self.prompt(second, restoring: restoring) },
+            tokenCount: { (prompt: String) -> Int in prompt.utf8.count })
+        XCTAssertEqual(rendered, plain)
+        XCTAssertTrue(second.outputState.reasoningHistory.isWithdrawn)
+        XCTAssertEqual(second.outputState.reasoningHistory.restoredPromptTokens, 0)
+        XCTAssertEqual(try Self.prompt(second), plain)
+        // The generated turn still records under the request's fence.
+        XCTAssertNotNil(second.outputState.reasoningHistory.recordTarget())
+    }
+
+    /// Item 2: within the limit the restore stands, and the tokens it added
+    /// are noted for usage.
+    func testRestoredPromptTokensAreNoted() async throws {
+        let history = AssistantReasoningHistory()
+        _ = try serveFirstTurn(history, completion())
+        let plain = try Self.prompt(try request(secondTurn, history: AssistantReasoningHistory()))
+        let second = try request(secondTurn, history: history)
+        for limit in [nil, 1 << 20] as [Int?] {
+            let rendered = try await ModelRuntime.renderingHistoryReasoning(
+                for: second, maxContextTokens: limit,
+                render: { (restoring: Bool) async throws -> String in try Self.prompt(second, restoring: restoring) },
+                tokenCount: { (prompt: String) -> Int in prompt.utf8.count })
+            XCTAssertTrue(rendered.contains("<|content_thinking|>" + reasoning))
+            XCTAssertEqual(second.outputState.reasoningHistory.restoredPromptTokens, rendered.utf8.count - plain.utf8.count)
+        }
+        // Nothing restored: one render, nothing noted.
+        let unrestored = try request(firstTurn, history: history)
+        var renders = 0
+        _ = try await ModelRuntime.renderingHistoryReasoning(
+            for: unrestored, maxContextTokens: nil,
+            render: { (restoring: Bool) async throws -> String in
+                renders += 1
+                return try Self.prompt(unrestored, restoring: restoring)
+            },
+            tokenCount: { (prompt: String) -> Int in prompt.utf8.count })
+        XCTAssertEqual(renders, 1)
+        XCTAssertEqual(unrestored.outputState.reasoningHistory.restoredPromptTokens, 0)
+    }
+
+    /// Item 2: reported usage leaves the restored tokens out, and the cached
+    /// count never exceeds the reported prompt.
+    func testRestoredReasoningIsNotBilled() throws {
+        let served = CompletionResult(
+            content: answer, finishReason: "stop", promptTokens: 100, cachedPromptTokens: 95,
+            kvCacheBytesReused: 4096, completionTokens: 9, settlementDisposition: .eligibleOwner,
+            reasoningContent: reasoning, reasoningTokens: 6)
+        let billed = served.excludingRestoredPromptTokens(10)
+        XCTAssertEqual(billed.promptTokens, 90)
+        XCTAssertEqual(billed.cachedPromptTokens, 90)
+        XCTAssertEqual(billed.completionTokens, 9)
+        XCTAssertEqual(served.excludingRestoredPromptTokens(500).promptTokens, 0)
+        XCTAssertEqual(served.excludingRestoredPromptTokens(500).cachedPromptTokens, 0)
+        XCTAssertEqual(served.excludingRestoredPromptTokens(0).promptTokens, 100)
+        XCTAssertEqual(served.excludingRestoredPromptTokens(0).cachedPromptTokens, 95)
+
+        let history = AssistantReasoningHistory()
+        _ = try serveFirstTurn(history, completion())
+        let second = try request(secondTurn, history: history)
+        _ = try Self.prompt(second)
+        second.outputState.reasoningHistory.noteRestoredPromptTokens(10)
+        let finished = ModelRuntime.finishingHistoryReasoning(served, for: second, toolSelectionModelID: nil)
+        XCTAssertEqual(finished.promptTokens, 90)
+        XCTAssertEqual(finished.cachedPromptTokens, 90)
+        // And the second turn was recorded.
+        XCTAssertEqual(history.count, 2)
+        let unrestored = try request(firstTurn)
+        XCTAssertEqual(ModelRuntime.finishingHistoryReasoning(served, for: unrestored, toolSelectionModelID: nil).promptTokens, 100)
+    }
+
+    /// Item 4: a turn whose request rendered before its key was purged is
+    /// not recorded.
+    func testRecordAfterAPurgeIsANoOp() throws {
+        let history = AssistantReasoningHistory()
+        let first = try request(firstTurn, history: history)
+        _ = try Self.prompt(first)
+        history.purge(conversationKey: "conv:inkling-restore")
+        ModelRuntime.recordHistoryReasoning(completion(), for: first, toolSelectionModelID: nil)
+        XCTAssertEqual(history.count, 0)
+        let wiped = try request(firstTurn, history: history)
+        _ = try Self.prompt(wiped)
+        history.removeAll()
+        ModelRuntime.recordHistoryReasoning(completion(), for: wiped, toolSelectionModelID: nil)
+        XCTAssertEqual(history.count, 0)
     }
 }

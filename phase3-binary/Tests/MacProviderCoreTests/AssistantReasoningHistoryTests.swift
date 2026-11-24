@@ -135,24 +135,90 @@ final class AssistantReasoningHistoryTests: XCTestCase {
         XCTAssertNotNil(history.restoring(ask(2), model: model, conversationKey: key))
     }
 
-    func testBytesAreBounded() {
-        let overhead = AssistantReasoningHistory.entryOverheadBytes
-        let history = AssistantReasoningHistory(limits: .init(
-            maxEntries: 100, maxBytes: 2 * (overhead + 10), maxEntryBytes: overhead + 10, ttlSeconds: 3600))
+    /// Many uses between evictions leave stale queue tickets behind; the
+    /// order stays least recently used first after the queues compact.
+    func testLeastRecentlyUsedOrderSurvivesManyUses() {
+        let history = AssistantReasoningHistory(limits: .init(maxEntries: 3, maxBytes: 1 << 20, maxEntryBytes: 1 << 20, ttlSeconds: 3600))
         func turn(_ n: Int) -> [ChatMessage] { [ChatMessage(role: .user, content: "q\(n)")] }
-        // Over the per-entry cap: not stored.
-        history.record(model: model, conversationKey: key, prefix: turn(9), content: "a", toolCalls: nil, reasoning: String(repeating: "x", count: 11))
+        func ask(_ n: Int) -> [ChatMessage] { turn(n) + [ChatMessage(role: .assistant, content: "a\(n)")] }
+        for n in 0..<3 {
+            history.record(model: model, conversationKey: key, prefix: turn(n), content: "a\(n)", toolCalls: nil, reasoning: "r\(n)")
+        }
+        for round in 0..<500 {
+            XCTAssertNotNil(history.restoring(ask(round % 2 == 0 ? 0 : 2), model: model, conversationKey: key))
+        }
+        // Turn 1 was never used again: it goes first.
+        history.record(model: model, conversationKey: key, prefix: turn(3), content: "a3", toolCalls: nil, reasoning: "r3")
+        XCTAssertNil(history.restoring(ask(1), model: model, conversationKey: key))
+        XCTAssertEqual(history.count, 3)
+        // Then turn 0 (used before turn 2 in the last round).
+        history.record(model: model, conversationKey: key, prefix: turn(4), content: "a4", toolCalls: nil, reasoning: "r4")
+        XCTAssertNil(history.restoring(ask(0), model: model, conversationKey: key))
+        XCTAssertNotNil(history.restoring(ask(2), model: model, conversationKey: key))
+    }
+
+    func testBytesAreBoundedInTotalAndPerConversation() {
+        let overhead = AssistantReasoningHistory.entryOverheadBytes
+        let entry = overhead + 10
+        // An eighth of the total is two entries per conversation.
+        let history = AssistantReasoningHistory(limits: .init(
+            maxEntries: 100, maxBytes: 16 * entry, maxEntryBytes: 10, ttlSeconds: 3600))
+        func turn(_ n: Int) -> [ChatMessage] { [ChatMessage(role: .user, content: "q\(n)")] }
+        let ten = String(repeating: "x", count: 10)
+        // Over the per-entry reasoning cap: not stored; exactly at it: stored.
+        history.record(model: model, conversationKey: key, prefix: turn(99), content: "a", toolCalls: nil, reasoning: ten + "x")
         XCTAssertEqual(history.count, 0)
         for n in 0..<3 {
-            history.record(model: model, conversationKey: key, prefix: turn(n), content: "a", toolCalls: nil, reasoning: String(repeating: "x", count: 10))
+            history.record(model: model, conversationKey: key, prefix: turn(n), content: "a", toolCalls: nil, reasoning: ten)
         }
         XCTAssertEqual(history.count, 2)
-        XCTAssertEqual(history.byteCount, 2 * (overhead + 10))
+        XCTAssertEqual(history.conversationByteCount(conversationKey: key), 2 * entry)
         XCTAssertNil(history.restoring(turn(0) + [ChatMessage(role: .assistant, content: "a")], model: model, conversationKey: key))
+        XCTAssertNotNil(history.restoring(turn(2) + [ChatMessage(role: .assistant, content: "a")], model: model, conversationKey: key))
         // Re-recording a turn replaces it without double-counting.
         history.record(model: model, conversationKey: key, prefix: turn(2), content: "a", toolCalls: nil, reasoning: String(repeating: "y", count: 10))
         XCTAssertEqual(history.count, 2)
-        XCTAssertEqual(history.byteCount, 2 * (overhead + 10))
+        XCTAssertEqual(history.byteCount, 2 * entry)
+        // Nine conversations of two turns each: the total holds sixteen.
+        for conversation in 0..<9 {
+            for n in 0..<2 {
+                history.record(model: model, conversationKey: "conv:\(conversation)", prefix: turn(n), content: "a", toolCalls: nil, reasoning: ten)
+            }
+        }
+        XCTAssertEqual(history.count, 16)
+        XCTAssertEqual(history.byteCount, 16 * entry)
+        XCTAssertEqual(history.conversationByteCount(conversationKey: "conv:8"), 2 * entry)
+    }
+
+    func testStandardEntryCapIsExactlyOneMebibyteOfReasoning() {
+        let history = AssistantReasoningHistory()
+        history.record(model: model, conversationKey: key, prefix: opening, content: "", toolCalls: [call],
+                       reasoning: String(repeating: "x", count: (1 << 20) + 1))
+        XCTAssertEqual(history.count, 0)
+        history.record(model: model, conversationKey: key, prefix: opening, content: "", toolCalls: [call],
+                       reasoning: String(repeating: "x", count: 1 << 20))
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.byteCount, (1 << 20) + AssistantReasoningHistory.entryOverheadBytes)
+        XCTAssertEqual(AssistantReasoningHistory.Limits.standard.maxConversationBytes, 4 << 20)
+        XCTAssertEqual(AssistantReasoningHistory.Limits.standard.maxRestoreBytes, 256 << 10)
+    }
+
+    /// The newest turns are restored first; the first turn over the
+    /// per-request cap ends the restore.
+    func testRestoreIsCappedPerRequestNewestFirst() throws {
+        let history = AssistantReasoningHistory(limits: .init(
+            maxEntries: 10, maxBytes: 1 << 20, maxEntryBytes: 1 << 20, maxRestoreBytes: 10, ttlSeconds: 3600))
+        var messages: [ChatMessage] = [ChatMessage(role: .user, content: "q0")]
+        for n in 0..<3 {
+            history.record(model: model, conversationKey: key, prefix: messages, content: "a\(n)", toolCalls: nil, reasoning: "rrr\(n)")
+            messages += [ChatMessage(role: .assistant, content: "a\(n)"), ChatMessage(role: .user, content: "q\(n + 1)")]
+        }
+        let restored = try XCTUnwrap(history.restoring(messages, model: model, conversationKey: key))
+        XCTAssertEqual(restored.turns, 2)
+        XCTAssertEqual(restored.bytes, 8)
+        XCTAssertNil(restored.messages[1].reasoningContent)
+        XCTAssertEqual(restored.messages[3].reasoningContent, "rrr1")
+        XCTAssertEqual(restored.messages[5].reasoningContent, "rrr2")
     }
 
     func testIdleEntriesExpire() {
@@ -167,6 +233,25 @@ final class AssistantReasoningHistoryTests: XCTestCase {
         XCTAssertNil(history.restoring(followUp(), model: model, conversationKey: key))
         XCTAssertEqual(history.count, 0)
         XCTAssertEqual(history.byteCount, 0)
+        // A record sweeps idle entries too.
+        recordFirstTurn(history)
+        clock.advance(61)
+        history.record(model: model, conversationKey: "conv:other", prefix: opening, content: "", toolCalls: [call], reasoning: "x")
+        XCTAssertEqual(history.count, 1)
+    }
+
+    func testNegativeTTLIsClampedToZero() {
+        XCTAssertEqual(AssistantReasoningHistory.Limits(maxEntries: 1, maxBytes: 1, maxEntryBytes: 1, ttlSeconds: -5).ttlSeconds, 0)
+        XCTAssertEqual(AssistantReasoningHistory.Limits(maxEntries: 1, maxBytes: 1, maxEntryBytes: 1, ttlSeconds: .nan).ttlSeconds, 0)
+        let clock = TestClock()
+        let history = AssistantReasoningHistory(
+            limits: .init(maxEntries: 10, maxBytes: 1 << 20, maxEntryBytes: 1 << 20, ttlSeconds: -60),
+            now: { clock.now })
+        recordFirstTurn(history)
+        // Not expired at once (a negative TTL would expire every entry).
+        XCTAssertNotNil(history.restoring(followUp(), model: model, conversationKey: key))
+        clock.advance(1)
+        XCTAssertNil(history.restoring(followUp(), model: model, conversationKey: key))
     }
 
     func testPurgeDropsOneConversationAndRemoveAllDropsEvery() {
@@ -176,11 +261,74 @@ final class AssistantReasoningHistoryTests: XCTestCase {
         history.record(model: model, conversationKey: "conv:account-b", prefix: opening, content: "", toolCalls: [call], reasoning: "B.")
         history.purge(conversationKey: " \(key)")
         XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.conversationByteCount(conversationKey: key), 0)
         XCTAssertNil(history.restoring(followUp(), model: model, conversationKey: key))
         XCTAssertNotNil(history.restoring(followUp(), model: model, conversationKey: "conv:account-b"))
         history.removeAll()
         XCTAssertEqual(history.count, 0)
         XCTAssertEqual(history.byteCount, 0)
+    }
+
+    /// A turn whose request rendered before a purge of its key never
+    /// records after it; other keys and later requests record.
+    func testRecordRacingAPurgeIsFencedOut() {
+        let history = AssistantReasoningHistory()
+        let rendered = history.fence(conversationKey: key)
+        let otherRendered = history.fence(conversationKey: "conv:account-b")
+        history.purge(conversationKey: key)
+        history.record(model: model, conversationKey: key, prefix: opening, content: "", toolCalls: [call],
+                       reasoning: "Stale.", fence: rendered)
+        XCTAssertEqual(history.count, 0)
+        history.record(model: model, conversationKey: "conv:account-b", prefix: opening, content: "", toolCalls: [call],
+                       reasoning: "B.", fence: otherRendered)
+        XCTAssertEqual(history.count, 1)
+        history.record(model: model, conversationKey: key, prefix: opening, content: "", toolCalls: [call],
+                       reasoning: "Fresh.", fence: history.fence(conversationKey: " \(key) "))
+        XCTAssertEqual(history.count, 2)
+    }
+
+    func testRecordRacingRemoveAllIsFencedOut() {
+        let history = AssistantReasoningHistory()
+        let rendered = history.fence(conversationKey: key)
+        history.removeAll()
+        history.record(model: model, conversationKey: key, prefix: opening, content: "", toolCalls: [call],
+                       reasoning: "Stale.", fence: rendered)
+        XCTAssertEqual(history.count, 0)
+        XCTAssertNotEqual(rendered, history.fence(conversationKey: key))
+        recordFirstTurn(history)
+        XCTAssertEqual(history.count, 1)
+    }
+
+    /// One lookup per request: later renders reuse it even when the store
+    /// changes in between, and a withdrawn restore renders as sent.
+    func testRequestStatePinsOneRestore() throws {
+        let history = AssistantReasoningHistory()
+        recordFirstTurn(history, reasoning: "First.")
+        let state = ReasoningHistoryRequestState()
+        XCTAssertNil(state.restore(followUp(), model: model, conversationKey: key))
+        XCTAssertNil(state.recordTarget())
+        state.attach(history)
+        XCTAssertEqual(state.restore(followUp(), model: model, conversationKey: key)?.messages[2].reasoningContent, "First.")
+        XCTAssertTrue(state.isRestoring)
+        // A regenerated turn overwrites the stored reasoning; this request
+        // keeps the restore it rendered first.
+        recordFirstTurn(history, reasoning: "Second.")
+        XCTAssertEqual(state.restore(followUp(), model: model, conversationKey: key)?.messages[2].reasoningContent, "First.")
+        history.removeAll()
+        XCTAssertEqual(state.restore(followUp(), model: model, conversationKey: key)?.messages[2].reasoningContent, "First.")
+        // The fence is the one the first render saw.
+        let target = try XCTUnwrap(state.recordTarget())
+        XCTAssertNotEqual(target.fence, history.fence(conversationKey: key))
+        state.noteRestoredPromptTokens(12)
+        XCTAssertEqual(state.restoredPromptTokens, 12)
+        state.withdraw()
+        XCTAssertNil(state.restore(followUp(), model: model, conversationKey: key))
+        XCTAssertFalse(state.isRestoring)
+        XCTAssertEqual(state.restoredPromptTokens, 0)
+        state.noteRestoredPromptTokens(12)
+        XCTAssertEqual(state.restoredPromptTokens, 0)
+        XCTAssertTrue(state.claimReport())
+        XCTAssertFalse(state.claimReport())
     }
 
     func testReasoningAliasParses() throws {
@@ -195,8 +343,22 @@ final class AssistantReasoningHistoryTests: XCTestCase {
         XCTAssertEqual(try parse(["reasoning_content": "a"]).reasoningContent, "a")
         XCTAssertEqual(try parse(["reasoning": "b"]).reasoningContent, "b")
         XCTAssertEqual(try parse(["reasoning_content": "a", "reasoning": "b"]).reasoningContent, "a")
+        // An empty reasoning_content counts as absent.
+        XCTAssertEqual(try parse(["reasoning_content": "", "reasoning": "b"]).reasoningContent, "b")
+        XCTAssertEqual(try parse(["reasoning_content": ""]).reasoningContent, "")
         XCTAssertNil(try parse(["reasoning": ["effort": "high"]]).reasoningContent)
         XCTAssertNil(try parse([:]).reasoningContent)
+    }
+}
+
+private extension AssistantReasoningHistory {
+    /// A record under the purge state at the call.
+    func record(
+        model: String, conversationKey: String?, prefix: [ChatMessage],
+        content: String?, toolCalls: [ToolCall]?, reasoning: String?
+    ) {
+        record(model: model, conversationKey: conversationKey, prefix: prefix, content: content,
+               toolCalls: toolCalls, reasoning: reasoning, fence: fence(conversationKey: conversationKey))
     }
 }
 
