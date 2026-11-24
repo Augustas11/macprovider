@@ -10,11 +10,17 @@
 # $POC/scratchpad/2487/results/compile-<run>, releases the lock. The job refuses under 20 GB free.
 # Last line: T2487_COMPILE rc=<n> PASS|FAIL.
 #
-# Usage: studio-2487-compile.sh [--dry-run]   env: FORK_REF (default below), FILTER
-# Estimated length (estimate, not measured): 20-30 min, mostly the cold package build.
+# Usage: studio-2487-compile.sh [--bench] [--dry-run]   env: FORK_REF (default below), FILTER;
+#   --bench: job-fork-dspark-bench.sh instead (release build, loads the oQ4e model, memguard 10%;
+#   env PROMPT_COUNT TOKENS BLOCK PREFILL_STEP pass through).
+# Estimated length (estimate, not measured): 20-30 min, mostly the cold package build; --bench
+# adds a cold release build (~15 min) and 8 prompts x 512 tokens x 2 paths (~5 min).
 set -u
-DRY=0; [ "${1:-}" = --dry-run ] && DRY=1
-FORK_REF=${FORK_REF:-08de0ae}
+DRY=0; BENCH=0
+for a in "$@"; do
+  case "$a" in --dry-run) DRY=1 ;; --bench) BENCH=1 ;; *) echo "unknown argument $a"; exit 2 ;; esac
+done
+FORK_REF=${FORK_REF:-7e7ab72}
 FILTER=${FILTER:-Inkling2|ConvolutionTail|KVCacheRound}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
@@ -27,6 +33,8 @@ OWNER=t2487-compile
 STALL_MIN=20
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 JOB=scripts/lab/2487/job-fork-compile.sh
+[ "$BENCH" = 1 ] && JOB=scripts/lab/2487/job-fork-dspark-bench.sh
+ENVS=""; for n in PROMPT_COUNT TOKENS BLOCK PREFILL_STEP; do [ -n "${!n:-}" ] && ENVS="$ENVS $n=$(printf %q "${!n}")"; done
 METAL=phase3-binary/scripts/build-mlx-metallib.sh
 RC=99
 mkdir -p "$SCR" "$RES"; : > "$LOG"
@@ -39,10 +47,10 @@ for f in "$REPO/$JOB" "$REPO/$METAL" "$0"; do
 done
 [ -z "$(git -C "$REPO" status --porcelain -- scripts/lab/2487 "$METAL")" ] \
   || { blocker "uncommitted changes in scripts/lab/2487 or $METAL; commit first"; final; exit 2; }
-say "COMPILE_START run=$RUN_ID macprovider=$(git -C "$REPO" rev-parse --short HEAD) fork_ref=$FORK_REF filter=$FILTER dry_run=$DRY log=$LOG"
+say "COMPILE_START run=$RUN_ID macprovider=$(git -C "$REPO" rev-parse --short HEAD) fork_ref=$FORK_REF job=$(basename "$JOB") filter=$FILTER env:${ENVS:- (defaults)} dry_run=$DRY log=$LOG"
 if [ "$DRY" = 1 ]; then
   say "DRY studio$ df -g ~ (>= 20 GB); mkdir -p lab-2487/job lab-2487/logs; scp $JOB $METAL"
-  say "DRY studio$ RUN_ID=$RUN_ID FORK_REF=$FORK_REF nohup bash lab-2487/job/job-fork-compile.sh (own pgid)"
+  say "DRY studio$ RUN_ID=$RUN_ID FORK_REF=$FORK_REF$ENVS nohup bash lab-2487/job/$(basename "$JOB") (own pgid)$([ "$BENCH" = 1 ] && echo ' + memguard 10%')"
   RC=0; say "DRY ok"; exit 0
 fi
 
@@ -74,7 +82,7 @@ finish() {
   local jl=$RES/compile-$RUN_ID/compile-$RUN_ID.log
   line=$(grep -h '^.* T2487_COMPILE rc=' "$jl" 2>/dev/null | tail -1)
   if [ -n "$line" ]; then
-    grep -hE 'BLOCKER:|error:|failed|passed|✘|✔' "$jl" | tail -40 >> "$LOG"
+    grep -hE 'BLOCKER:|error:|failed|passed|✘|✔|DSPARK_' "$jl" | tail -40 | tee -a "$LOG"
     RC=$(echo "$line" | sed -E 's/.*rc=([0-9]+).*/\1/')
   else
     blocker "the job printed no T2487_COMPILE line; see $jl"
@@ -86,9 +94,12 @@ finish() {
 trap finish EXIT
 
 "${SSH[@]}" 'mkdir -p lab-2487/job lab-2487/logs' || { blocker "remote mkdir failed"; exit 5; }
-scp -q "$REPO/$JOB" macstudio:lab-2487/job/job-fork-compile.sh || { blocker "scp job failed"; exit 5; }
+scp -q "$REPO/$JOB" "macstudio:lab-2487/job/$(basename "$JOB")" || { blocker "scp job failed"; exit 5; }
+scp -q "$REPO/scripts/lab/2487/memguard.sh" macstudio:lab-2487/job/memguard.sh || { blocker "scp memguard failed"; exit 5; }
 scp -q "$REPO/$METAL" macstudio:lab-2487/job/build-mlx-metallib.sh || { blocker "scp metallib script failed"; exit 5; }
-PID=$("${SSH[@]}" "cd lab-2487 && RUN_ID=$RUN_ID FORK_REF=$FORK_REF FILTER='$FILTER' nohup /usr/bin/perl -e 'setpgrp(0,0); exec @ARGV' bash job/job-fork-compile.sh > logs/compile-$RUN_ID.log 2>&1 < /dev/null & echo \$!") \
+GUARD=""
+[ "$BENCH" = 1 ] && GUARD="nohup bash job/memguard.sh \$jp 10 logs/memguard-$RUN_ID.log > /dev/null 2>&1 < /dev/null &"
+PID=$("${SSH[@]}" "cd lab-2487 && RUN_ID=$RUN_ID FORK_REF=$FORK_REF FILTER='$FILTER'$ENVS nohup /usr/bin/perl -e 'setpgrp(0,0); exec @ARGV' bash job/$(basename "$JOB") > logs/compile-$RUN_ID.log 2>&1 < /dev/null & jp=\$!; $GUARD echo \$jp") \
   || { blocker "remote start failed"; exit 5; }
 say "JOB_STARTED pid=$PID log=~/lab-2487/logs/compile-$RUN_ID.log"
 
