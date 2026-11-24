@@ -207,8 +207,9 @@ extension ModelRuntime {
         private var answer: Stream?
         private var closeEnd: Int?
         private var head = ""
-        /// `.afterMiniMaxThink`: the text so far leads with answer text, so
-        /// stops run over all of it (`StopScope.closeTag(for:)`).
+        /// `.afterMiniMaxThink`, `.afterInklingThink`: the text so far leads
+        /// with answer text, so stops run over all of it
+        /// (`StopScope.closeTag(for:)`).
         private var miniMaxAnswerLead = false
         private let counter = WorkCounter()
 
@@ -247,10 +248,10 @@ extension ModelRuntime {
                 }
             }
             previousRaw = raw
-            if case .streamingSafePrefix(.afterMiniMaxThink) = mode {
+            if case .streamingSafePrefix(let scope) = mode, let answerLead = scope.answerLead(raw) {
                 // The lead is a function of the first Characters: decided once
-                // the text has any, and recomputed if they changed.
-                let answerLead = ReasoningOutput.MiniMax.lead(raw) == .answer
+                // the text has any, and recomputed if they changed (MiniMax,
+                // Inkling 2).
                 if answerLead != miniMaxAnswerLead {
                     miniMaxAnswerLead = answerLead
                     start()
@@ -272,9 +273,9 @@ extension ModelRuntime {
                 thinking = Stream(origin: 0, filter: stopTokenFilter, requestStops: [], holdback: false,
                                   closeTag: ReasoningOutput.closeTag, counter: counter)
                 answer = nil
-            case .streamingSafePrefix(.afterMiniMaxThink) where !miniMaxAnswerLead:
+            case .streamingSafePrefix(let scope) where scope.leadCloseTag != nil && !miniMaxAnswerLead:
                 thinking = Stream(origin: 0, filter: stopTokenFilter, requestStops: [], holdback: false,
-                                  closeTag: ReasoningOutput.MiniMax.closeTag, counter: counter)
+                                  closeTag: scope.leadCloseTag!, counter: counter)
                 answer = nil
             case .streamingSafePrefix:
                 thinking = nil
@@ -914,6 +915,82 @@ struct IncrementalMiniMaxReasoningSplit {
     }
 }
 
+/// Incremental twin of `ReasoningOutput.Inkling.splitStreamingPrefix`
+/// (#2467), built as `IncrementalMiniMaxReasoningSplit` is: the split of the
+/// text through the last marker that a grapheme break follows is kept
+/// (`settled`); each step searches only the text added since the previous
+/// one (plus a margin) for the next marker.
+struct IncrementalInklingReasoningSplit {
+    private typealias Inkling = ReasoningOutput.Inkling
+    private var previous = ""
+    private let keepsReasoning: Bool
+    /// The split of the text before UTF-8 offset `settled`.
+    private var state: Inkling.Scan
+    private var settled = 0
+    /// No marker starts in `settled..<searched`.
+    private var searched = 0
+    private(set) var restartCount = 0
+
+    init(keepsReasoning: Bool = true) {
+        self.keepsReasoning = keepsReasoning
+        state = Inkling.Scan(keepsReasoning: keepsReasoning)
+    }
+
+    mutating func splitStreamingPrefix(_ text: String) -> ReasoningOutput.Split {
+        var text = text
+        text.makeContiguousUTF8()
+        // A marker before `searched` would end within its length, and the
+        // scalars after it could join its last grapheme.
+        let verified = searched > settled ? min(previous.utf8.count, searched + Inkling.maxTagUTF8 + 8) : settled
+        if verified > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: verified) {
+            restartCount += 1
+            state = Inkling.Scan(keepsReasoning: keepsReasoning)
+            settled = 0
+            searched = 0
+        }
+        previous = text
+        let scalars = text.unicodeScalars
+        while true {
+            let tail = text[IncrementalEmitterText.index(text, utf8Offset: settled)...]
+            if state.verbatim {
+                // After the first call opener the text is answer as it
+                // stands: commit all but the margin.
+                let keep = IncrementalEmitterText.breakIndex(
+                    tail, atOrBefore: tail.utf8.count - IncrementalEmitterText.margin, floor: tail.startIndex)
+                state.append(tail[..<keep])
+                settled = IncrementalEmitterText.offset(text, keep)
+                searched = settled
+                var result = state
+                result.append(text[keep...])
+                return result.split
+            }
+            let from = IncrementalEmitterText.breakIndex(tail, atOrBefore: searched - settled, floor: tail.startIndex)
+            guard let next = Inkling.nextTag(in: tail[from...]) else {
+                searched = max(searched, text.utf8.count - Inkling.maxTagUTF8 - IncrementalEmitterText.margin)
+                var result = state
+                result.append(Inkling.withoutPartialTags(tail))
+                return result.split
+            }
+            let upper = next.range.upperBound
+            guard upper < scalars.endIndex,
+                  ModelRuntime.IncrementalStreamFilter.breaksBetween(scalars[scalars.index(before: upper)], scalars[upper])
+            else {
+                // The scalars after the marker may still join it: not settled.
+                searched = max(searched, IncrementalEmitterText.offset(text, next.range.lowerBound))
+                var result = state
+                result.append(tail[..<next.range.lowerBound])
+                result.apply(tag: next.tag)
+                result.append(result.verbatim ? text[upper...] : Inkling.withoutPartialTags(text[upper...]))
+                return result.split
+            }
+            state.append(tail[..<next.range.lowerBound])
+            state.apply(tag: next.tag)
+            settled = IncrementalEmitterText.offset(text, upper)
+            searched = settled
+        }
+    }
+}
+
 /// Incremental twin of `ReasoningOutput.removingStrayTags(_:streaming: true)`.
 ///
 /// Removing every `<think>` and `</think>` until none is left has one result
@@ -1015,6 +1092,7 @@ struct IncrementalStrayTagRemoval {
 struct IncrementalToolStopText {
     private var reasoningSplit = IncrementalReasoningSplit()
     private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit(keepsReasoning: false)
+    private var inklingReasoningSplit = IncrementalInklingReasoningSplit(keepsReasoning: false)
     private var toolText: IncrementalToolText
 
     init(observer: NativeToolCallStreamEmitter) {
@@ -1022,7 +1100,9 @@ struct IncrementalToolStopText {
             markers: observer.markerTexts, bracesMatter: observer.bareBracesMayOpenCall, qwenBareCalls: observer.bareQwenCallsMayOpen)
     }
 
-    var restartCount: Int { reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + toolText.restartCount }
+    var restartCount: Int {
+        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + inklingReasoningSplit.restartCount + toolText.restartCount
+    }
     var maxUncommittedUTF8: Int { toolText.maxUncommittedUTF8 }
     /// Bytes the tool-text cut search read (test hook).
     var scannedUTF8: Int { toolText.scannedUTF8 }
@@ -1038,6 +1118,9 @@ struct IncrementalToolStopText {
         case .afterMiniMaxThink:
             // Only the answer, outside every `<mm:think>` block, holds calls.
             text = miniMaxReasoningSplit.splitStreamingPrefix(text).answer
+        case .afterInklingThink:
+            // Only the answer, outside every thinking frame, holds calls.
+            text = inklingReasoningSplit.splitStreamingPrefix(text).answer
         case .whole:
             break
         }

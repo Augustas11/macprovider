@@ -144,6 +144,8 @@ final class GrammarTemplatesParserTests: XCTestCase {
         case .minimax:
             let ns = ToolCallParser.miniMaxNamespace
             return ns + "<tool_call>\n" + ns + "<invoke name=\"" + name + "\">" + ns + "<city>Paris" + ns + "</city>" + ns + "</invoke>\n" + ns + "</tool_call>"
+        case .inkling2:
+            return "<|message_model|>" + name + "<|content_invoke_tool_json|>{\"name\":\"" + name + "\",\"args\":{\"city\":\"Paris\"}}<|end_message|>"
         }
     }
 
@@ -187,7 +189,8 @@ final class GrammarTemplatesParserTests: XCTestCase {
             (.llama3, #"{"name":"f","parameters":{"city":"Paris","data":[{"ok":true}]}}"#),
             (.glm, #"<tool_call>f<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>data</arg_key><arg_value>[{"ok":true}]</arg_value></tool_call>"#),
             (.gemma4, "<|tool_call>call:f{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>data<|\"|>:[{<|\"|>ok<|\"|>:true}]}<tool_call|>"),
-            (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="f"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="data" string="false">[{"ok":true}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#)
+            (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="f"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="data" string="false">[{"ok":true}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#),
+            (.inkling2, #"<|message_model|>f<|content_invoke_tool_json|>{"name":"f","args":{"city":"Paris","data":[{"ok":true}]}}<|end_message|>"#),
         ]
         for (family, text) in examples {
             let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: family).compile()

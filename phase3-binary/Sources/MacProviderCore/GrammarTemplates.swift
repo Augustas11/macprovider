@@ -124,6 +124,11 @@ public enum GrammarTemplates {
             }
             parts.append(.literal(ns + "</invoke>\n" + ns + "</tool_call>"))
             return .sequence(parts)
+        case .inkling2:
+            // The frame the Inkling 2 template writes for a history call:
+            // header name, the JSON opener, `{"name":…,"args":…}`.
+            return .sequence([.literal("<|message_model|>" + name + "<|content_invoke_tool_json|>{\"name\":" + quoted(name) + ",\"args\":"),
+                              arguments, .literal("}<|end_message|>")])
         case .gemma4:
             return .sequence([.literal("<|tool_call>call:" + name), schema(parameters, depth: 0, gemma: true), .literal("<tool_call|>")])
         case .lfm2:
@@ -192,8 +197,16 @@ public enum GrammarTemplates {
     }
 
     private static func structured(_ body: ByteGrammar, family: ToolCallGrammar?) -> ByteGrammar {
-        guard family == .harmony else { return body }
-        return .sequence([.literal("<|start|>assistant<|channel|>final<|message|>"), body, .literal("<|return|>")])
+        switch family {
+        case .harmony?:
+            return .sequence([.literal("<|start|>assistant<|channel|>final<|message|>"), body, .literal("<|return|>")])
+        case .inkling2?:
+            // Inkling 2 (#2467): the JSON is the body of one content frame,
+            // as the template writes an assistant reply.
+            return .sequence([.literal("<|message_model|><|content_text|>"), body, .literal("<|end_message|>")])
+        default:
+            return body
+        }
     }
 
     private static func canonicalToolObject(_ value: JSONValue) -> JSONValue {

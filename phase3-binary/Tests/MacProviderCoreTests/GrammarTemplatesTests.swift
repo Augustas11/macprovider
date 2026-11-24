@@ -125,7 +125,8 @@ final class GrammarTemplatesTests: XCTestCase {
             (.gemma4, "<|tool_call>call:weather{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>count<|\"|>:2}<tool_call|>"),
             (.harmony, #"<|start|>assistant to=functions.weather<|channel|>commentary<|message|>{"city":"Paris","count":2}<|call|>"#),
             (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="weather"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="count" string="false">2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#),
-            (.minimax, "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"weather\">]<]minimax[>[<city>Paris]<]minimax[>[</city>]<]minimax[>[<count>2]<]minimax[>[</count>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>")
+            (.minimax, "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"weather\">]<]minimax[>[<city>Paris]<]minimax[>[</city>]<]minimax[>[<count>2]<]minimax[>[</count>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>"),
+            (.inkling2, #"<|message_model|>weather<|content_invoke_tool_json|>{"name":"weather","args":{"city":"Paris","count":2}}<|end_message|>"#),
         ]
         XCTAssertEqual(examples.count, ToolCallGrammar.allCases.count)
         for (family, text) in examples {

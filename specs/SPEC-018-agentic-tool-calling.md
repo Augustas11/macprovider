@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.19 (2026-11-21, guaranteed tool choice on function-XML Qwen templates uses the template's own call form; Related: #2452)
+**Version:** 0.3.20 (2026-11-24, Inkling 2 frame grammar and reasoning split; Related: #2467)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,18 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.20 (2026-11-24, Related: #2467):** §3.1 adds the `inkling2`
+  grammar (Inkling 2, `thinkingmachines/Inkling-2-Mini`
+  `chat_template.jinja`, model type `inkling2_loop`): every message is a
+  frame of special tokens, and a call is
+  `<|message_model|>NAME<|content_invoke_tool_json|>{"name":NAME,"args":{…}}<|end_message|>`.
+  The family fallback wins over the inferred template format. §3.12 adds
+  the Inkling 2 frame split: thinking frames are reasoning, text frames are
+  content. The provider renders the template natively (the pinned
+  swift-jinja cannot run its `tojson` arguments) to the bytes the template
+  renders. As for MiniMax M3, every Inkling 2 request, plain chat included,
+  needs the declaring provider (SPEC-002 v1.6.43). Other families are
+  unchanged.
 - **v0.3.19 (2026-11-21, Related: #2452):** §3.11 conformance. When
   `tool_choice` is `required` or names a function and the loaded template's
   call format is function-XML (`xml_function`, `qwen3_5`), the guaranteed
@@ -590,6 +602,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | `dsml` | family fallback `deepseek-v4` (the family has no Jinja template; §3.12) | `<｜DSML｜tool_calls>` holding one or more `<｜DSML｜invoke name="NAME">…</｜DSML｜invoke>`, each a list of `<｜DSML｜parameter name="KEY" string="true\|false">VALUE</｜DSML｜parameter>`; several blocks may follow each other; the last block may end at the end of output without its close when its invokes are complete; whitespace between markup is free. | `<｜DSML｜parameter>` names. A declared non-string type must parse strictly as that type under either string flag. Otherwise, `string="true"` values are literal text; `string="false"` values are typed as GLM values. Duplicate names, a flag other than `true`/`false`, an unclosed parameter or invoke, or a declared-type mismatch fail closed. | `ToolCallParser.parseDSMLCalls` |
 | `lfm2` | template format `lfm2`; family fallback `lfm2.5-24b-a2b` | `<|tool_call_start|>[NAME(key=value, ...), ...]<|tool_call_end|>`; complete nonempty list, ASCII Python identifiers for function names and keyword names; quoted strings and bounded JSON values, plus Python `True`, `False`, `None`; no expressions, positional arguments, duplicate keys, incomplete delimiters or trailing non-whitespace after the envelope. Preserve leading prose. | keyword arguments converted to a strict JSON object without rounding numeric literals; depth32 and existing per-call/per-response byte limits apply. | `LFMToolCallParser` |
 | `minimax` | family `minimax-m3` / `minimax_m3` (v0.3.18), which wins over the template format the runtime infers (`json`); no template format maps to it | `]<]minimax[>[<tool_call>` holding one or more `]<]minimax[>[<invoke name="NAME">…]<]minimax[>[</invoke>`, each a list of `]<]minimax[>[<KEY>VALUE]<]minimax[>[</KEY>`; a mapping value is nested elements and a list value is `]<]minimax[>[<item>` elements; then `]<]minimax[>[</tool_call>`. Whitespace between elements is free. As for `glm` (v0.3.12, v0.3.13, without the repairs): invokes parse one at a time and a failing, undeclared or schema-failing one is dropped while the rest stand; a byte-cap overflow fails the whole output closed; a wrapper whose opener repeats before its close starts at the last opener; a final wrapper without its close keeps only complete invokes and fails closed when it holds a second opener; text outside wrappers is prose; namespaced markup never reaches `content`, streamed or not. Calls inside a §3.12 reasoning block are not calls. | element keys (top level: the `<parameter=…>` charset). Scalars are typed as `glm` values; nested elements become an array when declared `array` (or, undeclared, when every child is `item`), else an object; an empty value is `""`, `[]` or `{}` by declared type. Depth over 32 and duplicate keys fail the call. | `ToolCallParser.parseMiniMaxCalls` |
+| `inkling2` | family `inkling-2` / `inkling2` (v0.3.20), which wins over the template format the runtime infers; no template format maps to it | One or more call frames `<|message_model|>NAME<|content_invoke_tool_json|>` + a JSON object `{"name":NAME,"args":{…}}` + `<|end_message|>`, as the template writes a history call; an empty header takes the JSON name. Frames parse one at a time: a frame whose JSON fails, whose name differs from a nonempty header, whose `args` is not an object, or whose name is undeclared is dropped while the rest stand; a frame cut before its JSON closes is dropped; a byte-cap overflow fails the whole output closed. Text frames before the first call are prose; frame markers never reach `content`, streamed or not. Calls inside a §3.12 thinking frame are not calls. | `args` (JSON object; the template sorts top-level keys in history) | `ToolCallParser.parseInklingCalls` |
 | `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
@@ -1118,6 +1131,33 @@ the generated text up to the first `</think>` is reasoning:
   yet". Encrypted reservations use their closed inventories: relay-blind gets
   the retryable `relay_blind_provider_unsupported` (SPEC-041-R007) and
   privacy-class gets `privacy_class_unavailable` (SPEC-049-R013).
+- **v0.3.20:** the `inkling2` grammar's prompt ends at a message boundary
+  (the model writes its own `<|message_model|>`), with a system message
+  `Thinking effort level: X` before the first non-system message; X maps
+  `reasoning_effort` as the template does (`none` 0, `minimal` 0.1, `low`
+  0.2, `medium` 0.7, `high` 0.9, `xhigh` and `max` 0.99; 0.9 when omitted).
+  The output is a sequence of frames
+  `<|message_model|>[NAME]<|content_…|>BODY<|end_message|>`. The bodies of
+  `<|content_thinking|>` frames are reasoning; the bodies of
+  `<|content_text|>`, `<|content_tool_error|>` and
+  `<|content_invoke_tool_text|>` frames, and unframed text, are the answer.
+  From the first `<|content_invoke_tool_json|>` on, the call frame (its
+  header included) and everything after it are answer text as written for
+  §3.1, so a marker inside a call argument stays in the argument. A header
+  is held until its content marker arrives and is dropped when none does, so
+  a tool name never streams as content. An unclosed thinking frame runs to
+  the end of the output. Reasoning tokens are each thinking frame's tokens,
+  from the one starting `<|content_thinking|>` through the one completing
+  its `<|end_message|>` (to the end when it never closed), summed. A reply
+  with no thinking frame carries no `reasoning_content`. A stream holds back
+  a tail that could still become a marker. When the reply leads with a
+  thinking frame, or its start could still become one, stop strings apply
+  only after the first `<|end_message|>`, as for MiniMax M3 above. The
+  frame markers are kept through the stop-token filter for this split; the
+  EOS `<|content_model_end_sampling|>` is stripped. Every Inkling 2 request
+  needs this split, so the coordinator routes every Inkling 2 request,
+  plain chat included, as it routes MiniMax M3 (SPEC-002 v1.6.43), with the
+  same 503 and encrypted-reservation errors.
 - The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
   `finish_reason` as before; `reasoning_content` is not part of it in this
   version.

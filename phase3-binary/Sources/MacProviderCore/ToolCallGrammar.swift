@@ -33,6 +33,12 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     /// arrays (`<item>`) expanded into the same namespaced XML. Parsed by
     /// `ToolCallParser.parseMiniMaxCalls`.
     case minimax
+    /// Inkling 2 (`thinkingmachines/Inkling-2-Mini` chat template): one
+    /// `<|message_model|>NAME<|content_invoke_tool_json|>` frame per call
+    /// holding `{"name":NAME,"args":{…}}` and closed by `<|end_message|>`.
+    /// Every frame marker is a special token. Parsed by
+    /// `ToolCallParser.parseInklingCalls`.
+    case inkling2
 
     /// Catalog-family fallback. Families whose template has no tool support
     /// (Qwen2-VL) return nil, and so does any unknown family.
@@ -51,7 +57,14 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         if id.contains("deepseek-v4") || id.contains("deepseek_v4") { return .dsml }
         if id.contains("lfm2.5-24b-a2b") { return .lfm2 }
         if isMiniMaxM3(id) { return .minimax }
+        if isInkling2(id) { return .inkling2 }
         return nil
+    }
+
+    /// Inkling 2 (`inkling2_loop`, #2467): the base, the mlx-community build
+    /// and the uncensored rows.
+    static func isInkling2(_ lowercasedID: String) -> Bool {
+        lowercasedID.contains("inkling-2") || lowercasedID.contains("inkling2")
     }
 
     /// MiniMax M3 and M3.1 (`MiniMax-M3.1-Flash`). Earlier MiniMax
@@ -94,6 +107,9 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         // so the fork's inference guesses its generic JSON format; the family
         // decides (#2189).
         if isMiniMaxM3(id) { return .minimax }
+        // The Inkling 2 template writes `tool_calls` and `function.name`, so
+        // the fork may guess a generic format; its frames decide (#2467).
+        if isInkling2(id) { return .inkling2 }
         return fromTemplateFormat(templateFormat) ?? family(modelID: modelID)
     }
 }

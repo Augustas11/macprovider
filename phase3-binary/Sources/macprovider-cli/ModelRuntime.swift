@@ -3866,6 +3866,13 @@ maxTokens: 1,
         if normalizedLabels.contains(where: { $0 == "lfm3" || $0 == "lfm3forcausallm" }) {
             return "lfm3"
         }
+        // Inkling 2 (`inkling2_loop`, #2467): a looped MoE with short-conv
+        // and attention layers on the fork's own caches. Not a paged-KV
+        // family, so attach fails closed on identity and the model serves
+        // serial.
+        if normalizedLabels.contains(where: { $0 == "inkling2loop" || $0 == "inkling2loopforconditionalgeneration" }) {
+            return "inkling2"
+        }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
         // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
@@ -15592,6 +15599,13 @@ maxTokens: maxTokens,
                 tokens: tokens,
                 keeping: Set(tokens.filter { $0.hasPrefix("<") && $0.hasSuffix(">") }),
                 after: ToolCallParser.miniMaxNamespace)
+        case .inkling2?:
+            // Inkling 2 (#2467): every frame marker is a special token. The
+            // reasoning split and the call parser read them and remove them
+            // from reasoning and content (`ReasoningOutput.Inkling`); the
+            // EOS and every other control token are stripped as usual.
+            let frameMarkers = Set(ReasoningOutput.Inkling.tags)
+            return StopTokenFilter(tokens: filter.tokens.filter { !frameMarkers.contains($0) })
         default:
             return filter
         }
@@ -16541,7 +16555,10 @@ maxTokens: maxTokens,
             // after the first `</think>`.
             // MiniMax (#2189): only the text outside `<mm:think>` blocks. A
             // reply that did not reason carries no reasoning_content.
+            // Inkling 2 (#2467): only the bodies of content frames, and the
+            // call frames, outside every thinking frame.
             let miniMax = splitsMiniMaxReasoning(request)
+            let inkling = splitsInklingReasoning(request)
             var reasoning: ReasoningOutput.Split?
             var answer = filteredText
             if request.outputTraits.reasoningOpen {
@@ -16550,6 +16567,10 @@ maxTokens: maxTokens,
             } else if miniMax {
                 let split = ReasoningOutput.MiniMax.split(filteredText)
                 if ReasoningOutput.MiniMax.reasoned(filteredText) { reasoning = split }
+                answer = split.answer
+            } else if inkling {
+                let split = ReasoningOutput.Inkling.split(filteredText)
+                if ReasoningOutput.Inkling.reasoned(filteredText) { reasoning = split }
                 answer = split.answer
             }
             if try stripsStrayThinkTags(request) {
@@ -16570,6 +16591,8 @@ maxTokens: maxTokens,
                     defaultCompletionTokens,
                     miniMax
                         ? ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                        : inkling
+                        ? ReasoningOutput.Inkling.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                         : ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                 )
             }
@@ -16807,6 +16830,9 @@ maxTokens: maxTokens,
         case .afterMiniMaxThink:
             // Only the answer, outside every `<mm:think>` block, holds calls.
             text = ReasoningOutput.MiniMax.splitStreamingPrefix(text).answer
+        case .afterInklingThink:
+            // Only the answer, outside every thinking frame, holds calls.
+            text = ReasoningOutput.Inkling.splitStreamingPrefix(text).answer
         case .whole:
             break
         }
@@ -16881,11 +16907,19 @@ maxTokens: maxTokens,
         !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .minimax
     }
 
+    /// Inkling 2 output (#2467): every message is a frame of special tokens,
+    /// and the bodies of `<|content_thinking|>` frames are reasoning
+    /// (`ReasoningOutput.Inkling`). Its prompt never leaves `<think>` open.
+    static func splitsInklingReasoning(_ request: ChatCompletionRequest) -> Bool {
+        !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .inkling2
+    }
+
     /// The text request stops run over (`ReasoningOutput.StopScope`). Rows
     /// other than `.whole` carry no request stop-token sequences: a stop in
     /// the reasoning must not end them, so the text filters end them.
     static func reasoningStopScope(_ request: ChatCompletionRequest) -> ReasoningOutput.StopScope {
         if request.outputTraits.reasoningOpen { return .afterThink }
+        if splitsInklingReasoning(request) { return .afterInklingThink }
         return splitsMiniMaxReasoning(request) ? .afterMiniMaxThink : .whole
     }
 
@@ -17096,7 +17130,7 @@ maxTokens: maxTokens,
         }
         // Each native template owns its reasoning-history scope. Preserve
         // assistant reasoning only for the exact families that render it.
-        let historyReasoning = (grammar == .glm || grammar == .lfm2
+        let historyReasoning = (grammar == .glm || grammar == .lfm2 || grammar == .inkling2
             || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
                 modelID: toolSelectionModelID ?? request.model))) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
@@ -17840,6 +17874,9 @@ struct SerialStreamingTextEmitter {
     /// MiniMax rows (#2189): `<mm:think>` blocks stream as
     /// `reasoning_content` (`ReasoningOutput.MiniMax`).
     private var splitsMiniMaxReasoning: Bool { stopScope == .afterMiniMaxThink }
+    /// Inkling 2 rows (#2467): thinking frames stream as `reasoning_content`
+    /// (`ReasoningOutput.Inkling`).
+    private var splitsInklingReasoning: Bool { stopScope == .afterInklingThink }
     private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
@@ -17857,12 +17894,14 @@ struct SerialStreamingTextEmitter {
     /// whole-text functions instead (the differential tests' reference).
     private var reasoningSplit = IncrementalReasoningSplit()
     private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
+    private var inklingReasoningSplit = IncrementalInklingReasoningSplit()
     private var strayTagRemoval = IncrementalStrayTagRemoval()
     private var toolText: IncrementalToolText
     private var usesReferenceText = false
 
     var incrementalRestartCount: Int {
-        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
+        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + inklingReasoningSplit.restartCount
+            + strayTagRemoval.restartCount + toolText.restartCount
     }
 
     /// The longest text the stray-tag removal or tool-text reduction left
@@ -17918,12 +17957,17 @@ struct SerialStreamingTextEmitter {
     ) -> Step {
         var candidate = candidate
         var emittedVisible = false
-        if reasoningOpen || splitsMiniMaxReasoning {
+        if reasoningOpen || stopScope.splitsBlocks {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
-            // MiniMax: the same for every `<mm:think>…</mm:think>` block.
+            // MiniMax: the same for every `<mm:think>…</mm:think>` block;
+            // Inkling 2: for every thinking frame.
             let split: ReasoningOutput.Split
-            if splitsMiniMaxReasoning {
+            if splitsInklingReasoning {
+                split = usesReferenceText
+                    ? ReasoningOutput.Inkling.splitStreamingPrefix(candidate.text)
+                    : inklingReasoningSplit.splitStreamingPrefix(candidate.text)
+            } else if splitsMiniMaxReasoning {
                 split = usesReferenceText
                     ? ReasoningOutput.MiniMax.splitStreamingPrefix(candidate.text)
                     : miniMaxReasoningSplit.splitStreamingPrefix(candidate.text)
@@ -17947,7 +17991,7 @@ struct SerialStreamingTextEmitter {
             // A MiniMax answer grows around its blocks: it goes on whether or
             // not a block is open now (a request stop only ends the row after
             // the first `</mm:think>`, `ReasoningOutput.StopScope`).
-            guard split.closed || splitsMiniMaxReasoning else { return .more }
+            guard split.closed || stopScope.splitsBlocks else { return .more }
             candidate = (split.answer, candidate.hitStop)
         }
         if stripsStrayThinkTags {
@@ -18031,8 +18075,9 @@ struct SerialStreamingTextEmitter {
         onChunk: (StreamChunk) -> Void
     ) throws {
         var finalText = finalText
-        if reasoningOpen || splitsMiniMaxReasoning {
-            let split = splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
+        if reasoningOpen || stopScope.splitsBlocks {
+            let split = splitsInklingReasoning ? ReasoningOutput.Inkling.split(finalText)
+                : splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
             let rest = ModelRuntime.streamDelta(from: emittedReasoning, to: parsed.reasoningContent ?? split.reasoning)
             if !rest.isEmpty {
                 emittedReasoning += rest
@@ -18249,6 +18294,12 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = ToolCallParser.miniMaxCallsStart
             endDelimiter = ToolCallParser.miniMaxCallsEnd
             argumentKey = "arguments"
+        case .inkling2?:
+            // After the reasoning split, `<|message_model|>` in the answer
+            // only starts a call frame (`ReasoningOutput.Inkling`).
+            startDelimiter = ReasoningOutput.Inkling.messageModel
+            endDelimiter = ReasoningOutput.Inkling.endMessage
+            argumentKey = "args"
         default:
             startDelimiter = ToolCallParser.toolCallOpen
             endDelimiter = "</tool_call>"
