@@ -210,7 +210,12 @@ def _tool_calls_ok(choice: dict, name: str = "read_file") -> str | None:
 
 
 # MiniMax M3 wraps reasoning in <mm:think> (#2189); neither tag contains the other.
-REASONING_MARKUP = ("<think>", "</think>", "<mm:think>", "</mm:think>")
+# Inkling 2 frames every message with special tokens (#2467): a frame marker in
+# content or reasoning means the provider did not split the frames.
+REASONING_MARKUP = (
+    "<think>", "</think>", "<mm:think>", "</mm:think>",
+    "<|message_model|>", "<|content_thinking|>", "<|content_text|>", "<|end_message|>",
+)
 
 
 def _leaks_reasoning(text: str) -> bool:
@@ -646,6 +651,8 @@ def tool_grammar_family(model: str) -> str:
         return "lfm2"
     if "minimax-m3" in m or "minimax_m3" in m:
         return "minimax"
+    if "inkling-2" in m or "inkling2" in m:
+        return "inkling2"
     return ""
 
 
@@ -659,7 +666,7 @@ def advertised_capabilities(model_id: str) -> dict:
     return {
         "tools": tools,
         "tool_choice": modes,
-        "reasoning": "glm-5" in m or "gpt-oss" in m or "deepseek-v4" in m,
+        "reasoning": any(f in m for f in ("glm-5", "gpt-oss", "deepseek-v4", "inkling-2", "inkling2")),
         "response_format": True,
         "messages": True,
         "responses": True,
