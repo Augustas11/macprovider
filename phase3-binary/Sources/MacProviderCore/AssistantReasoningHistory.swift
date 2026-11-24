@@ -470,6 +470,7 @@ public final class ReasoningHistoryRequestState: @unchecked Sendable {
     private var lookup: Lookup?
     private var withdrawn = false
     private var restoredTokens = 0
+    private var restoredTokensClaimed = false
     private var reported = false
 
     public init() {}
@@ -481,6 +482,7 @@ public final class ReasoningHistoryRequestState: @unchecked Sendable {
         guard self.store !== store else { return }
         self.store = store
         lookup = nil
+        restoredTokens = 0
     }
 
     /// The restore for the request's messages: looked up (with the purge
@@ -529,6 +531,17 @@ public final class ReasoningHistoryRequestState: @unchecked Sendable {
     public var restoredPromptTokens: Int {
         lock.lock()
         defer { lock.unlock() }
+        return restoredTokens
+    }
+
+    /// The restored prompt tokens to leave out of reported usage, once per
+    /// request: a nested completion path that finishes the same request
+    /// again gets zero, so usage is never reduced twice.
+    public func claimRestoredPromptTokens() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        if restoredTokensClaimed { return 0 }
+        restoredTokensClaimed = true
         return restoredTokens
     }
 

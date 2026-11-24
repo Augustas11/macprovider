@@ -216,6 +216,23 @@ final class InklingReasoningRestoreTests: XCTestCase {
         XCTAssertNotNil(second.outputState.reasoningHistory.recordTarget())
     }
 
+    /// The restore must leave the output budget (at least one token) inside
+    /// the context: a restored prompt exactly at the limit renders as sent.
+    func testRestoredPromptAtTheLimitLeavesNoOutputRoomAndRendersAsSent() async throws {
+        let history = AssistantReasoningHistory()
+        _ = try serveFirstTurn(history, completion())
+        let plain = try Self.prompt(try request(secondTurn, history: AssistantReasoningHistory()))
+        let probe = try request(secondTurn, history: history)
+        let restoredCount = try Self.prompt(probe, restoring: true).utf8.count
+        let second = try request(secondTurn, history: history)
+        let rendered = try await ModelRuntime.renderingHistoryReasoning(
+            for: second, maxContextTokens: restoredCount,
+            render: { (restoring: Bool) async throws -> String in try Self.prompt(second, restoring: restoring) },
+            tokenCount: { (prompt: String) -> Int in prompt.utf8.count })
+        XCTAssertEqual(rendered, plain)
+        XCTAssertTrue(second.outputState.reasoningHistory.isWithdrawn)
+    }
+
     /// Item 2: within the limit the restore stands, and the tokens it added
     /// are noted for usage.
     func testRestoredPromptTokensAreNoted() async throws {
@@ -269,6 +286,11 @@ final class InklingReasoningRestoreTests: XCTestCase {
         let finished = ModelRuntime.finishingHistoryReasoning(served, for: second, toolSelectionModelID: nil)
         XCTAssertEqual(finished.promptTokens, 90)
         XCTAssertEqual(finished.cachedPromptTokens, 90)
+        // A nested completion path finishing the same request again (the
+        // streamed held-output path) does not subtract a second time.
+        let again = ModelRuntime.finishingHistoryReasoning(served, for: second, toolSelectionModelID: nil)
+        XCTAssertEqual(again.promptTokens, 100)
+        XCTAssertEqual(again.cachedPromptTokens, 95)
         // And the second turn was recorded.
         XCTAssertEqual(history.count, 2)
         let unrestored = try request(firstTurn)

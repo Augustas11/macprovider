@@ -17226,7 +17226,10 @@ maxTokens: maxTokens,
         let plain = try await render(false)
         let restoredCount = tokenCount(restored)
         let added = max(0, restoredCount - tokenCount(plain))
-        if let maxContextTokens, restoredCount > maxContextTokens {
+        // The restore must leave the request's whole output budget (and the
+        // one free token a batched row needs) inside the context.
+        if let maxContextTokens,
+           restoredCount + max(1, request.maxTokens ?? 1) > maxContextTokens {
             state.withdraw()
             if state.claimReport() {
                 FileHandle.standardError.write(Data(
@@ -17252,7 +17255,7 @@ maxTokens: maxTokens,
         toolSelectionModelID: String?
     ) -> CompletionResult {
         recordHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID)
-        let restoredTokens = request.outputState.reasoningHistory.restoredPromptTokens
+        let restoredTokens = request.outputState.reasoningHistory.claimRestoredPromptTokens()
         guard restoredTokens > 0 else { return completion }
         return completion.excludingRestoredPromptTokens(restoredTokens)
     }

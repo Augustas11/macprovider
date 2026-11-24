@@ -1,5 +1,5 @@
 import Foundation
-import MacProviderCore
+@testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
 
