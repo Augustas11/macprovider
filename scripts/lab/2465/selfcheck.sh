@@ -207,21 +207,48 @@ print("\n".join([f"model: {q(key)}", f"model_artifact_path: {q(path)}", f"model_
 PY
 cp "$S/config.yaml" "$RES/serve-config.yaml"
 log "SELFCHECK_SERVE_START model=$DAISY_KEY"
-( export CFFIXED_USER_HOME=$S/home TMPDIR=$S/tmp/ MACPROVIDER_LIFECYCLE_ROOT=$S/home/lifecycle \
-    MACPROVIDER_CTL_SOCKET_PATH=$S/tmp/ctl.sock MACPROVIDER_SWITCH_STATE_PATH=$S/tmp/last-switch.ts \
-    MACPROVIDER_WATCHDOG_STATE_DIR=$S/home/watchdog MACPROVIDER_AUTO_UPDATE_ENABLED=false \
-    MACPROVIDER_MODEL_ARTIFACT_ROOT=$ROOT \
-    MACPROVIDER_LAB_STATIC_FEED_ORIGIN=http://127.0.0.1:$FEED_PORT \
-    MACPROVIDER_LAB_STATIC_FEED_KEY_ID=$STATIC_KEY_ID MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY=$STATIC_PUB
-  cd "$BIN" && exec ./macprovider-cli serve --config "$S/config.yaml" --no-join > "$RES/serve.out" 2> "$RES/serve.err" < /dev/null ) &
-SERVE_PID=$!
-last="" since=$(date +%s)
-until grep -q 'event=native_mtp_self_check result=' "$RES/serve.err" 2>/dev/null; do
-  kill -0 "$SERVE_PID" 2>/dev/null || { FAILED=1; log "BLOCKER: serve exited before the self-check: $(tail -n 3 "$RES/serve.err" | tr '\n' ' ' | cut -c1-400)"; break; }
-  cur=$(stat -f '%m %z' "$RES/serve.err" 2>/dev/null); now=$(date +%s)
-  if [ "$cur" != "$last" ]; then last=$cur; since=$now; fi
-  [ $((now - since)) -lt "$STALL_S" ] || { FAILED=1; log "BLOCKER: serve log stalled ${STALL_S}s before the self-check: $(grep -E 'native_mtp|lab_static_feed' "$RES/serve.err" | tail -n 3 | tr '\n' ' ' | cut -c1-400)"; break; }
-  sleep 5
+# The small-M route verdict is recorded after the first load; until it exists native MTP is not admitted
+# (native_mtp_serve_path_admission rejected, small_m_route_stock_order). So: pass 1 serves until the
+# verdict is recorded and is stopped; pass 2 restarts on the persisted verdict, where native MTP is
+# admitted and the self-check runs at load. Any other admission refusal stops the job at once.
+start_serve() {
+  ( export CFFIXED_USER_HOME=$S/home TMPDIR=$S/tmp/ MACPROVIDER_LIFECYCLE_ROOT=$S/home/lifecycle \
+      MACPROVIDER_CTL_SOCKET_PATH=$S/tmp/ctl.sock MACPROVIDER_SWITCH_STATE_PATH=$S/tmp/last-switch.ts \
+      MACPROVIDER_WATCHDOG_STATE_DIR=$S/home/watchdog MACPROVIDER_AUTO_UPDATE_ENABLED=false \
+      MACPROVIDER_MODEL_ARTIFACT_ROOT=$ROOT \
+      MACPROVIDER_LAB_STATIC_FEED_ORIGIN=http://127.0.0.1:$FEED_PORT \
+      MACPROVIDER_LAB_STATIC_FEED_KEY_ID=$STATIC_KEY_ID MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY=$STATIC_PUB
+    cd "$BIN" && exec ./macprovider-cli serve --config "$S/config.yaml" --no-join > "$RES/serve.out" 2> "$RES/serve.err" < /dev/null ) &
+  SERVE_PID=$!
+}
+stop_serve() {
+  kill -TERM "$SERVE_PID" 2>/dev/null
+  for _ in $(seq 1 120); do kill -0 "$SERVE_PID" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null
+}
+admission() { grep -m1 '"event":"native_mtp_serve_path_admission"' "$RES/serve.err" 2>/dev/null; }
+for pass in 1 2; do
+  [ "$pass" = 2 ] && { cp "$RES/serve.err" "$RES/serve-pass1.err"; log "SELFCHECK_RESTART small-M verdict recorded; serving again for native MTP"; }
+  start_serve
+  last="" since=$(date +%s) restart=0
+  until grep -q 'event=native_mtp_self_check result=' "$RES/serve.err" 2>/dev/null; do
+    kill -0 "$SERVE_PID" 2>/dev/null || { FAILED=1; log "BLOCKER: serve exited before the self-check: $(tail -n 3 "$RES/serve.err" | tr '\n' ' ' | cut -c1-400)"; break; }
+    a=$(admission)
+    case "$a" in
+      *'"status":"rejected"'*)
+        if [ "$pass" = 1 ] && printf '%s' "$a" | grep -q small_m_route_stock_order; then
+          grep -q 'event=small_m_route action=verdict_recorded' "$RES/serve.err" && { restart=1; break; }
+        else
+          FAILED=1; log "BLOCKER: native MTP not admitted (pass $pass): $(printf '%s' "$a" | cut -c1-300)"; break
+        fi ;;
+    esac
+    cur=$(stat -f '%m %z' "$RES/serve.err" 2>/dev/null); now=$(date +%s)
+    if [ "$cur" != "$last" ]; then last=$cur; since=$now; fi
+    [ $((now - since)) -lt "$STALL_S" ] || { FAILED=1; log "BLOCKER: serve log stalled ${STALL_S}s before the self-check: $(grep -E 'native_mtp|lab_static_feed' "$RES/serve.err" | tail -n 3 | tr '\n' ' ' | cut -c1-400)"; break; }
+    sleep 5
+  done
+  [ "$restart" = 1 ] && [ "$FAILED" = 0 ] || break
+  stop_serve
 done
 grep -E 'event=(native_mtp[a-z_]*|lab_static_feed_override)' "$RES/serve.err" | cut -c1-300 | sed 's/^/SELFCHECK_EVENT /'
 log "SELFCHECK_DONE $(grep -m1 'event=native_mtp_self_check result=' "$RES/serve.err" | cut -c1-200)"
