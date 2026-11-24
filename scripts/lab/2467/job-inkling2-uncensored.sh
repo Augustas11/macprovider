@@ -25,14 +25,14 @@
 #  4. fetch (inkling2_uncensored_splice.py): pinned API listings; the source listing must equal
 #     the committed source manifest 050f1cec; downloads only the source's weight shard, index
 #     and config (~19.5 GB), and whatever the original's directory lacks of the same files;
-#  4b. recipe: every base attn.o_proj against mx.quantize of the original attn.wo_ud of its
+#  4b. recipe: every base attn.o_proj against the oQ quantizer (ported from oMLX) of the original attn.wo_ud of its
 #     layer, in the base's format; refuses unless the base is a plain quantization of that
 #     tensor (absolute error bound) and our recipe errs no more than ERROR_RATIO x the base's;
 #  5. diff: tensor by tensor against the original; refuses unless exactly EXPECT_CHANGED (20)
 #     tensors differ and all are attention output projections (attn.wo_ud.weight), and unless
 #     every other source file equals the original's (edit.pt the only extra);
 #  6. splice into an APFS clone of the base: each changed projection re-quantized with
-#     mx.quantize in the base's format for that module (read from its config quantization map),
+#     the oQ quantizer in the base's format for that module (read from its config quantization map),
 #     the recipe re-checked on the original projections, the numeric gate (spliced error vs
 #     uncensored BF16 within ERROR_RATIO of the base's own error vs original BF16, per layer),
 #     written in place, every other tensor and file verified byte-identical to the base;

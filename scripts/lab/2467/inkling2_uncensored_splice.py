@@ -30,14 +30,15 @@ part of `splice` needs numpy and mlx):
          other source file must equal the original's (config.json: equal as JSON except
          ignorable top-level keys), with `edit.pt` the only allowed extra file.
   recipe --base OQ --original DIR --out recipe.json [--error-ratio 1.25] [--max-error-ratio 2.0]
-         Before the splice: every base attn.o_proj against mx.quantize of the
-         original attn.wo_ud of its layer, in the base's format. Refuses unless the base's and
+         Before the splice: every base attn.o_proj against the oQ affine quantizer
+         (oq_affine_quantize, ported from oMLX) of the original attn.wo_ud of its layer, in
+         the base's format. Refuses unless the base's and
          our error on the original are below an absolute bound (a plain quantization, no
          transform) and ours is within the ratios of the base's (or byte-equal to it).
   splice --base OQ --source DIR --original DIR --fetch fetch.json --diff diff.json --out OUT
          --manifest splice.json [--error-ratio 1.25] [--max-error-ratio 2.0]
          OUT must be an APFS clone of OQ (`cp -c -R`). Re-quantizes each changed projection
-         with mx.quantize in the base's format for that module, and the original projection
+         with oq_affine_quantize in the base's format for that module, and the original projection
          the same way as a recipe check (`recipe_reproduced`: our bytes equal the base's).
          Numeric gate per module: the recipe checks above; the spliced tensor's dequantized
          error against the uncensored BF16 weight is within --error-ratio (relative
@@ -487,8 +488,141 @@ def quant_spec(config: dict, module: str, base: Shards) -> dict:
     return {**spec, "rows": rows, "cols": cols, "scale_dtype": s["dtype"]}
 
 
+# ---------------------------------------------------------------- oQ affine quantizer
+# Ported from oMLX v0.8.1 (github.com/jundot/omlx, tag v0.8.1, commit 13fd0c9d, omlx/oq.py:
+# _affine_minmax_params, _pack_affine_codes, _LSQ_*, _weighted_lsq_refit and
+# _weighted_affine_quantize). Copyright 2025 oMLX contributors, Apache License 2.0
+# (http://www.apache.org/licenses/LICENSE-2.0). Changes: mlx is passed in, importance None
+# means uniform, packing covers 2/4/8 bits only. oMLX runs the refit as a Metal kernel on the
+# GPU for groups of 32/64/128; this is its mlx-ops version (the one oMLX uses on the CPU).
+# The base's oQ4e build fed each attn.o_proj a calibration imatrix (mean squared input per
+# channel); that imatrix is not published, so the splice passes uniform importance.
+
+_OQ_LSQ_ROUNDS = 5
+_OQ_LSQ_START_FACTORS = (0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15)
+_OQ_CLIP_FACTORS = (0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25)
+
+
+def _oq_affine_minmax_params(mx, grouped, bits: int):
+    n_bins = mx.array((1 << bits) - 1, mx.float32)
+    eps = mx.array(1e-7, mx.float32)
+    zero = mx.array(0.0, mx.float32)
+    w_max = mx.max(grouped, axis=-1, keepdims=True).astype(mx.float32)
+    w_min = mx.min(grouped, axis=-1, keepdims=True).astype(mx.float32)
+    mask = mx.abs(w_min) > mx.abs(w_max)
+    scales = mx.maximum((w_max - w_min) / n_bins, eps)
+    scales = mx.where(mask, scales, -scales)
+    edge = mx.where(mask, w_min, w_max)
+    q0 = mx.round(edge / scales)
+    scales = mx.where(q0 != zero, edge / q0, scales)
+    biases = mx.where(q0 == zero, zero, edge)
+    return scales, biases
+
+
+def _oq_pack_affine_codes(mx, w, scales, biases, group_size: int, bits: int):
+    if bits not in (2, 4, 8):
+        raise Blocker(f"the oQ port packs 2, 4 and 8 bits, not {bits}")
+    orig = tuple(w.shape)
+    grouped = w.reshape(-1, orig[-1] // group_size, group_size)
+    n_bins = mx.array((1 << bits) - 1, mx.float32)
+    codes = mx.clip(mx.round((grouped - biases) / scales), 0, n_bins).astype(mx.uint32)
+    shifts = mx.power(mx.array(2, mx.uint32), mx.arange(0, 32, bits, dtype=mx.uint32))
+    packed = mx.sum(codes.reshape(codes.shape[0], -1, 32 // bits) * shifts, axis=2)
+    return packed.reshape(*orig[:-1], orig[-1] * bits // 32)
+
+
+def _oq_weighted_lsq_refit(mx, grouped, imp, scales, biases, bits: int, dtype):
+    """Per group, alternate rounding with the closed-form weighted least-squares fit of
+    v ~ s * c + b, from the given parameters and from symmetric clipping starts; errors use
+    the stored (DTYPE) precision, and a group keeps its parameters unless the error drops."""
+    n_bins = mx.array((1 << bits) - 1, mx.float32)
+    tiny = mx.array(1e-7, mx.float32)
+
+    def stored(x):
+        return x.astype(dtype).astype(mx.float32)
+
+    def fit(s, b):
+        codes = mx.clip(mx.round((grouped - b) / s), 0, n_bins)
+        err = mx.sum(imp * (grouped - (codes * s + b)) ** 2, axis=-1, keepdims=True)
+        return codes, err
+
+    total = mx.sum(imp, axis=-1, keepdims=True)
+    sum_v = mx.sum(imp * grouped, axis=-1, keepdims=True)
+    best_s, best_b = stored(scales), stored(biases)
+    _, best_err = fit(best_s, best_b)
+    w_min = mx.min(grouped, axis=-1, keepdims=True)
+    w_max = mx.max(grouped, axis=-1, keepdims=True)
+    starts = [(best_s, best_b)]
+    for factor in _OQ_LSQ_START_FACTORS:
+        s = mx.maximum((w_max - w_min) * factor / n_bins, tiny)
+        starts.append((s, (w_max + w_min) * 0.5 - n_bins * 0.5 * s))
+    for s, b in starts:
+        s, b = stored(s), stored(b)
+        for _ in range(_OQ_LSQ_ROUNDS):
+            codes, err = fit(s, b)
+            take = err < best_err
+            best_err = mx.where(take, err, best_err)
+            best_s = mx.where(take, s, best_s)
+            best_b = mx.where(take, b, best_b)
+            sum_c = mx.sum(imp * codes, axis=-1, keepdims=True)
+            sum_cc = mx.sum(imp * codes * codes, axis=-1, keepdims=True)
+            sum_cv = mx.sum(imp * codes * grouped, axis=-1, keepdims=True)
+            denom = sum_cc - sum_c * sum_c / total
+            safe = mx.where(denom > 0, denom, mx.array(1.0, mx.float32))
+            new_s = (sum_cv - sum_c * sum_v / total) / safe
+            ok = (denom > 0) & (mx.abs(new_s) > tiny)
+            new_b = (sum_v - new_s * sum_c) / total
+            s = stored(mx.where(ok, new_s, s))
+            b = stored(mx.where(ok, new_b, b))
+        mx.eval(best_s, best_b, best_err)
+    return best_s, best_b
+
+
+def oq_affine_quantize(mx, w, group_size: int, bits: int, importance=None):
+    """oQ affine quantization of a 2-D weight: min/max start, an importance-weighted clipping
+    search, then the least-squares refit. Same layout and dtypes as
+    mx.quantize(w, group_size, bits, mode="affine"); scales and biases in w's dtype."""
+    orig = tuple(w.shape)
+    grouped_f = w.reshape(-1, orig[-1] // group_size, group_size).astype(mx.float32)
+    if importance is None:
+        imp = mx.ones(grouped_f.shape, mx.float32)
+    else:
+        imp = mx.broadcast_to(mx.array(importance), orig).reshape(grouped_f.shape).astype(mx.float32)
+    imp = mx.maximum(imp, mx.array(1e-8, mx.float32))
+
+    n_bins = mx.array((1 << bits) - 1, mx.float32)
+    eps = mx.array(1e-7, mx.float32)
+    best_scales, best_biases = _oq_affine_minmax_params(mx, grouped_f, bits)
+    best_codes = mx.clip(mx.round((grouped_f - best_biases) / best_scales), 0, n_bins)
+    best_err = mx.sum(imp * (grouped_f - (best_codes * best_scales + best_biases)) ** 2, axis=-1, keepdims=True)
+    w_min = mx.min(grouped_f, axis=-1, keepdims=True)
+    w_max = mx.max(grouped_f, axis=-1, keepdims=True)
+    for edge, opposite, sign in ((w_max, w_min, -1.0), (w_min, w_max, 1.0)):
+        raw = mx.maximum(mx.abs(edge - opposite) / n_bins, eps) * sign
+        q0 = mx.round(edge / raw)
+        scale0 = mx.where(q0 != 0, edge / q0, raw)
+        bias0 = mx.where(q0 == 0, mx.array(0.0, mx.float32), edge)
+        for factor in _OQ_CLIP_FACTORS:
+            scales = scale0 * mx.array(factor, mx.float32)
+            codes = mx.clip(mx.round((grouped_f - bias0) / scales), 0, n_bins)
+            err = mx.sum(imp * (grouped_f - (codes * scales + bias0)) ** 2, axis=-1, keepdims=True)
+            take = err < best_err
+            best_err = mx.where(take, err, best_err)
+            best_scales = mx.where(take, scales, best_scales)
+            best_biases = mx.where(take, bias0, best_biases)
+
+    best_scales, best_biases = _oq_weighted_lsq_refit(mx, grouped_f, imp, best_scales, best_biases, bits, w.dtype)
+    packed = _oq_pack_affine_codes(mx, grouped_f.reshape(orig), best_scales, best_biases, group_size, bits)
+    scale_shape = (*orig[:-1], orig[-1] // group_size)
+    scales = best_scales.reshape(scale_shape).astype(w.dtype)
+    biases = best_biases.reshape(scale_shape).astype(w.dtype)
+    mx.eval(packed, scales, biases)
+    return packed, scales, biases
+
+
 class MlxQuantizer:
-    """mx.quantize / mx.dequantize in the base's affine format; numpy cross-checks the dequantization."""
+    """oQ affine quantization (oq_affine_quantize) / mx.dequantize in the base's affine format;
+    numpy cross-checks the dequantization."""
 
     def __init__(self):
         import mlx.core as mx
@@ -504,10 +638,9 @@ class MlxQuantizer:
         if spec["scale_dtype"] != "BF16":
             raise Blocker(f"scales are {spec['scale_dtype']}; the splice writes BF16 scales")
         w = self._bf16(raw, shape)
-        wq, scales, biases = mx.quantize(w, group_size=spec["group_size"], bits=spec["bits"], mode="affine")
-        mx.eval(wq, scales, biases)
+        wq, scales, biases = oq_affine_quantize(mx, w, spec["group_size"], spec["bits"])
         if scales.dtype != mx.bfloat16 or biases.dtype != mx.bfloat16 or wq.dtype != mx.uint32:
-            raise Blocker(f"mx.quantize returned {wq.dtype}/{scales.dtype}/{biases.dtype}")
+            raise Blocker(f"oq_affine_quantize returned {wq.dtype}/{scales.dtype}/{biases.dtype}")
         return {"weight": np.array(wq).astype("<u4").tobytes(),
                 "scales": np.array(scales.view(mx.uint16)).astype("<u2").tobytes(),
                 "biases": np.array(biases.view(mx.uint16)).astype("<u2").tobytes()}
@@ -563,7 +696,7 @@ ABS_REL_FRO = 0.02
 
 
 def recipe_failures(row: dict, error_ratio: float, max_error_ratio: float) -> list[str]:
-    """The base really is the source tensor in this format, and our mx.quantize recipe is in
+    """The base really is the source tensor in this format, and our oQ recipe is in
     line with oMLX's on the original weight (byte-equal when `recipe_reproduced`)."""
     be, oe = row["base_error"], row["our_original_error"]
     fails = []
@@ -582,7 +715,7 @@ def recipe_failures(row: dict, error_ratio: float, max_error_ratio: float) -> li
 
 
 def recipe(base: Path, org: Path, quantizer, error_ratio: float, max_error_ratio: float) -> dict:
-    """Before the splice: every base attn.o_proj against our mx.quantize of the
+    """Before the splice: every base attn.o_proj against our oQ quantization of the
     original attn.wo_ud of the same layer (format from the base's quantization map)."""
     refuse_pickles(base)
     refuse_pickles(org)
@@ -693,7 +826,7 @@ def splice(base: Path, src: Path, org: Path, out: Path, fetch: dict, diff: dict,
             fails.append(f"rel_fro {se['rel_fro']:.3e} > {error_ratio} x base {be['rel_fro']:.3e}")
         if se["max_abs"] > max_error_ratio * be["max_abs"]:
             fails.append(f"max_abs {se['max_abs']:.3e} > {max_error_ratio} x base {be['max_abs']:.3e}")
-        # Apples to apples: the same mx.quantize recipe on the edited and on the original weight.
+        # Apples to apples: the same oQ recipe on the edited and on the original weight.
         oe = row["our_original_error"]
         if se["rel_fro"] > error_ratio * oe["rel_fro"]:
             fails.append(f"rel_fro {se['rel_fro']:.3e} > {error_ratio} x our recipe on the original {oe['rel_fro']:.3e}")
@@ -763,7 +896,8 @@ def splice(base: Path, src: Path, org: Path, out: Path, fetch: dict, diff: dict,
         "license": LICENSE,
         "source": fetch["source"], "original": fetch["original"], "served_base": fetch["served_base"],
         "recipe": "the base's attn.o_proj format from its config quantization map (affine, "
-                  f"{sorted({json.dumps(r['format'], sort_keys=True) for r in rows})}), mx.quantize of the "
+                  f"{sorted({json.dumps(r['format'], sort_keys=True) for r in rows})}), oMLX's oQ affine quantizer "
+                  "(clipping search and least-squares refit, uniform importance) on the "
                   "uncensored BF16 attn.wo_ud weight; every other tensor and file byte-identical to the base",
         "compared": diff["compared"],
         "changed_modules": rows,

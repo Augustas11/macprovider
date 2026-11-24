@@ -5,7 +5,7 @@ Tiny synthetic checkpoints in the three layouts (original and uncensored source:
 BF16; base: oQ `model.layers.N.attn.o_proj` weight/scales/biases), stdlib only. The quantizer
 is a stand-in with the real byte sizes, so the plumbing (diff rules, in-place write, the
 verification of every other tensor and file) is what these tests check; the numeric gate's
-real numbers come from mx.quantize on the Studio.
+real numbers come from the oQ quantizer on the Studio.
 """
 
 from __future__ import annotations
@@ -253,6 +253,30 @@ class SpliceTests(unittest.TestCase):
         listing["model-00001-of-00001.safetensors"] = {"sha256": "0" * 64, "size": manifest["model-00001-of-00001.safetensors"]["size"]}
         with self.assertRaisesRegex(splice_mod.Blocker, "committed manifest"):
             splice_mod.check_source_listing(listing, manifest)
+
+
+@unittest.skipUnless(importlib.util.find_spec("mlx") and importlib.util.find_spec("numpy"), "needs mlx and numpy")
+class OQQuantizerTest(unittest.TestCase):
+    """The oQ port on a small CPU tensor: mx.quantize's layout, and less error than its
+    round-to-nearest (the 1.3x gap the Studio recipe gate measured against the base)."""
+
+    def test_oq_beats_round_to_nearest_in_the_same_layout(self):
+        import mlx.core as mx
+        import numpy as np
+        mx.set_default_device(mx.cpu)
+        rows, cols = 32, 256
+        w = np.random.default_rng(2467).standard_t(4, size=(rows, cols)).astype(np.float32) * 0.02
+        raw = np.array(mx.array(w).astype(mx.bfloat16).view(mx.uint16)).astype("<u2").tobytes()
+        spec = {"rows": rows, "cols": cols, "group_size": 64, "bits": 8, "scale_dtype": "BF16", "mode": "affine"}
+        q = splice_mod.MlxQuantizer()
+        ours = q.quantize(raw, [rows, cols], spec)
+        rtn = mx.quantize(q._bf16(raw, [rows, cols]), group_size=64, bits=8, mode="affine")
+        self.assertEqual([len(ours[k]) for k in ("weight", "scales", "biases")], [a.nbytes for a in rtn])
+        rtn = {"weight": np.array(rtn[0]).astype("<u4").tobytes(),
+               **{k: np.array(a.view(mx.uint16)).astype("<u2").tobytes() for k, a in zip(("scales", "biases"), rtn[1:])}}
+        e_ours, e_rtn = (q.error(p, spec, raw, [rows, cols]) for p in (ours, rtn))
+        self.assertLess(e_ours["mlx_vs_numpy_max_abs"], 1e-5 * e_ours["ref_max_abs"] + 1e-7)
+        self.assertLess(e_ours["rel_fro"], e_rtn["rel_fro"] / 1.2)
 
 
 if __name__ == "__main__":
