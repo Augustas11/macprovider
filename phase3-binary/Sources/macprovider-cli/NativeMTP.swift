@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MacProviderCore
 
@@ -583,13 +584,40 @@ private extension ChatCompletionPromptSource {
 
 /// SPEC-048-R016 (v0.1.32) on-device native-MTP qualification: MTP-on greedy
 /// tokens must equal ordinary decode on the same paged engine (same kernels,
-/// so near-tied logits resolve the same way), and MTP must be strictly faster
-/// than ordinary decode, as the SPEC-048-R015 (0.1.71) decode-throughput gate
+/// so near-tied logits resolve the same way), and MTP must be faster than
+/// ordinary decode, as the SPEC-048-R015 (0.1.71) decode-throughput gate
 /// requires a positive lower bound.
+///
+/// (0.1.125, #2481) The check measures the served one-row shape: besides the
+/// signed challenge it probes the parity grid's own prompts at a short and a
+/// long context, times ordinary decode on the route an ordinary request takes
+/// when native MTP is off, and admits native MTP only when it beats that by
+/// `minimumSpeedup` at every probe point.
 enum NativeMTPOnDeviceSelfCheck {
-    /// Exclusive: the speedup must exceed it.
-    static let minimumSpeedup = 1.0
+    /// Exclusive: the speedup must exceed it at every probe point. The 3%
+    /// margin keeps a best-of-two wall-clock win inside run-to-run noise from
+    /// admitting a path that serves slower (#2481: 1.11 on the challenge,
+    /// -2% to -8% on the served grid).
+    static let minimumSpeedup = 1.03
     static let repetitions = 2
+
+    /// A workload probe point: a parity-grid prompt of about `contextTokens`
+    /// tokens (row 0, `scripts/lab/parity-grid/prompts.py`) decoded for
+    /// `outputTokens` tokens, timed over the whole request (prefill included),
+    /// as the grid's one-row request tok/s is.
+    struct ProbePoint: Equatable, Sendable {
+        let name: String
+        let contextTokens: Int
+        let outputTokens: Int
+    }
+
+    /// The grid's short and 4k contexts. The long point decodes 256 tokens so
+    /// the verify cost at a 4k context reaches steady state; both are clamped
+    /// to the tuple's signed prompt and completion bounds.
+    static let workloadPoints: [ProbePoint] = [
+        ProbePoint(name: "ctx200_out128", contextTokens: 200, outputTokens: 128),
+        ProbePoint(name: "ctx4000_out256", contextTokens: 4000, outputTokens: 256),
+    ]
 
     /// Scheduler request ids are durable replay keys (SPEC-038 AC-25): an
     /// ordinary-decode run is claimed on disk and never released. The
@@ -601,9 +629,26 @@ enum NativeMTPOnDeviceSelfCheck {
 
     struct Verdict: Equatable {
         let passed: Bool
-        /// `passed`, `token_mismatch`, `no_net_gain`, `empty_output`.
+        /// `passed`, `token_mismatch`, `no_net_gain`, `empty_output`,
+        /// `no_probe_points`.
         let reason: String
+        /// The verdict's speedup: the failing point's, else the smallest.
         let speedup: Double
+        /// The probe point the verdict names (the failing one, else the
+        /// tightest); nil for a single-point decision.
+        var point: String? = nil
+    }
+
+    /// One measured probe point. `referenceTokens` is ordinary decode on the
+    /// native request's own route (the R015 exactness reference);
+    /// `ordinarySeconds` is the best ordinary run on the route an ordinary
+    /// request takes with native MTP off (the speed a buyer gets without it).
+    struct PointMeasurement: Equatable, Sendable {
+        let name: String
+        let mtpTokens: [Int]
+        let mtpSeconds: Double
+        let referenceTokens: [Int]
+        let ordinarySeconds: Double
     }
 
     static func decide(
@@ -626,5 +671,101 @@ enum NativeMTPOnDeviceSelfCheck {
             return Verdict(passed: false, reason: "no_net_gain", speedup: speedup)
         }
         return Verdict(passed: true, reason: "passed", speedup: speedup)
+    }
+
+    /// Admits native MTP only when every probe point passes `decide`: the
+    /// first failing point decides the verdict; otherwise it passes with the
+    /// smallest speedup. No points is a failure.
+    static func admit(_ points: [PointMeasurement]) -> Verdict {
+        var tightest: Verdict?
+        for point in points {
+            var verdict = decide(
+                mtpTokens: point.mtpTokens,
+                mtpSeconds: point.mtpSeconds,
+                ordinaryTokens: point.referenceTokens,
+                ordinarySeconds: point.ordinarySeconds
+            )
+            verdict.point = point.name
+            guard verdict.passed else { return verdict }
+            if let current = tightest, current.speedup <= verdict.speedup { continue }
+            tightest = verdict
+        }
+        return tightest ?? Verdict(passed: false, reason: "no_probe_points", speedup: 0)
+    }
+
+    /// The ordinary routes of a probe point: `speed` is the route an ordinary
+    /// request takes when native MTP is off (stock order in a `mixed`
+    /// process), `reference` the native request's own route (row-invariant
+    /// in `mixed`), whose ordinary output native tokens must equal.
+    static func ordinaryRoutes(
+        processRoute: SmallMRoute = SmallMRoute.processRoute,
+        mixed: Bool = SmallMRoute.processMixed
+    ) -> (speed: SmallMRoute, reference: SmallMRoute) {
+        (
+            SmallMRoute.requestRoute(nativeAdmitted: false, processRoute: processRoute, mixed: mixed),
+            SmallMRoute.requestRoute(nativeAdmitted: true, processRoute: processRoute, mixed: mixed)
+        )
+    }
+
+    /// The probe's prompt and completion lengths inside the tuple's signed
+    /// bounds; nil when the bounds leave nothing to measure.
+    static func boundedPoint(
+        _ point: ProbePoint,
+        maxPromptTokens: Int,
+        maxCompletionTokens: Int
+    ) -> ProbePoint? {
+        let context = min(point.contextTokens, maxPromptTokens)
+        let output = min(point.outputTokens, maxCompletionTokens)
+        guard context > 0, output > 1 else { return nil }
+        return ProbePoint(name: point.name, contextTokens: context, outputTokens: output)
+    }
+
+    /// A smaller character target when the tokenized prompt exceeds the
+    /// signed prompt bound: scaled by the overshoot with 3% headroom.
+    static func shrunkContextTokens(current: Int, tokenized: Int, maxPromptTokens: Int) -> Int {
+        guard tokenized > 0 else { return 0 }
+        return max(0, Int(Double(current) * Double(maxPromptTokens) / Double(tokenized) * 0.97))
+    }
+
+    // MARK: parity-grid prompt (scripts/lab/parity-grid/prompts.py, byte for byte)
+
+    private static let workloadWords: [String] = (
+        "harbor lantern keeper granite tide ledger copper meadow orchard river "
+        + "signal compass winter archive bridge foundry cellar market weaver canal "
+        + "quarry beacon glacier valley ferry orbit thicket summit furnace carriage "
+        + "pigment chapel cistern barley ember falcon garnet hollow island juniper "
+        + "kettle lagoon marble nectar osprey pewter quiver rafter saddle timber "
+        + "umber velvet walnut yarrow zephyr anchor bramble cinder dune estuary "
+        + "fjord gully heron inlet jetty kiln loom moor"
+    ).split(separator: " ").map(String.init)
+
+    private static let workloadInstruction =
+        "\n\nTask: using the notes above only as loose inspiration, write a very long, "
+        + "detailed, continuous story of at least 6000 words about the people who keep "
+        + "a remote coastal lighthouse. Write many chapters with dialogue and description. "
+        + "Do not summarize, do not conclude, do not add a closing remark, and do not stop "
+        + "early; keep writing the story."
+
+    /// The user message of `prompts.build_messages(contextTokens, row)`:
+    /// deterministic pseudo-prose sized at four characters per token. No buyer
+    /// data; the same text the grid sends.
+    static func workloadPromptText(contextTokens: Int, row: Int = 0) -> String {
+        let header = "Notebook \(String(format: "%04ld", row)). Field notes follow.\n\n"
+        let target = max(0, contextTokens) * 4
+        let bodyCount = max(0, target - header.utf8.count - workloadInstruction.utf8.count)
+        var body = ""
+        var size = 0
+        var index = 0
+        while size < bodyCount {
+            let digest = SHA256.hash(data: Data("parity-grid:\(row):\(index)".utf8))
+            let words = digest.prefix(12).map { workloadWords[Int($0) % workloadWords.count] }
+            let joined = words.joined(separator: " ")
+            let sentence = joined.prefix(1).uppercased() + String(joined.dropFirst()) + ". "
+            body += sentence
+            size += sentence.utf8.count
+            index += 1
+        }
+        // ASCII only: characters and UTF-8 bytes count alike, as Python's len.
+        return header + String(body.prefix(bodyCount)) + workloadInstruction
     }
 }
