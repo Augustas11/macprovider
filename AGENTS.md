@@ -145,6 +145,18 @@ while sessions regenerated evidence instead of deploying. Each is binding.
     - Why: GLM and others needed separate catch-up campaigns after their
       ports (#2451, #2474), and Inkling 2 Mini reached exact parity at
       17 tok/s against mlx-vlm's 29 (#2467).
+16. **A green campaign PR is frozen.** Once the lab e2e named in its body
+    passes and CI is green, the PR takes only fixes to its own diff (audit
+    findings, CI failures, rebase conflicts) and what rule 15 requires.
+    - New behaviour found at that point gets its own issue and its own PR
+      after this one merges. Rule 4 does not pull it in: it is a new issue,
+      not more of this one.
+    - Merge and deploy the frozen PR the same day (rule 1), then start the
+      follow-up from the merged main.
+    - Why: PR 2486 was green, then took on reasoning restore; that added
+      two HIGH billing findings, three audit rounds, two digest
+      regenerations and four CI runs, and delayed Inkling's merge by about
+      2.6 hours (2026-11-24).
 
 ## Project Overview
 
