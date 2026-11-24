@@ -32,15 +32,24 @@ The 24 GB tier is not staged. 16.87 GB of weights is above 70% of 24 GB
 - `mlx-community/Inkling-2-Mini-oQ4e-mtp`: Apache-2.0, "following the source model" (README; no LICENSE file).
 - `OpenUncensored/Inkling-2-Mini-Uncensored` @ `4e5f06d7`: Apache-2.0 (README front matter and disclosure section; no LICENSE file). Its base licence is the one above, so the base model's acceptable use policy applies to it.
 
-**Flag, uncensored row held.** The policy prohibits attempts to circumvent,
-disable or remove measures implemented in the Model Materials. A
-refusal-removed derivative runs straight into that clause. The row is not
-listed until the operator clears it. `staged-rows.json` keeps its source
-identity under `held`: source snapshot manifest `050f1cec…69e2`
-(`openuncensored-source-050f1cec.manifest`), 20,191,617,908 bytes. The served
-artifact will be our own quant of that source, which does not exist yet.
-The source ships `edit.pt`, a PyTorch pickle. The quant build reads only the
-safetensors, config and tokenizer files and must never unpickle it.
+**Uncensored row: operator decision 2026-11-24 to list.** The policy
+prohibits attempts to circumvent, disable or remove measures implemented in
+the Model Materials, and a refusal-removed derivative runs straight into that
+clause; the operator decided to list the row anyway. Its notes carry the
+Apache-2.0 licence, the policy link and that decision.
+
+`staged-rows.json` stages `openuncensored/inkling-2-mini-uncensored` beside the
+base row: the same tier, RAM, rate class and price, under its own labelled
+rate row, as the abliterated rows carry their bases' prices. The served
+artifact `aug11/Inkling-2-Mini-oQ4e-mtp-uncensored` is the oQ4e base with
+the source's changed attention output projections re-quantized in the
+base's own format. `scripts/lab/2467/job-inkling2-uncensored.sh` builds and
+checks it in a Studio window and publishes it only with `PUBLISH=1`. Until
+then the row's revision, manifest hash and size are the placeholders its
+`placeholders` block names. Source identity: snapshot manifest
+`050f1cec…69e2` (`openuncensored-source-050f1cec.manifest`), 20,191,617,908
+bytes. The source ships `edit.pt`, a PyTorch pickle. The job never downloads
+or unpickles it and reads tensors only through safetensors.
 
 ## Measured so far (not reproduced here)
 

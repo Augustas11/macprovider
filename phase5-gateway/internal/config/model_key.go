@@ -48,6 +48,8 @@ var exactModelKeyAliases = map[string]string{
 	"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
 	"inkling-2-mini-oq4e-mtp":                               "thinkingmachines/inkling-2-mini",
 	"inkling-2-mini":                                        "thinkingmachines/inkling-2-mini",
+	"aug11/inkling-2-mini-oq4e-mtp-uncensored":              "openuncensored/inkling-2-mini-uncensored",
+	"inkling-2-mini-uncensored":                             "openuncensored/inkling-2-mini-uncensored",
 }
 
 func normalizeServedModelAlias(namespace, key string) string {

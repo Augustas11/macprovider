@@ -1916,14 +1916,17 @@ func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 	}
 }
 
-// #2467: the stored allowlist matches the router's for Inkling-2-Mini.
+// #2467: the stored allowlist matches the router's for Inkling-2-Mini and its
+// uncensored build.
 func TestValidDemandModelIDKnowsInkling2MiniIdentitiesExactly(t *testing.T) {
-	for _, model := range []string{"thinkingmachines/inkling-2-mini", "mlx-community/Inkling-2-Mini-oQ4e-mtp"} {
+	for _, model := range []string{"thinkingmachines/inkling-2-mini", "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+		"openuncensored/inkling-2-mini-uncensored", "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored"} {
 		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
 			t.Errorf("%q must be a known demand model id", model)
 		}
 	}
-	for _, model := range []string{"thinkingmachines/inkling-2-minix", "inkling-2-mini", "mlx-community/inkling-2-mini-oq4e-mtp", "ThinkingMachines/Inkling-2-Mini", "openuncensored/inkling-2-mini-uncensored"} {
+	for _, model := range []string{"thinkingmachines/inkling-2-minix", "inkling-2-mini", "mlx-community/inkling-2-mini-oq4e-mtp", "ThinkingMachines/Inkling-2-Mini",
+		"OpenUncensored/Inkling-2-Mini-Uncensored", "inkling-2-mini-uncensored", "aug11/inkling-2-mini-oq4e-mtp-uncensored", "openuncensored/inkling-2-mini-uncensoredx"} {
 		if validDemandModelID(model) {
 			t.Errorf("%q must not be a known demand model id", model)
 		}
