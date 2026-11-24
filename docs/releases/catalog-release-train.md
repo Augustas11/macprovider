@@ -13,12 +13,17 @@ Update this file when a catalog-content or rows-only pricing PR merges, when a
 signed content release goes live, or when a rollout is deliberately held behind
 another gate.
 
-## Current state — 2026-11-21
+## Current state — 2026-11-25
 
-Read from `scripts/ops/catalog-activate.sh status` on 2026-11-14; the Live
-entry is updated for the 2026-11-15 MiniMax activation.
-
-- **Live (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
+- **Live (2026-11-25):** `published-2026-11-24-daisyrose-27b-listed-v296` (Inkling 2 Mini rows from
+  [PR 2486](https://github.com/Augustas11/macprovider/pull/2486), DaisyRose-27B row from
+  [PR 2477](https://github.com/Augustas11/macprovider/pull/2477); Related: #2467, #2465), activated
+  through `scripts/ops/catalog-activate.sh` on Pearl runtime v1.8.298 with the acknowledged price
+  table `534036ef…5168` (only the two new models move off `default`: DaisyRose at the Qwen3.8-27B
+  rates, Inkling 2 Mini at 0.06/0.24/0.015 per M). The gateway proof passed. Both rows are
+  `listed`; serving them needs provider CLI 1.8.299 (staging PR 2491). Still owed from earlier
+  releases: buyer-UX conformance records for DeepSeek V4-Flash abliterated and MiniMax M3.1 Flash.
+- **Previous (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
   (catalog release B of [PR 2456](https://github.com/Augustas11/macprovider/pull/2456), merged as
   `8e0814aed`; Related: #2452), activated through `scripts/ops/catalog-activate.sh` on top of
   `published-2026-11-20-qwen38-27b-mtp-cap-32k-v289`. Release A (`3fa5689f2`, the listed row) was
