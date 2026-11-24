@@ -4203,6 +4203,7 @@ func validDemandModelID(model string) bool {
 		"Qwen3.5-9B-4bit",
 		"mlx-community/GLM-4.5-Air-4bit",
 		"Jundot/GLM-5.3-Flash-oQ4e-mtp",
+		"aug11/GLM-5.3-Flash-oQ4e-mtp",
 		"grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
 		"Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
 		"frogggias/Ripple-65B-Preview-MLX-4bit",

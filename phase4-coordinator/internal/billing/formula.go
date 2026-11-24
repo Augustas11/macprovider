@@ -87,11 +87,14 @@ func NormalizeModelKey(model string) string {
 // key, never a prefix or family: GLM-5.3-Flash's catalog key is
 // zai-org/glm-5.3-flash, while its OpenRouter slug (and the bare name the
 // z-ai/glm- rule rewrites) is z-ai/glm-5.3-flash and its served artifact is
-// Jundot/GLM-5.3-Flash-oQ4e-mtp (epic #2029). DeepSeek-V4-Flash's catalog key
+// Jundot/GLM-5.3-Flash-oQ4e-mtp (epic #2029), re-hosted byte-identical as
+// aug11/GLM-5.3-Flash-oQ4e-mtp after the upstream revision was deleted
+// (#2480). DeepSeek-V4-Flash's catalog key
 // is deepseek/deepseek-v4-flash.
 var exactModelKeyAliases = map[string]string{
 	"z-ai/glm-5.3-flash":            "zai-org/glm-5.3-flash",
 	"jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+	"aug11/glm-5.3-flash-oq4e-mtp":  "zai-org/glm-5.3-flash",
 	// The abliterated GLM-5.3-Flash build is its own labelled catalog key
 	// (#2189): its OpenRouter-style slug and its served artifact (the
 	// "-4bit" suffix is already stripped) bill as that key, never as

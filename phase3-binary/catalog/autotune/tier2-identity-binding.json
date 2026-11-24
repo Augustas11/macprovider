@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "704a461ee78daba6d5025efb6c7f89e18f5b6d1d161f63ff4e240ed2c8dfb26a",
-  "generated_at": "2026-11-24T17:15:00Z",
+  "autotune_candidates_sha256": "70412b8328ce682c658e543f222dd80d857089489a5ce36af2f6d8d33b9be55f",
+  "generated_at": "2026-11-24T19:07:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -8,6 +8,13 @@
       "model_id": "aug11/DeepSeek-V4-Flash-0731-MXFP4-MLX-abliterated",
       "model_revision": "93580c7832b77d6ed29dece0dfb026ea91ecd3a4",
       "sha256": "c4373972754de5f271744dfcb0a98cd156a4200802a87b8e23344f8be78a6478"
+    },
+    {
+      "catalog_key": "zai-org/glm-5.3-flash",
+      "min_ram_gb": 234,
+      "model_id": "aug11/GLM-5.3-Flash-oQ4e-mtp",
+      "model_revision": "2b2bdf90dd3db97a65736aea1cf8e08147c0252f",
+      "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"
     },
     {
       "catalog_key": "minimaxai/minimax-m3.1-flash-abliterated",
@@ -22,13 +29,6 @@
       "model_id": "frogggias/Ripple-65B-Preview-MLX-4bit",
       "model_revision": "4a33b33f043f41a51ae7236edd440d64cfa7cc94",
       "sha256": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6"
-    },
-    {
-      "catalog_key": "zai-org/glm-5.3-flash",
-      "min_ram_gb": 234,
-      "model_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
-      "model_revision": "36defc5042d92a992a7948e83d6f110b8df69329",
-      "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"
     },
     {
       "catalog_key": "liquidai/lfm3-1.7b",
@@ -221,6 +221,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-24-inkling-2-mini-recommendable-v296",
+  "release_id": "published-2026-11-25-glm53-flash-mirror-v296",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

@@ -66,6 +66,8 @@
     {"input": "Z-AI/GLM-5.3-Flash", "expected": "zai-org/glm-5.3-flash"},
     {"input": "glm-5.3-flash", "expected": "zai-org/glm-5.3-flash"},
     {"input": "Jundot/GLM-5.3-Flash-oQ4e-mtp", "expected": "zai-org/glm-5.3-flash"},
+    {"input": "aug11/GLM-5.3-Flash-oQ4e-mtp", "expected": "zai-org/glm-5.3-flash"},
+    {"input": "aug11/glm-5.3-flash", "expected": "aug11/glm-5.3-flash"},
     {"input": "z-ai/glm-5.3-flash-free", "expected": "zai-org/glm-5.3-flash"},
     {"input": "z-ai/glm-5.3-flashx", "expected": "z-ai/glm-5.3-flashx"},
     {"input": "z-ai/glm-5.3", "expected": "z-ai/glm-5.3"},

@@ -341,7 +341,7 @@
       "canonical_model_id": "zai-org/glm-5.3-flash",
       "serving_path": {
         "verification_status": "verified",
-        "reference": "https://huggingface.co/Jundot/GLM-5.3-Flash-oQ4e-mtp"
+        "reference": "https://huggingface.co/aug11/GLM-5.3-Flash-oQ4e-mtp"
       },
       "license": {
         "commercial_permitted": true,

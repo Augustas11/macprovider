@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,7 +30,9 @@ func TestModelsAdvertisesExistingRoutingAliases(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Data) != 1 || len(body.Data[0].Aliases) != 3 || body.Data[0].Aliases[0] != "glm-5.3-flash" {
+	// #2480: the deleted upstream repo also advertises its byte-identical aug11 mirror.
+	want := []string{"aug11/glm-5.3-flash-oq4e-mtp", "glm-5.3-flash", "z-ai/glm-5.3-flash", "zai-org/glm-5.3-flash"}
+	if len(body.Data) != 1 || strings.Join(body.Data[0].Aliases, ",") != strings.Join(want, ",") {
 		t.Fatalf("aliases missing: %s", rr.Body.String())
 	}
 }

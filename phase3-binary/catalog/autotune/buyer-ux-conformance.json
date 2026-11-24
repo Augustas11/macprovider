@@ -285,7 +285,7 @@
         }
       },
       "gateway": "https://api.malibu.tech/v1",
-      "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp"
+      "model": "aug11/GLM-5.3-Flash-oQ4e-mtp"
     },
     "zai-org/glm-5.3-flash-uncensored": {
       "capabilities": {

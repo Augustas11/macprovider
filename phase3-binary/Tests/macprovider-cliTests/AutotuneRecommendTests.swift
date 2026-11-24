@@ -6701,8 +6701,9 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "60837794f3caafc4682dd1a9188a82c55a9100ef",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":46,"hidden_size":4096,"num_attention_heads":96,"num_key_value_heads":8,"head_dim":128}"#
         ),
+        // Byte-identical aug11 mirror of the deleted Jundot revision 36defc50 (#2480).
         "zai-org/glm-5.3-flash": (
-            revision: "36defc5042d92a992a7948e83d6f110b8df69329",
+            revision: "2b2bdf90dd3db97a65736aea1cf8e08147c0252f",
             json: #"{"text_config":{"max_position_embeddings":1048576,"num_hidden_layers":45,"hidden_size":4096,"num_attention_heads":64,"num_key_value_heads":64,"head_dim":0,"kv_lora_rank":512,"qk_rope_head_dim":0,"index_head_dim":128,"index_kpool":4,"index_kpool_compress":true,"num_nextn_predict_layers":1,"layer_types":["linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention"],"linear_attn_config":{"num_heads":64,"head_dim":128,"short_conv_kernel_size":4}}}"#
         ),
         // Same KV geometry as the base GLM-5.3-Flash row.

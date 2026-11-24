@@ -1,50 +1,50 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 31087,
-      "sha256": "a72231b42cf0991fd3f09fe973bcfea54e1a9a929bf2f1ff42e64b37cc3dec66",
+      "bytes": 31320,
+      "sha256": "97a2d31fb3e94d19affc74374a3099a2bd75473a1dd8a4acc053d823309a4a44",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+      "version": "published-2026-11-25-glm53-flash-mirror-v296"
     },
     "autotune-candidates.json": {
-      "bytes": 37403,
-      "sha256": "704a461ee78daba6d5025efb6c7f89e18f5b6d1d161f63ff4e240ed2c8dfb26a",
+      "bytes": 37646,
+      "sha256": "70412b8328ce682c658e543f222dd80d857089489a5ce36af2f6d8d33b9be55f",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+      "version": "published-2026-11-25-glm53-flash-mirror-v296"
     },
     "continuous-batching-policy.json": {
-      "bytes": 7303,
-      "sha256": "334f78afe63e098ea18e6ac8904ec6da8c11fabe109589986c1fc801f6201f3d",
+      "bytes": 7293,
+      "sha256": "974d94e6f39660fa7c9f3411a7920ba02f60cfb7e070db0cf389c839e232a26e",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+      "version": "published-2026-11-25-glm53-flash-mirror-v296"
     },
     "demand-rank.json": {
-      "bytes": 3597,
-      "sha256": "8f027545f1e6aea5c36d3af24c84b03625d77fc6b944242467b3950f89b79221",
+      "bytes": 3587,
+      "sha256": "67222364a1072cd0792a1f800dd1b65d243c4e9cb8e85cc2a67065c44e39fd56",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+      "version": "published-2026-11-25-glm53-flash-mirror-v296"
     },
     "native-mtp-admission.json": {
-      "bytes": 91519,
-      "sha256": "153d87fc0944314979000e451000404da74100e63cafcd58b3d7651830682689",
+      "bytes": 91509,
+      "sha256": "56caabf0511f9072323ce5ea4c8882bb5ce1bc07c4148cea1e12ffc2fa766d3f",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-24-inkling-2-mini-recommendable-v296"
+      "version": "published-2026-11-25-glm53-flash-mirror-v296"
     },
     "rate-card.json": {
       "bytes": 6386,
-      "sha256": "d87300e4f1dc2f4af0a031652c8acefd63234a513333b9ce815528a6ca394472",
+      "sha256": "bb91ce6e7a67dac62a52f97452a90251d896a89961422794785bad83110e8f29",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "6ad728e277ba257dc313fea87451e32f0dd281901f721884d9e418cad8045ad7"
     },
     "tier2-catalog.json": {
-      "bytes": 13534,
-      "sha256": "da5f2b5c951d9e78ba37bb9eac7aefc9dbb4979871a1a18487544b33a35e851a",
+      "bytes": 14095,
+      "sha256": "e38accb7f2f90d363359e52de1a729074b7ba6d00844b6591714e38c374ca689",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-11-24-daisyrose-27b-v1"
+      "version": "macprovider-tier2-model-catalog-2026-11-25-glm53-flash-mirror-v1"
     }
   },
-  "generated_at": "2026-11-24T17:15:00Z",
+  "generated_at": "2026-11-24T19:07:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-24-inkling-2-mini-recommendable-v296",
+  "release_id": "published-2026-11-25-glm53-flash-mirror-v296",
   "schema_version": "macprovider.autotune-release.v1"
 }

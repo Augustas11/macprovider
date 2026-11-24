@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-24-daisyrose-27b-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-25-glm53-flash-mirror-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-24T10:50:00Z",
+  "issued_at": "2026-11-24T19:20:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -27,6 +27,15 @@
       "model_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
       "min_ram_gb": 234,
       "notes": "Buyer-serving candidate zai-org/glm-5.3-flash (epic #2029 native glm5_next engine); identity from signed SPEC-023 row.",
+      "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "aug11/GLM-5.3-Flash-oQ4e-mtp",
+      "min_ram_gb": 234,
+      "notes": "Buyer-serving candidate zai-org/glm-5.3-flash (epic #2029 native glm5_next engine), byte-identical re-host of Jundot/GLM-5.3-Flash-oQ4e-mtp@36defc50 after the upstream revision was deleted (#2480); identity from signed SPEC-023 row.",
       "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
       "source": "operator-curated"
     },
@@ -286,7 +295,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "-O6vrtc89NwRao3_RC8pWhWX-nxxkTqj7QxRMIUrrstC28gMJHQRbOkaf8PIqEKvfbCGq3MX0Xtc0v8DYCfuAA"
+    "sig": "tlPZjTJaWSbE0qbPyUYswC04vtWaYhxEGiz6twALYDX6EU69JfQqfQnvgywARs0TNM_xjXpOq7NSTph-a5GZAQ"
   },
   "version": 1
 }

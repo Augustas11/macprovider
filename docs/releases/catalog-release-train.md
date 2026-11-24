@@ -31,6 +31,19 @@ another gate.
   activates). Owed after activation, once a provider on CLI 1.8.299 serves
   `mlx-community/Inkling-2-Mini-oQ4e-mtp`: evidence (e) (`buyer_serving_e2e`) and the buyer-UX
   conformance run (`buyer_ux_conformance_owed`).
+- **Signed, in review:** `published-2026-11-25-glm53-flash-mirror-v296` (Related: #2480) rebinds
+  `zai-org/glm-5.3-flash` from the deleted `Jundot/GLM-5.3-Flash-oQ4e-mtp@36defc50` to the
+  byte-identical mirror `aug11/GLM-5.3-Flash-oQ4e-mtp@2b2bdf90`. The snapshot-manifest hash
+  `7299b6a7…48f9`, size, artifact id, prices, CB entries and native-MTP tuples are unchanged; the
+  native-MTP projection paths, the served model id and a new Tier-2 pin (Jundot pin kept) move to
+  the mirror. Content-gate lane `catalog-content` against the live v296 release. The billing and
+  gateway alias `aug11/glm-5.3-flash-oq4e-mtp` -> `zai-org/glm-5.3-flash` ships in the same PR and
+  must be live on Pearl (next runtime train) before activation. Before activation, give each
+  provider that already holds GLM-5.3-Flash an APFS clone of its durable copy at the new store
+  path (`cp -c -R <models>/Jundot--GLM-5.3-Flash-oQ4e-mtp/36defc50…/7299b6a7…
+  <models>/aug11--GLM-5.3-Flash-oQ4e-mtp/2b2bdf90…/7299b6a7…`), or it re-downloads 186 GB. Live steps
+  after merge: `scripts/ops/pearl-runtime.sh status`/`next --run` for the alias, then
+  `scripts/ops/catalog-activate.sh status`, then `next --run`.
 - **Previous (2026-11-21):** `published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289`
   (catalog release B of [PR 2456](https://github.com/Augustas11/macprovider/pull/2456), merged as
   `8e0814aed`; Related: #2452), activated through `scripts/ops/catalog-activate.sh` on top of
