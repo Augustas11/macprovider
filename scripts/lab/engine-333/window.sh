@@ -29,12 +29,13 @@
 #    run to run: window 2 measured base-vs-base 4-row differences on qwen3.5-27b);
 #  - no cell of new is slower than base1 beyond the cell's noise band;
 #  - cb pass of a key with a signed CB entry: new's ROUTE is batched (run-grid --expect-route);
-#  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on) and new's own native-MTP
-#    self-check passed (SPEC-048 R015: native MTP equals ordinary decode token for token on the
-#    same serve). new's text is also compared with the cb pass's ordinary decode; where the two
-#    serves run different small-M routes (row_invariant/mixed vs stock_order) the numerics
-#    differ, so those differences are reported, not gated. Base runs that propose no native-MTP
-#    token are reported, not gated, and the pass's new-vs-base1 speed is not compared.
+#  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on), every native-MTP self-check
+#    line of new's serve says passed, and new's text equals ref's (SPEC-048 R015: native MTP is
+#    lossless): ref is the new binary with native MTP off and small_m_route row_invariant, the
+#    route native-MTP rows run in. The cb pass's serve runs stock_order, so new's text against it
+#    is reported, not gated. When base1 proposed no native-MTP token its cells are ordinary
+#    decode: new-vs-base1 speed is not gated, and new native MTP slower than new ordinary decode
+#    is reported as GATE_WARN (a native-MTP admission finding, not an engine regression).
 # TEXT_CHANGE_KEYS="key=reason ...": catalog keys whose numerics the engine changes on purpose;
 # their text differences from base1 are reported, not gated (gate.py --text-change-expected).
 # Exit 0 = every new grid ran and every gate passed.
@@ -123,25 +124,31 @@ for spec in "${MODELS[@]}"; do
   passes="cb"; [ "$mtp" = mtp ] && passes="cb mtp"
   for pass in $passes; do
     M="$OUT/$name/$pass"; mkdir -p "$M"
-    for run in base1:"$BASE" new:"$NEW" base2:"$BASE"; do
+    runs=(base1:"$BASE" new:"$NEW" base2:"$BASE")
+    # mtp pass: ref = new binary, native MTP off, small_m_route row_invariant (the route native-MTP
+    # rows run in): the same-route ordinary reference new's native-MTP text must equal.
+    [ "$pass" = mtp ] && runs+=(ref:"$NEW")
+    for run in "${runs[@]}"; do
       tag="${run%%:*}"; bin="${run#*:}"; R="$M/$tag"; rm -rf "$R"; mkdir -p "$R"
       msha=$(shasum -a 256 "$bin/mlx.metallib" | cut -d' ' -f1)
       extra="$R/serve-extra.yaml"; : > "$extra"; route=any
       cb_extra "$key" "$msha" "$extra"; crc=$?
       if [ $crc -eq 0 ]; then route=batched; elif [ $crc -ne 3 ]; then echo "cb tuple failed for $key"; failed=1; continue; fi
       rows=1,4
-      if [ "$pass" = mtp ]; then
+      if [ "$pass" = mtp ] && [ "$tag" = ref ]; then
+        echo "small_m_route: row_invariant" >> "$extra"; rows=1; route=any
+      elif [ "$pass" = mtp ]; then
         mtp_extra "$key" "$sha" "$extra" || { echo "mtp provenance failed for $key"; failed=1; continue; }
         rows=1; route=any
       fi
       args=(--model-path "$path" --model-id "$key" --model-sha256 "$sha" --model-name "$name" --bin-dir "$bin"
             --out-dir "$R" --trials "$TRIALS" --skip-reference --skip-compare --cb auto --no-autotune-candidate
             --rows "$rows" --outputs 128,512 --contexts short,4k --expect-route "$route" --config-extra "$extra")
-      [ "$pass" = mtp ] && args+=(--expect-native-mtp on)
+      [ "$pass" = mtp ] && [ "$tag" != ref ] && args+=(--expect-native-mtp on)
       echo "#### $name $pass $tag $(date +%T)"
       bash "$PG/run-grid.sh" "${args[@]}" > "$R/run.log" 2>&1
       rc=$?; echo "grid rc=$rc $name $pass $tag"
-      if [ $rc -ne 0 ]; then tail -8 "$R/run.log"; [ "$tag" = new ] && failed=1; fi
+      if [ $rc -ne 0 ]; then tail -8 "$R/run.log"; { [ "$tag" = new ] || [ "$tag" = ref ]; } && failed=1; fi
       grep -h "^ROUTE\|NATIVE_MTP\|CB_WARMUP_DONE" "$R/run.log" | tail -4
     done
     for cand in new base2; do
@@ -155,6 +162,11 @@ for spec in "${MODELS[@]}"; do
         /usr/bin/python3 -I "$PG/compare.py" --subset --baseline "$OUT/$name/cb/new/provider.jsonl" \
           --ours "$M/new/provider.jsonl" --json "$M/compare-new-mtp-vs-new-ordinary.json" > "$M/compare-new-mtp-vs-new-ordinary.md" 2>&1
         echo "compare $name new native MTP vs new ordinary rc=$?"; cat "$M/compare-new-mtp-vs-new-ordinary.md"
+      fi
+      if [ -f "$M/ref/provider.jsonl" ] && [ -f "$M/new/provider.jsonl" ]; then
+        /usr/bin/python3 -I "$PG/compare.py" --subset --baseline "$M/ref/provider.jsonl" \
+          --ours "$M/new/provider.jsonl" --json "$M/compare-new-mtp-vs-ref.json" > "$M/compare-new-mtp-vs-ref.md" 2>&1
+        echo "compare $name new native MTP vs same-route ordinary rc=$?"; cat "$M/compare-new-mtp-vs-ref.md"
       fi
     fi
     tce=""; for kv in ${TEXT_CHANGE_KEYS:-}; do [ "${kv%%=*}" = "$key" ] && tce="${kv#*=}"; done

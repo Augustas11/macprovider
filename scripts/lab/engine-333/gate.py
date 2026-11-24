@@ -5,10 +5,11 @@ usage: gate.py --pass cb|mtp [--text-change-expected REASON] PASS_DIR
 --text-change-expected: the engine changes this model's numerics on purpose (REASON names the
 upstream change), so a text difference from base1 is reported as INFO, not a failure.
 Reads PASS_DIR/compare-new.json and compare-base2.json (compare.py --baseline base1) and, for
-the mtp pass, compare-new-mtp-vs-new-ordinary.json, base1/provider.jsonl
+the mtp pass, compare-new-mtp-vs-new-ordinary.json, compare-new-mtp-vs-ref.json, base1/provider.jsonl
 (native_mtp.proposed_tokens) and the native-MTP self-check and small-M route lines of
 new/serve/serve.err and ../cb/new/serve/serve.err. Prints one line per failed check and a
-GATE line; exits 0 when every check passes, 1 otherwise.
+GATE line; GATE_WARN lines report findings that do not fail the gate; exits 0 when every check
+passes, 1 otherwise.
 """
 import argparse, json, os, re, sys
 
@@ -22,17 +23,21 @@ def load(path):
 def cells(doc):
     return {(c["ctx"], c["out"], c["rows"]): c for c in (doc or {}).get("cells", [])}
 
-def serve_event(run_dir, pattern):
-    """First capture of pattern in run_dir/serve/serve.err, or None."""
+def serve_events(run_dir, pattern):
+    """Every capture of pattern in run_dir/serve/serve.err, in order."""
+    out = []
     try:
         with open(os.path.join(run_dir, "serve", "serve.err"), errors="replace") as f:
             for line in f:
-                mm = re.search(pattern, line)
-                if mm:
-                    return mm.group(1)
+                out += [mm.group(1) for mm in re.finditer(pattern, line)]
     except OSError:
         pass
-    return None
+    return out
+
+def serve_event(run_dir, pattern):
+    """First capture of pattern in run_dir/serve/serve.err, or None."""
+    ev = serve_events(run_dir, pattern)
+    return ev[0] if ev else None
 
 def proposed(jsonl):
     n = 0
@@ -53,7 +58,7 @@ def main():
     ap.add_argument("--text-change-expected", default="")
     ap.add_argument("dir")
     a = ap.parse_args()
-    problems, info = [], []
+    problems, info, warn = [], [], []
     new = load(os.path.join(a.dir, "compare-new.json"))
     # mtp pass: did base1 actually run native MTP? If it proposed no token, its cells are ordinary
     # decode and a new-vs-base1 speed delta compares native MTP against ordinary decode.
@@ -64,7 +69,7 @@ def main():
             info.append("base1 proposed no native-MTP token: new-vs-base1 speed not compared"
                         " (base1 cells are ordinary decode; the cb pass gates that speed)")
     base2 = cells(load(os.path.join(a.dir, "compare-base2.json")))
-    if a.pass_ == "cb" and new is None:
+    if new is None:
         problems.append("no compare-new.json (new grid did not run)")
     for key, c in sorted(cells(new).items()):
         ctx, out, rows = key
@@ -88,9 +93,21 @@ def main():
         # sets this mtp serve against the cb pass's serve; when their small-M routes differ
         # (row_invariant/mixed vs stock_order) the matmul numerics differ, so its text
         # differences are reported, not gated.
-        sc = serve_event(os.path.join(a.dir, "new"), r"event=native_mtp_self_check result=(\S+)")
+        scs = serve_events(os.path.join(a.dir, "new"), r"event=native_mtp_self_check result=(\S+)")
+        sc = "passed" if scs and all(x == "passed" for x in scs) else ",".join(scs) or "absent"
         if sc != "passed":
-            problems.append(f"new native-MTP self-check result={sc or 'absent'} (R015 needs passed)")
+            problems.append(f"new native-MTP self-check result={sc} (R015 needs every line passed)")
+        ref = load(os.path.join(a.dir, "compare-new-mtp-vs-ref.json"))
+        if ref is None:
+            info.append("no same-route ordinary reference (ref run absent): R015 rests on the self-check")
+        for key, c in sorted(cells(ref).items()):
+            if not c.get("identical"):
+                problems.append(f"ctx{key[0]}|out{key[1]}|rows{key[2]}: native MTP text differs from same-route (row_invariant) ordinary decode")
+        if not base_mtp_ran:
+            for key, c in sorted(cells(m).items()):
+                d = c.get("request_delta")
+                if d is not None and d < -c.get("band", 0.03):
+                    warn.append(f"ctx{key[0]}|out{key[1]}|rows{key[2]}: new native MTP {d:+.3f} request tok/s vs new ordinary decode")
         r_mtp = serve_event(os.path.join(a.dir, "new"), r"event=small_m_route mode=(\S+)")
         r_cb = serve_event(os.path.join(os.path.dirname(os.path.abspath(a.dir)), "cb", "new"),
                            r"event=small_m_route mode=(\S+)")
@@ -104,6 +121,8 @@ def main():
                 problems.append(f"{tag} (same small-M route {r_mtp or '?'})")
     for i in info:
         print("GATE_INFO", i)
+    for w in warn:
+        print("GATE_WARN", w)
     for p in problems:
         print("GATE_FAIL", p)
     print(f"GATE {'PASS' if not problems else 'FAIL'} {a.dir} problems={len(problems)}")
