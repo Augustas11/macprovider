@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.20 (2026-11-24, Inkling 2 frame grammar and reasoning split; Related: #2467)
+**Version:** 0.3.21 (2026-11-24, history reasoning restore; Related: #2467)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,19 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.21 (2026-11-24, Related: #2467):** §3.12 history reasoning
+  restore. Inkling 2's template replays every earlier assistant turn's
+  reasoning, as GLM-5.3 (`clear_thinking` false) and Qwen3.8 do; a client
+  that drops reasoning showed the model a history it never wrote and broke
+  the conversation-cache prefix at the first assistant turn. The provider
+  now keeps, in process memory only, the reasoning of each turn it
+  generated for a request with a conversation key, and puts it back on the
+  identical assistant turn of a later request that arrives without any,
+  for the families whose renderer reads history reasoning (SPEC-018-R008).
+  Assistant history also accepts the `reasoning` alias. Registers
+  `SPEC-018-R011`. A request whose client sends reasoning, a request
+  without a conversation key, a privacy-class request and every other
+  family render exactly as before.
 - **v0.3.20 (2026-11-24, Related: #2467):** §3.1 adds the `inkling2`
   grammar (Inkling 2, `thinkingmachines/Inkling-2-Mini`
   `chat_template.jinja`, model type `inkling2_loop`): every message is a
@@ -1263,7 +1276,42 @@ reasoning in the raw message path when using the Qwen grammar. The official
 pinned template consumes `reasoning_content` and applies `preserve_thinking`;
 requests without assistant reasoning retain their existing structured input.
 Other Qwen models and other families retain their existing behavior. It is prompt text, billed in `prompt_tokens` like any other.
-Registers `SPEC-018-R008`.
+Registers `SPEC-018-R008`. **v0.3.21:** the LFM2.5 template and the Inkling 2
+encoder also receive it (Inkling 2 renders it as a `<|content_thinking|>`
+frame before the turn's content, for every assistant turn). An assistant
+message's string `reasoning` is read as `reasoning_content` when the message
+has no string `reasoning_content`.
+
+**History reasoning restore (v0.3.21).** For the families above, the
+provider MUST keep the reasoning of each assistant turn it generates for a
+request that carries a conversation key, and MUST put it back on an
+assistant history message of a later request that has no (or empty)
+reasoning, when all of these match the generated turn: the request model,
+the conversation key, every message before that turn (role, content, tool
+calls and tool results; reasoning and tool-call IDs ignored), the turn's
+content (trimmed; null equals empty) and its tool calls (names, and
+arguments compared as canonical JSON with sorted keys). Reasoning a client
+sends is rendered as sent. The prompt then equals the one the client would
+have produced by sending the reasoning back, which is also the token
+sequence the model generated, so the conversation cache prefix extends
+through the restored turn. The store:
+
+- is in the serving process's memory only: never persisted, logged,
+  sent to the coordinator or reused across conversation keys (which are
+  account-scoped), so one buyer's reasoning never reaches another buyer's
+  prompt;
+- is bounded (default 4096 turns, 32 MiB, 1 MiB per turn, 72 h idle) with
+  least-recently-used eviction;
+- is purged with the conversation cache: a per-key purge drops that key's
+  turns, a purge of every hot entry (model unload, swap) drops them all;
+- is never consulted or written for a request without a conversation key or
+  one that may not use reusable caches (a SPEC-049 privacy-class request,
+  SPEC-049-R010).
+
+A restore logs one line per request, `event=reasoning_history
+action=restored turns=N bytes=B`, with counts only. Restored reasoning is
+prompt text billed in `prompt_tokens`, and receipts still bind the
+buyer-authored messages. Registers `SPEC-018-R011`.
 
 **DeepSeek-V4 (v0.3.4).** The family ships no Jinja template; the provider
 renders prompts with `DeepseekV4Encoding`, a port of the model's

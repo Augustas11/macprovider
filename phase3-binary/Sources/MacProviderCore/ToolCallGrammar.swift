@@ -153,4 +153,17 @@ public final class RequestOutputState: @unchecked Sendable {
         value = traits
         lock.unlock()
     }
+
+    private var reasoningRestoreReported = false
+
+    /// True once per request: a prompt renders more than once (preflight,
+    /// thinking probe, serving), but a history-reasoning restore
+    /// (SPEC-018-R011) is logged once.
+    public func claimReasoningRestoreReport() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if reasoningRestoreReported { return false }
+        reasoningRestoreReported = true
+        return true
+    }
 }

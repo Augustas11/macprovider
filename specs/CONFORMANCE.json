@@ -2554,6 +2554,32 @@
       }
     },
     {
+      "requirement_id": "SPEC-018-R011",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/AssistantReasoningHistory.swift:public final class AssistantReasoningHistory",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func restoringHistoryReasoning",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func recordHistoryReasoning",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func purgeHot"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/AssistantReasoningHistoryTests.swift:final class AssistantReasoningHistoryTests",
+        "phase3-binary/Tests/macprovider-cliTests/InklingReasoningRestoreTests.swift:final class InklingReasoningRestoreTests",
+        "phase4-coordinator/internal/buyer/reasoning_history_passthrough_test.go:func TestChatRequestKeepsAssistantReasoningThroughDispatch",
+        "phase5-gateway/internal/router/reasoning_history_passthrough_test.go:func TestChatCompletionsForwardsAssistantReasoningHistory",
+        "phase5-gateway/internal/router/reasoning_history_passthrough_test.go:func TestAnthropicMessagesForwardsThinkingBlocksAsReasoningContent"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2467",
+        "rationale": "Provider keeps generated assistant reasoning in process memory, scoped by model and conversation key, and restores it on identical history turns that arrive without it, for families whose renderer reads history reasoning. Unit coverage for the store bounds and the Inkling 2 rendered prefix; a live multi-turn prefix-cache hit and a signed CLI release remain pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-020-R001",
       "spec_id": "SPEC-020",
       "state": "pending",

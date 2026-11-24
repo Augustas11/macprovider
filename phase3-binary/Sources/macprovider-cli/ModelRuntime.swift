@@ -11216,6 +11216,7 @@ maxTokens: boundedMaxTokens,
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.nonStreamed)
         completion.servedPath = Self.servedPathOrSerial(completion)
+        Self.recordHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID(snapshot))
         return (completion, snapshot)
     }
 
@@ -12165,6 +12166,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.streamed)
         completion.servedPath = Self.servedPathOrSerial(completion)
+        Self.recordHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID(handle.snapshot))
         return completion
     }
 
@@ -17063,13 +17065,20 @@ maxTokens: maxTokens,
         nativeVisionProfile: NativeVisionProfile? = nil,
         toolSelectionModelID: String? = nil,
         supportsBonsaiThinking: Bool = false,
-        requestedThinking: Bool = false
+        requestedThinking: Bool = false,
+        reasoningHistory: AssistantReasoningHistory = .shared
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
         }
+        let grammar = renderGrammar(for: request, toolSelectionModelID: toolSelectionModelID)
+        let historyFamily = rendersHistoryReasoning(
+            grammar: grammar, modelID: toolSelectionModelID ?? request.model)
+        let requestMessages = historyFamily
+            ? restoringHistoryReasoning(request, from: reasoningHistory)
+            : request.messages
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
-            to: request.messages,
+            to: requestMessages,
             responseFormat: request.responseFormat,
             modelID: request.model
         )
@@ -17087,12 +17096,6 @@ maxTokens: maxTokens,
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
-        // Tool history goes through the loaded template (SPEC-018 §3.6). A
-        // profiled identity is the loaded model even under a local alias.
-        let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
-            ? toolSelectionModelID ?? request.model
-            : request.model
-        let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
         if grammar == .lfm2, selection != .none, Self.hasEnabledTools(request.promptSource.tools) {
             try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
         }
@@ -17130,9 +17133,7 @@ maxTokens: maxTokens,
         }
         // Each native template owns its reasoning-history scope. Preserve
         // assistant reasoning only for the exact families that render it.
-        let historyReasoning = (grammar == .glm || grammar == .lfm2 || grammar == .inkling2
-            || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
-                modelID: toolSelectionModelID ?? request.model))) && messages.contains {
+        let historyReasoning = historyFamily && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
         }
         if grammar == .dsml || historyReasoning {
@@ -17149,6 +17150,68 @@ maxTokens: maxTokens,
             chat: chat,
             tools: tools,
             additionalContext: additionalContext
+        )
+    }
+
+    /// The grammar `userInput(for:)` renders with. Tool history goes through
+    /// the loaded template (SPEC-018 §3.6); a profiled identity is the loaded
+    /// model even under a local alias.
+    static func renderGrammar(for request: ChatCompletionRequest, toolSelectionModelID: String?) -> ToolCallGrammar? {
+        let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
+            ? toolSelectionModelID ?? request.model
+            : request.model
+        return request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+    }
+
+    /// SPEC-018-R008: the families whose renderer receives assistant history
+    /// reasoning. Each template or encoder decides which turns keep it.
+    static func rendersHistoryReasoning(grammar: ToolCallGrammar?, modelID: String) -> Bool {
+        switch grammar {
+        case .dsml?, .glm?, .lfm2?, .inkling2?: return true
+        case .qwen?: return ChatCompletionRequest.usesQwen38Template(modelID: modelID)
+        default: return false
+        }
+    }
+
+    /// SPEC-018-R011: the request's messages with the reasoning this provider
+    /// generated put back on assistant turns that arrived without any. Only
+    /// a request with a conversation key that may use reusable caches is
+    /// restored; the log line carries counts only.
+    static func restoringHistoryReasoning(
+        _ request: ChatCompletionRequest, from history: AssistantReasoningHistory
+    ) -> [ChatMessage] {
+        guard request.ingestProvenance.mayUseReusableKVCache,
+              let restored = history.restoring(
+                request.messages, model: request.model, conversationKey: request.conversationKey)
+        else { return request.messages }
+        if request.outputState.claimReasoningRestoreReport() {
+            FileHandle.standardError.write(Data(
+                "event=reasoning_history action=restored turns=\(restored.turns) bytes=\(restored.bytes)\n".utf8))
+        }
+        return restored.messages
+    }
+
+    /// SPEC-018-R011: keeps the reasoning of a turn this runtime generated,
+    /// keyed by the request's messages and the turn as the buyer received it.
+    static func recordHistoryReasoning(
+        _ completion: CompletionResult,
+        for request: ChatCompletionRequest,
+        toolSelectionModelID: String?,
+        into history: AssistantReasoningHistory = .shared
+    ) {
+        guard request.ingestProvenance.mayUseReusableKVCache,
+              completion.reasoningContent?.isEmpty == false,
+              rendersHistoryReasoning(
+                grammar: renderGrammar(for: request, toolSelectionModelID: toolSelectionModelID),
+                modelID: toolSelectionModelID ?? request.model)
+        else { return }
+        history.record(
+            model: request.model,
+            conversationKey: request.conversationKey,
+            prefix: request.messages,
+            content: completion.content,
+            toolCalls: completion.toolCalls?.isEmpty == false ? completion.toolCalls : nil,
+            reasoning: completion.reasoningContent
         )
     }
 

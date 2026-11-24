@@ -1020,6 +1020,8 @@ actor ConversationCache {
         // Key on the trimmed form so a purge matches `begin()`'s entry keying.
         let key = conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return false }
+        // SPEC-018-R011: restored reasoning goes with the conversation.
+        AssistantReasoningHistory.shared.purge(conversationKey: key)
         localPurgeGen[key, default: 0] += 1
         let removed = entries.removeValue(forKey: key)
         if let removed { recordEviction(modelID: removed.modelID, reason: "purge") }
@@ -1034,6 +1036,7 @@ actor ConversationCache {
     /// persist work so no pre-rotation snapshot publishes into the new epoch
     /// (CRITICAL-2).
     func purgeAllHot() async {
+        AssistantReasoningHistory.shared.removeAll()
         globalPurgeGen += 1
         let removed = entries
         entries.removeAll()
