@@ -25,6 +25,15 @@ NEW="$L/macprovider/phase3-binary/.build/release"
 DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}" \
   bash macprovider/phase3-binary/scripts/build-mlx-metallib.sh "$NEW" > metallib.log 2>&1 \
   || { echo "METALLIB_FAILED"; tail -20 metallib.log; exit 2; }
+# The required-kernel manifest names the core and mlx-swift revisions it was derived from: re-derive
+# it from this build's mlx-swift checkout and check the built metallib carries every kernel.
+K="$L/window-${WINDOW:-4}"; mkdir -p "$K"
+( export DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}"
+  /usr/bin/python3 -I macprovider/scripts/mlx-metallib-kernels.py derive \
+    --mlx-swift-checkout macprovider/phase3-binary/.build/checkouts/mlx-swift --output "$K/mlx-metallib-required-kernels.json" \
+  && /usr/bin/python3 -I macprovider/scripts/mlx-metallib-kernels.py check --manifest "$K/mlx-metallib-required-kernels.json" "$NEW/mlx.metallib" ) \
+  > "$K/metallib-kernels.log" 2>&1
+echo "metallib kernels rc=$? (derived manifest: $K/mlx-metallib-required-kernels.json)"
 
 echo "== base copy of the live install $(date +%T)"
 rm -rf base && cp -R /Users/a1/macprovider base || exit 3
