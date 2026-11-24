@@ -1,32 +1,45 @@
 {
   "decisions": [
     {
-      "action": "promote_recommendable",
-      "admission_clause": null,
-      "as_of": "2026-11-20T09:45:00Z",
-      "coldstart_slot_used": false,
-      "fit_clause": null,
-      "listed_since": "2026-11-20T09:30:00Z",
-      "model_key": "deepseek/deepseek-v4-flash-abliterated",
+      "action": "admit_listed",
+      "admission_clause": "coldstart_slot",
+      "as_of": "2026-11-24T08:05:00Z",
+      "coldstart_slot_used": true,
+      "fit_clause": "tier_target",
+      "listed_since": null,
+      "model_key": "thinkingmachines/inkling-2-mini",
       "observation_window_end": null,
       "observation_window_start": null,
-      "operator_decision": "promoted",
+      "operator_decision": "admitted",
       "operator_role": "catalog-operator",
-      "promotion": {
-        "bench_provenance_source": "runtime_validated_only",
-        "conformance_owed": true,
-        "demand_rank_recommendable": true,
-        "demand_rank_source_sha256": "17a0b23e8a94fbcb67f3da63195d936ebbfc3a4a7ea900ed70da3bf2bf363304",
-        "operator_admission_reference": "#2452",
-        "rate_card_source_sha256": "205034bfb0cd02fe939f22404f78701a8dedb8eeb13572073202d36bfce9c2ea",
-        "rate_class": "class-120b-moe",
-        "rate_row_resolved": true
-      },
-      "signals": null
+      "promotion": null,
+      "signals": {
+        "demand_rank_absent_reason": "unranked",
+        "demand_rank_source_sha256": "c4fefe76cca692d3b54c0788e1d05078e3af2e42755f7d6d4226355e53ce8af3",
+        "distinct_provider_offer_absent_reason": "source_unavailable",
+        "distinct_provider_offer_count": null,
+        "distinct_provider_offer_source_sha256": null,
+        "distinct_provider_offer_suppressed": false,
+        "distinct_provider_offer_window_end": null,
+        "distinct_provider_offer_window_start": null,
+        "fleet_fit_absent_reason": "source_unavailable",
+        "fleet_fit_fraction_ppm": null,
+        "fleet_fit_source_sha256": null,
+        "fleet_fit_window_end": null,
+        "fleet_fit_window_start": null,
+        "openrouter_demand_rank": null,
+        "unmatched_model_request_absent_reason": "source_unavailable",
+        "unmatched_model_request_count": null,
+        "unmatched_model_request_source_sha256": null,
+        "unmatched_model_request_suppressed": false,
+        "unmatched_model_request_window_end": null,
+        "unmatched_model_request_window_id": null,
+        "unmatched_model_request_window_start": null
+      }
     }
   ],
-  "generated_at": "2026-11-20T09:45:00Z",
-  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289",
+  "generated_at": "2026-11-24T08:05:00Z",
+  "release_id": "published-2026-11-24-inkling-2-mini-listed-v289",
   "schema_version": "macprovider.intake-decision.v1",
   "thresholds": {
     "INTAKE_BUYER_REQUEST_FLOOR": 250,
@@ -39,6 +52,6 @@
     "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000,
     "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
     "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
-    "tier_target": "<= 256 GB"
+    "tier_target": "<= 36 GB"
   }
 }

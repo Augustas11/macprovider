@@ -38,7 +38,7 @@ func TestToolGrammarFamilyMatchesSharedFixture(t *testing.T) {
 		}
 		covered[c.Family] = true
 	}
-	for _, family := range []string{toolGrammarQwen, toolGrammarGLM, toolGrammarLlama3, toolGrammarGemma4, toolGrammarHarmony, toolGrammarDSML, toolGrammarLFM2, toolGrammarMiniMax} {
+	for _, family := range []string{toolGrammarQwen, toolGrammarGLM, toolGrammarLlama3, toolGrammarGemma4, toolGrammarHarmony, toolGrammarDSML, toolGrammarLFM2, toolGrammarMiniMax, toolGrammarInkling2} {
 		if !covered[family] {
 			t.Errorf("no fixture case for family %q", family)
 		}

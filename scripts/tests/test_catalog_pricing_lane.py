@@ -419,6 +419,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # artifact and its nvidia/ served id onto the nemotron-3.5-lightning-30b-a3b row.
         # #2329: the Nemotron 3.5 Bolt listed cut moves its served rapid-mlx
         # artifact and its nvidia/ served id onto the nemotron-3.5-bolt-74b-a9b row.
+        # #2467: the Inkling-2-Mini listed cut moves its served oQ4e artifact
+        # and its served id onto the thinkingmachines/inkling-2-mini row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -444,6 +446,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("nvidia/nemotron-3.5-bolt-74b-a9b", "default", "nemotron-3.5-bolt-74b-a9b"),
                 ("aug11/MiniMax-M3.1-Flash-oQ3e-mtp-abliterated", "default", "minimaxai/minimax-m3.1-flash-abliterated"),
                 ("minimaxai/minimax-m3.1-flash-abliterated", "default", "minimaxai/minimax-m3.1-flash-abliterated"),
+                ("mlx-community/Inkling-2-Mini-oQ4e-mtp", "default", "thinkingmachines/inkling-2-mini"),
+                ("thinkingmachines/inkling-2-mini", "default", "thinkingmachines/inkling-2-mini"),
             },
         )
         for bad in (

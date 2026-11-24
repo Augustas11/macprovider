@@ -117,6 +117,8 @@ enum ToolCallParser {
             return parseGLMCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas) ?? none
         case .minimax?:
             return parseMiniMaxCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas) ?? none
+        case .inkling2?:
+            return parseInklingCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames) ?? none
         case .gemma4?, .llama3?, .dsml?, .lfm2?:
             do {
                 let calls: [ToolCall]
@@ -158,6 +160,7 @@ enum ToolCallParser {
         case .dsml?: return [DeepseekV4Encoding.toolCallsStart]
         case .lfm2?: return [LFMToolCallParser.startMarker]
         case .minimax?: return [miniMaxCallsStart]
+        case .inkling2?: return [ReasoningOutput.Inkling.messageModel]
         case .harmony?, nil: return []
         }
     }
@@ -523,6 +526,107 @@ enum ToolCallParser {
             return .string(raw)
         }
         return try glmValue(raw, type: type)
+    }
+
+    // MARK: Inkling 2 (#2467)
+
+    private typealias Inkling = ReasoningOutput.Inkling
+
+    /// Inkling 2 calls, as the `thinkingmachines/Inkling-2-Mini` chat
+    /// template writes them and its `response_template` reads them:
+    ///
+    ///     <|message_model|>NAME<|content_invoke_tool_json|>{"name":NAME,"args":{…}}<|end_message|>
+    ///
+    /// one frame per call. The text reaches here from the reasoning split
+    /// (`ReasoningOutput.Inkling`): prose with its frame markers removed,
+    /// then, from the first call frame on, the output as written. Each call
+    /// frame parses on its own: the JSON object is located before any marker
+    /// is read, so marker text inside a string value is data (as Ollama's
+    /// parser does). A frame whose JSON is malformed, whose `name` differs
+    /// from a non-empty header, whose `args` is not an object, or that names
+    /// an undeclared function is dropped, and the rest still parse. Other
+    /// frames after the first call (prose, a thought) are dropped, as for the
+    /// other grammars (SPEC-018 §2.4). Nil when the text holds no call frame.
+    static func parseInklingCalls(
+        _ rawOutput: String,
+        modelID: String,
+        allowedFunctionNames: Set<String>?
+    ) -> ParsedToolCalls? {
+        guard let first = nextInklingCallFrame(in: rawOutput[...]) else { return nil }
+        var calls: [ToolCall] = []
+        var rest = rawOutput[first.lowerBound...]
+        var total = 0
+        while let frame = nextInklingCallFrame(in: rest) {
+            let header = rest[rest.index(frame.lowerBound, offsetBy: Inkling.messageModel.count)..<frame.opener.lowerBound]
+            // The object is scanned in place (no copy of the rest per frame),
+            // and the next frame is searched for after it and after the
+            // blank space before it.
+            var objectStart = frame.opener.upperBound
+            while objectStart < rawOutput.endIndex, rawOutput[objectStart].isWhitespace {
+                objectStart = rawOutput.index(after: objectStart)
+            }
+            guard objectStart < rawOutput.endIndex, rawOutput[objectStart] == "{",
+                  let object = scanJSONValue(in: rawOutput, from: objectStart, allowIncomplete: false) else {
+                glmWarning("dropped unclosed Inkling 2 tool call for \(modelID)", modelID: modelID)
+                break
+            }
+            rest = rawOutput[rawOutput.utf8.index(objectStart, offsetBy: object.utf8.count)...]
+            do {
+                let call = try inklingCall(object, header: String(header))
+                if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {
+                    throw ParseError.undeclaredFunction
+                }
+                let bytes = call.arguments.utf8.count
+                guard bytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else { throw ParseError.byteCapExceeded }
+                total += bytes
+                guard total <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                    glmWarning("Inkling 2 tool-call output failed closed for \(modelID): response byte cap", modelID: modelID)
+                    calls = []
+                    break
+                }
+                calls.append(call)
+            } catch {
+                glmWarning("dropped malformed Inkling 2 tool call for \(modelID): \(error)", modelID: modelID)
+            }
+        }
+        let prose = inklingProse(rawOutput[..<first.lowerBound])
+        guard !calls.isEmpty else {
+            return ParsedToolCalls(cleanedContent: prose, toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+        }
+        return ParsedToolCalls(cleanedContent: nil, toolCalls: calls, leadingContent: prose)
+    }
+
+    /// The next `<|message_model|>HEADER<|content_invoke_tool_json|>` in
+    /// `text`: the frame start and the opener's range. The header holds no
+    /// `<` (a tool name).
+    private static func nextInklingCallFrame(in text: Substring) -> (lowerBound: String.Index, opener: Range<String.Index>)? {
+        var from = text.startIndex
+        while let start = text.range(of: Inkling.messageModel, range: from..<text.endIndex) {
+            let header = text[start.upperBound...].prefix(while: { $0 != "<" })
+            if text[header.endIndex...].hasPrefix(Inkling.contentToolJSON) {
+                let opener = header.endIndex..<text.index(header.endIndex, offsetBy: Inkling.contentToolJSON.count)
+                return (start.lowerBound, opener)
+            }
+            from = start.upperBound
+        }
+        return nil
+    }
+
+    /// One `{"name","args"}` call object; `header` is the frame's name.
+    static func inklingCall(_ object: String, header: String) throws -> ToolCall {
+        guard case .object(let fields) = try StrictJSONParser.parse(object, maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH + 1),
+              case .string(let name)? = fields["name"], isValidToolFunctionName(name),
+              header.isEmpty || header == name,
+              case .object = fields["args"] ?? .object([:]) else {
+            throw ParseError.invalidShape
+        }
+        let call = try parseJSONCall(object, argumentKey: "args")
+        return ToolCall(id: call.id, functionName: name, arguments: call.arguments)
+    }
+
+    /// Prose before the first call, without frame markup or blank space.
+    static func inklingProse<S: StringProtocol>(_ text: S) -> String? {
+        nilIfBlank(Inkling.strippingMarkers(String(text)))
     }
 
     // MARK: MiniMax M3 (#2189)

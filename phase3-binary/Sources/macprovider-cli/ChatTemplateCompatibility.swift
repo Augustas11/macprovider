@@ -199,7 +199,9 @@ private extension Character {
 /// `ChatTemplatePromptRenderer` (the same context and options, with the
 /// `ChatTemplateCompatibility` rewrite) and encode through
 /// `PromptControlTokenEncoder` (SPEC-018 §3.14); a DeepSeek-V4 artifact (no
-/// template) renders through `DeepseekV4ChatTokenizer`.
+/// template) renders through `DeepseekV4ChatTokenizer`, and an Inkling 2
+/// artifact renders its template's bytes through `Inkling2Encoding` (the
+/// pinned swift-jinja cannot run that template's `tojson` arguments).
 struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         if DeepseekV4ChatTokenizer.applies(to: directory) {
@@ -221,7 +223,21 @@ struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
             upstream: upstream,
             structuralSources: renderer.templateTexts
         )
-        return ChatTemplateTokenizer(upstream: upstream, renderer: renderer, encoder: encoder)
+        // `Inkling2Encoding.render` is overloaded; an explicit closure keeps the
+        // type checker off the overload set (a bare reference in a ternary
+        // crashes swift-frontend 6.3).
+        var nativeRender: (@Sendable (ChatTemplatePromptRenderer.Input) throws -> String)?
+        if Inkling2Encoding.applies(to: directory) {
+            nativeRender = { @Sendable (input: ChatTemplatePromptRenderer.Input) throws -> String in
+                try Inkling2Encoding.render(input)
+            }
+        }
+        return ChatTemplateTokenizer(
+            upstream: upstream,
+            renderer: renderer,
+            encoder: encoder,
+            nativeRender: nativeRender
+        )
     }
 }
 
@@ -231,6 +247,14 @@ struct ChatTemplateTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
     let upstream: PreTrainedTokenizer
     let renderer: ChatTemplatePromptRenderer
     let encoder: PromptControlTokenEncoder
+    /// Renders in place of the Jinja template for a family whose template
+    /// the pinned swift-jinja cannot run (`Inkling2Encoding`).
+    var nativeRender: (@Sendable (ChatTemplatePromptRenderer.Input) throws -> String)? = nil
+
+    private func render(_ input: ChatTemplatePromptRenderer.Input) throws -> String {
+        if let nativeRender { return try nativeRender(input) }
+        return try renderer.render(input)
+    }
 
     var controlTokens: ControlTokenTable? { encoder.control }
 
@@ -267,11 +291,12 @@ struct ChatTemplateTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
         // text it renders for the inline form.
         if let split = ChatTemplatePromptRenderer.splittingInlineReasoning(messages) {
             let splitInput = try renderer.input(messages: split, tools: tools, additionalContext: additionalContext)
-            if let original = try? renderer.render(input), let candidate = try? renderer.render(splitInput), original == candidate {
+            if let original = try? render(input), let candidate = try? render(splitInput), original == candidate {
                 input = splitInput
             }
         }
         return try encoder.encodePrompt(
-            input, check: ChatTemplatePromptRenderer.check, sanitize: ChatTemplatePromptRenderer.sanitize, render: renderer.render)
+            input, check: ChatTemplatePromptRenderer.check, sanitize: ChatTemplatePromptRenderer.sanitize,
+            render: { try self.render($0) })
     }
 }

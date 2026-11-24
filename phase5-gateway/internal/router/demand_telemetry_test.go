@@ -573,6 +573,23 @@ func TestDemandTelemetryKnowsAbliteratedDeepSeekAndQwenIdentitiesExactly(t *test
 	}
 }
 
+// #2467: the Inkling-2-Mini and uncensored Inkling-2-Mini catalog keys and
+// served artifact ids are recorded as themselves; look-alikes are not.
+func TestDemandTelemetryKnowsInkling2MiniIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"thinkingmachines/inkling-2-mini", "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+		"openuncensored/inkling-2-mini-uncensored", "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"thinkingmachines/inkling-2-minix", "inkling-2-mini", "mlx-community/inkling-2-mini-oq4e-mtp", "ThinkingMachines/Inkling-2-Mini",
+		"OpenUncensored/Inkling-2-Mini-Uncensored", "inkling-2-mini-uncensored", "aug11/inkling-2-mini-oq4e-mtp-uncensored", "openuncensored/inkling-2-mini-uncensoredx"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2236: the Nemotron 3.5 Lightning catalog key and served artifact id are
 // recorded as themselves, never folded into Nemotron 3 Nano.
 func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {

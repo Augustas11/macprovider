@@ -1,0 +1,139 @@
+{
+  "schema_version": "macprovider.staged-catalog-rows.v1",
+  "issue": 2467,
+  "prepared_at": "2026-11-24",
+  "lands_when": "The base row thinkingmachines/inkling-2-mini left this file at catalog release published-2026-11-24-inkling-2-mini-listed-v289 (rule 15 passed on the pinned engine, Studio run 20261124T073707Z). The uncensored row lands when its artifact is published (scripts/lab/2467/job-inkling2-uncensored.sh, PUBLISH=1 after JOB_PASS) and its placeholders are filled, with a regenerate of the catalog release.",
+  "rows": {
+    "openuncensored/inkling-2-mini-uncensored": {
+      "placeholders": {
+        "fields": [
+          "candidate_row.model_revision",
+          "candidate_row.model_sha256",
+          "artifact_source_entry.artifacts.mlx-oq4e-mtp.hash",
+          "artifact_source_entry.artifacts.mlx-oq4e-mtp.size_bytes",
+          "artifact_source_entry.artifacts.mlx-oq4e-mtp.source_ref.revision",
+          "tier2_catalog_model.sha256",
+          "tier2_identity_binding_model.model_revision",
+          "tier2_identity_binding_model.sha256"
+        ],
+        "model_revision": "0000000000000000000000000000000000000000",
+        "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 16873811514,
+        "filled_by": "scripts/lab/2467/job-inkling2-uncensored.sh with PUBLISH=1: PUBLISH_DONE revision= and stage_manifest=; size_bytes is the sum of the published files (the base's size with its README.md replaced by the model card); commit the snapshot manifest under phase3-binary/catalog/autotune/snapshot-manifests/ and recompute it from the HF tree API at the published revision"
+      },
+      "candidate_row": {
+        "bench_gate": {
+          "max_4k_ttft_ms": 3000,
+          "min_sustained_tps": 10,
+          "provenance": {
+            "hardware": "Mac Studio M3 Ultra 256GB",
+            "notes": "PLACEHOLDER until the rule-15 Studio window on the pinned provider build, as the thinkingmachines/inkling-2-mini row: the uncensored build has the base's quantization, shapes and dtypes (only the 20 attention output projections re-quantized), so the base row's measured single-row decode and 4K TTFT carry over; set source to runtime_validated_only with them. Gate values are the catalog's advisory defaults, not a measurement. Advisory QoS only.",
+            "source": "never_benched"
+          }
+        },
+        "min_bandwidth_tier": "C",
+        "min_ram_gb": 32,
+        "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
+        "model_revision": "0000000000000000000000000000000000000000",
+        "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "notes": "listed (#2467): uncensored Inkling-2-Mini. Artifact aug11/Inkling-2-Mini-oQ4e-mtp-uncensored: mlx-community/Inkling-2-Mini-oQ4e-mtp at 3eea0427 (the thinkingmachines/inkling-2-mini artifact) with the attention output projections of OpenUncensored/Inkling-2-Mini-Uncensored at 4e5f06d7 (20 attn.wo_ud tensors, the only tensors that differ from thinkingmachines/Inkling-2-Mini at b85c3cfa) re-quantized in the base's attn.o_proj format (affine 8-bit g64); every other tensor and file byte-identical to the base except the model card (scripts/lab/2467/job-inkling2-uncensored.sh). Text-only through the Swift inkling2 port, as the base row; the bundled DSpark draft is not used. Placement and price as the base row: class-30b-moe, own labelled rate row openuncensored/inkling-2-mini-uncensored at the thinkingmachines/inkling-2-mini price (60000 / 15000 / 240000 credits per Mtok), as the abliterated rows carry their bases' prices. min_ram_gb=32, as the base. License: Apache-2.0 (thinkingmachines/Inkling-2-Mini, OpenUncensored/Inkling-2-Mini-Uncensored and mlx-community/Inkling-2-Mini-oQ4e-mtp), with the base model's Thinking Machines Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which covers modified versions and makes the operator responsible for its users' compliance; operator decision 2026-11-24 to list.",
+        "runtime_status": "listed"
+      },
+      "artifact_source_entry": {
+        "artifacts": {
+          "mlx-oq4e-mtp": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 32,
+            "notes": "Uncensored Inkling-2-Mini (#2467): the attention output projections of OpenUncensored/Inkling-2-Mini-Uncensored at 4e5f06d7 (source snapshot manifest 050f1cec, committed beside this file) re-quantized into mlx-community/Inkling-2-Mini-oQ4e-mtp at 3eea0427 (oMLX v0.8.1 oQ4e, 15 files, 4 weight shards plus mtp.safetensors). Same quantization, shapes and dtypes as the base artifact. The source's edit.pt (a PyTorch pickle) was never downloaded or loaded. Hash, size and revision are placeholders until the publish step; flip verification_status to verified (verified_at = cut date) once the pinned CLI loads it through the inkling2 port. License: Apache-2.0 (thinkingmachines/Inkling-2-Mini, OpenUncensored/Inkling-2-Mini-Uncensored and mlx-community/Inkling-2-Mini-oQ4e-mtp), with the base model's Thinking Machines Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which covers modified versions and makes the operator responsible for its users' compliance; operator decision 2026-11-24 to list.",
+            "quantization": "oq4e-nvfp4-experts-affine4-affine8-mixed",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 16873811514,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
+              "revision": "0000000000000000000000000000000000000000"
+            },
+            "verification_status": "declared",
+            "verified_at": null
+          }
+        },
+        "primary_artifact_id": "mlx-oq4e-mtp",
+        "rate_class": "class-30b-moe"
+      },
+      "rate_card_row": {
+        "completion_rate_per_mtok": 240000,
+        "prompt_cache_hit_rate_per_mtok": 15000,
+        "prompt_rate_per_mtok": 60000
+      },
+      "coordinator_rewards_row": "    openuncensored/inkling-2-mini-uncensored: # #2467 uncensored Inkling-2-Mini - own labelled row at the thinkingmachines/inkling-2-mini price, operator decision 2026-11-24\n      prompt_credits_per_mtok: 60000         # $0.06/M\n      prompt_cache_hit_credits_per_mtok: 15000 # $0.015/M prefix-cache hit\n      completion_credits_per_mtok: 240000     # $0.24/M\n",
+      "acknowledged_pricing_moves": [
+        {
+          "model": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
+          "from_row": "default",
+          "to_row": "openuncensored/inkling-2-mini-uncensored"
+        },
+        {
+          "model": "openuncensored/inkling-2-mini-uncensored",
+          "from_row": "default",
+          "to_row": "openuncensored/inkling-2-mini-uncensored"
+        }
+      ],
+      "demand_rank_row": {
+        "demand_weight": 0.15,
+        "min_provider_target": 2,
+        "rank": null,
+        "recommendable": false
+      },
+      "tier2_catalog_model": {
+        "artifact_kind": "mlx_weight_file",
+        "hash_scope": "macprovider.snapshot-manifest.v1",
+        "min_ram_gb": 32,
+        "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
+        "notes": "Buyer-serving candidate openuncensored/inkling-2-mini-uncensored; identity from signed SPEC-023 row.",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "operator-curated"
+      },
+      "tier2_identity_binding_model": {
+        "catalog_key": "openuncensored/inkling-2-mini-uncensored",
+        "min_ram_gb": 32,
+        "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
+        "model_revision": "0000000000000000000000000000000000000000",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "intake_decision": {
+        "action": "admit_listed",
+        "admission_clause": "coldstart_slot",
+        "coldstart_slot_used": true,
+        "fit_clause": "tier_target",
+        "tier_target": "<= 32 GB",
+        "note": "as_of, generated_at, release_id and the signals block (demand-rank digest, absent reasons) are filled at the cut, as in the #2465 decision. Operator decision 2026-11-24 to list the uncensored build (licence hold lifted)."
+      },
+      "source_identity": {
+        "source_ref": {
+          "kind": "huggingface_revision",
+          "repo_id": "OpenUncensored/Inkling-2-Mini-Uncensored",
+          "revision": "4e5f06d72b5a70c9dcd5e8046aea576eb3ee8487"
+        },
+        "source_snapshot_manifest_sha256": "050f1cec9aa9a78bb4b365bebf5cb4758e531713943bd2e8208d43ffd5c869e2",
+        "source_size_bytes": 20191617908,
+        "original_ref": {
+          "kind": "huggingface_revision",
+          "repo_id": "thinkingmachines/Inkling-2-Mini",
+          "revision": "b85c3cfa615fc413cc9af3379f491b963f3b586a"
+        },
+        "never_loaded": [
+          "edit.pt"
+        ]
+      },
+      "licence": {
+        "license": "apache-2.0",
+        "acceptable_use_policy": "https://thinkingmachines.ai/model-acceptable-use-policy/",
+        "operator_decision": "2026-11-24: list"
+      }
+    }
+  }
+}

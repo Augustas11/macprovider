@@ -16,14 +16,15 @@ import (
 // catalog family; the coordinator only needs the family to refuse tool
 // requests to a model whose template has no tool grammar.
 const (
-	toolGrammarQwen    = "qwen"
-	toolGrammarGLM     = "glm"
-	toolGrammarLlama3  = "llama3"
-	toolGrammarGemma4  = "gemma4"
-	toolGrammarHarmony = "harmony"
-	toolGrammarDSML    = "dsml"
-	toolGrammarLFM2    = "lfm2"
-	toolGrammarMiniMax = "minimax"
+	toolGrammarQwen     = "qwen"
+	toolGrammarGLM      = "glm"
+	toolGrammarLlama3   = "llama3"
+	toolGrammarGemma4   = "gemma4"
+	toolGrammarHarmony  = "harmony"
+	toolGrammarDSML     = "dsml"
+	toolGrammarLFM2     = "lfm2"
+	toolGrammarMiniMax  = "minimax"
+	toolGrammarInkling2 = "inkling2"
 )
 
 func toolGrammarFamily(model string) string {
@@ -52,6 +53,10 @@ func toolGrammarFamily(model string) string {
 	case strings.Contains(id, "minimax-m3"), strings.Contains(id, "minimax_m3"):
 		// MiniMax M3 / M3.1 (#2189); earlier MiniMax grammars differ.
 		return toolGrammarMiniMax
+	case strings.Contains(id, "inkling-2"), strings.Contains(id, "inkling2"):
+		// Inkling 2 (#2467): `<|message_model|>NAME<|content_invoke_tool_json|>`
+		// frames, with reasoning in `<|content_thinking|>` frames.
+		return toolGrammarInkling2
 	}
 	return ""
 }

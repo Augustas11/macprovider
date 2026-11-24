@@ -633,6 +633,10 @@ EXACT_MODEL_KEY_ALIASES = {
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
     "aug11/deepseek-v4-flash-0731-mxfp4-mlx-abliterated": "deepseek/deepseek-v4-flash-abliterated",
     "latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
+    "inkling-2-mini-oq4e-mtp": "thinkingmachines/inkling-2-mini",
+    "inkling-2-mini": "thinkingmachines/inkling-2-mini",
+    "aug11/inkling-2-mini-oq4e-mtp-uncensored": "openuncensored/inkling-2-mini-uncensored",
+    "inkling-2-mini-uncensored": "openuncensored/inkling-2-mini-uncensored",
 }
 
 

@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-20-deepseek-v4-flash-abliterated-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-24-inkling-2-mini-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-20T09:30:00Z",
+  "issued_at": "2026-11-24T08:05:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -263,12 +263,21 @@
       "notes": "Buyer-serving candidate qwen/qwen3.8-27b; identity from signed SPEC-023 row.",
       "sha256": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
       "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+      "min_ram_gb": 32,
+      "notes": "Buyer-serving candidate thinkingmachines/inkling-2-mini; identity from signed SPEC-023 row.",
+      "sha256": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34",
+      "source": "operator-curated"
     }
   ],
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "T6_zbGp54-1U3hoJGJSrFMB9tC5J7E6nML2t_p8xUVqRPWzYkn19DPpPL8KxMG-ab-bjljmBTb_X3ptMpFKYAw"
+    "sig": "yAlr6UGEUAANyo23Eu7O7fwRa8xMSD1IKhZsgAPhIQpEqCJBtjgcV-wpYgLr1mPpmbFbSv5kGEP0cGmLuFZrBw"
   },
   "version": 1
 }

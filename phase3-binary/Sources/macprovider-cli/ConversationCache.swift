@@ -538,11 +538,17 @@ actor ConversationCache {
     private var globalPurgeGen = 0
     private var counters: [String: ConversationCacheModelCounters] = [:]
 
+    /// SPEC-018-R011: the owning runtime's reasoning history, purged with
+    /// the conversations it belongs to.
+    nonisolated let reasoningHistory: AssistantReasoningHistory
+
     init(config: Config = .fromEnvironment(), coldTier: (any ConversationColdTier)? = nil,
-         memoryBudget: ConversationCacheMemoryBudget = ConversationCacheMemoryBudget()) {
+         memoryBudget: ConversationCacheMemoryBudget = ConversationCacheMemoryBudget(),
+         reasoningHistory: AssistantReasoningHistory = AssistantReasoningHistory()) {
         self.config = config
         self.memoryBudget = memoryBudget
         self.coldTier = coldTier
+        self.reasoningHistory = reasoningHistory
     }
 
     /// Attach the cold tier after construction (the serve process activates the
@@ -1020,6 +1026,8 @@ actor ConversationCache {
         // Key on the trimmed form so a purge matches `begin()`'s entry keying.
         let key = conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return false }
+        // SPEC-018-R011: restored reasoning goes with the conversation.
+        reasoningHistory.purge(conversationKey: key)
         localPurgeGen[key, default: 0] += 1
         let removed = entries.removeValue(forKey: key)
         if let removed { recordEviction(modelID: removed.modelID, reason: "purge") }
@@ -1034,6 +1042,7 @@ actor ConversationCache {
     /// persist work so no pre-rotation snapshot publishes into the new epoch
     /// (CRITICAL-2).
     func purgeAllHot() async {
+        reasoningHistory.removeAll()
         globalPurgeGen += 1
         let removed = entries
         entries.removeAll()

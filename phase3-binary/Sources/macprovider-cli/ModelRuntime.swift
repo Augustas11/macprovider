@@ -460,7 +460,8 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID,
                 templateToolFormat: configuration.toolCallFormat?.rawValue,
-                supportsBonsaiThinking: isPrismBonsai
+                supportsBonsaiThinking: isPrismBonsai,
+                maxContextTokens: maxContextTokens
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -2493,6 +2494,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let continuousBatchReplayAuthority: ContinuousBatchRuntimeReplayAuthority
     private var continuousBatchingDurableReplayAuthorityAvailable: Bool
     private let conversationCache: ConversationCache
+    /// SPEC-018-R011: this runtime's reasoning history; its conversation
+    /// cache purges it.
+    private let reasoningHistory: AssistantReasoningHistory
     /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
@@ -3866,6 +3870,13 @@ maxTokens: 1,
         if normalizedLabels.contains(where: { $0 == "lfm3" || $0 == "lfm3forcausallm" }) {
             return "lfm3"
         }
+        // Inkling 2 (`inkling2_loop`, #2467): a looped MoE with short-conv
+        // and attention layers on the fork's own caches. Not a paged-KV
+        // family, so attach fails closed on identity and the model serves
+        // serial.
+        if normalizedLabels.contains(where: { $0 == "inkling2loop" || $0 == "inkling2loopforconditionalgeneration" }) {
+            return "inkling2"
+        }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
         // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
@@ -4415,7 +4426,9 @@ maxTokens: 1,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
-        self.conversationCache = ConversationCache()
+        let reasoningHistory = AssistantReasoningHistory()
+        self.reasoningHistory = reasoningHistory
+        self.conversationCache = ConversationCache(reasoningHistory: reasoningHistory)
         let boundedMaxBatch = min(max(1, maxBatch), hardwareServingRowCap)
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
@@ -5011,12 +5024,15 @@ maxTokens: 1,
             observedRuntimeIdentity: effectiveObservedIdentity
         )
         self.continuousBatchScheduler = nil
+        let reasoningHistory = AssistantReasoningHistory()
+        self.reasoningHistory = reasoningHistory
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.conversationCache = ConversationCache(
-            memoryBudget: testConversationCacheMemoryBudget ?? ConversationCacheMemoryBudget()
+            memoryBudget: testConversationCacheMemoryBudget ?? ConversationCacheMemoryBudget(),
+            reasoningHistory: reasoningHistory
         )
         #else
-        self.conversationCache = ConversationCache()
+        self.conversationCache = ConversationCache(reasoningHistory: reasoningHistory)
         #endif
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
@@ -8452,6 +8468,8 @@ maxTokens: 1,
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        // SPEC-018-R011: the prompt preflight renders is the one serving renders.
+        request.outputState.reasoningHistory.attach(reasoningHistory)
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2: the streaming path prepares the prompt during preflight
@@ -8512,7 +8530,8 @@ maxTokens: 1,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                     templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                     nativeVisionProfile: handle.snapshot.nativeVisionProfile,
-                    toolSelectionModelID: selectionModelID
+                    toolSelectionModelID: selectionModelID,
+                    maxContextTokens: maxContextTokens
                 )
                 try Task.checkCancellation()
                 try handle.drainCancelled.check()
@@ -8733,7 +8752,8 @@ maxTokens: 1,
                 context: context,
                 templateSupportsThinkingToggle: snapshot.templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: snapshot.templateSupportsPreserveThinking,
-                toolSelectionModelID: toolSelectionModelID
+                toolSelectionModelID: toolSelectionModelID,
+                maxContextTokens: maxContextTokens
             )
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
@@ -11200,6 +11220,7 @@ maxTokens: boundedMaxTokens,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        request.outputState.reasoningHistory.attach(reasoningHistory)
         let timeline = RequestTimeline.current ?? RequestTimeline()
         let (marked, snapshot) = try await RequestTimeline.$current.withValue(timeline) {
             try await completeWithServedSnapshotMarked(request, with: handle, shouldCancel: shouldCancel)
@@ -11209,6 +11230,7 @@ maxTokens: boundedMaxTokens,
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.nonStreamed)
         completion.servedPath = Self.servedPathOrSerial(completion)
+        completion = Self.finishingHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID(snapshot))
         return (completion, snapshot)
     }
 
@@ -11391,7 +11413,8 @@ maxTokens: boundedMaxTokens,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                         templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
-                        toolSelectionModelID: selectionModelID
+                        toolSelectionModelID: selectionModelID,
+                        maxContextTokens: maxContextTokens
                     )
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
@@ -12146,6 +12169,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        request.outputState.reasoningHistory.attach(reasoningHistory)
         let timeline = RequestTimeline.current ?? RequestTimeline()
         // SPEC-018 §3.14: control-text marks never leave the runtime.
         let emit = timeline.noting(onChunk)
@@ -12158,6 +12182,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         completion.timeline = timeline
         completion.ttftMilliseconds = timeline.receiptTTFTMilliseconds(.streamed)
         completion.servedPath = Self.servedPathOrSerial(completion)
+        completion = Self.finishingHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID(handle.snapshot))
         return completion
     }
 
@@ -12455,7 +12480,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                         templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
-                        toolSelectionModelID: selectionModelID
+                        toolSelectionModelID: selectionModelID,
+                        maxContextTokens: maxContextTokens
                     )
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
@@ -15592,6 +15618,13 @@ maxTokens: maxTokens,
                 tokens: tokens,
                 keeping: Set(tokens.filter { $0.hasPrefix("<") && $0.hasSuffix(">") }),
                 after: ToolCallParser.miniMaxNamespace)
+        case .inkling2?:
+            // Inkling 2 (#2467): every frame marker is a special token. The
+            // reasoning split and the call parser read them and remove them
+            // from reasoning and content (`ReasoningOutput.Inkling`); the
+            // EOS and every other control token are stripped as usual.
+            let frameMarkers = Set(ReasoningOutput.Inkling.tags)
+            return StopTokenFilter(tokens: filter.tokens.filter { !frameMarkers.contains($0) })
         default:
             return filter
         }
@@ -16541,7 +16574,10 @@ maxTokens: maxTokens,
             // after the first `</think>`.
             // MiniMax (#2189): only the text outside `<mm:think>` blocks. A
             // reply that did not reason carries no reasoning_content.
+            // Inkling 2 (#2467): only the bodies of content frames, and the
+            // call frames, outside every thinking frame.
             let miniMax = splitsMiniMaxReasoning(request)
+            let inkling = splitsInklingReasoning(request)
             var reasoning: ReasoningOutput.Split?
             var answer = filteredText
             if request.outputTraits.reasoningOpen {
@@ -16550,6 +16586,10 @@ maxTokens: maxTokens,
             } else if miniMax {
                 let split = ReasoningOutput.MiniMax.split(filteredText)
                 if ReasoningOutput.MiniMax.reasoned(filteredText) { reasoning = split }
+                answer = split.answer
+            } else if inkling {
+                let split = ReasoningOutput.Inkling.split(filteredText)
+                if ReasoningOutput.Inkling.reasoned(filteredText) { reasoning = split }
                 answer = split.answer
             }
             if try stripsStrayThinkTags(request) {
@@ -16570,6 +16610,8 @@ maxTokens: maxTokens,
                     defaultCompletionTokens,
                     miniMax
                         ? ReasoningOutput.MiniMax.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                        : inkling
+                        ? ReasoningOutput.Inkling.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                         : ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
                 )
             }
@@ -16807,6 +16849,9 @@ maxTokens: maxTokens,
         case .afterMiniMaxThink:
             // Only the answer, outside every `<mm:think>` block, holds calls.
             text = ReasoningOutput.MiniMax.splitStreamingPrefix(text).answer
+        case .afterInklingThink:
+            // Only the answer, outside every thinking frame, holds calls.
+            text = ReasoningOutput.Inkling.splitStreamingPrefix(text).answer
         case .whole:
             break
         }
@@ -16846,6 +16891,14 @@ maxTokens: maxTokens,
             return (calls.isEmpty ? text : "", calls)
         }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
+            // Inkling 2 (#2467): without declared tools a call frame is an
+            // undeclared call. As for dropped GLM calls (#2259), only the
+            // prose before it is content, never its markup; the stream cuts
+            // at the same `<|message_model|>`, so both carry the same bytes.
+            if toolGrammar(for: request) == .inkling2,
+               let frame = text.range(of: ReasoningOutput.Inkling.messageModel) {
+                return (ReasoningOutput.Inkling.strippingMarkers(String(text[..<frame.lowerBound])), [])
+            }
             return (text, [])
         }
         let parsed = ToolCallParser.parseToolCalls(
@@ -16881,11 +16934,19 @@ maxTokens: maxTokens,
         !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .minimax
     }
 
+    /// Inkling 2 output (#2467): every message is a frame of special tokens,
+    /// and the bodies of `<|content_thinking|>` frames are reasoning
+    /// (`ReasoningOutput.Inkling`). Its prompt never leaves `<think>` open.
+    static func splitsInklingReasoning(_ request: ChatCompletionRequest) -> Bool {
+        !request.outputTraits.reasoningOpen && toolGrammar(for: request) == .inkling2
+    }
+
     /// The text request stops run over (`ReasoningOutput.StopScope`). Rows
     /// other than `.whole` carry no request stop-token sequences: a stop in
     /// the reasoning must not end them, so the text filters end them.
     static func reasoningStopScope(_ request: ChatCompletionRequest) -> ReasoningOutput.StopScope {
         if request.outputTraits.reasoningOpen { return .afterThink }
+        if splitsInklingReasoning(request) { return .afterInklingThink }
         return splitsMiniMaxReasoning(request) ? .afterMiniMaxThink : .whole
     }
 
@@ -17029,13 +17090,19 @@ maxTokens: maxTokens,
         nativeVisionProfile: NativeVisionProfile? = nil,
         toolSelectionModelID: String? = nil,
         supportsBonsaiThinking: Bool = false,
-        requestedThinking: Bool = false
+        requestedThinking: Bool = false,
+        restoresHistoryReasoning restores: Bool = true
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
         }
+        let grammar = renderGrammar(for: request, toolSelectionModelID: toolSelectionModelID)
+        // SPEC-018-R011: Inkling 2 only; `restores` false renders as sent.
+        let requestMessages = restores && restoresHistoryReasoning(grammar: grammar)
+            ? restoringHistoryReasoning(request)
+            : request.messages
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
-            to: request.messages,
+            to: requestMessages,
             responseFormat: request.responseFormat,
             modelID: request.model
         )
@@ -17053,12 +17120,6 @@ maxTokens: maxTokens,
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
-        // Tool history goes through the loaded template (SPEC-018 §3.6). A
-        // profiled identity is the loaded model even under a local alias.
-        let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
-            ? toolSelectionModelID ?? request.model
-            : request.model
-        let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
         if grammar == .lfm2, selection != .none, Self.hasEnabledTools(request.promptSource.tools) {
             try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
         }
@@ -17096,7 +17157,7 @@ maxTokens: maxTokens,
         }
         // Each native template owns its reasoning-history scope. Preserve
         // assistant reasoning only for the exact families that render it.
-        let historyReasoning = (grammar == .glm || grammar == .lfm2
+        let historyReasoning = (grammar == .glm || grammar == .lfm2 || grammar == .inkling2
             || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
                 modelID: toolSelectionModelID ?? request.model))) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
@@ -17115,6 +17176,115 @@ maxTokens: maxTokens,
             chat: chat,
             tools: tools,
             additionalContext: additionalContext
+        )
+    }
+
+    /// The grammar `userInput(for:)` renders with. Tool history goes through
+    /// the loaded template (SPEC-018 §3.6); a profiled identity is the loaded
+    /// model even under a local alias.
+    static func renderGrammar(for request: ChatCompletionRequest, toolSelectionModelID: String?) -> ToolCallGrammar? {
+        let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
+            ? toolSelectionModelID ?? request.model
+            : request.model
+        return request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+    }
+
+    /// SPEC-018-R011: the grammar whose turns the provider records and
+    /// restores reasoning for. Every other family renders history reasoning
+    /// as the client sent it (SPEC-018-R008).
+    static func restoresHistoryReasoning(grammar: ToolCallGrammar?) -> Bool {
+        grammar == .inkling2
+    }
+
+    /// SPEC-018-R011: the request's messages with the reasoning this provider
+    /// generated put back on assistant turns that arrived without any, from
+    /// the request's one lookup of its runtime's store. Only a request with a
+    /// conversation key that may use reusable caches is restored.
+    static func restoringHistoryReasoning(_ request: ChatCompletionRequest) -> [ChatMessage] {
+        guard request.ingestProvenance.mayUseReusableKVCache,
+              let restored = request.outputState.reasoningHistory.restore(
+                request.messages, model: request.model, conversationKey: request.conversationKey)
+        else { return request.messages }
+        return restored.messages
+    }
+
+    /// SPEC-018-R011: renders the prompt with any restored history reasoning,
+    /// and, when a turn was restored, once more as sent. The prompt tokens
+    /// the restore added are noted on the request: reported usage leaves
+    /// them out (restored reasoning is not billed). A restored prompt over
+    /// `maxContextTokens` is dropped for the prompt as sent. The log line
+    /// carries counts only, once per request.
+    static func renderingHistoryReasoning<Rendered>(
+        for request: ChatCompletionRequest,
+        maxContextTokens: Int?,
+        render: (_ restoring: Bool) async throws -> Rendered,
+        tokenCount: (Rendered) -> Int
+    ) async throws -> Rendered {
+        let restored = try await render(true)
+        let state = request.outputState.reasoningHistory
+        guard state.isRestoring else { return restored }
+        let plain = try await render(false)
+        let restoredCount = tokenCount(restored)
+        let added = max(0, restoredCount - tokenCount(plain))
+        // The restore must leave the request's whole output budget (and the
+        // one free token a batched row needs) inside the context.
+        let needed = restoredCount.addingReportingOverflow(max(1, request.maxTokens ?? 1))
+        if let maxContextTokens, needed.overflow || needed.partialValue > maxContextTokens {
+            state.withdraw()
+            if state.claimReport() {
+                FileHandle.standardError.write(Data(
+                    "event=reasoning_history action=withdrawn reason=context_limit tokens=\(added)\n".utf8))
+            }
+            return plain
+        }
+        state.noteRestoredPromptTokens(added)
+        if state.claimReport(), let restore = request.outputState.reasoningHistory.restore(
+            request.messages, model: request.model, conversationKey: request.conversationKey) {
+            FileHandle.standardError.write(Data(
+                "event=reasoning_history action=restored turns=\(restore.turns) bytes=\(restore.bytes) tokens=\(added)\n".utf8))
+        }
+        return restored
+    }
+
+    /// SPEC-018-R011, at the end of a served request: usage without the
+    /// prompt tokens restored reasoning added (cached tokens stay within the
+    /// reported prompt), and the generated turn recorded.
+    static func finishingHistoryReasoning(
+        _ completion: CompletionResult,
+        for request: ChatCompletionRequest,
+        toolSelectionModelID: String?
+    ) -> CompletionResult {
+        recordHistoryReasoning(completion, for: request, toolSelectionModelID: toolSelectionModelID)
+        let restoredTokens = request.outputState.reasoningHistory.claimRestoredPromptTokens()
+        guard restoredTokens > 0 else { return completion }
+        return completion.excludingRestoredPromptTokens(restoredTokens)
+    }
+
+    /// SPEC-018-R011: keeps the reasoning of an Inkling 2 turn this runtime
+    /// generated, keyed by the request's messages and the turn as the buyer
+    /// received it, under the purge fence of the request's render.
+    static func recordHistoryReasoning(
+        _ completion: CompletionResult,
+        for request: ChatCompletionRequest,
+        toolSelectionModelID: String?
+    ) {
+        guard request.ingestProvenance.mayUseReusableKVCache,
+              completion.reasoningContent?.isEmpty == false,
+              restoresHistoryReasoning(grammar: renderGrammar(for: request, toolSelectionModelID: toolSelectionModelID)),
+              let target = request.outputState.reasoningHistory.recordTarget()
+        else { return }
+        // The store keys on the core module's call type.
+        let calls = (completion.toolCalls ?? []).map {
+            MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments)
+        }
+        target.store.record(
+            model: request.model,
+            conversationKey: request.conversationKey,
+            prefix: request.messages,
+            content: completion.content,
+            toolCalls: calls.isEmpty ? nil : calls,
+            reasoning: completion.reasoningContent,
+            fence: target.fence
         )
     }
 
@@ -17168,33 +17338,42 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
         nativeVisionProfile: NativeVisionProfile? = nil,
-        toolSelectionModelID: String?
+        toolSelectionModelID: String?,
+        maxContextTokens: Int? = nil
     ) async throws -> (input: LMInput, toolCallPrefill: String?) {
         // Planned first: it validates the selected name before any prompt text.
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: context.configuration.toolCallFormat?.rawValue)
         let supportsBonsaiThinking = isPrismBonsai(context.model)
-        let lmInput: LMInput = try await renderingRequestedThinking(
+        let lmInput: LMInput = try await renderingHistoryReasoning(
             for: request,
-            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            supportsBonsaiThinking: supportsBonsaiThinking,
-            render: { thinking in
-                let input = try userInput(
+            maxContextTokens: maxContextTokens,
+            render: { (restoring: Bool) async throws -> LMInput in
+                try await renderingRequestedThinking(
                     for: request,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                    nativeVisionProfile: nativeVisionProfile,
-                    toolSelectionModelID: toolSelectionModelID,
                     supportsBonsaiThinking: supportsBonsaiThinking,
-                    requestedThinking: thinking
+                    render: { thinking in
+                        let input = try userInput(
+                            for: request,
+                            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                            nativeVisionProfile: nativeVisionProfile,
+                            toolSelectionModelID: toolSelectionModelID,
+                            supportsBonsaiThinking: supportsBonsaiThinking,
+                            requestedThinking: thinking,
+                            restoresHistoryReasoning: restoring
+                        )
+                        do {
+                            return try await context.processor.prepare(input: input)
+                        } catch {
+                            throw ChatTemplateRequestError.mapping(error)
+                        }
+                    },
+                    promptTail: { context.tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
                 )
-                do {
-                    return try await context.processor.prepare(input: input)
-                } catch {
-                    throw ChatTemplateRequestError.mapping(error)
-                }
             },
-            promptTail: { context.tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
+            tokenCount: { (input: LMInput) -> Int in input.text.tokens.size }
         )
         guard let plan else {
             resolveOutputTraits(for: request, grammar: grammar, promptTokens: lmInput.text.tokens.asArray(Int.self), tokenizer: context.tokenizer)
@@ -17261,30 +17440,39 @@ maxTokens: maxTokens,
         templateSupportsPreserveThinking: Bool,
         toolSelectionModelID: String?,
         templateToolFormat: String? = nil,
-        supportsBonsaiThinking: Bool = false
+        supportsBonsaiThinking: Bool = false,
+        maxContextTokens: Int? = nil
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
-        let lmInput: LMInput = try await renderingRequestedThinking(
+        let lmInput: LMInput = try await renderingHistoryReasoning(
             for: request,
-            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            supportsBonsaiThinking: supportsBonsaiThinking,
-            render: { thinking in
-                let input = try userInput(
+            maxContextTokens: maxContextTokens,
+            render: { (restoring: Bool) async throws -> LMInput in
+                try await renderingRequestedThinking(
                     for: request,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                    toolSelectionModelID: toolSelectionModelID,
                     supportsBonsaiThinking: supportsBonsaiThinking,
-                    requestedThinking: thinking
+                    render: { thinking in
+                        let input = try userInput(
+                            for: request,
+                            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                            toolSelectionModelID: toolSelectionModelID,
+                            supportsBonsaiThinking: supportsBonsaiThinking,
+                            requestedThinking: thinking,
+                            restoresHistoryReasoning: restoring
+                        )
+                        do {
+                            return try await processor.prepare(input: input)
+                        } catch {
+                            throw ChatTemplateRequestError.mapping(error)
+                        }
+                    },
+                    promptTail: { tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
                 )
-                do {
-                    return try await processor.prepare(input: input)
-                } catch {
-                    throw ChatTemplateRequestError.mapping(error)
-                }
             },
-            promptTail: { tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
+            tokenCount: { (input: LMInput) -> Int in input.text.tokens.size }
         )
         let promptTokens = lmInput.text.tokens.asArray(Int.self)
         guard let plan else {
@@ -17840,6 +18028,9 @@ struct SerialStreamingTextEmitter {
     /// MiniMax rows (#2189): `<mm:think>` blocks stream as
     /// `reasoning_content` (`ReasoningOutput.MiniMax`).
     private var splitsMiniMaxReasoning: Bool { stopScope == .afterMiniMaxThink }
+    /// Inkling 2 rows (#2467): thinking frames stream as `reasoning_content`
+    /// (`ReasoningOutput.Inkling`).
+    private var splitsInklingReasoning: Bool { stopScope == .afterInklingThink }
     private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
@@ -17857,12 +18048,14 @@ struct SerialStreamingTextEmitter {
     /// whole-text functions instead (the differential tests' reference).
     private var reasoningSplit = IncrementalReasoningSplit()
     private var miniMaxReasoningSplit = IncrementalMiniMaxReasoningSplit()
+    private var inklingReasoningSplit = IncrementalInklingReasoningSplit()
     private var strayTagRemoval = IncrementalStrayTagRemoval()
     private var toolText: IncrementalToolText
     private var usesReferenceText = false
 
     var incrementalRestartCount: Int {
-        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
+        reasoningSplit.restartCount + miniMaxReasoningSplit.restartCount + inklingReasoningSplit.restartCount
+            + strayTagRemoval.restartCount + toolText.restartCount
     }
 
     /// The longest text the stray-tag removal or tool-text reduction left
@@ -17918,12 +18111,17 @@ struct SerialStreamingTextEmitter {
     ) -> Step {
         var candidate = candidate
         var emittedVisible = false
-        if reasoningOpen || splitsMiniMaxReasoning {
+        if reasoningOpen || stopScope.splitsBlocks {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
-            // MiniMax: the same for every `<mm:think>…</mm:think>` block.
+            // MiniMax: the same for every `<mm:think>…</mm:think>` block;
+            // Inkling 2: for every thinking frame.
             let split: ReasoningOutput.Split
-            if splitsMiniMaxReasoning {
+            if splitsInklingReasoning {
+                split = usesReferenceText
+                    ? ReasoningOutput.Inkling.splitStreamingPrefix(candidate.text)
+                    : inklingReasoningSplit.splitStreamingPrefix(candidate.text)
+            } else if splitsMiniMaxReasoning {
                 split = usesReferenceText
                     ? ReasoningOutput.MiniMax.splitStreamingPrefix(candidate.text)
                     : miniMaxReasoningSplit.splitStreamingPrefix(candidate.text)
@@ -17947,8 +18145,15 @@ struct SerialStreamingTextEmitter {
             // A MiniMax answer grows around its blocks: it goes on whether or
             // not a block is open now (a request stop only ends the row after
             // the first `</mm:think>`, `ReasoningOutput.StopScope`).
-            guard split.closed || splitsMiniMaxReasoning else { return .more }
+            guard split.closed || stopScope.splitsBlocks else { return .more }
             candidate = (split.answer, candidate.hitStop)
+        }
+        // Inkling 2 (#2467): without declared tools the answer ends at a call
+        // frame (`<|message_model|>` survives the split only there); the
+        // final parse drops the call, so its markup never streams.
+        if splitsInklingReasoning, !streamToolsIncrementally,
+           let frame = candidate.text.range(of: ReasoningOutput.Inkling.messageModel) {
+            candidate.text = String(candidate.text[..<frame.lowerBound])
         }
         if stripsStrayThinkTags {
             candidate.text = usesReferenceText
@@ -18031,8 +18236,9 @@ struct SerialStreamingTextEmitter {
         onChunk: (StreamChunk) -> Void
     ) throws {
         var finalText = finalText
-        if reasoningOpen || splitsMiniMaxReasoning {
-            let split = splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
+        if reasoningOpen || stopScope.splitsBlocks {
+            let split = splitsInklingReasoning ? ReasoningOutput.Inkling.split(finalText)
+                : splitsMiniMaxReasoning ? ReasoningOutput.MiniMax.split(finalText) : ReasoningOutput.split(finalText)
             let rest = ModelRuntime.streamDelta(from: emittedReasoning, to: parsed.reasoningContent ?? split.reasoning)
             if !rest.isEmpty {
                 emittedReasoning += rest
@@ -18249,6 +18455,12 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = ToolCallParser.miniMaxCallsStart
             endDelimiter = ToolCallParser.miniMaxCallsEnd
             argumentKey = "arguments"
+        case .inkling2?:
+            // After the reasoning split, `<|message_model|>` in the answer
+            // only starts a call frame (`ReasoningOutput.Inkling`).
+            startDelimiter = ReasoningOutput.Inkling.messageModel
+            endDelimiter = ReasoningOutput.Inkling.endMessage
+            argumentKey = "args"
         default:
             startDelimiter = ToolCallParser.toolCallOpen
             endDelimiter = "</tool_call>"
@@ -18855,6 +19067,42 @@ struct CompletionResult: Sendable {
             timeline: timeline,
             servedPath: servedPath
         )
+    }
+
+    /// SPEC-018-R011: usage without the prompt tokens that restored
+    /// reasoning added. The cached count is clamped to the reported prompt
+    /// (`init`), so the buyer-body bound the coordinator and gateway apply
+    /// to prompt tokens holds for the cached count too.
+    func excludingRestoredPromptTokens(_ restoredTokens: Int) -> CompletionResult {
+        guard restoredTokens > 0 else { return self }
+        var result = CompletionResult(
+            content: content,
+            finishReason: finishReason,
+            promptTokens: max(0, promptTokens - restoredTokens),
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: completionTokens,
+            generatedCompletionTokens: generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            nativeMTPProposedTokens: nativeMTPProposedTokens,
+            nativeMTPAcceptedTokens: nativeMTPAcceptedTokens,
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            shardGroupEvidence: shardGroupEvidence,
+            reasoningContent: reasoningContent,
+            reasoningTokens: reasoningTokens,
+            stopSequence: stopSequence,
+            timeline: timeline,
+            servedPath: servedPath
+        )
+        result.ttftMilliseconds = ttftMilliseconds
+        return result
     }
 
     func withContent(_ content: String) -> CompletionResult {

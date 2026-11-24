@@ -62,11 +62,11 @@ func legacyToolFamily(model string) bool {
 // capability derivation and request eligibility. A SPEC-051 shard group head
 // refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
-	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || family == toolGrammarMiniMax {
-		// LFM and MiniMax shipped after the generic grammar floor. Require
-		// the exact loaded-model declaration, which old providers cannot
-		// advertise (a provider without the MiniMax family declares only
-		// auto and none for it).
+	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || splitsFamilyReasoning(family) {
+		// LFM, MiniMax and Inkling 2 shipped after the generic grammar floor.
+		// Require the exact loaded-model declaration, which old providers
+		// cannot advertise (a provider without the family declares only auto
+		// and none for it).
 		return !p.ShardGroupHeadV1 &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "required"}) &&
 			providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "named"})
@@ -86,14 +86,21 @@ func providerToolGrammarEligible(p pool.Provider) bool {
 	return providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) == "" || providerParsesToolGrammar(p)
 }
 
+// splitsFamilyReasoning reports a family whose reasoning only a provider that
+// declares the family splits off content: MiniMax M3's <mm:think> blocks
+// (#2189) and Inkling 2's <|content_thinking|> frames (#2467).
+func splitsFamilyReasoning(family string) bool {
+	return family == toolGrammarMiniMax || family == toolGrammarInkling2
+}
+
 // providerServesModelOutput reports whether a provider can serve any request
-// for its loaded model, tools or not. A native MiniMax M3 provider must split
-// the model's <mm:think> reasoning off content (#2189); only a CLI that
-// declares the MiniMax family for its exact loaded model does, which is the
+// for its loaded model, tools or not. A native MiniMax M3 or Inkling 2
+// provider must split the model's reasoning off content (#2189, #2467); only a
+// CLI that declares the family for its exact loaded model does, which is the
 // providerParsesToolGrammar predicate (a declaration, not a binary version).
 // Other families and external runtimes are unaffected.
 func providerServesModelOutput(p pool.Provider) bool {
-	if providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) != toolGrammarMiniMax {
+	if providerEngineClass(p) != engineClassNative || !splitsFamilyReasoning(toolGrammarFamily(p.ModelID)) {
 		return true
 	}
 	return providerParsesToolGrammar(p)
@@ -156,7 +163,10 @@ func providerServesToolGrammars(p pool.Provider) bool {
 // the DeepSeek-V4 encoder opens `<think>` unless reasoning_effort is none).
 func reasoningFamily(model string) bool {
 	id := strings.ToLower(model)
-	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4")
+	// Inkling 2 (#2467) thinks by default (template effort 0.9) in
+	// <|content_thinking|> frames the provider splits into reasoning_content.
+	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4") ||
+		strings.Contains(id, "inkling-2") || strings.Contains(id, "inkling2")
 }
 
 // onRequestReasoningProviderMinVersion is the floor for provider CLIs that

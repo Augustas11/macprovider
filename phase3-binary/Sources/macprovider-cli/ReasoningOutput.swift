@@ -305,6 +305,239 @@ enum ReasoningOutput {
         }
     }
 
+    /// Inkling 2 output frames (#2467). Every message the model writes is a
+    /// frame of special tokens: `<|message_model|>` and an optional header
+    /// name, one content opener, the body, `<|end_message|>`; the reply ends
+    /// with `<|content_model_end_sampling|>` (EOS). As the model's
+    /// `tokenizer_config.json` `response_template` reads a turn, the body of a
+    /// `<|content_thinking|>` frame is reasoning; `<|content_text|>`,
+    /// `<|content_tool_error|>` and `<|content_invoke_tool_text|>` bodies are
+    /// content; a `<|content_invoke_tool_json|>` body is a `{"name","args"}`
+    /// call. Text outside any frame (an unframed reply) is content. The system
+    /// line `Thinking effort level: X` comes from the prompt
+    /// (`Inkling2Encoding`), never from the output.
+    ///
+    /// The split keeps frame markup out of reasoning and answer. A header is
+    /// held until its opener arrives, so a tool name never streams as prose.
+    /// The first tool frame ends the scan (`verbatim`): from its
+    /// `<|message_model|>` on, the rest is answer text as written, for the
+    /// tool parser (`ToolCallParser.parseInklingCalls`), and marker text in
+    /// call arguments stays in the arguments. Request stops run after the
+    /// first `<|end_message|>` when the reply opens with a thinking frame
+    /// (`StopScope.afterInklingThink`), over the whole output otherwise.
+    enum Inkling {
+        static let messageModel = "<|message_model|>"
+        static let contentThinking = "<|content_thinking|>"
+        static let contentText = "<|content_text|>"
+        static let contentToolError = "<|content_tool_error|>"
+        static let contentToolText = "<|content_invoke_tool_text|>"
+        static let contentToolJSON = "<|content_invoke_tool_json|>"
+        static let endMessage = "<|end_message|>"
+        /// The EOS token; stripped by the stop-token filter like any other.
+        static let endSampling = "<|content_model_end_sampling|>"
+        /// Every marker the split reads; the tool-aware stop-token filter
+        /// keeps them in the text (`ModelRuntime.toolAwareStopTokenFilter`).
+        static let tags = [messageModel, contentThinking, contentText, contentToolError, contentToolText, contentToolJSON, endMessage]
+        static let maxTagUTF8 = tags.map(\.utf8.count).max()!
+
+        enum Lead: Equatable {
+            /// Nothing yet, or a proper prefix of the first frame's opener.
+            case undecided
+            /// The first frame is a thinking frame.
+            case thinking
+            /// The first frame holds content or a call, or the reply is unframed.
+            case answer
+        }
+
+        static func lead(_ text: String) -> Lead {
+            var rest = Substring(text)
+            if rest.hasPrefix(messageModel) {
+                rest = rest.dropFirst(messageModel.count)
+                rest = rest.drop(while: { $0 != "<" })
+            } else if messageModel.hasPrefix(rest) {
+                return .undecided
+            }
+            if rest.hasPrefix(contentThinking) { return .thinking }
+            if rest.isEmpty || tags.contains(where: { $0.hasPrefix(rest) }) { return .undecided }
+            return .answer
+        }
+
+        /// The split of a scanned prefix: text between markers goes to
+        /// `append`, each marker to `apply`.
+        struct Scan {
+            enum Frame: Equatable {
+                /// Between frames, or an unframed reply: text is answer.
+                case none
+                /// After `<|message_model|>`, before the content opener.
+                case header
+                case thinking
+                case content
+            }
+
+            private(set) var frame = Frame.none
+            private(set) var opened = false
+            private(set) var verbatim = false
+            private(set) var reasoning = ""
+            private(set) var answer = ""
+            /// The held header name (a tool name before its call opener).
+            private var header = ""
+            /// False on the tool-stop path, which reads only the answer.
+            private let keepsReasoning: Bool
+
+            init(keepsReasoning: Bool = true) {
+                self.keepsReasoning = keepsReasoning
+            }
+
+            var inside: Bool { frame == .thinking }
+
+            mutating func append<S: StringProtocol>(_ text: S) {
+                if verbatim {
+                    answer += text
+                    return
+                }
+                switch frame {
+                case .thinking: if keepsReasoning { reasoning += text }
+                case .header: header += text
+                case .none, .content: answer += text
+                }
+            }
+
+            mutating func apply(tag: String) {
+                if verbatim {
+                    answer += tag
+                    return
+                }
+                switch tag {
+                case messageModel:
+                    frame = .header
+                    header = ""
+                case contentThinking:
+                    frame = .thinking
+                    opened = true
+                    header = ""
+                case contentToolJSON:
+                    // The call frame as written, header name included, for
+                    // the tool parser; the rest of the output stays as is.
+                    answer += messageModel + header + contentToolJSON
+                    header = ""
+                    verbatim = true
+                case endMessage:
+                    frame = .none
+                    header = ""
+                default:
+                    // `<|content_text|>`, `<|content_tool_error|>`,
+                    // `<|content_invoke_tool_text|>`: a content frame.
+                    frame = .content
+                    header = ""
+                }
+            }
+
+            var split: Split { Split(reasoning: reasoning, answer: answer, closed: !inside) }
+        }
+
+        /// The first marker in `text`.
+        static func nextTag(in text: Substring) -> (range: Range<String.Index>, tag: String)? {
+            var next: (range: Range<String.Index>, tag: String)?
+            for tag in tags {
+                let upper = next?.range.lowerBound ?? text.endIndex
+                if let range = text.range(of: tag, range: text.startIndex..<upper), range.lowerBound < upper {
+                    next = (range, tag)
+                }
+            }
+            return next
+        }
+
+        /// `text` without a suffix that could still become a marker.
+        static func withoutPartialTags(_ text: Substring) -> Substring {
+            let held = (1..<maxTagUTF8).last(where: { length in
+                let tail = String(text.suffix(length))
+                return tail.count == length && tags.contains(where: { $0.hasPrefix(tail) })
+            }) ?? 0
+            return text.dropLast(held)
+        }
+
+        static func scan(_ text: String, streaming: Bool) -> Scan {
+            var scan = Scan()
+            var rest = text[...]
+            while !scan.verbatim, let next = nextTag(in: rest) {
+                scan.append(rest[..<next.range.lowerBound])
+                scan.apply(tag: next.tag)
+                rest = rest[next.range.upperBound...]
+            }
+            scan.append(streaming && !scan.verbatim ? withoutPartialTags(rest) : rest)
+            return scan
+        }
+
+        /// Splits complete (final) output. A thinking frame that never
+        /// closed (for example `finish_reason` length) runs to the end; a
+        /// header that never reached its opener is dropped.
+        static func split(_ text: String) -> Split {
+            scan(text, streaming: false).split
+        }
+
+        /// Splits a streaming prefix: a suffix that could still become a
+        /// marker is held, so reasoning and answer only grow. Incremental
+        /// twin: `IncrementalInklingReasoningSplit`.
+        static func splitStreamingPrefix(_ text: String) -> Split {
+            scan(text, streaming: true).split
+        }
+
+        /// True when the final output opened a thinking frame.
+        static func reasoned(_ text: String) -> Bool {
+            scan(text, streaming: false).opened
+        }
+
+        /// The tokens of each thinking frame, from the one that starts its
+        /// opener through the one that completes the marker ending it (to
+        /// the end when it never ended), summed; a token two frames share
+        /// counts once. None without a thinking frame.
+        static func reasoningTokenCount(tokenIDs: [Int], decode: ([Int]) -> String) -> Int {
+            guard !tokenIDs.isEmpty else { return 0 }
+            let text = decode(tokenIDs)
+            var scan = Scan(keepsReasoning: false)
+            var rest = text[...]
+            var blocks: [(open: Int, close: Int?)] = []
+            while !scan.verbatim, let next = nextTag(in: rest) {
+                scan.append(rest[..<next.range.lowerBound])
+                let wasInside = scan.inside
+                scan.apply(tag: next.tag)
+                if scan.inside, !wasInside {
+                    blocks.append((text.utf8.distance(from: text.startIndex, to: next.range.lowerBound), nil))
+                }
+                if wasInside, !scan.inside {
+                    blocks[blocks.count - 1].close = text.utf8.distance(from: text.startIndex, to: next.range.upperBound)
+                }
+                rest = rest[next.range.upperBound...]
+            }
+            func tokens(past bytes: Int) -> Int {
+                var low = 1
+                var high = tokenIDs.count
+                while low < high {
+                    let mid = (low + high) / 2
+                    if decode(Array(tokenIDs.prefix(mid))).utf8.count > bytes { high = mid } else { low = mid + 1 }
+                }
+                return low
+            }
+            var count = 0
+            var counted = 0
+            for block in blocks {
+                let before = max(counted, tokens(past: block.open) - 1)
+                let end = block.close.map { tokens(past: $0 - 1) } ?? tokenIDs.count
+                count += max(0, end - before)
+                counted = max(counted, end)
+            }
+            return count
+        }
+
+        /// The model's own frame markers are kept through the stop-token
+        /// filter for this split; buyer-visible text never holds them.
+        static func strippingMarkers(_ text: String) -> String {
+            var text = text
+            for tag in tags + [endSampling] { text = text.replacingOccurrences(of: tag, with: "") }
+            return text
+        }
+    }
+
     /// Which output text request stops run over (SPEC-018 §3.12). Callers
     /// pass it explicitly; there is no Bool-literal or default scope.
     enum StopScope: Equatable {
@@ -316,8 +549,36 @@ enum ReasoningOutput {
         /// reply leads with answer text (`MiniMax.lead`), then the whole
         /// output. An undecided lead is still reasoning.
         case afterMiniMaxThink
+        /// Inkling 2 (#2467): the text after the first `<|end_message|>`
+        /// unless the reply opens with a content frame or unframed text
+        /// (`Inkling.lead`), then the whole output. An undecided lead is
+        /// still reasoning.
+        case afterInklingThink
 
         init(_ reasoningOpen: Bool) { self = reasoningOpen ? .afterThink : .whole }
+
+        /// Whether the text so far leads with answer text, for the scopes
+        /// whose reasoning region depends on the lead; nil for the others.
+        func answerLead(_ text: String) -> Bool? {
+            switch self {
+            case .whole, .afterThink: return nil
+            case .afterMiniMaxThink: return MiniMax.lead(text) == .answer
+            case .afterInklingThink: return Inkling.lead(text) == .answer
+            }
+        }
+
+        /// The tag that ends the reasoning region of a lead-dependent scope.
+        var leadCloseTag: String? {
+            switch self {
+            case .whole, .afterThink: return nil
+            case .afterMiniMaxThink: return MiniMax.closeTag
+            case .afterInklingThink: return Inkling.endMessage
+            }
+        }
+
+        /// Reasoning blocks may occur anywhere in the reply (MiniMax,
+        /// Inkling 2): the answer grows around them.
+        var splitsBlocks: Bool { leadCloseTag != nil }
 
         /// The tag that ends the stop-free reasoning region of `text`, or nil
         /// when stops run over all of it.
@@ -326,6 +587,7 @@ enum ReasoningOutput {
             case .whole: return nil
             case .afterThink: return ReasoningOutput.closeTag
             case .afterMiniMaxThink: return MiniMax.lead(text) == .answer ? nil : MiniMax.closeTag
+            case .afterInklingThink: return Inkling.lead(text) == .answer ? nil : Inkling.endMessage
             }
         }
     }

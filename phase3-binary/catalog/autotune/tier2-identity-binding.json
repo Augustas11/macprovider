@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "c4f7b3681e20f887ed533192da6cd536475124cab482cd013923cc028b541650",
-  "generated_at": "2026-11-20T09:45:00Z",
+  "autotune_candidates_sha256": "35eca74b3522f452c3538e78498cb6682cc860345e186bbfecbc4b751f2f1302",
+  "generated_at": "2026-11-24T08:05:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -64,6 +64,13 @@
       "model_id": "mlx-community/gpt-oss-20b-MXFP4-Q8",
       "model_revision": "773a7da77e569019bb0fd17a554b263738d669a3",
       "sha256": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1"
+    },
+    {
+      "catalog_key": "thinkingmachines/inkling-2-mini",
+      "min_ram_gb": 32,
+      "model_id": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+      "model_revision": "3eea042751cd296b7266628a8342c1749242e1fe",
+      "sha256": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34"
     },
     {
       "catalog_key": "meta-llama/llama-3.2-3b-instruct",
@@ -207,6 +214,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-20-deepseek-v4-flash-abliterated-recommendable-v289",
+  "release_id": "published-2026-11-24-inkling-2-mini-listed-v289",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

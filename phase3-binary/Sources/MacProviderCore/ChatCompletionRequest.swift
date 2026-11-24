@@ -765,9 +765,15 @@ public struct ChatMessage: Sendable {
             } else {
                 parsedToolCalls = nil
             }
+            // `reasoning` is the common alias (OpenRouter, vLLM); a non-empty
+            // string `reasoning_content` wins when a client sends both, and an
+            // empty one counts as absent.
+            let primary = dict["reasoning_content"] as? String
+            let alias = dict["reasoning"] as? String
+            let reasoning = primary?.isEmpty == false ? primary : (alias?.isEmpty == false ? alias : primary ?? alias)
             return ChatMessage(
                 role: role, content: content, toolCallID: nil, toolCalls: parsedToolCalls,
-                reasoningContent: dict["reasoning_content"] as? String
+                reasoningContent: reasoning
             )
         case .tool:
             guard let toolCallID = dict["tool_call_id"] as? String, !toolCallID.isEmpty else {

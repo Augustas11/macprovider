@@ -1,6 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.42 (2026-11-16, sanctions keyed on the resolved catalog row)
+**Version:** 1.6.43 (2026-11-24, Inkling 2 joins the reasoning-split provider gate)
+
+**Change log v1.6.43 (2026-11-24, Related: #2467):** The v1.6.34 gate for a
+family whose reasoning the provider must split off the answer now also
+covers Inkling 2 (`inkling2` grammar, SPEC-018 v0.3.20): every Inkling 2
+request, plain chat included, reaches only a native provider that declares
+the family for its exact loaded model, with the same 503, settlement and
+encrypted-reservation behaviour as MiniMax M3. Other families are unchanged.
 
 **Change log v1.6.42 (2026-11-16, Related: #2338):** `SPEC-002-R011`
 keys every per-model sanction on the resolved catalog row, not on the

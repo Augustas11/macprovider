@@ -285,6 +285,11 @@ class BuyerUXConformanceTests(unittest.TestCase):
             minimax = bux.advertised_capabilities(model)
             self.assertEqual((minimax["tools"], minimax["tool_choice"], minimax["reasoning"]), (True, ["auto", "none"], False))
         self.assertEqual(bux.tool_grammar_family("MiniMaxAI/MiniMax-M2.5"), "")
+        # #2467: Inkling 2 has a tool grammar and thinks by default.
+        for model in ("mlx-community/Inkling-2-Mini-oQ4e-mtp", "thinkingmachines/inkling-2-mini"):
+            self.assertEqual(bux.tool_grammar_family(model), "inkling2")
+            inkling = bux.advertised_capabilities(model)
+            self.assertEqual((inkling["tools"], inkling["tool_choice"], inkling["reasoning"]), (True, ["auto", "none"], True))
 
     def test_tool_grammar_family_matches_the_shared_fixture(self):
         """#2355: one fixture for the Swift, Go, gateway and Python copies."""
@@ -309,6 +314,14 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertEqual(result["checks"]["stream_tool_deltas"]["status"], bux.FAIL)
         self.assertIn("reasoning markup", result["checks"]["stream_tool_deltas"]["detail"])
         self.assertFalse(bux._leaks_reasoning("The tag is mm:think without brackets."))
+
+    def test_inkling2_frame_markup_is_a_leak(self):
+        """#2467: an Inkling 2 frame marker in content means the frames were not split."""
+        for content in ("<|message_model|><|content_thinking|>2+2 is 4.<|end_message|>4",
+                        "2+2 is 4.<|end_message|><|message_model|><|content_text|>4", "<|content_thinking|>still thinking"):
+            leak = chat({"content": content}, "stop")
+            self.assertEqual(self.run_with(plain=leak)["checks"]["no_reasoning_leak"]["status"], bux.FAIL, content)
+        self.assertFalse(bux._leaks_reasoning("The frame is content_text without its token."))
 
 
 class RetryAndSamplingTests(unittest.TestCase):

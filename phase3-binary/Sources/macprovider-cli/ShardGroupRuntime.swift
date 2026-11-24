@@ -378,6 +378,11 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         guard ModelRuntime.toolGrammar(for: request) != .minimax else {
             throw APIError(status: 400, message: "MiniMax M3 is not supported by a shard group yet", code: "shard_group_model_unsupported", param: "model")
         }
+        // Inkling 2 frames its output in special tokens the shard stream
+        // does not split (#2467).
+        guard ModelRuntime.toolGrammar(for: request) != .inkling2 else {
+            throw APIError(status: 400, message: "Inkling 2 is not supported by a shard group yet", code: "shard_group_model_unsupported", param: "model")
+        }
         guard case .text = request.responseFormat else {
             throw APIError(status: 400, message: "Structured output is not supported by a shard group yet", code: "shard_group_response_format_unsupported", param: "response_format")
         }

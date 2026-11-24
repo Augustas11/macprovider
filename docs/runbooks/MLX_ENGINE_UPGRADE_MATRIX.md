@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.88` | `73eb9cf7663df03476c568f907bcadd829488c45` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.89` | `10584fc0d79cf75b49115f0f42fd7b8c8f30c637` | `3.33.0` (`ca661dc6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
@@ -46,6 +46,20 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-24 the LM row is `3.33.0-macprovider.89` (`10584fc`), on
+`3.33.0-macprovider.88` (#2467): 3.33.0-macprovider.88 plus the Inkling 2 Mini
+text model (inkling2_loop: model file, registry entry, tests and a tiny test
+fixture) and its Ollama-ported decode kernels (fused attention inputs,
+residual mix, message controllers, short convolutions, router top-k, ring
+attention; new MLXLMCommon kernel files and a read-only
+RotatingKVCache.ringRotation), rebased unchanged from
+macprovider/2467-ollama-kernels (ea6f545c); no other model's code changes.
+Measured on this revision (Studio run 20261124T073707Z): 64/64 greedy parity
+against mlx-vlm on both layouts at 1K and 8K; on the oQ4e weights 45.3/43.9/40.2
+decode tok/s at 1K/8K/32K, 156-163% of mlx-vlm, prefill 99-107%. No Swift, core
+or C pin
+changes.
 
 As of 2026-11-24 the LM row is `3.33.0-macprovider.88` (`73eb9cf`), the fork
 patch stack (through `3.32.3-macprovider.87`) rebased onto upstream `3.33.0`
