@@ -301,6 +301,32 @@ health v9.0.0 $LIVE
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a code change" scripts/ops/pearl-runtime.sh status
 expect_next signed_tag:mutate
 
+# Runtime tag guard: no tag while a ready PR touches the runtime or its billing aliases.
+fixture '{"runs": {}, "prs": [
+  {"number": 77, "isDraft": false, "files": [{"path": "phase5-gateway/internal/router/alias.go"}]},
+  {"number": 78, "isDraft": true, "files": [{"path": "phase4-coordinator/internal/billing/formula.go"}]},
+  {"number": 79, "isDraft": false, "files": [{"path": "docs/runbooks/x.md"}]}]}'
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a ready gateway PR open" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:blocked
+case "$(next_field reason)" in *"ready PR #77 touches coordinator/gateway"*PEARL_RUNTIME_ALLOW_OPEN_PRS=1*) ok ;; *) bad "open-PR guard reason: $(next_field reason)" ;; esac
+PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 3 "open runtime PR refuses the tag" scripts/ops/pearl-runtime.sh next --run
+fixture '{"runs": {}, "prs": [{"number": 80, "isDraft": false, "files": [{"path": "phase3-binary/catalog/autotune/rate-card.json"}]}]}'
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a ready rate-card PR open" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:blocked
+case "$(next_field reason)" in *"#80"*) ok ;; *) bad "rate-card PR not named: $(next_field reason)" ;; esac
+PEARL_RUNTIME_ALLOW_OPEN_PRS=1 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "override without a reason" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:blocked
+PEARL_RUNTIME_ALLOW_OPEN_PRS=1 PEARL_RUNTIME_ALLOW_OPEN_PRS_REASON="rate-only row, no alias" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "override with a reason" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:mutate
+[ "$(fact_of open_runtime_prs_allowed)" = "#80: rate-only row, no alias" ] && ok || bad "override fact: $(fact_of open_runtime_prs_allowed)"
+fixture '{"runs": {}, "prs": [{"number": 81, "isDraft": true, "files": [{"path": "phase4-coordinator/x.go"}]}, {"number": 82, "isDraft": false, "files": [{"path": "README.md"}]}]}'
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "drafts and unrelated PRs do not block the tag" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:mutate
+fixture '{"runs": {}, "pr_list_fail": true}'
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status when gh cannot list PRs" scripts/ops/pearl-runtime.sh status
+expect_next signed_tag:blocked
+fixture '{"runs": {}}'
+
 touch "$W/untracked-file"
 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 3 "dirty tree refuses a mutating step" scripts/ops/pearl-runtime.sh next --run
 expect_err "working tree is not clean"

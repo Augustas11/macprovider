@@ -22,38 +22,28 @@ LAB_BUILD_SURFACES = {
     # Isolated loopback lab rig: builds the lab binary that reads the
     # static-feed lab override (#2364); never a release or signing path.
     ROOT / "scripts" / "lab" / "1690-m6" / "rig.sh",
-    ROOT / "scripts" / "lab" / "minimax" / "job-2376-parity.sh",
     # Start-up timing rig (#2431): builds the lab binary to time `serve --no-join`.
     ROOT / "scripts" / "lab" / "startup-timing" / "run-from-mac.sh",
-    # Abliterated-perf lab window (#2409): each job builds the lab binary on the
-    # Studio for loopback parity/throughput cells; never a release or signing path.
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-dsv4-abliterated.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-parity.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-profile.sh",
-    # Catalog intake windows (#2465 DaisyRose-27B, #2466 Sage-S2.1-Flash): build the
-    # lab binary on the Studio for loopback MTP cells; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2465" / "job.sh",
     # #2465 MTP-16 self-check record capture for the DaisyRose-27B variant (lab build,
     # loopback static-feed origin); never a release or signing path.
     ROOT / "scripts" / "lab" / "2465" / "selfcheck.sh",
-    ROOT / "scripts" / "lab" / "2466" / "job.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-prefill-step-gate.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-cb.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen4-listing.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-qwen-mtp-cap.sh",
-    ROOT / "scripts" / "lab" / "ablit-perf" / "job-glm-wide-prefill.sh",
-    # Mixed small-M route window (#2462): builds the lab binary on the Studio for
-    # A/B/A loopback cells; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2462" / "job.sh",
     # Dense qmm tile windows (#2451): build lab binaries on the Studio for TTFT A/B
     # cells; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2451" / "job.sh",
     ROOT / "scripts" / "lab" / "2451" / "ship-job.sh",
-    # Native-MTP verify profile window (#2469, #2475): builds the lab binary on the
-    # Studio for loopback verify-step timing; never a release or signing path.
-    ROOT / "scripts" / "lab" / "2469" / "job.sh",
 }
+LAB_ROOT = ROOT / "scripts" / "lab"
+
+
+def _is_lab_job_script(path: Path) -> bool:
+    """A Studio window job script: scripts/lab/<campaign>/job.sh or job-<name>.sh.
+
+    These build the lab binary for loopback cells on the Studio and are never
+    a release, signing or CI path, so each new campaign's job script needs no
+    allowlist edit. Only that exact depth and name shape is accepted.
+    """
+    if path.parent.parent != LAB_ROOT or path.is_symlink():
+        return False
+    return path.name == "job.sh" or (path.name.startswith("job-") and path.suffix == ".sh")
 # These proof-only files quote the forbidden flag to verify that production
 # inputs exclude it; they never invoke a release, signing, or CI build.
 LAB_FLAG_REFERENCE_SURFACES = {
@@ -230,7 +220,7 @@ def _proof_surface_uses_only_literal_git(text: str) -> bool:
 
 
 def _permitted_flag_reference(path: Path, text: str) -> bool:
-    if path in LAB_BUILD_SURFACES:
+    if path in LAB_BUILD_SURFACES or _is_lab_job_script(path):
         return True
     return path in LAB_FLAG_REFERENCE_SURFACES and _proof_surface_uses_only_literal_git(text)
 
@@ -273,6 +263,19 @@ class NativeMTPLabFlagGuardTests(unittest.TestCase):
 
     def test_unknown_flag_reference_path_is_not_permitted(self) -> None:
         self.assertFalse(_permitted_flag_reference(ROOT / "scripts" / "new-proof.py", FORBIDDEN))
+
+    def test_lab_job_scripts_are_permitted_by_pattern_only(self) -> None:
+        for name in ("job.sh", "job-qwen-parity.sh"):
+            self.assertTrue(_permitted_flag_reference(LAB_ROOT / "9999-new" / name, FORBIDDEN), name)
+        for path in (
+            LAB_ROOT / "9999-new" / "release.sh",
+            LAB_ROOT / "9999-new" / "job.py",
+            LAB_ROOT / "9999-new" / "nested" / "job.sh",
+            LAB_ROOT / "job.sh",
+            ROOT / "scripts" / "release" / "job.sh",
+            ROOT / ".github" / "workflows" / "job.sh",
+        ):
+            self.assertFalse(_permitted_flag_reference(path, FORBIDDEN), str(path.relative_to(ROOT)))
 
     def test_qualification_helpers_do_not_expose_lab_serving_mutations(self) -> None:
         offenders: list[str] = []

@@ -16,7 +16,11 @@
 # "Runtime apply"; docs/releases/cli-release-train.md Session protocol):
 #   1 code_changed      coordinator/gateway code differs from the live tag (rule 2:
 #                       never cut a runtime release to ship tooling only)
-#   2 signed_tag        signed annotated tag on origin/main HEAD
+#   2 signed_tag        signed annotated tag on origin/main HEAD; blocked while an
+#                       open non-draft PR touches phase4-coordinator/, phase5-gateway/
+#                       or catalog rate-card/alias files (merge it first, or
+#                       PEARL_RUNTIME_ALLOW_OPEN_PRS=1 plus
+#                       PEARL_RUNTIME_ALLOW_OPEN_PRS_REASON)
 #   3 dispatch          pearl-runtime-release.yml on main (one in flight at most)
 #   4 env_approval      production-release approval (owner account)
 #   4a app_attest_recorder  one-time: app_attest_recorder login and
@@ -403,6 +407,18 @@ PEARL_UPDATER_BIN="${PEARL_UPDATER_BIN:-/usr/local/sbin/macprovider-pearl-update
 PEARL_TIER2_WATCHDOG_BIN="${PEARL_TIER2_WATCHDOG_BIN:-/usr/local/sbin/macprovider-tier2-enforcement-watchdog}"
 RETENTION_SCOPE="retention-run"
 
+
+# Open non-draft PRs whose files ship in the runtime (coordinator, gateway) or
+# feed its billing aliases (catalog rate cards). A tag cut while one is
+# unmerged forces a second release and a second buyer hold (v1.8.297 was
+# tagged while such a PR was mid-rebase; v1.8.298 followed). Prints "#N, #M"
+# (empty when none); fails when gh cannot list.
+open_runtime_prs() {
+  gh pr list -R "$(gh_repo)" --state open --limit 200 --json number,isDraft,files \
+    --jq '[.[] | select(.isDraft | not) | select(any(.files[]?.path;
+      test("^(phase4-coordinator|phase5-gateway)/") or
+      test("^phase3-binary/(catalog|dist/static)/.*(rate-card|alias)"))) | "#\(.number)"] | join(", ")'
+}
 
 max_remote_tag() {
   git -C "$REPO_ROOT" ls-remote --tags origin 'v*' 2>/dev/null |
@@ -1750,6 +1766,7 @@ EOF
   OPS_SCOPE="pearl-runtime-$T"
 
   # 2. signed annotated tag on main HEAD.
+  local open_prs=""
   if remote_tag_exists "$T"; then
     local ttype signed=false
     ttype="$(git -C "$REPO_ROOT" cat-file -t "$T" 2>/dev/null || true)"
@@ -1766,7 +1783,15 @@ EOF
     step signed_tag pending ""
     if [ "$(semver_cmp "${T#v}" "${max_tag:-0.0.0}")" != "1" ]; then
       set_next signed_tag blocked "Signed annotated tag $T" "" "$T is not above the highest remote tag v$max_tag; consumed tags are never reused"
+    elif ! open_prs="$(open_runtime_prs)"; then
+      set_next signed_tag blocked "Signed annotated tag $T" "" \
+        "cannot list open PRs with gh; a tag cut while a ready coordinator/gateway PR is unmerged forces a second release (v1.8.297 -> v1.8.298)"
+    elif [ -n "$open_prs" ] && { [ "${PEARL_RUNTIME_ALLOW_OPEN_PRS:-}" != 1 ] || [ -z "${PEARL_RUNTIME_ALLOW_OPEN_PRS_REASON:-}" ]; }; then
+      fact open_runtime_prs "$open_prs"
+      set_next signed_tag blocked "Signed annotated tag $T" "" \
+        "ready PR $open_prs touches coordinator/gateway; merge it first or set PEARL_RUNTIME_ALLOW_OPEN_PRS=1 with a reason (PEARL_RUNTIME_ALLOW_OPEN_PRS_REASON)"
     else
+      [ -z "$open_prs" ] || fact open_runtime_prs_allowed "$open_prs: ${PEARL_RUNTIME_ALLOW_OPEN_PRS_REASON:-}"
       set_next signed_tag mutate "Push signed annotated tag $T on origin/main HEAD $main_sha" \
 "git tag -s -a $T -m 'Pearl runtime $T' $main_sha
 git push origin refs/tags/$T"
