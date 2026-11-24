@@ -29,9 +29,12 @@
 #    run to run: window 2 measured base-vs-base 4-row differences on qwen3.5-27b);
 #  - no cell of new is slower than base1 beyond the cell's noise band;
 #  - cb pass of a key with a signed CB entry: new's ROUTE is batched (run-grid --expect-route);
-#  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on) and its text equals new's
-#    own ordinary decode in the cb pass (SPEC-048 R015: native MTP is lossless). Base runs that
-#    cannot admit native MTP on this loopback are reported, not gated.
+#  - mtp pass: new proposes tokens (run-grid --expect-native-mtp on) and new's own native-MTP
+#    self-check passed (SPEC-048 R015: native MTP equals ordinary decode token for token on the
+#    same serve). new's text is also compared with the cb pass's ordinary decode; where the two
+#    serves run different small-M routes (row_invariant/mixed vs stock_order) the numerics
+#    differ, so those differences are reported, not gated. Base runs that propose no native-MTP
+#    token are reported, not gated, and the pass's new-vs-base1 speed is not compared.
 # TEXT_CHANGE_KEYS="key=reason ...": catalog keys whose numerics the engine changes on purpose;
 # their text differences from base1 are reported, not gated (gate.py --text-change-expected).
 # Exit 0 = every new grid ran and every gate passed.
