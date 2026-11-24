@@ -56,6 +56,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pass", dest="pass_", choices=("cb", "mtp"), required=True)
     ap.add_argument("--text-change-expected", default="")
+    ap.add_argument("--new-only", action="store_true",
+                    help="no base runs (RUNS without base1): skip the new-vs-base1 checks")
     ap.add_argument("dir")
     a = ap.parse_args()
     problems, info, warn = [], [], []
@@ -64,12 +66,12 @@ def main():
     # decode and a new-vs-base1 speed delta compares native MTP against ordinary decode.
     base_mtp_ran = True
     if a.pass_ == "mtp":
-        base_mtp_ran = proposed(os.path.join(a.dir, "base1", "provider.jsonl")) > 0
+        base_mtp_ran = a.new_only or proposed(os.path.join(a.dir, "base1", "provider.jsonl")) > 0
         if not base_mtp_ran:
             info.append("base1 proposed no native-MTP token: new-vs-base1 speed not compared"
                         " (base1 cells are ordinary decode; the cb pass gates that speed)")
     base2 = cells(load(os.path.join(a.dir, "compare-base2.json")))
-    if new is None:
+    if new is None and not a.new_only:
         problems.append("no compare-new.json (new grid did not run)")
     for key, c in sorted(cells(new).items()):
         ctx, out, rows = key
@@ -86,7 +88,7 @@ def main():
             problems.append(f"{tag}: new request tok/s {delta:+.3f} vs base1, beyond band {band:.3f}")
     if a.pass_ == "mtp":
         m = load(os.path.join(a.dir, "compare-new-mtp-vs-new-ordinary.json"))
-        if m is None:
+        if m is None and not a.new_only:
             problems.append("no native-MTP vs ordinary comparison (new mtp or new cb grid did not run)")
         # SPEC-048 R015 losslessness is the serve's own native-MTP self-check: native MTP and
         # ordinary decode on the same serve, token for token. The cross-serve comparison above
@@ -98,7 +100,9 @@ def main():
         if sc != "passed":
             problems.append(f"new native-MTP self-check result={sc} (R015 needs every line passed)")
         ref = load(os.path.join(a.dir, "compare-new-mtp-vs-ref.json"))
-        if ref is None:
+        if ref is None and a.new_only:
+            problems.append("no same-route ordinary reference: a new-only window gates R015 on it")
+        elif ref is None:
             info.append("no same-route ordinary reference (ref run absent): R015 rests on the self-check")
         for key, c in sorted(cells(ref).items()):
             if not c.get("identical"):

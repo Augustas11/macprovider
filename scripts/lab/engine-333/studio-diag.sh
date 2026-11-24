@@ -31,6 +31,7 @@ fork_probe() { # tag checkout_dir metallib
   rm -f "$dir/Tests/MLXLMTests/Qwen35RealVerifyParityLab.swift"
 }
 
+if [ "${DIAG:-1}" != provider ]; then
 git -C "$L/mlx-swift-lm" checkout -q "$LM_REV" || exit 4
 fork_probe new "$L/mlx-swift-lm" "$NEW/mlx.metallib"
 [ -d "$L/mlx-swift-lm-85" ] || git -C "$L/mlx-swift-lm" worktree add -q "$L/mlx-swift-lm-85" 3.32.3-macprovider.85
@@ -47,12 +48,13 @@ if [ -n "$(lsha old)" ] && [ "$(lsha old)" = "$(lsha no633)" ]; then echo "LOGIT
 else echo "LOGITS_DIFFER old vs new-minus-#633"; failed=1; fi
 [ "$(lsha new)" = "$(lsha old)" ] && echo "LOGITS new == old (bitwise)" || echo "LOGITS new != old (expected from #633)"
 [ "$(tok new)" = "$(tok old)" ] && echo "TOKENS new == old" || echo "TOKENS new != old"
+fi
 
 echo "#### provider tests $(date +%T)"
 P="$L/macprovider/phase3-binary"
 ( cd "$P" && swift build --build-tests ) > "$D/provider-build.log" 2>&1 || { echo "PROVIDER_BUILD_FAILED"; tail -5 "$D/provider-build.log"; exit 1; }
 for x in "$P"/.build/arm64-apple-macosx/debug/*.xctest/Contents/MacOS; do cp "$NEW/mlx.metallib" "$x/mlx.metallib"; done
-for f in 'PagedKVRuntimeBridgeTests/testRealQwen35' 'PagedKVRuntimeBridgeTests/testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims' 'NativeMTPSelfTestTests'; do
+for f in 'PagedKVRuntimeBridgeTests/testRealQwen35' 'PagedKVRuntimeBridgeTests/testMTPPackedCache' 'PagedKVRuntimeBridgeTests/testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims' 'NativeMTPSelfTestTests'; do
   log="$D/provider-$(echo "$f" | tr '/' '_').log"
   ( cd "$P" && swift test --skip-build --filter "$f" ) > "$log" 2>&1
   rc=$?; echo "provider $f rc=$rc"; [ $rc -eq 0 ] || failed=1

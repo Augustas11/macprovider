@@ -122,6 +122,8 @@ for spec in "${MODELS[@]}"; do
   pathkey="${rest%%:*}"; mtp=""; [ "$rest" = "$pathkey" ] || mtp="${rest#*:}"
   path="${pathkey%@*}"; key="${pathkey##*@}"; sha="$(basename "$path")"
   passes="cb"; [ "$mtp" = mtp ] && passes="cb mtp"
+  # PASSES="mtp" / RUNS="new ref": a correctness-only window (no speed controls).
+  if [ -n "${PASSES:-}" ]; then p2=""; for p in $passes; do [[ " $PASSES " == *" $p "* ]] && p2="$p2 $p"; done; passes="$p2"; fi
   for pass in $passes; do
     M="$OUT/$name/$pass"; mkdir -p "$M"
     runs=(base1:"$BASE" new:"$NEW" base2:"$BASE")
@@ -129,7 +131,9 @@ for spec in "${MODELS[@]}"; do
     # rows run in): the same-route ordinary reference new's native-MTP text must equal.
     [ "$pass" = mtp ] && runs+=(ref:"$NEW")
     for run in "${runs[@]}"; do
-      tag="${run%%:*}"; bin="${run#*:}"; R="$M/$tag"; rm -rf "$R"; mkdir -p "$R"
+      tag="${run%%:*}"; bin="${run#*:}"
+      if [ -n "${RUNS:-}" ] && [[ " $RUNS " != *" $tag "* ]]; then continue; fi
+      R="$M/$tag"; rm -rf "$R"; mkdir -p "$R"
       msha=$(shasum -a 256 "$bin/mlx.metallib" | cut -d' ' -f1)
       extra="$R/serve-extra.yaml"; : > "$extra"; route=any
       cb_extra "$key" "$msha" "$extra"; crc=$?
@@ -170,7 +174,8 @@ for spec in "${MODELS[@]}"; do
       fi
     fi
     tce=""; for kv in ${TEXT_CHANGE_KEYS:-}; do [ "${kv%%=*}" = "$key" ] && tce="${kv#*=}"; done
-    /usr/bin/python3 -I "$HERE/gate.py" --pass "$pass" ${tce:+--text-change-expected "$tce"} "$M" | tee "$M/gate.txt"
+    newonly=""; [ -n "${RUNS:-}" ] && [[ " $RUNS " != *" base1 "* ]] && newonly=--new-only
+    /usr/bin/python3 -I "$HERE/gate.py" --pass "$pass" $newonly ${tce:+--text-change-expected "$tce"} "$M" | tee "$M/gate.txt"
     [ "${PIPESTATUS[0]}" -eq 0 ] || failed=1
   done
 done
