@@ -19,6 +19,15 @@ SPEC-048 R015 `s4-p1536-o512` gated cell this happened only on the native arm,
 whose text preparation lane (`qwen3_5_mtp_v1`) admits arrivals during the
 head's forwards; it cost the native row about 1.2 s of first-token latency
 and the gated TTFT p95 about +6% against ordinary CB with no MTP drafting.
+In those cells the ordinary arm's arrivals miss the head's second forward by
+about 4 ms, so the ordinary arm already prefills them as one group; the rule
+makes the native arm's prefill grouping deterministic and identical to the
+ordinary arm's. Measured (Studio window r2, 12 blocks per arm, A1/B/A2): s4
+gated native TTFT p95 20.61 -> 19.54 s, and the R015 TTFT, TPOT and throughput
+bounds against ordinary CB all PASS. s2 native TTFT p95 10.25 -> 10.60 s
+(+3.4%) because the arrival no longer shares the head's second forward (head
+TTFT -18%, head TPOT about +7%, per-request e2e about -2.3%); the s2 TPOT bound
+failure reflects the per-step held-row overhead tracked in #2489.
 While a row decodes, and on a serial-cohort backend (v0.3.24, v0.3.49), the
 rule is unchanged. Each row keeps its own chunk partition, so no token
 changes.
