@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at e7243b3d the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 6c2ac790 (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 52ae025c the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at cde15ff7 (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,31 +42,30 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: One commit that only
-# moves its mlx-swift pin to 0.32.3-macprovider.27
-# (e7243b3d792ea39da0a653990fba06630cc6ada6), 0.32.3-macprovider.26 plus the
-# MLX core dense qmm_t 64-row tile from 1024 rows for affine bfloat16 group-64
-# weights. No model source changes; the tags are cut from these revisions at
-# the campaign freeze.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.87"
-SPEC048_MLX_SWIFT_LM_REVISION = "0efe0402707951016ed695d11f359df669b26c09"
-SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
+# 3.33.0-macprovider.88 (engine-333): the fork patch stack (through
+# 3.32.3-macprovider.87, 0efe0402) rebased onto upstream 3.33.0, with its
+# mlx-swift pin at 0.33.0-macprovider.28 (52ae025cbfac595328bd7fad23c8bce560bbe57c).
+# Upstream #633 (gated-delta q/k L2-norm eps) changes Qwen gated-delta greedy
+# text on purpose; no other model-output change. The tags are cut from these
+# revisions at merge.
+SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.88"
+SPEC048_MLX_SWIFT_LM_REVISION = "73eb9cf7663df03476c568f907bcadd829488c45"
+SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.27"
-# Fork tag 0.32.3-macprovider.27 (#2451): .26 (aaa82655) plus one commit that
-# moves the MLX core gitlink to the dense qmm_t 64-row tile below and adds the
-# QmmTileTests bit-identity test. .26 (#2462) is .25 (12d26ef6) plus one commit that
-# moves the MLX core gitlink to the per-op small-M route below and mlx-c to its
-# C binding, adds the Swift API (SmallMRoute, withSmallMRoute: a thread scope
-# QuantizedMatmul captures at graph build) and regenerates the quantized jit
-# sources. .25 is .24 (7fbcada9) plus a synchronous eval that waits for the
-# device without holding the process-wide evalLock. The tag is cut from this
-# revision at the campaign freeze.
-SPEC048_MLX_SWIFT_REVISION = "e7243b3d792ea39da0a653990fba06630cc6ada6"
-SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.4-macprovider.17 (#2451): v0.32.4-macprovider.16 (dd68f1d2)
-# plus one commit: dense qmm_t takes a 64-row tile from 1024 rows for affine
-# bfloat16 group-64 weights. .16 (#2462) is v0.32.4-macprovider.15 (4e9a71dc)
+SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"
+# Fork tag 0.33.0-macprovider.28 (engine-333): the fork patch stack rebased onto
+# upstream mlx-swift 0.33.0 plus mlx-swift PR 522; its Source/Cmlx/mlx gitlink
+# is cde15ff75 and Source/Cmlx/mlx-c is 33d88bf. Prior: 0.32.3-macprovider.27
+# (e7243b3d, #2451) is .26 (aaa82655) plus the dense qmm_t 64-row tile gitlink
+# and the QmmTileTests bit-identity test; .26 (#2462) added the per-op small-M
+# route (SmallMRoute, withSmallMRoute). The tag is cut from this revision at
+# merge.
+SPEC048_MLX_SWIFT_REVISION = "52ae025cbfac595328bd7fad23c8bce560bbe57c"
+SPEC048_MLX_SWIFT_UPSTREAM_BASE = "7ede4fd6d05f63305c1c0ebf4f8c1909a637c574"
+# Fork tag v0.32.4-macprovider.18 (engine-333): v0.32.4-macprovider.17
+# (6c2ac790) plus cherry-picks of ml-explore/mlx #4883, #4881 and #4930.
+# .17 (#2451) is v0.32.4-macprovider.16 (dd68f1d2) plus one commit: dense qmm_t
+# takes a 64-row tile from 1024 rows for affine bfloat16 group-64 weights. .16 (#2462) is v0.32.4-macprovider.15 (4e9a71dc)
 # plus three commits that add a thread-scoped per-op small-row route captured
 # on QuantizedMatmul (carried through its vjp/jvp) and a discriminating 2-row
 # GPU route test; .15 is seven commits on v0.32.4-macprovider.14 (upstream MLX
@@ -79,18 +78,21 @@ SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.17"
-SPEC048_MLX_CORE_REVISION = "6c2ac790c038dd43acbae5e0c99f94c49d94b771"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.18"
+SPEC048_MLX_CORE_REVISION = "cde15ff75e719a47677d7953657ee319ba50deee"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.
+# v0.8.0-macprovider.5 (engine-333): mlx-c v0.8.0 plus the fork's reference-
+# prefill and small-M route bindings (the v0.6.0-macprovider.4 commit 70f188c
+# ported); its CMake FetchContent pins MLX core cde15ff75. Prior:
 # v0.6.0-macprovider.4 (#2462): v0.6.0-macprovider.2 (2b1ff2b5) plus one commit
 # that binds the per-op small-M route scope (mlx/c/small_m_route.h). Tag .3
 # (07f7ae44) is a separate line on .2 and was never pinned; .4 is cut from
 # this revision at the campaign freeze.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"
-SPEC048_MLX_C_TAG = "v0.6.0-macprovider.4"
-SPEC048_MLX_C_REVISION = "70f188c0c19b36823e7c7b30c30ae6e8514509c3"
-SPEC048_MLX_C_UPSTREAM_BASE = "ebc88f10caa1b625e6b581437a8dea6df8a70085"
+SPEC048_MLX_C_TAG = "v0.8.0-macprovider.5"
+SPEC048_MLX_C_REVISION = "33d88bf44b974d73f978ba3ebee046fd941d13bf"
+SPEC048_MLX_C_UPSTREAM_BASE = "a26f2d584a14ec619ae8db9a09be03becd47598a"
 
 # #2028 audit carry: every reviewed revision and upstream base is a full
 # lowercase 40-hex Git object id, checked at import so a truncated or

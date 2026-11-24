@@ -665,6 +665,14 @@ enum DeepseekV4Encoding {
     }
 
     static func runtimeValue(_ any: Any) -> Value {
+        // mlx-swift-lm 3.33 hands tool-call arguments over with Optional values: a
+        // JSON null arrives as Optional.none boxed in Any, which no case below
+        // matches. Unwrap it first so it renders as null, not "nil".
+        let mirror = Mirror(reflecting: any)
+        if mirror.displayStyle == .optional {
+            guard let wrapped = mirror.children.first?.value else { return .null }
+            return runtimeValue(wrapped)
+        }
         switch any {
         case let value as Value: return value
         case is NSNull: return .null

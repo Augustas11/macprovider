@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.88 (engine-333) on 3.32.3-macprovider.87: The
+        // fork patch stack rebased onto upstream mlx-swift-lm 3.33.0, with the
+        // mlx-swift pin at 0.33.0-macprovider.28 (upstream 0.33.0 plus the
+        // small-M route and dense qmm tile), MLX core v0.32.4-macprovider.18
+        // (.17 plus upstream mlx 4883, 4881, 4930) and mlx-c v0.8.0-macprovider.5.
+        // Upstream 633 changes gated-delta Qwen text on purpose (q/k eps).
         // Tag 3.32.3-macprovider.87 (#2451) on 3.32.3-macprovider.86: Dense
         // qmm_t in the MLX core takes a 64-row tile from 1024 rows for affine
         // bfloat16 group-64 weights. No model source changes.
@@ -263,7 +269,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "0efe0402707951016ed695d11f359df669b26c09"
+            revision: "73eb9cf7663df03476c568f907bcadd829488c45"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
