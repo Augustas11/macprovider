@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.123
+**Version:** 0.1.124
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.123",
+  "version": "0.1.124",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -653,12 +653,33 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.87` | `0efe0402707951016ed695d11f359df669b26c09` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.27` | `e7243b3d792ea39da0a653990fba06630cc6ada6` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.17` | `6c2ac790c038dd43acbae5e0c99f94c49d94b771` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
-| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.88` | `73eb9cf7663df03476c568f907bcadd829488c45` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `ml-explore/mlx-swift` `0.33.0` (`7ede4fd6d05f63305c1c0ebf4f8c1909a637c574`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-c` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `ml-explore/mlx-c` `v0.8.0` (`a26f2d584a14ec619ae8db9a09be03becd47598a`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.87` is on `3.32.3-macprovider.86`
+The mlx-swift-lm row `3.33.0-macprovider.88` (engine-333), at
+`73eb9cf7663df03476c568f907bcadd829488c45`, is the fork patch stack (through
+`3.32.3-macprovider.87`) rebased onto upstream `3.33.0`
+(`ca661dc6885f8603e911746838b60d312439a368`), which contains ml-explore/mlx-swift-lm #701 and #581, with its
+mlx-swift pin at `0.33.0-macprovider.28`
+(`52ae025cbfac595328bd7fad23c8bce560bbe57c`): the fork patch stack rebased onto mlx-swift `0.33.0`
+(`7ede4fd6d05f63305c1c0ebf4f8c1909a637c574`) plus mlx-swift PR 522, whose `Source/Cmlx/mlx` gitlink is
+`cde15ff75e719a47677d7953657ee319ba50deee` and `Source/Cmlx/mlx-c` is
+`33d88bf44b974d73f978ba3ebee046fd941d13bf`. The core row moves to `v0.32.4-macprovider.18`
+(`cde15ff75e719a47677d7953657ee319ba50deee`, upstream `v0.32.4`): `v0.32.4-macprovider.17` plus
+cherry-picks of ml-explore/mlx #4883, #4881 and #4930. The C row moves to
+`v0.8.0-macprovider.5` (`33d88bf44b974d73f978ba3ebee046fd941d13bf`, upstream `v0.8.0`
+`a26f2d584a14ec619ae8db9a09be03becd47598a`): `v0.8.0` plus the fork's reference-prefill and small-M route
+bindings (the `v0.6.0-macprovider.4` commit `70f188c` ported); its CMake
+FetchContent pins MLX core `cde15ff75`. Upstream ml-explore/mlx-swift-lm #633
+(`c408452`, the gated-delta q/k L2-norm eps moved to the transformers
+reference) is in `3.33.0` and changes every gated-delta Qwen model's greedy text
+on purpose; a lab probe proved the new pin's logits minus #633 equal the old
+pin's bit for bit, so #633 is the only model-output change. The tags are cut at
+merge from these revisions.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.87` is on `3.32.3-macprovider.86`
 (`bcffd492b1d89d009e57278defd258e76ac78ab3`) (#2451), at
 `0efe0402707951016ed695d11f359df669b26c09`: one commit that only moves its
 mlx-swift pin to `0.32.3-macprovider.27`
@@ -3098,6 +3119,16 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.124 (2026-11-24, engine-333)** — R003 names mlx-swift-lm
+  `3.33.0-macprovider.88` (`73eb9cf7663df03476c568f907bcadd829488c45`), the fork patch stack
+  rebased onto upstream `3.33.0` (ml-explore/mlx-swift-lm #701 and #581 are in
+  that release), mlx-swift `0.33.0-macprovider.28`
+  (`52ae025cbfac595328bd7fad23c8bce560bbe57c`), MLX core `v0.32.4-macprovider.18`
+  (`cde15ff75e719a47677d7953657ee319ba50deee`, `v0.32.4-macprovider.17` plus ml-explore/mlx #4883,
+  #4881 and #4930) and mlx-c `v0.8.0-macprovider.5`
+  (`33d88bf44b974d73f978ba3ebee046fd941d13bf`). ml-explore/mlx-swift-lm #633 changes every
+  gated-delta Qwen model's greedy text on purpose and is the only model-output
+  change.
 - **0.1.123 (2026-11-23, Related: #2451)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.87` (`0efe0402707951016ed695d11f359df669b26c09`) on
   `3.32.3-macprovider.86`, mlx-swift `0.32.3-macprovider.27`

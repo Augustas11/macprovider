@@ -54,7 +54,7 @@ echo "#### provider tests $(date +%T)"
 P="$L/macprovider/phase3-binary"
 ( cd "$P" && swift build --build-tests ) > "$D/provider-build.log" 2>&1 || { echo "PROVIDER_BUILD_FAILED"; tail -5 "$D/provider-build.log"; exit 1; }
 for x in "$P"/.build/arm64-apple-macosx/debug/*.xctest/Contents/MacOS; do cp "$NEW/mlx.metallib" "$x/mlx.metallib"; done
-for f in 'PagedKVRuntimeBridgeTests/testRealQwen35' 'PagedKVRuntimeBridgeTests/testMTPPackedCache' 'PagedKVRuntimeBridgeTests/testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims' 'NativeMTPSelfTestTests'; do
+for f in 'KVBuildIdentityDriftTests' 'PagedKVRuntimeBridgeTests/testRealQwen35' 'PagedKVRuntimeBridgeTests/testMTPPackedCache' 'PagedKVRuntimeBridgeTests/testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims' 'NativeMTPSelfTestTests'; do
   log="$D/provider-$(echo "$f" | tr '/' '_').log"
   ( cd "$P" && swift test --skip-build --filter "$f" ) > "$log" 2>&1
   rc=$?; echo "provider $f rc=$rc"; [ $rc -eq 0 ] || failed=1

@@ -261,7 +261,9 @@ let package = Package(
         // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
         // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
         // dd68f1d2d; mlx-c unchanged).
-        // engine-333: branch macprovider/engine-333-r2 (73eb9cf7) is the 3.33.0
+        // engine-333: tags 3.33.0-macprovider.88 (mlx-swift-lm), 0.33.0-macprovider.28
+        // (mlx-swift), v0.32.4-macprovider.18 (core) and v0.8.0-macprovider.5 (mlx-c).
+        // Branch macprovider/engine-333-r2 (73eb9cf7) is the 3.33.0
         // rebase (748d330) with the mlx-swift pin moved to 52ae025: mlx-swift
         // 0.33.0 plus the #2462 small-M route and the #2451 dense qmm tile, core
         // cde15ff75 (v0.32.4-macprovider.17 plus mlx #4883, #4881, #4930), mlx-c

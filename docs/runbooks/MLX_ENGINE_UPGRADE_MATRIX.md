@@ -34,10 +34,10 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.87` | `0efe0402707951016ed695d11f359df669b26c09` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.27` | `e7243b3d792ea39da0a653990fba06630cc6ada6` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.17` | `6c2ac790c038dd43acbae5e0c99f94c49d94b771` | `v0.32.4` (`36969c09…`) |
-| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.4` | `70f188c0c19b36823e7c7b30c30ae6e8514509c3` | pinned base `ebc88f10…` |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.88` | `73eb9cf7663df03476c568f907bcadd829488c45` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm, its manifest
@@ -46,6 +46,21 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-24 the LM row is `3.33.0-macprovider.88` (`73eb9cf`), the fork
+patch stack (through `3.32.3-macprovider.87`) rebased onto upstream `3.33.0`
+(ml-explore/mlx-swift-lm #701 and #581 are in that release), with its mlx-swift
+pin at `0.33.0-macprovider.28` (`52ae025`): the fork patch stack on mlx-swift
+`0.33.0` plus mlx-swift PR 522, whose core gitlink is `cde15ff` and mlx-c is
+`33d88bf`. The core row moves to `v0.32.4-macprovider.18` (`cde15ff`, `.17` plus
+ml-explore/mlx #4883, #4881 and #4930). The C row moves to
+`v0.8.0-macprovider.5` (`33d88bf`): mlx-c `v0.8.0` plus the reference-prefill
+and small-M route bindings, with MLX core `cde15ff75` in its FetchContent pin.
+Upstream ml-explore/mlx-swift-lm #633 (`c408452`, gated-delta q/k L2-norm eps)
+is in `3.33.0` and changes every gated-delta Qwen model's greedy text on
+purpose; a lab probe proved the new pin's logits minus #633 equal the old
+pin's bit for bit, so #633 is the only model-output change. The tags are cut at
+merge from these revisions.
 
 As of 2026-11-23 the LM row is `3.32.3-macprovider.87` (`0efe040`), on
 `3.32.3-macprovider.86` (#2451): one commit that only moves the mlx-swift pin
