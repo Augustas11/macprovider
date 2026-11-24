@@ -19,7 +19,8 @@ not add steps of its own:
 
 Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
 `test-runbook-commands.sh`, `test-entrypoints.sh`, `test-canary-swap.sh`,
-`test-studio-lab-window-controller.sh`, `test-studio-lab-handoff.py`.
+`test-studio-lab-window-controller.sh`, `test-studio-lab-handoff.py`,
+`test-window-preflight.sh`.
 
 ## Use
 

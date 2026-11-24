@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Versioned pre-commit hook (scripts/git-hooks/install.sh): the secret preflight.
+set -euo pipefail
+# shellcheck source=scripts/git-hooks/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+run_secret_preflight commit

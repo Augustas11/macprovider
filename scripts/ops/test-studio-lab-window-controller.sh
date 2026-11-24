@@ -19,6 +19,7 @@ make_harness() {
   cp "$OPS_DIR/lib/common.sh" "$root/scripts/ops/lib/common.sh"
   cp "$OPS_DIR/lib/runbook-commands.sh" "$root/scripts/ops/lib/runbook-commands.sh"
   cp "$OPS_DIR/lib/published-provider-identity.sh" "$root/scripts/ops/lib/published-provider-identity.sh"
+  cp "$OPS_DIR/lib/window-preflight.sh" "$root/scripts/ops/lib/window-preflight.sh"
   cp "$OPS_DIR/lib/studio-lab-window-remote.py" "$root/scripts/ops/lib/studio-lab-window-remote.py"
   cp "$OPS_DIR/lib/studio-lab-window-manifest.py" "$root/scripts/ops/lib/studio-lab-window-manifest.py"
   cp "$OPS_DIR/lib/studio-owner-pin-probe.py" "$root/scripts/ops/lib/studio-owner-pin-probe.py"
@@ -363,6 +364,7 @@ LAB_TIMEOUT_S=20
 READY_TIMEOUT_S=120
 POLL_S=1
 require_fresh_settings() { :; }
+preflight_window() { printf 'preflight\n' >> "$TEST_EVENTS"; }
 remote_probe() { printf '%s\n' '{"hardware_model":"Mac15,14","journal":{"state":"absent"},"installed":{"binary_version":"1.2.3"}}'; }
 published_provider_identity_ok() { printf 'published\n' >> "$TEST_EVENTS"; }
 source_snapshot() { printf '%s\n' '{}'; }
@@ -382,6 +384,7 @@ import sys
 lines = open(sys.argv[1]).read().splitlines()
 def before(a, b):
     assert lines.index(a) < lines.index(b), (a, b, lines)
+before("preflight", "directory")
 before("acquire test-owner --purpose studio-lab-window:active-window", "marker:prepared")
 before("marker:prepared", "verify-helper")
 before("verify-helper", "marker:dispatching")

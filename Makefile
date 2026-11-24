@@ -11,7 +11,7 @@
         test-byom-e2e test-byom-discovery-journey test-openai-wire test-local-chat-app-core \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
-        build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
+        build-linux check check-exceptions fmt fmt-check verify-autotune-catalog pr-fast
 
 test: test-coordinator test-coordinator-billing-race test-gateway test-integration test-dist
 
@@ -106,6 +106,20 @@ TEST_DIST_SHARDS := catalog python1 python2 release ops deploy
 PYTHON_TEST_SHARDS := 2
 
 test-dist: $(addprefix test-dist-,$(TEST_DIST_SHARDS))
+
+# Pre-push fast checks (scripts/git-hooks/pre-push), about 10 s, no build.
+# The CI suites that failed most PR runs on cheap drift (13 of 19 red runs,
+# 2026-11-22..24): a stale decode-path digest, the native-MTP lab-flag guard,
+# the mlx-swift-lm pin-bump test, the native-MTP admission sidecar and its
+# committed projection manifest, the DSV4 CB/DSpark harness test. Same commands
+# CI runs (test-dist-catalog, test-dist-python*); never a Swift or Go build.
+pr-fast:
+	python3 scripts/decode_path_digest.py --check
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+		scripts.tests.test_native_mtp_lab_flag_guard \
+		scripts.tests.test_bump_mlx_swift_lm_pin \
+		scripts.tests.test_native_mtp_admission_sidecar \
+		scripts.tests.test_dsv4_cb_dspark_harness
 
 # Catalog and autotune content release (the single slowest suite).
 test-dist-catalog:
@@ -223,6 +237,7 @@ test-dist-ops:
 	bash scripts/ops/test-canary-swap.sh
 	bash scripts/ops/test-runner-reserve.sh
 	bash scripts/ops/test-studio-lab-window-controller.sh
+	bash scripts/ops/test-window-preflight.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 scripts/ops/test-studio-lab-handoff.py
 	bash scripts/ops/test-hotfix-push.sh
 

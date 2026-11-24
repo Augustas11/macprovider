@@ -13,6 +13,8 @@ OPS_NAME=studio-lab-window
 . "$OPS_DIR/lib/common.sh"
 # shellcheck source=lib/published-provider-identity.sh
 . "$OPS_DIR/lib/published-provider-identity.sh"
+# shellcheck source=lib/window-preflight.sh
+. "$OPS_DIR/lib/window-preflight.sh"
 
 OPS_SCOPE=studio-lab-window
 STUDIO_MODEL=Mac15,14
@@ -520,9 +522,24 @@ abort_prepared_window() {
   rm -f "$(active_marker_path)"
 }
 
+# Cheap checks before anything is staged or paused: the files this window
+# copies exist, and the Studio has python3 >= 3.10, Xcode with XCTest
+# (STUDIO_DEVELOPER_DIR, default under the Studio $HOME), a clean lab clone
+# and free disk (STUDIO_LAB_MIN_FREE_GB, default 50).
+_window_preflight_ssh() { studio_ssh "$2"; }
+preflight_window() {
+  local -a ship=("$REMOTE_HELPER" "$PROBE_HELPER" "$LAB_SCRIPT") xcode=()
+  [ "$STUDIO_LAB_JOB_KIND" = diagnostic-legacy ] || ship+=("$MANIFEST_HELPER")
+  [ -z "${STUDIO_DEVELOPER_DIR:-}" ] || xcode=(--developer-dir "$STUDIO_DEVELOPER_DIR")
+  WINDOW_PREFLIGHT_SSH=_window_preflight_ssh window_preflight --ship "${ship[@]}" \
+    --studio "$STUDIO_SSH" --studio-clone "$STUDIO_LAB_SOURCE_DIR" \
+    --min-free-gb "${STUDIO_LAB_MIN_FREE_GB:-50}" ${xcode[@]+"${xcode[@]}"}
+}
+
 start_window() {
   local probe source manifest nonce version state manifest_sha source_kind
   require_fresh_settings
+  preflight_window || refuse "window preflight failed (BLOCKER lines above); nothing was staged or paused"
   probe="$OPS_TMP_DIR/studio-probe.json"; source="$OPS_TMP_DIR/source-snapshot.json"
   manifest="$OPS_TMP_DIR/window-manifest.json"
   remote_probe > "$probe" || refuse "fresh Studio baseline probe failed"

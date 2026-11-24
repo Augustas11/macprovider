@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Versioned pre-push hook (scripts/git-hooks/install.sh).
+#
+# 1. The secret preflight, as the old .git/hooks/pre-push ran it.
+# 2. `make pr-fast` (seconds): the cheap checks that most often failed a
+#    28-minute CI run. Skipped when every pushed file is docs-only
+#    (*.md under docs/, AGENTS.md, CLAUDE.md) or the push only deletes refs.
+# Bypass once with `git push --no-verify` (the CI gate still applies).
+set -euo pipefail
+here="$(dirname "${BASH_SOURCE[0]}")"
+# shellcheck source=scripts/git-hooks/lib.sh
+. "$here/lib.sh"
+
+updates="$(cat)"
+printf '%s\n' "$updates" | run_secret_preflight push
+
+zero=0000000000000000000000000000000000000000
+changed=""
+unknown=false
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" != "$zero" ] || continue
+  if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    base="$(git merge-base origin/main "$local_sha" 2>/dev/null || true)"
+  else
+    base="$remote_sha"
+  fi
+  if [ -z "$base" ]; then unknown=true; continue; fi
+  changed+="$(git diff --name-only "$base" "$local_sha")"$'\n'
+done <<< "$updates"
+
+docs_only=true
+if [ "$unknown" = true ]; then
+  docs_only=false
+else
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      AGENTS.md|CLAUDE.md|docs/*.md) ;;
+      *) docs_only=false; break ;;
+    esac
+  done <<< "$changed"
+  # Nothing pushed (a ref already on the remote) needs no checks either.
+fi
+
+if [ "$docs_only" = true ]; then
+  printf 'pre-push: no non-docs change pushed, make pr-fast skipped\n' >&2
+  exit 0
+fi
+printf 'pre-push: make pr-fast (bypass with --no-verify)\n' >&2
+make -C "$(git rev-parse --show-toplevel)" pr-fast
