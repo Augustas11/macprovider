@@ -187,7 +187,8 @@ for _ in $(seq 1 40); do listening "$FEED_PORT" && break; sleep 0.25; done
 listening "$FEED_PORT" || die "the loopback feed origin did not start: $(tail -n 2 "$RES/feeds.log" | tr '\n' ' ')" 11
 log "FEEDS origin=http://127.0.0.1:$FEED_PORT key_id=$STATIC_KEY_ID"
 
-# 5. Serve with native MTP until the self-check decides.
+# 5. Serve with native MTP until the self-check decides. donor_mode: a listed row is admitted only on a
+#    donor-mode provider (requireRecommendable is !donorMode in the catalog preflight).
 S=$WORK/serve
 mkdir -p "$S/home" "$S/tmp"
 /usr/bin/python3 -I - "$CAT/autotune-candidates.json" "$DAISY_KEY" "$DAISY_SHA" "$ROOT/$TARGET_REL" "$PORT" "$S" \
@@ -200,7 +201,7 @@ row = doc["rows"][key]
 q = json.dumps
 print("\n".join([f"model: {q(key)}", f"model_artifact_path: {q(path)}", f"model_artifact_sha256: {sha}",
                  f"port: {port}", f"ctl_socket_path: {q(sdir + '/tmp/ctl.sock')}", "credential_store: protected_file",
-                 "native_mtp_mode: auto", f"model_catalog_key: {q(key)}", f"model_catalog_model_id: {q(row['model_id'])}",
+                 "native_mtp_mode: auto", "donor_mode: true", f"model_catalog_key: {q(key)}", f"model_catalog_model_id: {q(row['model_id'])}",
                  f"model_catalog_revision: {q(row['model_revision'])}", f"model_catalog_sha256: {q(sha)}",
                  f"model_catalog_version: {q(doc['version'])}", f"model_catalog_hash: {q(hashlib.sha256(raw).hexdigest())}"]))
 PY
