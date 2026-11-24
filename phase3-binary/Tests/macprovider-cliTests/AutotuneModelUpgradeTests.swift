@@ -2075,3 +2075,326 @@ extension AutotuneModelUpgradeTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: incumbentPath))
     }
 }
+
+// MARK: - #2485 prefetch cleanup, unsupported model types and the disk floor
+
+extension AutotuneModelUpgradeTests {
+    func testCleanupRemovesTheStagingSnapshotItsBlobsAndTheDurableCopy() async throws {
+        let fixture = try PrefetchFixture()
+        let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: fixture.downloader(log: FetchLog()))
+        let outcome = try await Self.prefetchAll(fixture, resolver: resolver)
+        let byKey = Dictionary(uniqueKeysWithValues: outcome.artifacts.map { ($0.modelKey, $0) })
+        let loser = try XCTUnwrap(byKey["loser"])
+        let winner = try XCTUnwrap(byKey["winner"])
+        let loserStaging = Self.staging(loser, resolver: resolver)
+        let winnerStaging = Self.staging(winner, resolver: resolver)
+        // The download leaves the Hugging Face staging copy beside the durable one.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: loserStaging.path))
+
+        // Hub-style blobs: one only the loser's snapshot links, one another
+        // snapshot of the same repo links too.
+        let repo = loserStaging.deletingLastPathComponent().deletingLastPathComponent()
+        let blobs = try Self.linkBlobs(["own", "shared"], from: loserStaging, repo: repo)
+        let other = repo.appendingPathComponent("snapshots/other-revision", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: other.appendingPathComponent("shared.bin").path,
+            withDestinationPath: "../../blobs/shared"
+        )
+
+        let removed = AutotuneModelUpgrade.removeUnselectedRunDownloads(
+            outcome.artifacts,
+            keepModelKeys: ["incumbent", "winner"],
+            catalog: fixture.catalog,
+            resolver: resolver
+        )
+
+        XCTAssertEqual(removed, [loser.path])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: loser.path), "durable copy")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: loserStaging.path), "prefetch snapshot")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: blobs["own"]!.path), "blob only it linked")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blobs["shared"]!.path), "blob another snapshot links")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: winner.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: winnerStaging.path))
+        // A second pass finds nothing left to remove.
+        XCTAssertEqual(AutotuneModelUpgrade.removeUnselectedRunDownloads(
+            outcome.artifacts,
+            keepModelKeys: ["incumbent", "winner"],
+            catalog: fixture.catalog,
+            resolver: resolver
+        ), [])
+
+        // A repo left with nothing in it goes too; the incumbent and the
+        // copy that existed before the run stay.
+        XCTAssertEqual(AutotuneModelUpgrade.removeUnselectedRunDownloads(
+            outcome.artifacts,
+            keepModelKeys: ["incumbent"],
+            catalog: fixture.catalog,
+            resolver: resolver
+        ), [winner.path])
+        let winnerRepo = winnerStaging.deletingLastPathComponent().deletingLastPathComponent()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: winnerRepo.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(byKey["incumbent"]).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(byKey["preexisting"]).path))
+        let preexisting = try XCTUnwrap(byKey["preexisting"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Self.staging(preexisting, resolver: resolver).path))
+    }
+
+    func testCleanupNeverRemovesWhatTheServedModelUses() async throws {
+        let fixture = try PrefetchFixture()
+        let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: fixture.downloader(log: FetchLog()))
+        let outcome = try await Self.prefetchAll(fixture, resolver: resolver)
+        let byKey = Dictionary(uniqueKeysWithValues: outcome.artifacts.map { ($0.modelKey, $0) })
+        let loser = try XCTUnwrap(byKey["loser"])
+        let winner = try XCTUnwrap(byKey["winner"])
+        let loserStaging = Self.staging(loser, resolver: resolver)
+        let repo = loserStaging.deletingLastPathComponent().deletingLastPathComponent()
+        let blobs = try Self.linkBlobs(["own"], from: loserStaging, repo: repo)
+        // The served model lives outside the repo and links the loser's blob.
+        let served = fixture.hub.appendingPathComponent("served-model", isDirectory: true)
+        try FileManager.default.createDirectory(at: served, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: served.appendingPathComponent("weights.bin").path,
+            withDestinationPath: blobs["own"]!.path
+        )
+
+        AutotuneModelUpgrade.removeUnselectedRunDownloads(
+            outcome.artifacts,
+            keepModelKeys: ["incumbent"],
+            catalog: fixture.catalog,
+            resolver: resolver,
+            servedPaths: [served.path, winner.path]
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: loserStaging.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blobs["own"]!.path), "a blob the served model links")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: winner.path), "the served path itself")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: served.path))
+    }
+
+    func testUnsupportedModelTypeIsSkippedBeforeDownload() async throws {
+        let fixture = try PrefetchFixture()
+        let downloads = URLLog()
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let url = try XCTUnwrap(request.url)
+                let modelType = url.path.contains("/namespace/loser/") ? "qwen2_vl" : "llama"
+                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
+                let body = #"{"siblings":[{"rfilename":"weights.bin","size":11}],"config":{"model_type":"\#(modelType)"}}"#
+                return (Data(body.utf8), response)
+            },
+            download: { request in
+                downloads.record(try XCTUnwrap(request.url))
+                return try r2485DownloadedReplacement()
+            }
+        )
+        downloader.loadableModelType = { $0 != "qwen2_vl" }
+        let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: downloader)
+        let outcome = try await Self.prefetchAll(fixture, resolver: resolver)
+
+        XCTAssertEqual(Set(outcome.artifacts.map(\.modelKey)), ["incumbent", "preexisting", "winner"])
+        let diagnostic = try XCTUnwrap(outcome.diagnostics.first { $0.modelID == "namespace/loser" })
+        XCTAssertTrue(diagnostic.reason.contains("model_type qwen2_vl"), diagnostic.reason)
+        XCTAssertFalse(downloads.paths.contains { $0.contains("/namespace/loser/") }, "\(downloads.paths)")
+        XCTAssertTrue(downloads.paths.contains { $0.contains("/namespace/winner/") })
+        let row = try XCTUnwrap(fixture.catalog.rows["loser"])
+        let staging = resolver.prefetchSnapshotURL(
+            modelID: row.modelID,
+            revision: try XCTUnwrap(row.modelRevision),
+            sha256: try XCTUnwrap(row.modelSHA256)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    func testHubConfigWithoutAReadableModelTypeSkipsNothing() throws {
+        let decode = { (json: String) in
+            try JSONDecoder().decode(HuggingFaceSnapshotDownloader.ModelInfo.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try decode(#"{"siblings":[],"config":{"model_type":"qwen2_vl"}}"#).modelType, "qwen2_vl")
+        XCTAssertNil(try decode(#"{"siblings":[],"config":{"model_type":3}}"#).modelType)
+        XCTAssertNil(try decode(#"{"siblings":[],"config":null}"#).modelType)
+        XCTAssertNil(try decode(#"{"siblings":[{"rfilename":"a","size":1}]}"#).modelType)
+        XCTAssertEqual(try decode(#"{"siblings":[{"rfilename":"a","size":1}],"config":[]}"#).siblings.count, 1)
+    }
+
+    func testProbeLoadsOnlyTheModelTypesThePathLoaderBuilds() async {
+        let llamaLoads = await ModelRuntime.probeLoadsModelType("llama")
+        let qwen3Loads = await ModelRuntime.probeLoadsModelType("qwen3")
+        let prismLoads = await ModelRuntime.probeLoadsModelType("prism_hadamard_qwen35")
+        let qwen2VLLoads = await ModelRuntime.probeLoadsModelType("qwen2_vl")
+        let unknownLoads = await ModelRuntime.probeLoadsModelType("no_such_model_type")
+        XCTAssertTrue(llamaLoads)
+        XCTAssertTrue(qwen3Loads)
+        XCTAssertTrue(prismLoads)
+        XCTAssertFalse(qwen2VLLoads)
+        XCTAssertFalse(unknownLoads)
+    }
+
+    func testDiskFloorStopsTheRunAndKeepsWhatIsDone() async throws {
+        func run(stopAtDiskFloor: Bool) async throws -> (ArtifactPrefetchOutcomes, [String]) {
+            let fixture = try PrefetchFixture()
+            var catalog = fixture.catalog
+            var tail = try XCTUnwrap(catalog.rows["winner"])
+            tail.modelID = "namespace/tail"
+            catalog.rows["tail"] = tail
+            let disk = DiskBox(availableBytes: 100)
+            let downloads = URLLog()
+            var downloader = HuggingFaceSnapshotDownloader(
+                fetch: { request in
+                    let url = try XCTUnwrap(request.url)
+                    // The loser is too large for the room left above the floor;
+                    // the tail after it would fit.
+                    let size = url.path.contains("/namespace/loser/") ? 50 : 11
+                    let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
+                    return (Data(#"{"siblings":[{"rfilename":"weights.bin","size":\#(size)}]}"#.utf8), response)
+                },
+                download: { request in
+                    downloads.record(try XCTUnwrap(request.url))
+                    disk.consume(11)
+                    return try r2485DownloadedReplacement()
+                }
+            )
+            downloader.freeSpaceReserveBytes = 60
+            downloader.availableDiskBytes = { _ in disk.availableBytes }
+            let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: downloader)
+            let outcome = try await AutotuneRecommendationBenchmarker(artifactResolver: resolver).prefetchArtifacts(
+                candidateCatalog: catalog,
+                hardware: Self.hardware(memoryGB: 16),
+                candidateModelIDs: Set(catalog.rows.values.map(\.modelID)),
+                modelKeyOrder: ["incumbent", "winner", "loser", "tail"],
+                stopAtDiskFloor: stopAtDiskFloor
+            )
+            return (outcome, downloads.paths)
+        }
+
+        let (stopped, stoppedDownloads) = try await run(stopAtDiskFloor: true)
+        // winner: 100 free >= 11 + 60, downloaded (89 left); loser: 89 < 50 + 60,
+        // refused; the tail is not started; the row already on disk is kept.
+        XCTAssertEqual(Set(stopped.artifacts.map(\.modelKey)), ["incumbent", "winner", "preexisting"])
+        XCTAssertEqual(stoppedDownloads.filter { $0.contains("/namespace/") }.count, 1)
+        XCTAssertTrue(stoppedDownloads.allSatisfy { !$0.contains("/namespace/tail/") })
+        let loserReason = try XCTUnwrap(stopped.diagnostics.first { $0.modelID == "namespace/loser" }).reason
+        XCTAssertTrue(loserReason.contains("not enough free disk space"), loserReason)
+        let tailReason = try XCTUnwrap(stopped.diagnostics.first { $0.modelID == "namespace/tail" }).reason
+        XCTAssertTrue(tailReason.contains("free disk space floor"), tailReason)
+        XCTAssertNoThrow(try AutotuneModelUpgrade.verifiedUpgradeArtifacts(stopped, incumbentModelID: "namespace/incumbent"))
+
+        // Without the stop (a manual recommend), the smaller tail still fits.
+        let (skipped, _) = try await run(stopAtDiskFloor: false)
+        XCTAssertTrue(skipped.artifacts.contains { $0.modelKey == "tail" })
+    }
+
+    func testUpgradeFreeSpaceFloorIsOneMemoryAtLeast16GiB() throws {
+        XCTAssertEqual(AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: 8), 16 * 1_073_741_824)
+        XCTAssertEqual(AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: 32), 32 * 1_073_741_824)
+        XCTAssertEqual(AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: 512), 512 * 1_073_741_824)
+        XCTAssertGreaterThan(
+            AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: 8),
+            HuggingFaceSnapshotDownloader.downloadFreeSpaceReserveBytes
+        )
+        let fixture = try PrefetchFixture()
+        let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: fixture.downloader(log: FetchLog()))
+        let prefetcher = AutotuneCommand.budgetedUpgradePrefetcher(
+            AutotuneRecommendationBenchmarker(artifactResolver: resolver),
+            resolvedConfig: nil,
+            memoryGB: 32
+        )
+        XCTAssertEqual(
+            prefetcher.artifactResolver.downloader.freeSpaceReserveBytes,
+            AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: 32)
+        )
+        XCTAssertNotNil(prefetcher.artifactResolver.downloader.loadableModelType)
+    }
+
+    private static func prefetchAll(
+        _ fixture: PrefetchFixture,
+        resolver: CachedModelArtifactResolver
+    ) async throws -> ArtifactPrefetchOutcomes {
+        try await AutotuneRecommendationBenchmarker(artifactResolver: resolver).prefetchArtifacts(
+            candidateCatalog: fixture.catalog,
+            hardware: hardware(memoryGB: 16),
+            candidateModelIDs: Set(fixture.catalog.rows.values.map(\.modelID)),
+            modelKeyOrder: ["incumbent", "winner", "loser"]
+        )
+    }
+
+    private static func staging(_ artifact: PrefetchedModelArtifact, resolver: CachedModelArtifactResolver) -> URL {
+        resolver.prefetchSnapshotURL(
+            modelID: artifact.modelID,
+            revision: artifact.modelRevision,
+            sha256: artifact.sha256
+        ).standardizedFileURL
+    }
+
+    /// Writes `repo/blobs/<name>` for each name and links it from
+    /// `snapshot/<name>.bin` with the relative path the Hub uses.
+    private static func linkBlobs(_ names: [String], from snapshot: URL, repo: URL) throws -> [String: URL] {
+        let blobs = repo.appendingPathComponent("blobs", isDirectory: true)
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
+        var urls: [String: URL] = [:]
+        for name in names {
+            let blob = blobs.appendingPathComponent(name).standardizedFileURL
+            try Data(name.utf8).write(to: blob)
+            try FileManager.default.createSymbolicLink(
+                atPath: snapshot.appendingPathComponent("\(name).bin").path,
+                withDestinationPath: "../../blobs/\(name)"
+            )
+            urls[name] = blob
+        }
+        return urls
+    }
+}
+
+private func r2485DownloadedReplacement() throws -> (URL, URLResponse) {
+    let downloaded = FileManager.default.temporaryDirectory
+        .appendingPathComponent("r2485-download-\(UUID().uuidString).bin")
+    try Data("replacement".utf8).write(to: downloaded)
+    return (
+        downloaded,
+        URLResponse(
+            url: URL(string: "https://example.test/weights.bin")!,
+            mimeType: nil,
+            expectedContentLength: 11,
+            textEncodingName: nil
+        )
+    )
+}
+
+private final class URLLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var paths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(_ url: URL) {
+        lock.lock()
+        recorded.append(url.path)
+        lock.unlock()
+    }
+}
+
+private final class DiskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var available: Int64
+
+    init(availableBytes: Int64) {
+        available = availableBytes
+    }
+
+    var availableBytes: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return available
+    }
+
+    func consume(_ bytes: Int64) {
+        lock.lock()
+        available -= bytes
+        lock.unlock()
+    }
+}

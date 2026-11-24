@@ -6243,6 +6243,132 @@ final class AutotuneRecommendTests: XCTestCase {
         }
     }
 
+    func testUpgradeProbeDropsAFailedChallengerAndKeepsProbing() async throws {
+        let fixture = try upgradeProbeFixture()
+        let loadFailure = #"provider model load failed: unsupportedModelType("qwen2_vl")"#
+        let prober = RecordingStage1Prober(results: [
+            fixture.challengerPath: .infeasible(reason: loadFailure, nErr: 1),
+            fixture.incumbentPath: .feasible(medianTPS: 88, p95TTFTMS: 900),
+        ])
+        let dropped = DroppedKeys()
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: fixture.resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: fixture.request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18_080,
+            candidateModelIDs: fixture.modelIDs,
+            prefetchedArtifacts: fixture.prefetched,
+            dropFailedCandidatesExcept: [fixture.incumbentKey],
+            onCandidateDropped: { dropped.keys.append($0) }
+        )
+
+        // The challenger sorts first and fails; the incumbent is still probed.
+        XCTAssertEqual(prober.probedModels, [fixture.challengerPath, fixture.incumbentPath])
+        XCTAssertEqual(Set(outcomes.benchmarks.keys), [fixture.incumbentKey])
+        XCTAssertEqual(outcomes.diagnostics[fixture.challengerKey], "\(loadFailure) (n_err=1)")
+        XCTAssertEqual(dropped.keys, [fixture.challengerKey])
+    }
+
+    func testUpgradeProbeStillFailsClosedOnTheIncumbent() async throws {
+        let fixture = try upgradeProbeFixture()
+        let prober = RecordingStage1Prober(results: [
+            fixture.challengerPath: .feasible(medianTPS: 88, p95TTFTMS: 900),
+            fixture.incumbentPath: .infeasible(reason: "provider readiness timeout", nErr: 1),
+        ])
+        let dropped = DroppedKeys()
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: fixture.resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: fixture.request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: fixture.modelIDs,
+                prefetchedArtifacts: fixture.prefetched,
+                dropFailedCandidatesExcept: [fixture.incumbentKey],
+                onCandidateDropped: { dropped.keys.append($0) }
+            )
+            XCTFail("an incumbent probe failure must still fail the upgrade run")
+        } catch AutotuneRecommendError.candidateProbeFailed(let failedModelKey, _) {
+            XCTAssertEqual(failedModelKey, fixture.incumbentKey)
+        }
+        XCTAssertEqual(dropped.keys, [])
+    }
+
+    private struct UpgradeProbeFixture {
+        let request: AutotuneRecommendRequest
+        let resolver: CachedModelArtifactResolver
+        let incumbentKey: String
+        let challengerKey: String
+        let incumbentPath: String
+        let challengerPath: String
+        let prefetched: [String: PrefetchedModelArtifact]
+        let modelIDs: Set<String>
+    }
+
+    /// Two receipt-bound rows with verified durable copies: the incumbent
+    /// and a challenger that sorts before it.
+    private func upgradeProbeFixture() throws -> UpgradeProbeFixture {
+        let incumbentKey = "qwen3-coder-30b-a3b-instruct"
+        let challengerKey = "a-challenger"
+        var request = try makeRequest(modelKey: incumbentKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        request.benchmarks = [:]
+        var challengerRow = try XCTUnwrap(request.candidateCatalog.rows[incumbentKey])
+        challengerRow.modelID = "namespace/challenger"
+        request.candidateCatalog.rows[challengerKey] = challengerRow
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        var prefetched: [String: PrefetchedModelArtifact] = [:]
+        var paths: [String: String] = [:]
+        for key in [incumbentKey, challengerKey] {
+            let row = try XCTUnwrap(request.candidateCatalog.rows[key])
+            let revision = try XCTUnwrap(row.modelRevision)
+            let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+            try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+            try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+            let sha256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+            request.candidateCatalog.rows[key]?.modelSHA256 = sha256
+            _ = try resolver.verifiedExistingArtifact(for: try XCTUnwrap(request.candidateCatalog.rows[key]))
+            let path = try durableArtifactPath(hubRoot: hub, modelID: row.modelID, revision: revision, sha256: sha256)
+            paths[key] = path
+            prefetched[key] = PrefetchedModelArtifact(
+                modelKey: key,
+                modelID: row.modelID,
+                modelRevision: revision,
+                candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: key)),
+                path: path,
+                sha256: sha256
+            )
+        }
+        return UpgradeProbeFixture(
+            request: request,
+            resolver: resolver,
+            incumbentKey: incumbentKey,
+            challengerKey: challengerKey,
+            incumbentPath: try XCTUnwrap(paths[incumbentKey]),
+            challengerPath: try XCTUnwrap(paths[challengerKey]),
+            prefetched: prefetched,
+            modelIDs: Set(request.candidateCatalog.rows.values.map(\.modelID))
+        )
+    }
+
     func testBenchmarksDiagnosesRowsSkippedByRAMGate() async throws {
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var request = try makeRequest(modelKey: modelKey)
@@ -7136,6 +7262,10 @@ private final class RecordingStage1Prober: Stage1Probing {
         probedDeadlines.append(deadline)
         return results[model] ?? .infeasible(reason: "missing stub probe result", nErr: 1)
     }
+}
+
+private final class DroppedKeys {
+    var keys: [String] = []
 }
 
 private struct StaticProbeSafetySampler: ProbeSafetySampling {

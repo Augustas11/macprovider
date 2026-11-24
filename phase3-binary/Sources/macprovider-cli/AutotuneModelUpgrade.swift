@@ -382,15 +382,30 @@ enum AutotuneModelUpgrade {
     /// is exactly the durable content-addressed path of its current signed row
     /// is removed, and never a path a kept row also uses, so the incumbent's
     /// artifact and any copy that existed before the run are never touched.
+    /// The row's hash-qualified prefetch snapshot in the Hugging Face cache
+    /// (`<revision>.macprovider-prefetch.<sha256>`, created by this same
+    /// download) goes too, with every blob it links that no other snapshot
+    /// of the repo links (#2485). Nothing at, inside or above a served path
+    /// is removed, nor a blob a served path links. Already-removed paths are
+    /// skipped, so a second call is a no-op.
     @discardableResult
     static func removeUnselectedRunDownloads(
         _ artifacts: [PrefetchedModelArtifact],
         keepModelKeys: Set<String>,
         catalog: CandidateCatalog,
         resolver: CachedModelArtifactResolver,
+        servedPaths: Set<String> = [],
         removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
     ) -> [String] {
         let keptPaths = Set(artifacts.filter { keepModelKeys.contains($0.modelKey) }.map(\.path))
+        let served = Set(servedPaths.flatMap { path -> [String] in
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            return [url.path, url.resolvingSymlinksInPath().path]
+        })
+        func overlapsServed(_ url: URL) -> Bool {
+            let path = url.standardizedFileURL.path
+            return served.contains { $0 == path || $0.hasPrefix(path + "/") || path.hasPrefix($0 + "/") }
+        }
         var removed: [String] = []
         for artifact in artifacts where artifact.downloadedByRun == true
             && !keepModelKeys.contains(artifact.modelKey)
@@ -407,15 +422,130 @@ enum AutotuneModelUpgrade {
                   ).standardizedFileURL,
                   expected.path == artifact.path
             else { continue }
-            do {
-                try removeItem(expected)
+            let staging = resolver.prefetchSnapshotURL(
+                modelID: row.modelID,
+                revision: artifact.modelRevision,
+                sha256: sha256
+            ).standardizedFileURL
+            var removedAny = false
+            for target in [expected, staging] {
+                var info = stat()
+                guard lstat(target.path, &info) == 0 else { continue }
+                if overlapsServed(target) || keptPaths.contains(target.path) {
+                    FileHandle.standardError.write(Data("model_upgrade: kept \(target.path): a served or kept model uses it\n".utf8))
+                    continue
+                }
+                let blobs = target == staging ? linkedBlobs(in: staging) : []
+                do {
+                    try removeItem(target)
+                    removedAny = true
+                } catch {
+                    FileHandle.standardError.write(Data("[warn] model_upgrade: could not remove \(target.path): \(error)\n".utf8))
+                    continue
+                }
+                if target == staging {
+                    removeUnreferencedBlobs(blobs, snapshot: staging, servedPaths: served, removeItem: removeItem)
+                }
+            }
+            if removedAny {
                 removed.append(artifact.path)
                 FileHandle.standardError.write(Data("model_upgrade: removed unselected download \(artifact.modelID)\n".utf8))
-            } catch {
-                FileHandle.standardError.write(Data("[warn] model_upgrade: could not remove \(artifact.path): \(error)\n".utf8))
             }
         }
         return removed
+    }
+
+    /// The `blobs/` files of `snapshot`'s Hugging Face repo that symlinks
+    /// under `snapshot` point at.
+    static func linkedBlobs(in snapshot: URL) -> Set<String> {
+        let blobsRoot = snapshot.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("blobs", isDirectory: true).standardizedFileURL.path
+        var blobs = Set<String>()
+        for target in symlinkTargets(under: snapshot) where target.hasPrefix(blobsRoot + "/") {
+            blobs.insert(target)
+        }
+        return blobs
+    }
+
+    /// Standardized targets of every symlink under `root` (not followed).
+    static func symlinkTargets(under root: URL) -> Set<String> {
+        var targets = Set<String>()
+        var rootInfo = stat()
+        guard lstat(root.path, &rootInfo) == 0 else { return targets }
+        if (rootInfo.st_mode & S_IFMT) == S_IFLNK {
+            if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: root.path) {
+                targets.insert(linkTarget(destination, from: root))
+            }
+            return targets
+        }
+        // Relative names keep `root`'s own spelling of the path (no
+        // `/private` resolution), so targets compare with paths built the same way.
+        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else {
+            return targets
+        }
+        for case let relative as String in enumerator {
+            let url = root.appendingPathComponent(relative)
+            var info = stat()
+            guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK,
+                  let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+            else { continue }
+            targets.insert(linkTarget(destination, from: url))
+        }
+        return targets
+    }
+
+    /// The standardized path a link at `link` with `destination` names.
+    private static func linkTarget(_ destination: String, from link: URL) -> String {
+        let target = destination.hasPrefix("/")
+            ? URL(fileURLWithPath: destination)
+            : link.deletingLastPathComponent().appendingPathComponent(destination)
+        return target.standardizedFileURL.path
+    }
+
+    /// Removes the blobs a removed snapshot linked that no remaining snapshot
+    /// of the repo and no served path links, then the repo's `snapshots/`,
+    /// `blobs/` and repo directories when they are left empty.
+    static func removeUnreferencedBlobs(
+        _ blobs: Set<String>,
+        snapshot: URL,
+        servedPaths: Set<String>,
+        removeItem: (URL) throws -> Void
+    ) {
+        let snapshots = snapshot.deletingLastPathComponent()
+        let repo = snapshots.deletingLastPathComponent()
+        if !blobs.isEmpty {
+            var referenced = Set<String>()
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? [] {
+                referenced.formUnion(symlinkTargets(under: snapshots.appendingPathComponent(name)))
+            }
+            for path in servedPaths {
+                referenced.formUnion(symlinkTargets(under: URL(fileURLWithPath: path)))
+                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+            }
+            for blob in blobs.subtracting(referenced).sorted() {
+                var info = stat()
+                guard lstat(blob, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { continue }
+                do {
+                    try removeItem(URL(fileURLWithPath: blob))
+                } catch {
+                    FileHandle.standardError.write(Data("[warn] model_upgrade: could not remove \(blob): \(error)\n".utf8))
+                }
+            }
+        }
+        // rmdir removes only an empty directory.
+        for directory in [snapshots, repo.appendingPathComponent("blobs", isDirectory: true), repo] {
+            _ = rmdir(directory.path)
+        }
+    }
+
+    /// The paths the configured model is served from: `model_artifact_path`
+    /// and an absolute `model`, as the config file names them now.
+    static func servedArtifactPaths(configPath: String?) -> Set<String> {
+        guard let config = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)) else { return [] }
+        return Set([config.modelArtifactPath, config.model].compactMap { path in
+            guard let path, path.hasPrefix("/") else { return nil }
+            return path
+        })
     }
 
     /// The model keys a run keeps on disk: the incumbent, plus a target once
@@ -445,13 +575,15 @@ enum AutotuneModelUpgrade {
     /// error, exit 75 or an interrupt), removes this run's downloads except
     /// the incumbent, an applied target and the row the config file names
     /// at cleanup time (`configuredKey`, re-read then), so a config changed
-    /// during the run never loses its served model.
+    /// during the run never loses its served model. `servedPaths` (also
+    /// re-read then) names the paths the config serves from.
     static func withRunDownloadCleanup<T>(
         _ artifacts: [PrefetchedModelArtifact],
         incumbentKey: String,
         catalog: CandidateCatalog,
         resolver: CachedModelArtifactResolver,
         configuredKey: () -> String?,
+        servedPaths: () -> Set<String> = { [] },
         body: (RunKeep) async throws -> T
     ) async rethrows -> T {
         let keep = RunKeep([incumbentKey])
@@ -460,7 +592,8 @@ enum AutotuneModelUpgrade {
                 artifacts,
                 keepModelKeys: keep.keys.union(configuredKey().map { [$0] } ?? []),
                 catalog: catalog,
-                resolver: resolver
+                resolver: resolver,
+                servedPaths: servedPaths()
             )
         }
         return try await body(keep)
@@ -516,6 +649,18 @@ enum AutotuneModelUpgrade {
     /// bandwidth and disk, whatever the catalog lists.
     static func runDownloadCapBytes(memoryGB: Int) -> Int64 {
         Int64(max(memoryGB, 1)) * 2 * 1_073_741_824
+    }
+
+    /// #2485: the free space an upgrade run leaves on the disk. Each
+    /// download must leave its advertised size plus this floor free, and the
+    /// first row that would not stops the run's downloads. It is one
+    /// memory's worth (half the run cap), at least 16 GiB: after any run the
+    /// disk still has room for one more model of the largest size this Mac
+    /// serves, with the probe's swap and OS updates beside it, where the
+    /// 5 GiB download reserve left a 32 GB Mac at 6.8 GB free. The run cap
+    /// bounds one run; the floor bounds the disk.
+    static func upgradeFreeSpaceFloorBytes(memoryGB: Int) -> Int64 {
+        Int64(max(memoryGB, 16)) * 1_073_741_824
     }
 
     /// Unattended runs spread one release of the recommendation inputs

@@ -13612,10 +13612,14 @@
         "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func drainThenIsolate(",
         "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func providerMismatch(",
         "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func contentDigest(",
-        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func acquireUpgradeRunLock("
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func acquireUpgradeRunLock(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func removeUnselectedRunDownloads(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:static func upgradeFreeSpaceFloorBytes(",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func probeLoadsModelType("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneModelUpgradeTests.swift:final class AutotuneModelUpgradeTests",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testUpgradeProbeDropsAFailedChallengerAndKeepsProbing",
         "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_case",
         "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_legacy_cli_case",
         "scripts/test-install-autotune-recommend-config.sh::run_upgrade_ignores_fresh_bounds_case"
