@@ -129,6 +129,10 @@ var exactModelKeyAliases = map[string]string{
 	// key: its served heretic oQ4e artifact bills as that key. The qwen/
 	// namespace is stripped, so the key's fixed point has no namespace.
 	"latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "qwen3.8-flash-next-abliterated",
+	// Inkling-2-Mini's served mlx-community oQ4e artifact (namespace already
+	// stripped) and the bare name bill as its catalog key (#2467).
+	"inkling-2-mini-oq4e-mtp": "thinkingmachines/inkling-2-mini",
+	"inkling-2-mini":          "thinkingmachines/inkling-2-mini",
 }
 
 func normalizeServedAlias(namespace, key string) string {
