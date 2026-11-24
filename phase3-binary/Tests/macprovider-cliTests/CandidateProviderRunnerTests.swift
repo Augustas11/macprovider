@@ -22,6 +22,81 @@ final class CandidateProviderRunnerTests: XCTestCase {
         XCTAssertEqual(config.nativeMTPMode, .off)
     }
 
+    /// #2494: the child gets the row's catalog model id, so a vision row
+    /// (Qwen2-VL) selects the native-vision loader in the probe exactly as
+    /// serving does, and the child still runs no catalog preflight.
+    func testCandidateConfigCarriesTheRowCatalogModelID() throws {
+        let snapshot = "/tmp/hub/models--mlx-community--Qwen2-VL-2B-Instruct-4bit/snapshots/rev"
+        let sha256 = String(repeating: "a", count: 64)
+        func load(_ catalogModelID: String?) throws -> AppConfig {
+            let yaml = CandidateProviderRunner.candidateConfigContents(catalogModelID: catalogModelID)
+            // The flags `serveArguments` gives the child for a bound artifact.
+            var cli = CLIOverrides()
+            cli.model = snapshot
+            cli.modelArtifactPath = snapshot
+            cli.modelArtifactSHA256 = sha256
+            return try ConfigLoader.load(
+                cli: cli,
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in yaml },
+                resolveCredentials: false
+            )
+        }
+        let config = try load(NativeVisionProfile.modelID)
+        XCTAssertEqual(config.modelCatalogModelID, NativeVisionProfile.modelID)
+        XCTAssertNil(config.modelCatalogKey)
+        XCTAssertNil(config.modelCatalogRevision)
+        XCTAssertEqual(config.nativeMTPMode, .off)
+        XCTAssertEqual(config.modelArtifactSHA256, sha256)
+        // The rule ModelRuntime applies to that config: served id = configured
+        // id = the snapshot path, and the verified catalog id selects vision.
+        XCTAssertEqual(
+            NativeVisionProfile.selectionModelID(
+                servedModelID: config.model,
+                configuredModelID: config.model,
+                verifiedCatalogModelID: config.modelCatalogModelID
+            ),
+            NativeVisionProfile.modelID
+        )
+
+        XCTAssertNil(try load(nil).modelCatalogModelID)
+        XCTAssertNil(try load("").modelCatalogModelID)
+        XCTAssertNil(try load("evil: true\nenable_receipts: true").modelCatalogModelID)
+        XCTAssertEqual(try load("evil: true\nenable_receipts: true").enableReceipts, false)
+    }
+
+    func testStartWritesEachRowsCatalogModelIDIntoItsOwnConfig() throws {
+        let artifact = try temporaryDirectory(name: "provider-runner-catalog-id")
+        try Data("weights".utf8).write(to: artifact.appendingPathComponent("weights.bin"))
+        let sha256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: artifact)
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: "/usr/bin/true",
+            logDirectory: try temporaryDirectory(name: "provider-runner-catalog-id-logs")
+        )
+        let configPath = try XCTUnwrap(runner.configPathForTesting)
+        func startAndReadConfig(_ catalogModelID: String?) throws -> String {
+            try runner.start(
+                model: artifact.path,
+                port: 18_080,
+                artifactBinding: CandidateArtifactBinding(
+                    path: artifact.path, sha256: sha256, catalogModelID: catalogModelID
+                )
+            )
+            defer { _ = runner.stop(graceSeconds: 0.1) }
+            return try String(contentsOfFile: configPath, encoding: .utf8)
+        }
+
+        let vision = try startAndReadConfig(NativeVisionProfile.modelID)
+        XCTAssertTrue(vision.contains("\nmodel_catalog_model_id: \(NativeVisionProfile.modelID)\n"), vision)
+        XCTAssertFalse(vision.contains("model_catalog_key"), vision)
+        let unbound = try startAndReadConfig(nil)
+        XCTAssertFalse(unbound.contains("model_catalog_model_id"), unbound)
+        var info = stat()
+        XCTAssertEqual(stat(configPath, &info), 0)
+        XCTAssertEqual(info.st_mode & 0o777, 0o600)
+    }
+
     func testServeArgumentsIncludeNoJoinAndOptionalKnobs() throws {
         XCTAssertEqual(
             try CandidateProviderRunner.serveArguments(

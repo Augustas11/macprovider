@@ -171,6 +171,14 @@ final class CandidateProviderRunner {
             // stale exited group was being reaped. Never replace that handle.
             throw CandidateProviderRunnerError.alreadyRunning(pid: current.process.processIdentifier)
         }
+        // #2494: the generated config carries this row's catalog model id, so
+        // each start rewrites it. A caller-supplied config is never written.
+        if ownedCandidateConfigRoot != nil, let configPath {
+            try Self.writeCandidateConfig(
+                to: URL(fileURLWithPath: configPath),
+                catalogModelID: artifactBinding?.catalogModelID
+            )
+        }
 
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
         Self.pruneLogs(in: logDirectory)
@@ -391,6 +399,8 @@ final class CandidateProviderRunner {
         currentProviderIfAny()?.process.isRunning
     }
 
+    var configPathForTesting: String? { configPath }
+
     static var defaultLogDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/macprovider/autotune-logs", isDirectory: true)
@@ -523,8 +533,25 @@ final class CandidateProviderRunner {
             try? FileManager.default.removeItem(at: root)
             throw CocoaError(.fileWriteNoPermission)
         }
-        let config = root.appendingPathComponent("candidate.yaml")
-        let contents = """
+        do {
+            try writeCandidateConfig(to: root.appendingPathComponent("candidate.yaml"), catalogModelID: nil)
+        } catch {
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+        return root
+    }
+
+    /// The isolated child's config. With `catalogModelID` (a signed catalog
+    /// row's `model_id`, set only with a verified artifact binding) it adds
+    /// `model_catalog_model_id`, so the child selects the loader serving
+    /// selects for that row (#2494): `NativeVisionProfile.selectionModelID`
+    /// needs the catalog id plus the verified artifact SHA-256, and
+    /// `NativeVisionProfile.load`'s per-file pins stay the gate. It adds no
+    /// `model_catalog_key`, so no catalog preflight, envelope or admission
+    /// runs. An id outside the plain YAML scalar set is left out.
+    static func candidateConfigContents(catalogModelID: String?) -> String {
+        var contents = """
         # Generated for an isolated autotune child. No provider credentials,
         # coordinator identity, endpoint, receipt, or production state paths.
         enable_receipts: false
@@ -540,12 +567,20 @@ final class CandidateProviderRunner {
         idle_prewarm:
           enabled: false
         """
-        try Data(contents.utf8).write(to: config, options: .atomic)
+        if let catalogModelID, !catalogModelID.isEmpty, catalogModelID.utf8.allSatisfy({ byte in
+            (0x61...0x7A).contains(byte) || (0x41...0x5A).contains(byte) || (0x30...0x39).contains(byte)
+                || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
+        }) {
+            contents += "\nmodel_catalog_model_id: \(catalogModelID)"
+        }
+        return contents + "\n"
+    }
+
+    static func writeCandidateConfig(to config: URL, catalogModelID: String?) throws {
+        try Data(candidateConfigContents(catalogModelID: catalogModelID).utf8).write(to: config, options: .atomic)
         guard chmod(config.path, mode_t(0o600)) == 0 else {
-            try? FileManager.default.removeItem(at: root)
             throw CocoaError(.fileWriteNoPermission)
         }
-        return root
     }
 
     private static func pruneLogs(in directory: URL, maxFiles: Int = 32, maxBytes: Int64 = 32 * 1024 * 1024) {

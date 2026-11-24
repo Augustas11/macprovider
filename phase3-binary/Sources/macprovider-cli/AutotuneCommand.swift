@@ -1222,13 +1222,16 @@ struct AutotuneCommand: AsyncParsableCommand {
                 )
             }
         }
-        // #2485: an upgrade drops a challenger whose probe fails and removes
-        // its download at once, under the same keep rules; the incumbent's
-        // failure still fails the run.
-        let upgradeDropFailedExcept: Set<String>?
+        // #2485, #2494: a receipt-bound run drops a row whose probe fails
+        // and probes the rest, except a required row: the incumbent of an
+        // upgrade, or the single row of a single-row (#585) receipt. An
+        // upgrade also removes a dropped row's download at once, under the
+        // same keep rules. A dropped row has no benchmark, so it is never
+        // eligible and an upgrade never switches to it.
+        let requiredModelKeys: Set<String>?
         let upgradeDroppedCleanup: ((String) -> Void)?
         if upgrade, let receipt {
-            upgradeDropFailedExcept = Set(upgradeIncumbentKey.map { [$0] } ?? [])
+            requiredModelKeys = Set(upgradeIncumbentKey.map { [$0] } ?? [])
             upgradeDroppedCleanup = { modelKey in
                 let configured = AutotuneModelUpgrade.configuredCatalogKey(configPath: configPathForCleanup, catalog: catalog.value)
                 FileHandle.standardError.write(Data("model_upgrade: dropped \(modelKey) after its probe failed\n".utf8))
@@ -1240,8 +1243,11 @@ struct AutotuneCommand: AsyncParsableCommand {
                     servedPaths: AutotuneModelUpgrade.servedArtifactPaths(configPath: configPathForCleanup)
                 )
             }
+        } else if let prefetchedArtifacts {
+            requiredModelKeys = prefetchedArtifacts.count == 1 ? Set(prefetchedArtifacts.keys) : []
+            upgradeDroppedCleanup = nil
         } else {
-            upgradeDropFailedExcept = nil
+            requiredModelKeys = nil
             upgradeDroppedCleanup = nil
         }
         // R029 step 5/6: an upgrade's state and evidence name the row served
@@ -1307,7 +1313,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 deadline: recommendationDeadline,
                 candidateModelIDs: candidateModelFilter,
                 prefetchedArtifacts: prefetchedArtifacts,
-                dropFailedCandidatesExcept: upgradeDropFailedExcept,
+                requiredModelKeys: requiredModelKeys,
                 onCandidateDropped: upgradeDroppedCleanup
             )
         } catch AutotuneContextCalibrationError.deadlineExceeded {
@@ -1474,7 +1480,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                             path: selectedBenchmark.modelArtifactPath,
                             sha256: selectedBenchmark.artifactSHA256,
                             sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
-                            minRAMGB: selectedRow.minRAMGB
+                            minRAMGB: selectedRow.minRAMGB,
+                            catalogModelID: selectedRow.modelID
                         )
                     ),
                     deadline: recommendationDeadline,
@@ -1567,7 +1574,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                             path: selectedBenchmark.modelArtifactPath,
                             sha256: selectedBenchmark.artifactSHA256,
                             sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
-                            minRAMGB: selectedRow.minRAMGB
+                            minRAMGB: selectedRow.minRAMGB,
+                            catalogModelID: selectedRow.modelID
                         ),
                         isInterrupted: { interruptFlag.isSet() }
                     ),
@@ -2437,7 +2445,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         resolver.downloader.runDownloadBudget = RunDownloadBudget(limitBytes: capBytes)
         let floorBytes = AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: memoryGB)
         resolver.downloader.freeSpaceReserveBytes = floorBytes
-        resolver.downloader.loadableModelType = { await ModelRuntime.probeLoadsModelType($0) }
+        resolver.downloader.loadableModelType = { await ModelRuntime.probeLoadsModelType($0, modelID: $1) }
         FileHandle.standardError.write(Data(
             "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB and leaves at least \(String(format: "%.1f", Double(floorBytes) / 1_000_000_000)) GB free\n".utf8
         ))

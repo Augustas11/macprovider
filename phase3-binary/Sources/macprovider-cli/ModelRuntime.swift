@@ -14042,14 +14042,13 @@ maxTokens: maxTokens,
         return config["model_type"] as? String == "prism_hadamard_qwen35"
     }
 
-    /// Whether `loadLocalContainer` can build a model of `modelType` when it
-    /// loads by path, as an autotune probe does: the VLM registry for the
-    /// Prism type, the LLM registry otherwise. The native-vision profile is
-    /// selected by served model id or catalog alias; `CandidateProviderRunner`
-    /// passes `--model <path>` and no alias, so a VLM-only type such as
-    /// `qwen2_vl` does not load in a probe (#2485).
-    nonisolated static func probeLoadsModelType(_ modelType: String) async -> Bool {
-        if modelType == "prism_hadamard_qwen35" {
+    /// Whether `loadLocalContainer` can build a model of `modelType` when an
+    /// autotune probe loads the catalog row `modelID` by path: the VLM
+    /// registry for the native-vision profile's row (the probe child gets the
+    /// row's verified catalog binding, #2494) and for the Prism type, the LLM
+    /// registry otherwise (#2485).
+    nonisolated static func probeLoadsModelType(_ modelType: String, modelID: String? = nil) async -> Bool {
+        if modelType == "prism_hadamard_qwen35" || NativeVisionProfile.supports(modelID: modelID) {
             return await VLMTypeRegistry.shared.contains(modelType)
         }
         return await LLMTypeRegistry.shared.contains(modelType)

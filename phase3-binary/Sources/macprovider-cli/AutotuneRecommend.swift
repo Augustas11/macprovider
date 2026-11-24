@@ -4032,7 +4032,7 @@ struct HuggingFaceSnapshotDownloader {
     /// `model_type`. When set, a Hugging Face snapshot whose Hub metadata
     /// names a type it rejects is refused before any byte is written. nil
     /// checks nothing.
-    var loadableModelType: (@Sendable (String) async -> Bool)? = nil
+    var loadableModelType: (@Sendable (_ modelType: String, _ modelID: String) async -> Bool)? = nil
 
     /// Bytes available for important use (APFS purgeable space included, as
     /// in `quarantineHasRoom`) on the volume holding `url`, or nil when it
@@ -4557,7 +4557,7 @@ struct HuggingFaceSnapshotDownloader {
         )
         let siblings = info.siblings
         try Self.assertDeadlineActive(deadline)
-        if let loadable = self.loadableModelType, let modelType = info.modelType, !(await loadable(modelType)) {
+        if let loadable = self.loadableModelType, let modelType = info.modelType, !(await loadable(modelType, modelID)) {
             throw AutotuneRecommendError.unsupportedModelType(modelID: modelID, modelType: modelType)
         }
         guard !siblings.isEmpty else {
@@ -5767,16 +5767,17 @@ struct AutotuneRecommendationBenchmarker {
         deadline: Date? = nil,
         candidateModelIDs: Set<String>? = nil,
         prefetchedArtifacts: [String: PrefetchedModelArtifact]? = nil,
-        dropFailedCandidatesExcept: Set<String>? = nil,
+        requiredModelKeys: Set<String>? = nil,
         onCandidateDropped: ((String) -> Void)? = nil
     ) async throws -> BenchmarkOutcomes {
-        // A receipt-bound run fails closed on any probe failure, except that
-        // a model upgrade (#2485) drops a failed challenger with a diagnostic
-        // and keeps probing; the rows in `dropFailedCandidatesExcept` (the
-        // incumbent) still fail the run.
+        // A receipt-bound run fails closed on a probe failure of a required
+        // row: the incumbent of a model upgrade, or the single row of a
+        // single-row (#585) receipt. Every other row is dropped with a
+        // diagnostic and the run keeps probing (#2485, #2494). nil makes
+        // every receipt row required.
         func dropsFailure(_ modelKey: String) -> Bool {
-            guard let kept = dropFailedCandidatesExcept else { return false }
-            return !kept.contains(modelKey)
+            guard let requiredModelKeys else { return false }
+            return !requiredModelKeys.contains(modelKey)
         }
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
@@ -5876,7 +5877,8 @@ struct AutotuneRecommendationBenchmarker {
                         path: artifact.modelArgument,
                         sha256: artifact.sha256,
                         sizeBytes: artifact.sizeBytes,
-                        minRAMGB: row.minRAMGB
+                        minRAMGB: row.minRAMGB,
+                        catalogModelID: row.modelID
                     ),
                     deadline: deadline
                 )

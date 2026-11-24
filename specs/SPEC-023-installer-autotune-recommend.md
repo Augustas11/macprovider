@@ -8,7 +8,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.46 (2026-11-24, Related: #2485)** — §9.4 `SPEC-023-R029`: the
+- **v0.22.46 (2026-11-24, Related: #2485, #2494)** — §9.4 `SPEC-023-R029`: the
   upgrade no longer leaves candidate weights on disk. Cleanup removes a
   removed row's hash-qualified prefetch snapshot in the Hugging Face cache
   (`<revision>.macprovider-prefetch.<sha256>`) and the blobs it alone links,
@@ -18,7 +18,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   whose Hub `model_type` this build's probe cannot load is refused before
   download, and every download leaves its size plus a free-space floor of
   `max(memory_gb, 16)` GiB; the first row refused for space stops the run's
-  downloads and keeps what is done (step 2). AC-52 is amended.
+  downloads and keeps what is done (step 2). Outside an upgrade, a
+  receipt-bound run requires only the single row of a single-row receipt;
+  each row of a larger receipt that fails its probe is skipped with a
+  diagnostic (step 4). A probe child is configured with its row's signed
+  `model_id` as `model_catalog_model_id`, so it picks the loader serving
+  picks; the Qwen2-VL row loads through the native-vision profile, and the
+  load-time check accepts the VLM registry for that row (steps 2 and 4).
+  AC-52 is amended.
 - **v0.22.45 (2026-11-16, Related: #2154, #2328)** — SPEC-023-R024: for the
   `gemma4_mtp_v1` family adapter only, `mlx_affine` names an MLX affine
   8-bit target and its unquantized bfloat16 embedded assistant, represented
@@ -3288,7 +3295,8 @@ use it.
    a later row is verified only when it is already on disk. A row whose
    Hugging Face metadata names a `model_type` the probe's path loader cannot
    build (the LLM type registry, or the VLM registry for
-   `prism_hadamard_qwen35`) is dropped before any byte is written; a row
+   `prism_hadamard_qwen35` and for the native-vision profile's row) is
+   dropped before any byte is written; a row
    without that metadata is downloaded as before. One run MUST NOT download more than twice the Mac's
    memory in total (`2 × memory_gb` GiB, summed over advertised snapshot
    sizes and charged before a snapshot's first byte). Every planned
@@ -3329,7 +3337,14 @@ use it.
    whose probe fails (a load failure, an infeasible or invalid measurement,
    an unusable artifact) is dropped with a diagnostic, its download is
    removed at once under the step 6 rules, and the run probes the rest. A
-   failed incumbent probe fails the run.
+   failed incumbent probe fails the run. A dropped row has no benchmark, so
+   it is never eligible and the decision cannot switch to it. Outside an
+   upgrade the same applies to a receipt-bound run, where only the single
+   row of a single-row receipt is required. Each probe child is configured
+   with its row's signed `model_id` as `model_catalog_model_id` (and no
+   `model_catalog_key`), beside the verified artifact path and SHA-256, so
+   it selects the loader serving selects for that row: the native-vision
+   profile for Qwen2-VL, whose per-file pins stay the gate.
 5. **Decision.** The catalog bench gate is hard for the automatic switch:
    a row whose measured sustained TPS is below its `bench_gate.min_sustained_tps`
    (or not finite), or whose 4k TTFT exceeds `bench_gate.max_4k_ttft_ms`,

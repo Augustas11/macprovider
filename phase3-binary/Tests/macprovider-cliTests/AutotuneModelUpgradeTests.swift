@@ -2189,7 +2189,7 @@ extension AutotuneModelUpgradeTests {
                 return try r2485DownloadedReplacement()
             }
         )
-        downloader.loadableModelType = { $0 != "qwen2_vl" }
+        downloader.loadableModelType = { modelType, _ in modelType != "qwen2_vl" }
         let resolver = CachedModelArtifactResolver(hubRoot: fixture.hub, downloader: downloader)
         let outcome = try await Self.prefetchAll(fixture, resolver: resolver)
 
@@ -2224,11 +2224,24 @@ extension AutotuneModelUpgradeTests {
         let prismLoads = await ModelRuntime.probeLoadsModelType("prism_hadamard_qwen35")
         let qwen2VLLoads = await ModelRuntime.probeLoadsModelType("qwen2_vl")
         let unknownLoads = await ModelRuntime.probeLoadsModelType("no_such_model_type")
+        // #2494: the probe child gets the row's catalog binding, so the
+        // native-vision row loads through the VLM registry; the same type
+        // under any other id still goes to the LLM registry.
+        let visionRowLoads = await ModelRuntime.probeLoadsModelType("qwen2_vl", modelID: NativeVisionProfile.modelID)
+        let visionRowLowercaseLoads = await ModelRuntime.probeLoadsModelType(
+            "qwen2_vl", modelID: NativeVisionProfile.modelID.lowercased())
+        let otherQwen2VLLoads = await ModelRuntime.probeLoadsModelType("qwen2_vl", modelID: "namespace/other-qwen2-vl")
+        let visionRowUnknownLoads = await ModelRuntime.probeLoadsModelType(
+            "no_such_model_type", modelID: NativeVisionProfile.modelID)
         XCTAssertTrue(llamaLoads)
         XCTAssertTrue(qwen3Loads)
         XCTAssertTrue(prismLoads)
         XCTAssertFalse(qwen2VLLoads)
         XCTAssertFalse(unknownLoads)
+        XCTAssertTrue(visionRowLoads)
+        XCTAssertTrue(visionRowLowercaseLoads)
+        XCTAssertFalse(otherQwen2VLLoads)
+        XCTAssertFalse(visionRowUnknownLoads)
     }
 
     func testDiskFloorStopsTheRunAndKeepsWhatIsDone() async throws {

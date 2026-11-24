@@ -6266,7 +6266,7 @@ final class AutotuneRecommendTests: XCTestCase {
             port: 18_080,
             candidateModelIDs: fixture.modelIDs,
             prefetchedArtifacts: fixture.prefetched,
-            dropFailedCandidatesExcept: [fixture.incumbentKey],
+            requiredModelKeys: [fixture.incumbentKey],
             onCandidateDropped: { dropped.keys.append($0) }
         )
 
@@ -6300,7 +6300,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 port: 18_080,
                 candidateModelIDs: fixture.modelIDs,
                 prefetchedArtifacts: fixture.prefetched,
-                dropFailedCandidatesExcept: [fixture.incumbentKey],
+                requiredModelKeys: [fixture.incumbentKey],
                 onCandidateDropped: { dropped.keys.append($0) }
             )
             XCTFail("an incumbent probe failure must still fail the upgrade run")
@@ -6308,6 +6308,44 @@ final class AutotuneRecommendTests: XCTestCase {
             XCTAssertEqual(failedModelKey, fixture.incumbentKey)
         }
         XCTAssertEqual(dropped.keys, [])
+    }
+
+    /// #2494: a multi-row receipt outside an upgrade requires no row, so a
+    /// failed row is skipped with its diagnostic and the rest are probed.
+    /// Every probe child is bound to its row's catalog model id.
+    func testMultiRowReceiptSkipsAFailedRowAndBindsEachRowsCatalogModelID() async throws {
+        let fixture = try upgradeProbeFixture()
+        let prober = RecordingStage1Prober(results: [
+            fixture.challengerPath: .infeasible(reason: "provider exited before Stage 1 probe rc=1", nErr: 1),
+            fixture.incumbentPath: .feasible(medianTPS: 88, p95TTFTMS: 900),
+        ])
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: fixture.resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: fixture.request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18_080,
+            candidateModelIDs: fixture.modelIDs,
+            prefetchedArtifacts: fixture.prefetched,
+            requiredModelKeys: []
+        )
+
+        XCTAssertEqual(Set(outcomes.benchmarks.keys), [fixture.incumbentKey])
+        XCTAssertEqual(outcomes.diagnostics[fixture.challengerKey], "provider exited before Stage 1 probe rc=1 (n_err=1)")
+        XCTAssertEqual(
+            prober.probedArtifactBindings.map { $0?.catalogModelID },
+            [
+                fixture.request.candidateCatalog.rows[fixture.challengerKey]?.modelID,
+                fixture.request.candidateCatalog.rows[fixture.incumbentKey]?.modelID,
+            ]
+        )
     }
 
     private struct UpgradeProbeFixture {
