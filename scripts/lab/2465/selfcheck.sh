@@ -222,6 +222,7 @@ start_serve() {
       MACPROVIDER_CTL_SOCKET_PATH=$S/tmp/ctl.sock MACPROVIDER_SWITCH_STATE_PATH=$S/tmp/last-switch.ts \
       MACPROVIDER_WATCHDOG_STATE_DIR=$S/home/watchdog MACPROVIDER_AUTO_UPDATE_ENABLED=false \
       MACPROVIDER_MODEL_ARTIFACT_ROOT=$ROOT \
+      MACPROVIDER_LAB_NATIVE_MTP_SOURCE_COMMIT=$COMMIT \
       MACPROVIDER_LAB_STATIC_FEED_ORIGIN=http://127.0.0.1:$FEED_PORT \
       MACPROVIDER_LAB_STATIC_FEED_KEY_ID=$STATIC_KEY_ID MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY=$STATIC_PUB
     cd "$BIN" && exec ./macprovider-cli serve --config "$S/config.yaml" --no-join > "$RES/serve.out" 2> "$RES/serve.err" < /dev/null ) &
