@@ -223,11 +223,20 @@ struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
             upstream: upstream,
             structuralSources: renderer.templateTexts
         )
+        // `Inkling2Encoding.render` is overloaded; an explicit closure keeps the
+        // type checker off the overload set (a bare reference in a ternary
+        // crashes swift-frontend 6.3).
+        var nativeRender: (@Sendable (ChatTemplatePromptRenderer.Input) throws -> String)?
+        if Inkling2Encoding.applies(to: directory) {
+            nativeRender = { @Sendable (input: ChatTemplatePromptRenderer.Input) throws -> String in
+                try Inkling2Encoding.render(input)
+            }
+        }
         return ChatTemplateTokenizer(
             upstream: upstream,
             renderer: renderer,
             encoder: encoder,
-            nativeRender: Inkling2Encoding.applies(to: directory) ? Inkling2Encoding.render : nil
+            nativeRender: nativeRender
         )
     }
 }
@@ -287,6 +296,7 @@ struct ChatTemplateTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
             }
         }
         return try encoder.encodePrompt(
-            input, check: ChatTemplatePromptRenderer.check, sanitize: ChatTemplatePromptRenderer.sanitize, render: render)
+            input, check: ChatTemplatePromptRenderer.check, sanitize: ChatTemplatePromptRenderer.sanitize,
+            render: { try self.render($0) })
     }
 }
