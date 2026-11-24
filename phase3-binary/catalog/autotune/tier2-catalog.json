@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-24-inkling-2-mini-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-24-daisyrose-27b-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-24T08:05:00Z",
+  "issued_at": "2026-11-24T10:50:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -286,7 +286,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "yAlr6UGEUAANyo23Eu7O7fwRa8xMSD1IKhZsgAPhIQpEqCJBtjgcV-wpYgLr1mPpmbFbSv5kGEP0cGmLuFZrBw"
+    "sig": "-O6vrtc89NwRao3_RC8pWhWX-nxxkTqj7QxRMIUrrstC28gMJHQRbOkaf8PIqEKvfbCGq3MX0Xtc0v8DYCfuAA"
   },
   "version": 1
 }

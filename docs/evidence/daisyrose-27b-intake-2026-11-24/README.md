@@ -11,7 +11,7 @@ with `scripts/catalog-hash-sweep.py`'s algorithm. The same code reproduces the
 
 The row is listed at the Qwen3.8-27B placement and price. Native MTP is
 admitted as a SPEC-048 MTP-13 same-architecture variant of `qwen/qwen3.8-27b`
-that binds its own R012 fit evidence (SPEC-048 0.1.124, see below).
+that binds its own R012 fit evidence (SPEC-048 0.1.126, see below).
 
 ## Measurements
 
@@ -70,14 +70,19 @@ tuple class. Preconditions:
 | R012: served `.safetensors` bytes no more than the donor's, else own fit evidence | met through own fit evidence: DaisyRose is 250 bytes larger (16,054,541,599 vs 16,054,541,349; shard deltas +90, −30, +190, from safetensors header lengths). The variant block binds `mtp-daisy-policy.json` and `mtp-daisy-analysis.json` by SHA-256 under `fit_evidence`. The policy names DaisyRose's artifact hash `996b96ee…`, and all 8 cells, including the 32K-prompt s1 cell and the s4 sustained cell, record no memory failures. |
 | Snapshot manifests committed under `snapshot-manifests/` | met: `996b96ee….manifest` and the donor's `8a8786e9….manifest` |
 
-Open risk: no MTP-16 `self_check_record` exists for DaisyRose yet, so the bank
-carries the donor's expected output for the tuple. The R033 coordinator
-canary compares that output; if DaisyRose's trunk produces different tokens,
-the canary disables the native tuple (ordinary serving continues) until the
-record is bound. `scripts/lab/2465/selfcheck.sh` captures it in a Studio
-window, and `catalog-release.py bind-native-mtp-self-check-record --model-key
-radixark/daisyrose-27b --source <selfcheck-record.json>` binds it; the
-release is then regenerated and re-signed.
+MTP-16 self-check record: bound. Studio run `20261124T103540Z`
+(`scripts/lab/2465/selfcheck.sh` at campaign commit `2dd00ac22`, before the
+rebase onto main's Inkling release; donor-mode serve of
+`radixark/daisyrose-27b`) passed the native-MTP self-check: speedup
+1.34, 64 tokens, accepted 31 / rejected 0. The record is
+`selfcheck-record-20261124T103540Z.json`, bound with
+`catalog-release.py bind-native-mtp-self-check-record --model-key
+radixark/daisyrose-27b`, so the self-test bank carries DaisyRose's own
+expected output for the tuple and the R033 coordinator canary compares that.
+The run used the engine before 3.33 (#2484). The challenge output is a short
+counting sequence; if the 3.33 engine changes it, the canary disables only the
+native tuple (ordinary serving continues) until a record from the cut build
+is bound.
 
 ## Files
 
@@ -88,3 +93,5 @@ release is then regenerated and re-signed.
   `macprovider.native-mtp-r015-policy.v1`).
 - `mtp-daisy-analysis.json`: DaisyRose R015 analysis (schema
   `macprovider.native-mtp-r015-analysis.v1`).
+- `selfcheck-record-20261124T103540Z.json`: the MTP-16 self-check record
+  bound into `native-mtp-variants.json`.

@@ -2959,7 +2959,7 @@ NATIVE_MTP_VARIANT_KEYS = {
     "mtp_manifest_sha256", "projection_artifacts", "quantization",
 }
 NATIVE_MTP_VARIANT_OPTIONAL_KEYS = {"mtp_artifact_sha256", "self_check_record", "fit_evidence"}
-# SPEC-048 0.1.124: a variant whose served weights exceed its donor's binds its
+# SPEC-048 0.1.126: a variant whose served weights exceed its donor's binds its
 # own R012 fit evidence: the R015 policy and analysis of a run on the variant
 # artifact, each committed under docs/evidence/ and named by SHA-256.
 NATIVE_MTP_FIT_EVIDENCE_KEYS = {"policy", "analysis"}
@@ -3288,7 +3288,7 @@ def _native_mtp_fit_int(value: object) -> bool:
 
 def require_native_mtp_variant_fit_evidence(variant: dict, donor: dict, label: str,
                                             evidence_root: pathlib.Path = ROOT) -> None:
-    """SPEC-048 0.1.124 R012 own fit evidence: an R015 run on the variant's own
+    """SPEC-048 0.1.126 R012 own fit evidence: an R015 run on the variant's own
     target, MTP head and tokenizer, on the donor's hardware RAM, that ran a cell
     at the donor's prompt bound, a cell at the donor's qualified slots and the
     full sustained run, and measured no memory failure, no hard failure and at
@@ -3384,7 +3384,7 @@ def require_native_mtp_variant_weight_fit(variants: list, donors: dict, artifact
     """R012 (SPEC-048 0.1.103): a variant's served weights are no larger than
     its donor's, so the donor's fit evidence covers it. Non-weight snapshot
     files (GGUF, mmproj, docs) are not loaded and do not count. A larger
-    variant passes only on its own bound fit evidence (0.1.124); declared
+    variant passes only on its own bound fit evidence (0.1.126); declared
     evidence is checked whether or not it is needed."""
     for variant in variants:
         donor = donors[variant["donor_model_key"]]

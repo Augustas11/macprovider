@@ -276,7 +276,7 @@ class NativeMTPVariantWeightFitTests(unittest.TestCase):
         with self.assertRaisesRegex(catalog_release.CatalogError, "does not hash to the feed's artifact hash"):
             self.fit({"a.safetensors": 3}, {"a.safetensors": 2}, tamper)
 
-    # SPEC-048 0.1.124: a larger variant passes only on its own bound fit evidence.
+    # SPEC-048 0.1.126: a larger variant passes only on its own bound fit evidence.
     LARGER = ({"model-00001.safetensors": 91}, {"model-00001.safetensors": 90})
 
     @staticmethod

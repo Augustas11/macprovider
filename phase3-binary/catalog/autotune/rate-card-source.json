@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-11-24T08:05:00Z",
+  "generated_at": "2026-11-24T10:50:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
@@ -136,6 +136,11 @@
       "prompt_cache_hit_rate_per_mtok": 30000,
       "prompt_rate_per_mtok": 120000
     },
+    "radixark/daisyrose-27b": {
+      "completion_rate_per_mtok": 1584000,
+      "prompt_cache_hit_rate_per_mtok": 30000,
+      "prompt_rate_per_mtok": 120000
+    },
     "thinkingmachines/inkling-2-mini": {
       "completion_rate_per_mtok": 240000,
       "prompt_cache_hit_rate_per_mtok": 15000,
@@ -155,11 +160,6 @@
       "completion_rate_per_mtok": 88000,
       "prompt_cache_hit_rate_per_mtok": 5500,
       "prompt_rate_per_mtok": 18500
-    },
-    "radixark/daisyrose-27b": {
-      "completion_rate_per_mtok": 1584000,
-      "prompt_cache_hit_rate_per_mtok": 30000,
-      "prompt_rate_per_mtok": 120000
     }
   },
   "schema_version": "macprovider.rate-card-source.v1",

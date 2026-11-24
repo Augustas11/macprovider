@@ -3,7 +3,7 @@
     {
       "action": "admit_listed",
       "admission_clause": "coldstart_slot",
-      "as_of": "2026-11-23T18:45:00Z",
+      "as_of": "2026-11-24T10:50:00Z",
       "coldstart_slot_used": true,
       "fit_clause": "tier_target",
       "listed_since": null,
@@ -15,7 +15,7 @@
       "promotion": null,
       "signals": {
         "demand_rank_absent_reason": "unranked",
-        "demand_rank_source_sha256": "ca8d657b77032df3560e894c7877b9a241d9b42f76c506e88c2d0e0394e2e36b",
+        "demand_rank_source_sha256": "c247d51979d8587140dbf9adafdafcda1ebefa6752ce43fc62dc1695923b2362",
         "distinct_provider_offer_absent_reason": "source_unavailable",
         "distinct_provider_offer_count": null,
         "distinct_provider_offer_source_sha256": null,
@@ -38,7 +38,7 @@
       }
     }
   ],
-  "generated_at": "2026-11-23T18:45:00Z",
+  "generated_at": "2026-11-24T10:50:00Z",
   "release_id": "published-2026-11-24-daisyrose-27b-listed-v296",
   "schema_version": "macprovider.intake-decision.v1",
   "thresholds": {
