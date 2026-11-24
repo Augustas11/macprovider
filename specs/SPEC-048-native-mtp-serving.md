@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.126
+**Version:** 0.1.127
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.126",
+  "version": "0.1.127",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -910,7 +910,10 @@ exactness under R015 and R016 is unchanged: a native request's tokens MUST
 still equal that request's own one-row ordinary decode on `row_invariant`,
 the reference it was qualified against. The drafter load is allowed in a
 `mixed` process and still refused in a `stock_order` or `serial_only`
-process. The MTP-16 self-check runs on `row_invariant`. A native request and
+process. The MTP-16 self-check's native probe and its token reference run on
+`row_invariant`; from 0.1.127 its speed reference runs on the route an
+ordinary request takes with native MTP off (`stock_order` in a `mixed`
+process; MTP-16). A native request and
 an ordinary request of the same prompt in one `mixed` process MAY differ at
 a near-tied greedy token (SPEC-038 FR-CB6); the native request's parity
 reference is not the ordinary request beside it but its own one-row
@@ -2980,7 +2983,9 @@ paged engine (same kernels, so near-tied logits resolve identically) at
 greedy, requires identical token IDs, and requires the native run to be
 strictly faster than the ordinary run (best of two runs each): speedup greater
 than 1.0 from 0.1.71, matching the R015 decode-throughput gate's positive lower
-bound, and at least 1.15x through 0.1.70. The R015 PASS on the final
+bound, and at least 1.15x through 0.1.70; from 0.1.127, greater than 1.03 at
+every probe point against the ordinary route an ordinary request takes
+(below). The R015 PASS on the final
 mlx-swift-lm 3.32.3 stack is recorded in `docs/research/mlx-swift-lm-3.32.3/`
 (`step3-native-margin.md`, `step3-parity-event.md`, `step45-throughput.md`). Failure disables only that tuple
 on that Mac. The signed challenge record's expected digest is no longer
@@ -2989,6 +2994,58 @@ runtime revision. The SPEC-031-R033 coordinator canary is unchanged: it still
 fails a tuple whose output differs from the signed bank record, so a release
 that changes MLX numerics MUST re-baseline the challenge bank on the new
 runtime through the normal signed release path.
+
+**(0.1.127) Served-shape probe points (Related: #2481).** One 64-token
+challenge does not measure the served one-row workload: Qwen3.6-35B-A3B
+passed it at 1.11 while one-row native MTP served 2.4% (200-token context)
+to 7.7% (4,000-token context, 512 output tokens) below ordinary decode in the
+parity grid on the same binary. The self-check therefore measures three probe
+points, in order, and stops at the first that fails:
+
+1. `challenge`: the signed challenge as above (its output is the receipt and
+   the `native_mtp_self_check_record`);
+2. `ctx200_out128`: the parity grid's prompt of about 200 tokens
+   (`scripts/lab/parity-grid/prompts.py`, row 0, byte for byte), rendered
+   with the loaded chat template as a buyer turn, 128 output tokens;
+3. `ctx4000_out256`: the same prompt generator at about 4,000 tokens, 256
+   output tokens, so the verify cost at a long context reaches steady state.
+
+The prompts are generated text, not buyer data. A workload point is clamped
+to the tuple's signed `max_prompt_tokens` and `max_completion_tokens`; when
+the rendered prompt exceeds the prompt bound the character target shrinks
+(at most three renderings), and a point no rendering fits is skipped and
+logged (`result=skipped_outside_signed_bounds`), since no buyer request of
+that shape is served native. Each point times the whole request, prefill
+included, as the grid's one-row request tok/s does. The native side is the
+request shape of `native_mtp_selftest_v1` (an integrity probe on the
+quiescent scheduler) at the depth a served row starts at,
+`min(2, max_proposal_depth)`, best of two runs. The speed reference is the
+best of two ordinary runs on the route an ordinary request takes with
+native MTP off (`stock_order` in a SPEC-038 FR-CB9 `mixed` process, the
+process route otherwise), because that is the throughput a buyer gets
+without native MTP. The token reference is ordinary decode on the native
+request's own route (R003 0.1.121); when the two routes are the same, one
+run serves as both. Native MTP is admitted for the load only when, at every
+point measured, native tokens equal the token reference and the speedup
+(speed-reference seconds over native seconds) is greater than 1.03. The
+3% margin keeps a best-of-two wall-clock win inside run-to-run noise from
+admitting a path that serves slower. Each point logs
+`event=native_mtp_self_check_point` (point, result, speedup, prompt and
+output tokens, both times), and the verdict line
+`event=native_mtp_self_check result=` names the deciding point. The decision
+is all or nothing for the load: the runtime has no per-context native-MTP
+band beyond the signed prompt bound, so a tuple that loses at either context
+serves ordinary decode until its next load.
+
+Cost at load: at most three points of two native and two ordinary requests,
+plus one token-reference request per point in a `mixed` process, with
+prompts of at most about 4,000 tokens and at most 256 output tokens; it stops
+at the first failing point. Estimated from the #2481 grid rates (not yet
+measured as a self-check), Qwen3.6-35B-A3B on an M3 Ultra adds about 25 to
+30 seconds; a dense 27B model, whose 3,500-token prefill takes about 11
+seconds (#2402), adds about 1.5 to 2 minutes. The check runs before the
+load publishes native MTP, and its native requests run only on a quiescent
+scheduler, as the challenge's do.
 
 After admission, the coordinator MUST maintain a fresh SPEC-031-R033
 `native_mtp_canary_v1` pass for the exact
@@ -3156,6 +3213,16 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.127 (2026-11-25, Related: #2481)** — R016: the on-device self-check
+  measures the served one-row shape. Besides the signed challenge it probes
+  the parity grid's prompts at about 200 tokens (128 output) and about 4,000
+  tokens (256 output), clamped to the tuple's signed bounds; it times the
+  ordinary reference on the route an ordinary request takes with native MTP
+  off (`stock_order` in a `mixed` process) while the token reference stays on
+  the native route; and it admits native MTP only when the speedup exceeds
+  1.03 at every point (previously greater than 1.0 on the challenge alone).
+  Added load cost and the per-point log events are in MTP-16. No signed
+  record, bank or tuple changes.
 - **0.1.126 (2026-11-24, Related: #2465)** — MTP-13 variant item 3: a
   variant whose served weights exceed its donor's binds its own R012 fit
   evidence (`fit_evidence`, an R015 policy and analysis on the variant

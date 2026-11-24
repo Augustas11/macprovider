@@ -5797,30 +5797,33 @@ maxTokens: 1,
         )
     }
 
-    /// The same challenge prompt on the ordinary decode path of the same
-    /// scheduler: the reference the MTP self-check output must equal. Best of
-    /// `NativeMTPOnDeviceSelfCheck.repetitions` timed runs.
-    private func executeNativeMTPOrdinaryReference(
-        _ input: NativeMTPSelfTestInput,
+    /// Ordinary decode of a self-check prompt on the same scheduler, best of
+    /// `repetitions` timed runs. `nativeAdmitted` picks the route: true is the
+    /// native request's own route (the exactness reference), false the route
+    /// an ordinary request takes with native MTP off (the speed reference).
+    private func runNativeMTPSelfCheckOrdinary(
+        label: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        nativeAdmitted: Bool,
+        repetitions: Int,
         scheduler: ContinuousBatchScheduler
     ) async throws -> (tokens: [Int], seconds: Double) {
-        guard let challenge = input.selectedChallenge else {
-            throw NativeMTPSelfTestError.failed("missing_challenge_record")
-        }
         var tokens: [Int] = []
         var seconds = Double.infinity
         let runNonce = UUID().uuidString.lowercased()
-        for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+        for attempt in 0..<max(1, repetitions) {
             let id = NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(
-                challengeID: challenge.challengeID,
+                challengeID: "\(label)-\(nativeAdmitted ? "ref" : "speed")",
                 runNonce: runNonce,
                 attempt: attempt
             )
             let start = Date()
             let result = try await scheduler.submit(Self.nativeMTPOrdinaryReferenceRequest(
                 id: id,
-                promptTokens: challenge.promptTokenIDs,
-                maxOutputTokens: challenge.maxCompletionTokens
+                promptTokens: promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                nativeAdmitted: nativeAdmitted
             ))
             seconds = min(seconds, Date().timeIntervalSince(start))
             tokens = result.generatedTokens
@@ -5828,14 +5831,51 @@ maxTokens: 1,
         return (tokens, seconds)
     }
 
-    /// One ordinary reference run of the MTP self-check. SPEC-048 R003
-    /// (0.1.121): the reference is the request's own one-row decode on the
-    /// route its native probe runs, row-invariant in a `mixed` process, so
-    /// the token match and the speed gate compare like with like.
+    /// The ordinary side of one self-check probe point (SPEC-048-R016
+    /// 0.1.125): the speed reference is the best of
+    /// `NativeMTPOnDeviceSelfCheck.repetitions` runs on the route an ordinary
+    /// request takes with native MTP off; the token reference is ordinary
+    /// decode on the native route, the same run when both routes agree.
+    private func measureNativeMTPSelfCheckOrdinary(
+        label: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        scheduler: ContinuousBatchScheduler
+    ) async throws -> (referenceTokens: [Int], seconds: Double) {
+        let speed = try await runNativeMTPSelfCheckOrdinary(
+            label: label,
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            nativeAdmitted: false,
+            repetitions: NativeMTPOnDeviceSelfCheck.repetitions,
+            scheduler: scheduler
+        )
+        let routes = NativeMTPOnDeviceSelfCheck.ordinaryRoutes()
+        guard routes.speed != routes.reference else {
+            return (speed.tokens, speed.seconds)
+        }
+        let reference = try await runNativeMTPSelfCheckOrdinary(
+            label: label,
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            nativeAdmitted: true,
+            repetitions: 1,
+            scheduler: scheduler
+        )
+        return (reference.tokens, speed.seconds)
+    }
+
+    /// One self-check ordinary run. SPEC-048 R003 (0.1.121): with
+    /// `nativeAdmitted` the reference is the request's own one-row decode on
+    /// the route its native probe runs, row-invariant in a `mixed` process,
+    /// so the token match compares like with like. SPEC-048-R016 (0.1.125):
+    /// without it, the run takes the route an ordinary request takes with
+    /// native MTP off, the speed the native path must beat.
     static func nativeMTPOrdinaryReferenceRequest(
         id: String,
         promptTokens: [Int],
         maxOutputTokens: Int,
+        nativeAdmitted: Bool = true,
         processRoute: SmallMRoute = SmallMRoute.processRoute,
         mixed: Bool = SmallMRoute.processMixed
     ) -> ContinuousBatchSchedulerRequest {
@@ -5847,8 +5887,157 @@ maxTokens: 1,
             samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
             temperature: 0,
             topP: 1,
-            smallMRoute: SmallMRoute.requestRoute(nativeAdmitted: true, processRoute: processRoute, mixed: mixed)
+            smallMRoute: SmallMRoute.requestRoute(
+                nativeAdmitted: nativeAdmitted, processRoute: processRoute, mixed: mixed)
         )
+    }
+
+    /// The native side of a workload probe point: the request shape of
+    /// `native_mtp_selftest_v1` (an integrity probe on the quiescent
+    /// scheduler, so it trains no buyer depth policy) at the depth a served
+    /// row starts at, best of `NativeMTPOnDeviceSelfCheck.repetitions`.
+    private func measureNativeMTPSelfCheckWorkloadNative(
+        label: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        load: NativeMTPRuntimeLoadResult,
+        scheduler: ContinuousBatchScheduler
+    ) async throws -> (tokens: [Int], seconds: Double) {
+        guard let servedSnapshot = load.selfTestInput.servedSnapshot else {
+            throw NativeMTPSelfTestError.failed("missing_challenge_record")
+        }
+        let fence = NativeMTPTupleFence(
+            admissionTupleSHA256: load.selfTestInput.tupleSHA256,
+            servedSnapshotID: load.servedSnapshotID,
+            targetGeneration: servedSnapshot.generation
+        )
+        let depth = min(2, load.admissionCapability.maxProposalDepth)
+        guard depth > 0 else {
+            throw NativeMTPSelfTestError.failed("selftest_no_proposal_depth")
+        }
+        var tokens: [Int] = []
+        var seconds = Double.infinity
+        let runNonce = UUID().uuidString.lowercased()
+        for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+            let id = "native-mtp-selfcheck-native-\(label)-\(runNonce)-\(attempt)"
+            let start = Date()
+            let result = try await scheduler.submitNativeMTPIntegrityProbe(ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: "",
+                promptTokens: promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: depth,
+                nativeMTPCompleteWindowBytesByDepth: load.capability.completeWindowBytesByDepth,
+                nativeMTPFamilyAdapter: load.capability.family,
+                nativeMTPTupleFence: fence,
+                nativeMTPIntegrityProbe: true
+            ))
+            seconds = min(seconds, Date().timeIntervalSince(start))
+            guard result.retainedCache == nil, result.serialConversationCache == nil else {
+                throw NativeMTPSelfTestError.failed("selftest_retained_state")
+            }
+            tokens = result.generatedTokens
+        }
+        return (tokens, seconds)
+    }
+
+    /// The parity-grid prompt of a workload probe point, tokenized with the
+    /// loaded chat template as a buyer turn and kept inside the tuple's
+    /// signed prompt bound (the character target shrinks when the template
+    /// overshoots). Nil when no prompt fits.
+    private static func nativeMTPSelfCheckWorkloadPrompt(
+        container: ModelContainer,
+        contextTokens: Int,
+        maxPromptTokens: Int
+    ) async throws -> [Int]? {
+        var target = contextTokens
+        for _ in 0..<3 {
+            guard target > 0 else { return nil }
+            let text = NativeMTPOnDeviceSelfCheck.workloadPromptText(contextTokens: target)
+            let tokens = try await container.perform { context in
+                let lmInput = try await context.processor.prepare(input: UserInput(chat: [.user(text)]))
+                return lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            }
+            guard !tokens.isEmpty else { return nil }
+            if tokens.count <= maxPromptTokens { return tokens }
+            target = NativeMTPOnDeviceSelfCheck.shrunkContextTokens(
+                current: target, tokenized: tokens.count, maxPromptTokens: maxPromptTokens)
+        }
+        return nil
+    }
+
+    /// The workload probe points of the self-check, after the challenge.
+    /// Stops at the first failing point.
+    private func measureNativeMTPSelfCheckWorkload(
+        _ load: NativeMTPRuntimeLoadResult,
+        scheduler: ContinuousBatchScheduler
+    ) async throws -> [NativeMTPOnDeviceSelfCheck.PointMeasurement] {
+        var measured: [NativeMTPOnDeviceSelfCheck.PointMeasurement] = []
+        for configured in NativeMTPOnDeviceSelfCheck.workloadPoints {
+            // A point the tuple's signed bounds cannot hold is a shape no
+            // buyer request gets native MTP for: skipped, not failed.
+            guard let point = NativeMTPOnDeviceSelfCheck.boundedPoint(
+                configured,
+                maxPromptTokens: load.admissionCapability.maxPromptTokens,
+                maxCompletionTokens: load.admissionCapability.maxCompletionTokens
+            ), let prompt = try await Self.nativeMTPSelfCheckWorkloadPrompt(
+                container: load.targetContainer,
+                contextTokens: point.contextTokens,
+                maxPromptTokens: load.admissionCapability.maxPromptTokens
+            ) else {
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_self_check_point point=\(configured.name) result=skipped_outside_signed_bounds\n".utf8
+                ))
+                continue
+            }
+            let native = try await measureNativeMTPSelfCheckWorkloadNative(
+                label: point.name,
+                promptTokens: prompt,
+                maxOutputTokens: point.outputTokens,
+                load: load,
+                scheduler: scheduler
+            )
+            let ordinary = try await measureNativeMTPSelfCheckOrdinary(
+                label: point.name,
+                promptTokens: prompt,
+                maxOutputTokens: point.outputTokens,
+                scheduler: scheduler
+            )
+            let measurement = NativeMTPOnDeviceSelfCheck.PointMeasurement(
+                name: point.name,
+                mtpTokens: native.tokens,
+                mtpSeconds: native.seconds,
+                referenceTokens: ordinary.referenceTokens,
+                ordinarySeconds: ordinary.seconds
+            )
+            Self.logNativeMTPSelfCheckPoint(measurement, promptTokens: prompt.count)
+            measured.append(measurement)
+            guard NativeMTPOnDeviceSelfCheck.admit([measurement]).passed else { break }
+        }
+        return measured
+    }
+
+    nonisolated static func nativeMTPSelfCheckPointLogLine(
+        _ point: NativeMTPOnDeviceSelfCheck.PointMeasurement,
+        promptTokens: Int
+    ) -> String {
+        let verdict = NativeMTPOnDeviceSelfCheck.admit([point])
+        let seconds = { (value: Double) in value.isFinite ? String(format: "%.3f", value) : "inf" }
+        return "event=native_mtp_self_check_point point=\(point.name) result=\(verdict.reason) "
+            + "speedup=\(String(format: "%.3f", verdict.speedup)) prompt_tokens=\(promptTokens) "
+            + "output_tokens=\(point.referenceTokens.count) native_s=\(seconds(point.mtpSeconds)) "
+            + "ordinary_s=\(seconds(point.ordinarySeconds)) min_speedup=\(NativeMTPOnDeviceSelfCheck.minimumSpeedup)\n"
+    }
+
+    private static func logNativeMTPSelfCheckPoint(
+        _ point: NativeMTPOnDeviceSelfCheck.PointMeasurement,
+        promptTokens: Int
+    ) {
+        FileHandle.standardError.write(Data(nativeMTPSelfCheckPointLogLine(point, promptTokens: promptTokens).utf8))
     }
 
     func runNativeMTPCanary(_ request: CoordinatorClient.NativeMTPCanaryRequestPayload) async -> CoordinatorClient.NativeMTPCanaryResultPayload {
@@ -7724,6 +7913,13 @@ maxTokens: 1,
                 // paged engine, and MTP must beat it by the R015 decode bar.
                 // A pre-signed token digest from another runtime revision is
                 // not the reference.
+                // SPEC-048-R016 (0.1.125, #2481): the challenge is one probe
+                // point; the parity grid's short and 4k prompts are the others.
+                // Every point needs identical tokens and a native speedup over
+                // the route an ordinary request takes with native MTP off.
+                guard let challenge = nativeMTPLoad.selfTestInput.selectedChallenge else {
+                    throw NativeMTPSelfTestError.failed("missing_challenge_record")
+                }
                 var receipt: NativeMTPSelfTestReceipt?
                 var mtpSeconds = Double.infinity
                 for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
@@ -7739,18 +7935,27 @@ maxTokens: 1,
                     )
                     mtpSeconds = min(mtpSeconds, Date().timeIntervalSince(start))
                 }
-                let ordinary = try await self.executeNativeMTPOrdinaryReference(
-                    nativeMTPLoad.selfTestInput,
+                let ordinary = try await self.measureNativeMTPSelfCheckOrdinary(
+                    label: challenge.challengeID,
+                    promptTokens: challenge.promptTokenIDs,
+                    maxOutputTokens: challenge.maxCompletionTokens,
                     scheduler: scheduler
                 )
-                let verdict = NativeMTPOnDeviceSelfCheck.decide(
+                let challengePoint = NativeMTPOnDeviceSelfCheck.PointMeasurement(
+                    name: "challenge",
                     mtpTokens: receipt?.generatedTokenIDs ?? [],
                     mtpSeconds: mtpSeconds,
-                    ordinaryTokens: ordinary.tokens,
+                    referenceTokens: ordinary.referenceTokens,
                     ordinarySeconds: ordinary.seconds
                 )
+                Self.logNativeMTPSelfCheckPoint(challengePoint, promptTokens: challenge.promptTokenIDs.count)
+                var points = [challengePoint]
+                if NativeMTPOnDeviceSelfCheck.admit(points).passed {
+                    points += try await self.measureNativeMTPSelfCheckWorkload(nativeMTPLoad, scheduler: scheduler)
+                }
+                let verdict = NativeMTPOnDeviceSelfCheck.admit(points)
                 FileHandle.standardError.write(Data(
-                    "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
+                    "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.referenceTokens.count) point=\(verdict.point ?? "none") points=\(points.count)\n".utf8
                 ))
                 if let receipt, Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) {
                     if let line = Self.nativeMTPSelfCheckRecordLogLine(receipt) {
