@@ -1,5 +1,12 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Pearl runtime v1.8.297 and v1.8.298 (2026-11-24)
+
+- v1.8.297 (tag on `8912277b4`, release run 45378449233) applied 11:05Z through `scripts/ops/pearl-runtime.sh`; it carries the Inkling 2 Mini billing alias from PR 2486.
+- v1.8.298 (tag on `bb67a9bb2`, release run 45385393018) applied 11:39Z; it adds the DaisyRose-27B billing alias and reasoning/tool family entries from PR 2477. Health: coordinator and gateway report v1.8.298.
+- v1.8.297 was tagged while PR 2477 was mid-rebase, so two buyer holds ran 34 minutes apart. Lesson: hold a runtime tag until every ready PR that touches coordinator or gateway aliases has merged.
+- Remaining live step: `scripts/ops/catalog-activate.sh` for `published-2026-11-24-daisyrose-27b-listed-v296` (Inkling 2 Mini and DaisyRose rows), then the 1.8.297 CLI cut (`docs/releases/cli-release-train.md`).
+
 ## Release coordination update — 2026-10-29
 
 Provider CLI 1.8.277 is promoted; its shipped changes, native-MTP runtime rebind
