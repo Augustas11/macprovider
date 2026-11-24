@@ -17,6 +17,19 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.89 (#2467) on 3.33.0-macprovider.88:
+        // 3.33.0-macprovider.88 plus the Inkling 2 Mini text model
+        // (inkling2_loop: model file, registry entry, tests and a tiny test
+        // fixture) and its Ollama-ported decode kernels (fused attention
+        // inputs, residual mix, message controllers, short convolutions,
+        // router top-k, ring attention; new MLXLMCommon kernel files and a
+        // read-only RotatingKVCache.ringRotation), rebased unchanged from
+        // macprovider/2467-ollama-kernels (ea6f545c); no other model's code
+        // changes. Measured on the 3.32.3 base (ea6f545c, Studio run
+        // 20261124T062416Z): 64/64 greedy parity against mlx-vlm on both
+        // layouts; on the oQ4e weights 46.4/45.6/41.0 decode tok/s at
+        // 1K/8K/32K, 160-166% of mlx-vlm, prefill 98-107%; this revision is
+        // checked on the Studio next.
         // Tag 3.33.0-macprovider.88 (engine-333) on 3.32.3-macprovider.87: The
         // fork patch stack rebased onto upstream mlx-swift-lm 3.33.0, with the
         // mlx-swift pin at 0.33.0-macprovider.28 (upstream 0.33.0 plus the
@@ -269,7 +282,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "73eb9cf7663df03476c568f907bcadd829488c45"
+            revision: "10584fc0d79cf75b49115f0f42fd7b8c8f30c637"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
