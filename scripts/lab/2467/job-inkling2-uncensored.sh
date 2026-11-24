@@ -39,10 +39,18 @@
 #  7. mlx-vlm greedy oracle on the spliced artifact (fork tools/inkling2_parity/dump_real_oracle.py,
 #     oQ layout, 1024 and 8192 tokens, 64 steps, GPU), the reference the #2467 slice-3/4 parity
 #     used;
-#  8. Swift parity: Inkling2RealParityTests (compiled path, exact mode) on the spliced artifact
-#     against that oracle; gate: every greedy token equal at 1024 and 8192. On a gate failure the
-#     same check runs on the base against its own oracle ($LAB/oracle-real-oq, from the earlier
-#     window, dumped when absent) to tell a splice effect from a port gap;
+#  8. Swift parity: Inkling2RealParityTests (compiled path, exact-mode test) on the spliced
+#     artifact against that oracle, then on the base against its own oracle ($LAB/oracle-real-oq,
+#     dumped when absent). The base control gate is exact: all 64 greedy tokens at 1024 and 8192.
+#     The uncensored gate is tie-aware (parity_tie_gate.py), per row, all three required:
+#       - every mismatching step is a near-tie: the port's token is within 0.25 logit of the
+#         oracle's top-1, in the oracle's own logits (oracle-{1024,8192}.safetensors);
+#       - at most 2 mismatches per row;
+#       - uncensored meanKL <= 1.25x the base control's meanKL at the same length.
+#     One `PARITY_GATE row=<len> mismatches=<n> worst_margin=<x> kl_ratio=<y> PASS|FAIL` line per
+#     row. The port's token is read from the exact-mode assertion text in the Swift test log (the
+#     parity JSON does not hold it); a mismatch it cannot be read for, or any other test error,
+#     FAILs the row. Pass/fail of the Swift run itself is not the gate for the uncensored rows;
 #  9. refusal probe: REFUSAL_N harmful + REFUSAL_N harmless prompts, base vs uncensored, both
 #     through mlx-vlm on the oQ tensors (inkling2_refusal_probe.py), greedy; gate: the
 #     uncensored build answers at least one harmful prompt the base refuses (REFUSAL_FLIP);
@@ -118,7 +126,7 @@ xc() { env DEVELOPER_DIR="$TEST_DEV" "$@"; }
 trap '[ -n "$BUILD_PID" ] && { pkill -TERM -P "$BUILD_PID"; kill "$BUILD_PID"; } 2>/dev/null; true' EXIT
 
 log "JOB_START inkling2-uncensored run=$RUN_ID fork=$FORK_COMMIT commit=${COMMIT:-unknown} dry_run=$DRY"
-for f in "$SPLICE" "$PROBE" "$PUBLISH_PY" "$REFCHECK" "$MANIFEST_LIB" "$SOURCE_MANIFEST"; do
+for f in "$SPLICE" "$PROBE" "$PUBLISH_PY" "$REFCHECK" "$MANIFEST_LIB" "$SOURCE_MANIFEST" "$HERE/parity_tie_gate.py"; do
   [ -f "$f" ] || die "missing job file $f" 11
 done
 [ "$(shasum -a 256 "$SOURCE_MANIFEST" | cut -d' ' -f1)" = 050f1cec9aa9a78bb4b365bebf5cb4758e531713943bd2e8208d43ffd5c869e2 ] \
@@ -126,7 +134,7 @@ done
 
 if [ "$DRY" = 1 ]; then
   # Parse only: no import runs the helpers' module code.
-  for f in "$SPLICE" "$PROBE" "$PUBLISH_PY" "$REFCHECK" "$MANIFEST_LIB"; do
+  for f in "$SPLICE" "$PROBE" "$PUBLISH_PY" "$REFCHECK" "$MANIFEST_LIB" "$HERE/parity_tie_gate.py"; do
     /usr/bin/python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$f" || die "$f does not parse" 11
   done
   DRYRES=${TMPDIR:-/tmp}/inkling2-uncensored-dry-$RUN_ID
@@ -263,7 +271,7 @@ fi
 rbundle=$(ls -d "$RB"/release/*PackageTests.xctest 2>/dev/null | head -n 1)
 [ -n "$rbundle" ] || die "no release test bundle under $RB/release" 14
 cp "$METALLIB" "$rbundle/Contents/MacOS/mlx.metallib" && cp "$METALLIB" "$RB/release/mlx.metallib" || die "metallib copy failed" 14
-parity() {  # NAME MODEL ORACLE
+parity() {  # NAME MODEL ORACLE [tie]: tie = the gate on this row is parity_tie_gate.py, not exact
   local rc
   log "PARITY_START $1"
   (cd "$FORK" && INKLING2_COMPILED=1 INKLING2_REAL_MODE=exact INKLING2_REAL_MODEL="$2" INKLING2_REAL_ORACLE="$3" \
@@ -274,9 +282,9 @@ parity() {  # NAME MODEL ORACLE
   grep -E "^inkling2 real parity layout=[a-z]+ path=[a-z]+ length=" "$RES/parity-$1.log" | sed -E 's/ stepMaxDiffs=.*//' \
     | cut -c1-600 | sed "s/^/PARITY_ROW $1 /"
   grep -E "^inkling2 lever exactness " "$RES/parity-$1.log" | cut -c1-300 | sed "s/^/PARITY_LEVERS $1 /"
-  /usr/bin/python3 -I - "$RES/parity-$1.json" "$rc" "$CTXS" > "$RES/parity-$1.verdict.json" <<'PYEOF'
+  /usr/bin/python3 -I - "$RES/parity-$1.json" "$rc" "$CTXS" "${4:-exact}" > "$RES/parity-$1.verdict.json" <<'PYEOF'
 import json, sys
-path, rc, ctxs = sys.argv[1], int(sys.argv[2]), [int(c) for c in sys.argv[3].split(",")]
+path, rc, ctxs, mode = sys.argv[1], int(sys.argv[2]), [int(c) for c in sys.argv[3].split(",")], sys.argv[4]
 try:
     rows = json.load(open(path))
 except (OSError, ValueError) as exc:
@@ -286,26 +294,32 @@ else:
 out = [{"length": r["length"], "matching": r["matchingTokens"], "steps": r["steps"], "path": r["path"],
         "layout": r["layout"], "mean_kl": r["meanKL"], "decode_tps": r["decodeTokensPerSecond"]} for r in rows]
 bad = [err] if err else []
-if rc != 0:
+if rc != 0 and mode == "exact":
     bad.append(f"swift test exit {rc}")
 if sorted(r["length"] for r in out) != sorted(ctxs):
     bad.append(f"lengths {sorted(r['length'] for r in out)} are not {ctxs}")
-bad += [f"{r['length']}: {r['matching']}/{r['steps']}" for r in out if r["matching"] != r["steps"] or r["steps"] <= 0]
+bad += [f"{r['length']}: {r['matching']}/{r['steps']}" for r in out
+        if r["steps"] <= 0 or (mode == "exact" and r["matching"] != r["steps"])]
 bad += [f"{r['length']}: path {r['path']} layout {r['layout']}" for r in out if (r["path"], r["layout"]) != ("compiled", "oq")]
 print(json.dumps({"pass": not bad, "failures": bad, "rows": out}, indent=2))
 PYEOF
   local v
   v=$(/usr/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print("PASS" if d["pass"] else "FAIL " + "; ".join(d["failures"]))' "$RES/parity-$1.verdict.json")
-  log "PARITY_GATE $1 $v"
+  log "PARITY_${4:+SHAPE}${4:-GATE} $1 $v"
   case "$v" in PASS) return 0 ;; *) return 1 ;; esac
 }
-if ! parity uncensored "$UNC" "$RES/oracle-uncensored"; then
-  log "PARITY_CONTROL the gate failed; the same check on the base tells a splice effect from a port gap"
-  if [ -f "$BASE_ORACLE/oracle.json" ] || oracle base "$BASE" "$BASE_ORACLE"; then
-    parity base "$BASE" "$BASE_ORACLE" | sed 's/^/BASE_/'
-  fi
-  die "Swift parity on the spliced artifact failed (see PARITY_ROW lines and the BASE_ control)" 17
+# The uncensored rows are gated by parity_tie_gate.py below; this only checks the report's shape.
+parity uncensored "$UNC" "$RES/oracle-uncensored" tie || die "no usable Swift parity report for the spliced artifact" 17
+if [ -f "$BASE_ORACLE/oracle.json" ] || oracle base "$BASE" "$BASE_ORACLE"; then
+  parity base "$BASE" "$BASE_ORACLE" | sed 's/^/BASE_/'
+  [ "${PIPESTATUS[0]}" = 0 ] || die "the base control is not exact (a port gap the splice did not cause)" 17
+else
+  die "the base control oracle is unavailable" 17
 fi
+"$PY" -B -I "$HERE/parity_tie_gate.py" --report "$RES/parity-uncensored.json" --log "$RES/parity-uncensored.log" \
+  --base-report "$RES/parity-base.json" --oracle-dir "$RES/oracle-uncensored" --lengths "$CTXS" | tee "$RES/parity-gate.log" \
+  | while IFS= read -r l; do log "$l"; done
+[ "${PIPESTATUS[0]}" = 0 ] || die "Swift parity on the spliced artifact failed the tie-aware gate (see PARITY_GATE lines)" 17
 
 # 9. Refusal probe, base vs uncensored, both oQ builds through mlx-vlm.
 "$PY" -B -I "$REFCHECK" prompts "$RES/refusal-prompts.json" --data "$REFUSAL_DATA" --n "$REFUSAL_N" \

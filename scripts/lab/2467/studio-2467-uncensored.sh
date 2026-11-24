@@ -40,8 +40,8 @@ RES=$SCR/results
 LOCKSH=$POC/scratchpad/studio-lock.sh
 OWNER=t2467-uncensored
 STALL_MIN=30
-FORK_DIR=${FORK_DIR:-$HOME/mlx-swift-lm-2467}
-FORK_BRANCH=${FORK_BRANCH:-macprovider/2467-inkling2}
+FORK_DIR=${FORK_DIR:-/Users/augstar/mlx-swift-lm-2467-88}
+FORK_BRANCH=${FORK_BRANCH:-macprovider/2467-inkling2-88}
 EVIDENCE=docs/evidence/inkling-2-mini-intake-2026-11-24/openuncensored-source-050f1cec.manifest
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 mkdir -p "$SCR" "$RES"
@@ -71,6 +71,12 @@ REMOTE=$(git -C "$FORK_DIR" rev-parse "origin/$FORK_BRANCH" 2>/dev/null)
 for f in tools/inkling2_parity/dump_real_oracle.py tools/inkling2_parity/oq_adapter.py Tests/MLXLMTests/Inkling2ParityTests.swift; do
   git -C "$FORK_DIR" cat-file -e "HEAD:$f" 2>/dev/null || { blocker "fork HEAD lacks $f"; exit 2; }
 done
+# The shipped fork must be the revision the CLI build pins; read from Package.resolved, not hardcoded.
+PINNED=$(/usr/bin/python3 -I -c 'import json,sys
+for p in json.load(open(sys.argv[1]))["pins"]:
+    if p["identity"] == "mlx-swift-lm": print(p["state"]["revision"])' "$REPO/phase3-binary/Package.resolved" 2>/dev/null)
+[ -n "$PINNED" ] || { blocker "no mlx-swift-lm revision in phase3-binary/Package.resolved"; exit 2; }
+[ "$FORK_COMMIT" = "$PINNED" ] || { blocker "fork HEAD $FORK_COMMIT is not the mlx-swift-lm revision $PINNED pinned in phase3-binary/Package.resolved; refusing to ship"; exit 2; }
 SHORT=${FORK_COMMIT:0:12}
 SRC_REMOTE="\$HOME/lab-2467/src-$SHORT"
 
