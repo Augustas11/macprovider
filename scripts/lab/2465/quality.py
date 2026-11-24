@@ -89,8 +89,10 @@ def eos_ids(model_dir, tokenizer):
     e = getattr(tokenizer, "eos_token_id", None)
     if isinstance(e, int):
         ids.add(e)
-    for extra in getattr(tokenizer, "eos_token_ids", None) or []:
-        ids.add(int(extra))
+    extra = getattr(tokenizer, "eos_token_ids", None) or []
+    # mlx-vlm's tokenizer wrapper exposes a single int here; mlx-lm exposes a set/list.
+    for x in ([extra] if isinstance(extra, int) else extra):
+        ids.add(int(x))
     gc = os.path.join(model_dir, "generation_config.json")
     if os.path.exists(gc):
         v = json.load(open(gc)).get("eos_token_id")

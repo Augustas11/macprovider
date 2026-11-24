@@ -11,10 +11,9 @@
 # Steps:
 #  1. preflight: nothing on :8080/:8000/:$PORT, no live agent, serve, FLOP agent or VM process;
 #     inputs present; the metallib is the signed native-MTP entry's (GLM-5.3-Flash);
-#  2. download (DOWNLOAD=1, default): Hygaard/Sage-S2.1-Flash-oQ4e-mtp at the pinned SAGE_REV into
-#     ~/lab-2466/models/Sage-S2.1-Flash-oQ4e-mtp with huggingface_hub.snapshot_download (REF_VENV).
-#     It starts only when free disk >= the bytes still missing + the window's own need (below), and
-#     ends with the pinned total byte count and file count checked;
+#  2. snapshot: ~/lab-2466/models/Sage-S2.1-Flash-oQ4e-mtp@SAGE_REV must carry the .verified marker
+#     written by scripts/lab/2466/fetch-sage.sh (hf download + per-file sha256/size check).
+#     The job then checks the pinned total byte count and file count;
 #  3. disk gate: free >= SAGE_GB + EXTRA_GB (60): the native-MTP admission capture copies the
 #     whole model on a serve start (#2468), so the window keeps one model's worth free;
 #  4. lab-harness release build (-DMACPROVIDER_LAB_HARNESS) in $SRC/phase3-binary/.build-lab-2466;
@@ -34,7 +33,7 @@
 #                `serve --no-join` (native MTP off, CB off); if the candidate's serve does not come
 #                up, both models run the mlx-vlm reference instead;
 #  7. scripts/lab/2465/intake_verdict.py: `T2466_VERDICT PASS|FAIL ...` in results/<run>/verdict.md.
-# Knobs: CELLS DOWNLOAD (1) EXTRA_GB (60) SKIP_BUILD PORT (18466) MTP_BLOCKS (10)
+# Knobs: CELLS EXTRA_GB (60) SKIP_BUILD PORT (18466) MTP_BLOCKS (10)
 #        DECODE_CTX (1024,8192,32768) REF_CTX (1024,8192,32768) REF_VENV STALL_S (1800).
 # Every failure prints `BLOCKER:`; the job ends with JOB_PASS (every step ran; the verdict is in
 # T2466_VERDICT) or JOB_FAIL. Watchdogs are stall detectors only, never wall-clock cuts.
@@ -60,14 +59,13 @@ MTP_BLOCKS=${MTP_BLOCKS:-10}
 DECODE_CTX=${DECODE_CTX:-1024,8192,32768}
 REF_CTX=${REF_CTX:-1024,8192,32768}
 REF_VENV=${REF_VENV:-$HOME/venvs/ref-omlx}
-DOWNLOAD=${DOWNLOAD:-1}
 SAGE_REPO=Hygaard/Sage-S2.1-Flash-oQ4e-mtp
 # Pinned 2026-11-22 from https://huggingface.co/api/models/Hygaard/Sage-S2.1-Flash-oQ4e-mtp (sha);
 # the tree at this revision: 71 files, 186593494737 bytes (projectors/ included).
 SAGE_REV=a972e256db2553562bd718e677d100089aca5fce
 SAGE_BYTES=186593494737
 SAGE_FILES=71
-SAGE_DIR=$LAB/models/Sage-S2.1-Flash-oQ4e-mtp
+SAGE_DIR=$LAB/models/Sage-S2.1-Flash-oQ4e-mtp@$SAGE_REV
 SAGE_GB=$(( (SAGE_BYTES + 1073741823) / 1073741824 ))
 GLM_KEY=zai-org/glm-5.3-flash
 GLM_SHA=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
@@ -98,7 +96,7 @@ stop_serve() {
 }
 trap stop_serve EXIT
 mkdir -p "$RES" "$LAB/models"
-log "JOB_START run=$RUN_ID commit=$COMMIT cells=\"$CELLS\" download=$DOWNLOAD sage_rev=$SAGE_REV sage_gb=$SAGE_GB extra_gb=$EXTRA_GB mtp_blocks=$MTP_BLOCKS port=$PORT"
+log "JOB_START run=$RUN_ID commit=$COMMIT cells=\"$CELLS\" sage_rev=$SAGE_REV sage_gb=$SAGE_GB extra_gb=$EXTRA_GB mtp_blocks=$MTP_BLOCKS port=$PORT"
 
 # 1. Preflight.
 listening 8080 && die "a server listens on :8080; the Studio is not paused" 3
@@ -128,25 +126,13 @@ REF_VERSIONS=$("$REF_VENV/bin/python" -I -B -c 'import importlib.metadata as m; 
   || die "the reference venv lacks mlx / mlx-vlm / mlx-lm / huggingface_hub / numpy" 11
 log "INPUTS glm=$GLM_DIR ref_venv=$REF_VENV $REF_VERSIONS"
 
-# 2. Download.
+# 2. Snapshot. scripts/lab/2466/fetch-sage.sh downloads and hash-verifies it (the first window
+# ran on an unverified directory: provider preflight_hash mismatch); this job only checks the marker.
+[ "$(cat "$SAGE_DIR.verified" 2>/dev/null)" = "$SAGE_REPO $SAGE_REV" ] \
+  || die "Sage snapshot $SAGE_DIR is not hash-verified: run scripts/lab/2466/fetch-sage.sh first" 11
 have=$(present_bytes "$SAGE_DIR")
-missing_gb=$(( (SAGE_BYTES - have + 1073741823) / 1073741824 )); [ "$missing_gb" -ge 0 ] || missing_gb=0
-need_dl=$(( missing_gb + SAGE_GB + EXTRA_GB ))
-log "DISK free_gb=$(free_gb) sage_present_bytes=$have missing_gb=$missing_gb download_needs_gb=$need_dl window_needs_gb=$((SAGE_GB + EXTRA_GB))"
-if [ "$have" != "$SAGE_BYTES" ]; then
-  [ "$DOWNLOAD" = 1 ] || die "Sage is not fully downloaded ($have of $SAGE_BYTES bytes) and DOWNLOAD=0" 11
-  [ "$(free_gb)" -ge "$need_dl" ] || die "only $(free_gb) GB free; the download needs ${missing_gb} GB plus the window's $((SAGE_GB + EXTRA_GB)) GB" 13
-  log "DOWNLOAD_START $SAGE_REPO@$SAGE_REV -> $SAGE_DIR"
-  "$REF_VENV/bin/python" -I -B - "$SAGE_REPO" "$SAGE_REV" "$SAGE_DIR" > "$RES/download.log" 2>&1 <<'PY' || die "download failed: $(tail -n 3 "$RES/download.log" | tr '\n' ' ' | cut -c1-300)" 12
-import sys
-from huggingface_hub import snapshot_download
-repo, rev, out = sys.argv[1:4]
-print("DONE", snapshot_download(repo_id=repo, revision=rev, local_dir=out, max_workers=8), flush=True)
-PY
-  have=$(present_bytes "$SAGE_DIR")
-fi
 files=$(find "$SAGE_DIR" -path "$SAGE_DIR/.cache" -prune -o -type f -print | grep -c .)
-log "DOWNLOAD_DONE bytes=$have files=$files (pinned $SAGE_BYTES / $SAGE_FILES)"
+log "SNAPSHOT_VERIFIED bytes=$have files=$files (pinned $SAGE_BYTES / $SAGE_FILES)"
 [ "$have" = "$SAGE_BYTES" ] && [ "$files" = "$SAGE_FILES" ] || die "Sage snapshot is not the pinned tree: $have bytes, $files files" 12
 
 # 3. Disk gate for the window itself.
