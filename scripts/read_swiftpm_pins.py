@@ -53,7 +53,7 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # CacheList, which it refused before), so no other model's decode path
 # changes; the tag is cut from this revision at merge.
 SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.90"
-SPEC048_MLX_SWIFT_LM_REVISION = "ad1c742daeafa213cc2ee573a8812b9125cf0733"
+SPEC048_MLX_SWIFT_LM_REVISION = "39f7e60d87e0dee5ee87c62e11db4d81afdf223f"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"

@@ -292,7 +292,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ad1c742daeafa213cc2ee573a8812b9125cf0733"
+            revision: "39f7e60d87e0dee5ee87c62e11db4d81afdf223f"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

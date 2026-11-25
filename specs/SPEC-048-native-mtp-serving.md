@@ -719,14 +719,14 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.90` | `ad1c742daeafa213cc2ee573a8812b9125cf0733` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.90` | `39f7e60d87e0dee5ee87c62e11db4d81afdf223f` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `ml-explore/mlx-swift` `0.33.0` (`7ede4fd6d05f63305c1c0ebf4f8c1909a637c574`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `ml-explore/mlx-c` `v0.8.0` (`a26f2d584a14ec619ae8db9a09be03becd47598a`) |
 
 The mlx-swift-lm row `3.33.0-macprovider.90` is on `3.33.0-macprovider.89`
 (`10584fc0d79cf75b49115f0f42fd7b8c8f30c637`) (#2487), at
-`ad1c742daeafa213cc2ee573a8812b9125cf0733`: 3.33.0-macprovider.89 plus the
+`39f7e60d87e0dee5ee87c62e11db4d81afdf223f`: 3.33.0-macprovider.89 plus the
 Inkling 2 DSpark draft (Inkling2DSparkDraftModel, loaded from mtp.safetensors
 and bound to the loaded target), staged and rewound rounds over the target's
 attention rings and convolution tails (ConvolutionTailCache,
@@ -3360,7 +3360,7 @@ requests.
   process MAY load a serial native tuple's drafter. R015 cells and the R016
   self-check reference for a serial tuple are serial ordinary decode at one
   row in the same process. R003 names mlx-swift-lm `3.33.0-macprovider.90`
-  (`ad1c742daeafa213cc2ee573a8812b9125cf0733`) on `3.33.0-macprovider.89`
+  (`39f7e60d87e0dee5ee87c62e11db4d81afdf223f`) on `3.33.0-macprovider.89`
   (#2487): 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
   (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to the
   loaded target), staged and rewound rounds over the target's attention rings
