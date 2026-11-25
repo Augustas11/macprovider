@@ -859,8 +859,11 @@ private struct PrefetchFixture {
         self.catalog = catalog
     }
 
+    /// The free-space reserve is off: the fixture writes 11-byte files, and a
+    /// CI runner with less than the 5 GiB default free would otherwise skip
+    /// every row. Tests of the reserve set `freeSpaceReserveBytes` themselves.
     func downloader(log: FetchLog) -> HuggingFaceSnapshotDownloader {
-        HuggingFaceSnapshotDownloader(
+        var downloader = HuggingFaceSnapshotDownloader(
             fetch: { request in
                 let url = try XCTUnwrap(request.url)
                 log.record(url)
@@ -882,6 +885,8 @@ private struct PrefetchFixture {
                 )
             }
         )
+        downloader.freeSpaceReserveBytes = nil
+        return downloader
     }
 }
 
