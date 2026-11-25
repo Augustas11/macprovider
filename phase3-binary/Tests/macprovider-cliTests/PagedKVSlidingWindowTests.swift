@@ -319,6 +319,9 @@ final class PagedKVSlidingWindowTests: XCTestCase {
                 }
                 previous = count == 1 ? identity : nil
             }
+            // The buffers catch up from the ring: the full history, in order.
+            XCTAssertEqual(paged.state[0].asArray(Float.self), (0 ..< position).map(Float.init))
+            XCTAssertEqual(paged.state[1].asArray(Float.self), (0 ..< position).map(Float.init))
             XCTAssertEqual(paged.trim(4), 4)
             let keys = Self.positions(position - 4, 1)
             let presented = paged.update(keys: keys, values: keys).0

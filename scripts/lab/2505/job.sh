@@ -21,7 +21,8 @@
 #   throughput  msb-throughput --engine scheduler at --rows 1, 2, 4 (1024-token prompts) and 4
 #               (8192-token prompts), 256 timed decode tokens, 3 runs: aggregate decode tok/s
 #               against the same build's one-row engine and the production serial path;
-#   split       one-row gate: a lone scheduler row vs production serial, three repeats;
+#   split       one-row gate and split: a lone row with the per-step history write (lab switch)
+#               and deferred to the ring, alternated three times, each against production serial;
 #   diag        one-row parity bisection, each cell its own process: the 1500-token ragged row
 #               alone; the ragged cohort reordered (the 1500-token row first); the ragged cohort
 #               with the hybrid decode pipeline off; the ragged cohort with MACPROVIDER_CB_TRACE.
@@ -179,9 +180,12 @@ PY2
   MACPROVIDER_CB_TRACE=1 msb diag-trace --scenario parity --rows 4 --prompt-token-file "$OUT/diag-ragged.json" --parity-tokens 256
 fi
 if has split; then
-  # One-row gate (#2505): a lone scheduler row against production serial, three
-  # repeats in the same window (each report carries its own serial row).
+  # One-row gate and split (#2505): a lone scheduler row with every sliding key also written
+  # into the full history each step (MACPROVIDER_LAB_DEFERRED_HISTORY=off, the r6 path) and
+  # with the history deferred to the ring (served), alternated, each report with its own
+  # production serial row. The difference is the per-step history write.
   for i in 1 2 3; do
+    MACPROVIDER_LAB_DEFERRED_HISTORY=off msb r1-history-$i --scenario throughput --rows 1 --prompt-tokens 1024 --decode-tokens 256 --runs 3
     msb r1-gate-$i --scenario throughput --rows 1 --prompt-tokens 1024 --decode-tokens 256 --runs 3
   done
 fi
