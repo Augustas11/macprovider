@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 struct ChatScreen: View {
@@ -111,12 +112,18 @@ struct ChatScreen: View {
                     LazyVStack(alignment: .leading, spacing: 22) {
                         ForEach(store.turns) { turn in
                             VStack(alignment: .leading, spacing: 12) {
-                                message(label: "You", text: turn.prompt, user: true)
+                                if !turn.prompt.isEmpty { message(label: "You", text: turn.prompt, user: true) }
+                                ForEach(turn.attachments) { item in
+                                    Label(item.name, systemImage: item.imageDataURL == nil ? "doc" : "photo")
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                        .accessibilityIdentifier("malibu.chat.attachment")
+                                }
                                 if turn.complete && !store.isRunning {
                                     HStack(spacing: 12) {
                                         Button("Edit", systemImage: "pencil") {
                                             editingTurn = turn.id
                                             draft = turn.prompt
+                                            store.stageForEdit(turn.attachments)
                                             composerFocused = true
                                         }
                                         .accessibilityIdentifier("malibu.chat.edit")
@@ -211,7 +218,28 @@ struct ChatScreen: View {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(activity).font(.caption) }
                     .accessibilityIdentifier("malibu.chat.activity")
             }
+            if !store.pendingAttachments.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(store.pendingAttachments) { item in
+                        HStack(spacing: 4) {
+                            Label(item.name, systemImage: item.imageDataURL == nil ? "doc" : "photo")
+                                .lineLimit(1)
+                            Button { store.removePending(item.id) } label: { Image(systemName: "xmark") }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Remove \(item.name)")
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                        .accessibilityIdentifier("malibu.chat.attachment")
+                    }
+                }
+            }
             HStack(alignment: .bottom, spacing: 12) {
+                Button("Attach", systemImage: "paperclip") { attachFiles() }
+                    .labelStyle(.iconOnly)
+                    .disabled(store.isRunning)
+                    .accessibilityIdentifier("malibu.chat.attach")
                 TextField("Message the model on this Mac…", text: $draft, axis: .vertical)
                     .lineLimit(2...6).textFieldStyle(.plain).padding(12)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
@@ -227,6 +255,13 @@ struct ChatScreen: View {
                     }
                     .accessibilityLabel("Message")
                     .accessibilityIdentifier("malibu.chat.composer")
+                    .onDrop(of: [.fileURL, .image, .pdf, .plainText], isTargeted: nil) { providers in
+                        store.take(providers)
+                        return true
+                    }
+                    .onPasteCommand(of: [.fileURL, .image, .png, .jpeg, .pdf]) { providers in
+                        store.take(providers)
+                    }
                 if store.isRunning {
                     Button("Stop", systemImage: "stop.fill") { store.stop() }
                         .keyboardShortcut(".", modifiers: .command)
@@ -299,8 +334,9 @@ struct ChatScreen: View {
         }
     }
     private var canSend: Bool {
-        !store.isRunning
-            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let typed = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !store.isRunning
+            && (typed || !store.pendingAttachments.isEmpty)
             && draft.utf8.count <= ChatStore.maxPromptBytes
             && store.capability != nil && !store.isChecking
     }
@@ -313,6 +349,15 @@ struct ChatScreen: View {
         }
         if store.isRunning { draft = "" }
         composerFocused = true
+    }
+    private func attachFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image, .pdf, .plainText, .utf8PlainText]
+        panel.prompt = "Attach"
+        if panel.runModal() == .OK { store.take(panel.urls) }
     }
     private func chooseFolder() {
         let panel = NSOpenPanel()
