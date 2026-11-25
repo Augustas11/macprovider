@@ -3324,14 +3324,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             // Rows keep each step's sampled tokens on the device as the next
             // step's input and queue that step before the host reads the
             // previous one, so the GPU never waits on the host inside a
-            // window; the window end is its one draining sync. Rows that need
-            // host tokens before the next forward (drafter hidden capture,
-            // batched model state) read each step before queuing the next.
+            // window; the window end is its one draining sync. Rows with
+            // batched model state need host tokens before the next forward,
+            // so they read each step before queuing the next. Drafter hidden
+            // capture pipelines (#2489: a held native row cost every row of
+            // its window about 2.6 ms/step): each step keeps its own emitted
+            // hidden state, read with that step's tokens, and the captured
+            // columns are lazy gathers evaluated once at the window end.
             // Hybrid rows pipeline too (#2444: a lone Qwen3.8-27B row went
             // from 28.2 to 25.9 ms/token): a stop checkpoint is cut from the
             // recurrent state arrays the step itself produced, kept with the
             // step, not from the cache, which already holds the next step.
-            var pipelined = captureIndices.isEmpty && !hasBatchedState
+            var pipelined = !hasBatchedState
             #if MACPROVIDER_LAB_HARNESS
             // Lab A/B only (#2444): the pre-fix unpipelined hybrid window.
             if checkpointStops, Self.labHybridPipelineOff { pipelined = false }
@@ -3508,7 +3512,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             break
                         }
                     }
-                    pendingStep = (stepIndex, sampled, logits, output.state, stepRecurrent)
+                    // readStep reads only the hidden capture from a step's
+                    // state; the emitted shared K/V views are not held across
+                    // the next forward.
+                    var pendingState: LMOutput.State?
+                    if !captureIndices.isEmpty, let hidden = output.state?[mtpLastHiddenStatesKey] {
+                        pendingState = LMOutput.State()
+                        pendingState?[mtpLastHiddenStatesKey] = hidden
+                    }
+                    pendingStep = (stepIndex, sampled, logits, pendingState, stepRecurrent)
                 } else if try !readStep(
                     stepIndex, sampled: sampled, logits: logits, state: output.state, recurrent: stepRecurrent
                 ) {
@@ -5275,6 +5287,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     #if DEBUG
+    /// A row's buffered depth-zero columns, in commit order.
+    func nativeMTPPendingDrafterColumnsForTest(requestID: String) -> [(token: Int, hidden: MLXArray)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPPendingDrafterColumns[requestID] ?? []
+    }
+
     func rowTargetCacheDigestForTest(requestID: String) throws -> String {
         enterTargetLock()
         defer { exitTargetLock() }
