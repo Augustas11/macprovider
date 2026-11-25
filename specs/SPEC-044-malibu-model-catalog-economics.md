@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.13
+**Version:** 0.2.14
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1474,16 +1474,26 @@ compare catalog models. The Discover view:
    share of the catalog rate as a percentage of `provider_share_bps`,
    `demand_rank`, `ready_provider_count`, approximate size and fit against
    this Mac's memory, local readiness, and the row's reason, for trusted and
-   R014 `catalog_reference` rows only; a `catalog_reference` row always
-   carries the R014 not-earning caveat beside its rates. The R004
-   variability disclosure MUST stay visible in the same scroll container as
-   the rate-bearing list and in the detail pane. No amount per time period.
+   R014 `catalog_reference` rows only. A list row MAY show a coarse demand
+   label in place of the rank (ranks 1-5 "High demand", 6-20 "Steady
+   demand", none above 20) while the detail view shows the exact
+   `demand_rank`. A rate in a list row is labelled "network rate"; the R014
+   not-earning caveat (and, for a trusted row that is not settlement
+   capable, the no-credit caveat) sits beside the rates in the detail view
+   and is carried in the row's accessibility label, and a list row need not
+   repeat it as its own line. The R004 variability disclosure MUST stay
+   visible in the same scroll container as the rate-bearing list and in the
+   detail pane. No amount per time period.
 3. MAY filter by a provider search term and by `fit: "fits"`, and MAY offer a
    provider-selected sort by `demand_rank` (ascending), provider completion
-   payout rate (descending) or `estimated_gb` (ascending), nulls last. The
-   default order MUST be the R005 tuple, and every provider-selected sort MUST
-   be stable over the R005 order so R005 breaks every tie. This is the only
-   exception to R005's sole-ordering rule and applies only inside Discover.
+   payout rate (descending), or `estimated_gb` (descending among `fit:
+   "fits"` rows, every other row after them), nulls last. The default order
+   MUST be the R005 tuple, and every provider-selected sort MUST be stable
+   over the R005 order so R005 breaks every tie. This is the only exception
+   to R005's sole-ordering rule and applies only inside Discover. Discover
+   MAY offer a Recommended subset: the first five `fit: "fits"` rows in R005
+   order, re-sorted by the provider's choice. A full listing (Browse) MUST
+   still list every signed catalog model under item 1.
 4. MUST gate actions exactly as R006: `Switch` only for a row the R008
    sections would show as `Ready`, through the same confirmation; `Download`
    only for an R014 `prepare_model` transaction on that row, through the R014
@@ -1495,6 +1505,19 @@ compare catalog models. The Discover view:
    after an explicit provider search, never merged into catalog rows, never
    with a rate, demand or action, and decoded strictly as `models_browse.v1`
    with every row non-actionable and `action_model_id: null` (R006).
+6. MAY pin one client-computed "Best for this Mac" pick above the
+   Recommended subset. Candidates are item-1 rows with `fit: "fits"`, a
+   non-null `estimated_gb` no greater than 0.8 of this Mac's memory, a
+   non-null provider completion payout rate, and either the current model or
+   an available `Switch` or R014 `Download`. The pick is a candidate named by
+   the current recommendation if there is one; otherwise the highest
+   completion payout rate times `demand_weight` (or 1 / `demand_rank` when
+   the weight is null, else 0), ties in R005 order, except that a candidate
+   already on this Mac wins when its score is at least 0.9 of the highest.
+   The pick is presentation only: it never starts an action itself, its only
+   action is that row's own item-4 action through the same confirmation, and
+   its copy follows R004 and item 2 with no claim that the model earns, pays
+   more, or produces income.
 
 **SPEC-044-R014 - Catalog reference rate and catalog download (v1).** This
 requirement applies to the `model_catalog_economics.v1` envelope only. The v2
@@ -1665,6 +1688,12 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.14 - R013: Discover may pin a client-computed "Best for this Mac"
+  pick that never starts an action itself; Recommended may be the top five
+  fitting rows while Browse lists every signed catalog model; a new
+  `estimated_gb`-descending "largest that fits" sort; list rows may show a
+  coarse demand label with the exact rank kept in the detail view; and the
+  item-2 caveat wording matches the 0.2.13 R014 change (Related: #2502).
 - 0.2.13 - R014: a listed catalog-reference rate reads "network rate"; the
   not-earning caveat stays beside the rates in the detail view and in the
   row's accessibility label, and is no longer repeated as an orange line
