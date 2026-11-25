@@ -11,7 +11,7 @@
 # Last line: T2505 rc=<n> PASS|FAIL.
 #
 # Usage: studio-2505.sh [--dry-run]   env: STEPS (job default "fork provider parity throughput"),
-#   FORK_REF (default: the mlx-swift-lm revision Package.resolved pins).
+#   FORK_REF (default: the head of the fork branch macprovider/2505-inkling2-cb).
 # Estimated length (estimate, not measured): cold fork build ~15 min, provider debug + release
 # builds ~30 min, parity 2 cells and throughput 4 cells ~20 min.
 set -u
@@ -42,10 +42,8 @@ git -C "$REPO" fetch -q origin "$BRANCH" || { blocker "git fetch origin $BRANCH 
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 [ "$COMMIT" = "$(git -C "$REPO" rev-parse "origin/$BRANCH")" ] || { blocker "HEAD $COMMIT is not pushed to origin/$BRANCH"; final; exit 2; }
 [ -z "$(git -C "$REPO" status --porcelain -- "${SHIP[@]}")" ] || { blocker "uncommitted changes under ${SHIP[*]}; commit and push first"; final; exit 2; }
-PIN=$(/usr/bin/python3 -I -c 'import json,sys
-p=[p for p in json.load(open(sys.argv[1]))["pins"] if p["identity"]=="mlx-swift-lm"]
-print(p[0]["state"]["revision"])' "$REPO/phase3-binary/Package.resolved")
-FORK_REF=${FORK_REF:-$PIN}
+FORK_REF=${FORK_REF:-$(git ls-remote https://github.com/Augustas11/mlx-swift-lm.git refs/heads/macprovider/2505-inkling2-cb | cut -f1)}
+echo "$FORK_REF" | grep -Eq '^[0-9a-f]{7,40}$' || { blocker "no fork ref"; final; exit 2; }
 STEPS=${STEPS:-fork provider parity throughput}
 SRC_REMOTE=lab-2505/src-${COMMIT:0:12}
 say "T2505_START run=$RUN_ID commit=${COMMIT:0:12} fork=${FORK_REF:0:12} steps=\"$STEPS\" dry_run=$DRY log=$LOG"

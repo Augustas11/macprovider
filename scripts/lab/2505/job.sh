@@ -20,8 +20,9 @@
 #   throughput  msb-throughput --engine scheduler at --rows 1, 2, 4 (1024-token prompts) and 4
 #               (8192-token prompts), 256 timed decode tokens, 3 runs: aggregate decode tok/s
 #               against the same build's one-row engine and the production serial path.
-# Model: mlx-community/Inkling-2-Mini-oQ4e-mtp @ 3eea0427 (MODEL). The provider resolves the fork
-# at its Package.resolved pin, which must equal FORK_REF.
+# Model: mlx-community/Inkling-2-Mini-oQ4e-mtp @ 3eea0427 (MODEL). The provider builds against the
+# fork checkout at FORK_REF through `swift package edit` (the campaign moves the Package.resolved
+# pin with scripts/bump-mlx-swift-lm-pin.py at freeze, after PR 2507's pin lands).
 # Every failure prints `BLOCKER:`; the last line is T2505 rc=<n> PASS|FAIL.
 set -u
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
@@ -59,15 +60,11 @@ free_gb=$(df -g "$HOME" | awk 'NR==2{print $4}')
 [ "${free_gb:-0}" -ge "$MIN_FREE_GB" ] || die "only ${free_gb:-?} GB free (need $MIN_FREE_GB)" 13
 [ -d "$DEVELOPER_DIR" ] || die "no DEVELOPER_DIR at $DEVELOPER_DIR" 92
 [ -f "$MODEL/config.json" ] || die "no model at $MODEL" 11
-PIN=$(/usr/bin/python3 -I -c 'import json,sys
-p=[p for p in json.load(open(sys.argv[1]))["pins"] if p["identity"]=="mlx-swift-lm"]
-print(p[0]["state"]["revision"] if p else "")' "$PKG/Package.resolved")
-case "$PIN" in "$FORK_REF"*) ;; *) die "Package.resolved pins mlx-swift-lm $PIN, not FORK_REF $FORK_REF" 64 ;; esac
 say "JOB_START run=$RUN_ID commit=$COMMIT fork=$FORK_REF steps=\"$STEPS\" free=${free_gb}GB model=$MODEL ($(du -sh "$MODEL" | cut -f1)) swift=$(swift --version 2>&1 | head -1)"
 
 # Fork: build and the Inkling 2 tests, CPU then GPU.
+R=$L/src/mlx-swift-lm
 if has fork; then
-  R=$L/src/mlx-swift-lm
   if [ ! -d "$R/.git" ]; then
     git clone -q https://github.com/Augustas11/mlx-swift-lm.git "$R" || die "fork clone failed" 93
   fi
@@ -100,6 +97,11 @@ fi
 
 # Provider: unit tests (debug) and the lab-harness release build.
 if has provider; then
+  [ "$(git -C "$R" rev-parse HEAD 2>/dev/null)" = "$(git -C "$R" rev-parse "$FORK_REF^{commit}" 2>/dev/null)" ] \
+    || die "the fork checkout $R is not at $FORK_REF (run the fork step)" 93
+  (cd "$PKG" && swift package --build-path "$BUILD" edit mlx-swift-lm --path "$R") > "$OUT/provider-edit.log" 2>&1 \
+    || die "swift package edit mlx-swift-lm failed: $(tail -3 "$OUT/provider-edit.log" | tr '\n' ' ')" 93
+  say "PROVIDER_FORK edited mlx-swift-lm -> $R ($(git -C "$R" rev-parse --short HEAD))"
   say "PROVIDER_TEST_BUILD swift build --build-tests"
   (cd "$PKG" && nice -n 10 swift build --build-tests --build-path "$BUILD") > "$OUT/provider-test-build.log" 2>&1 \
     || { grep -E "error:" "$OUT/provider-test-build.log" | sort -u | head -40; die "provider test build failed" 14; }
