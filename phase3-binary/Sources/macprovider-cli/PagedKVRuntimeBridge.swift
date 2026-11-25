@@ -3542,6 +3542,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     // per-step arrays to cut a checkpoint from: read each step
                     // before queuing the next, as before #2444.
                     pipelined = false
+                    #if MACPROVIDER_LAB_HARNESS
+                    try? FileHandle.standardError.write(contentsOf: Data(
+                        "event=lab_decode_window pipelined=false reason=recurrent_state_reused\n".utf8
+                    ))
+                    #endif
                 }
                 if hasBatchedState, let invariantStateModel, let stepState {
                     do {
@@ -3584,6 +3589,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             previous.index, sampled: previous.sampled, logits: previous.logits, state: previous.state,
                             recurrent: previous.recurrent
                         ) else {
+                            // This step is already in the caches: read it too,
+                            // so the window returns every token its K/V and
+                            // recurrent state hold (a window that ends early
+                            // for a submission keeps its rows, #2505).
+                            _ = try readStep(
+                                stepIndex, sampled: sampled, logits: logits, state: output.state, recurrent: stepRecurrent
+                            )
                             stopped = true
                             break
                         }
@@ -3641,18 +3653,54 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                            ])
         #endif
         if endedEarly {
-            // Every row is cancelled and about to be released. Its KV now ends
-            // before its block table (extended for the full window), so it
-            // must not be recorded for retention or reused as a session.
+            // The window ended before its last step: every row was cancelled,
+            // or a lone-row hop ended for a submission (#2505). Each row's
+            // K/V and recurrent state hold exactly the steps it returns, which
+            // end before its block table (extended for the full window), so
+            // the row is recorded against its table cut to those tokens; the
+            // scheduler trims the allocator to the same length. The session is
+            // never reused.
             storeDecodeSession(nil)
-            for input in supportedInputs {
-                removeRowState(for: input.requestID)
+            // A row that cannot be kept fails rather than decode on caches
+            // that no longer hold its history. A cancelled row is already
+            // gone from the scheduler, which ignores its failure.
+            var failedRows: Set<Int> = []
+            for (index, input) in supportedInputs.enumerated() {
+                let endTokenCount = input.committedKVTokenCount + ranSteps
+                // Drafter capture rows would also need their columns handed
+                // over; they never run lone-row hops (Inkling has no native MTP).
+                guard !captureIndices.contains(index) else {
+                    removeRowState(for: input.requestID)
+                    failedRows.insert(index)
+                    continue
+                }
+                do {
+                    let table = try input.binding.currentTable.prefix(logicalTokenCount: endTokenCount)
+                    let binding = PagedKVStorageBinding(
+                        handle: input.binding.handle,
+                        blockSizeTokens: input.binding.blockSizeTokens,
+                        maxLogicalTokens: input.binding.maxLogicalTokens,
+                        rowGeneration: input.binding.rowGeneration,
+                        currentTable: table,
+                        poolEpoch: input.binding.poolEpoch
+                    )
+                    if cacheKinds.contains(.recurrentMamba) {
+                        rowStates[index].recurrentWindow = RecurrentWindowRecord(
+                            endTokenCount: endTokenCount,
+                            endState: recurrentStateArrays(rowStates[index].caches),
+                            checkpoints: windowCheckpoints[index] ?? []
+                        )
+                    }
+                    try setRowState(rowStates[index], for: input.requestID, binding: binding)
+                } catch {
+                    removeRowState(for: input.requestID)
+                    failedRows.insert(index)
+                }
             }
-            return zip(supportedInputs, sampledByRow).map { input, tokens in
-                ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
-                    requestID: input.requestID,
-                    tokens: tokens
-                ))
+            return zip(supportedInputs, sampledByRow).enumerated().map { index, pair -> ContinuousBatchDecodeOutcome in
+                failedRows.contains(index)
+                    ? .rowFailure(requestID: pair.0.requestID)
+                    : .output(ContinuousBatchDecodeOutput(requestID: pair.0.requestID, tokens: pair.1))
             }
         }
         storeDecodeSession(cacheKinds.contains(.recurrentMamba) ? nil : session)
