@@ -41,6 +41,8 @@ struct SavedChat: Codable, Identifiable, Equatable {
     var createdAt: Date
     var updatedAt: Date
     var turns: [SavedChatTurn]
+    /// Absent or nil means this chat does not search the web.
+    var webSearch: Bool? = nil
 
     static let titleLimit = 60
     /// The first user message on one line, cut to about 60 characters.

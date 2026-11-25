@@ -88,6 +88,13 @@ struct ChatScreen: View {
                 }
                 Spacer()
             }
+            Toggle("Web search — queries leave this Mac. Inference stays local.", isOn: Binding(
+                get: { store.webSearch },
+                set: { store.setWebSearch($0) }
+            ))
+            .toggleStyle(.switch)
+            .disabled(store.isRunning)
+            .accessibilityIdentifier("malibu.chat.web-search")
             if let used = store.contextUsedTokens, let limit = store.contextLimitTokens, limit > 0 {
                 ProgressView(value: Double(min(used, limit)), total: Double(limit))
                     .accessibilityLabel("Context \(min(used, limit)) of \(limit) tokens")
