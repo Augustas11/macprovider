@@ -40,7 +40,6 @@ extension ModelRuntime {
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
         serialPrefillReservesLastToken: Bool = false,
-        loneRowDecodeLockstepWindow: Int? = nil,
         widePrefillChunkTokens: Int? = nil
     ) -> ContinuousBatchSchedulerConfiguration {
         // The family ceiling is the chunk unless the operator set
@@ -88,7 +87,6 @@ extension ModelRuntime {
                 weightsGeneration: weightsGeneration
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-            loneRowDecodeLockstepWindow: loneRowDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: decodeStepsWhilePrefilling(promptChunkTokens: promptChunkTokens),
             maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
@@ -184,26 +182,6 @@ extension ModelRuntime {
     /// Inkling 2 (#2505): its serial `prepare` strides `prompt[..<n-1]` at
     /// the serve step and runs the last token as the first decode step, and
     /// its greedy tokens depend on that partition, so CB rows prefill on it.
-    /// Lone-row hop length (`loneRowDecodeLockstepWindow`, #2505): Inkling 2
-    /// rows decode alone on their own caches, so a lone row's hop has no
-    /// batch state to pack or sync and only its end drain to amortize.
-    nonisolated static func schedulerLoneRowDecodeLockstepWindow(
-        backend: (any ContinuousBatchSchedulerBackend)?
-    ) -> Int? {
-        guard (backend as? PagedKVSharedForwardBackend)?.recurrentStateLayout == .inkling2ConvTailFourSlot else {
-            return nil
-        }
-        #if MACPROVIDER_LAB_HARNESS
-        // Lab A/B only (#2505): the lone-row hop at another length (16 is
-        // the shared window, the hop length before the lone-row hop).
-        if let raw = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_LONE_ROW_WINDOW"],
-           let window = Int(raw), window >= 1 {
-            return window
-        }
-        #endif
-        return ContinuousBatchSchedulerConfiguration.defaultLoneRowDecodeLockstepWindow
-    }
-
     nonisolated static func schedulerSerialPrefillReservesLastToken(
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Bool {
@@ -372,7 +350,6 @@ extension ModelRuntime {
                 referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.prefillChunkTokens : nil,
                 serialPrefillStride: schedulerFollowsSerialPrefillStride(backend: backend),
                 serialPrefillReservesLastToken: schedulerSerialPrefillReservesLastToken(backend: backend),
-                loneRowDecodeLockstepWindow: schedulerLoneRowDecodeLockstepWindow(backend: backend),
                 widePrefillChunkTokens: schedulerWidePrefillChunkTokens(backend: backend)
             ),
             allocator: allocator,

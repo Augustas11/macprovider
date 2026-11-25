@@ -365,14 +365,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// `defaultDecodeLockstepWindow` so compiled contiguous decode can amortize
     /// the model-container hop. FR-CB5 still inserts at the next hop boundary.
     let maxDecodeLockstepWindow: Int
-    /// Tokens per hop for a lone decoding row with nothing waiting and no
-    /// prompt prefilling (Inkling 2, #2505). Each hop ends in a host drain,
-    /// so a lone row decoding in 16-step hops ran about 4% below serial
-    /// decode, which never drains. A longer hop ends at the next step once
-    /// a request is submitted (`ContinuousBatchDecodeWindowControl`), so a
-    /// joining row waits no longer than it would behind a 16-step hop. Never
-    /// below `maxDecodeLockstepWindow`.
-    let loneRowDecodeLockstepWindow: Int
     /// Decode tokens per hop while a prompt is mid-prefill and nothing else is
     /// waiting to join. `1` is strict one-token-per-prefill-chunk alternation,
     /// which starves active rows behind a long prompt: one 512-token chunk
@@ -433,7 +425,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxTotalStopTokens: Int = 256,
         snapshot: ContinuousBatchSchedulerSnapshot,
         maxDecodeLockstepWindow: Int = 1,
-        loneRowDecodeLockstepWindow: Int? = nil,
         maxDecodeStepsWhilePrefilling: Int = 1,
         maxDecodeRowsPerForward: Int = Int.max,
         nativeMTPRoundByteCapacity: Int? = nil,
@@ -511,7 +502,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxTotalStopTokens = max(1, maxTotalStopTokens)
         self.snapshot = snapshot
         self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
-        self.loneRowDecodeLockstepWindow = max(self.maxDecodeLockstepWindow, loneRowDecodeLockstepWindow ?? 1)
         self.maxDecodeStepsWhilePrefilling = max(1, maxDecodeStepsWhilePrefilling)
         self.maxDecodeRowsPerForward = max(1, maxDecodeRowsPerForward)
         self.nativeMTPRoundByteCapacity = max(
@@ -526,10 +516,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// Production serve-path lockstep burst. Join/leave still happens between
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
-
-    /// A lone Inkling 2 row's hop (#2505): one end drain per 256 tokens
-    /// instead of per 16. Measured at 16: 0.96x serial decode.
-    static let defaultLoneRowDecodeLockstepWindow = 256
 
     /// Production decode tokens per hop while a 512-token prompt chunk
     /// prefills. On the M3 Ultra a 512-token Qwen3.6 chunk is about 1.7 s and
@@ -2116,21 +2102,9 @@ final class ContinuousBatchDecodeWindowControl: @unchecked Sendable {
     private let lock = NSLock()
     private let requestIDs: Set<String>
     private var cancelled: Set<String> = []
-    /// A hop longer than the shared window ends at the next step once a
-    /// request is submitted, so the new row joins at the next hop boundary
-    /// as it would after a shared-window hop (#2505).
-    private let endsOnSubmit: Bool
-    private var submitted = false
 
-    init(requestIDs: [String], endsOnSubmit: Bool = false) {
+    init(requestIDs: [String]) {
         self.requestIDs = Set(requestIDs)
-        self.endsOnSubmit = endsOnSubmit
-    }
-
-    func noteSubmission() {
-        lock.lock()
-        defer { lock.unlock() }
-        if endsOnSubmit { submitted = true }
     }
 
     func markCancelled(_ requestID: String) {
@@ -2143,7 +2117,7 @@ final class ContinuousBatchDecodeWindowControl: @unchecked Sendable {
     var shouldContinue: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return cancelled.count < requestIDs.count && !submitted
+        return cancelled.count < requestIDs.count
     }
 }
 
@@ -3090,7 +3064,6 @@ actor ContinuousBatchScheduler {
         nextAdmissionSequence += 1
         pendingBindingChecks += 1
         pendingBindingTokenCount += retainedTokenCost
-        decodeWindowControl?.noteSubmission()
         CBTrace.log(request.id, "sch_submit seq=\(admissionSequence) cur=\(currentAdmissionSequence) active=\(activeDecode.count)")
         let bindingsAreValid = await localBindingsAreValid()
         CBTrace.log(request.id, "sch_bindings")
@@ -4187,7 +4160,7 @@ actor ContinuousBatchScheduler {
         // A prompt mid-prefill joins only after its last chunk, so decode may
         // take a bounded window between chunks (FR-CB2) instead of one token.
         let configured = activePrompt.isEmpty
-            ? (rows.count == 1 ? configuration.loneRowDecodeLockstepWindow : configuration.maxDecodeLockstepWindow)
+            ? configuration.maxDecodeLockstepWindow
             : min(configuration.maxDecodeLockstepWindow, configuration.maxDecodeStepsWhilePrefilling)
         guard configured > 1 else { return 1 }
         var window = configured
@@ -5892,13 +5865,7 @@ actor ContinuousBatchScheduler {
         var stepContinuation: AsyncStream<ContinuousBatchDecodeWindowStep>.Continuation?
         var stepConsumer: Task<Void, Never>?
         if windowSteps > 1 {
-            let endsOnSubmit = windowSteps > configuration.maxDecodeLockstepWindow
-            let control = ContinuousBatchDecodeWindowControl(requestIDs: windowIDs, endsOnSubmit: endsOnSubmit)
-            // A request submitted while this hop was being prepared (the
-            // allocator awaits above) found no control to tell.
-            if endsOnSubmit, !waiting.isEmpty || pendingBindingChecks > 0 || !admittingRequests.isEmpty {
-                control.noteSubmission()
-            }
+            let control = ContinuousBatchDecodeWindowControl(requestIDs: windowIDs)
             for id in windowIDs where cancelledIDs.contains(id) {
                 control.markCancelled(id)
             }
@@ -6008,36 +5975,6 @@ actor ContinuousBatchScheduler {
                 errorCode: released ? errorCode : "continuous_batching_cleanup_failed"
             )
             if !released { return }
-        }
-        // A hop that ended early (a lone-row hop on a submission, #2505)
-        // extended its rows' blocks for steps it did not run: cut each live
-        // row's table to the tokens it returned, the K/V its caches hold.
-        for outcome in outcomes {
-            guard case .output(let output) = outcome,
-                  output.tokens.count < windowSteps,
-                  !cancelledIDs.contains(output.requestID),
-                  healthyOutputIDs.contains(output.requestID),
-                  !invalidOutputIDs.contains(output.requestID),
-                  let row = activeDecode[output.requestID],
-                  let item = prepared.first(where: { $0.row.request.id == output.requestID })
-            else { continue }
-            do {
-                _ = try await allocator.trim(
-                    row.handle,
-                    toLogicalTokens: item.input.committedKVTokenCount + output.tokens.count
-                )
-            } catch {
-                record(.localPreparationFailed)
-                guard let removed = activeDecode.removeValue(forKey: output.requestID) else { continue }
-                invalidOutputIDs.insert(output.requestID)
-                let released = await release(removed.handle)
-                finish(
-                    removed,
-                    status: .requestFailed,
-                    errorCode: released ? "continuous_batching_decode_trim_failed" : "continuous_batching_cleanup_failed"
-                )
-                if !released { return }
-            }
         }
         await processCancellations()
         guard !cleanupFailedClosed else { return }

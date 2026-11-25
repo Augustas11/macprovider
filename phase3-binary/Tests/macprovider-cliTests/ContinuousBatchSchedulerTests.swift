@@ -6195,60 +6195,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(metrics.sharedForwardCalls, 1)
     }
 
-    /// A lone row decodes in the lone-row hop (#2505); rows that share a
-    /// forward keep the shared window.
-    func testLoneRowDecodesInTheLoneRowHop() async throws {
-        let backend = WindowRecordingBackend(scripts: ["solo": Array(11 ... 30)])
-        let scheduler = try await makeScheduler(
-            maxActiveRows: 1,
-            maxDecodeLockstepWindow: 4,
-            loneRowDecodeLockstepWindow: 12,
-            backend: backend
-        )
-        let result = try await scheduler.submit(.init(
-            id: "solo", conversationKey: "", promptTokens: [1], maxOutputTokens: 20,
-            temperature: 0.0, topP: 1.0
-        ))
-        XCTAssertEqual(result.outputTokens, Array(11 ... 30))
-        let windows = await backend.windowCalls()
-        XCTAssertEqual(windows.map(\.steps), [12, 7])
-    }
-
-    /// A lone-row hop longer than the shared window ends at the next step
-    /// once another request is submitted, so the new row joins as soon as it
-    /// would behind a shared-window hop (#2505).
-    func testLoneRowHopEndsAtTheNextStepWhenARequestIsSubmitted() async throws {
-        let afterFirstStep = AsyncGate()
-        let backend = StreamingWindowBackend(
-            scripts: ["solo": Array(10 ... 40), "late": [70, 71, 72]],
-            gateAfterStep: 0,
-            gate: afterFirstStep
-        )
-        let scheduler = try await makeScheduler(
-            maxActiveRows: 2,
-            tokenDeliveryBufferLimit: 64,
-            maxDecodeLockstepWindow: 2,
-            loneRowDecodeLockstepWindow: 16,
-            backend: backend
-        )
-        let solo = Task {
-            try await scheduler.submit(.init(id: "solo", conversationKey: "", promptTokens: [1], maxOutputTokens: 20))
-        }
-        try await eventually { await backend.blockedAtGate() }
-        let late = Task {
-            try await scheduler.submit(.init(id: "late", conversationKey: "", promptTokens: [2], maxOutputTokens: 3))
-        }
-        // Counted from the start of `submit`, where the hop is told to end.
-        try await eventually { await scheduler.metrics().waitingCount == 1 }
-        await afterFirstStep.open()
-        let soloResult = try await solo.value
-        let lateResult = try await late.value
-        XCTAssertEqual(soloResult.outputTokens, Array(10 ... 29))
-        XCTAssertEqual(lateResult.outputTokens, [70, 71, 72])
-        let ran = await backend.stepsRunPerWindow()
-        XCTAssertEqual(ran.first, 2, "the lone hop stops one step after the submission")
-    }
-
     /// Buyers see each window step's token when it is sampled, not when the
     /// whole lockstep window returns.
     func testLockstepWindowDeliversEachStepBeforeTheWindowReturns() async throws {
@@ -11059,7 +11005,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             .defaultQueueWaitTimeoutNanoseconds,
         tokenDeliveryBufferLimit: Int = 16,
         maxDecodeLockstepWindow: Int = 1,
-        loneRowDecodeLockstepWindow: Int? = nil,
         maxDecodeStepsWhilePrefilling: Int = 1,
         maxDecodeRowsPerForward: Int = Int.max,
         maxPrefillRowsPerIteration: Int = 1,
@@ -11113,7 +11058,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 weightsGeneration: 3
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-            loneRowDecodeLockstepWindow: loneRowDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling,
             maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,

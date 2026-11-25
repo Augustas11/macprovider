@@ -786,9 +786,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             maxActiveRows: max(1, prompts.count),
             maxPromptChunkTokens: maxPromptChunkTokens ?? max(1, promptTokens),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow
-                ?? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds),
-            // The serve path's lone-row hop, unless the caller set the window.
-            servesLoneRowHop: maxDecodeLockstepWindow == nil
+                ?? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         )
 
         func submitAll() async throws -> [(Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming)] {
@@ -890,7 +888,6 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         maxActiveRows: Int,
         maxPromptChunkTokens: Int,
         maxDecodeLockstepWindow: Int,
-        servesLoneRowHop: Bool = false,
         replayAuthority: MSBThroughputReplayAuthority = MSBThroughputReplayAuthority()
     ) throws -> (ContinuousBatchScheduler, MSBSchedulerWindowTimingBackend) {
         let sha = String(repeating: "a", count: 64)
@@ -973,9 +970,6 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                         ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
                     )
                     : max(1, maxDecodeLockstepWindow),
-                loneRowDecodeLockstepWindow: servesLoneRowHop
-                    ? ModelRuntime.schedulerLoneRowDecodeLockstepWindow(backend: inner)
-                    : nil,
                 maxDecodeStepsWhilePrefilling: ModelRuntime.decodeStepsWhilePrefilling(
                     promptChunkTokens: max(1, maxPromptChunkTokens)
                 )
