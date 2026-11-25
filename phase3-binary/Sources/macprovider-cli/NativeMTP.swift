@@ -88,6 +88,22 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.adaptationConfig = adaptationConfig
     }
 
+    /// The same capability with its prompt bound lowered to `limit` (never
+    /// raised above the signed bound). #2496: the on-device self-check's
+    /// measured ceiling for a model whose long probe point missed the bar.
+    func cappingPromptTokens(at limit: Int) -> NativeMTPCapability {
+        NativeMTPCapability(
+            admitted: admitted, revoked: revoked, revocationStateAvailable: revocationStateAvailable,
+            supportsCurrentProcessor: supportsCurrentProcessor, supportsCurrentStateCache: supportsCurrentStateCache,
+            supportsStreaming: supportsStreaming, supportsNonStreaming: supportsNonStreaming,
+            supportsStopSequences: supportsStopSequences, hasQualifiedRowMappedTransactions: hasQualifiedRowMappedTransactions,
+            maximumProposalDepth: maximumProposalDepth, maximumPromptTokens: min(maximumPromptTokens, max(0, limit)),
+            maximumCompletionTokens: maximumCompletionTokens, completeWindowBytesByDepth: completeWindowBytesByDepth,
+            family: family, throughputDeltaPPM: throughputDeltaPPM,
+            maximumNativeActiveRows: maximumNativeActiveRows, supportsSampling: supportsSampling,
+            adaptationConfig: adaptationConfig)
+    }
+
     static let unavailable = NativeMTPCapability(
         admitted: false,
         revoked: false,
@@ -649,6 +665,8 @@ enum NativeMTPOnDeviceSelfCheck {
         let mtpSeconds: Double
         let referenceTokens: [Int]
         let ordinarySeconds: Double
+        /// The probe's prompt length in tokens (0 when unknown).
+        var promptTokens: Int = 0
     }
 
     static func decide(
@@ -691,6 +709,34 @@ enum NativeMTPOnDeviceSelfCheck {
             tightest = verdict
         }
         return tightest ?? Verdict(passed: false, reason: "no_probe_points", speedup: 0)
+    }
+
+    /// #2496: the prompt ceiling under which native MTP still serves when the
+    /// only failing point is the last (longest) workload point and it failed
+    /// on speed alone (tokens equal). Every earlier point, the challenge and at
+    /// least one workload point, must pass. When the failing point was still
+    /// faster than ordinary decode (speedup > 1), the ceiling is where a
+    /// straight line between the last passing and the failing point crosses
+    /// `minimumSpeedup`, kept below the failing point's prompt; otherwise it
+    /// is the last passing point's prompt. Nil means no ceiling admits.
+    static func promptCeiling(_ points: [PointMeasurement]) -> Int? {
+        guard points.count >= 3, let failing = points.last else { return nil }
+        let earlier = points.dropLast()
+        guard earlier.allSatisfy({ admit([$0]).passed }),
+              let lastPass = earlier.last, lastPass.name != "challenge",
+              lastPass.promptTokens > 0, failing.promptTokens > lastPass.promptTokens else { return nil }
+        let failed = decide(
+            mtpTokens: failing.mtpTokens, mtpSeconds: failing.mtpSeconds,
+            ordinaryTokens: failing.referenceTokens, ordinarySeconds: failing.ordinarySeconds
+        )
+        guard !failed.passed, failed.reason == "no_net_gain" else { return nil }
+        guard failed.speedup > 1.0 else { return lastPass.promptTokens }
+        let passSpeedup = admit([lastPass]).speedup
+        guard passSpeedup > failed.speedup else { return lastPass.promptTokens }
+        let fraction = (passSpeedup - minimumSpeedup) / (passSpeedup - failed.speedup)
+        let span = Double(failing.promptTokens - lastPass.promptTokens)
+        let ceiling = lastPass.promptTokens + Int((span * fraction).rounded(.down))
+        return max(lastPass.promptTokens, min(ceiling, failing.promptTokens - 1))
     }
 
     /// The ordinary routes of a probe point: `speed` is the route an ordinary

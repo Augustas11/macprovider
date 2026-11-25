@@ -6012,7 +6012,8 @@ maxTokens: 1,
                 mtpTokens: native.tokens,
                 mtpSeconds: native.seconds,
                 referenceTokens: ordinary.referenceTokens,
-                ordinarySeconds: ordinary.seconds
+                ordinarySeconds: ordinary.seconds,
+                promptTokens: prompt.count
             )
             Self.logNativeMTPSelfCheckPoint(measurement, promptTokens: prompt.count)
             measured.append(measurement)
@@ -7898,6 +7899,7 @@ maxTokens: 1,
     /// Startup and creative restoration share the same on-device admission gate.
     private func qualifyAndPublishNativeMTP(_ nativeMTPLoad: NativeMTPRuntimeLoadResult) async {
         let selfTestReceipt: NativeMTPSelfTestReceipt?
+        var promptCeiling: Int?
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         let injectedReceipt = creativeRestoreTarget == nil ? nil : creativeNativeSelfCheckForTest
         #else
@@ -7946,17 +7948,30 @@ maxTokens: 1,
                     mtpTokens: receipt?.generatedTokenIDs ?? [],
                     mtpSeconds: mtpSeconds,
                     referenceTokens: ordinary.referenceTokens,
-                    ordinarySeconds: ordinary.seconds
+                    ordinarySeconds: ordinary.seconds,
+                    promptTokens: challenge.promptTokenIDs.count
                 )
                 Self.logNativeMTPSelfCheckPoint(challengePoint, promptTokens: challenge.promptTokenIDs.count)
                 var points = [challengePoint]
                 if NativeMTPOnDeviceSelfCheck.admit(points).passed {
                     points += try await self.measureNativeMTPSelfCheckWorkload(nativeMTPLoad, scheduler: scheduler)
                 }
-                let verdict = NativeMTPOnDeviceSelfCheck.admit(points)
+                var verdict = NativeMTPOnDeviceSelfCheck.admit(points)
                 FileHandle.standardError.write(Data(
                     "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.referenceTokens.count) point=\(verdict.point ?? "none") points=\(points.count)\n".utf8
                 ))
+                // #2496: a long point that only missed the speed bar no longer
+                // turns native MTP off for every prompt; it serves up to the
+                // measured ceiling and longer prompts take ordinary decode.
+                if !verdict.passed, let ceiling = NativeMTPOnDeviceSelfCheck.promptCeiling(points) {
+                    promptCeiling = ceiling
+                    verdict = NativeMTPOnDeviceSelfCheck.Verdict(
+                        passed: true, reason: "passed_prompt_ceiling", speedup: verdict.speedup, point: verdict.point
+                    )
+                    FileHandle.standardError.write(Data(
+                        "event=native_mtp_self_check result=passed_prompt_ceiling max_prompt_tokens=\(ceiling) failing_point=\(verdict.point ?? "none")\n".utf8
+                    ))
+                }
                 if let receipt, Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) {
                     if let line = Self.nativeMTPSelfCheckRecordLogLine(receipt) {
                         FileHandle.standardError.write(Data(line.utf8))
@@ -7975,7 +7990,9 @@ maxTokens: 1,
             selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_scheduler_unavailable")
         }
         if let receipt = selfTestReceipt {
-            self.currentNativeMTPCapability = nativeMTPLoad.capability
+            let servedCapability = promptCeiling.map { nativeMTPLoad.capability.cappingPromptTokens(at: $0) }
+                ?? nativeMTPLoad.capability
+            self.currentNativeMTPCapability = servedCapability
             self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
             self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
             self.currentNativeMTPSelfTestInput = nativeMTPLoad.selfTestInput
@@ -7985,7 +8002,7 @@ maxTokens: 1,
             )
             startNativeMTPRevocationRefresh(load: nativeMTPLoad)
             publishNativeMTPStatusSink(
-                capability: nativeMTPLoad.capability,
+                capability: servedCapability,
                 admissionCapability: nativeMTPLoad.admissionCapability,
                 reasonIfDisabled: .tupleNotAdmitted
             )

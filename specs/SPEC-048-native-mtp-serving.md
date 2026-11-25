@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.127
+**Version:** 0.1.128
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.127",
+  "version": "0.1.128",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -3033,9 +3033,19 @@ admitting a path that serves slower. Each point logs
 `event=native_mtp_self_check_point` (point, result, speedup, prompt and
 output tokens, both times), and the verdict line
 `event=native_mtp_self_check result=` names the deciding point. The decision
-is all or nothing for the load: the runtime has no per-context native-MTP
-band beyond the signed prompt bound, so a tuple that loses at either context
-serves ordinary decode until its next load.
+decides the load's native-MTP prompt bound. **(0.1.128)** When the challenge
+and every shorter point pass and only the longest measured point fails, on
+speed alone (tokens equal), native MTP is admitted with a local prompt
+ceiling instead of switching off: if the failing point was still faster than
+ordinary decode (speedup greater than 1.0), the ceiling is where a straight
+line between the last passing point and the failing point crosses 1.03, kept
+below the failing point's prompt length; otherwise it is the last passing
+point's prompt length. The served capability's prompt bound is the smaller of
+the signed bound and the ceiling, so a longer prompt takes ordinary decode
+(`capabilityMismatch`). The verdict logs
+`event=native_mtp_self_check result=passed_prompt_ceiling max_prompt_tokens=`.
+A token mismatch at any point, a failing challenge or short point, or no
+passing workload point still keeps native MTP off until the next load.
 
 Cost at load: at most three points of two native and two ordinary requests,
 plus one token-reference request per point in a `mixed` process, with
@@ -3213,6 +3223,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.128 (2026-11-25, Related: #2496)** — R016: a self-check whose only
+  failing point is the longest one, failed on speed with equal tokens, admits
+  native MTP under a local prompt ceiling (the 1.03 crossing between the last
+  passing and the failing point when the failing point is still above 1.0,
+  else the last passing prompt) instead of turning it off for every prompt.
+  The GLM-5.3-Flash uncensored self-check on the lab M3 Ultra (challenge
+  1.156, 341 tokens 1.131, 3,673 tokens 1.013) serves native MTP up to 3,192
+  prompt tokens. No signed record, bank or tuple changes.
 - **0.1.127 (2026-11-25, Related: #2481)** — R016: the on-device self-check
   measures the served one-row shape. Besides the signed challenge it probes
   the parity grid's prompts at about 200 tokens (128 output) and about 4,000

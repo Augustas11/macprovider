@@ -17,15 +17,92 @@ final class NativeMTPSelfCheckWorkloadTests: XCTestCase {
         ordinaryTPS: Double,
         nativeTPS: Double,
         tokens: [Int] = [1, 2, 3, 4],
-        nativeTokens: [Int]? = nil
+        nativeTokens: [Int]? = nil,
+        promptTokens: Int = 0
     ) -> Check.PointMeasurement {
         Check.PointMeasurement(
             name: name,
             mtpTokens: nativeTokens ?? tokens,
             mtpSeconds: Double(tokens.count) / nativeTPS,
             referenceTokens: tokens,
-            ordinarySeconds: Double(tokens.count) / ordinaryTPS
+            ordinarySeconds: Double(tokens.count) / ordinaryTPS,
+            promptTokens: promptTokens
         )
+    }
+
+    // MARK: - #2496 prompt ceiling
+
+    /// The live GLM-5.3-Flash uncensored self-check (2026-11-25, CLI
+    /// 1.8.299): challenge 1.156, ctx200 1.131 at 341 tokens, ctx4000 1.013 at
+    /// 3,673 tokens. Native MTP serves up to the line's 1.03 crossing.
+    func testIssue2496LiveGridAdmitsUpToTheMeasuredCeiling() throws {
+        let points = [
+            point("challenge", ordinaryTPS: 100, nativeTPS: 115.6, promptTokens: 51),
+            point("ctx200_out128", ordinaryTPS: 100, nativeTPS: 113.1, promptTokens: 341),
+            point("ctx4000_out256", ordinaryTPS: 100, nativeTPS: 101.3, promptTokens: 3673),
+        ]
+        XCTAssertFalse(Check.admit(points).passed, "the all-points rule alone still refuses")
+        let ceiling = try XCTUnwrap(Check.promptCeiling(points))
+        // 341 + (3673 - 341) * (1.131 - 1.03) / (1.131 - 1.013) = 3,192.
+        XCTAssertEqual(ceiling, 3192)
+        XCTAssertLessThan(ceiling, 3673)
+    }
+
+    func testAFailingPointSlowerThanOrdinaryCapsAtTheLastPassingPrompt() {
+        let points = [
+            point("challenge", ordinaryTPS: 100, nativeTPS: 120, promptTokens: 51),
+            point("ctx200_out128", ordinaryTPS: 100, nativeTPS: 112, promptTokens: 341),
+            point("ctx4000_out256", ordinaryTPS: 100, nativeTPS: 95, promptTokens: 3673),
+        ]
+        XCTAssertEqual(Check.promptCeiling(points), 341)
+    }
+
+    func testNoCeilingWhenTokensDifferAtTheLongPoint() {
+        let points = [
+            point("challenge", ordinaryTPS: 100, nativeTPS: 120, promptTokens: 51),
+            point("ctx200_out128", ordinaryTPS: 100, nativeTPS: 112, promptTokens: 341),
+            point("ctx4000_out256", ordinaryTPS: 100, nativeTPS: 102, nativeTokens: [1, 2, 3, 9], promptTokens: 3673),
+        ]
+        XCTAssertNil(Check.promptCeiling(points))
+    }
+
+    func testNoCeilingWhenAShortPointOrTheChallengeFails() {
+        // #2481: the short point fails, so nothing is admitted.
+        XCTAssertNil(Check.promptCeiling([
+            point("challenge", ordinaryTPS: 100, nativeTPS: 111, promptTokens: 51),
+            point("ctx200_out128", ordinaryTPS: 125.13, nativeTPS: 122.12, promptTokens: 341),
+        ]))
+        XCTAssertNil(Check.promptCeiling([
+            point("challenge", ordinaryTPS: 100, nativeTPS: 101, promptTokens: 51),
+            point("ctx200_out128", ordinaryTPS: 100, nativeTPS: 113, promptTokens: 341),
+            point("ctx4000_out256", ordinaryTPS: 100, nativeTPS: 101, promptTokens: 3673),
+        ]))
+        // The challenge alone passing is not enough: a workload point must pass.
+        XCTAssertNil(Check.promptCeiling([
+            point("challenge", ordinaryTPS: 100, nativeTPS: 120, promptTokens: 51),
+            point("ctx4000_out256", ordinaryTPS: 100, nativeTPS: 101, promptTokens: 3673),
+        ]))
+    }
+
+    func testTheCappedCapabilityRoutesLongerPromptsToOrdinaryDecode() {
+        let signed = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 200_000, maximumCompletionTokens: 32_768
+        )
+        let capped = signed.cappingPromptTokens(at: 3192)
+        XCTAssertEqual(capped.maximumPromptTokens, 3192)
+        XCTAssertEqual(signed.cappingPromptTokens(at: 500_000).maximumPromptTokens, 200_000, "never raised")
+        let expected = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 3192, maximumCompletionTokens: 32_768
+        )
+        XCTAssertEqual(capped, expected, "only the prompt bound changes")
     }
 
     func testEveryPointWinningPassesWithTheTightestSpeedup() {
