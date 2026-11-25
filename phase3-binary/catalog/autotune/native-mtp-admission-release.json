@@ -2,16 +2,16 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "48400638712395ca0fda55d9f2c7d2050374f46f9634a8b1b17acc7eff29ee6e",
-    "challenge_bank_sha256": "3a23bdacaaff58cc7c9dc6dc4308ac8a90c17b7a312530ae0a79e8cec09e04bc",
+    "challenge_bank_sha256": "fc62053988e6d9f7acb8c77569990c44b7b24b6de0a42a08f5b298233f9de335",
     "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
     "provider_revision": "ec252246fbf91fbef8d218213e7bb465c0100771",
     "reproducible_build_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
     "source_commit": "ec252246fbf91fbef8d218213e7bb465c0100771"
   },
-  "expires_at": "2027-02-21T23:33:00Z",
-  "issued_at": "2026-11-24T23:33:00Z",
+  "expires_at": "2027-02-22T23:35:00Z",
+  "issued_at": "2026-11-25T23:35:00Z",
   "provider_decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
-  "release_id": "published-2026-11-25-inkling-2-mini-32gb-v296",
+  "release_id": "published-2026-11-26-sage-s21-flash-listed-v296",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"

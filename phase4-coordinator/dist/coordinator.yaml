@@ -504,6 +504,10 @@ rewards:
       prompt_credits_per_mtok: 18500         # $0.0185/M
       prompt_cache_hit_credits_per_mtok: 5500 # $0.0055/M prefix-cache hit
       completion_credits_per_mtok: 88000     # $0.088/M
+    hygaard/sage-s2.1-flash-oq4e-mtp:      # #2466 Sage S2.1 Flash (GLM-5.3-Flash fine-tune) — own labelled row at the zai-org/glm-5.3-flash price
+      prompt_credits_per_mtok: 18500         # $0.0185/M
+      prompt_cache_hit_credits_per_mtok: 5500 # $0.0055/M prefix-cache hit
+      completion_credits_per_mtok: 88000     # $0.088/M
 
 # SPEC-015 / SPEC-022 settlement policy.
 #

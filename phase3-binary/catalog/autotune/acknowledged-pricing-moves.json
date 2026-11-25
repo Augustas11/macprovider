@@ -131,6 +131,16 @@
       "model": "radixark/daisyrose-27b",
       "from_row": "default",
       "to_row": "radixark/daisyrose-27b"
+    },
+    {
+      "model": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp",
+      "from_row": "default",
+      "to_row": "hygaard/sage-s2.1-flash-oq4e-mtp"
+    },
+    {
+      "model": "hygaard/sage-s2.1-flash-oq4e-mtp",
+      "from_row": "default",
+      "to_row": "hygaard/sage-s2.1-flash-oq4e-mtp"
     }
   ]
 }

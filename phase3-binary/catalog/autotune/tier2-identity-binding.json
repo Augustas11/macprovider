@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "111e8f246a35201bd17d44c18af684f95c11de3a023b48deb20bbb65d906ea80",
-  "generated_at": "2026-11-24T23:33:00Z",
+  "autotune_candidates_sha256": "72604674fcbc539beb44592a745034f472492d300e9204f4694eb6caa90e5973",
+  "generated_at": "2026-11-25T23:35:00Z",
   "models": [
     {
       "catalog_key": "deepseek/deepseek-v4-flash-abliterated",
@@ -22,6 +22,13 @@
       "model_id": "frogggias/Ripple-65B-Preview-MLX-4bit",
       "model_revision": "4a33b33f043f41a51ae7236edd440d64cfa7cc94",
       "sha256": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6"
+    },
+    {
+      "catalog_key": "hygaard/sage-s2.1-flash-oq4e-mtp",
+      "min_ram_gb": 235,
+      "model_id": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp",
+      "model_revision": "a972e256db2553562bd718e677d100089aca5fce",
+      "sha256": "d59ecd8525692c53ea9dd36d5e690d4c3218713f0b0a81fec77637e1f588c261"
     },
     {
       "catalog_key": "zai-org/glm-5.3-flash",
@@ -221,6 +228,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-25-inkling-2-mini-32gb-v296",
+  "release_id": "published-2026-11-26-sage-s21-flash-listed-v296",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

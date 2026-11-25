@@ -1,50 +1,50 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 31069,
-      "sha256": "47cf24e47e956340bdd0af360aa132d9635c5f282ebd0c36511b52a03b4d59dd",
+      "bytes": 32955,
+      "sha256": "be4da66356a31cc97ef5d79b65ad35ea3be0538dff04ccc8240f96cc3f148390",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-25-inkling-2-mini-32gb-v296"
+      "version": "published-2026-11-26-sage-s21-flash-listed-v296"
     },
     "autotune-candidates.json": {
-      "bytes": 37480,
-      "sha256": "111e8f246a35201bd17d44c18af684f95c11de3a023b48deb20bbb65d906ea80",
+      "bytes": 39269,
+      "sha256": "72604674fcbc539beb44592a745034f472492d300e9204f4694eb6caa90e5973",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-25-inkling-2-mini-32gb-v296"
+      "version": "published-2026-11-26-sage-s21-flash-listed-v296"
     },
     "continuous-batching-policy.json": {
-      "bytes": 7294,
-      "sha256": "aba30edc440a418c8f326ebad6d7b0da865390c27df103b07b4e349409fe6733",
+      "bytes": 7296,
+      "sha256": "1b8b0339057e996066c36209e15046e8df73bf655d16e8a6c19e21acf25d3b5f",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-25-inkling-2-mini-32gb-v296"
+      "version": "published-2026-11-26-sage-s21-flash-listed-v296"
     },
     "demand-rank.json": {
-      "bytes": 3588,
-      "sha256": "87492e71750e396a61fd5e4a7265b533bf41e7694c94671f4d35d6270c43a21d",
+      "bytes": 3706,
+      "sha256": "ae7acd7859c59137256267072a533f766d01320bed75b81697f188837291fd17",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-25-inkling-2-mini-32gb-v296"
+      "version": "published-2026-11-26-sage-s21-flash-listed-v296"
     },
     "native-mtp-admission.json": {
-      "bytes": 91510,
-      "sha256": "f41be20f79ab5334832631894e9aa5406407189a0cfcd386bd257170788ef302",
+      "bytes": 91512,
+      "sha256": "1e5cee4959472d762f6d36db2917a4c57bffdaa8c22c6398a8c3e98c18b6cae1",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-25-inkling-2-mini-32gb-v296"
+      "version": "published-2026-11-26-sage-s21-flash-listed-v296"
     },
     "rate-card.json": {
-      "bytes": 6386,
-      "sha256": "d98d8c20cc6f87cc7e6a2b0da2cc17a34b8738b6e48a5ade5b3ed25927e3f375",
+      "bytes": 6581,
+      "sha256": "e5b6823d1ee46a0e8f9c00a64053cf9b7c62e38285bda18ae9e3c2b41df5584c",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "6ad728e277ba257dc313fea87451e32f0dd281901f721884d9e418cad8045ad7"
+      "version": "720bb89c5c5bbe62869b9f889a08b9ed7fd05cdd15f98ed040f25508799d2262"
     },
     "tier2-catalog.json": {
-      "bytes": 13540,
-      "sha256": "ac27896a12d213bdc903f0447d524b14720fc45b6e5956f392279263d1bf5fd2",
+      "bytes": 14029,
+      "sha256": "98b52a34eece18692035700fd888ff55a754c4a6c1766c61272bd165ba91491e",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-11-25-inkling-2-mini-32gb-v1"
+      "version": "macprovider-tier2-model-catalog-2026-11-26-sage-s21-flash-v1"
     }
   },
-  "generated_at": "2026-11-24T23:33:00Z",
+  "generated_at": "2026-11-25T23:35:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-25-inkling-2-mini-32gb-v296",
+  "release_id": "published-2026-11-26-sage-s21-flash-listed-v296",
   "schema_version": "macprovider.autotune-release.v1"
 }

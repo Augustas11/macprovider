@@ -424,6 +424,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # #2465: the DaisyRose-27B listed cut moves its served 4-bit artifact
         # onto the daisyrose-27b row and its catalog key onto its own row, both
         # at the qwen3.8-27b price.
+        # #2466: the Sage S2.1 Flash listed cut moves its served Hygaard id and
+        # its catalog key onto its own row at the zai-org/glm-5.3-flash price.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -453,6 +455,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("thinkingmachines/inkling-2-mini", "default", "thinkingmachines/inkling-2-mini"),
                 ("mlx-community/DaisyRose-27B-4bit", "default", "radixark/daisyrose-27b"),
                 ("radixark/daisyrose-27b", "default", "radixark/daisyrose-27b"),
+                ("Hygaard/Sage-S2.1-Flash-oQ4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
+                ("hygaard/sage-s2.1-flash-oq4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
             },
         )
         for bad in (

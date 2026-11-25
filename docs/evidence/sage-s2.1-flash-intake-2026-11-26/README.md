@@ -15,10 +15,18 @@ every file. The manifest is committed as
 Sage S2.1 Flash is a GLM-5.3-Flash fine-tune by Shanghai AI Laboratory /
 InternLM (`internlm/Sage-S2.1-Flash`), MIT licensed. It has the same `glm5_next`
 architecture and the same `tokenizer.json` as `zai-org/glm-5.3-flash`. The row
-is staged in `staged-rows.json` at the GLM-5.3-Flash placement and price, under
-its own labelled rate row. `scripts/tests/test_sage_s21_flash_staged_rows.py`
-merges each fragment into the committed input and runs the generator's
-validators.
+is `listed` in signed catalog release
+`published-2026-11-26-sage-s21-flash-listed-v296` (generated against
+`published-2026-11-25-inkling-2-mini-32gb-v296`) at the GLM-5.3-Flash placement
+and price, under its own labelled rate row: the candidate, artifact-source,
+rate-card-source, acknowledged-pricing-moves, demand-rank, model-facts and
+intake-decision inputs, the Tier-2 catalog
+`macprovider-tier2-model-catalog-2026-11-26-sage-s21-flash-v1`
+(`catalog-key-2026q2`) and the `coordinator.yaml` `rewards.rate_card` row. Static
+feeds are signed with `streamvc-autotune-static-v4`. The intake decision uses
+the cold-start slot with the `<= 256 GB` tier-target fit term.
+`scripts/tests/test_sage_s21_flash_catalog_rows.py` checks the committed rows
+against each other, the snapshot manifest and the GLM-5.3-Flash row.
 
 ## Measurements
 
