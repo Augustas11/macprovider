@@ -152,6 +152,13 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Next CLI release — after 1.8.300 (tracked from 2026-11-25)
+
+- [PR 2507](https://github.com/Augustas11/macprovider/pull/2507) (Related: #2487), merged 2026-11-25 as `c968dfe7f`: Inkling-2-Mini serves native MTP with its bundled DSpark draft on the serial path (SPEC-048 0.1.130 serial one-row native tuple, adapter `inkling2_dspark_v1`). Fork pin mlx-swift-lm 3.33.0-macprovider.90 (`39f7e60`, tag cut). Exact speculative decoding: each verify row reproduces one-row decode, close-call head rows are recomputed one row at a time, and speculation stops before the 1024-position sliding window wraps. Studio run `20261125T110214Z` (oQ4e, 8 natural prompts × 512 tokens, block 8): parity 8/8, plain 46.6 tok/s, DSpark 95.5 tok/s, 2.05x, acceptance 2960/7827. Decode-path digest `4425a546`. Live steps, in order:
+  1. The next CLI cut (`scripts/ops/cli-release.sh status`, then `next --run`) ships the serial route.
+  2. A signed catalog release adds the Inkling sidecar tuple (`inkling2_dspark_v1`, `serial_native`, `max_native_active_rows` 1, quant kind `mlx_oq4e`, signed depth up to 6) and its self-test bank. Activate it with `scripts/ops/catalog-activate.sh status`, then `next --run`.
+  3. Live probe: an Inkling provider on the new CLI logs a passing serial self-check, `/v1/status` shows `native_mtp.enabled=true` with family `inkling2_dspark_v1`, and a buyer request through the Malibu gateway is served natively (`catalog-activate` `live_probe` and `gateway_proof`). The coordinator's observe-only pool canary reschedules on a serial tuple by design.
+
 ## CLI release — 1.8.300 (published 2026-11-25 17:39 local; tracked from 2026-11-25)
 
 Canary: this operator Mac serving Inkling-2-Mini serial (CB off by policy), gateway request served 17:26. Rollout verified 18:25, mirror latest 18:32. The Studio auto-updated and serves GLM-5.3-Flash-uncensored with CB and native MTP admitted (`mtp_admission=entry_for_model`); native MTP proven live through the Malibu gateway at 19:00 (catalog-activate `gateway_proof`: HTTP 200, zai-org/glm-5.3-flash-uncensored, `mtp_forwards` +15, CB shared forward, not serial).
