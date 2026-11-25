@@ -67,8 +67,12 @@ struct AgentsScreen: View {
             }
             Divider()
             ScrollView {
-                Text(session.transcript.isEmpty ? "Send a message to start a conversation." : session.transcript)
-                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                if session.transcript.isEmpty {
+                    Text("Send a message to start a conversation.")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ChatAnswerView(text: session.transcript)
+                }
             }
             if let approval = session.pendingApproval {
                 AgentToolApprovalView(server: approval.server, tool: approval.tool, arguments: approval.arguments,

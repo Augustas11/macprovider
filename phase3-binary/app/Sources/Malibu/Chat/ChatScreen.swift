@@ -95,8 +95,7 @@ struct ChatScreen: View {
                                 message(label: "You", text: turn.prompt, user: true)
                                 if !turn.reasoning.isEmpty {
                                     DisclosureGroup("Thinking") {
-                                        Text(turn.reasoning).font(.callout).foregroundStyle(.secondary)
-                                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                                        ChatAnswerView(text: turn.reasoning, showsCopy: false)
                                     }
                                     .accessibilityIdentifier("malibu.chat.thinking")
                                 }
@@ -130,9 +129,12 @@ struct ChatScreen: View {
     private func message(label: String, text: String, user: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            // Plain text avoids actionable links or remote attachments from
-            // untrusted model/file content while keeping code copyable.
-            Text(text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            if user {
+                Text(text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // Answers render as markdown. Links stay text and are not opened.
+                ChatAnswerView(text: text)
+            }
         }
         .padding(14)
         .background(user ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.035))
