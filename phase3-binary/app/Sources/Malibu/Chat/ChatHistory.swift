@@ -17,6 +17,8 @@ struct SavedChatTurn: Codable, Equatable {
     var versions: [ChatVersion]? = nil
     var activeVersion: Int? = nil
     var attachments: [ChatAttachment]? = nil
+    /// File names inserted for this answer. Absent on chats saved before knowledge.
+    var citations: [String]? = nil
 }
 
 /// One answer for a turn. A regenerate or edit keeps the previous one here.
@@ -32,6 +34,7 @@ struct ChatVersion: Codable, Equatable {
     var completionTokens: Int?
     var tokensPerSecond: Double?
     var attachments: [ChatAttachment]? = nil
+    var citations: [String]? = nil
 }
 
 struct SavedChat: Codable, Identifiable, Equatable {

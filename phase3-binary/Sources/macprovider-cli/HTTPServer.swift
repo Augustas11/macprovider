@@ -761,8 +761,47 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             handleChatCompletions(context: context)
         case (_, "/v1/chat/completions"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.POST, "/v1/embeddings"):
+            handleEmbeddings(context: context)
+        case (_, "/v1/embeddings"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request", extraHeaders: [("Allow", "POST")])
         default:
             writeError(context: context, status: .notFound, message: "not found", code: "invalid_request")
+        }
+    }
+
+    /// Loopback local-app only. A missing origin marker is a network request.
+    /// The privacy-class header used by image generation is not required.
+    static func validateEmbeddingsAccess(headers: HTTPHeaders, peerIsLoopback: Bool) throws {
+        guard requestOrigin(headers: headers, settlementMetadata: nil, peerIsLoopback: peerIsLoopback) == .local else {
+            throw APIError(status: 403, message: "Embeddings are only available on this Mac.", code: "embeddings_local_only")
+        }
+        try validateBrowserRequestHeaders(headers)
+    }
+
+    private func handleEmbeddings(context: ChannelHandlerContext) {
+        do {
+            guard let head = requestHead else { return }
+            try Self.validateEmbeddingsAccess(headers: head.headers, peerIsLoopback: Self.isLoopbackPeer(context.remoteAddress))
+            try Self.validateJSONContentType(head.headers.first(name: "Content-Type"))
+            try Self.validateContentEncoding(head.headers["Content-Encoding"])
+            let bytes = bodyBuffer?.getBytes(at: bodyBuffer?.readerIndex ?? 0, length: bodyBuffer?.readableBytes ?? 0) ?? []
+            let request: FeatureHashEmbedder.Request
+            do {
+                request = try FeatureHashEmbedder.parse(Data(bytes))
+            } catch let failure as FeatureHashFailure {
+                switch failure {
+                case .invalid:
+                    throw APIError(status: 400, message: "Invalid embeddings request.", code: "invalid_embeddings_request")
+                case .limit:
+                    throw APIError(status: 413, message: "Embeddings request is too large.", code: "embeddings_too_large")
+                }
+            }
+            writeJSON(context: context, status: .ok, body: FeatureHashEmbedder.response(for: request))
+        } catch let error as APIError {
+            writeAPIError(context: context, error)
+        } catch {
+            writeAPIError(context: context, APIError(status: 400, message: "Invalid embeddings request.", code: "invalid_embeddings_request"))
         }
     }
 

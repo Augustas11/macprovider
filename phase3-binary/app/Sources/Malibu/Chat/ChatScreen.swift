@@ -86,6 +86,12 @@ struct ChatScreen: View {
                             .accessibilityIdentifier("malibu.chat.undo")
                     }
                 }
+                Button(store.knowledgeName.map { "Knowledge: \($0)" } ?? "Knowledge", systemImage: "text.book.closed") {
+                    chooseKnowledge()
+                }
+                .disabled(store.isRunning)
+                .lineLimit(1)
+                .accessibilityIdentifier("malibu.chat.knowledge")
                 Spacer()
             }
             Toggle("Web search — queries leave this Mac. Inference stays local.", isOn: Binding(
@@ -184,6 +190,13 @@ struct ChatScreen: View {
                                     .accessibilityIdentifier("malibu.chat.thinking")
                                 }
                                 if !turn.answer.isEmpty { message(label: "Malibu", text: turn.answer, user: false) }
+                                ForEach(Array(turn.citations.enumerated()), id: \.offset) { _, name in
+                                    Text(name)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .accessibilityIdentifier("malibu.chat.citation")
+                                }
                                 if let stats = ChatStats.line(completionTokens: turn.completionTokens, tokensPerSecond: turn.tokensPerSecond) {
                                     Text(stats).font(.caption.monospaced()).foregroundStyle(.secondary)
                                         .accessibilityIdentifier("malibu.chat.stats")
@@ -393,6 +406,14 @@ struct ChatScreen: View {
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
         panel.prompt = "Choose folder"
         if panel.runModal() == .OK { store.selectFolders(panel.urls) }
+    }
+    private func chooseKnowledge() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose folder"
+        if panel.runModal() == .OK, let url = panel.url { store.selectKnowledge(url) }
     }
 }
 
