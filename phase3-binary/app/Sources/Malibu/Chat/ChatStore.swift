@@ -3,7 +3,7 @@ import Foundation
 
 struct ChatTurn: Identifiable, Equatable {
     let id: UUID
-    let prompt: String
+    var prompt: String
     var answer: String
     var complete: Bool
     /// Shown in a collapsed "Thinking" section; never sent back to the model.
@@ -17,6 +17,62 @@ struct ChatTurn: Identifiable, Equatable {
     var promptTokens: Int? = nil
     var completionTokens: Int? = nil
     var tokensPerSecond: Double? = nil
+    /// Earlier answers for this turn, including the one on screen at `activeVersion`.
+    var versions: [ChatVersion] = []
+    var activeVersion: Int = 0
+
+    mutating func beginAnotherVersion(prompt: String) {
+        let current = ChatVersion(prompt: self.prompt, answer: answer, reasoning: reasoning, complete: complete,
+                                  truncated: truncated, note: note, tools: tools, promptTokens: promptTokens,
+                                  completionTokens: completionTokens, tokensPerSecond: tokensPerSecond)
+        if versions.isEmpty {
+            versions = [current]
+            activeVersion = 0
+        } else if versions.indices.contains(activeVersion) {
+            versions[activeVersion] = current
+        }
+        versions.append(ChatVersion(prompt: prompt, answer: "", complete: false))
+        activeVersion = versions.count - 1
+        self.prompt = prompt
+        answer = ""
+        reasoning = ""
+        complete = false
+        truncated = false
+        note = nil
+        tools = []
+        promptTokens = nil
+        completionTokens = nil
+        tokensPerSecond = nil
+    }
+
+    mutating func selectVersion(_ index: Int) {
+        guard versions.indices.contains(index), index != activeVersion else { return }
+        if versions.indices.contains(activeVersion) {
+            versions[activeVersion] = ChatVersion(prompt: prompt, answer: answer, reasoning: reasoning, complete: complete,
+                                                  truncated: truncated, note: note, tools: tools, promptTokens: promptTokens,
+                                                  completionTokens: completionTokens, tokensPerSecond: tokensPerSecond)
+        }
+        activeVersion = index
+        let version = versions[index]
+        prompt = version.prompt
+        answer = version.answer
+        reasoning = version.reasoning
+        complete = version.complete
+        truncated = version.truncated
+        note = version.note
+        tools = version.tools
+        promptTokens = version.promptTokens
+        completionTokens = version.completionTokens
+        tokensPerSecond = version.tokensPerSecond
+    }
+
+    mutating func storeActiveVersion() {
+        let current = ChatVersion(prompt: prompt, answer: answer, reasoning: reasoning, complete: complete,
+                                  truncated: truncated, note: note, tools: tools, promptTokens: promptTokens,
+                                  completionTokens: completionTokens, tokensPerSecond: tokensPerSecond)
+        guard !versions.isEmpty else { return }
+        if versions.indices.contains(activeVersion) { versions[activeVersion] = current }
+    }
 }
 
 @MainActor
@@ -160,11 +216,29 @@ final class ChatStore: ObservableObject {
         // Like a new folder selection: a saved chat never runs against a
         // folder chosen for another conversation.
         workspace = nil; folderName = nil
-        turns = chat.turns.map {
-            ChatTurn(id: UUID(), prompt: $0.prompt, answer: $0.answer, complete: $0.complete,
-                     reasoning: $0.reasoning ?? "", truncated: $0.truncated ?? false, note: $0.note,
-                     tools: $0.tools ?? [], promptTokens: $0.promptTokens,
-                     completionTokens: $0.completionTokens, tokensPerSecond: $0.tokensPerSecond)
+        turns = chat.turns.map { saved in
+            let versions = saved.versions ?? []
+            var active = saved.activeVersion ?? 0
+            if !versions.isEmpty && !versions.indices.contains(active) { active = versions.count - 1 }
+            var turn = ChatTurn(id: UUID(), prompt: saved.prompt, answer: saved.answer, complete: saved.complete,
+                                reasoning: saved.reasoning ?? "", truncated: saved.truncated ?? false, note: saved.note,
+                                tools: saved.tools ?? [], promptTokens: saved.promptTokens,
+                                completionTokens: saved.completionTokens, tokensPerSecond: saved.tokensPerSecond,
+                                versions: versions, activeVersion: active)
+            if versions.indices.contains(active) {
+                let version = versions[active]
+                turn.prompt = version.prompt
+                turn.answer = version.answer
+                turn.reasoning = version.reasoning
+                turn.complete = version.complete
+                turn.truncated = version.truncated
+                turn.note = version.note
+                turn.tools = version.tools
+                turn.promptTokens = version.promptTokens
+                turn.completionTokens = version.completionTokens
+                turn.tokensPerSecond = version.tokensPerSecond
+            }
+            return turn
         }
         contextNote = nil
         contextUsedTokens = chat.turns.last?.promptTokens
@@ -194,7 +268,10 @@ final class ChatStore: ObservableObject {
         if wasRunning {
             let text = message ?? "Stopped. Partial replies are not used in the next turn."
             notice = text
-            if let running, let index = turns.firstIndex(where: { $0.id == running }) { turns[index].note = text }
+            if let running, let index = turns.firstIndex(where: { $0.id == running }) {
+                turns[index].note = text
+                turns[index].storeActiveVersion()
+            }
             saveCurrent()
         }
     }
@@ -205,29 +282,79 @@ final class ChatStore: ObservableObject {
         send(Self.continuePrompt)
     }
 
+    /// Sends the same prompt again and keeps the answer that was on screen.
+    func regenerate(_ id: UUID) {
+        guard let turn = turns.first(where: { $0.id == id }) else { return }
+        branch(id, prompt: turn.prompt)
+    }
+
+    /// Replaces this turn's prompt, drops replies that followed it, and sends again.
+    func editAndResend(_ id: UUID, prompt: String) {
+        branch(id, prompt: prompt)
+    }
+
+    /// Shows an earlier answer for this turn. Later turns stay removed.
+    func selectVersion(_ id: UUID, index: Int) {
+        guard !isRunning, let turnIndex = turns.firstIndex(where: { $0.id == id }) else { return }
+        turns[turnIndex].selectVersion(index)
+        unsaved = true
+        saveCurrent()
+    }
+
     func send(_ prompt: String) {
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isRunning else { return }
         guard text.utf8.count <= Self.maxPromptBytes else { notice = ChatFailure.limit.localizedDescription; return }
+        guard let (endpoint, expected, workspace) = readyToRun() else { return }
+        let id = UUID()
+        if turns.isEmpty && conversationTitle == nil {
+            conversationTitle = SavedChat.title(from: text); conversationCreated = Date()
+        }
+        // A reopened chat continues with the loaded model.
+        conversationModel = expected.model; runUsesAgent = workspace != nil
+        turns.append(ChatTurn(id: id, prompt: text, answer: "", complete: false))
+        unsaved = true
+        launch(id: id, prompt: text, endpoint: endpoint, expected: expected, workspace: workspace)
+    }
+
+    private func branch(_ id: UUID, prompt: String) {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isRunning else { return }
+        guard text.utf8.count <= Self.maxPromptBytes else { notice = ChatFailure.limit.localizedDescription; return }
+        guard let index = turns.firstIndex(where: { $0.id == id }), turns[index].complete else { return }
+        guard let (endpoint, expected, workspace) = readyToRun() else { return }
+        if turns.count > index + 1 { turns.removeSubrange((index + 1)...) }
+        turns[index].beginAnotherVersion(prompt: text)
+        conversationModel = expected.model
+        runUsesAgent = workspace != nil
+        unsaved = true
+        launch(id: id, prompt: text, endpoint: endpoint, expected: expected, workspace: workspace)
+    }
+
+    /// Sampling, provider and Agent-folder checks shared by send and edit.
+    private func readyToRun() -> (ChatEndpoint, ChatCapability, AgentWorkspace?)? {
         guard settings.isValid else {
             notice = "Check temperature, top-p, top-k, seed and stop."
-            return
+            return nil
         }
-        guard let endpoint, let expected = capability else { notice = ChatFailure.unavailable.localizedDescription; return }
-        let useAgent = agentMode
+        guard let endpoint, let expected = capability else { notice = ChatFailure.unavailable.localizedDescription; return nil }
         let selected = workspace
-        guard !useAgent || (expected.guaranteedTools && selected != nil) else {
+        guard !agentMode || (expected.guaranteedTools && selected != nil) else {
             notice = selected == nil ? "Choose a folder for read-only Agent access." : ChatFailure.unsupportedTools.localizedDescription
-            return
+            return nil
         }
-        // Copy only complete exchanges into a bounded request. Interrupted tool
-        // turns never become dangling tool messages in a later request.
-        // Reasoning is never sent back. History is sized to the model's
-        // context; a cut-off reply being continued is always carried.
+        return (endpoint, expected, agentMode ? selected : nil)
+    }
+
+    /// Copy only complete exchanges into a bounded request. The turn being
+    /// written is incomplete, so it is left out. Interrupted tool turns never
+    /// become dangling tool messages. Reasoning is never sent back. A cut-off
+    /// reply being continued is always carried.
+    private func priorMessages(promptBytes: Int, expected: ChatCapability) -> [[String: Any]] {
         var previous: [[String: Any]] = []
         var bytes = 0
         var included = 0
-        let budget = Self.contextBytes(for: expected) - text.utf8.count
+        let budget = Self.contextBytes(for: expected) - promptBytes
         let eligible = turns.filter(\.complete).count
         for turn in turns.reversed() where turn.complete {
             let size = turn.prompt.utf8.count + turn.answer.utf8.count
@@ -244,28 +371,32 @@ final class ChatStore: ObservableObject {
         if expected.maxContextTokens != nil {
             contextUsedTokens = max(0, bytes / 3)
         }
-        let id = UUID(); runID = id; discoveryID = UUID(); isChecking = false
-        if turns.isEmpty && conversationTitle == nil {
-            conversationTitle = SavedChat.title(from: text); conversationCreated = Date()
-        }
-        // A reopened chat continues with the loaded model.
-        conversationModel = expected.model; runUsesAgent = useAgent
-        turns.append(ChatTurn(id: id, prompt: text, answer: "", complete: false))
-        unsaved = true
+        return previous
+    }
+
+    private func launch(id: UUID, prompt: String, endpoint: ChatEndpoint, expected: ChatCapability, workspace: AgentWorkspace?) {
+        let previous = priorMessages(promptBytes: prompt.utf8.count, expected: expected)
+        runID = id; discoveryID = UUID(); isChecking = false
         isRunning = true; notice = nil; activity = "Checking local provider…"
         task = Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.run(id: id, endpoint: endpoint, expected: expected,
-                                   previous: previous, prompt: text, workspace: useAgent ? selected : nil)
+                                   previous: previous, prompt: prompt, workspace: workspace)
                 guard self.runID == id else { return }
-                if let index = self.turns.firstIndex(where: { $0.id == id }) { self.turns[index].complete = true }
+                if let index = self.turns.firstIndex(where: { $0.id == id }) {
+                    self.turns[index].complete = true
+                    self.turns[index].storeActiveVersion()
+                }
                 self.saveCurrent()
                 self.finish(id)
             } catch {
                 guard self.runID == id else { return }
                 let message = self.display(error)
-                if let index = self.turns.firstIndex(where: { $0.id == id }) { self.turns[index].note = message }
+                if let index = self.turns.firstIndex(where: { $0.id == id }) {
+                    self.turns[index].note = message
+                    self.turns[index].storeActiveVersion()
+                }
                 self.saveCurrent()
                 if error as? ChatFailure == .modelChanged {
                     self.resetConversation(); self.capability = nil; self.endpoint = nil
@@ -399,7 +530,9 @@ final class ChatStore: ObservableObject {
                               truncated: $0.truncated ? true : nil, note: $0.note,
                               tools: $0.tools.isEmpty ? nil : $0.tools,
                               promptTokens: $0.promptTokens, completionTokens: $0.completionTokens,
-                              tokensPerSecond: $0.tokensPerSecond)
+                              tokensPerSecond: $0.tokensPerSecond,
+                              versions: $0.versions.isEmpty ? nil : $0.versions,
+                              activeVersion: $0.versions.isEmpty ? nil : $0.activeVersion)
             })
         do { try historyStore.save(chat); unsaved = false }
         catch { notice = "This chat could not be saved on this Mac." }

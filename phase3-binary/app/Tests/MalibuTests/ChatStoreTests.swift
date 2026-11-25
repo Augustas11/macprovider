@@ -493,6 +493,71 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertFalse(String(decoding: transport.bodies[1], as: UTF8.self).contains("private chain of thought"))
     }
 
+    func testRegenerateKeepsTheEarlierAnswerAndOmitsItFromTheRequest() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "question", "first answer")
+        try await answer(store, transport, "follow up", "later")
+        let id = store.turns[0].id
+        store.regenerate(id)
+        try await waitUntil { transport.pending.count == 3 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[2]) as? [String: Any])
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String },
+                       ["question"], "The replaced answer and the turns after it stay out of the request")
+        transport.resolve(2, text: "second answer")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.count, 1)
+        XCTAssertEqual(store.turns[0].answer, "second answer")
+        XCTAssertEqual(store.turns[0].activeVersion, 1)
+        XCTAssertEqual(store.turns[0].versions.map(\.answer), ["first answer", "second answer"])
+        store.selectVersion(id, index: 0)
+        XCTAssertEqual(store.turns[0].answer, "first answer")
+        XCTAssertEqual(store.turns[0].prompt, "question")
+        let saved = try XCTUnwrap(ChatHistoryStore(directory: directory).load(store.conversationID))
+        XCTAssertEqual(saved.turns.first?.activeVersion, 0)
+        XCTAssertEqual(saved.turns.first?.versions?.map(\.answer), ["first answer", "second answer"])
+        store.newConversation()
+        let reopened = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        reopened.openConversation(saved.id)
+        XCTAssertEqual(reopened.turns.first?.answer, "first answer")
+        XCTAssertEqual(reopened.turns.first?.versions.count, 2)
+        let screen = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Chat/ChatScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("malibu.chat.edit"))
+        XCTAssertTrue(screen.contains("malibu.chat.regenerate"))
+        XCTAssertTrue(screen.contains("malibu.chat.branch"))
+    }
+
+    func testEditChangesThePromptAndDropsLaterTurns() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "original", "old answer")
+        try await answer(store, transport, "next", "kept too long")
+        let id = store.turns[0].id
+        store.editAndResend(id, prompt: "  rewritten  ")
+        try await waitUntil { transport.pending.count == 3 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[2]) as? [String: Any])
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String }, ["rewritten"])
+        transport.resolve(2, text: "new answer")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.count, 1)
+        XCTAssertEqual(store.turns[0].prompt, "rewritten")
+        XCTAssertEqual(store.turns[0].answer, "new answer")
+        XCTAssertEqual(store.turns[0].versions[0].prompt, "original")
+        XCTAssertEqual(store.turns[0].versions[0].answer, "old answer")
+        store.regenerate(id)
+        try await waitUntil { transport.pending.count == 4 }
+        store.regenerate(id)
+        XCTAssertEqual(transport.pending.count, 4, "An answer still streaming is not regenerated again")
+        store.selectVersion(id, index: 0)
+        XCTAssertEqual(store.turns[0].answer, "", "Switching versions waits until the run stops")
+        store.stop()
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while ContinuousClock.now < deadline {

@@ -14,6 +14,22 @@ struct SavedChatTurn: Codable, Equatable {
     var promptTokens: Int? = nil
     var completionTokens: Int? = nil
     var tokensPerSecond: Double? = nil
+    var versions: [ChatVersion]? = nil
+    var activeVersion: Int? = nil
+}
+
+/// One answer for a turn. A regenerate or edit keeps the previous one here.
+struct ChatVersion: Codable, Equatable {
+    var prompt: String
+    var answer: String
+    var reasoning: String = ""
+    var complete: Bool = false
+    var truncated: Bool = false
+    var note: String?
+    var tools: [String] = []
+    var promptTokens: Int?
+    var completionTokens: Int?
+    var tokensPerSecond: Double?
 }
 
 struct SavedChat: Codable, Identifiable, Equatable {

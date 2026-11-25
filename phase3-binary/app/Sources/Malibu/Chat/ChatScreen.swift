@@ -10,6 +10,8 @@ struct ChatScreen: View {
     @State private var showingHistory = false
     @State private var showingSettings = false
     @State private var pendingDelete: ChatSummary?
+    /// The turn whose prompt is in the composer, waiting to be sent again.
+    @State private var editingTurn: UUID?
     @FocusState private var composerFocused: Bool
 
     private var providerIdentity: ChatProviderIdentity { ChatProviderIdentity(agent.snapshot) }
@@ -51,7 +53,9 @@ struct ChatScreen: View {
                 Button("History", systemImage: "clock.arrow.circlepath") { showingHistory.toggle() }
                     .popover(isPresented: $showingHistory, arrowEdge: .bottom) { historyList }
                     .accessibilityIdentifier("malibu.chat.history")
-                Button("New chat", systemImage: "square.and.pencil") { store.newConversation() }
+                Button("New chat", systemImage: "square.and.pencil") {
+                    editingTurn = nil; draft = ""; store.newConversation()
+                }
                     .accessibilityIdentifier("malibu.chat.new")
             }
             HStack(spacing: 14) {
@@ -108,6 +112,41 @@ struct ChatScreen: View {
                         ForEach(store.turns) { turn in
                             VStack(alignment: .leading, spacing: 12) {
                                 message(label: "You", text: turn.prompt, user: true)
+                                if turn.complete && !store.isRunning {
+                                    HStack(spacing: 12) {
+                                        Button("Edit", systemImage: "pencil") {
+                                            editingTurn = turn.id
+                                            draft = turn.prompt
+                                            composerFocused = true
+                                        }
+                                        .accessibilityIdentifier("malibu.chat.edit")
+                                        Button("Regenerate", systemImage: "arrow.clockwise") {
+                                            editingTurn = nil
+                                            store.regenerate(turn.id)
+                                        }
+                                        .disabled(store.capability == nil || store.isChecking)
+                                        .accessibilityIdentifier("malibu.chat.regenerate")
+                                        if turn.versions.count > 1 {
+                                            Button { store.selectVersion(turn.id, index: turn.activeVersion - 1) } label: {
+                                                Image(systemName: "chevron.left")
+                                            }
+                                            .disabled(turn.activeVersion <= 0)
+                                            .accessibilityLabel("Previous answer")
+                                            .accessibilityIdentifier("malibu.chat.branch.previous")
+                                            Text("\(turn.activeVersion + 1) / \(turn.versions.count)")
+                                                .font(.caption.monospaced())
+                                                .accessibilityIdentifier("malibu.chat.branch")
+                                            Button { store.selectVersion(turn.id, index: turn.activeVersion + 1) } label: {
+                                                Image(systemName: "chevron.right")
+                                            }
+                                            .disabled(turn.activeVersion + 1 >= turn.versions.count)
+                                            .accessibilityLabel("Next answer")
+                                            .accessibilityIdentifier("malibu.chat.branch.next")
+                                        }
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .font(.caption)
+                                }
                                 if !turn.reasoning.isEmpty {
                                     DisclosureGroup("Thinking") {
                                         ChatAnswerView(text: turn.reasoning, showsCopy: false)
@@ -193,6 +232,10 @@ struct ChatScreen: View {
                         .keyboardShortcut(".", modifiers: .command)
                         .accessibilityIdentifier("malibu.chat.stop")
                 } else {
+                    if editingTurn != nil {
+                        Button("Cancel") { editingTurn = nil; draft = "" }
+                            .accessibilityIdentifier("malibu.chat.edit.cancel")
+                    }
                     Button("Send", systemImage: "arrow.up") { send() }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: .command)
@@ -261,7 +304,16 @@ struct ChatScreen: View {
             && draft.utf8.count <= ChatStore.maxPromptBytes
             && store.capability != nil && !store.isChecking
     }
-    private func send() { store.send(draft); if store.isRunning { draft = "" }; composerFocused = true }
+    private func send() {
+        if let editingTurn {
+            store.editAndResend(editingTurn, prompt: draft)
+            self.editingTurn = nil
+        } else {
+            store.send(draft)
+        }
+        if store.isRunning { draft = "" }
+        composerFocused = true
+    }
     private func chooseFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
