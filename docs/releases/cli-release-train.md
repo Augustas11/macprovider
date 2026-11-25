@@ -161,7 +161,8 @@ The exploratory goal matrix does not constitute admission qualification.
   - #2485: every unselected or failed candidate download is removed and a disk floor is kept. Live = after the cut, an upgrade run leaves no stray candidate weights on disk.
   - #2497: an unconfirmed buyer-serving readiness check defers the reconnect while requests are in flight, for up to 900 s, so no request dies with `ws_dead_mid_request`. Live = after the cut, a multi-agent run through the gateway on the Studio canary has no `ws_dead_mid_request`.
   - #2496: native MTP serves under a measured prompt ceiling when only the long self-check point misses (SPEC-048 0.1.128 R016). Live = after the cut, the Studio GLM logs `native_mtp_self_check result=passed_prompt_ceiling`, `/v1/status` shows `native_mtp.enabled=true`, and a short-prompt buyer request is served natively.
-  - The PR also carries signed catalog release `published-2026-11-25-inkling-2-mini-32gb-v296`, which sets Inkling 2 Mini `min_ram_gb` to 28. It is activated through `scripts/ops/catalog-activate.sh`; see the catalog train.
+  - The PR also carries signed catalog release `published-2026-11-25-inkling-2-mini-32gb-v296`, which sets Inkling 2 Mini `min_ram_gb` to 28. It is activated through `scripts/ops/catalog-activate.sh`; it went live 2026-11-25 13:31 (evidence a–d passed).
+- [PR 2501](https://github.com/Augustas11/macprovider/pull/2501) (Related: #2489), merged 2026-11-25 as `a6bf9902b`: decode windows that carry a held native-MTP row pipeline again. Drafter hidden capture no longer forces a host sync every step. Lab A/B/A on GLM-5.3-Flash, tokens identical: native gap median 44.5 → 41.4 ms at s4 and 42.2 → 39.4 ms at s2; ordinary rows unchanged. Live = after the cut, the Studio GLM serves native MTP with held rows, which also needs #2496's prompt ceiling from PR 2495.
 
 ## CLI release — 1.8.299 (published 2026-11-25 06:09 local; tracked from 2026-11-22)
 
