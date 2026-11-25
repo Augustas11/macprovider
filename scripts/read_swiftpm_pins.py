@@ -42,18 +42,12 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.33.0-macprovider.90 (#2487) on 3.33.0-macprovider.89:
-# 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
-# (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to the
-# loaded target), staged and rewound rounds over the target's attention rings
-# and convolution tails (ConvolutionTailCache, CacheListRoundStrategy), target
-# hidden-state taps and exact one-dispatch verify rows; the shared MLXLMCommon
-# changes are opt-in (MTPExactVerifyLimitModel and MTPChunkedPromptHiddenModel
-# target protocols, and round staging of an attention plus convolution-tail
-# CacheList, which it refused before), so no other model's decode path
-# changes; the tag is cut from this revision at merge.
-SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.90"
-SPEC048_MLX_SWIFT_LM_REVISION = "39f7e60d87e0dee5ee87c62e11db4d81afdf223f"
+# 3.33.0-macprovider.91 (#2474) on 3.33.0-macprovider.90:
+# 3.33.0-macprovider.90 plus a GLM-5.3-Flash change: a sliced (wide) prefill
+# projects only the last 64 rows of its last slice to logits; no other model's
+# code changes.
+SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.91"
+SPEC048_MLX_SWIFT_LM_REVISION = "3c1871468024386933dd2c6a6324ec023db56404"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"

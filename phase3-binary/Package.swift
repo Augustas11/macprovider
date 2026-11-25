@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.91 (#2474) on 3.33.0-macprovider.90: a
+        // GLM-5.3-Flash sliced (wide) prefill projects only the last 64 rows of
+        // its last slice to logits instead of every row (the batching route
+        // samples the last row); the rows kept stay on MLX qmm and match the
+        // full-width projection bit for bit. TTFT -1.3% at 3,673 tokens, noise
+        // at 14,126, identical tokens (A/B/A on the M3 Ultra).
         // Tag 3.33.0-macprovider.90 (#2487) on 3.33.0-macprovider.89:
         // 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
         // (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to
@@ -292,7 +298,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "39f7e60d87e0dee5ee87c62e11db4d81afdf223f"
+            revision: "3c1871468024386933dd2c6a6324ec023db56404"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
