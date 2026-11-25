@@ -12,7 +12,9 @@ Gate (exit 1 when any fails, 2 on unreadable input):
 Reported, never gated: per cell the median TTFT of each run, the candidate's change against each
 control, whether it beats both (AGENTS.md swarm rule 3: keep only a candidate that beats both
 neighbouring controls), the oMLX median TTFT and the candidate's and main's ratio to it. The verdict
-line is KEEP when the candidate beats both controls in every cell, else REVERT.
+line is KEEP when the candidate beats both controls in every cell, else REVERT. With --noise-pct P
+(> 0), KEEP when it beats both controls in at least one cell and every other cell is no more than
+P% slower than either control (a change that only reaches some prompt lengths, #2474).
 """
 import argparse
 import json
@@ -85,7 +87,7 @@ def change(a, b):
     return round(a / b - 1, 4) if a is not None and b else None
 
 
-def evaluate(control_a, candidate, control_b, reference=None):
+def evaluate(control_a, candidate, control_b, reference=None, noise_pct=0.0):
     a, c, b = cells(control_a), cells(candidate), cells(control_b)
     ref = ref_cells(reference or [])
     failures, rows = [], []
@@ -110,13 +112,27 @@ def evaluate(control_a, candidate, control_b, reference=None):
             "prompt_tokens": median(r.get("prompt_tokens") for r in c[key]),
             "control_a_ttft_s": ttft["a"], "candidate_ttft_s": ttft["cand"], "control_b_ttft_s": ttft["b"],
             "change_vs_a": change(ttft["cand"], ttft["a"]), "change_vs_b": change(ttft["cand"], ttft["b"]),
-            "beats_both_controls": beats, "omlx_ttft_s": ref_ttft,
+            "beats_both_controls": beats, "within_noise": within_noise(ttft, noise_pct), "omlx_ttft_s": ref_ttft,
             "candidate_vs_omlx": change(ttft["cand"], ref_ttft), "main_vs_omlx": change(main_ttft, ref_ttft),
         })
     if not any(k[1] == 512 for k in keys):
         failures.append("no 512-output cell")
-    verdict = "KEEP" if rows and all(r["beats_both_controls"] for r in rows) else "REVERT"
-    return {"pass": not failures, "failures": failures, "cells": rows, "verdict": verdict}
+    if noise_pct > 0:
+        keep = (rows and any(r["beats_both_controls"] for r in rows)
+                and all(r["beats_both_controls"] or r["within_noise"] for r in rows))
+    else:
+        keep = rows and all(r["beats_both_controls"] for r in rows)
+    verdict = "KEEP" if keep else "REVERT"
+    return {"pass": not failures, "failures": failures, "cells": rows, "verdict": verdict,
+            "noise_pct": noise_pct}
+
+
+def within_noise(ttft, noise_pct):
+    """The candidate is at most noise_pct% slower than each control (False when noise_pct <= 0)."""
+    if noise_pct <= 0 or any(ttft[k] is None for k in ("a", "cand", "b")):
+        return False
+    bound = 1 + noise_pct / 100
+    return ttft["cand"] <= ttft["a"] * bound and ttft["cand"] <= ttft["b"] * bound
 
 
 def pct(x):
@@ -154,13 +170,15 @@ def main(argv=None):
     ap.add_argument("--reference")
     ap.add_argument("--out-md", required=True)
     ap.add_argument("--out-json", required=True)
+    ap.add_argument("--noise-pct", type=float, default=0.0,
+                    help="KEEP band: cells that do not beat both controls may be this many percent slower")
     args = ap.parse_args(argv)
     try:
         runs = [read_jsonl(p) for p in (args.control_a, args.candidate, args.control_b)]
         reference = read_jsonl(args.reference) if args.reference else None
         if not all(runs):
             raise ValueError("an empty provider run")
-        result = evaluate(*runs, reference=reference)
+        result = evaluate(*runs, reference=reference, noise_pct=args.noise_pct)
     except (OSError, ValueError, KeyError) as e:
         print(f"gate input error: {e}", file=sys.stderr)
         return 2

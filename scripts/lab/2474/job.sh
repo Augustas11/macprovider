@@ -41,7 +41,8 @@
 #       T2474_VERDICT fork_test=.. tokens=.. fused=KEEP|REVERT omlx=ok|missing
 #     then JOB_PASS (every step ran, the oMLX rows exist, fork test passed, tokens identical) or JOB_FAIL.
 # Knobs: CONTEXTS (4k,16k) OUTPUTS (128,512) TRIALS (3) MIN_FREE_GB (60) E2E_EXTRA_GB (40) LIVE_SET (~/macprovider/compatibility-set.json: the lab binaries take its provider_cli version)
-#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR.
+#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR; JOB_MODE (abab|profile) PROFILE_PROMPTS (3673)
+#   PROFILE_STEPS (1837,2048) PROFILE_RUNS (3) PROFILE_REF_TTFT PROFILE_GRID_TTFT.
 #   JOB_CHECK=1: validate the knobs, print the grid argvs and exit 0 before touching anything.
 # Every failure prints `BLOCKER:`.
 set -u
@@ -70,6 +71,13 @@ MIN_FREE_GB=${MIN_FREE_GB:-60}
 E2E_EXTRA_GB=${E2E_EXTRA_GB:-40}
 SKIP_OMLX=${SKIP_OMLX:-0}
 SKIP_FORK_TEST=${SKIP_FORK_TEST:-0}
+JOB_MODE=${JOB_MODE:-abab}
+PROFILE_PROMPTS=${PROFILE_PROMPTS:-3673}
+PROFILE_STEPS=${PROFILE_STEPS:-1837,2048}
+PROFILE_RUNS=${PROFILE_RUNS:-3}
+# r7 same-window medians (oMLX, and the batching-route build) for the report's ratios.
+PROFILE_REF_TTFT=${PROFILE_REF_TTFT:-3673=8.74}
+PROFILE_GRID_TTFT=${PROFILE_GRID_TTFT:-3673=9.32}
 OMLX_DIR=${OMLX_DIR:-$LAB/omlx}
 OMLX_REPO=https://github.com/jundot/omlx
 OMLX_COMMIT=c74f1b18558842e6b10fcfa6e2e901bb382129d4
@@ -98,6 +106,10 @@ case "$MIN_FREE_GB" in ""|*[!0-9]*) die "MIN_FREE_GB=$MIN_FREE_GB must be a numb
 case "$E2E_EXTRA_GB" in ""|*[!0-9]*) die "E2E_EXTRA_GB=$E2E_EXTRA_GB must be a number" 64 ;; esac
 case "$SKIP_OMLX" in 0|1) ;; *) die "SKIP_OMLX=$SKIP_OMLX must be 0 or 1" 64 ;; esac
 case "$SKIP_FORK_TEST" in 0|1) ;; *) die "SKIP_FORK_TEST=$SKIP_FORK_TEST must be 0 or 1" 64 ;; esac
+case "$JOB_MODE" in abab|profile) ;; *) die "JOB_MODE=$JOB_MODE must be abab or profile" 64 ;; esac
+case "$PROFILE_PROMPTS" in ""|*[!0-9,]*) die "PROFILE_PROMPTS=$PROFILE_PROMPTS must be a comma list" 64 ;; esac
+case "$PROFILE_STEPS" in ""|*[!0-9,]*) die "PROFILE_STEPS=$PROFILE_STEPS must be a comma list" 64 ;; esac
+case "$PROFILE_RUNS" in [1-9]) ;; *) die "PROFILE_RUNS=$PROFILE_RUNS must be 1..9" 64 ;; esac
 case "$OMLX_DIR" in *[[:space:]]*|"") die "OMLX_DIR must be set and contain no whitespace" 64 ;; esac
 case "$FORK_COMMIT" in *[!0-9a-f]*|"") die "FORK_COMMIT=$FORK_COMMIT must be a commit id" 64 ;; esac
 case "$FORK_BASE" in *[!0-9a-f]*|"") die "FORK_BASE=$FORK_BASE must be a commit id" 64 ;; esac
@@ -175,6 +187,55 @@ MODEL_GB=$(du -sg "$GLM_MODEL" | cut -f1)
 need=$((MODEL_GB + E2E_EXTRA_GB))
 [ "$fg" -ge "$need" ] || die "glm needs ${need} GB free (model ${MODEL_GB} GB plus ${E2E_EXTRA_GB} GB); ${fg} GB free" 13
 [ "$SKIP_FORK_TEST" = 1 ] || [ -d "$TEST_DEV" ] || die "no Xcode developer dir at $TEST_DEV (TEST_DEV): the fork test cannot build" 14
+
+# JOB_MODE=profile (#2474 r8): where a 3,673-token prefill goes, by section, on the shipped fork
+# tree (the candidate plus the lab section timer). One section-timing build, the matmul peak from
+# the oMLX venv's MLX, `prefill-profile` at PROFILE_PROMPTS and PROFILE_STEPS (the first step size
+# is the synced and sections pass's: 1837 is the batching route's balanced chunk), then
+# prefill_profile_report.py against the r7 TTFTs. No A/B/A, no oMLX run.
+if [ "$JOB_MODE" = profile ]; then
+  PROF=$RES/profile
+  PROF_PKG=$LAB/prof-$RUN_ID/phase3-binary
+  PROF_BIN=$PROF_PKG/.build-lab-profile/release
+  mkdir -p "$PROF"
+  PEAK_PY=$OMLX_DIR/omlx-venv/bin/python
+  [ -x "$PEAK_PY" ] || die "no MLX python at $PEAK_PY for the matmul peak" 11
+  log "PROFILE_PEAK_START"
+  "$PEAK_PY" -I "$SRC/scripts/lab/ablit-perf/matmul_peak.py" --out "$PROF/peak.json" > "$PROF/peak.stdout" 2> "$PROF/peak.stderr" \
+    || die "matmul peak: $(tail -n 2 "$PROF/peak.stderr" | tr '\n' ' ')" 12
+  sed 's/^/PROFILE_PEAK /' "$PROF/peak.stdout"
+  if [ "${SKIP_BUILD:-0}" != 1 ]; then
+    log "BUILD_START profile"
+    rm -rf "$LAB"/prof-*
+    { mkdir -p "$PROF_PKG" && rsync -a --exclude '.build*' --exclude '.swiftpm' --exclude 'Packages' "$PKG/" "$PROF_PKG/"; } \
+      || die "profile tree copy failed" 14
+    (cd "$PROF_PKG" && swift package --build-path .build-lab-profile edit mlx-swift-lm --path "$FORK" \
+       && nice -n 10 swift build -c release --product macprovider-cli --build-path .build-lab-profile \
+         -Xswiftc -DMACPROVIDER_LAB_HARNESS -Xswiftc -DMACPROVIDER_SECTION_TIMING) > "$PROF/build.log" 2>&1 \
+      || die "profile build failed: $(grep -m3 'error:' "$PROF/build.log" | tr '\n' ' ' | cut -c1-400)" 14
+  fi
+  [ -x "$PROF_BIN/macprovider-cli" ] || die "no profile binary at $PROF_BIN" 14
+  cp "$METALLIB" "$PROF_BIN/mlx.metallib" || die "metallib copy failed" 14
+  shasum -a 256 "$PROF_BIN/macprovider-cli" "$PROF_BIN/mlx.metallib" > "$PROF/identity.sha256"
+  log "BUILD_DONE profile cli_sha256=$(cut -c1-16 "$PROF/identity.sha256" | head -n 1)"
+  log "PROFILE_START prompts=$PROFILE_PROMPTS steps=$PROFILE_STEPS runs=$PROFILE_RUNS"
+  "$PROF_BIN/macprovider-cli" prefill-profile --model-dir "$GLM_MODEL" \
+    --prompt-text "$PKG/Sources/macprovider-cli/ModelRuntime.swift" --prompt-tokens "$PROFILE_PROMPTS" \
+    --step-sizes "$PROFILE_STEPS" --runs "$PROFILE_RUNS" --output "$PROF/prefill-profile.json" \
+    > "$PROF/prefill-profile.stdout" 2> "$PROF/prefill-profile.stderr"
+  rc=$?
+  grep '^prefill-profile: ' "$PROF/prefill-profile.stderr" | sed 's/^/PROFILE_ /'
+  [ "$rc" = 0 ] && [ -s "$PROF/prefill-profile.json" ] \
+    || die "prefill-profile exit $rc: $(tail -n 3 "$PROF/prefill-profile.stderr" | tr '\n' ' ')" 15
+  /usr/bin/python3 -I "$SRC/scripts/lab/ablit-perf/prefill_profile_report.py" --profile "$PROF/prefill-profile.json" \
+    --peak "$PROF/peak.json" --config "$GLM_MODEL/config.json" --out-md "$PROF/profile.md" \
+    --out-json "$PROF/profile-summary.json" --reference-ttft "$PROFILE_REF_TTFT" --grid-ttft "$PROFILE_GRID_TTFT" \
+    > "$PROF/report.stdout" 2> "$PROF/report.stderr" || die "report: $(tail -n 2 "$PROF/report.stderr" | tr '\n' ' ')" 16
+  sed 's/^/PROFILE_MD /' "$PROF/profile.md"
+  rm -rf "$LAB"/prof-*
+  log "JOB_PASS"
+  exit 0
+fi
 
 # 2. oMLX, before any build: a reference that cannot be installed fails the window early.
 omlx_versions() {
@@ -342,7 +403,7 @@ done
 d=$RES/e2e
 REF_ARGS=()
 [ "$OMLX_OK" = ok ] && REF_ARGS=(--reference "$d/omlx/reference.jsonl")
-/usr/bin/python3 -I "$GATE" --control-a "$d/base-a/provider.jsonl" --candidate "$d/fused/provider.jsonl" \
+/usr/bin/python3 -I "$GATE" --noise-pct "${GATE_NOISE_PCT:-0.5}" --control-a "$d/base-a/provider.jsonl" --candidate "$d/fused/provider.jsonl" \
   --control-b "$d/base-b/provider.jsonl" ${REF_ARGS[@]+"${REF_ARGS[@]}"} --out-md "$d/gate.md" --out-json "$d/gate.json" \
   > "$d/gate.stdout" 2> "$d/gate.stderr"
 rc=$?

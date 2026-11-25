@@ -60,6 +60,25 @@ class GateTests(unittest.TestCase):
         self.assertEqual(r["verdict"], "REVERT")
         self.assertIsNone(r["cells"][0]["omlx_ttft_s"])
 
+    def test_noise_band_keeps_a_win_that_reaches_some_prompt_lengths(self):
+        short, long = ((4000, 128), (4000, 512)), ((16000, 128), (16000, 512))
+
+        def mixed(t_short, t_long):
+            return run(t_short, cells=short) + run(t_long, cells=long)
+
+        # Faster at 4k, 0.3% slower at 16k: REVERT without a band, KEEP with 0.5%.
+        a, b = mixed(9.44, 36.80), mixed(9.45, 36.74)
+        cand = mixed(9.32, 36.86)
+        self.assertEqual(gate.evaluate(a, cand, b)["verdict"], "REVERT")
+        r = gate.evaluate(a, cand, b, noise_pct=0.5)
+        self.assertTrue(r["pass"], r["failures"])
+        self.assertEqual(r["verdict"], "KEEP")
+        self.assertEqual([c["within_noise"] for c in r["cells"] if c["ctx"] == 16000], [True, True])
+        # 1% slower at 16k is past the band.
+        self.assertEqual(gate.evaluate(a, mixed(9.32, 37.20), b, noise_pct=0.5)["verdict"], "REVERT")
+        # Inside the band everywhere but beating both nowhere is no win.
+        self.assertEqual(gate.evaluate(a, mixed(9.46, 36.86), b, noise_pct=0.5)["verdict"], "REVERT")
+
     def test_a_token_difference_fails(self):
         r = gate.evaluate(run(2.0), run(1.8, text="other"), run(2.1))
         self.assertFalse(r["pass"])
