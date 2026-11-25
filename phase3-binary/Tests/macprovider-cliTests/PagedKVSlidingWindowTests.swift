@@ -289,6 +289,68 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
+    /// A full one-token window rolls its ring forward in place (#2505): from
+    /// the second one-token step on, the cache writes the new key into the
+    /// evicted slot of the arrays it presented last and presents them again,
+    /// with `RotatingKVCache`'s slot order and rotation. A multi-token
+    /// update or a trim in between starts a new ring.
+    func testOneTokenWindowRollsItsRingForwardInPlace() throws {
+        try requireMetal()
+        let window = 8
+        Device.withDefaultDevice(.cpu) {
+            let rotating = RotatingKVCache(maxSize: window, keep: 0)
+            let paged = makeCache(offset: 0, windowTokens: window, rollsSlidingRing: true)
+            var position = 0
+            var previous: ObjectIdentifier?
+            let updates = [10, 5] + Array(repeating: 1, count: 2 * window + 3) + [3]
+                + Array(repeating: 1, count: window + 2)
+            for (step, count) in updates.enumerated() {
+                let keys = Self.positions(position, count)
+                position += count
+                let expected = rotating.update(keys: keys, values: keys).0
+                let presented = paged.update(keys: keys, values: keys).0
+                XCTAssertEqual(presented.asArray(Float.self), expected.asArray(Float.self), "update \(step)")
+                XCTAssertEqual(paged.presentedRingRotation, count == 1 ? rotating.ringRotation ?? -1 : 0, "update \(step)")
+                let identity = ObjectIdentifier(presented)
+                if count == 1, updates[step - 1] == 1 {
+                    XCTAssertEqual(identity, previous, "update \(step) reuses the ring")
+                } else {
+                    XCTAssertNotEqual(identity, previous, "update \(step) starts a ring")
+                }
+                previous = count == 1 ? identity : nil
+            }
+            // The buffers catch up from the ring: the full history, in order.
+            XCTAssertEqual(paged.state[0].asArray(Float.self), (0 ..< position).map(Float.init))
+            XCTAssertEqual(paged.state[1].asArray(Float.self), (0 ..< position).map(Float.init))
+            XCTAssertEqual(paged.trim(4), 4)
+            let keys = Self.positions(position - 4, 1)
+            let presented = paged.update(keys: keys, values: keys).0
+            XCTAssertNotEqual(ObjectIdentifier(presented), previous, "a trim starts a new ring")
+            // A trim, copy or block export with tokens still pending in the ring
+            // sees the full history (each flushes first).
+            func rolled() -> PagedKVCache {
+                let cache = makeCache(offset: 0, windowTokens: window, rollsSlidingRing: true)
+                _ = cache.update(keys: Self.positions(0, window), values: Self.positions(0, window))
+                for p in window ..< window + 5 {
+                    _ = cache.update(keys: Self.positions(p, 1), values: Self.positions(p, 1))
+                }
+                return cache
+            }
+            let trimmed = rolled()
+            XCTAssertEqual(trimmed.trim(2), 2)
+            XCTAssertEqual(trimmed.state[0].asArray(Float.self), (0 ..< window + 3).map(Float.init))
+            let copied = rolled().concreteCopy()
+            XCTAssertEqual(copied.state[0].asArray(Float.self), (0 ..< window + 5).map(Float.init))
+            // Other sliding families (no `rollsSlidingRing`) rebuild every step.
+            let plain = makeCache(offset: 0, windowTokens: window)
+            _ = plain.update(keys: Self.positions(0, window), values: Self.positions(0, window))
+            let first = plain.update(keys: Self.positions(window, 1), values: Self.positions(window, 1)).0
+            let second = plain.update(keys: Self.positions(window + 1, 1), values: Self.positions(window + 1, 1)).0
+            XCTAssertNotEqual(ObjectIdentifier(first), ObjectIdentifier(second))
+            XCTAssertEqual(plain.state[0].asArray(Float.self), (0 ..< window + 2).map(Float.init))
+        }
+    }
+
     private static func positions(_ start: Int, _ count: Int) -> MLXArray {
         MLXArray((start ..< start + count).map(Float.init), [1, 1, count, 1])
     }
@@ -299,7 +361,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
-    private func makeCache(offset: Int, windowTokens: Int? = nil) -> PagedKVCache {
+    private func makeCache(offset: Int, windowTokens: Int? = nil, rollsSlidingRing: Bool = false) -> PagedKVCache {
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "sliding-window-test", poolEpoch: 1)
         return PagedKVCache(
             blockSizeTokens: 4,
@@ -321,7 +383,8 @@ final class PagedKVSlidingWindowTests: XCTestCase {
             ),
             initialOffset: offset,
             reconstructViaGather: false,
-            attentionWindowTokens: windowTokens
+            attentionWindowTokens: windowTokens,
+            rollsSlidingRing: rollsSlidingRing
         )
     }
 }

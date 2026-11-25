@@ -348,7 +348,8 @@ public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
     public static let deepseekV4RowPoolBridgeIdentifier = "deepseek-v4-row-pool-decode-v1"
     public static let recognizedModelFamilies = [
-        "deepseek_v4", "gemma4", "glm5_next", "gpt_oss", "lfm2", "llama", "minimax_m3", "qwen", "qwen4_exp",
+        "deepseek_v4", "gemma4", "glm5_next", "gpt_oss", "inkling2", "lfm2", "llama", "minimax_m3", "qwen",
+        "qwen4_exp",
     ]
 
     /// Some mixed cache layouts are measured per identity: Qwen hybrid decoders

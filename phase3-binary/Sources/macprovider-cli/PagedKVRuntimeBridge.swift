@@ -573,12 +573,18 @@ enum PagedKVRecurrentStateLayout: Equatable, Sendable {
     /// `ArraysCache(size: 4)` adds the PLE short-conv state (float, slot 2)
     /// and the n-gram history (integer token ids XOR eos, slot 3).
     case qwen4ExpPLEFourSlot(pleLayers: [Int])
+    /// Inkling 2 (`inkling2_loop`, #2505): every layer visit's convolution
+    /// tails, one `ArraysCache(size: 4)` of float32 `[1, 3, C]` slots (key,
+    /// value, attention-output and MLP-output convolutions), the recurrent
+    /// half of the visit in the flat cache layout (`PagedKVInkling2Layout`).
+    case inkling2ConvTailFourSlot
 
     /// Slots of an ordinary recurrent layer of this layout.
     var slotCount: Int {
         switch self {
         case .mambaTwoSlot, .qwen4ExpPLEFourSlot: 2
         case .lfm25ShortConvOneSlot: 1
+        case .inkling2ConvTailFourSlot: 4
         }
     }
 
@@ -617,6 +623,82 @@ enum PagedKVRecurrentStateLayout: Equatable, Sendable {
     /// `.lfm25ShortConvOneSlot` into this bridge.
     static let lfm25ExpectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] = (0..<40).map {
         ($0 - 2).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+    }
+}
+
+/// Inkling 2 (`inkling2_loop`, #2505) in the paged batch: the model builds
+/// one `CacheList(attention, ArraysCache(4))` per layer visit (48 for Mini:
+/// the core layers run `num_passes` times, each pass with its own caches).
+/// The batch keeps the flat layout, each visit's attention cache followed by
+/// its convolution tails, so attention pages (keep-0 sliding window on local
+/// layers, full history on global ones) and the tails are per-row recurrent
+/// state (`PagedKVRecurrentStateLayout.inkling2ConvTailFourSlot`). The model
+/// reads either layout (`Inkling2Model.flatCacheLayout`).
+struct PagedKVInkling2Layout: Equatable, Sendable {
+    let expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+
+    /// From the checkpoint `config.json` (its `text_config`); nil unless it
+    /// is a fixed-loop `inkling2_loop` text config this layout covers.
+    init?(config: [String: Any]) {
+        guard let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "inkling2_loop_text",
+              let layers = Self.integer(text["num_hidden_layers"]), layers > 0,
+              let window = Self.integer(text["sliding_window_size"]), window > 0,
+              let local = text["local_layer_ids"] as? [Any]
+        else { return nil }
+        let localLayers = local.compactMap(Self.integer)
+        guard localLayers.count == local.count,
+              localLayers.allSatisfy({ (0 ..< layers).contains($0) })
+        else { return nil }
+        var visits = Array(0 ..< layers)
+        if let loop = text["loop_config"] as? [String: Any] {
+            guard (loop["is_varloop"] as? Bool ?? false) == false,
+                  let start = Self.integer(loop["core_start"]),
+                  let end = Self.integer(loop["core_end"]),
+                  let passes = Self.integer(loop["num_passes"]),
+                  0 <= start, start < end, end <= layers, passes >= 1
+            else { return nil }
+            let core = Array(start ..< end)
+            visits = Array(0 ..< start) + Array(repeating: core, count: passes).flatMap { $0 }
+                + Array(end ..< layers)
+        }
+        let localSet = Set(localLayers)
+        expectedCacheKinds = visits.flatMap { layer -> [PagedKVSharedForwardBackend.CacheKind] in
+            [localSet.contains(layer) ? .slidingWindow(windowTokens: window) : .pagedAttention, .recurrentMamba]
+        }
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, String(cString: number.objCType) != "c" else { return nil }
+        let double = number.doubleValue
+        guard double.rounded() == double else { return nil }
+        return Int(exactly: double)
+    }
+
+    /// Whether `cache` is a visit's convolution tails: a plain `ArraysCache`,
+    /// or the fork's `ConvolutionTailCache` (an `ArraysCache` that can also
+    /// record a speculative round; outside a round it is a plain one).
+    static func isPlainConvolutionTails(_ cache: KVCache) -> Bool {
+        type(of: cache) == ArraysCache.self || type(of: cache) == ConvolutionTailCache.self
+    }
+
+    /// `caches` with every Inkling visit `CacheList(attention, ArraysCache)`
+    /// unwrapped into its two children; every other cache unchanged. Only a
+    /// keep-0 `RotatingKVCache` or a `KVCacheSimple` beside a plain
+    /// `ArraysCache` or `ConvolutionTailCache` is a visit (DeepSeek's pool
+    /// lists are not).
+    static func flattened(_ caches: [KVCache]) -> [KVCache] {
+        caches.flatMap { cache -> [KVCache] in
+            guard let list = cache as? CacheList else { return [cache] }
+            var leaves: [KVCache] = []
+            list.mapChildren { leaves.append($0); return $0 }
+            guard leaves.count == 2,
+                  isPlainConvolutionTails(leaves[1]),
+                  leaves[0] is KVCacheSimple
+                    || ((leaves[0] as? RotatingKVCache).map { $0.metaState.first == "0" } ?? false)
+            else { return [cache] }
+            return leaves
+        }
     }
 }
 
@@ -761,7 +843,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             if cache is MambaCache { return .recurrentMamba }
             // Qwen4-Exp PLE layers keep a plain four-slot `ArraysCache`; the
             // model's verified recurrent layout carries its slot count.
-            if type(of: cache) == ArraysCache.self { return .recurrentMamba }
+            // Inkling 2's convolution tails are a `ConvolutionTailCache`.
+            if PagedKVInkling2Layout.isPlainConvolutionTails(cache) { return .recurrentMamba }
             if cache is RotatingKVCache {
                 guard let window = cache.maxSize, window > 0 else { return nil }
                 // RotatingKVCache.metaState is [keep, maxSize, step, offset, idx].
@@ -1225,7 +1308,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                self.sharedForwardFits(
                    rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count, cap: self.prefillForwardTokenCap
                ),
-               !raggedOffsets || self.supportsRaggedPrefillOffsets {
+               !raggedOffsets || self.supportsRaggedPrefillOffsets,
+               !self.prefillsRowsAlone {
                 gpuTurn?.begin(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count }))
                 let rowStates = inputs.map {
                     self.rowState(
@@ -1715,6 +1799,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         return true
     }
+
+    /// Whether every prompt chunk runs as its own one-row forward (#2505). An
+    /// Inkling 2 row's prefill routes experts and projects over the chunk's
+    /// rows; a shared `[B, L]` forward would run those products over `B * L`
+    /// rows, whose kernel and reduction order can differ from serial prefill.
+    var prefillsRowsAlone: Bool { recurrentStateLayout == .inkling2ConvTailFourSlot }
 
     static func hasRaggedPromptOffsets(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
         Set(inputs.map(\.promptTokenOffset)).count > 1
@@ -3018,7 +3108,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         binding: binding,
                         initialOffset: initialOffset,
                         reconstructViaGather: false,
-                        attentionWindowTokens: windowTokens
+                        attentionWindowTokens: windowTokens,
+                        rollsSlidingRing: recurrentStateLayout == .inkling2ConvTailFourSlot
                     )
                 case .pagedMLA(let kpool):
                     PagedMLALatentCache(
@@ -5379,8 +5470,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
     }
 
-    static func batchLayerCacheForTest(rowCaches: [PagedKVCache], attachRows: Bool = false) -> any KVCache {
-        PagedKVBatchLayerCache(rowCaches: rowCaches, attachRows: attachRows)
+    static func batchLayerCacheForTest(
+        rowCaches: [PagedKVCache], attachRows: Bool = false, rowAttention: Bool = false
+    ) -> any KVCache {
+        PagedKVBatchLayerCache(rowCaches: rowCaches, attachRows: attachRows, rowAttention: rowAttention)
     }
 
     /// Ends a `batchLayerCacheForTest` batch for its rows, as a decode
@@ -5731,6 +5824,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
         }
+        // Inkling 2 (#2505) attends each row through the model's own attention
+        // (`KVCacheRowAttentionProtocol`); it has no native-MTP batch path.
+        let rowAttention = recurrentStateLayout == .inkling2ConvTailFourSlot
+        if rowAttention && nativeMTP {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
+        }
+        if rowAttention, rowCaches.count == 1 {
+            return try loneRowCaches(rowCaches[0])
+        }
         return try (0 ..< layerCount).map { layerIndex in
             switch cacheKinds[layerIndex] {
             case .pagedAttention, .slidingWindow:
@@ -5738,9 +5840,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard rows.count == rowCaches.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
                 }
-                let cache = raggedPrefill
+                let cache = raggedPrefill && !rowAttention
                     ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rows)
-                    : PagedKVBatchLayerCache(rowCaches: rows, attachRows: attachRows)
+                    : PagedKVBatchLayerCache(rowCaches: rows, attachRows: attachRows, rowAttention: rowAttention)
                 cache.columnExactVerification = nativeMTP && nativeMTPColumnExactVerification
                 return PagedKVSharedLayerBatch(
                     cache: cache,
@@ -5906,6 +6008,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return indexed
         }
         return caches.lazy.compactMap { ($0 as? PagedQwen4ExpSparseCache)?.binding.handle }.first
+    }
+
+    /// Inkling 2 (#2505): a lone row runs on its own caches, as a serial
+    /// row does. Its paged attention caches attend it through the model
+    /// (`KVCacheRowAttentionProtocol`) and the model updates its conv tails
+    /// in place, so the forward has no batch view to route through and the
+    /// window nothing to pack or sync (a lone row through the batch views
+    /// decoded about 3% below serial). A second row joining rebuilds the
+    /// batch from these same caches.
+    private func loneRowCaches(_ caches: [KVCache]) throws -> [PagedKVSharedLayerBatch] {
+        try caches.indices.map { layerIndex in
+            let cache = caches[layerIndex]
+            switch cacheKinds[layerIndex] {
+            case .pagedAttention, .slidingWindow:
+                guard cache is PagedKVCache else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+            case .recurrentMamba:
+                guard let conv = cache as? ArraysCache, !(conv is MambaCache),
+                      conv.state.isEmpty || conv.state.count == recurrentStateLayout.slotCount(layer: layerIndex)
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+            default:
+                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            }
+            return PagedKVSharedLayerBatch(
+                cache: cache,
+                validateBatchStateClosure: {},
+                syncRowsFromBatchClosure: {},
+                writebackCompiledInnerStateClosure: { _, _ in
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                },
+                pendingMTPResolutionsClosure: {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
+                }
+            )
+        }
     }
 
     /// Packs the rows' recurrent state of decoder layer `layer` into `batch`,
@@ -6606,11 +6746,17 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// (Gemma 4: sliding-window ring order, head-dim-512 fallback, #2328).
     var columnExactVerification = false
 
-    init(rowCaches: [PagedKVCache], attachRows: Bool = false) {
+    /// Inkling 2 (#2505): the model attends every row itself through
+    /// `updateAndAttendRows`, over the K/V the row's own cache returns, so
+    /// the batch keeps no padded buffers and never packs the rows.
+    let attendsRowsThroughModel: Bool
+
+    init(rowCaches: [PagedKVCache], attachRows: Bool = false, rowAttention: Bool = false) {
         self.rowCaches = rowCaches
-        self.attachesRows = attachRows
+        self.attendsRowsThroughModel = rowAttention
+        self.attachesRows = attachRows && !rowAttention
             && rowCaches.allSatisfy { !$0.reconstructViaGather && $0.attentionWindowTokens == nil }
-        packFromRows()
+        if !rowAttention { packFromRows() }
     }
 
     private var rowsAttached: Bool {
@@ -6793,6 +6939,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     private(set) var attendedOutsideCachePath = false
 
     func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
+        if attendsRowsThroughModel {
+            // A row-attention batch never presents padded K/V: a model that
+            // asks for it would attend outside its rows.
+            attendedOutsideCachePath = true
+        }
         if !insideUpdateAndAttend,
            incomingKeys.ndim == 4,
            PagedKVRowAttention.extents(
@@ -7676,7 +7827,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
 
     func copy() -> any KVCache {
         flushDeferredRows()
-        return PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0.concreteCopy() })
+        return PagedKVBatchLayerCache(
+            rowCaches: rowCaches.map { $0.concreteCopy() }, rowAttention: attendsRowsThroughModel)
     }
 
     fileprivate var preUpdateOffsets: [Int] {
@@ -7912,5 +8064,45 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             return concatenated([array, pad], axis: 2)
         }
         return concatenated(padded, axis: 0)
+    }
+}
+
+/// Inkling 2 (#2505, `KVCacheRowAttentionProtocol`): each row writes its new
+/// K/V to its own paged cache and the model attends that row alone over what
+/// the row cache returns (the sliding ring in `RotatingKVCache`'s slot order,
+/// with its rotation), so every row's attention is its one-row attention.
+/// Projections, MoE and the convolution tails stay batched.
+extension PagedKVBatchLayerCache: KVCacheRowAttentionProtocol {
+    var rowOffsets: [Int] { preUpdateOffsets }
+
+    func updateAndAttendRows(
+        keys incomingKeys: MLXArray, values incomingValues: MLXArray,
+        attend: (_ row: Int, _ view: KVCacheRowAttentionView) -> MLXArray
+    ) -> MLXArray {
+        guard attendsRowsThroughModel,
+              preparedMTPPackedRowMaps == nil,
+              incomingKeys.ndim == 4,
+              incomingValues.ndim == 4,
+              incomingKeys.dim(0) == rowCaches.count,
+              incomingValues.dim(0) == rowCaches.count,
+              incomingKeys.dim(2) == incomingValues.dim(2)
+        else {
+            // Not a row-attention batch, or a shape this path does not
+            // cover: fail the forward rather than attend across rows.
+            attendedOutsideCachePath = true
+            let (keys, values) = update(keys: incomingKeys, values: incomingValues)
+            return attend(0, KVCacheRowAttentionView(keys: keys, values: values, ringRotation: 0))
+        }
+        let outputs = rowCaches.enumerated().map { row, cache -> MLXArray in
+            let slice = row ..< row + 1
+            let (keys, values) = cache.update(
+                keys: incomingKeys[slice, 0..., 0..., 0...],
+                values: incomingValues[slice, 0..., 0..., 0...]
+            )
+            return attend(row, KVCacheRowAttentionView(
+                keys: keys, values: values, ringRotation: cache.presentedRingRotation
+            ))
+        }
+        return concatenated(outputs, axis: 0)
     }
 }

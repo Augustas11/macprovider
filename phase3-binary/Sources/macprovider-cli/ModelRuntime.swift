@@ -769,6 +769,9 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// The verified QSA/gated-delta layout of an allowlisted `qwen4_exp`
     /// identity, read from its `config.json`.
     let qwen4ExpAttention: PagedKVQwen4ExpLayout?
+    /// The verified visit layout of an allowlisted `inkling2` identity
+    /// (#2505), read from its `config.json`.
+    let inkling2Layout: PagedKVInkling2Layout?
     /// Observed on this load; ordinary shared-forward parity is independent.
     var supportsContiguousCacheMaterialization: Bool
 
@@ -783,8 +786,10 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         blockSparseAttention: PagedKVBlockSparseAttentionLayout? = nil,
         slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = nil,
         qwen4ExpAttention: PagedKVQwen4ExpLayout? = nil,
+        inkling2Layout: PagedKVInkling2Layout? = nil,
         supportsContiguousCacheMaterialization: Bool = true
     ) {
+        self.inkling2Layout = inkling2Layout
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
@@ -3476,6 +3481,14 @@ actor ModelRuntime: ModelRuntimeServing {
             else { return false }
             return cacheKinds == layout.expectedCacheKinds
         }
+        if modelCapabilities.modelFamily == "inkling2" {
+            // Flat visit layout (#2505): per visit, a keep=0 sliding window
+            // or full attention, then the four-slot convolution tails.
+            guard let layout = modelCapabilities.inkling2Layout,
+                  modelCapabilities.recurrentStateLayout == .inkling2ConvTailFourSlot
+            else { return false }
+            return cacheKinds == layout.expectedCacheKinds
+        }
         if modelCapabilities.modelFamily == "gpt_oss" || modelCapabilities.modelFamily == "gemma4" {
             // One cache per decoder layer in `layer_types` order: keep=0
             // sliding window of `sliding_window` tokens or full attention
@@ -3814,7 +3827,11 @@ maxTokens: 1,
     private nonisolated static func pagedKVCacheKinds(
         model: any LanguageModel
     ) throws -> [PagedKVSharedForwardBackend.CacheKind]? {
-        PagedKVSharedForwardBackend.CacheKind.kinds(from: try model.newCache(parameters: nil))
+        // Inkling 2's per-visit `CacheList(attention, tails)` in the flat
+        // layout the paged batch keeps (#2505); other caches unchanged.
+        PagedKVSharedForwardBackend.CacheKind.kinds(
+            from: PagedKVInkling2Layout.flattened(try model.newCache(parameters: nil))
+        )
     }
 
     nonisolated static func pagedKVModelFamily(_ modelID: String?) -> String {
@@ -3880,9 +3897,10 @@ maxTokens: 1,
             return "lfm3"
         }
         // Inkling 2 (`inkling2_loop`, #2467): a looped MoE with short-conv
-        // and attention layers on the fork's own caches. Not a paged-KV
-        // family, so attach fails closed on identity and the model serves
-        // serial.
+        // and attention layers. A paged-KV family (#2505) only on the
+        // allowlisted identity, whose verified visit layout
+        // (`PagedKVInkling2Layout`) pages attention and keeps the
+        // convolution tails as per-row recurrent state.
         if normalizedLabels.contains(where: { $0 == "inkling2loop" || $0 == "inkling2loopforconditionalgeneration" }) {
             return "inkling2"
         }
@@ -3945,6 +3963,7 @@ maxTokens: 1,
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
             "minimaxai/minimax-m3.1-flash-abliterated": "MiniMaxM3SparseForConditionalGeneration",
             "latent-variable/qwen3.8-flash-next-heretic-2-oq4e-mtp": "Qwen4ExpForConditionalGeneration",
+            "thinkingmachines/inkling-2-mini": "Inkling2LoopForConditionalGeneration",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -3989,6 +4008,17 @@ maxTokens: 1,
             else { return nil }
             return PagedKVQwen4ExpLayout(textConfig: textConfig)
         }()
+        // `inkling2` keys on the exact `architectures` array and model type and
+        // carries its verified flat visit layout (#2505).
+        let inkling2Layout: PagedKVInkling2Layout? = {
+            guard let id = modelID?.lowercased(),
+                  hybridArchitectureAllowlist[id] == "Inkling2LoopForConditionalGeneration",
+                  let configObject,
+                  configObject["architectures"] as? [String] == ["Inkling2LoopForConditionalGeneration"],
+                  configObject["model_type"] as? String == "inkling2_loop"
+            else { return nil }
+            return PagedKVInkling2Layout(config: configObject)
+        }()
         // `gpt_oss` and `gemma4` key on the exact `architectures` array and
         // model type and carry their verified sliding-window/full-attention
         // layer layout (`gemma4` from `text_config`, SPEC-039 v0.1.35).
@@ -4028,6 +4058,7 @@ maxTokens: 1,
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             if expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration" { return blockSparseAttention != nil }
             if expectedArchitecture == "Qwen4ExpForConditionalGeneration" { return qwen4ExpAttention != nil }
+            if expectedArchitecture == "Inkling2LoopForConditionalGeneration" { return inkling2Layout != nil }
             if expectedArchitecture == "GptOssForCausalLM" || expectedArchitecture == "Gemma4UnifiedForConditionalGeneration" {
                 return slidingWindowAttention != nil
             }
@@ -4040,7 +4071,9 @@ maxTokens: 1,
             modelID: modelID, configObject: configObject
         ) || lfm25HybridVerified
         let recurrentStateLayout: PagedKVRecurrentStateLayout = lfm25HybridVerified
-            ? .lfm25ShortConvOneSlot : qwen4ExpAttention?.recurrentStateLayout ?? .mambaTwoSlot
+            ? .lfm25ShortConvOneSlot
+            : inkling2Layout != nil ? .inkling2ConvTailFourSlot
+            : qwen4ExpAttention?.recurrentStateLayout ?? .mambaTwoSlot
         let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
@@ -4057,7 +4090,8 @@ maxTokens: 1,
             deepseekV4Pool: deepseekV4Pool,
             blockSparseAttention: blockSparseAttention,
             slidingWindowAttention: slidingWindowAttention,
-            qwen4ExpAttention: qwen4ExpAttention
+            qwen4ExpAttention: qwen4ExpAttention,
+            inkling2Layout: inkling2Layout
         )
     }
 

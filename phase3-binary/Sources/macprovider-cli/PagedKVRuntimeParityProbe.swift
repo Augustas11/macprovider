@@ -201,7 +201,9 @@ enum PagedKVRuntimeParityProbe {
 
             return try await container.perform { context in
                 let model = context.model
-                let stockLayout = try model.newCache(parameters: nil)
+                // Inkling 2's visit lists in the flat layout the paged batch
+                // keeps (#2505); the model reads either layout.
+                let stockLayout = PagedKVInkling2Layout.flattened(try model.newCache(parameters: nil))
                 guard let kinds = PagedKVSharedForwardBackend.CacheKind.kinds(from: stockLayout) else {
                     return .failClosed(nNew: nNew)
                 }

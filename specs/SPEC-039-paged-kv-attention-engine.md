@@ -1,7 +1,11 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.38
-Status: draft (normative design). v0.1.38 adds the FR-PKV12
+Version: v0.1.39
+Status: draft (normative design). v0.1.39 adds the `inkling2` paged family:
+the flat per-visit layout (each layer visit's attention cache, then its
+four-slot convolution tails as row-local recurrent state), row attention
+through the model, and a provisional FR-PKV12 entry for the exact
+`thinkingmachines/inkling-2-mini` identity. v0.1.38 adds the FR-PKV12
 `radixark/daisyrose-27b` identity (dense `qwen3_5` hybrid). v0.1.37 lifts the 8-flattened-token cap
 from `qwen4_exp` decode: a decode forward over a `pagedQwen4ExpKV` topology
 takes the device decode-row bound (11 rows on the M3 Ultra), while its prefill
@@ -114,6 +118,16 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.39 (2026-11-25): FR-PKV12 gains the `inkling2` class and
+the provisional catalog key `thinkingmachines/inkling-2-mini` with
+`Inkling2LoopForConditionalGeneration` (Related: #2505). Inkling 2 builds one
+`CacheList(attention, ArraysCache(4))` per layer visit; the paged batch keeps
+them flat and pages only attention. Each batched row attends alone, over the
+keys its one-row cache returns, through the model's own attention
+(`KVCacheRowAttentionProtocol`), because a padded batch cannot express the
+model's per-row relative band, query-dependent sink and ring-ordered window.
+Refines SPEC-039-R012.
+
 Change log v0.1.38 (2026-11-23): FR-PKV12 gains the catalog key
 `radixark/daisyrose-27b` with `Qwen3_5ForConditionalGeneration` (Related:
 #2465). Its artifact `mlx-community/DaisyRose-27B-4bit` @ `895983ea` is an
@@ -1255,6 +1269,64 @@ parity label, ring order and fail-closed cases are the `gpt_oss` class's.
   signed grant or production qualification, and attach fails closed until
   those gates pass. It authorizes ordinary CB only, never native MTP.
 
+- (v0.1.39, provisional, SPEC-first) the Inkling 2 Mini identity
+  `thinkingmachines/inkling-2-mini`, whose verified artifact is
+  `mlx-community/Inkling-2-Mini-oQ4e-mtp`, with
+  `architectures == ["Inkling2LoopForConditionalGeneration"]` and top-level
+  `model_type` `inkling2_loop` in the artifact's `config.json` (looped MoE
+  decoder; the paged path MUST additionally pass cross-row MoE
+  expert-dispatch isolation). It uses the `inkling2` class below. The code
+  entry keys on the model id plus the exact `architectures` array; a
+  path-only alias, another artifact id or any other layout fails closed. This
+  exception permits evaluation by the real attach-time parity and isolation
+  probes and the automatic FR-CB10 self-check; it is not parity evidence, a
+  signed grant or production qualification, and attach fails closed until
+  those gates pass. It authorizes ordinary CB only, never native MTP.
+
+**`inkling2` mixed class (v0.1.39).** The runtime cache identity is `mixed`.
+`text_config` MUST have `model_type` `inkling2_loop_text`, a positive
+`num_hidden_layers` and `sliding_window_size`, and `local_layer_ids` naming
+decoder layers. A `loop_config`, when present, MUST be fixed-loop
+(`is_varloop` false) with `0 <= core_start < core_end <= num_hidden_layers`
+and `num_passes >= 1`; the layer visits are then the prelude, the core
+`num_passes` times, then the coda (48 visits for the admitted 24-layer
+artifact). The model builds one `CacheList(attention, ArraysCache(4))` per
+visit; caches are never shared between passes. The paged topology is that
+list flattened: per visit, keep=0 `slidingWindow(windowTokens:
+sliding_window_size)` at a `local_layer_ids` layer or `pagedAttention`
+otherwise, then a recurrent entry (40 sliding, 8 full and 48 recurrent
+entries for the admitted artifact). The recurrent entry is the visit's
+convolution tails: four floating-point `[1, 3, C]` slots (key, value,
+attention-output and MLP-output convolutions) in an `ArraysCache(4)` (the
+model builds the fork's `ConvolutionTailCache` subclass, which is a plain
+`ArraysCache` outside a speculative round; both are accepted),
+packed and synced by row like other recurrent state and carried by the
+hybrid checkpoints; a joining row's absent tails pack as zeros, a fresh
+row's start. Both attention kinds page on the row's one block table; a
+sliding visit stores full history and presents the rotating-equivalent
+suffix in serial ring order (FR-PKV4). A row outside a batch slot that
+appends one token to a full window writes it into its presented ring in
+place and MAY defer the history write: at most `window - 1` such tokens
+wait in the ring, and they are written to the history before anything
+else reads or writes it (a multi-token update, batch attach or detach,
+staging, trim, state export or import, block export), so the history a
+reader sees is always complete. Batched rows attend one row at a
+time over exactly that row's presented keys, with the ring's rotation, as
+the model's one-row path attends. Projections and the tails stay batched;
+a batch of one-token rows takes the one-row projection spans, and each row
+routes its experts as it does alone (the multi-row score product reduces in
+a different order and can swap a near-tie expert); the global visits'
+log-scaling positions are per row. The head is one batched product, with
+every row whose two largest logits are closer than the verify margin
+recomputed by the one-row product (SPEC-048's verify head). A batch of one
+row decodes on that row's own caches with no batch layer cache, as serial
+decode does. Rows prefill one row per forward on the serial partition
+(SPEC-038 v0.3.67) and take no prompt checkpoints, as serial Inkling takes
+none. The
+batch keeps no padded K/V; a model that asks the batch for padded K/V marks
+the forward as attended outside the cache and fails it (SPEC-038 FR-CB2).
+Rows prefill at equal offsets only. Native-MTP batches over this class fail
+closed.
 
 - (v0.1.25, provisional, SPEC-first) only
   `prism-ml/Ternary-Bonsai-2-2B-mlx-2bit`, with `schema_version == 2`,
