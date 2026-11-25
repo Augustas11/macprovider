@@ -16,7 +16,8 @@
 #               lab-harness release build (-DMACPROVIDER_LAB_HARNESS) used by the next steps;
 #   parity      msb-throughput --engine scheduler --scenario parity, 4 rows: synthetic 1024-token
 #               prompts and one ragged cohort (700/1500/2100/3000 tokens, rings wrap at different
-#               columns), 256 greedy tokens each, batched vs serial;
+#               columns) and a second ragged cohort (900/1300/2600/4100), 256 greedy tokens
+#               each, batched vs serial;
 #   throughput  msb-throughput --engine scheduler at --rows 1, 2, 4 (1024-token prompts) and 4
 #               (8192-token prompts), 256 timed decode tokens, 3 runs: aggregate decode tok/s
 #               against the same build's one-row engine and the production serial path;
@@ -154,6 +155,13 @@ prompts = [{"name": f"p{n}", "ids": [rng.randrange(1000, 60000) for _ in range(n
 json.dump({"prompts": prompts}, open(sys.argv[1], "w"))
 PY
   msb parity-r4-ragged --scenario parity --rows 4 --prompt-token-file "$OUT/ragged-prompts.json" --parity-tokens 256
+  /usr/bin/python3 -I - "$OUT/ragged2-prompts.json" <<'PY'
+import json, random, sys
+rng = random.Random(7)
+prompts = [{"name": f"q{n}", "ids": [rng.randrange(1000, 60000) for _ in range(n)]} for n in (900, 1300, 2600, 4100)]
+json.dump({"prompts": prompts}, open(sys.argv[1], "w"))
+PY
+  msb parity-r4-ragged2 --scenario parity --rows 4 --prompt-token-file "$OUT/ragged2-prompts.json" --parity-tokens 256
 fi
 if has diag; then
   /usr/bin/python3 -I - "$OUT" <<'PY2'
