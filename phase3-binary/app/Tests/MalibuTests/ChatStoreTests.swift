@@ -383,10 +383,33 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(request["max_tokens"] as? Int, 2048)
         XCTAssertEqual((request["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String },
                        ["second", "short", "third"], "The turn that no longer fits the context is left out")
+        XCTAssertEqual(store.contextNote, ChatStore.contextOmittedNote)
         transport.pending[2].continuation.resume(throwing: ChatFailure.contextTooLong)
         try await waitUntil { !store.isRunning }
         XCTAssertEqual(store.notice, ChatFailure.contextTooLong.localizedDescription)
         XCTAssertEqual(store.turns.count, 3, "The conversation itself is kept")
+    }
+
+    func testAnswerStatsAreShownFromUsageAndSaved() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        transport.current = ChatCapability(model: "fixture", generation: 1, guaranteedTools: false, maxContextTokens: 8192)
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        store.send("hello")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, text: "hello there", promptTokens: 30, completionTokens: 12, decodeMilliseconds: 400)
+        try await waitUntil { !store.isRunning }
+        let turn = try XCTUnwrap(store.turns.last)
+        XCTAssertEqual(turn.completionTokens, 12)
+        XCTAssertEqual(turn.promptTokens, 30)
+        XCTAssertEqual(turn.tokensPerSecond, 30)
+        XCTAssertEqual(store.contextUsedTokens, 30)
+        XCTAssertEqual(store.contextLimitTokens, 8192)
+        XCTAssertNil(store.contextNote)
+        let saved = try XCTUnwrap(ChatHistoryStore(directory: directory).load(store.conversationID))
+        XCTAssertEqual(saved.turns.last?.completionTokens, 12)
+        XCTAssertEqual(saved.turns.last?.tokensPerSecond, 30)
     }
 
     func testContinueIsNotOfferedInAgentMode() async throws {
@@ -450,8 +473,12 @@ private final class ControlledChatTransport: ChatTransport {
         bodies.append(body)
         return try await withCheckedThrowingContinuation { pending.append(Pending(onText: onText, continuation: $0)) }
     }
-    func resolve(_ index: Int, text: String = "", calls: [ChatToolCall] = [], reasoning: String = "", truncated: Bool = false) {
-        pending[index].continuation.resume(returning: ChatCompletion(text: text, calls: calls,
-                                                                     reasoning: reasoning, truncated: truncated))
+    func resolve(_ index: Int, text: String = "", calls: [ChatToolCall] = [], reasoning: String = "",
+                 truncated: Bool = false, promptTokens: Int? = nil, completionTokens: Int? = nil,
+                 decodeMilliseconds: Int? = nil) {
+        pending[index].continuation.resume(returning: ChatCompletion(
+            text: text, calls: calls, reasoning: reasoning, truncated: truncated,
+            completionTokens: completionTokens, promptTokens: promptTokens,
+            decodeMilliseconds: decodeMilliseconds))
     }
 }

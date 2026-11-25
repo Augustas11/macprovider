@@ -11,6 +11,9 @@ struct SavedChatTurn: Codable, Equatable {
     var truncated: Bool?
     var note: String?
     var tools: [String]?
+    var promptTokens: Int? = nil
+    var completionTokens: Int? = nil
+    var tokensPerSecond: Double? = nil
 }
 
 struct SavedChat: Codable, Identifiable, Equatable {

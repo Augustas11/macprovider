@@ -14,6 +14,9 @@ struct ChatTurn: Identifiable, Equatable {
     var note: String?
     /// Agent tool calls as compact lines ("read_file notes.txt"), shown and saved.
     var tools: [String] = []
+    var promptTokens: Int? = nil
+    var completionTokens: Int? = nil
+    var tokensPerSecond: Double? = nil
 }
 
 @MainActor
@@ -28,6 +31,11 @@ final class ChatStore: ObservableObject {
     @Published var agentMode = false
     @Published private(set) var history: [ChatSummary] = []
     @Published private(set) var conversationID = UUID()
+    /// Prompt tokens of the latest reply, over the model's context, for the meter.
+    @Published private(set) var contextUsedTokens: Int?
+    @Published private(set) var contextLimitTokens: Int?
+    /// Set when older turns were left out of the request that is in flight or just finished.
+    @Published private(set) var contextNote: String?
     private let transport: any ChatTransport
     private let historyStore: ChatHistoryStore?
     private var conversationCreated = Date()
@@ -150,8 +158,12 @@ final class ChatStore: ObservableObject {
         turns = chat.turns.map {
             ChatTurn(id: UUID(), prompt: $0.prompt, answer: $0.answer, complete: $0.complete,
                      reasoning: $0.reasoning ?? "", truncated: $0.truncated ?? false, note: $0.note,
-                     tools: $0.tools ?? [])
+                     tools: $0.tools ?? [], promptTokens: $0.promptTokens,
+                     completionTokens: $0.completionTokens, tokensPerSecond: $0.tokensPerSecond)
         }
+        contextNote = nil
+        contextUsedTokens = chat.turns.last?.promptTokens
+        contextLimitTokens = nil
         unsaved = false
         notice = modelNotice()
     }
@@ -205,14 +217,23 @@ final class ChatStore: ObservableObject {
         // context; a cut-off reply being continued is always carried.
         var previous: [[String: Any]] = []
         var bytes = 0
+        var included = 0
         let budget = Self.contextBytes(for: expected) - text.utf8.count
+        let eligible = turns.filter(\.complete).count
         for turn in turns.reversed() where turn.complete {
             let size = turn.prompt.utf8.count + turn.answer.utf8.count
             let continued = previous.isEmpty && turn.truncated
             guard continued || bytes + size <= budget, previous.count < Self.contextMessages else { break }
             bytes += size
+            included += 1
             previous.insert(contentsOf: [["role": "user", "content": turn.prompt],
                                          ["role": "assistant", "content": turn.answer]], at: 0)
+        }
+        let omitted = eligible - included
+        contextNote = omitted > 0 ? Self.contextOmittedNote : nil
+        contextLimitTokens = expected.maxContextTokens
+        if expected.maxContextTokens != nil {
+            contextUsedTokens = max(0, bytes / 3)
         }
         let id = UUID(); runID = id; discoveryID = UUID(); isChecking = false
         if turns.isEmpty && conversationTitle == nil {
@@ -287,6 +308,7 @@ final class ChatStore: ObservableObject {
                     turns[index].answer = response.text
                     turns[index].reasoning = response.reasoning
                     turns[index].truncated = response.truncated
+                    recordUsage(response, on: index)
                     if response.truncated { turns[index].note = "This reply reached its length limit. Use Continue to keep going." }
                 }
                 return
@@ -302,7 +324,10 @@ final class ChatStore: ObservableObject {
             if let finish = finishes.first {
                 guard response.calls.count == 1, let answer = arguments[finish.offset]?["answer"],
                       !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatFailure.invalidTool }
-                if let index = turns.firstIndex(where: { $0.id == id }) { turns[index].answer = answer }
+                if let index = turns.firstIndex(where: { $0.id == id }) {
+                    turns[index].answer = answer
+                    recordUsage(response, on: index)
+                }
                 return
             }
             messages.append(["role": "assistant", "content": response.text, "tool_calls": response.calls.map(\.json)])
@@ -339,6 +364,16 @@ final class ChatStore: ObservableObject {
         turns.removeAll(); unsaved = false
         conversationID = UUID(); conversationCreated = Date()
         conversationTitle = nil; conversationModel = nil
+        contextNote = nil; contextUsedTokens = nil; contextLimitTokens = nil
+    }
+    /// Shown when a request had to leave older turns behind.
+    static let contextOmittedNote = "Earlier turns are outside this model's context."
+    private func recordUsage(_ response: ChatCompletion, on index: Int) {
+        turns[index].promptTokens = response.promptTokens
+        turns[index].completionTokens = response.completionTokens
+        turns[index].tokensPerSecond = response.tokensPerSecond
+        if let prompt = response.promptTokens { contextUsedTokens = prompt }
+        if let limit = capability?.maxContextTokens { contextLimitTokens = limit }
     }
     private func saveCurrent() {
         guard let historyStore, unsaved, !turns.isEmpty else { return }
@@ -351,7 +386,9 @@ final class ChatStore: ObservableObject {
                 SavedChatTurn(prompt: $0.prompt, answer: $0.answer, complete: $0.complete,
                               reasoning: $0.reasoning.isEmpty ? nil : $0.reasoning,
                               truncated: $0.truncated ? true : nil, note: $0.note,
-                              tools: $0.tools.isEmpty ? nil : $0.tools)
+                              tools: $0.tools.isEmpty ? nil : $0.tools,
+                              promptTokens: $0.promptTokens, completionTokens: $0.completionTokens,
+                              tokensPerSecond: $0.tokensPerSecond)
             })
         do { try historyStore.save(chat); unsaved = false }
         catch { notice = "This chat could not be saved on this Mac." }

@@ -61,6 +61,15 @@ struct ChatScreen: View {
                 }
                 Spacer()
             }
+            if let used = store.contextUsedTokens, let limit = store.contextLimitTokens, limit > 0 {
+                ProgressView(value: Double(min(used, limit)), total: Double(limit))
+                    .accessibilityLabel("Context \(min(used, limit)) of \(limit) tokens")
+                    .accessibilityIdentifier("malibu.chat.context-meter")
+            }
+            if let contextNote = store.contextNote {
+                Text(contextNote).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("malibu.chat.context-note")
+            }
             if store.capability != nil && store.capability?.guaranteedTools != true {
                 Text("Agent mode needs a model with guaranteed tool selection.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -100,6 +109,10 @@ struct ChatScreen: View {
                                     .accessibilityIdentifier("malibu.chat.thinking")
                                 }
                                 if !turn.answer.isEmpty { message(label: "Malibu", text: turn.answer, user: false) }
+                                if let stats = ChatStats.line(completionTokens: turn.completionTokens, tokensPerSecond: turn.tokensPerSecond) {
+                                    Text(stats).font(.caption.monospaced()).foregroundStyle(.secondary)
+                                        .accessibilityIdentifier("malibu.chat.stats")
+                                }
                                 ForEach(Array(turn.tools.enumerated()), id: \.offset) { _, line in
                                     Label(line, systemImage: "wrench.and.screwdriver")
                                         .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)

@@ -84,7 +84,32 @@ struct ChatCompletion: Sendable {
     /// The reply stopped early (finish_reason `length`, or the text cap); `text` holds what arrived.
     var truncated = false
     /// `usage.completion_tokens`, when the server reported it.
-    var completionTokens: Int?
+    var completionTokens: Int? = nil
+    /// `usage.prompt_tokens`, when the server reported it.
+    var promptTokens: Int? = nil
+    /// Provider decode time (`macprovider_decode_ms`, else `macprovider_generation_ms`).
+    var decodeMilliseconds: Int? = nil
+    var tokensPerSecond: Double? { ChatStats.rate(completionTokens: completionTokens, milliseconds: decodeMilliseconds) }
+}
+
+enum ChatStats {
+    /// "128 tokens · 36.4 tok/s" when the provider reported both numbers.
+    static func line(completionTokens: Int?, tokensPerSecond: Double?) -> String? {
+        switch (completionTokens, tokensPerSecond) {
+        case let (tokens?, rate?): return "\(tokens) tokens · \(Self.format(rate)) tok/s"
+        case let (tokens?, nil): return "\(tokens) tokens"
+        default: return nil
+        }
+    }
+    static func rate(completionTokens: Int?, milliseconds: Int?) -> Double? {
+        guard let completionTokens, completionTokens >= 0, let milliseconds, milliseconds > 0 else { return nil }
+        return Double(completionTokens) / (Double(milliseconds) / 1000)
+    }
+    static func format(_ rate: Double) -> String {
+        guard rate.isFinite, rate >= 0 else { return "0" }
+        if rate >= 100 { return String(Int(rate.rounded())) }
+        return String(format: "%.1f", rate)
+    }
 }
 
 /// Byte framing preserves split UTF-8 scalars and CRLF. Limits apply before
@@ -133,6 +158,8 @@ struct ChatStreamAccumulator {
     private(set) var lastReasoning: String?
     private(set) var truncated = false
     private(set) var completionTokens: Int?
+    private(set) var promptTokens: Int?
+    private(set) var decodeMilliseconds: Int?
     private var calls: [Int: ChatToolCall] = [:]
     private(set) var done = false
     private var finished = false
@@ -153,8 +180,13 @@ struct ChatStreamAccumulator {
             default: throw ChatFailure.malformed
             }
         }
-        if let usage = object["usage"] as? [String: Any], let tokens = usage["completion_tokens"] as? Int, tokens >= 0 {
-            completionTokens = tokens
+        if let usage = object["usage"] as? [String: Any] {
+            if let tokens = Self.usageInt(usage["completion_tokens"]) { completionTokens = tokens }
+            if let tokens = Self.usageInt(usage["prompt_tokens"]) { promptTokens = tokens }
+            if let decode = Self.usageInt(usage["macprovider_decode_ms"]) ?? Self.usageInt(usage["macprovider_generation_ms"]),
+               decode > 0 {
+                decodeMilliseconds = decode
+            }
         }
         guard let choices = object["choices"] as? [[String: Any]] else { throw ChatFailure.malformed }
         // Usage-only events are permitted, but may not substitute for a finish.
@@ -197,7 +229,16 @@ struct ChatStreamAccumulator {
         guard ordered.allSatisfy({ !$0.id.isEmpty && !$0.name.isEmpty }),
               Set(ordered.map(\.id)).count == ordered.count else { throw ChatFailure.malformed }
         return ChatCompletion(text: text, calls: ordered, reasoning: reasoning, truncated: truncated,
-                              completionTokens: completionTokens)
+                              completionTokens: completionTokens, promptTokens: promptTokens,
+                              decodeMilliseconds: decodeMilliseconds)
+    }
+    /// JSON numbers arrive as Int or as a whole Double.
+    static func usageInt(_ value: Any?) -> Int? {
+        if let number = value as? Int, number >= 0 { return number }
+        if let number = value as? Double, number >= 0, number.rounded() == number, number <= Double(Int.max) {
+            return Int(number)
+        }
+        return nil
     }
 }
 
