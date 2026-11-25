@@ -11067,6 +11067,48 @@ final class CoordinatorClientTests: XCTestCase {
         await client.cleanupConnectionForTest()
     }
 
+    func testUnconfirmedReadinessDefersTheReconnectUntilInFlightRequestsEnd() async throws {
+        // Issue #2497 (2026-11-25 live coding agent): a provider busy with a
+        // 41K-token prefill read unconfirmed and the watch closed the socket,
+        // failing the stream with ws_dead_mid_request. With a request in
+        // flight the watch keeps the session; once it ends, the same false
+        // reconnects.
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let script = ReadinessScript([], then: .confirmed)
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script, status: status)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        XCTAssertEqual(try fixture.record().state, .servingBuyers)
+
+        let startedAt = await status.beginRequest(requestID: "long-prefill")
+        await script.setFinal(.notServing(hold: nil))
+        let callsAtFalse = await script.calls
+        for _ in 0 ..< 200 {
+            if await script.calls >= callsAtFalse + 5 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let callsHeld = await script.calls
+        XCTAssertGreaterThanOrEqual(callsHeld, callsAtFalse + 5, "the watch kept polling")
+        XCTAssertNotEqual(try fixture.record().reasonCode, "buyer_serving_readiness_unconfirmed",
+                          "no reconnect while a request is in flight")
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "long-prefill")
+        let ended = try await waitForLifecycleReason(fixture, "buyer_serving_readiness_unconfirmed")
+        XCTAssertEqual(ended.state, .locallyReadyConnecting)
+        await client.cleanupConnectionForTest()
+    }
+
     func testCoordinatorHeldSessionReconnectsWhenAdmissionHoldEndsUnconfirmed() async throws {
         let fixture = try LifecycleFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
