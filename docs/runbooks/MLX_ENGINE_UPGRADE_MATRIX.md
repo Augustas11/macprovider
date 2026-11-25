@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.90` | `39f7e60d87e0dee5ee87c62e11db4d81afdf223f` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.91` | `3c1871468024386933dd2c6a6324ec023db56404` | `3.33.0` (`ca661dc6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
@@ -47,7 +47,12 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-25 the LM row is `3.33.0-macprovider.90` (`39f7e60`), on
+As of 2026-11-26 the LM row is `3.33.0-macprovider.91` (`3c18714`), on
+`3.33.0-macprovider.90` (#2474): a GLM-5.3-Flash sliced prefill projects only
+the last 64 rows of its last slice to logits; no other model's path changes.
+No Swift, core or C pin changes.
+
+On 2026-11-25 the LM row was `3.33.0-macprovider.90` (`39f7e60`), on
 `3.33.0-macprovider.89` (#2487): 3.33.0-macprovider.89 plus the Inkling 2
 DSpark draft (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound
 to the loaded target), staged and rewound rounds over the target's attention

@@ -112,7 +112,7 @@ class ReportTests(unittest.TestCase):
         flops = p["flops_per_token"]
         self.assertAlmostEqual(flops, 2 * (512 + 384 + 64 + 64 + 1024) + sum(p["attention_flops_per_token"].values()))
         c = p["ceilings"]["bf16_tflops"]
-        self.assertAlmostEqual(c["ceiling_tps"], 0.5 * 10e12 / flops)
+        self.assertAlmostEqual(c["ceiling_tps"], 10e12 / flops)
         self.assertAlmostEqual(c["ours_share"], (40 / 0.105) / c["ceiling_tps"])
         self.assertAlmostEqual(c["reference_share"], (40 / 0.05) / c["ceiling_tps"])
         self.assertTrue(p["first_tokens_agree"])

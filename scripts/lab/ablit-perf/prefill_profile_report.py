@@ -24,7 +24,8 @@ Stdlib only. The tables, per prompt length P:
     share applied to the served TTFT, and groups: attention (mla.*, indexer.*), MoE/MLP,
     KDA (linear attention, its state writes included), hyper-connections (hc.*), cache
     writes (mla.cache_append + indexer.pools), other (the forward's own time).
- 5. The prefill ceiling: about half the measured matmul peak / compute per token.
+ 5. The prefill ceiling: the measured matmul peak / compute per token. (A 0.5 factor here put
+    both our served prefill and oMLX at 141-162% of "the ceiling" on GLM-5.3-Flash, #2474 r8.)
     Compute per token = 2 x active weight MACs (inventory: every weight matrix, routed
     experts at num_experts_per_tok of n_routed_experts, MTP, embedding and lm_head
     excluded) + attention FLOPs averaged over positions 0..P-1 (sparse MLA: 4 H R
@@ -216,7 +217,7 @@ def summarize(profile: dict, peak: dict, config: dict, ref: dict[int, float], gr
         ceilings = {}
         for key in ("bf16_tflops", "q4_tflops"):
             tflops = float(peak.get(key) or float("nan"))
-            tps = 0.5 * tflops * 1e12 / flops
+            tps = tflops * 1e12 / flops
             ceilings[key] = {"peak_tflops": tflops, "ceiling_tps": tps,
                              "ours_share": base["prefill_tps"] / tps,
                              "reference_share": (n / ref[n] / tps) if n in ref else None}
@@ -284,7 +285,7 @@ def markdown(summary: dict, reference_chunk: str) -> str:
             out.append(f"| {r['section']} | {r['calls']} | {fmt(r['ms'])} | {fmt(100 * r['share'])}% | {fmt(r['served_ms_est'])} |")
         out.append("")
     out += ["## 5. Prefill ceiling", "",
-            "Ceiling = 0.5 x measured peak / compute per token.", "",
+            "Ceiling = measured peak / compute per token.", "",
             "| prompt | GFLOP per token | peak | peak TFLOP/s | ceiling tok/s | ours | reference |",
             "|---:|---:|---|---:|---:|---:|---:|"]
     for p in summary["prompts"]:

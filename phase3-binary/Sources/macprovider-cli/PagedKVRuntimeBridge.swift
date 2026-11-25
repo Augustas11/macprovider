@@ -1393,10 +1393,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         let output = try withPreparedCache(state.caches, lengths: text.sequenceLengths) {
                             try SmallMRouteScope.build { context.model(text, cache: state.caches, state: modelState) }
                         }
-                        // A model that ran the slices returns the last
-                        // slice's logits only; full-width logits mean it ran
-                        // one plain forward, whose numerics differ: fail the row.
-                        if let slices = input.prefillSliceTokens, output.logits.dim(1) != slices[slices.count - 1] {
+                        // A model that ran the slices returns logits for its
+                        // last slice only, or that slice's last rows (#2474);
+                        // full-width logits mean it ran one plain forward,
+                        // whose numerics differ: fail the row.
+                        if let slices = input.prefillSliceTokens,
+                           output.logits.dim(1) > slices[slices.count - 1] {
                             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prefill_slices_not_run")
                         }
                         if input.sampleFirstToken {
