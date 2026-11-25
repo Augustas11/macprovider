@@ -10,7 +10,7 @@ import json
 import re
 import sys
 
-WANTED = re.compile(r"pass|tps|tokens_per_s|aggregate|serial|speedup|ratio|mismatch|identical|diverg|error", re.I)
+WANTED = re.compile(r"pass|match|tps|tokens_per_s|aggregate|serial|speedup|ratio|mismatch|identical|diverg|error", re.I)
 
 
 def leaves(node, path=""):

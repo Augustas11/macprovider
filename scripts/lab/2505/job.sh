@@ -19,7 +19,10 @@
 #               columns), 256 greedy tokens each, batched vs serial;
 #   throughput  msb-throughput --engine scheduler at --rows 1, 2, 4 (1024-token prompts) and 4
 #               (8192-token prompts), 256 timed decode tokens, 3 runs: aggregate decode tok/s
-#               against the same build's one-row engine and the production serial path.
+#               against the same build's one-row engine and the production serial path;
+#   diag        one-row parity bisection, each cell its own process: the 1500-token ragged row
+#               alone; the ragged cohort reordered (the 1500-token row first); the ragged cohort
+#               with the hybrid decode pipeline off; the ragged cohort with MACPROVIDER_CB_TRACE.
 # Model: mlx-community/Inkling-2-Mini-oQ4e-mtp @ 3eea0427 (MODEL). The provider builds against the
 # fork checkout at FORK_REF through `swift package edit` (the campaign moves the Package.resolved
 # pin with scripts/bump-mlx-swift-lm-pin.py at freeze, after PR 2507's pin lands).
@@ -39,7 +42,8 @@ OUT=$L/results/$RUN_ID
 MODEL=${MODEL:-$HOME/lab-2467/models/Inkling-2-Mini-oQ4e-mtp@3eea0427}
 FIXTURES=${FIXTURES:-$HOME/lab-2467/src-10584fc0d79c/fork/Tests/MLXLMTests/Resources/inkling2}
 BUILD=.build-lab-2505
-BIN=$PKG/$BUILD/release
+# BIN may name an earlier run's lab-harness release directory (steps that need no rebuild).
+BIN=${BIN:-$PKG/$BUILD/release}
 MIN_FREE_GB=${MIN_FREE_GB:-40}
 FAILED=0
 mkdir -p "$OUT" "$L/src"
@@ -111,6 +115,8 @@ if has provider; then
   for x in "$PKG/$BUILD"/arm64-apple-macosx/debug/*.xctest/Contents/MacOS "$PKG/$BUILD/arm64-apple-macosx/debug"; do
     cp "$OUT/metallib/mlx.metallib" "$x/" 2>/dev/null
   done
+  # Tests that read resolved sources look under .build/checkouts.
+  [ -e "$PKG/.build" ] || ln -s "$BUILD" "$PKG/.build"
   say "PROVIDER_TEST"
   (cd "$PKG" && swift test --skip-build --build-path "$BUILD" \
       --filter 'PagedKVInkling2Tests|PagedKVSlidingWindowTests|PagedKVRuntimeBridge|PagedKVRecurrent') \
@@ -136,7 +142,7 @@ msb() {  # msb LABEL ARGS...
   [ $rc = 0 ] || blocker "$label rc=$rc: $(tail -n 3 "$OUT/$label.err" | tr '\n' ' ' | cut -c1-400)"
 }
 
-if has parity || has throughput; then
+if has parity || has throughput || has diag; then
   [ -x "$BIN/macprovider-cli" ] || die "no lab-harness binary at $BIN (run the provider step)" 14
 fi
 if has parity; then
@@ -148,6 +154,20 @@ prompts = [{"name": f"p{n}", "ids": [rng.randrange(1000, 60000) for _ in range(n
 json.dump({"prompts": prompts}, open(sys.argv[1], "w"))
 PY
   msb parity-r4-ragged --scenario parity --rows 4 --prompt-token-file "$OUT/ragged-prompts.json" --parity-tokens 256
+fi
+if has diag; then
+  /usr/bin/python3 -I - "$OUT" <<'PY2'
+import json, random, sys
+rng = random.Random(2505)
+prompts = [{"name": f"p{n}", "ids": [rng.randrange(1000, 60000) for _ in range(n)]} for n in (700, 1500, 2100, 3000)]
+json.dump({"prompts": [prompts[1]]}, open(sys.argv[1] + "/diag-p1500.json", "w"))
+json.dump({"prompts": [prompts[1], prompts[0], prompts[2], prompts[3]]}, open(sys.argv[1] + "/diag-reordered.json", "w"))
+json.dump({"prompts": prompts}, open(sys.argv[1] + "/diag-ragged.json", "w"))
+PY2
+  msb diag-p1500-alone --scenario parity --rows 1 --prompt-token-file "$OUT/diag-p1500.json" --parity-tokens 256
+  msb diag-reordered --scenario parity --rows 4 --prompt-token-file "$OUT/diag-reordered.json" --parity-tokens 256
+  MACPROVIDER_LAB_HYBRID_PIPELINE=off msb diag-pipeline-off --scenario parity --rows 4 --prompt-token-file "$OUT/diag-ragged.json" --parity-tokens 256
+  MACPROVIDER_CB_TRACE=1 msb diag-trace --scenario parity --rows 4 --prompt-token-file "$OUT/diag-ragged.json" --parity-tokens 256
 fi
 if has throughput; then
   for r in 1 2 4; do
