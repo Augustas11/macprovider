@@ -5813,6 +5813,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if rowAttention && nativeMTP {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
         }
+        if rowAttention, rowCaches.count == 1 {
+            return try loneRowCaches(rowCaches[0])
+        }
         return try (0 ..< layerCount).map { layerIndex in
             switch cacheKinds[layerIndex] {
             case .pagedAttention, .slidingWindow:
@@ -5988,6 +5991,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return indexed
         }
         return caches.lazy.compactMap { ($0 as? PagedQwen4ExpSparseCache)?.binding.handle }.first
+    }
+
+    /// Inkling 2 (#2505): a lone row runs on its own caches, as a serial
+    /// row does. Its paged attention caches attend it through the model
+    /// (`KVCacheRowAttentionProtocol`) and the model updates its conv tails
+    /// in place, so the forward has no batch view to route through and the
+    /// window nothing to pack or sync (a lone row through the batch views
+    /// decoded about 3% below serial). A second row joining rebuilds the
+    /// batch from these same caches.
+    private func loneRowCaches(_ caches: [KVCache]) throws -> [PagedKVSharedLayerBatch] {
+        try caches.indices.map { layerIndex in
+            let cache = caches[layerIndex]
+            switch cacheKinds[layerIndex] {
+            case .pagedAttention, .slidingWindow:
+                guard cache is PagedKVCache else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+            case .recurrentMamba:
+                guard let conv = cache as? ArraysCache, !(conv is MambaCache),
+                      conv.state.isEmpty || conv.state.count == recurrentStateLayout.slotCount(layer: layerIndex)
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+            default:
+                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            }
+            return PagedKVSharedLayerBatch(
+                cache: cache,
+                validateBatchStateClosure: {},
+                syncRowsFromBatchClosure: {},
+                writebackCompiledInnerStateClosure: { _, _ in
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                },
+                pendingMTPResolutionsClosure: {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
+                }
+            )
+        }
     }
 
     /// Packs the rows' recurrent state of decoder layer `layer` into `batch`,

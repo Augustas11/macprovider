@@ -200,6 +200,16 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// `ringOrdered` rotated into `RotatingKVCache`'s slot order (the
     /// rotation `RotatingKVCache.ringRotation` reports for the same update).
     private(set) var presentedRingRotation = 0
+    /// One-token sliding-window decode (#2505): the window `presentation`
+    /// returned last, kept as `RotatingKVCache` keeps it, a ring of
+    /// `attentionWindowTokens` slots with the oldest key at column `shift`.
+    /// The next one-token update writes its key into the evicted slot in
+    /// place and presents the same arrays, instead of copying the window
+    /// into ring order every step (about 4% of a lone Inkling row's decode).
+    /// The full history stays in the buffers. `mutation` is `mutationCount`
+    /// when the ring was presented: any other change to the row since
+    /// (trim, restore, a multi-token update, a batch write) rebuilds it.
+    private var slidingRing: (keys: MLXArray, values: MLXArray, shift: Int, mutation: Int)?
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
     /// parity fixtures, that logical K/V was reconstructed through the real gather rather
@@ -571,6 +581,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             storedTokens = keys.dim(2)
             // Adopted K/V are temporal: the ring restarts here, as after a prefill.
             slidingRingAnchor = offset
+            slidingRing = nil
             mutationCount &+= 1
         }
     }
@@ -607,6 +618,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         // temporal order (`RotatingKVCache` refuses to trim a ring past its
         // window and linearizes on a forced trim), so the ring restarts here.
         slidingRingAnchor = offset
+        slidingRing = nil
         // Keep capacity within the blocks the allocator still accounts for
         // (SPEC-039 FR-PKV2): a trim that frees whole blocks copies the kept
         // prefix into a right-sized buffer so the freed memory is released.
@@ -815,19 +827,47 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let shift = incomingTokens == 1
             ? Self.slidingRingShift(postUpdateOffset: offset, anchor: slidingRingAnchor, windowSize: attentionWindowTokens)
             : 0
-        #if MACPROVIDER_LAB_HARNESS
-        // Lab A/B only (#2505): the window in temporal order, without the
-        // ring copy. Tokens may leave the serial ones; the cost is the point.
-        if Self.labSkipRingCopy {
-            return (keys[.ellipsis, start..., 0...], values[.ellipsis, start..., 0...])
-        }
-        #endif
         // `ringOrdered` moves the oldest key to column `shift`.
         presentedRingRotation = shift > 0 && shift < end - start ? shift : 0
-        return (
-            Self.ringOrdered(keys[.ellipsis, start..., 0...], shift: shift),
-            Self.ringOrdered(values[.ellipsis, start..., 0...], shift: shift)
-        )
+        // The ring is kept only for a full one-token window, the only update
+        // whose presentation the next one-token update can roll forward.
+        let keepsRing = incomingTokens == 1 && !reconstructViaGather && end - start == attentionWindowTokens
+        guard keepsRing else {
+            slidingRing = nil
+            return (
+                Self.ringOrdered(keys[.ellipsis, start..., 0...], shift: shift),
+                Self.ringOrdered(values[.ellipsis, start..., 0...], shift: shift)
+            )
+        }
+        if let ring = slidingRing,
+           ring.mutation == mutationCount &- 1,
+           shift == (ring.shift + 1) % attentionWindowTokens,
+           Self.ringHolds(keys, ring: ring.keys),
+           Self.ringHolds(values, ring: ring.values) {
+            // The previous presentation held the window one token back with
+            // its oldest key at `ring.shift`: the new key replaces it there,
+            // leaving the oldest key at `shift`, exactly `ringOrdered`'s
+            // layout of the new window.
+            let slot = ring.shift
+            ring.keys[.ellipsis, slot ..< slot + 1, 0...] = keys[.ellipsis, (end - 1)..., 0...]
+            ring.values[.ellipsis, slot ..< slot + 1, 0...] = values[.ellipsis, (end - 1)..., 0...]
+            slidingRing = (ring.keys, ring.values, shift, mutationCount)
+            return (ring.keys, ring.values)
+        }
+        let ringKeys = Self.ringOrdered(keys[.ellipsis, start..., 0...], shift: shift)
+        let ringValues = Self.ringOrdered(values[.ellipsis, start..., 0...], shift: shift)
+        slidingRing = (ringKeys, ringValues, shift, mutationCount)
+        return (ringKeys, ringValues)
+    }
+
+    /// Whether `ring` can take the new column of `merged` in place: same
+    /// dtype and the same batch, head and head-dim sizes.
+    private static func ringHolds(_ merged: MLXArray, ring: MLXArray) -> Bool {
+        ring.ndim == 4 && merged.ndim == 4
+            && ring.dtype == merged.dtype
+            && ring.dim(0) == merged.dim(0)
+            && ring.dim(1) == merged.dim(1)
+            && ring.dim(3) == merged.dim(3)
     }
 
     /// Where a keep=0 `RotatingKVCache` of `windowSize` slots holds its window
@@ -850,11 +890,6 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     /// `window` rotated right by `shift` along the sequence axis.
-    #if MACPROVIDER_LAB_HARNESS
-    static let labSkipRingCopy =
-        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_RING_COPY"] == "off"
-    #endif
-
     static func ringOrdered(_ window: MLXArray, shift: Int) -> MLXArray {
         let length = window.dim(2)
         guard shift > 0, shift < length else { return window }
