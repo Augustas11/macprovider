@@ -152,7 +152,9 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
-## Next CLI release — 1.8.300 (tracked from 2026-11-25)
+## CLI release — 1.8.300 (published 2026-11-25 17:39 local; tracked from 2026-11-25)
+
+Canary: this operator Mac serving Inkling-2-Mini serial (CB off by policy), gateway request served 17:26. Rollout verified 18:25, mirror latest 18:32. The Studio auto-updated and serves GLM-5.3-Flash-uncensored with CB and native MTP admitted (`mtp_admission=entry_for_model`); the native-MTP live probe through the gateway is still owed (catalog-activate `live_probe`).
 
 - [PR 2479](https://github.com/Augustas11/macprovider/pull/2479) (Related: #2478), merged 2026-11-25 as `851ba7f7c`: held native-MTP rows get their own prefill schedule at 4 slots, removing the +6% TTFT on the SPEC-048 gated cells (s2 TTFT +3.4% remains, deterministic). Live = after the cut, a provider serving native MTP at 4 slots through the Malibu gateway.
 
