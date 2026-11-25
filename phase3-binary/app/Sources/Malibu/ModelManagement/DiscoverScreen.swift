@@ -84,7 +84,9 @@ enum DiscoverPresentation {
                 : String(localized: "not downloaded", comment: "Discover list local state"))
         }
         if row.providerCompletionPayoutUSDPerMillionTokens != nil {
-            parts.append(ModelsPresentation.rateText(row) + " / 1M out")
+            parts.append(row.nonEarningDisclosure == nil
+                ? ModelsPresentation.rateText(row) + " / 1M out"
+                : String(localized: "network rate \(ModelsPresentation.rateText(row)) / 1M out", comment: "Discover list rate for a model this Mac is not earning"))
         }
         if let rank = row.demandRank {
             parts.append(String(localized: "demand #\(rank)", comment: "Discover list demand rank"))
@@ -170,7 +172,6 @@ enum DiscoverPresentation {
         }
         for row in visible {
             var line = ModelsPresentation.title(row) + " (" + ModelsPresentation.name(row) + ") — " + listSubtitle(row)
-            if let caveat = listCaveat(row) { line += " — " + caveat }
             strings.append(line)
         }
         if let first = visible.first {
@@ -350,15 +351,12 @@ struct DiscoverScreen: View {
                                 Text(DiscoverPresentation.listSubtitle(row))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                if let caveat = DiscoverPresentation.listCaveat(row) {
-                                    // SPEC-044-R014: the not-earning caveat
-                                    // travels with every listed rate.
-                                    Text(caveat)
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            // SPEC-044-R014 (0.2.13): the not-earning caveat is
+                            // read with the row and shown in the detail pane
+                            // beside the rates, not as a line under every row.
+                            .accessibilityHint(Text(DiscoverPresentation.listCaveat(row) ?? ""))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .background(selected?.id == row.id ? Color.accentColor.opacity(0.12) : Color.clear)
@@ -401,7 +399,7 @@ struct DiscoverScreen: View {
                     ForEach(Array(DiscoverPresentation.detailLines(row, hostMemoryGB: ModelsPresentation.hostMemoryGB).enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.callout)
-                            .foregroundStyle(line == row.nonEarningDisclosure ? Color.orange : Color.primary)
+                            .foregroundStyle(line == row.nonEarningDisclosure ? Color.secondary : Color.primary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Text(ModelsPresentation.rateDisclosure)

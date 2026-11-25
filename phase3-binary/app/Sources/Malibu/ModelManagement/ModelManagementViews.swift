@@ -110,8 +110,8 @@ struct ModelRowView: View {
                         }
                         if let nonEarningDisclosure = row.nonEarningDisclosure {
                             Text(nonEarningDisclosure)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(.orange)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }

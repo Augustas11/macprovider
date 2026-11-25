@@ -542,11 +542,6 @@ struct ModelsScreen: View {
             VStack(alignment: .trailing, spacing: 1) {
                 Text(ModelsPresentation.rateText(row))
                     .font(.callout.monospacedDigit())
-                if row.nonEarningDisclosure != nil {
-                    Text(String(localized: "No provider credit yet", comment: "Short non-earning caveat beside a rate"))
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
             }
             .frame(width: 100, alignment: .trailing)
             .accessibilityElement(children: .ignore)

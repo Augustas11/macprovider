@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.12
+**Version:** 0.2.13
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1530,8 +1530,10 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    not admitted for and is not earning. It never sets
    `catalog_economics_permitted` or `settlement_capable`, never makes a row
    `trusted`, and never makes `Switch`, `Evaluate`, `Adopt`, or `Clean up`
-   available. Malibu MUST show its rates under R004 with the not-earning
-   caveat beside them and in their accessibility label, MUST NOT show
+   available. Malibu MUST show its rates under R004, label a listed rate as the
+   network rate, show the not-earning caveat beside the rates in the
+   model's detail view, and carry it in the row's accessibility label; a
+   list row need not repeat the caveat as its own line (0.2.13), MUST NOT show
    earning-eligible, settlement-ready, or paid-routing copy for it, and MUST
    treat as malformed a `catalog_reference` row that is not a catalog-only
    row, lacks any money field, has a `rate_source` or projection
@@ -1663,6 +1665,10 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.13 - R014: a listed catalog-reference rate reads "network rate"; the
+  not-earning caveat stays beside the rates in the detail view and in the
+  row's accessibility label, and is no longer repeated as an orange line
+  under every list row (Related: #2502).
 - 0.2.12 - Adds R014 for the v1 envelope (Related: #2059): catalog-only rows
   carry the source-aware `byom.local.not_offered` guidance (Malibu also
   accepts the `byom.local.local_only` label CLI 1.8.258 emits on that row);

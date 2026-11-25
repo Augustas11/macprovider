@@ -296,7 +296,7 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: nil)?.id, "qwen/qwen3-8b", "the first row is selected")
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "meta/llama-3.2-3b")?.id, "meta/llama-3.2-3b")
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "gone")?.id, "qwen/qwen3-8b")
-        XCTAssertEqual(DiscoverPresentation.listSubtitle(download), d("4§6 GB · Fits · not downloaded · $0§36 / 1M out · demand #3"))
+        XCTAssertEqual(DiscoverPresentation.listSubtitle(download), d("4§6 GB · Fits · not downloaded · network rate $0§36 / 1M out · demand #3"))
 
         XCTAssertEqual(download.action, .download)
         XCTAssertEqual(download.category, .needsPreparation)
