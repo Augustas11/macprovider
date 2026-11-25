@@ -152,6 +152,10 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Next CLI release — 1.8.300 (tracked from 2026-11-25)
+
+- [PR 2479](https://github.com/Augustas11/macprovider/pull/2479) (Related: #2478), merged 2026-11-25 as `851ba7f7c`: held native-MTP rows get their own prefill schedule at 4 slots, removing the +6% TTFT on the SPEC-048 gated cells (s2 TTFT +3.4% remains, deterministic). Live = after the cut, a provider serving native MTP at 4 slots through the Malibu gateway.
+
 ## CLI release — 1.8.299 (published 2026-11-25 06:09 local; tracked from 2026-11-22)
 
 `v1.8.299` was published from `a10a94344` (`a10a943447d2b90710d3a491ece943b8a8c60549`). The first candidate (run 45452310371 on `b28da49df`) failed the acceptance signer because main moved after dispatch; the recut, acceptance run 45476788980, passed. Studio canary served 1.8.299 (model loaded after 603 s, 120 s crash hold clean); its CB re-check stayed `prior_grant_pending_recheck` until the buyer runner's Studio target was paused (12 admission holds ended in `drain_timeout`), then granted with 4 served slots. Promotion run 45497664695, recommendation bump to 1.8.299, rollout verification run 45499956726 and mirror latest.json all passed; `cli-release.sh status` reports the train complete.
