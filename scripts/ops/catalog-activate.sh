@@ -53,7 +53,10 @@
 #   8 provider_restart        canary/Studio provider reports the new catalog release
 #   9 live_probe              provider /v1/status: continuous_batching active;
 #                             native_mtp enabled+eligible|active unless explicitly
-#                             selecting a CB-only proof below
+#                             selecting a CB-only proof below. A serial native
+#                             tuple (SPEC-048 MTP-7, native_mtp.family in
+#                             SERIAL_NATIVE_MTP_FAMILIES) serves without CB: it
+#                             needs only native_mtp enabled+eligible|active
 #   9a cached_turns           SPEC-038 AC-26: when the live signed CB policy grants cached
 #                             turns to the provider's tuple (/v1/status
 #                             continuous_batching.policy.cached_turns_authorized), the
@@ -162,6 +165,29 @@ native_mtp_release_preflight() {
     return 1
   fi
   step native_mtp_release_match done "$([ "$native_bound" = true ] && echo 'every signed admission entry matches the verified release' || echo 'release is not native-bound')"
+}
+
+# SPEC-048 MTP-7 (0.1.130): family adapters whose signed tuple is serial
+# native (serial_native, one slot, one row). Keep in step with
+# NativeMTPAdmissionSidecar.serialNativeFamilyAdapters.
+SERIAL_NATIVE_MTP_FAMILIES="inkling2_dspark_v1"
+
+# live_probe_serving_path_ok CB_ACTIVE MTP_ENABLED MTP_MODE MTP_FAMILY
+# Succeeds when the provider's /v1/status shows the serving path the
+# activation needs: CB active plus native MTP (or an explicit CB-only proof),
+# or, for a serial native tuple, native MTP enabled with no CB.
+live_probe_serving_path_ok() {
+  local cb_active="$1" mtp_enabled="$2" mtp_mode="$3" mtp_family="$4" mtp_on=false family
+  [ "$mtp_enabled" = true ] && { [ "$mtp_mode" = eligible ] || [ "$mtp_mode" = active ]; } && mtp_on=true
+  if [ "$cb_active" = true ]; then
+    [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = false ] || [ "$mtp_on" = true ]
+    return
+  fi
+  [ "$mtp_on" = true ] && [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" != false ] || return 1
+  for family in $SERIAL_NATIVE_MTP_FAMILIES; do
+    [ "$mtp_family" = "$family" ] && return 0
+  done
+  return 1
 }
 
 qwen_journal_probe() {
@@ -594,7 +620,7 @@ PY
   fact revocation_coverage_days "$coverage_days"
 
   # Provider (canary/Studio) status, read-only over ssh when configured.
-  local p_rid="" p_digest="" p_mtp_enabled="" p_mtp_mode="" p_cb_active="" p_connected="" p_lifecycle="" p_paused=false
+  local p_rid="" p_digest="" p_mtp_enabled="" p_mtp_mode="" p_mtp_family="" p_cb_active="" p_connected="" p_lifecycle="" p_paused=false
   if [ -n "${STUDIO_SSH:-}" ] && [ -n "${STUDIO_STATUS_PORT:-}" ]; then
     case "$STUDIO_STATUS_PORT" in *[!0-9]*) die "STUDIO_STATUS_PORT must be numeric" ;; esac
     studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/pstatus.json" 2>/dev/null || true
@@ -602,6 +628,7 @@ PY
     p_digest="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["catalog"]["digest"]')"
     p_mtp_enabled="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["enabled"]')"
     p_mtp_mode="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["mode"]')"
+    p_mtp_family="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["family"]')"
     p_cb_active="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["active"]')"
     p_connected="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["coordinator"]["connected"]')"
     p_lifecycle="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["lifecycle"]["state"]')"
@@ -616,6 +643,7 @@ PY
   fact provider_catalog_release_id "$p_rid"
   fact provider_native_mtp_enabled "$p_mtp_enabled"
   fact provider_native_mtp_mode "$p_mtp_mode"
+  fact provider_native_mtp_family "$p_mtp_family"
   fact provider_continuous_batching_active "$p_cb_active"
   fact provider_coordinator_connected "$p_connected"
   fact provider_lifecycle_state "$p_lifecycle"
@@ -874,11 +902,14 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
   # Dense CB-only models have no native-MTP heads. An explicit CB-only proof
   # must not require that unrelated capability. Preserve the historical native
   # probe when unset; the gateway proof still requires shared-forward movement.
-  if [ "$p_cb_active" = true ] && { [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = false ] ||
-       { [ "$p_mtp_enabled" = true ] && { [ "$p_mtp_mode" = eligible ] || [ "$p_mtp_mode" = active ]; }; }; }; then
-    step live_probe "done" "continuous_batching active, native_mtp $p_mtp_mode (forward requirement=${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-default})"
+  if live_probe_serving_path_ok "$p_cb_active" "$p_mtp_enabled" "$p_mtp_mode" "$p_mtp_family"; then
+    if [ "$p_cb_active" = true ]; then
+      step live_probe "done" "continuous_batching active, native_mtp $p_mtp_mode (forward requirement=${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-default})"
+    else
+      step live_probe "done" "serial native tuple $p_mtp_family: native_mtp $p_mtp_mode without continuous batching (SPEC-048 MTP-7)"
+    fi
   else
-    step live_probe pending "native_mtp enabled=$p_mtp_enabled mode=$p_mtp_mode cb_active=$p_cb_active"
+    step live_probe pending "native_mtp enabled=$p_mtp_enabled mode=$p_mtp_mode family=$p_mtp_family cb_active=$p_cb_active"
     if [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = false ]; then
       [ -z "$p_rid" ] || set_next live_probe manual "Verify the signed CB policy and local self-check grant for the target provider" \
 "# Confirm /v1/status continuous_batching.active=true after the signed policy and local self-check grant.
