@@ -342,7 +342,7 @@ serve_quality() {  # serve_quality LABEL MODEL_ID DIR SHA
     log "QUALITY_SERVE_UNAVAILABLE $m rc=$rc (5 exited, 4 stalled): $(tail -n 3 "$s/serve.err" | tr '\n' ' ' | cut -c1-300)"
     stop_serve; return 1
   fi
-  /usr/bin/python3 -I "$TOOLS/quality.py" serve --port "$PORT" --model "$mid" --label "$m" --run-id "$RUN_SLUG" --reasoning-effort none \
+  /usr/bin/python3 -I "$TOOLS/quality.py" serve --port "$PORT" --model "$mid" --label "$m" --run-id "$RUN_SLUG" --reasoning-effort none --budget-scale 4 \
     --out "$RES/quality/$m-raw.jsonl" > "$RES/quality/$m.log" 2>&1; rc=$?
   grep '^QUALITY_REQ ' "$RES/quality/$m.log"
   stop_serve
@@ -365,10 +365,15 @@ cell_quality() {
   serve_complete() { /usr/bin/python3 -I -c 'import json,sys
 rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 sys.exit(0 if all(r.get("finish_reason")=="stop" for r in rows if r.get("kind")=="case") else 1)' "$RES/quality/$1-raw.jsonl"; }
-  { serve_quality "$INC" "$GLM_KEY" "$GLM_DIR" "$GLM_SHA" && serve_complete "$INC"; } || path=reference
-  [ $path = serve ] && { { serve_quality "$CAND" "$SAGE_REPO" "$SAGE_DIR" "$SAGE_SHA" && serve_complete "$CAND"; } || path=reference; }
+  # Both models always run the served path with the same request bodies; a case that ends on
+  # length scores as a failed case for that model. The mlx-vlm reference cannot load the
+  # glm5_next family (r10/r11: concatenate shape error, unexpected vision weights), so it is
+  # used only when a lab serve cannot start at all.
+  serve_quality "$INC" "$GLM_KEY" "$GLM_DIR" "$GLM_SHA" || path=reference
+  [ $path = serve ] && { serve_quality "$CAND" "$SAGE_REPO" "$SAGE_DIR" "$SAGE_SHA" || path=reference; }
+  for m in $INC $CAND; do [ -f "$RES/quality/$m-raw.jsonl" ] && ! serve_complete "$m" && log "QUALITY_LENGTH_CASES $m (scored as failed cases)"; done
   if [ $path = reference ]; then
-    log "QUALITY_PATH reference (a lab serve did not finish all nine with stop; both models run the mlx-vlm reference)"
+    log "QUALITY_PATH reference (a lab serve could not start; both models run the mlx-vlm reference)"
     ref_quality "$INC" "$GLM_DIR"; ref_quality "$CAND" "$SAGE_DIR"
   fi
   for m in $INC $CAND; do

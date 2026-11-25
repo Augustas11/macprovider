@@ -66,9 +66,13 @@ def cmd_serve(a):
             # (SPEC-018-R010 turns GLM thinking off for it), so both paths answer the same prompt.
             if a.reasoning_effort:
                 body["reasoning_effort"] = a.reasoning_effort
+            # Code answers outgrow the corpus budgets (r11: 5/9 GLM cases ended on length with
+            # thinking off). Both models get the same scaled budget, so the comparison stays fair.
+            if a.budget_scale != 1:
+                body["max_tokens"] = int(body["max_tokens"] * a.budget_scale)
             req = urllib.request.Request(f"http://127.0.0.1:{a.port}{r['path']}", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", **r["headers"]}, method="POST")
-            rec = {"kind": "case", "case_id": r["case_id"], "request_id": r["request_id"], "max_tokens": r["body"]["max_tokens"]}
+            rec = {"kind": "case", "case_id": r["case_id"], "request_id": r["request_id"], "max_tokens": body["max_tokens"]}
             t0 = time.time()
             try:
                 with urllib.request.urlopen(req, timeout=a.timeout) as resp:
@@ -205,6 +209,7 @@ def main():
     s.add_argument("--model", required=True)
     s.add_argument("--timeout", type=float, default=1800)
     s.add_argument("--reasoning-effort", default=None, help="sent as reasoning_effort on every case (default: not sent)")
+    s.add_argument("--budget-scale", type=float, default=1, help="multiply every case max_tokens (default 1)")
     r = sub.add_parser("reference")
     r.add_argument("--model-dir", required=True)
     r.add_argument("--loader", choices=("mlx-lm", "mlx-vlm"), required=True)
