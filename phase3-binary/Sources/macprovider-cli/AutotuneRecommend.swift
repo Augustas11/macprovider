@@ -12,6 +12,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     case noHMACSecret
     case insufficientDiskSpace(modelID: String, requiredBytes: Int64, availableBytes: Int64)
     case downloadBudgetExceeded(modelID: String, requiredBytes: Int64, remainingBytes: Int64)
+    case unsupportedModelType(modelID: String, modelType: String)
 
     var description: String {
         switch self {
@@ -31,6 +32,8 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
         case .downloadBudgetExceeded(let modelID, let requiredBytes, let remainingBytes):
             let gb = { (bytes: Int64) in String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
             return "run download cap reached before \(modelID): need \(gb(requiredBytes)), \(gb(remainingBytes)) left in this run"
+        case .unsupportedModelType(let modelID, let modelType):
+            return "\(modelID) has model_type \(modelType), which this build cannot load; not downloaded"
         }
     }
 
@@ -39,7 +42,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     var perCandidateSkipReason: String? {
         switch self {
         case .invalidArtifact(let message): return message
-        case .insufficientDiskSpace, .downloadBudgetExceeded: return description
+        case .insufficientDiskSpace, .downloadBudgetExceeded, .unsupportedModelType: return description
         default: return nil
         }
     }
@@ -3977,6 +3980,34 @@ final class RunDownloadBudget: @unchecked Sendable {
 struct HuggingFaceSnapshotDownloader {
     struct ModelInfo: Decodable {
         var siblings: [Sibling]
+        /// The Hub's parse of the repo's `config.json`, when it has one.
+        /// Unsigned and advisory: it only lets a run skip a row before its
+        /// download, and a missing or malformed value skips nothing.
+        var modelType: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case siblings
+            case config
+        }
+
+        private struct HubConfig: Decodable {
+            var modelType: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case modelType = "model_type"
+            }
+        }
+
+        init(siblings: [Sibling], modelType: String? = nil) {
+            self.siblings = siblings
+            self.modelType = modelType
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            siblings = try c.decode([Sibling].self, forKey: .siblings)
+            modelType = (try? c.decodeIfPresent(HubConfig.self, forKey: .config))?.modelType
+        }
     }
 
     struct Sibling: Decodable {
@@ -3996,6 +4027,12 @@ struct HuggingFaceSnapshotDownloader {
     /// SPEC-023-R029: total bytes one model-upgrade run may download, shared
     /// by every snapshot that run fetches. nil means no per-run cap.
     var runDownloadBudget: RunDownloadBudget? = nil
+
+    /// SPEC-023-R029 (#2485): whether this build's probe can load a
+    /// `model_type`. When set, a Hugging Face snapshot whose Hub metadata
+    /// names a type it rejects is refused before any byte is written. nil
+    /// checks nothing.
+    var loadableModelType: (@Sendable (_ modelType: String, _ modelID: String) async -> Bool)? = nil
 
     /// Bytes available for important use (APFS purgeable space included, as
     /// in `quarantineHasRoom`) on the volume holding `url`, or nil when it
@@ -4485,6 +4522,10 @@ struct HuggingFaceSnapshotDownloader {
         if case .downloadBudgetExceeded? = error as? AutotuneRecommendError {
             return true
         }
+        // Every source serves the same signed bytes, so the same model type.
+        if case .unsupportedModelType? = error as? AutotuneRecommendError {
+            return true
+        }
         if let calibration = error as? AutotuneContextCalibrationError, calibration == .deadlineExceeded {
             return true
         }
@@ -4507,14 +4548,18 @@ struct HuggingFaceSnapshotDownloader {
     ) async throws {
         // Only the real Hugging Face origin may receive HF_TOKEN.
         let sendToken = endpoint == Self.huggingFaceOrigin
-        let siblings = try await modelSiblings(
+        let info = try await modelInfo(
             endpoint: endpoint,
             sendToken: sendToken,
             modelID: modelID,
             revision: revision,
             deadline: deadline
         )
+        let siblings = info.siblings
         try Self.assertDeadlineActive(deadline)
+        if let loadable = self.loadableModelType, let modelType = info.modelType, !(await loadable(modelType, modelID)) {
+            throw AutotuneRecommendError.unsupportedModelType(modelID: modelID, modelType: modelType)
+        }
         guard !siblings.isEmpty else {
             throw AutotuneRecommendError.invalidArtifact("empty HuggingFace snapshot \(modelID)@\(revision)")
         }
@@ -4731,13 +4776,13 @@ struct HuggingFaceSnapshotDownloader {
         _ = chmod(destination.path, 0o600)
     }
 
-    private func modelSiblings(
+    private func modelInfo(
         endpoint: URL,
         sendToken: Bool,
         modelID: String,
         revision: String,
         deadline: Date?
-    ) async throws -> [Sibling] {
+    ) async throws -> ModelInfo {
         try Self.assertDeadlineActive(deadline)
         var request = URLRequest(url: apiURL(endpoint: endpoint, modelID: modelID, revision: revision))
         request.timeoutInterval = try Self.boundedInterval(30, deadline: deadline)
@@ -4754,7 +4799,7 @@ struct HuggingFaceSnapshotDownloader {
         guard let http = result.response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw AutotuneRecommendError.invalidArtifact("HuggingFace API failed \(modelID)@\(revision)")
         }
-        return try JSONDecoder.autotune.decode(ModelInfo.self, from: result.data).siblings
+        return try JSONDecoder.autotune.decode(ModelInfo.self, from: result.data)
     }
 
     static func assertDeadlineActive(_ deadline: Date?) throws {
@@ -5224,6 +5269,7 @@ struct CachedModelArtifactResolver {
         } catch {
             if case .insufficientDiskSpace? = error as? AutotuneRecommendError { throw error }
             if case .downloadBudgetExceeded? = error as? AutotuneRecommendError { throw error }
+            if case .unsupportedModelType? = error as? AutotuneRecommendError { throw error }
             throw AutotuneRecommendError.invalidArtifact(
                 "isolated artifact prefetch failed: " + String(describing: error)
             )
@@ -5586,12 +5632,16 @@ struct AutotuneRecommendationBenchmarker {
     /// With `removeRunDownloadsOnFailureKeeping` (a model upgrade), an error
     /// that ends the prefetch first removes what this call downloaded, under
     /// the R029 cleanup rules, except the model keys the closure returns.
+    /// With `stopAtDiskFloor` (a model upgrade, #2485), a row refused for
+    /// free disk space ends the prefetch: the rows already fetched are kept
+    /// and no later row is downloaded.
     func prefetchArtifacts(
         candidateCatalog: CandidateCatalog,
         hardware: AutotuneRecommendHardware,
         candidateModelIDs: Set<String>,
         modelKeyOrder: [String] = [],
-        removeRunDownloadsOnFailureKeeping: (() -> Set<String>)? = nil
+        removeRunDownloadsOnFailureKeeping: (() -> Set<String>)? = nil,
+        stopAtDiskFloor: Bool = false
     ) async throws -> ArtifactPrefetchOutcomes {
         var matchedModelKeysByID: [String: [String]] = [:]
         for modelKey in candidateCatalog.rows.keys.sorted() {
@@ -5630,6 +5680,7 @@ struct AutotuneRecommendationBenchmarker {
         let ordered = modelKeyOrder.filter { candidateCatalog.rows[$0] != nil }
         let orderedSet = Set(ordered)
         let modelKeys = ordered + candidateCatalog.rows.keys.sorted().filter { !orderedSet.contains($0) }
+        var stoppedAtDiskFloor = false
         for modelKey in modelKeys {
             guard let row = candidateCatalog.rows[modelKey], candidateModelIDs.contains(row.modelID) else {
                 continue
@@ -5661,6 +5712,15 @@ struct AutotuneRecommendationBenchmarker {
                 var locationInfo = stat()
                 let preexisted = staging == nil || durable == nil
                     || locations.contains { $0.map { lstat($0.path, &locationInfo) == 0 } ?? false }
+                // Past the floor, a row already on disk is still verified;
+                // only a new download is not started.
+                if stoppedAtDiskFloor, !preexisted {
+                    diagnostics.append(PrefetchDiagnostic(
+                        modelID: row.modelID,
+                        reason: "not downloaded: an earlier row reached the free disk space floor"
+                    ))
+                    continue
+                }
                 let artifact: VerifiedModelArtifact
                 do {
                     artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
@@ -5684,6 +5744,9 @@ struct AutotuneRecommendationBenchmarker {
             } catch let error as AutotuneRecommendError {
                 guard let reason = error.perCandidateSkipReason else { throw error }
                 diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: reason))
+                if stopAtDiskFloor, case .insufficientDiskSpace = error {
+                    stoppedAtDiskFloor = true
+                }
             }
         }
         completed = true
@@ -5703,8 +5766,19 @@ struct AutotuneRecommendationBenchmarker {
         interruptFlag: AutotuneInterruptFlag? = nil,
         deadline: Date? = nil,
         candidateModelIDs: Set<String>? = nil,
-        prefetchedArtifacts: [String: PrefetchedModelArtifact]? = nil
+        prefetchedArtifacts: [String: PrefetchedModelArtifact]? = nil,
+        requiredModelKeys: Set<String>? = nil,
+        onCandidateDropped: ((String) -> Void)? = nil
     ) async throws -> BenchmarkOutcomes {
+        // A receipt-bound run fails closed on a probe failure of a required
+        // row: the incumbent of a model upgrade, or the single row of a
+        // single-row (#585) receipt. Every other row is dropped with a
+        // diagnostic and the run keeps probing (#2485, #2494). nil makes
+        // every receipt row required.
+        func dropsFailure(_ modelKey: String) -> Bool {
+            guard let requiredModelKeys else { return false }
+            return !requiredModelKeys.contains(modelKey)
+        }
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
         var planned: [String] = []
@@ -5803,7 +5877,8 @@ struct AutotuneRecommendationBenchmarker {
                         path: artifact.modelArgument,
                         sha256: artifact.sha256,
                         sizeBytes: artifact.sizeBytes,
-                        minRAMGB: row.minRAMGB
+                        minRAMGB: row.minRAMGB,
+                        catalogModelID: row.modelID
                     ),
                     deadline: deadline
                 )
@@ -5824,7 +5899,7 @@ struct AutotuneRecommendationBenchmarker {
                         medianTPS: medianTPS,
                         p95TTFTMS: p95TTFTMS
                     ) {
-                        if prefetchedArtifacts != nil {
+                        if prefetchedArtifacts != nil, !dropsFailure(modelKey) {
                             throw AutotuneRecommendError.candidateProbeFailed(
                                 modelKey: modelKey,
                                 reason: invalidDiagnostic
@@ -5832,6 +5907,7 @@ struct AutotuneRecommendationBenchmarker {
                         }
                         diagnostics[modelKey] = invalidDiagnostic
                         progress("paid-yield: \(step) skipped \(row.modelID): \(invalidDiagnostic)")
+                        if dropsFailure(modelKey) { onCandidateDropped?(modelKey) }
                         continue
                     }
                     let generatedAt = clock()
@@ -5873,7 +5949,7 @@ struct AutotuneRecommendationBenchmarker {
                     progress("paid-yield: \(step) done \(row.modelID) (tps=\(medianTPS.rounded6), ttft=\(recorded.ttftMS)ms)")
                 case .infeasible(let reason, let nErr):
                     let diagnostic = "\(reason) (n_err=\(nErr))"
-                    if prefetchedArtifacts != nil {
+                    if prefetchedArtifacts != nil, !dropsFailure(modelKey) {
                         throw AutotuneRecommendError.candidateProbeFailed(
                             modelKey: modelKey,
                             reason: diagnostic
@@ -5881,14 +5957,16 @@ struct AutotuneRecommendationBenchmarker {
                     }
                     diagnostics[modelKey] = diagnostic
                     progress("paid-yield: \(step) skipped \(row.modelID): \(diagnostic)")
+                    if dropsFailure(modelKey) { onCandidateDropped?(modelKey) }
                 }
             } catch let error as AutotuneRecommendError {
-                if prefetchedArtifacts != nil {
+                if prefetchedArtifacts != nil, !dropsFailure(modelKey) {
                     throw error
                 }
                 if let reason = error.perCandidateSkipReason {
                     diagnostics[modelKey] = reason
                     progress("paid-yield: \(step) skipped \(row.modelID): \(reason)")
+                    if dropsFailure(modelKey) { onCandidateDropped?(modelKey) }
                     continue
                 }
                 throw error

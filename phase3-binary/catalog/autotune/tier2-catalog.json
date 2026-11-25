@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-24-daisyrose-27b-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-25-inkling-2-mini-32gb-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-24T10:50:00Z",
+  "issued_at": "2026-11-24T23:33:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -268,7 +268,7 @@
       "artifact_kind": "mlx_weight_file",
       "hash_scope": "macprovider.snapshot-manifest.v1",
       "model_id": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
-      "min_ram_gb": 32,
+      "min_ram_gb": 28,
       "notes": "Buyer-serving candidate thinkingmachines/inkling-2-mini; identity from signed SPEC-023 row.",
       "sha256": "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34",
       "source": "operator-curated"
@@ -286,7 +286,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "-O6vrtc89NwRao3_RC8pWhWX-nxxkTqj7QxRMIUrrstC28gMJHQRbOkaf8PIqEKvfbCGq3MX0Xtc0v8DYCfuAA"
+    "sig": "bmFWZI0JZxPMvfaAm82vb8p9d4hJCeNrXqnC63Wti26oPTYm_h7ot2RmlET1pdTSHtPWWVsffA6HJHL8Dws7Dg"
   },
   "version": 1
 }

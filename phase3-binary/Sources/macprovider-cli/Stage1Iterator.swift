@@ -8,6 +8,10 @@ struct CandidateArtifactBinding: Equatable, Sendable {
     let sha256: String
     var sizeBytes: Int? = nil
     var minRAMGB: Int? = nil
+    /// The signed catalog row's `model_id`. The candidate child is configured
+    /// with it as `model_catalog_model_id`, so it picks the loader serving
+    /// picks for that row (the native-vision profile for Qwen2-VL, #2494).
+    var catalogModelID: String? = nil
 }
 
 protocol Stage1ProviderRunning: AnyObject {

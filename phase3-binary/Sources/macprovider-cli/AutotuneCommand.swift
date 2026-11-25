@@ -1217,9 +1217,38 @@ struct AutotuneCommand: AsyncParsableCommand {
                     receipt.artifacts,
                     keepModelKeys: upgradeRunKeep.keys.union(configured.map { [$0] } ?? []),
                     catalog: catalog.value,
-                    resolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+                    resolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
+                    servedPaths: AutotuneModelUpgrade.servedArtifactPaths(configPath: configPathForCleanup)
                 )
             }
+        }
+        // #2485, #2494: a receipt-bound run drops a row whose probe fails
+        // and probes the rest, except a required row: the incumbent of an
+        // upgrade, or the single row of a single-row (#585) receipt. An
+        // upgrade also removes a dropped row's download at once, under the
+        // same keep rules. A dropped row has no benchmark, so it is never
+        // eligible and an upgrade never switches to it.
+        let requiredModelKeys: Set<String>?
+        let upgradeDroppedCleanup: ((String) -> Void)?
+        if upgrade, let receipt {
+            requiredModelKeys = Set(upgradeIncumbentKey.map { [$0] } ?? [])
+            upgradeDroppedCleanup = { modelKey in
+                let configured = AutotuneModelUpgrade.configuredCatalogKey(configPath: configPathForCleanup, catalog: catalog.value)
+                FileHandle.standardError.write(Data("model_upgrade: dropped \(modelKey) after its probe failed\n".utf8))
+                AutotuneModelUpgrade.removeUnselectedRunDownloads(
+                    receipt.artifacts.filter { $0.modelKey == modelKey },
+                    keepModelKeys: upgradeRunKeep.keys.union(configured.map { [$0] } ?? []),
+                    catalog: catalog.value,
+                    resolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
+                    servedPaths: AutotuneModelUpgrade.servedArtifactPaths(configPath: configPathForCleanup)
+                )
+            }
+        } else if let prefetchedArtifacts {
+            requiredModelKeys = prefetchedArtifacts.count == 1 ? Set(prefetchedArtifacts.keys) : []
+            upgradeDroppedCleanup = nil
+        } else {
+            requiredModelKeys = nil
+            upgradeDroppedCleanup = nil
         }
         // R029 step 5/6: an upgrade's state and evidence name the row served
         // after the decision, so they are written after it.
@@ -1283,7 +1312,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                 interruptFlag: interruptFlag,
                 deadline: recommendationDeadline,
                 candidateModelIDs: candidateModelFilter,
-                prefetchedArtifacts: prefetchedArtifacts
+                prefetchedArtifacts: prefetchedArtifacts,
+                requiredModelKeys: requiredModelKeys,
+                onCandidateDropped: upgradeDroppedCleanup
             )
         } catch AutotuneContextCalibrationError.deadlineExceeded {
             FileHandle.standardError.write(
@@ -1449,7 +1480,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                             path: selectedBenchmark.modelArtifactPath,
                             sha256: selectedBenchmark.artifactSHA256,
                             sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
-                            minRAMGB: selectedRow.minRAMGB
+                            minRAMGB: selectedRow.minRAMGB,
+                            catalogModelID: selectedRow.modelID
                         )
                     ),
                     deadline: recommendationDeadline,
@@ -1542,7 +1574,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                             path: selectedBenchmark.modelArtifactPath,
                             sha256: selectedBenchmark.artifactSHA256,
                             sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
-                            minRAMGB: selectedRow.minRAMGB
+                            minRAMGB: selectedRow.minRAMGB,
+                            catalogModelID: selectedRow.modelID
                         ),
                         isInterrupted: { interruptFlag.isSet() }
                     ),
@@ -2212,7 +2245,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             incumbentKey: incumbentKey,
             catalog: inputs.candidate.value,
             resolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
-            configuredKey: { AutotuneModelUpgrade.configuredCatalogKey(configPath: configPath, catalog: inputs.candidate.value) }
+            configuredKey: { AutotuneModelUpgrade.configuredCatalogKey(configPath: configPath, catalog: inputs.candidate.value) },
+            servedPaths: { AutotuneModelUpgrade.servedArtifactPaths(configPath: configPath) }
         ) { keep in
             let heldLease = AutotuneModelUpgrade.LeaseSlot()
             try await drainThenIsolate(
@@ -2370,7 +2404,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 incumbentKey: incumbentKey,
                 cachedBenchmarks: cachedBenchmarks
             ),
-            removeRunDownloadsOnFailureKeeping: keepOnCleanup
+            removeRunDownloadsOnFailureKeeping: keepOnCleanup,
+            stopAtDiskFloor: true
         )
         for diagnostic in outcome.diagnostics.sorted(by: { $0.modelID < $1.modelID }) {
             FileHandle.standardError.write(Data("model_upgrade: dropped \(diagnostic.modelID): \(diagnostic.reason)\n".utf8))
@@ -2383,7 +2418,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 outcome.artifacts,
                 keepModelKeys: keepOnCleanup(),
                 catalog: catalog.value,
-                resolver: resolver
+                resolver: resolver,
+                servedPaths: AutotuneModelUpgrade.servedArtifactPaths(configPath: configPath)
             )
             throw error
         }
@@ -2397,7 +2433,8 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     /// R029 step 2 cap: the prefetcher an upgrade run uses, with the run's
-    /// download budget installed on its downloader.
+    /// download budget, the free-space floor and the loadable-model-type
+    /// check (#2485) installed on its downloader.
     static func budgetedUpgradePrefetcher(
         _ benchmarker: AutotuneRecommendationBenchmarker?,
         resolvedConfig: AppConfig?,
@@ -2406,8 +2443,11 @@ struct AutotuneCommand: AsyncParsableCommand {
         var resolver = benchmarker?.artifactResolver ?? CachedModelArtifactResolver.forConfig(resolvedConfig)
         let capBytes = AutotuneModelUpgrade.runDownloadCapBytes(memoryGB: memoryGB)
         resolver.downloader.runDownloadBudget = RunDownloadBudget(limitBytes: capBytes)
+        let floorBytes = AutotuneModelUpgrade.upgradeFreeSpaceFloorBytes(memoryGB: memoryGB)
+        resolver.downloader.freeSpaceReserveBytes = floorBytes
+        resolver.downloader.loadableModelType = { await ModelRuntime.probeLoadsModelType($0, modelID: $1) }
         FileHandle.standardError.write(Data(
-            "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB\n".utf8
+            "model_upgrade: this run downloads at most \(String(format: "%.1f", Double(capBytes) / 1_000_000_000)) GB and leaves at least \(String(format: "%.1f", Double(floorBytes) / 1_000_000_000)) GB free\n".utf8
         ))
         var prefetcher = benchmarker ?? AutotuneRecommendationBenchmarker()
         prefetcher.artifactResolver = resolver

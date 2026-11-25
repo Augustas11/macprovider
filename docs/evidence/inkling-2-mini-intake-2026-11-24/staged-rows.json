@@ -32,11 +32,11 @@
           }
         },
         "min_bandwidth_tier": "C",
-        "min_ram_gb": 32,
+        "min_ram_gb": 28,
         "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
         "model_revision": "0000000000000000000000000000000000000000",
         "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-        "notes": "listed (#2467): uncensored Inkling-2-Mini. Artifact aug11/Inkling-2-Mini-oQ4e-mtp-uncensored: mlx-community/Inkling-2-Mini-oQ4e-mtp at 3eea0427 (the thinkingmachines/inkling-2-mini artifact) with the attention output projections of OpenUncensored/Inkling-2-Mini-Uncensored at 4e5f06d7 (20 attn.wo_ud tensors, the only tensors that differ from thinkingmachines/Inkling-2-Mini at b85c3cfa) re-quantized in the base's attn.o_proj format (affine 8-bit g64); every other tensor and file byte-identical to the base except the model card (scripts/lab/2467/job-inkling2-uncensored.sh). Text-only through the Swift inkling2 port, as the base row; the bundled DSpark draft is not used. Placement and price as the base row: class-30b-moe, own labelled rate row openuncensored/inkling-2-mini-uncensored at the thinkingmachines/inkling-2-mini price (60000 / 15000 / 240000 credits per Mtok), as the abliterated rows carry their bases' prices. min_ram_gb=32, as the base. License: Apache-2.0 (thinkingmachines/Inkling-2-Mini, OpenUncensored/Inkling-2-Mini-Uncensored and mlx-community/Inkling-2-Mini-oQ4e-mtp), with the base model's Thinking Machines Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which covers modified versions and makes the operator responsible for its users' compliance; operator decision 2026-11-24 to list.",
+        "notes": "listed (#2467): uncensored Inkling-2-Mini. Artifact aug11/Inkling-2-Mini-oQ4e-mtp-uncensored: mlx-community/Inkling-2-Mini-oQ4e-mtp at 3eea0427 (the thinkingmachines/inkling-2-mini artifact) with the attention output projections of OpenUncensored/Inkling-2-Mini-Uncensored at 4e5f06d7 (20 attn.wo_ud tensors, the only tensors that differ from thinkingmachines/Inkling-2-Mini at b85c3cfa) re-quantized in the base's attn.o_proj format (affine 8-bit g64); every other tensor and file byte-identical to the base except the model card (scripts/lab/2467/job-inkling2-uncensored.sh). Text-only through the Swift inkling2 port, as the base row; the bundled DSpark draft is not used. Placement and price as the base row: class-30b-moe, own labelled rate row openuncensored/inkling-2-mini-uncensored at the thinkingmachines/inkling-2-mini price (60000 / 15000 / 240000 credits per Mtok), as the abliterated rows carry their bases' prices. min_ram_gb=28, as the base. License: Apache-2.0 (thinkingmachines/Inkling-2-Mini, OpenUncensored/Inkling-2-Mini-Uncensored and mlx-community/Inkling-2-Mini-oQ4e-mtp), with the base model's Thinking Machines Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which covers modified versions and makes the operator responsible for its users' compliance; operator decision 2026-11-24 to list.",
         "runtime_status": "listed"
       },
       "artifact_source_entry": {
@@ -47,7 +47,7 @@
             ],
             "hash": "0000000000000000000000000000000000000000000000000000000000000000",
             "hash_algorithm": "macprovider.snapshot-manifest.v1",
-            "min_ram_gb": 32,
+            "min_ram_gb": 28,
             "notes": "Uncensored Inkling-2-Mini (#2467): the attention output projections of OpenUncensored/Inkling-2-Mini-Uncensored at 4e5f06d7 (source snapshot manifest 050f1cec, committed beside this file) re-quantized into mlx-community/Inkling-2-Mini-oQ4e-mtp at 3eea0427 (oMLX v0.8.1 oQ4e, 15 files, 4 weight shards plus mtp.safetensors). Same quantization, shapes and dtypes as the base artifact. The source's edit.pt (a PyTorch pickle) was never downloaded or loaded. Hash, size and revision are placeholders until the publish step; flip verification_status to verified (verified_at = cut date) once the pinned CLI loads it through the inkling2 port. License: Apache-2.0 (thinkingmachines/Inkling-2-Mini, OpenUncensored/Inkling-2-Mini-Uncensored and mlx-community/Inkling-2-Mini-oQ4e-mtp), with the base model's Thinking Machines Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which covers modified versions and makes the operator responsible for its users' compliance; operator decision 2026-11-24 to list.",
             "quantization": "oq4e-nvfp4-experts-affine4-affine8-mixed",
             "runtime_format": "mlx_safetensors",
@@ -91,7 +91,7 @@
       "tier2_catalog_model": {
         "artifact_kind": "mlx_weight_file",
         "hash_scope": "macprovider.snapshot-manifest.v1",
-        "min_ram_gb": 32,
+        "min_ram_gb": 28,
         "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
         "notes": "Buyer-serving candidate openuncensored/inkling-2-mini-uncensored; identity from signed SPEC-023 row.",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -99,7 +99,7 @@
       },
       "tier2_identity_binding_model": {
         "catalog_key": "openuncensored/inkling-2-mini-uncensored",
-        "min_ram_gb": 32,
+        "min_ram_gb": 28,
         "model_id": "aug11/Inkling-2-Mini-oQ4e-mtp-uncensored",
         "model_revision": "0000000000000000000000000000000000000000",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000"

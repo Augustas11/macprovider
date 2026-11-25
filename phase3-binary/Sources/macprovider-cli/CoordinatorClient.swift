@@ -801,6 +801,13 @@ actor CoordinatorClient {
     /// Like every accepted session, this hold reconnects without restarting
     /// the process when coordinator transport liveness is lost.
     private var activeBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
+    /// Issue #2497: when an unconfirmed readiness read first deferred its
+    /// reconnect because requests were in flight; nil when none is deferred.
+    private var readinessReconnectDeferredSince: Date?
+    /// Longest a reconnect waits for in-flight requests (#2497): past it the
+    /// socket closes even with requests running, so a coordinator that keeps
+    /// routing to an unconfirmed session cannot hold it open forever.
+    static let readinessReconnectInFlightDeferralLimitSeconds: TimeInterval = 900
     private var admissionPendingHoldActive: Bool { activeBuyerServingHold != nil }
     private var lastHeartbeatSuccessNanoseconds: UInt64 = 0
     private let inboundLiveness = CoordinatorInboundLiveness()
@@ -6496,6 +6503,7 @@ actor CoordinatorClient {
         switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
         case .confirmed:
             await providerStatus.clearFirstTokenStallAwaitingReadiness()
+            readinessReconnectDeferredSince = nil
             if let endedHold = activeBuyerServingHold {
                 activeBuyerServingHold = nil
                 let ended = Self.buyerServingHoldEnded(endedHold)
@@ -6535,6 +6543,27 @@ actor CoordinatorClient {
             if await providerStatus.firstTokenStallExplainsUnconfirmedReadiness() {
                 return false
             }
+            // Issue #2497: a provider busy with a long prefill answers the
+            // coordinator's probes late and reads unconfirmed; closing the
+            // socket then fails every forwarded request mid-stream
+            // (ws_dead_mid_request). The coordinator routes nothing new to an
+            // unconfirmed provider, so the requests drain and the next poll
+            // with none in flight reconnects.
+            let inFlight = await providerStatus.requestsInFlightCount()
+            let now = Date()
+            if inFlight > 0 {
+                if let since = readinessReconnectDeferredSince {
+                    if now.timeIntervalSince(since) < Self.readinessReconnectInFlightDeferralLimitSeconds {
+                        return false
+                    }
+                    print("Coordinator buyer-serving readiness still not confirmed after \(Int(Self.readinessReconnectInFlightDeferralLimitSeconds)) s with \(inFlight) request(s) in flight; reconnecting")
+                } else {
+                    readinessReconnectDeferredSince = now
+                    print("Coordinator buyer-serving readiness was not confirmed; reconnect deferred until \(inFlight) in-flight request(s) end")
+                    return false
+                }
+            }
+            readinessReconnectDeferredSince = nil
             activeBuyerServingHold = nil
             _ = try? recordLifecycleTransition(
                 to: .locallyReadyConnecting,

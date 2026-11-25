@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.45
+version: v0.22.46
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,24 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.46 (2026-11-24, Related: #2485, #2494)** — §9.4 `SPEC-023-R029`: the
+  upgrade no longer leaves candidate weights on disk. Cleanup removes a
+  removed row's hash-qualified prefetch snapshot in the Hugging Face cache
+  (`<revision>.macprovider-prefetch.<sha256>`) and the blobs it alone links,
+  beside its durable copy, and never a path or blob the served model uses
+  (step 6). A challenger whose probe fails is dropped and cleaned at once and
+  the run goes on; an incumbent failure still fails the run (step 4). A row
+  whose Hub `model_type` this build's probe cannot load is refused before
+  download, and every download leaves its size plus a free-space floor of
+  `max(memory_gb, 16)` GiB; the first row refused for space stops the run's
+  downloads and keeps what is done (step 2). Outside an upgrade, a
+  receipt-bound run requires only the single row of a single-row receipt;
+  each row of a larger receipt that fails its probe is skipped with a
+  diagnostic (step 4). A probe child is configured with its row's signed
+  `model_id` as `model_catalog_model_id`, so it picks the loader serving
+  picks; the Qwen2-VL row loads through the native-vision profile, and the
+  load-time check accepts the VLM registry for that row (steps 2 and 4).
+  AC-52 is amended.
 - **v0.22.45 (2026-11-16, Related: #2154, #2328)** — SPEC-023-R024: for the
   `gemma4_mtp_v1` family adapter only, `mlx_affine` names an MLX affine
   8-bit target and its unquantized bfloat16 embedded assistant, represented
@@ -3268,9 +3286,18 @@ use it.
    order: the incumbent first, then the rest by estimated §4 ordering score
    (the row's cached probe TPS on this Mac, else its catalog
    `min_sustained_tps`), so the likely winners are fetched first. Every
-   download MUST leave the advertised artifact size plus the downloader's
-   5 GiB free-space reserve available on its volumes, or it is refused before
-   any byte is written. One run MUST NOT download more than twice the Mac's
+   download MUST leave the advertised artifact size plus the upgrade's
+   free-space floor, `max(memory_gb, 16)` GiB, available on its volumes, or
+   it is refused before any byte is written. The floor is one memory's worth
+   (half the run cap), so after any run the disk still holds room for one
+   more model of the largest size the Mac serves. The first row refused for
+   free space stops the run's downloads: rows already fetched are kept, and
+   a later row is verified only when it is already on disk. A row whose
+   Hugging Face metadata names a `model_type` the probe's path loader cannot
+   build (the LLM type registry, or the VLM registry for
+   `prism_hadamard_qwen35` and for the native-vision profile's row) is
+   dropped before any byte is written; a row
+   without that metadata is downloaded as before. One run MUST NOT download more than twice the Mac's
    memory in total (`2 × memory_gb` GiB, summed over advertised snapshot
    sizes and charged before a snapshot's first byte). Every planned
    challenger fits in memory, so the cap always admits the best-ordered
@@ -3306,7 +3333,18 @@ use it.
 4. **Benchmark.** Probes use only the prefetched, verified artifacts, so
    nothing is downloaded while the incumbent is stopped. Each row runs the
    same Stage-1 admission as any recommendation: swap and thermal vetoes,
-   the buyer-TTFT ceiling and the cached-evidence binding.
+   the buyer-TTFT ceiling and the cached-evidence binding. A challenger
+   whose probe fails (a load failure, an infeasible or invalid measurement,
+   an unusable artifact) is dropped with a diagnostic, its download is
+   removed at once under the step 6 rules, and the run probes the rest. A
+   failed incumbent probe fails the run. A dropped row has no benchmark, so
+   it is never eligible and the decision cannot switch to it. Outside an
+   upgrade the same applies to a receipt-bound run, where only the single
+   row of a single-row receipt is required. Each probe child is configured
+   with its row's signed `model_id` as `model_catalog_model_id` (and no
+   `model_catalog_key`), beside the verified artifact path and SHA-256, so
+   it selects the loader serving selects for that row: the native-vision
+   profile for Qwen2-VL, whose per-file pins stay the gate.
 5. **Decision.** The catalog bench gate is hard for the automatic switch:
    a row whose measured sustained TPS is below its `bench_gate.min_sustained_tps`
    (or not finite), or whose 4k TTFT exceeds `bench_gate.max_4k_ttft_ms`,
@@ -3350,7 +3388,12 @@ use it.
    limited to the row's exact durable content-addressed path under the
    current signed row and never touches a path a kept row uses; the
    incumbent's artifact and any copy that existed before the run are never
-   removed.
+   removed. With that durable copy goes the row's prefetch snapshot in the
+   Hugging Face cache (`<revision>.macprovider-prefetch.<sha256>`, which the
+   same download created), every blob it links that no other snapshot of the
+   repo links, and the repo directories it leaves empty. Nothing at, inside
+   or above a path the config serves from (`model_artifact_path` or an
+   absolute `model`) is removed, nor a blob such a path links.
 7. **Pins.** The upgrade never moves a provider whose config has
    `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
    (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
@@ -3575,7 +3618,14 @@ selects it; when no challenger clears the gate the incumbent is kept.
 Prefetch fetches the incumbent first and then rows by estimated score, a
 download without room for its size plus the free-space reserve is refused
 and leaves no directory, and after the decision only the run's own
-unselected `downloaded_by_run` snapshots are removed. The provider is
+unselected `downloaded_by_run` snapshots are removed, each with its
+Hugging Face prefetch snapshot and the blobs only it links, never a path or
+blob the served model uses. An upgrade download leaves its size plus
+`max(memory_gb, 16)` GiB free, the first row refused for space stops the
+downloads and keeps the rows already fetched, and a row whose Hub
+`model_type` the probe cannot load is refused before download. A failed
+challenger probe drops and cleans that row and the run continues; a failed
+incumbent probe fails the run. The provider is
 stopped only after it reports idle, and it is restarted after success,
 failure and interrupt. A run whose downloads reach `2 × memory_gb` GiB drops
 the remaining rows and keeps the incumbent's verification. An unattended run

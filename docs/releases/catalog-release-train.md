@@ -15,6 +15,15 @@ another gate.
 
 ## Current state — 2026-11-25
 
+- **Signed, in review:** `published-2026-11-25-inkling-2-mini-32gb-v296` (Related: #2494, #2467)
+  lowers `thinkingmachines/inkling-2-mini` `min_ram_gb` from 32 to 28 (candidate row and its
+  `mlx-oq4e-mtp` artifact) so a 32 GB Mac can be recommended it: 16.87 GB of weights fits under the
+  planner's 4 GB margin, the same tier as `qwen/qwen3.6-35b-a3b` (20.4 GB, 28). No tier change, so no
+  intake decision. The Tier-2 catalog is re-signed with `catalog-key-2026q2` as
+  `macprovider-tier2-model-catalog-2026-11-25-inkling-2-mini-32gb-v1` (31 models; only Inkling 2
+  Mini's `min_ram_gb` changes, 32 to 28). Prices and native-MTP tuples are unchanged; content-gate
+  lane `catalog-content`. Live steps after merge: `scripts/ops/catalog-activate.sh status`, then
+  `next --run`.
 - **Live (2026-11-25 03:53):** `published-2026-11-24-inkling-2-mini-recommendable-v296` ([PR 2492](https://github.com/Augustas11/macprovider/pull/2492); Related: #2467) promotes `thinkingmachines/inkling-2-mini` from `listed` to `recommendable`, activated through `scripts/ops/catalog-activate.sh` (canary admitted, 600 s watch clean, gateway proof passed). Prices, Tier-2 catalog and native-MTP tuples are unchanged. Owed once a provider on CLI 1.8.299 serves `mlx-community/Inkling-2-Mini-oQ4e-mtp`: evidence (e) (`buyer_serving_e2e`) and its buyer-UX conformance run (`buyer_ux_conformance_owed`). Still owed from earlier releases: buyer-UX conformance records for DeepSeek V4-Flash abliterated and MiniMax M3.1 Flash.
 - **Weight mirror (2026-11-25, Related: #2480):** the GLM-5.3-Flash pinned Hugging Face revision was deleted upstream. `models.malibu.tech` now serves that snapshot under its unchanged signed hash `7299b6a7…48f9` (manifest hosted on the site, files redirected to a byte-identical pinned copy), so fresh installs resolve through the CLI's mirror fallback. No catalog change. A revision sweep of the 32 pinned artifact revisions found no other missing one.
 - **Previous (2026-11-25):** `published-2026-11-24-daisyrose-27b-listed-v296` (Inkling 2 Mini rows from
