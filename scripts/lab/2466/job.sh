@@ -342,7 +342,7 @@ serve_quality() {  # serve_quality LABEL MODEL_ID DIR SHA
     log "QUALITY_SERVE_UNAVAILABLE $m rc=$rc (5 exited, 4 stalled): $(tail -n 3 "$s/serve.err" | tr '\n' ' ' | cut -c1-300)"
     stop_serve; return 1
   fi
-  /usr/bin/python3 -I "$TOOLS/quality.py" serve --port "$PORT" --model "$mid" --label "$m" --run-id "$RUN_SLUG" \
+  /usr/bin/python3 -I "$TOOLS/quality.py" serve --port "$PORT" --model "$mid" --label "$m" --run-id "$RUN_SLUG" --reasoning-effort none \
     --out "$RES/quality/$m-raw.jsonl" > "$RES/quality/$m.log" 2>&1; rc=$?
   grep '^QUALITY_REQ ' "$RES/quality/$m.log"
   stop_serve

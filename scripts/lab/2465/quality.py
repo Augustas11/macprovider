@@ -61,7 +61,12 @@ def cmd_serve(a):
         out.write(json.dumps({"kind": "meta", "path": "serve", "label": a.label, "model": a.model, "workload": ident}) + "\n")
         failed = 0
         for r in rows:
-            req = urllib.request.Request(f"http://127.0.0.1:{a.port}{r['path']}", data=json.dumps(r["body"]).encode(),
+            body = dict(r["body"])
+            # The reference renders with enable_thinking=False; `none` is the serve-side match
+            # (SPEC-018-R010 turns GLM thinking off for it), so both paths answer the same prompt.
+            if a.reasoning_effort:
+                body["reasoning_effort"] = a.reasoning_effort
+            req = urllib.request.Request(f"http://127.0.0.1:{a.port}{r['path']}", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", **r["headers"]}, method="POST")
             rec = {"kind": "case", "case_id": r["case_id"], "request_id": r["request_id"], "max_tokens": r["body"]["max_tokens"]}
             t0 = time.time()
@@ -199,6 +204,7 @@ def main():
     s.add_argument("--port", type=int, required=True)
     s.add_argument("--model", required=True)
     s.add_argument("--timeout", type=float, default=1800)
+    s.add_argument("--reasoning-effort", default=None, help="sent as reasoning_effort on every case (default: not sent)")
     r = sub.add_parser("reference")
     r.add_argument("--model-dir", required=True)
     r.add_argument("--loader", choices=("mlx-lm", "mlx-vlm"), required=True)
