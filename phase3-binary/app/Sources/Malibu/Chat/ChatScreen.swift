@@ -14,6 +14,10 @@ struct ChatScreen: View {
     /// The turn whose prompt is in the composer, waiting to be sent again.
     @State private var editingTurn: UUID?
     @FocusState private var composerFocused: Bool
+    @StateObject private var dictation = ChatDictation()
+    @StateObject private var speaker = ChatSpeaker()
+    @State private var shareHold = ChatShareHold()
+    @State private var announcedAnswer = ""
 
     private var providerIdentity: ChatProviderIdentity { ChatProviderIdentity(agent.snapshot) }
     var body: some View {
@@ -33,7 +37,25 @@ struct ChatScreen: View {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
             }
         }
-        .onDisappear { store.close() }
+        .onDisappear {
+            dictation.stop()
+            speaker.stop()
+            store.close()
+        }
+        .onChange(of: store.isRunning) { was, now in
+            guard was, !now, let turn = store.turns.last, turn.complete, !turn.answer.isEmpty else { return }
+            let announcement = "Answer. " + String(turn.answer.prefix(400))
+            guard announcement != announcedAnswer else { return }
+            announcedAnswer = announcement
+            AccessibilityNotification.Announcement(Text(verbatim: announcement)).post()
+        }
+        .task(id: speaker.speakingID) {
+            guard speaker.speakingID != nil else { return }
+            while !Task.isCancelled && speaker.speakingID != nil {
+                try? await Task.sleep(for: .milliseconds(200))
+                speaker.noteIfFinished()
+            }
+        }
     }
 
     private var header: some View {
@@ -65,9 +87,22 @@ struct ChatScreen: View {
                     .popover(isPresented: $showingHistory, arrowEdge: .bottom) { historyList }
                     .accessibilityIdentifier("malibu.chat.history")
                 Button("New chat", systemImage: "square.and.pencil") {
-                    editingTurn = nil; draft = ""; store.newConversation()
+                    dictation.stop()
+                    speaker.stop()
+                    announcedAnswer = ""
+                    editingTurn = nil
+                    draft = ""
+                    store.newConversation()
                 }
+                    .keyboardShortcut("n", modifiers: .command)
                     .accessibilityIdentifier("malibu.chat.new")
+                Button("Export", systemImage: "square.and.arrow.down") { exportChat() }
+                    .disabled(store.isRunning || store.turns.isEmpty)
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .accessibilityIdentifier("malibu.chat.export")
+                Button("Share", systemImage: "square.and.arrow.up") { shareChat() }
+                    .disabled(store.isRunning || store.turns.isEmpty)
+                    .accessibilityIdentifier("malibu.chat.share")
             }
             HStack(spacing: 14) {
                 Toggle("Agent mode", isOn: $store.agentMode)
@@ -189,7 +224,10 @@ struct ChatScreen: View {
                                     }
                                     .accessibilityIdentifier("malibu.chat.thinking")
                                 }
-                                if !turn.answer.isEmpty { message(label: "Malibu", text: turn.answer, user: false) }
+                                if !turn.answer.isEmpty {
+                                    message(label: "Malibu", text: turn.answer, user: false, streaming: !turn.complete)
+                                }
+                                readAloud(turn)
                                 ForEach(Array(turn.citations.enumerated()), id: \.offset) { _, name in
                                     Text(name)
                                         .font(.caption)
@@ -227,7 +265,7 @@ struct ChatScreen: View {
         }
     }
 
-    private func message(label: String, text: String, user: Bool) -> some View {
+    private func message(label: String, text: String, user: Bool, streaming: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if user {
@@ -241,6 +279,28 @@ struct ChatScreen: View {
         .background(user ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
+        .modifier(ChatStreamingTrait(enabled: streaming))
+    }
+
+    @ViewBuilder
+    private func readAloud(_ turn: ChatTurn) -> some View {
+        if turn.complete && !turn.answer.isEmpty {
+            if turn.id == store.turns.last?.id {
+                speakControl(turn).keyboardShortcut("r", modifiers: [.command, .shift])
+            } else {
+                speakControl(turn)
+            }
+        }
+    }
+
+    private func speakControl(_ turn: ChatTurn) -> some View {
+        Button(speaker.speakingID == turn.id ? "Stop reading" : "Read aloud",
+               systemImage: speaker.speakingID == turn.id ? "speaker.slash" : "speaker.wave.2") {
+            speaker.toggle(turn.answer, id: turn.id)
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .accessibilityIdentifier("malibu.chat.speak")
     }
 
     private var composer: some View {
@@ -278,6 +338,20 @@ struct ChatScreen: View {
                 }
             }
             HStack(alignment: .bottom, spacing: 12) {
+                Button("Focus message") { composerFocused = true }
+                    .keyboardShortcut("l", modifiers: .command)
+                    .accessibilityIdentifier("malibu.chat.focus")
+                    .accessibilityHidden(true)
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                Button(dictation.isListening ? "Stop dictation" : "Dictate",
+                       systemImage: dictation.isListening ? "mic.fill" : "mic") {
+                    dictation.toggle(base: draft, onText: { draft = $0 }, onFailure: { store.showNotice($0) })
+                }
+                    .labelStyle(.iconOnly)
+                    .disabled(store.isRunning)
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .accessibilityIdentifier("malibu.chat.dictate")
                 Button("Attach", systemImage: "paperclip") { attachFiles() }
                     .labelStyle(.iconOnly)
                     .disabled(store.isRunning)
@@ -339,7 +413,10 @@ struct ChatScreen: View {
                 List(store.history) { chat in
                     HStack(spacing: 8) {
                         Button {
-                            store.openConversation(chat.id); showingHistory = false
+                            dictation.stop()
+                            speaker.stop()
+                            store.openConversation(chat.id)
+                            showingHistory = false
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(chat.title)
@@ -383,6 +460,8 @@ struct ChatScreen: View {
             && store.capability != nil && !store.isChecking
     }
     private func send() {
+        dictation.stop()
+        speaker.stop()
         if let editingTurn {
             store.editAndResend(editingTurn, prompt: draft)
             self.editingTurn = nil
@@ -391,6 +470,36 @@ struct ChatScreen: View {
         }
         if store.isRunning { draft = "" }
         composerFocused = true
+    }
+    private func exportChat() {
+        guard let markdown = transcriptText() else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "chat.md"
+        panel.prompt = "Export"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try ChatTranscript.write(markdown, to: url) }
+        catch { store.showNotice(ChatTranscript.exportFailed) }
+    }
+    private func shareChat() {
+        guard let markdown = transcriptText() else { return }
+        guard let view = NSApp.keyWindow?.contentView else {
+            store.showNotice(ChatTranscript.exportFailed)
+            return
+        }
+        let picker = NSSharingServicePicker(items: [markdown])
+        shareHold.picker = picker
+        picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+    }
+    private func transcriptText() -> String? {
+        let prompt = store.turns.first(where: { !$0.prompt.isEmpty })?.prompt ?? ""
+        let markdown = ChatTranscript.markdown(title: SavedChat.title(from: prompt), turns: store.turns)
+        guard markdown.utf8.count <= ChatTranscript.byteLimit else {
+            store.showNotice(ChatTranscript.exportFailed)
+            return nil
+        }
+        return markdown
     }
     private func attachFiles() {
         let panel = NSOpenPanel()
@@ -414,6 +523,19 @@ struct ChatScreen: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose folder"
         if panel.runModal() == .OK, let url = panel.url { store.selectKnowledge(url) }
+    }
+}
+
+private final class ChatShareHold: @unchecked Sendable {
+    var picker: NSSharingServicePicker?
+}
+
+private struct ChatStreamingTrait: ViewModifier {
+    var enabled: Bool
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled { content.accessibilityAddTraits(.updatesFrequently) }
+        else { content }
     }
 }
 

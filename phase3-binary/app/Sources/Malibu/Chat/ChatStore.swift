@@ -275,6 +275,9 @@ final class ChatStore: ObservableObject {
     /// Saves the current chat (it is saved after every turn) and starts an empty one.
     func newConversation() { stop(); saveCurrent(); resetConversation(); notice = nil }
 
+    /// A blocked action the screen can explain. The store owns the notice text.
+    func showNotice(_ text: String) { notice = text }
+
     func openConversation(_ id: UUID) {
         guard let historyStore, id != conversationID || turns.isEmpty else { return }
         stop()
