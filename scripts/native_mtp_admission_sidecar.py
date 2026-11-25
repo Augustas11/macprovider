@@ -133,6 +133,8 @@ INT_MAX = (1 << 63) - 1
 # entries (256 before); GLM-5.3-Flash carries 554 per-module overrides.
 MAX_QUANTIZATION_EXCEPTIONS = 1024
 MAX_PROPOSAL_DEPTH = 6
+# SPEC-048 0.1.130: serial native tuples serve one row on the serial path.
+SERIAL_NATIVE_ADAPTERS = {"inkling2_dspark_v1"}
 
 
 class SidecarError(ValueError):
@@ -208,10 +210,10 @@ def _timestamp(value: object, path: str) -> datetime:
     return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def validate_quantization(q: object, path: str) -> None:
+def validate_quantization(q: object, path: str, adapter: str = "") -> None:
     q = _exact_keys(q, QUANTIZATION_KEYS, path)
     kind = q["kind"]
-    if kind not in {"base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8"}:
+    if kind not in {"base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8", "mlx_oq4e"}:
         fail(f"{path}.kind", "unsupported")
     _sorted_unique(q["unquantized_exceptions"], f"{path}.unquantized_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
     _sorted_unique(q["per_layer_exceptions"], f"{path}.per_layer_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
@@ -230,6 +232,20 @@ def validate_quantization(q: object, path: str) -> None:
                 fail(f"{path}.{key}", f"must be {value!r} for mlx_affine")
         if q["block_size_elements"] not in (32, 64, 128) or isinstance(q["block_size_elements"], bool):
             fail(f"{path}.block_size_elements", "must be 32, 64, or 128 for mlx_affine")
+    elif kind == "mlx_oq4e":
+        # SPEC-048-R002 0.1.130: the Inkling 2 oQ4e mixed target, bf16 draft.
+        if adapter != "inkling2_dspark_v1":
+            fail(f"{path}.kind", "mlx_oq4e is admitted for inkling2_dspark_v1 only")
+        expected = {
+            "packed_data_dtype": "uint32", "packed_layout": "mlx_array_native_v1",
+            "scale_dtype": "bfloat16", "scale_layout": "per_block",
+            "block_size_elements": 64, "alignment_bytes": None, "padding_rule": "none",
+        }
+        for key, value in expected.items():
+            if q[key] != value or isinstance(q[key], bool):
+                fail(f"{path}.{key}", f"must be {value!r} for mlx_oq4e")
+        if q["unquantized_exceptions"] or q["per_layer_exceptions"]:
+            fail(path, "mlx_oq4e exception arrays must be empty")
     elif kind == "mlx_mxfp4_mxfp8":
         expected = {
             "packed_data_dtype": "uint32", "packed_layout": "mlx_array_native_v1",
@@ -280,7 +296,9 @@ def validate_entry(entry: object, path: str) -> dict:
     # SPEC-023-R024 / SPEC-048 0.1.23: a verify row (depth + 1 tokens) must stay
     # inside the fused MoE envelope of seven tokens per row.
     depth = _int(entry["proposal_depth"], f"{path}.proposal_depth", 1, MAX_PROPOSAL_DEPTH)
-    slots = _int(entry["qualified_slots"], f"{path}.qualified_slots", 2, 8)
+    serial = entry["mtp_family_adapter"] in SERIAL_NATIVE_ADAPTERS
+    slots = _int(entry["qualified_slots"], f"{path}.qualified_slots", 1, 1) if serial \
+        else _int(entry["qualified_slots"], f"{path}.qualified_slots", 2, 8)
     windows = entry["complete_window_bytes_by_depth"]
     if not isinstance(windows, list) or len(windows) != depth + 1:
         fail(f"{path}.complete_window_bytes_by_depth", "must have proposal_depth + 1 values")
@@ -304,12 +322,15 @@ def validate_entry(entry: object, path: str) -> dict:
     # SPEC-048 0.1.110: the Gemma 4 assistant runs one native row.
     if entry["mtp_family_adapter"] == "gemma4_mtp_v1" and bound > 1:
         fail(f"{path}.max_native_active_rows", "gemma4_mtp_v1 supports at most 1 native active row")
+    if serial and bound > 1:
+        fail(f"{path}.max_native_active_rows", f'{entry["mtp_family_adapter"]} supports at most 1 native active row')
     if bound > slots:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:
         fail(f"{path}.request_feature_profile", "unsupported")
     # DSpark is greedy-only; embedded layout does not restrict GLM sampling.
-    if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1" and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
+    if entry["mtp_family_adapter"] in {"deepseek_v4_dspark_v1", "inkling2_dspark_v1"} \
+            and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
         fail(f"{path}.request_feature_profile", f'{entry["mtp_family_adapter"]} is greedy only')
     if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1":
         if entry["mtp_head_count"] != 3:
@@ -318,6 +339,11 @@ def validate_entry(entry: object, path: str) -> dict:
             fail(f"{path}.proposal_depth", "deepseek_v4_dspark_v1 supports at most 5 proposals")
         if not isinstance(entry["quantization"], dict) or entry["quantization"].get("kind") != "mlx_mxfp4_mxfp8":
             fail(f"{path}.quantization.kind", "deepseek_v4_dspark_v1 requires mixed MX packing")
+    if entry["mtp_family_adapter"] == "inkling2_dspark_v1":
+        if entry["mtp_head_count"] != 3:
+            fail(f"{path}.mtp_head_count", "inkling2_dspark_v1 requires 3 draft layers")
+        if not isinstance(entry["quantization"], dict) or entry["quantization"].get("kind") != "mlx_oq4e":
+            fail(f"{path}.quantization.kind", "inkling2_dspark_v1 requires the oQ4e target")
     _int(entry["max_prompt_tokens"], f"{path}.max_prompt_tokens", 1, 1_048_576)
     low = _int(entry["decrease_threshold_ppm"], f"{path}.decrease_threshold_ppm", 0, 1_000_000)
     high = _int(entry["increase_threshold_ppm"], f"{path}.increase_threshold_ppm", 0, 1_000_000)
@@ -326,7 +352,7 @@ def validate_entry(entry: object, path: str) -> dict:
     _int(entry["max_verification_positions_per_committed_milli"],
          f"{path}.max_verification_positions_per_committed_milli", 1000, 4000)
     _int(entry["throughput_delta_ppm"], f"{path}.throughput_delta_ppm", -1_000_000, 1_000_000)
-    validate_quantization(entry["quantization"], f"{path}.quantization")
+    validate_quantization(entry["quantization"], f"{path}.quantization", entry["mtp_family_adapter"])
     baseline = _exact_keys(entry["ordinary_baseline"], BASELINE_KEYS, f"{path}.ordinary_baseline")
     if baseline["decode_path"] != "ordinary":
         fail(f"{path}.ordinary_baseline.decode_path", "must be ordinary")

@@ -4160,6 +4160,11 @@ maxTokens: 1,
         runtimeCacheClass: String,
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String? {
+        // SPEC-048 (0.1.130): Inkling 2 is not a paged-KV family; its only
+        // native tuple (`inkling2_dspark_v1`) is a serial one-row tuple.
+        if modelCapabilities.modelFamily == "inkling2" {
+            return NativeMTPAdmissionSidecar.serialNativeCacheClass
+        }
         guard !modelCapabilities.ordinaryHybridOnly else { return nil }
         if runtimeCacheClass == "KVCacheSimple" {
             return "paged_kv"
@@ -14348,15 +14353,19 @@ maxTokens: maxTokens,
     /// so this is reached only if an admission set appears after startup. A
     /// `mixed` process (v0.3.61) allows it: each native-admitted request
     /// runs the row-invariant route.
+    /// SPEC-048 (0.1.130): a serial-only process may load the drafter of a
+    /// serial-admitted adapter (`serialAdmitted`), whose rounds never batch
+    /// target rows; every other adapter is still refused there.
     nonisolated static func nativeMTPActivationRefusal(
         mode: NativeMTPMode,
         route: SmallMRoute,
-        mixed: Bool = SmallMRoute.processMixed
+        mixed: Bool = SmallMRoute.processMixed,
+        serialAdmitted: Bool = false
     ) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
         switch route {
         case .rowInvariant: return nil
-        case .serialOnly: return "small_m_route_serial_only"
+        case .serialOnly: return serialAdmitted ? nil : "small_m_route_serial_only"
         case .stockOrder: return mixed ? nil : "small_m_route_stock_order"
         }
     }
@@ -14387,7 +14396,10 @@ maxTokens: maxTokens,
             rejectionObserver(reasonCode)
             return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole, modelID: eventModelID)
         }
-        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
+        // A serial-only refusal waits for the signed adapter: a serial-admitted
+        // adapter may load there (SPEC-048 0.1.130); any other refusal is final.
+        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route),
+           nativeMTPActivationRefusal(mode: mode, route: route, serialAdmitted: true) != nil {
             return reject(reasonCode: reasonCode, artifactRole: "runtime")
         }
         guard let targetModelRevision else {
@@ -14462,6 +14474,13 @@ maxTokens: maxTokens,
                 resolvedArtifactAuthority: resolvedArtifactAuthority,
                 captureArtifacts: true
             )
+            if let reasonCode = nativeMTPActivationRefusal(
+                mode: mode,
+                route: route,
+                serialAdmitted: nativeMTPSerialAdmitted(familyAdapter: admissionCapability.familyAdapter)
+            ) {
+                return reject(reasonCode: reasonCode, artifactRole: "runtime")
+            }
             guard nativeMTPAdmissionMatchesRunningBuild(
                 admissionCapability,
                 targetModelRevision: targetModelRevision,
@@ -14544,11 +14563,21 @@ maxTokens: maxTokens,
                 targetDirectory: capturedArtifacts.targetURL,
                 drafterDirectory: drafterDirectory,
                 tokenizerLoader: capturedTokenizerLoader,
-                maximumProposalDepth: admissionCapability.maxProposalDepth
+                maximumProposalDepth: admissionCapability.maxProposalDepth,
+                targetContainer: capturedTargetContainer
             )
             try capturedArtifacts.revalidateAfterLoad()
+            // A serial native drafter is stateful but not packed (it never
+            // drafts batched rows); every other adapter keeps the packed cast.
+            let serialAdmitted = nativeMTPSerialAdmitted(familyAdapter: admissionCapability.familyAdapter)
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
-                let stateLayerCount = (context.model as? any MTPPackedStatefulDrafterModel)?
+                let stateful: (any StatefulMTPDrafterModel)?
+                if serialAdmitted {
+                    stateful = context.model as? any StatefulMTPDrafterModel
+                } else {
+                    stateful = context.model as? any MTPPackedStatefulDrafterModel
+                }
+                let stateLayerCount = stateful?
                     .makeState(parameters: nil)
                     .cache
                     .count
@@ -15072,6 +15101,15 @@ maxTokens: maxTokens,
                 && representation.manifestSHA256 == quantization.representationManifestSHA256
                 && quantization.perLayerExceptions.isEmpty
                 && quantization.unquantizedExceptions.isEmpty
+        case ("mlx_oq4e", "bf16"):
+            // SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: oQ4e target, bf16 draft.
+            guard admissionCapability.familyAdapter == NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter,
+                  let representation = try? NativeMTPArtifactObserver.inkling2DSparkRepresentation(for: observation)
+            else { return false }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && quantization.perLayerExceptions.isEmpty
+                && quantization.unquantizedExceptions.isEmpty
         case ("bf16", "bf16"):
             guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
                 return false
@@ -15123,12 +15161,13 @@ maxTokens: maxTokens,
         NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
         NativeMTPAdapterLayout(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
         NativeMTPAdapterLayout(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        NativeMTPAdapterLayout(familyAdapter: "inkling2_dspark_v1", sourceLayout: "checkpoint_mtp"),
     ]
 
     static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
         switch familyAdapter {
         case "qwen3_5_mtp_v1": .separateArtifact
-        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1": .targetEmbedded
+        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1", "inkling2_dspark_v1": .targetEmbedded
         case "gemma4_mtp_v1": .targetEmbeddedAssistant
         default: nil
         }
@@ -15137,6 +15176,17 @@ maxTokens: maxTokens,
     /// Gemma 4 assistant `block_size` 4: one bonus token plus at most three
     /// drafts from one position (SPEC-048 0.1.110, `gemma4_mtp_v1`).
     static let gemma4NativeMTPMaximumProposalDepth = 3
+
+    /// Inkling 2 DSpark `block_size` 8: one bonus token plus at most seven
+    /// drafts per round from its three draft layers (SPEC-048 0.1.130,
+    /// `inkling2_dspark_v1`).
+    static let inkling2NativeMTPMaximumProposalDepth = 7
+
+    /// SPEC-048 (0.1.130): adapters whose native tuple serves one row on the
+    /// serial path. Every other adapter needs the continuous-batch scheduler.
+    nonisolated static func nativeMTPSerialAdmitted(familyAdapter: String?) -> Bool {
+        familyAdapter.map(NativeMTPAdmissionSidecar.isSerialNativeFamilyAdapter) ?? false
+    }
 
     /// Whether the signed proposal depth fits the adapter. Qwen and GLM draft
     /// one token per prediction layer; DeepSeek DSpark has exactly three
@@ -15149,6 +15199,9 @@ maxTokens: maxTokens,
         maxProposalDepth: Int
     ) -> Bool {
         if familyAdapter == "deepseek_v4_dspark_v1" { return predictionLayerCount == 3 }
+        if familyAdapter == "inkling2_dspark_v1" {
+            return predictionLayerCount == 3 && (1...inkling2NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
+        }
         return switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .targetEmbeddedAssistant:
             (1...gemma4NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
@@ -15191,6 +15244,12 @@ maxTokens: maxTokens,
         else { return false }
         switch nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) {
         case .targetEmbedded:
+            if layout.familyAdapter == "inkling2_dspark_v1" {
+                // Serial native tuple: no paged K/V topology; the draft binds
+                // to the loaded Inkling 2 target and the serial self-check
+                // proves exactness in this process (SPEC-048 0.1.130).
+                return modelCapabilities.modelFamily == "inkling2"
+            }
             if layout.familyAdapter == "deepseek_v4_dspark_v1" {
                 return deepseekV4NativeMTPTopologySupported(
                     maxProposalDepth: admissionCapability.maxProposalDepth,
@@ -15288,6 +15347,12 @@ maxTokens: maxTokens,
         familyAdapter: String,
         targetContainer: ModelContainer
     ) async -> Bool {
+        if familyAdapter == "inkling2_dspark_v1" {
+            guard let directory = try? await targetContainer.modelDirectory else { return false }
+            let isInkling2 = await targetContainer.perform { context in context.model is Inkling2Model }
+            return isInkling2 && FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(Inkling2DSparkDraftModel.embeddedWeightFileName).path)
+        }
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact: return true
         case nil: return false
@@ -15318,8 +15383,23 @@ maxTokens: maxTokens,
         targetDirectory: URL,
         drafterDirectory: URL,
         tokenizerLoader: any TokenizerLoader,
-        maximumProposalDepth: Int? = nil
+        maximumProposalDepth: Int? = nil,
+        targetContainer: ModelContainer? = nil
     ) async throws -> MTPDrafterContainer {
+        if familyAdapter == "inkling2_dspark_v1" {
+            // `inkling2_dspark_v1`: the draft's own `mtp.safetensors` beside the
+            // target shards, bound to the loaded target (its folded Markov
+            // projection reads the target's LM head).
+            guard let targetContainer else {
+                throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+            }
+            return try await targetContainer.perform { context -> MTPDrafterContainer in
+                guard let target = context.model as? Inkling2Model else {
+                    throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+                }
+                return try Inkling2DSparkDraftModel.loadEmbeddedContainer(targetDirectory: targetDirectory, target: target)
+            }
+        }
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact:
             await Qwen35TextMTPRegistration.register()
@@ -15365,7 +15445,10 @@ maxTokens: maxTokens,
     private static func nativeMTPExpectedStateClass(
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String {
-        modelCapabilities.hybridDecoderArchitectureVerified && modelCapabilities.slidingWindowAttention == nil
+        // Inkling 2 (SPEC-048 0.1.130): attention rings plus short-convolution
+        // tails, which the fork stages and rewinds per round.
+        if modelCapabilities.modelFamily == "inkling2" { return "hybrid_stageable_rewindable" }
+        return modelCapabilities.hybridDecoderArchitectureVerified && modelCapabilities.slidingWindowAttention == nil
             ? "hybrid_stageable_rewindable"
             : "stageable_rewindable"
     }

@@ -115,6 +115,32 @@ def dspark_tuple():
     return value
 
 
+def inkling_tuple():
+    """A stand-in Inkling-2-Mini serial native tuple (SPEC-048 0.1.130
+    inkling2_dspark_v1): oQ4e target, bf16 DSpark draft, one row."""
+    value = glm_tuple()
+    entry = value["entry"]
+    entry["model_key"] = "thinkingmachines/inkling-2-mini"
+    entry["mtp_family_adapter"] = "inkling2_dspark_v1"
+    entry["mtp_state_class"] = "hybrid_stageable_rewindable"
+    entry["cache_state_classes"] = ["hybrid_stageable_rewindable"]
+    entry["mtp_head_count"] = 3
+    entry["proposal_depth"] = 6
+    entry["complete_window_bytes_by_depth"] = [1024 * (i + 1) for i in range(7)]
+    entry["qualified_slots"] = 1
+    entry["ordinary_baseline"]["qualified_slots"] = 1
+    entry["max_native_active_rows"] = 1
+    entry["quantization"] = {
+        "kind": "mlx_oq4e", "packed_data_dtype": "uint32",
+        "packed_layout": "mlx_array_native_v1", "scale_dtype": "bfloat16",
+        "scale_layout": "per_block", "block_size_elements": 64,
+        "alignment_bytes": None, "padding_rule": "none",
+        "unquantized_exceptions": [], "per_layer_exceptions": [],
+        "representation_manifest_sha256": "6" * 64,
+    }
+    return value
+
+
 def projection_artifacts(tag):
     return {
         name: {"path": f"{tag}/{name}", "sha256": f"{index + 1:x}" * 64}
@@ -321,6 +347,37 @@ class DeepseekDSparkAdmissionTests(unittest.TestCase):
         self.assertEqual(entries[1:], controls)
         self.assertEqual(entries[0]["mtp_head_count"], 3)
         self.assertEqual(entries[0]["proposal_depth"], 5)
+
+    def test_inkling_serial_tuple_is_one_row_greedy_oq4e(self):
+        entry = json.loads(build(inkling_tuple(), release_input()))["entries"][0]
+        self.assertEqual(entry["mtp_family_adapter"], "inkling2_dspark_v1")
+        self.assertEqual(entry["qualified_slots"], 1)
+        self.assertEqual(entry["max_native_active_rows"], 1)
+        for key, value, reason in [
+            ("request_feature_profile", "native_mtp_sampled_text_v1", "greedy only"),
+            ("mtp_head_count", 2, "requires 3 draft layers"),
+            ("qualified_slots", 2, "qualified_slots"),
+        ]:
+            with self.subTest(key=key):
+                bad = inkling_tuple()
+                bad["entry"][key] = value
+                with self.assertRaisesRegex(SidecarError, reason):
+                    build(bad, release_input())
+        bad = inkling_tuple()
+        bad["entry"]["quantization"]["kind"] = "mlx_affine"
+        with self.assertRaisesRegex(SidecarError, "requires the oQ4e target"):
+            build(bad, release_input())
+
+    def test_oq4e_kind_and_one_slot_stay_inkling_only(self):
+        value = glm_tuple()
+        value["entry"]["quantization"] = inkling_tuple()["entry"]["quantization"]
+        with self.assertRaisesRegex(SidecarError, "inkling2_dspark_v1 only"):
+            build(value, release_input())
+        value = glm_tuple()
+        value["entry"]["qualified_slots"] = 1
+        value["entry"]["ordinary_baseline"]["qualified_slots"] = 1
+        with self.assertRaisesRegex(SidecarError, "qualified_slots"):
+            build(value, release_input())
 
     def test_dspark_rejects_sampled_profile_and_wrong_stage_count(self):
         for key, value, reason in [
