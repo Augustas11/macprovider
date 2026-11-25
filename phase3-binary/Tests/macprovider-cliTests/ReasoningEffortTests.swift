@@ -25,6 +25,7 @@ final class ReasoningEffortTests: XCTestCase {
             "openai/gpt-oss-20b", "mlx-community/gpt-oss-120b-4bit",
             "qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit",
             "radixark/daisyrose-27b", "mlx-community/DaisyRose-27B-4bit",
+            "hygaard/sage-s2.1-flash-oq4e-mtp",
         ]
         for model in models {
             for effort in ChatCompletionRequest.acceptedReasoningEfforts {
@@ -120,6 +121,13 @@ final class ReasoningEffortTests: XCTestCase {
                 XCTAssertEqual(try render(path, request: request(model: model, effort: effort)), low, "\(model): \(effort)")
             }
         }
+    }
+
+    func testSageS21FlashUsesGLMGrammarAndTurnsThinkingOffForNone() throws {
+        XCTAssertEqual(ToolCallGrammar.family(modelID: "hygaard/sage-s2.1-flash-oq4e-mtp"), .glm)
+        XCTAssertNil(ToolCallGrammar.family(modelID: "hygaard/sage-s2.1-flash-oq4e-mtp-v2"))
+        let input = try ModelRuntime.userInput(for: request(model: "hygaard/sage-s2.1-flash-oq4e-mtp", effort: "none"))
+        XCTAssertEqual(input.additionalContext?["enable_thinking"] as? Bool, false)
     }
 
     func testThinkingToggleTemplatesStayOffForLowestEfforts() throws {
