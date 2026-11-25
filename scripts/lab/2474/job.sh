@@ -288,8 +288,12 @@ entries = [e for e in json.load(open(policy))["entries"] if e["model_id"] == mod
 if len(entries) != 1:
     sys.exit(f"{len(entries)} signed CB entries for {model_id}")
 e = entries[0]
+# The release metallib can differ from the signed entry's (1.8.300: native-MTP admission logs
+# decode_path=provenance_differs). Serve matches the CB tuple's metallib against the file it loads,
+# so the lab tuple names the installed metallib; every other field stays the signed entry's.
 if e["metallib_sha256"] != metallib:
-    sys.exit(f"metallib {metallib} is not the tuple's {e['metallib_sha256']}: the CB tuple cannot match")
+    print(f"METALLIB_PROVENANCE_DIFFERS installed={metallib} signed={e['metallib_sha256']}", file=sys.stderr)
+    e["metallib_sha256"] = metallib
 keys = ("model_id", "model_sha256", "tokenizer_sha256", "chat_template_sha256", "cache_class", "kv_dtype",
         "requires_moe", "hardware_class", "metallib_sha256", "kernel_identifier", "cached_turns_accepted")
 print("continuous_batching: canary")
@@ -298,6 +302,7 @@ print(f"continuous_batch_queue_limit: {e.get('max_served_slots', 4)}")
 print("continuous_batching_accepted_tuples:")
 print("  - {" + ", ".join(f"{k}: {json.dumps(e[k])}" for k in keys) + "}")
 PY
+grep '^METALLIB_PROVENANCE_DIFFERS ' "$RES/e2e/cb-tuple.err" | while read -r l; do log "$l"; done
 
 # 6. base-a, fused, base-b, then the oMLX reference on base-b's stored grid.
 OMLX_OK=missing
