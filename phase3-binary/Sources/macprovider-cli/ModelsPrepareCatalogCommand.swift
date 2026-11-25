@@ -201,7 +201,8 @@ enum ModelsPrepareCatalogRunner {
         var resolveRow: @Sendable (String) async throws -> ModelArtifactSignedRow
         /// (row, resolver, configured artifact path, config path)
         var prepare: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome
-        /// Bytes of completed files the downloader has staged so far.
+        /// Bytes of completed files the downloader has staged so far, plus
+        /// the bytes its in-flight transfers have written.
         var stagedBytes: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Int64
         /// The paths of this model's interrupted-download leftovers. The
         /// command never deletes them: the downloader removes its own staging
@@ -230,9 +231,10 @@ enum ModelsPrepareCatalogRunner {
             stagedBytes: { row, resolver in
                 let snapshots = resolver.snapshotURL(modelID: row.modelID, revision: row.revision).deletingLastPathComponent()
                 let names = (try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? []
-                return names.filter { $0.hasPrefix(".download-") }.reduce(Int64(0)) {
+                let staged = names.filter { $0.hasPrefix(".download-") }.reduce(Int64(0)) {
                     $0 + (ModelArtifactDiagnostics.regularFileBytes(in: snapshots.appendingPathComponent($1)) ?? 0)
                 }
+                return staged + HFDownloadInFlightBytes.shared.total
             },
             partialPaths: { row, resolver in
                 Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))

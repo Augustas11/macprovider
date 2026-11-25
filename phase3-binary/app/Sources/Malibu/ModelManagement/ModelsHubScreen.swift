@@ -26,16 +26,22 @@ enum ModelsHubPresentation {
     static func rows(for tab: ModelsHubTab, rows: [MalibuModelRow]) -> [MalibuModelRow] {
         switch tab {
         case .recommended, .browse:
-            return discoveryRows(for: tab, rows: rows, search: "", fitsOnly: false, sort: .catalog)
-        case .onThisMac: return ModelsPresentation.sections(rows).flatMap(\.rows)
+            return discoveryRows(for: tab, rows: rows, search: "", fitsOnly: false, sort: .bestMatch)
+        case .onThisMac: return ModelsPresentation.sections(ModelsPresentation.onThisMacRows(rows)).flatMap(\.rows)
         case .downloads: return []
         }
     }
 
+    /// Browse lists every signed catalog model; Recommended lists the first
+    /// `recommendedLimit` fitting rows in R005 order, then applies the sort.
     static func discoveryRows(for tab: ModelsHubTab, rows: [MalibuModelRow], search: String,
                               fitsOnly: Bool, sort: DiscoverPresentation.Sort) -> [MalibuModelRow] {
-        DiscoverPresentation.visibleRows(rows, search: search,
-                                         fitsOnly: tab == .recommended || fitsOnly, sort: sort)
+        guard tab == .recommended else {
+            return DiscoverPresentation.visibleRows(rows, search: search, fitsOnly: fitsOnly, sort: sort)
+        }
+        let top = DiscoverPresentation.filteredRows(rows, search: search, fitsOnly: true)
+            .prefix(DiscoverPresentation.recommendedLimit)
+        return DiscoverPresentation.sorted(Array(top), by: sort)
     }
 
     static func recentDownloads(_ history: [ModelActivityEntry]) -> [ModelActivityEntry] {

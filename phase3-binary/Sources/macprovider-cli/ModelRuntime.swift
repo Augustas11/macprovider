@@ -2841,10 +2841,16 @@ actor ModelRuntime: ModelRuntimeServing {
     /// count: 60)` on M3.1-Flash, whose layers are all sparse). Qwen4-Exp's
     /// full-attention layers build their own `Qwen4ExpAttentionCache`
     /// (`Qwen4ExpSparseCache`), whose indexer also keeps the whole context.
+    /// Inkling 2 builds a `CacheList` per layer visit: a model-native sliding
+    /// window or a `KVCacheSimple` for global attention, plus a convolution
+    /// tail, and ignores `maxKVSize`; every global-attention leaf failed the
+    /// cap (`incompatibleCapacity(expected: 120000, count: 8)` on
+    /// Inkling-2-Mini), so every serial request failed.
     nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
         model is GLM5NextModel || model is GLM5NextTextModel || model is DeepseekV4Model
             || model is MiniMaxM3Model || model is MiniMaxM3TextModel
             || model is Qwen4ExpModel || model is Qwen4ExpTextModel
+            || model is Inkling2Model
     }
 
     /// Parameters for a `TokenIterator` over an explicit cache the model sized

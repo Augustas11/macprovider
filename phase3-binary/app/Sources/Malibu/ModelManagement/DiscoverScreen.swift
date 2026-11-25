@@ -8,22 +8,26 @@ import SwiftUI
 enum DiscoverPresentation {
     enum Sort: String, CaseIterable, Identifiable {
         /// The SPEC-044-R005 order the store already applied.
-        case catalog
+        case bestMatch
         case demand
         case rate
-        case size
+        /// `estimated_gb` descending among rows that fit; the rest last.
+        case largestFits
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .catalog: return String(localized: "Catalog order", comment: "Discover sort")
+            case .bestMatch: return String(localized: "Best match", comment: "Discover sort")
             case .demand: return String(localized: "Demand", comment: "Discover sort")
-            case .rate: return String(localized: "Provider rate", comment: "Discover sort")
-            case .size: return String(localized: "Size", comment: "Discover sort")
+            case .rate: return String(localized: "Rate", comment: "Discover sort")
+            case .largestFits: return String(localized: "Largest that fits", comment: "Discover sort")
             }
         }
     }
+
+    /// Recommended lists the first rows of the fitting catalog only.
+    static let recommendedLimit = 5
 
     static let emptyCatalog = String(localized: "No signed catalog models are available right now. Models lists every row with the reason it can or can't be served.", comment: "Discover empty catalog")
     static let emptyRecommended = String(localized: "No recommended model fits this Mac. Browse all catalog models in Models › Browse.", comment: "Recommended empty state")
@@ -52,12 +56,21 @@ enum DiscoverPresentation {
         fitsOnly: Bool,
         sort: Sort
     ) -> [MalibuModelRow] {
+        sorted(filteredRows(rows, search: search, fitsOnly: fitsOnly), by: sort)
+    }
+
+    /// Signed catalog rows matching the search and fit filter, in R005 order.
+    static func filteredRows(_ rows: [MalibuModelRow], search: String, fitsOnly: Bool) -> [MalibuModelRow] {
         let needle = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = catalogRows(rows).filter { row in
+        return catalogRows(rows).filter { row in
             (!fitsOnly || row.fit == "fits")
                 && (needle.isEmpty || ModelsPresentation.matches(row, needle))
         }
-        let indexed = Array(filtered.enumerated())
+    }
+
+    /// Reorders rows that arrive in R005 order; ties keep that order.
+    static func sorted(_ rows: [MalibuModelRow], by sort: Sort) -> [MalibuModelRow] {
+        let indexed = Array(rows.enumerated())
         func ordered(_ key: (MalibuModelRow) -> Double?, descending: Bool) -> [MalibuModelRow] {
             indexed.sorted { lhs, rhs in
                 switch (key(lhs.element), key(rhs.element)) {
@@ -69,27 +82,120 @@ enum DiscoverPresentation {
             }.map(\.element)
         }
         switch sort {
-        case .catalog: return filtered
+        case .bestMatch: return rows
         case .demand: return ordered({ $0.demandRank.map(Double.init) }, descending: false)
         case .rate: return ordered({ $0.providerCompletionPayoutUSDPerMillionTokens }, descending: true)
-        case .size: return ordered({ $0.estimatedGB }, descending: false)
+        case .largestFits:
+            return ordered({ $0.estimatedGB }, descending: true).filter { $0.fit == "fits" }
+                + rows.filter { $0.fit != "fits" }
         }
     }
 
-    static func listSubtitle(_ row: MalibuModelRow) -> String {
-        var parts = [ModelsPresentation.sizeText(row), ModelsPresentation.fitText(row)]
-        if row.category != .current {
-            parts.append(row.weightsPresentLocally
-                ? String(localized: "on this Mac", comment: "Discover list local state")
-                : String(localized: "not downloaded", comment: "Discover list local state"))
+    // MARK: Best for this Mac
+
+    /// The share of this Mac's memory a pick may use.
+    static let bestPickMemoryShare = 0.8
+    /// A local pick wins when it scores at least this share of the best one,
+    /// so the owner is not asked to download many GB for a small gain.
+    static let localPickScoreShare = 0.9
+
+    /// Rate times demand weight: `demand_weight`, else 1 / `demand_rank`,
+    /// else 0. Nil for a row with no completion rate.
+    static func bestPickScore(_ row: MalibuModelRow) -> Double? {
+        guard let rate = row.providerCompletionPayoutUSDPerMillionTokens else { return nil }
+        let weight = row.demandWeight ?? row.demandRank.flatMap { $0 > 0 ? 1 / Double($0) : nil } ?? 0
+        return rate * weight
+    }
+
+    /// Signed catalog rows this Mac can serve now or after one confirmed
+    /// action, with a rate, using at most 80% of its memory.
+    static func bestPickCandidates(_ rows: [MalibuModelRow], hostMemoryGB: Int) -> [MalibuModelRow] {
+        catalogRows(rows).filter { row in
+            guard row.fit == "fits",
+                  let gb = row.estimatedGB, gb <= bestPickMemoryShare * Double(hostMemoryGB),
+                  row.providerCompletionPayoutUSDPerMillionTokens != nil else { return false }
+            return row.category == .current || row.action == .switchModel || row.action == .download
         }
-        if row.providerCompletionPayoutUSDPerMillionTokens != nil {
-            parts.append(ModelsPresentation.rateText(row) + " / 1M out")
+    }
+
+    /// The pinned "Best for this Mac" row. Client-computed presentation
+    /// only: it never starts an action. A store recommendation that names a
+    /// candidate wins; otherwise the highest score wins, unless a row already
+    /// on this Mac scores within 10% of it. Ties keep the R005 order.
+    static func bestPick(_ rows: [MalibuModelRow], hostMemoryGB: Int, recommendedID: String? = nil) -> MalibuModelRow? {
+        let candidates = bestPickCandidates(rows, hostMemoryGB: hostMemoryGB)
+        if let key = recommendedID?.lowercased(),
+           let recommended = candidates.first(where: { $0.id.lowercased() == key || $0.catalogVerifiedModelKey?.lowercased() == key }) {
+            return recommended
         }
-        if let rank = row.demandRank {
-            parts.append(String(localized: "demand #\(rank)", comment: "Discover list demand rank"))
+        func best(_ rows: [MalibuModelRow]) -> (row: MalibuModelRow, score: Double)? {
+            var top: (row: MalibuModelRow, score: Double)?
+            for row in rows {
+                let score = bestPickScore(row) ?? 0
+                if let current = top, score <= current.score { continue }
+                top = (row: row, score: score)
+            }
+            return top
         }
-        return parts.joined(separator: " · ")
+        guard let top = best(candidates) else { return nil }
+        if let local = best(candidates.filter { $0.weightsPresentLocally || $0.category == .current }),
+           local.score >= localPickScoreShare * top.score {
+            return local.row
+        }
+        return top.row
+    }
+
+    static let bestPickTitle = String(localized: "Best for this Mac", comment: "Recommended pinned card title")
+
+    // MARK: Rows
+
+    /// Row demand: ranks 1-5 read "High demand", 6-20 "Steady demand",
+    /// anything else nothing. The detail pane keeps the exact rank.
+    static func demandLabel(_ rank: Int?) -> String? {
+        guard let rank, rank >= 1 else { return nil }
+        if rank <= 5 { return String(localized: "High demand", comment: "Discover row demand label for ranks 1-5") }
+        if rank <= 20 { return String(localized: "Steady demand", comment: "Discover row demand label for ranks 6-20") }
+        return nil
+    }
+
+    /// A row's small badge: serving, already local, or tight on memory.
+    static func rowBadge(_ row: MalibuModelRow, hostMemoryGB: Int) -> String? {
+        if row.category == .current { return String(localized: "Serving", comment: "Discover row badge") }
+        if row.weightsPresentLocally { return String(localized: "On this Mac", comment: "Discover row badge") }
+        if let gb = row.estimatedGB, gb > 0.75 * Double(hostMemoryGB) {
+            return String(localized: "Tight", comment: "Discover row badge: uses most of this Mac's memory")
+        }
+        return nil
+    }
+
+    static func gbText(_ gb: Double) -> String {
+        gb.formatted(.number.precision(.fractionLength(1)))
+    }
+
+    /// "uses 4.6 GB of 32 GB", or "won't fit" for a row that does not fit.
+    static func memoryUse(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
+        if row.fit == "wont_fit" { return String(localized: "won't fit", comment: "Discover row: model does not fit this Mac") }
+        let use = row.estimatedGB.map {
+            String(localized: "uses \(gbText($0)) GB of \(hostMemoryGB) GB", comment: "Discover row memory use")
+        } ?? String(localized: "size unknown", comment: "Discover row size unknown")
+        return row.fit == "fits" ? use : use + " · " + String(localized: "fit unknown", comment: "Discover row fit unknown")
+    }
+
+    /// "network rate $0.36 / 1M out": the catalog rate, never a claim that
+    /// this Mac is earning it (SPEC-044-R014 item 2).
+    static func rowRate(_ row: MalibuModelRow) -> String? {
+        guard row.providerCompletionPayoutUSDPerMillionTokens != nil else { return nil }
+        guard row.nonEarningDisclosure != nil else {
+            return ModelsPresentation.rateText(row) + " / 1M out"
+        }
+        return String(localized: "network rate \(ModelsPresentation.rateText(row)) / 1M out", comment: "Discover row rate")
+    }
+
+    /// A row's second line: memory use, rate and demand.
+    static func rowMeta(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
+        [memoryUse(row, hostMemoryGB: hostMemoryGB), rowRate(row), demandLabel(row.demandRank)]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 
     /// The not-earning caveat for a listed row that shows a rate.
@@ -97,44 +203,91 @@ enum DiscoverPresentation {
         row.providerCompletionPayoutUSDPerMillionTokens == nil ? nil : row.nonEarningDisclosure
     }
 
-    static func memoryLine(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
-        let size = row.estimatedGB.map {
-            String(localized: "About \($0.formatted(.number.precision(.fractionLength(1)))) GB of weights", comment: "Discover size")
-        } ?? String(localized: "Size unknown", comment: "Discover size unknown")
-        let fit: String
-        switch row.fit {
-        case "fits": fit = String(localized: "fits this Mac's \(hostMemoryGB) GB", comment: "Discover fit")
-        case "wont_fit": fit = String(localized: "does not fit this Mac's \(hostMemoryGB) GB", comment: "Discover fit")
-        default: fit = String(localized: "fit on this Mac's \(hostMemoryGB) GB is unknown", comment: "Discover fit")
-        }
-        return "\(size) · \(fit)"
+    /// A row's accessibility label: both lines and the caveat beside the rate.
+    static func rowAccessibilityLabel(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
+        [ModelsPresentation.title(row), rowBadge(row, hostMemoryGB: hostMemoryGB),
+         rowMeta(row, hostMemoryGB: hostMemoryGB), listCaveat(row)]
+            .compactMap { $0 }
+            .joined(separator: ". ")
     }
 
-    /// The detail pane, top to bottom. Rates, share, demand rank and provider
-    /// count only; no amounts per hour, day or month.
-    static func detailLines(_ row: MalibuModelRow, hostMemoryGB: Int) -> [String] {
-        var lines = [memoryLine(row, hostMemoryGB: hostMemoryGB)]
-        lines.append(contentsOf: row.economicsRateLines)
+    // MARK: Detail
+
+    /// One label and value in the detail pane's fact grid. A secondary fact
+    /// (a caveat or reason) has no label and reads in secondary colour.
+    struct Fact: Equatable {
+        let label: String
+        let value: String
+        var secondary = false
+    }
+
+    static func statusText(_ row: MalibuModelRow) -> String {
+        if row.category == .current { return String(localized: "Serving", comment: "Discover status") }
+        if row.action == .switchModel { return String(localized: "On this Mac · ready to switch", comment: "Discover status") }
+        if !row.weightsPresentLocally {
+            return row.action == .download
+                ? String(localized: "Not on this Mac · not earning yet", comment: "Discover status")
+                : String(localized: "Not on this Mac", comment: "Discover status")
+        }
+        return String(localized: "On this Mac", comment: "Discover status")
+    }
+
+    /// The detail pane's facts, top to bottom. Rates, share, demand rank and
+    /// provider count only; no amounts per hour, day or month.
+    static func detailFacts(_ row: MalibuModelRow, hostMemoryGB: Int) -> [Fact] {
+        var facts: [Fact] = []
+        var memory = row.estimatedGB.map {
+            String(localized: "\(gbText($0)) GB of \(hostMemoryGB) GB", comment: "Discover detail memory")
+        } ?? String(localized: "Size unknown · this Mac has \(hostMemoryGB) GB", comment: "Discover detail memory unknown")
+        if row.fit == "wont_fit" {
+            memory += " · " + String(localized: "won't fit", comment: "Discover detail fit")
+        } else if row.fit != "fits" {
+            memory += " · " + String(localized: "fit unknown", comment: "Discover detail fit")
+        }
+        facts.append(Fact(label: String(localized: "Memory", comment: "Discover detail label"), value: memory))
         if let share = row.providerShareBPS {
             let percent = (Double(share) / 100).formatted(.number.precision(.fractionLength(0...2)))
-            lines.append(String(localized: "Provider share: \(percent)% of the catalog rate.", comment: "Discover provider share"))
+            facts.append(Fact(label: String(localized: "Your share", comment: "Discover detail label"),
+                              value: String(localized: "\(percent)% of the catalog rate", comment: "Discover detail share")))
         }
-        if let rank = row.demandRank {
-            lines.append(String(localized: "Network demand rank \(rank).", comment: "Discover demand rank"))
+        let rates = [
+            row.providerCompletionPayoutUSDPerMillionTokens.map {
+                String(localized: "$\($0.formatted(.number.precision(.significantDigits(2...4)))) out", comment: "Discover detail completion rate")
+            },
+            row.providerPromptPayoutUSDPerMillionTokens.map {
+                String(localized: "$\($0.formatted(.number.precision(.significantDigits(2...4)))) in", comment: "Discover detail prompt rate")
+            },
+        ].compactMap { $0 }
+        if !rates.isEmpty {
+            facts.append(Fact(label: String(localized: "Rate", comment: "Discover detail label"),
+                              value: rates.joined(separator: " · ") + " " + String(localized: "per 1M tokens", comment: "Discover detail rate unit")))
+            if let caveat = row.nonEarningDisclosure { facts.append(Fact(label: "", value: caveat, secondary: true)) }
         }
+        var demand: [String] = []
+        if let rank = row.demandRank { demand.append(String(localized: "rank \(rank)", comment: "Discover detail demand rank")) }
         if let count = row.readyProviderCount {
-            lines.append(count == 1
-                ? String(localized: "1 provider is ready to serve it.", comment: "Discover provider count")
-                : String(localized: "\(count) providers are ready to serve it.", comment: "Discover provider count"))
+            demand.append(count == 1
+                ? String(localized: "1 provider ready", comment: "Discover detail provider count")
+                : String(localized: "\(count) providers ready", comment: "Discover detail provider count"))
         }
-        if let caveat = row.nonEarningDisclosure { lines.append(caveat) }
-        if let verdict = row.earningVerdict { lines.append(verdict) }
-        lines.append(row.weightsPresentLocally
-            ? String(localized: "Weights are on this Mac.", comment: "Discover local state")
-            : String(localized: "Weights are not on this Mac.", comment: "Discover local state"))
-        // The served row's action line already says it is serving.
-        if row.category != .current, let reason = ModelsPresentation.reason(row) { lines.append(reason) }
-        return lines
+        if !demand.isEmpty {
+            facts.append(Fact(label: String(localized: "Demand", comment: "Discover detail label"), value: demand.joined(separator: " · ")))
+        }
+        facts.append(Fact(label: String(localized: "Status", comment: "Discover detail label"), value: statusText(row)))
+        // A catalog-only row's verdict repeats the status line.
+        if !row.isCatalogOnly, row.category != .current, let verdict = row.earningVerdict {
+            facts.append(Fact(label: "", value: verdict, secondary: true))
+        }
+        // R013 item 2: a row with no typed action states why.
+        if primaryAction(row) == PrimaryAction.none,
+           let reason = ModelsPresentation.reason(row), reason != row.nonEarningDisclosure {
+            facts.append(Fact(label: "", value: reason, secondary: true))
+        }
+        return facts
+    }
+
+    static func factLine(_ fact: Fact) -> String {
+        fact.label.isEmpty ? fact.value : fact.label + ": " + fact.value
     }
 
     enum PrimaryAction: Equatable {
@@ -152,35 +305,44 @@ enum DiscoverPresentation {
         return .none
     }
 
+    /// The pinned card's lines: title, badge, one meta line.
+    static func bestPickLines(_ row: MalibuModelRow, hostMemoryGB: Int) -> [String] {
+        var lines = [bestPickTitle, ModelsPresentation.title(row)]
+        if let badge = rowBadge(row, hostMemoryGB: hostMemoryGB) { lines.append(badge) }
+        lines.append(rowMeta(row, hostMemoryGB: hostMemoryGB))
+        return lines
+    }
+
     static func screenStrings(
         rows: [MalibuModelRow],
+        mode: ModelsHubTab = .browse,
         search: String = "",
         fitsOnly: Bool = true,
-        sort: Sort = .catalog,
+        sort: Sort = .bestMatch,
         hostMemoryGB: Int
     ) -> [String] {
         var strings = [String(localized: "Discover", comment: "Discover title")]
-        let visible = visibleRows(rows, search: search, fitsOnly: fitsOnly, sort: sort)
+        let visible = ModelsHubPresentation.discoveryRows(for: mode, rows: rows, search: search, fitsOnly: fitsOnly, sort: sort)
         if catalogRows(rows).isEmpty {
             strings.append(emptyCatalog)
         } else if visible.isEmpty {
-            strings.append(emptyFilter)
+            strings.append(mode == .recommended ? emptyRecommended : emptyFilter)
         } else {
             strings.append(ModelsPresentation.rateDisclosure)
         }
+        if mode == .recommended, let pick = bestPick(rows, hostMemoryGB: hostMemoryGB) {
+            strings.append(contentsOf: bestPickLines(pick, hostMemoryGB: hostMemoryGB))
+        }
         for row in visible {
-            var line = ModelsPresentation.title(row) + " (" + ModelsPresentation.name(row) + ") — " + listSubtitle(row)
-            if let caveat = listCaveat(row) { line += " — " + caveat }
-            strings.append(line)
+            let badge = rowBadge(row, hostMemoryGB: hostMemoryGB).map { " [\($0)]" } ?? ""
+            strings.append(ModelsPresentation.title(row) + badge + " — " + rowMeta(row, hostMemoryGB: hostMemoryGB))
         }
         if let first = visible.first {
             strings.append("[\(ModelsPresentation.title(first))]")
-            strings.append(contentsOf: detailLines(first, hostMemoryGB: hostMemoryGB))
-            if primaryAction(first) == .download {
-                strings.append(ModelsPresentation.downloadConfirmationMessage(first))
-            }
+            strings.append(ModelsPresentation.name(first))
+            strings.append(contentsOf: detailFacts(first, hostMemoryGB: hostMemoryGB).map(factLine))
         }
-        strings.append(otherMLXTitle)
+        if mode == .browse { strings.append(otherMLXTitle) }
         return strings
     }
 }
@@ -192,7 +354,7 @@ struct DiscoverScreen: View {
     @State private var fitsOnly: Bool
     private let mode: ModelsHubTab
     let browseModels: (() -> Void)?
-    @State private var sort: DiscoverPresentation.Sort = .catalog
+    @State private var sort: DiscoverPresentation.Sort = .bestMatch
     @State private var selectedID: String?
     @State private var switchRow: MalibuModelRow?
     @State private var pendingDownload: MalibuModelRow?
@@ -213,6 +375,21 @@ struct DiscoverScreen: View {
 
     private var selected: MalibuModelRow? {
         DiscoverPresentation.selection(visible, selectedID: selectedID)
+    }
+
+    private var hostMemoryGB: Int { ModelsPresentation.hostMemoryGB }
+
+    /// Recommended only. When the autotune recommendation callout is shown it
+    /// is this Mac's pick (with its Adopt action), so the card stays hidden
+    /// and the screen never shows two competing "best" models.
+    private var bestPick: MalibuModelRow? {
+        guard mode == .recommended else { return nil }
+        if let recommendation = store.recommendation,
+           DiscoverPresentation.showsRecommendation(recommendation.displayModelID, rows: store.rows) {
+            return nil
+        }
+        let recommended = store.recommendation.flatMap { $0.isRecommendationResult ? $0.displayModelID : nil }
+        return DiscoverPresentation.bestPick(store.rows, hostMemoryGB: hostMemoryGB, recommendedID: recommended)
     }
 
     var body: some View {
@@ -320,52 +497,52 @@ struct DiscoverScreen: View {
                     }
                     .padding(12)
                 } else {
-                    // SPEC-044-R004: visible in the same scroll container.
+                    // SPEC-044-R004: visible once at the top of the scroll
+                    // container that holds every rate.
                     Text(ModelsPresentation.rateDisclosure)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 6)
+                    if let pick = bestPick {
+                        bestPickCard(pick)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 8)
+                    }
                     ForEach(visible) { row in
                         Button {
                             selectedID = row.id
                         } label: {
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 6) {
-                                    if row.category == .current {
-                                        Image(systemName: "circle.fill")
-                                            .font(.system(size: 7))
-                                            .foregroundStyle(.green)
-                                            .accessibilityHidden(true)
-                                    }
                                     Text(ModelsPresentation.title(row))
                                         .font(.callout.weight(.medium))
-                                        .fixedSize(horizontal: false, vertical: true)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    if let badge = DiscoverPresentation.rowBadge(row, hostMemoryGB: hostMemoryGB) {
+                                        badgeView(badge)
+                                    }
                                 }
-                                Text(ModelsPresentation.name(row))
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text(DiscoverPresentation.listSubtitle(row))
+                                Text(DiscoverPresentation.rowMeta(row, hostMemoryGB: hostMemoryGB))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                if let caveat = DiscoverPresentation.listCaveat(row) {
-                                    // SPEC-044-R014: the not-earning caveat
-                                    // travels with every listed rate.
-                                    Text(caveat)
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                }
+                                    .lineLimit(1)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                            .padding(.vertical, 7)
                             .background(selected?.id == row.id ? Color.accentColor.opacity(0.12) : Color.clear)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        // The exact repo id stays one hover away and in the
+                        // detail pane, not as a third line on every row.
+                        .help(ModelsPresentation.name(row))
                         .accessibilityElement(children: .combine)
+                        // SPEC-044-R014: the not-earning caveat travels in
+                        // the row's accessibility label.
+                        .accessibilityLabel(Text(DiscoverPresentation.rowAccessibilityLabel(row, hostMemoryGB: hostMemoryGB)))
                         .accessibilityAddTraits(selected?.id == row.id ? .isSelected : [])
                     }
                 }
@@ -398,12 +575,20 @@ struct DiscoverScreen: View {
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
-                    ForEach(Array(DiscoverPresentation.detailLines(row, hostMemoryGB: ModelsPresentation.hostMemoryGB).enumerated()), id: \.offset) { _, line in
-                        Text(line)
+                    Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 6) {
+                        ForEach(Array(DiscoverPresentation.detailFacts(row, hostMemoryGB: hostMemoryGB).enumerated()), id: \.offset) { _, fact in
+                            GridRow {
+                                Text(fact.label)
+                                    .foregroundStyle(.secondary)
+                                Text(fact.value)
+                                    .font(fact.secondary ? Font.caption : Font.callout)
+                                    .foregroundStyle(fact.secondary ? Color.secondary : Color.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             .font(.callout)
-                            .foregroundStyle(line == row.nonEarningDisclosure ? Color.orange : Color.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .padding(.top, 4)
                     Text(ModelsPresentation.rateDisclosure)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -428,7 +613,8 @@ struct DiscoverScreen: View {
         }
         switch DiscoverPresentation.primaryAction(row) {
         case .serving:
-            Label(String(localized: "This Mac is serving this model.", comment: "Discover serving"), systemImage: "checkmark.circle")
+            // The Status fact already says "Serving".
+            EmptyView()
         case .switchModel:
             VStack(alignment: .leading, spacing: 4) {
                 Button(String(localized: "Switch to this model…", comment: "Discover switch action")) { switchRow = row }
@@ -438,16 +624,61 @@ struct DiscoverScreen: View {
                     .foregroundStyle(.secondary)
             }
         case .download:
-            VStack(alignment: .leading, spacing: 4) {
-                ModelDownloadControl(store: store, row: row, showsSize: true) { pendingDownload = row }
-                Text(ModelsPresentation.downloadConfirmationMessage(row))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // The confirmation dialog explains what Download does.
+            ModelDownloadControl(store: store, row: row, showsSize: true) { pendingDownload = row }
         case .none:
             EmptyView()
         }
+    }
+
+    private func badgeView(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+    }
+
+    /// The pinned pick: title, badge, one meta line and the row's own gated
+    /// action (the same Switch sheet or Download confirmation as the list).
+    private func bestPickCard(_ row: MalibuModelRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(DiscoverPresentation.bestPickTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(ModelsPresentation.title(row))
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let badge = DiscoverPresentation.rowBadge(row, hostMemoryGB: hostMemoryGB) {
+                    badgeView(badge)
+                }
+            }
+            Text(DiscoverPresentation.rowMeta(row, hostMemoryGB: hostMemoryGB))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            switch DiscoverPresentation.primaryAction(row) {
+            case .switchModel:
+                Button(String(localized: "Switch to this model…", comment: "Discover switch action")) { switchRow = row }
+                    .disabled(!store.canPerformModelAction)
+                    .padding(.top, 2)
+            case .download:
+                ModelDownloadControl(store: store, row: row, showsSize: true) { pendingDownload = row }
+                    .padding(.top, 2)
+            case .serving, .none:
+                EmptyView()
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.09)))
+        .help(ModelsPresentation.name(row))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(DiscoverPresentation.bestPickTitle + ". " + DiscoverPresentation.rowAccessibilityLabel(row, hostMemoryGB: hostMemoryGB)))
+        .accessibilityIdentifier("malibu.discover.bestPick")
     }
 
     private var otherMLXSection: some View {
