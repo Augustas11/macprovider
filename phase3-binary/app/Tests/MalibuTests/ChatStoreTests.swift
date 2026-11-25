@@ -85,8 +85,41 @@ final class ChatStoreTests: XCTestCase {
         try await waitUntil { !store.isRunning }
         XCTAssertTrue(transport.bodies.isEmpty)
         XCTAssertEqual(store.notice, ChatFailure.modelChanged.localizedDescription)
-        XCTAssertTrue(store.turns.isEmpty)
-        XCTAssertNil(store.capability)
+        XCTAssertEqual(store.turns.map(\.prompt), ["hello"])
+        await store.refresh(port: 9042)
+        XCTAssertEqual(store.turns.map(\.prompt), ["hello"], "A loaded-model change keeps the conversation")
+        XCTAssertEqual(store.capability?.model, "replacement")
+    }
+
+    func testNetworkModelKeepsTheConversation() async throws {
+        let transport = ControlledChatTransport()
+        let gateway = FakeChatGateway()
+        gateway.models = [ConnectedModel(id: "net-model", contextWindow: 8192, maxOutputTokens: 1024, supportsTools: false)]
+        let store = ChatStore(transport: transport, gateway: gateway, buyerKey: { "buyer" })
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "local question", "local answer")
+        await store.refreshNetworkModels()
+        store.route = .network("net-model")
+        XCTAssertEqual(store.turns.count, 1)
+        store.send("next")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.map(\.prompt), ["local question", "next"])
+        XCTAssertEqual(store.turns.last?.answer, "network answer")
+        XCTAssertEqual(transport.bodies.count, 1)
+        let body = try XCTUnwrap(gateway.bodies.last)
+        XCTAssertEqual(body["model"] as? String, "net-model")
+        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual((body["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String },
+                       ["local question", "local answer", "next"])
+        let missing = ChatStore(transport: transport, gateway: gateway, buyerKey: { throw ConnectedAppsError.credential })
+        await missing.refresh(port: 9042)
+        try await answer(missing, transport, "stay", "put")
+        await missing.refreshNetworkModels()
+        missing.route = .network("net-model")
+        missing.send("again")
+        XCTAssertEqual(missing.notice, "Save a buyer key in Connected apps to use a network model.")
+        XCTAssertEqual(missing.turns.map(\.prompt), ["stay"])
+        XCTAssertEqual(gateway.bodies.count, 1)
     }
     func testUnsupportedAgentAndOversizedPromptNeverReachTransport() async throws {
         let transport = ControlledChatTransport()
@@ -614,6 +647,18 @@ final class ChatStoreTests: XCTestCase {
         }
         XCTFail("State did not settle", file: file, line: line)
         throw ChatFailure.timeout
+    }
+}
+
+@MainActor
+private final class FakeChatGateway: ChatGateway {
+    var models: [ConnectedModel] = []
+    var bodies: [[String: Any]] = []
+    var text = "network answer"
+    func chatModels(key: String) async throws -> [ConnectedModel] { models }
+    func complete(body: [String: Any], key: String) async throws -> ChatCompletion {
+        bodies.append(body)
+        return ChatCompletion(text: text)
     }
 }
 

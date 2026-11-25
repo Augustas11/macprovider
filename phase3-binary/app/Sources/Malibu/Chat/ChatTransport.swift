@@ -18,7 +18,7 @@ enum ChatFailure: Error, LocalizedError, Equatable {
         switch self {
         case .unavailable: return "Start a provider and load a model to chat on this Mac."
         case .upgradeRequired: return "Update provider software to use local Chat with customer priority and separate usage."
-        case .modelChanged: return "The loaded model changed. Start a new conversation."
+        case .modelChanged: return "The loaded model changed before this reply."
         case .unsupportedTools: return "This model does not advertise guaranteed tool selection. Use Chat mode."
         case .preempted: return "Paused for a paying customer. Send a new message when this Mac is available."
         case .malformed: return "The local provider returned an incomplete or invalid response."

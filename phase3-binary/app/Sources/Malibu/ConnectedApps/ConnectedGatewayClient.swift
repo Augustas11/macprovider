@@ -22,6 +22,12 @@ struct ConnectedGatewayClient {
         return Self.agentReady(try Self.decodeModels(data))
     }
 
+    /// Chat lists every published model. Agents keep the tool-and-context filter.
+    func chatModels(key: String) async throws -> [ConnectedModel] {
+        let data = try await request(path: "models", key: key, body: nil)
+        return try Self.decodeModels(data)
+    }
+
     /// SPEC-025-R012: tool-capable models with enough context, from the
     /// gateway's published metadata only.
     static func agentReady(_ models: [ConnectedModel]) -> [ConnectedModel] {

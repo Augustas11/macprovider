@@ -27,6 +27,7 @@ struct ChatScreen: View {
         .accessibilityIdentifier("malibu.chat.screen")
         .task(id: providerIdentity) {
             store.providerChanged(to: providerIdentity)
+            await store.refreshNetworkModels()
             while !Task.isCancelled {
                 await store.refresh(port: ProviderConfig.readHTTPPort())
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
@@ -44,6 +45,15 @@ struct ChatScreen: View {
                         .font(.callout).foregroundStyle(.secondary).lineLimit(2)
                         .textSelection(.enabled)
                         .accessibilityIdentifier("malibu.chat.model")
+                    Picker("Model", selection: $store.route) {
+                        Text(store.capability?.model ?? "This Mac").tag(ChatRoute.thisMac)
+                        ForEach(store.networkModels) { model in
+                            Text(model.id).tag(ChatRoute.network(model.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(store.isRunning)
+                    .accessibilityIdentifier("malibu.chat.model-picker")
                 }
                 Spacer()
                 Button("Settings", systemImage: "slider.horizontal.3") { showingSettings.toggle() }
