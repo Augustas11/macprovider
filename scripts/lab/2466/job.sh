@@ -357,10 +357,15 @@ ref_quality() {  # ref_quality LABEL DIR
 cell_quality() {
   mkdir -p "$RES/quality"
   local path=serve m
-  serve_quality "$INC" "$GLM_KEY" "$GLM_DIR" "$GLM_SHA" || path=reference
-  [ $path = serve ] && { serve_quality "$CAND" "$SAGE_REPO" "$SAGE_DIR" "$SAGE_SHA" || path=reference; }
+  # The provider never sets enable_thinking (SPEC-018-R010), so a reasoning model can spend a
+  # whole case budget thinking. A serve run counts only when every case finished with stop.
+  serve_complete() { /usr/bin/python3 -I -c 'import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+sys.exit(0 if all(r.get("finish_reason")=="stop" for r in rows if r.get("kind")=="case") else 1)' "$RES/quality/$1-raw.jsonl"; }
+  { serve_quality "$INC" "$GLM_KEY" "$GLM_DIR" "$GLM_SHA" && serve_complete "$INC"; } || path=reference
+  [ $path = serve ] && { { serve_quality "$CAND" "$SAGE_REPO" "$SAGE_DIR" "$SAGE_SHA" && serve_complete "$CAND"; } || path=reference; }
   if [ $path = reference ]; then
-    log "QUALITY_PATH reference (a lab serve did not answer all nine; both models run the mlx-vlm reference)"
+    log "QUALITY_PATH reference (a lab serve did not finish all nine with stop; both models run the mlx-vlm reference)"
     ref_quality "$INC" "$GLM_DIR"; ref_quality "$CAND" "$SAGE_DIR"
   fi
   for m in $INC $CAND; do
