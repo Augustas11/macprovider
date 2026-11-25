@@ -55,8 +55,9 @@ final class AgentModelTargetTests: XCTestCase {
         let session = AgentSession(transport: AgentModelTransport(local: fake, port: { 9042 }))
         do { _ = try await session.run(agent: agent, prompt: "loop"); XCTFail("Must hit cap") }
         catch { XCTAssertEqual(error as? ChatFailure, .limit) }
-        XCTAssertEqual(fake.completions, 4)
-        XCTAssertEqual(fake.budgets.reduce(0,+), 8192)
+        // 50 rounds at 2,048 reserved tokens each: the round cap, not the token budget, ends the loop.
+        XCTAssertEqual(fake.completions, ChatStore.maxRounds)
+        XCTAssertEqual(fake.budgets.reduce(0,+), ChatStore.maxRounds * 2048)
     }
 }
 

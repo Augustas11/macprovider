@@ -248,7 +248,9 @@ final class TaskSchedulerTests: XCTestCase {
     }
 
     func testActualSessionEnforcesRoundAndOutputTokenBudgets() async throws {
-        for (tokens, expectedCalls) in [(1024, 6), (2048, 4)] {
+        // The run budget lets every round use its full allowance, so a looping
+        // agent reaches the real round cap rather than running out of tokens.
+        for tokens in [1024, 2048] {
             let path = try directory()
             var agent = AgentDefinition(); agent.workspaceTools = true; agent.workspacePath = path.path
             agent.sampling.maxTokens = tokens
@@ -258,9 +260,10 @@ final class TaskSchedulerTests: XCTestCase {
                 _ = try await session.run(agent: agent, prompt: "Keep reading", preapprovedTools: [])
                 XCTFail("Unbounded loop succeeded")
             } catch { XCTAssertEqual(error as? ChatFailure, .limit) }
-            XCTAssertEqual(transport.calls, expectedCalls)
-            XCTAssertLessThanOrEqual(transport.budgets.reduce(0, +), TaskScheduler.maximumOutputTokens)
-            XCTAssertLessThanOrEqual(transport.calls, TaskScheduler.maximumRounds)
+            XCTAssertEqual(transport.calls, TaskScheduler.maximumRounds)
+            XCTAssertEqual(transport.calls, ChatStore.maxRounds)
+            XCTAssertTrue(transport.budgets.allSatisfy { $0 == TaskScheduler.roundTokens(agent.sampling.maxTokens) })
+            XCTAssertLessThanOrEqual(transport.budgets.reduce(0, +), TaskScheduler.runTokenBudget(agent.sampling.maxTokens))
         }
     }
 

@@ -4,8 +4,11 @@ import SwiftUI
 @MainActor
 struct ChatScreen: View {
     @ObservedObject var agent: MalibuAgent
-    @StateObject private var store = ChatStore()
+    /// Owned by the main window so the open chat survives switching tabs.
+    @ObservedObject var store: ChatStore
     @State private var draft = ""
+    @State private var showingHistory = false
+    @State private var pendingDelete: ChatSummary?
     @FocusState private var composerFocused: Bool
 
     private var providerIdentity: ChatProviderIdentity { ChatProviderIdentity(agent.snapshot) }
@@ -19,7 +22,7 @@ struct ChatScreen: View {
         }
         .accessibilityIdentifier("malibu.chat.screen")
         .task(id: providerIdentity) {
-            store.providerChanged()
+            store.providerChanged(to: providerIdentity)
             while !Task.isCancelled {
                 await store.refresh(port: ProviderConfig.readHTTPPort())
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
@@ -39,6 +42,9 @@ struct ChatScreen: View {
                         .accessibilityIdentifier("malibu.chat.model")
                 }
                 Spacer()
+                Button("History", systemImage: "clock.arrow.circlepath") { showingHistory.toggle() }
+                    .popover(isPresented: $showingHistory, arrowEdge: .bottom) { historyList }
+                    .accessibilityIdentifier("malibu.chat.history")
                 Button("New chat", systemImage: "square.and.pencil") { store.newConversation() }
                     .accessibilityIdentifier("malibu.chat.new")
             }
@@ -58,13 +64,7 @@ struct ChatScreen: View {
             if store.capability != nil && store.capability?.guaranteedTools != true {
                 Text("Agent mode needs a model with guaranteed tool selection.")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if store.agentMode {
-                Text("Read, list and search only in your chosen folder. No commands, changes or network tools. Limited to 6 rounds, 12 calls and 90 seconds.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            Label("On this Mac only · no cloud fallback · paying customers have priority", systemImage: "lock.shield")
-                .font(.caption).foregroundStyle(.secondary)
-                .accessibilityIdentifier("malibu.chat.privacy")
         }
         .padding(20)
     }
@@ -83,7 +83,7 @@ struct ChatScreen: View {
                              ? "Choose a folder, then ask for a summary or help finding something."
                              : "Ask a question using the model already loaded by your provider.")
                             .foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        Text("Chats stay in memory and are cleared when this screen closes. Local usage is separate from earnings.")
+                        Text("Chats are saved on this Mac only. Local usage is separate from earnings.")
                             .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: 480).padding(40)
@@ -93,7 +93,28 @@ struct ChatScreen: View {
                         ForEach(store.turns) { turn in
                             VStack(alignment: .leading, spacing: 12) {
                                 message(label: "You", text: turn.prompt, user: true)
+                                if !turn.reasoning.isEmpty {
+                                    DisclosureGroup("Thinking") {
+                                        Text(turn.reasoning).font(.callout).foregroundStyle(.secondary)
+                                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .accessibilityIdentifier("malibu.chat.thinking")
+                                }
                                 if !turn.answer.isEmpty { message(label: "Malibu", text: turn.answer, user: false) }
+                                ForEach(Array(turn.tools.enumerated()), id: \.offset) { _, line in
+                                    Label(line, systemImage: "wrench.and.screwdriver")
+                                        .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                if let note = turn.note, note != store.notice {
+                                    Label(note, systemImage: "exclamationmark.circle")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                if turn.truncated && turn.id == store.turns.last?.id && !store.isRunning {
+                                    Button("Continue", systemImage: "arrow.down.forward") { store.continueAnswer() }
+                                        .disabled(store.capability == nil || store.isChecking)
+                                        .accessibilityIdentifier("malibu.chat.continue")
+                                }
                             }.id(turn.id)
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
@@ -101,6 +122,7 @@ struct ChatScreen: View {
                 }
             }
             .onChange(of: store.turns.last?.answer) { _, _ in proxy.scrollTo("chat-bottom", anchor: .bottom) }
+            .onChange(of: store.turns.last?.tools.count) { _, _ in proxy.scrollTo("chat-bottom", anchor: .bottom) }
             .onChange(of: store.turns.count) { _, _ in proxy.scrollTo("chat-bottom", anchor: .bottom) }
         }
     }
@@ -134,7 +156,9 @@ struct ChatScreen: View {
                     .lineLimit(2...6).textFieldStyle(.plain).padding(12)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                     .focused($composerFocused)
-                    .disabled(store.isRunning)
+                    // Typing stays possible while a reply streams (Return waits on canSend), so focus is
+                    // never dropped; the composer takes focus as soon as the chat opens.
+                    .onAppear { composerFocused = true }
                     // Return sends, as in every chat app; Shift-Return keeps a newline.
                     .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) { return .ignored }
@@ -155,11 +179,60 @@ struct ChatScreen: View {
                         .accessibilityIdentifier("malibu.chat.send")
                 }
             }
-            Text(draft.utf8.count > ChatStore.maxPromptBytes ? "Message is too long. Keep it under 8 KB."
-                 : store.agentMode && store.folderName == nil ? "Choose a folder first: Agent mode reads only the folder you pick."
-                 : "Return to send · Shift-Return for a new line · Ephemeral conversation")
-                .font(.caption2).foregroundStyle(.secondary)
+            if draft.utf8.count > ChatStore.maxPromptBytes {
+                Text("Message is too long. Keep it under 8 KB.").font(.caption2).foregroundStyle(.secondary)
+            } else if store.agentMode && store.folderName == nil {
+                Text("Choose a folder first: Agent mode reads only the folder you pick.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }.padding(20)
+    }
+    private var historyList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Saved on this Mac").font(.headline).padding(12)
+            Divider()
+            if store.history.isEmpty {
+                Text("No saved chats yet.").foregroundStyle(.secondary)
+                    .frame(width: 320).padding(.vertical, 24)
+            } else {
+                List(store.history) { chat in
+                    HStack(spacing: 8) {
+                        Button {
+                            store.openConversation(chat.id); showingHistory = false
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(chat.title)
+                                    .fontWeight(chat.id == store.conversationID ? .semibold : .regular)
+                                    .lineLimit(1)
+                                Text(chat.updatedAt, format: .relative(presentation: .named))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Button(role: .destructive) { pendingDelete = chat } label: { Label("Delete", systemImage: "trash") }
+                            .labelStyle(.iconOnly).buttonStyle(.borderless)
+                            .help("Delete this chat")
+                            .accessibilityIdentifier("malibu.chat.history.delete")
+                    }
+                }
+                .frame(width: 320, height: 360)
+            }
+        }
+        .accessibilityIdentifier("malibu.chat.history.list")
+        .confirmationDialog(
+            "Delete this chat?",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
+        ) {
+            Button("Delete", role: .destructive) {
+                if let chat = pendingDelete { store.deleteConversation(chat.id) }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("It is removed from this Mac and cannot be restored.")
+        }
     }
     private var canSend: Bool {
         !store.isRunning

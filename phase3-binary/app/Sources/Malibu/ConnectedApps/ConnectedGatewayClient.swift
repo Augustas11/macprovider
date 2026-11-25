@@ -173,7 +173,7 @@ struct ConnectedGatewayClient {
               reason == "stop" || reason == "tool_calls",
               let message = choice["message"] as? [String: Any] else { throw ChatFailure.malformed }
         let raw = message["tool_calls"] as? [[String: Any]] ?? []
-        guard raw.count <= ChatStore.maxCalls else { throw ChatFailure.limit }
+        guard raw.count <= ChatStreamAccumulator.maxCallsPerResponse else { throw ChatFailure.limit }
         let calls = try raw.map { item -> ChatToolCall in
             guard let id = item["id"] as? String, !id.isEmpty, id.utf8.count <= 128,
                   let function = item["function"] as? [String: Any],
@@ -185,15 +185,18 @@ struct ConnectedGatewayClient {
         guard Set(calls.map(\.id)).count == calls.count else { throw ChatFailure.malformed }
         let text = message["content"] as? String ?? ""
         guard text.utf8.count <= 65536 else { throw ChatFailure.limit }
-        return ChatCompletion(text: text, calls: calls)
+        let tokens = (root["usage"] as? [String: Any])?["completion_tokens"] as? Int
+        return ChatCompletion(text: text, calls: calls, completionTokens: tokens.flatMap { $0 >= 0 ? $0 : nil })
     }
 
     private func request(path: String, key: String, body: [String: Any]?) async throws -> Data {
         // Production metadata uses the fixed HTTPS gateway. Inference tests use
         // only the fixed loopback consumer and its local token.
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
+        // Same stall guard as local Chat: a non-streaming agent round can take
+        // minutes. There is no 90 s run limit; the resource limit is a backstop.
+        configuration.timeoutIntervalForRequest = LocalChatTransport.idleTimeout
+        configuration.timeoutIntervalForResource = LocalChatTransport.resourceTimeout
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil

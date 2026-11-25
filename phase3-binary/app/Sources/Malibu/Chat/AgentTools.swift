@@ -12,6 +12,12 @@ actor AgentWorkspace {
     static let fileByteLimit = 32 * 1024
     static let outputByteLimit = 64 * 1024
     static let entryLimit = 512
+    /// Hidden entries and build/dependency folders are not listed, searched
+    /// or followed; they bury the user's files and exhaust the entry cap.
+    static let skippedFolders: Set<String> = [".build", "node_modules", "DerivedData", "Pods"]
+    static func isSkipped(_ name: String) -> Bool { name.hasPrefix(".") || skippedFolders.contains(name) }
+    static let listTruncatedNote = "[truncated: more than \(entryLimit) entries; list a subfolder]"
+    static let searchTruncatedNote = "[search incomplete: limit reached; narrow the path or query]"
     private let beforeOpen: (@Sendable (String) -> Void)?
 
     init(url: URL, beforeOpen: (@Sendable (String) -> Void)? = nil) throws {
@@ -88,11 +94,14 @@ actor AgentWorkspace {
         switch call.name {
         case "read_file": return try read(path: args["path"]!, deadline: deadline)
         case "list_files":
-            return try entries(path: args["path"]!, deadline: deadline).joined(separator: "\n")
+            let listing = try entries(path: args["path"]!, deadline: deadline)
+            guard listing.truncated else { return listing.names.joined(separator: "\n") }
+            return (listing.names + [Self.listTruncatedNote]).joined(separator: "\n")
         case "search_files":
-            var visited = 0; var scanned = 0; var output: [String] = []; var outputBytes = 0
-            try search(path: args["path"]!, query: args["query"]!, depth: 0, visited: &visited,
-                       scanned: &scanned, output: &output, outputBytes: &outputBytes, deadline: deadline)
+            var visited = 0; var scanned = 0; var output: [String] = []; var outputBytes = 0; var truncated = false
+            try search(path: args["path"]!, query: args["query"]!, depth: 0, visited: &visited, scanned: &scanned,
+                       output: &output, outputBytes: &outputBytes, truncated: &truncated, deadline: deadline)
+            if truncated { output.append(Self.searchTruncatedNote) }
             return output.isEmpty ? "No matches within the bounded search." : output.joined(separator: "\n")
         default: throw ChatFailure.invalidTool
         }
@@ -147,11 +156,12 @@ actor AgentWorkspace {
         guard let text = String(data: data, encoding: .utf8), !text.contains("\0") else { throw ChatFailure.invalidTool }
         return text
     }
-    private func entries(path: String, deadline: ContinuousClock.Instant) throws -> [String] {
+    /// Over the entry or byte cap the listing is cut short and marked truncated.
+    private func entries(path: String, deadline: ContinuousClock.Instant) throws -> (names: [String], truncated: Bool) {
         let fd = try openPath(path, directory: true)
         guard let directory = fdopendir(fd) else { Darwin.close(fd); throw ChatFailure.unsafePath }
         defer { closedir(directory) }
-        var names: [String] = []; var bytes = 0
+        var names: [String] = []; var bytes = 0; var truncated = false
         while let entry = readdir(directory) {
             try check(deadline)
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -162,29 +172,38 @@ actor AgentWorkspace {
             // or tool-output structure in the model's context; such names are
             // not listed, searched or readable through these tools.
             if name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) { continue }
+            if Self.isSkipped(name) { continue }
+            guard names.count < Self.entryLimit, bytes + name.utf8.count + 1 <= Self.outputByteLimit else {
+                truncated = true; break
+            }
             bytes += name.utf8.count + 1
-            guard names.count < Self.entryLimit, bytes <= Self.outputByteLimit else { throw ChatFailure.limit }
             names.append(name)
         }
-        return names.sorted()
+        return (names.sorted(), truncated)
     }
+    /// Limits stop the search early and set `truncated`; the matches found so
+    /// far are kept. Cancellation and the deadline still throw.
     private func search(path: String, query: String, depth: Int, visited: inout Int, scanned: inout Int,
-                        output: inout [String], outputBytes: inout Int, deadline: ContinuousClock.Instant) throws {
+                        output: inout [String], outputBytes: inout Int, truncated: inout Bool,
+                        deadline: ContinuousClock.Instant) throws {
         guard depth <= 5 else { return }
-        let names: [String]
-        do { names = try entries(path: path, deadline: deadline) }
-        // A subdirectory over the entry limit is skipped, not fatal to the
-        // whole search; the requested directory itself still must fit.
-        catch ChatFailure.limit where depth > 0 { return }
-        for name in names {
+        let listing = try entries(path: path, deadline: deadline)
+        // A subdirectory over the entry limit is skipped, not searched in part;
+        // the requested directory itself is searched as far as it was listed.
+        if listing.truncated {
+            truncated = true
+            if depth > 0 { return }
+        }
+        for name in listing.names {
             try check(deadline)
             visited += 1
-            guard visited <= Self.entryLimit else { throw ChatFailure.limit }
+            guard visited <= Self.entryLimit else { truncated = true; return }
             let child = path == "." ? name : path + "/" + name
             if let fd = try? openPath(child, directory: true) {
                 Darwin.close(fd)
-                try search(path: child, query: query, depth: depth + 1, visited: &visited,
-                           scanned: &scanned, output: &output, outputBytes: &outputBytes, deadline: deadline)
+                try search(path: child, query: query, depth: depth + 1, visited: &visited, scanned: &scanned,
+                           output: &output, outputBytes: &outputBytes, truncated: &truncated, deadline: deadline)
+                if visited > Self.entryLimit { return }
             } else {
                 // Symlinks, binary/oversized files, sockets, and unreadable files
                 // are skipped. Cancellation/timeouts still propagate below.
@@ -194,11 +213,13 @@ actor AgentWorkspace {
                 catch ChatFailure.invalidTool { continue }
                 catch ChatFailure.limit { continue }
                 scanned += text.utf8.count
-                guard scanned <= 512 * 1024 else { throw ChatFailure.limit }
+                guard scanned <= 512 * 1024 else { truncated = true; visited = Self.entryLimit + 1; return }
                 for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() where line.contains(query) {
                     let match = "\(child):\(index + 1): \(line.prefix(400))"
+                    guard outputBytes + match.utf8.count + 1 <= Self.outputByteLimit else {
+                        truncated = true; visited = Self.entryLimit + 1; return
+                    }
                     outputBytes += match.utf8.count + 1
-                    guard outputBytes <= Self.outputByteLimit else { throw ChatFailure.limit }
                     output.append(match)
                 }
             }
