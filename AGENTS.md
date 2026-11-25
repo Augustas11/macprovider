@@ -414,8 +414,10 @@ Then:
    forward, sampling, host sync) from the same run.
    For a speed goal, record the ceiling next to the baseline: decode =
    measured memory bandwidth / bytes read per output token (active weights,
-   output layer, KV at the working context); prefill = about half the
-   measured matmul peak / compute per token. Measure both on the box, not
+   output layer, KV at the working context); prefill = the measured matmul
+   peak / compute per token (served GLM prefill reaches 71%, oMLX 78% of the
+   measured bf16 peak on the Studio, so half the peak is not a bound).
+   Measure both on the box, not
    from the spec sheet. Report progress as a share of the ceiling, and report
    a target above it early, with the arithmetic.
 2. Profile before ideas. Each idea states the share of the metric it can
