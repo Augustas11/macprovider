@@ -7,9 +7,9 @@
 # #2474: GLM-5.3-Flash uncensored long-prompt TTFT gap to oMLX, after #2451 (PR 2457 + PR 2473).
 # One window, one row, the production batching route, the #2451 grid (4k/16k = 3,673/14,126 prompt
 # tokens, scripts/lab/parity-grid/grid.json):
-#   base   = phase3-binary at COMMIT (origin/main: mlx-swift-lm 3.32.3-macprovider.87, 0efe0402);
+#   base   = phase3-binary at COMMIT (origin/main: mlx-swift-lm 3.33.0-macprovider.89, 10584fc0);
 #   fused  = the same tree with mlx-swift-lm replaced by SRC/mlx-swift-lm (fork branch
-#            macprovider/2474-fused-gate-up-87, FORK_COMMIT, one commit on .87: routed gate and up
+#            macprovider/2474-fused-gate-up-89, FORK_COMMIT, one commit on .89: routed gate and up
 #            as one gathered quantized matmul; on by default, MLX_GLM5_FUSED_GATE_UP=0 disables);
 #   omlx   = oMLX 0.8.0rc1 @ c74f1b18 (the #2451 reference: MTP, DFlash off, --no-cache), driven by
 #            parity-grid reference_omlx.py on the same grid prompts.
@@ -40,7 +40,7 @@
 #       PARITY_ROW engine=fused vs=base-a prompt_tokens=N out=M identical=<true|false>
 #       T2474_VERDICT fork_test=.. tokens=.. fused=KEEP|REVERT omlx=ok|missing
 #     then JOB_PASS (every step ran, the oMLX rows exist, fork test passed, tokens identical) or JOB_FAIL.
-# Knobs: CONTEXTS (4k,16k) OUTPUTS (128,512) TRIALS (3) MIN_FREE_GB (60) E2E_EXTRA_GB (40)
+# Knobs: CONTEXTS (4k,16k) OUTPUTS (128,512) TRIALS (3) MIN_FREE_GB (60) E2E_EXTRA_GB (40) LIVE_SET (~/macprovider/compatibility-set.json: the lab binaries take its provider_cli version)
 #   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR.
 #   JOB_CHECK=1: validate the knobs, print the grid argvs and exit 0 before touching anything.
 # Every failure prints `BLOCKER:`.
@@ -241,7 +241,18 @@ fi
 log "FORK_TEST $FORK_TEST"
 
 # 4. Builds: base on its pins, fused with mlx-swift-lm replaced by the shipped fork tree.
+# Serve refuses to start when the installed signed compatibility set names another provider_cli
+# version, so both lab binaries carry the live install's version (read from the set, never pinned
+# here). SRC is this run's throwaway archive, so the edit stays in the lab copy.
+LIVE_SET=${LIVE_SET:-$HOME/macprovider/compatibility-set.json}
+LIVE_VERSION=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["signed"]["components"]["provider_cli"]["version"])' \
+  "$LIVE_SET" 2>/dev/null)
+case "$LIVE_VERSION" in ""|*[!0-9.]*) die "cannot read provider_cli version from $LIVE_SET: '$LIVE_VERSION'" 11 ;; esac
+log "LIVE_VERSION $LIVE_VERSION (from $LIVE_SET)"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
+  vsrc=$PKG/Sources/macprovider-cli/CoordinatorClient.swift
+  sed -i '' "s/static let binaryVersion = \"[0-9.]*\"/static let binaryVersion = \"$LIVE_VERSION\"/" "$vsrc"
+  grep -q "static let binaryVersion = \"$LIVE_VERSION\"" "$vsrc" || die "binaryVersion pin to $LIVE_VERSION failed" 14
   log "BUILD_START base"
   (cd "$PKG" && nice -n 10 swift build -c release --product macprovider-cli --build-path .build-lab-main \
     -Xswiftc -DMACPROVIDER_LAB_HARNESS) > "$RES/e2e/build-base.log" 2>&1 \
@@ -262,7 +273,9 @@ for side in base fused; do
   [ -x "$bin/macprovider-cli" ] || die "no $side lab-harness binary at $bin" 14
   cp "$METALLIB" "$bin/mlx.metallib" || die "metallib copy failed" 14
   shasum -a 256 "$bin/macprovider-cli" "$bin/mlx.metallib" > "$RES/e2e/identity-$side.sha256"
-  log "BUILD_DONE $side $("$bin/macprovider-cli" --version 2>&1 | head -n 1) cli_sha256=$(cut -c1-16 "$RES/e2e/identity-$side.sha256" | head -n 1)"
+  ver=$("$bin/macprovider-cli" --version 2>&1 | head -n 1)
+  log "BUILD_DONE $side $ver cli_sha256=$(cut -c1-16 "$RES/e2e/identity-$side.sha256" | head -n 1)"
+  case " $ver " in *" $LIVE_VERSION "*) ;; *) die "the $side binary reports '$ver', not the live $LIVE_VERSION: serve would refuse the installed set" 14 ;; esac
 done
 cmp -s "$MAIN_BIN/macprovider-cli" "$CAND_BIN/macprovider-cli" && die "the base and fused binaries are identical: the fork did not reach the fused build" 14
 
