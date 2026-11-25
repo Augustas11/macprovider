@@ -446,6 +446,22 @@ final class ModelRuntimeSwapTests: XCTestCase {
         )
     }
 
+    /// The serial-only refusal waits for the signed adapter only for an
+    /// Inkling 2 target; any other target is refused before its sidecar is read.
+    func testSerialOnlyRefusalWaitsForTheAdapterOnlyForInklingTargets() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("serial-target-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (modelType, expected) in [("inkling2_loop", true), ("glm_moe_dsa", false), ("qwen3_5_moe", false)] {
+            let directory = root.appendingPathComponent(modelType)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: ["model_type": modelType])
+                .write(to: directory.appendingPathComponent("config.json"))
+            XCTAssertEqual(ModelRuntime.nativeMTPTargetMayRunSerial(targetDirectory: directory), expected, modelType)
+        }
+        XCTAssertFalse(ModelRuntime.nativeMTPTargetMayRunSerial(targetDirectory: root.appendingPathComponent("missing")))
+    }
+
     /// SPEC-048-R004 on the serial path: only a plain greedy text request
     /// with no carried state takes the native iterator.
     func testSerialNativeMTPEligibility() {

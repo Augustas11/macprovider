@@ -1786,8 +1786,20 @@ the whole prompt. A request that R004 makes ineligible (sampling, tools or a
 grammar, non-text content), or that carries a conversation-cache lease, a
 resumed prefix or carried model state, takes ordinary serial decode. A native
 iterator that cannot start falls back to ordinary decode on a fresh cache
-before any output. Native rounds are counted in the R010 status counters.
-Every other adapter keeps the rules above unchanged. One scheduler round MAY contain ordinary and native-MTP rows, with
+before any output. Native rounds are counted in the R010 status counters; an
+admitted request served ordinary counts as a pre-output fallback. The target
+MAY bound the positions a verify reproduces exactly: for `inkling2_dspark_v1`
+a verify ends where a sliding layer's 1024-position window first wraps, and on
+the GPU with a verify lever off no verify runs. Past that bound the iterator
+decodes one token at a time for the rest of the request, so a prompt at or
+past the window runs no native round. A verify row whose two largest
+unsuppressed logits are closer than 0.05 takes its head from the one-row
+product, so its greedy token is the one-row token. A serial native tuple has
+no scheduler, so it answers the observe-only pool canary with
+`capacity_unavailable`, which reschedules the canary and disables nothing;
+the in-process self-check is its exactness gate. The early serial-only
+refusal stays in force for every target whose architecture has no serial
+adapter. Every other adapter keeps the rules above unchanged. One scheduler round MAY contain ordinary and native-MTP rows, with
 different row offsets, proposal depths, accepted-prefix lengths, and terminal
 outcomes. Packing and unpacking MUST use explicit row/position maps and MUST
 NOT assume lockstep offsets or equal spans.

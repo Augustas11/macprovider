@@ -11954,6 +11954,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     kvCache = try Self.serveCache(
                                         model: generationContext.model, baseParameters: parameters, forceSimpleKV: forceSimpleKV)
                                 }
+                            } else if let serialNativeMTP {
+                                // Admitted native, served ordinary: count it as a pre-output fallback.
+                                serialNativeMTP.statusSink.recordPreoutputFallback(.requestIneligible)
                             }
                             let iterator: SerialDecodeIterator
                             if let serialNativeIterator {
@@ -13170,6 +13173,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 kvCache = try Self.serveCache(
                                     model: generationContext.model, baseParameters: parameters, forceSimpleKV: forceSimpleKV)
                             }
+                        } else if let serialNativeMTP {
+                            // Admitted native, served ordinary: count it as a pre-output fallback.
+                            serialNativeMTP.statusSink.recordPreoutputFallback(.requestIneligible)
                         }
                         let iterator: SerialDecodeIterator
                         if let serialNativeIterator {
@@ -14499,6 +14505,15 @@ maxTokens: maxTokens,
         }
     }
 
+    /// Whether the target's architecture has a serial native adapter: only
+    /// Inkling 2 (`inkling2_loop`, adapter `inkling2_dspark_v1`) today.
+    nonisolated static func nativeMTPTargetMayRunSerial(targetDirectory: URL) -> Bool {
+        guard let data = try? Data(contentsOf: targetDirectory.appendingPathComponent("config.json")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["model_type"] as? String == "inkling2_loop"
+    }
+
     private static func loadNativeMTPDrafterIfAdmitted(
         mode: NativeMTPMode,
         targetModelID: String,
@@ -14525,10 +14540,14 @@ maxTokens: maxTokens,
             rejectionObserver(reasonCode)
             return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole, modelID: eventModelID)
         }
-        // A serial-only refusal waits for the signed adapter: a serial-admitted
-        // adapter may load there (SPEC-048 0.1.130); any other refusal is final.
-        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route),
-           nativeMTPActivationRefusal(mode: mode, route: route, serialAdmitted: true) != nil {
+        // A serial-only refusal waits for the signed adapter only for a target a
+        // serial adapter can serve (SPEC-048 0.1.130); every other target keeps
+        // the immediate refusal, before any sidecar is read.
+        if let reasonCode = nativeMTPActivationRefusal(
+            mode: mode,
+            route: route,
+            serialAdmitted: nativeMTPTargetMayRunSerial(targetDirectory: targetDirectory)
+        ) {
             return reject(reasonCode: reasonCode, artifactRole: "runtime")
         }
         guard let targetModelRevision else {
@@ -20016,9 +20035,13 @@ extension ModelRuntime {
                 }
                 Stream().synchronize()
                 let seconds = Date().timeIntervalSince(start)
-                if seconds < best.seconds || best.tokens.isEmpty {
+                // Every repetition must give the same tokens; the fastest one is timed.
+                if best.seconds.isFinite, tokens != best.tokens {
+                    throw NativeMTPSelfTestError.failed("selftest_nondeterministic")
+                }
+                if seconds < best.seconds {
                     best = SerialNativeMTPSelfCheckRun(
-                        tokens: tokens, seconds: min(seconds, best.seconds),
+                        tokens: tokens, seconds: seconds,
                         acceptedTokens: accepted, proposedTokens: proposed, rounds: rounds)
                 }
             }
