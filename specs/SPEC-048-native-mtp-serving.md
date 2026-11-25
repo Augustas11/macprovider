@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.132
+**Version:** 0.1.133
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.132",
+  "version": "0.1.133",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -636,8 +636,16 @@ mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
-weights; the observer inspects every `.safetensors` file under the snapshot
-root recursively, a superset of that set. Each fork rebase MUST re-establish,
+weights; the observer inspects every top-level `.safetensors` file plus every
+subdirectory file the index names, a superset of that set (0.1.133). It does
+not descend into subdirectories the index does not name: the loader never
+reads them, and a model may ship unrelated weights there (Sage-S2.1-Flash's
+per-modality `projectors/**/projector.safetensors` repeat bare `layers.N.*`
+names across files). An index entry that is absolute, contains an empty, `.`
+or `..` component, or passes through a symlinked directory is rejected. The
+only declared additional weight files at this revision (JinaReranker's
+`projector.safetensors`, MiniMaxM3's refusal-direction file) belong to
+families without native MTP. Each fork rebase MUST re-establish,
 under the per-rebase acceptance gate, that every file the rebased loader can
 consume is in the observer's set; a loader that can reach a file the observer
 does not inspect blocks the rebase. The observer MUST reject symlinked or
@@ -3364,6 +3372,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.133 (2026-11-26, Related: #2466)** — R003 observer file set: the
+  artifact observer inspects top-level `.safetensors` files plus the
+  subdirectory files `model.safetensors.index.json` names, instead of every
+  nested file. This mirrors the pinned loader's `safetensorWeightURLs`, so
+  Sage-S2.1-Flash's `projectors/` weights no longer fail admission as
+  duplicate tensors.
 - **0.1.132 (2026-11-26)** — R003 names mlx-swift-lm `3.33.0-macprovider.92`
   (`1ed7853d27698b037d582aa2f00fc827ae4cca84`) on `3.33.0-macprovider.91`
   (#2505): Inkling 2 continuous batching: each batched row attends through the
