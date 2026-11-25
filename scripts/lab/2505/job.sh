@@ -119,7 +119,7 @@ if has provider; then
   [ -e "$PKG/.build" ] || ln -s "$BUILD" "$PKG/.build"
   say "PROVIDER_TEST"
   (cd "$PKG" && swift test --skip-build --build-path "$BUILD" \
-      --filter 'PagedKVInkling2Tests|PagedKVSlidingWindowTests|PagedKVRuntimeBridge|PagedKVRecurrent') \
+      --filter 'PagedKVInkling2Tests|PagedKVSlidingWindowTests|PagedKVRuntimeBridge|PagedKVRecurrent|ContinuousBatchSchedulerTests') \
     > "$OUT/provider-test.log" 2>&1; rc=$?
   grep -E "Test Case .*failed|recorded an issue|error:|Executed|skipped" "$OUT/provider-test.log" | sort -u | tail -40
   [ $rc = 0 ] || blocker "provider tests rc=$rc"

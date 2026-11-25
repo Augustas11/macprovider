@@ -449,6 +449,51 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(prefillTokenCounts, [512, 512, 512, 512, 52])
     }
 
+    /// Inkling 2 (#2505): serial `prepare` strides `prompt[..<n-1]` and runs
+    /// the last token alone; CB rows prefill on the same partition.
+    func testSerialPrefillStrideReservingTheLastTokenMatchesInklingPrepare() async throws {
+        for (count, expected) in [(1500, [512, 512, 475, 1]), (1025, [512, 512, 1]), (1, [1]), (300, [299, 1])] {
+            let backend = ScriptedBackend(scripts: ["inkling": [101]])
+            let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+            let scheduler = try await makeScheduler(
+                descriptor: descriptor,
+                tuple: Self.tuple(),
+                maxActiveRows: 1,
+                maxPromptChunkTokens: 512,
+                serialPrefillStride: true,
+                serialPrefillReservesLastToken: true,
+                backend: backend,
+                allocator: allocator
+            )
+            let result = try await scheduler.submit(.init(
+                id: "inkling",
+                conversationKey: "",
+                promptTokens: Array(1...count),
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+            let prefillTokenCounts = await backend.prefillTokenCountsByCall()
+            XCTAssertEqual(result.outputTokens, [101], "\(count) tokens")
+            XCTAssertEqual(prefillTokenCounts, expected, "\(count) tokens")
+        }
+    }
+
+    func testReservingTheLastTokenNeedsTheSerialStride() throws {
+        let config = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128),
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            decodeHeadroomTokens: 1,
+            serialPrefillReservesLastToken: true,
+            snapshot: ContinuousBatchSchedulerSnapshot(
+                modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 3
+            )
+        )
+        XCTAssertFalse(config.serialPrefillReservesLastToken)
+    }
+
     func testSerialPrefillStrideIgnoresASmallerPerIterationBudget() async throws {
         let backend = ScriptedBackend(scripts: ["minimax": [101]])
         let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
@@ -10968,6 +11013,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
         serialPrefillStride: Bool = false,
+        serialPrefillReservesLastToken: Bool = false,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
@@ -10999,6 +11045,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             serialPrefillStride: serialPrefillStride,
+            serialPrefillReservesLastToken: serialPrefillReservesLastToken,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,

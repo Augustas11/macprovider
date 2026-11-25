@@ -39,11 +39,16 @@ extension ModelRuntime {
         maxDecodeRowsPerForward: Int = Int.max,
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
+        serialPrefillReservesLastToken: Bool = false,
         widePrefillChunkTokens: Int? = nil
     ) -> ContinuousBatchSchedulerConfiguration {
         // The family ceiling is the chunk unless the operator set
         // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
-        let promptChunkTokens = min(max(1, prefillStepSize ?? promptChunkCeiling), promptChunkCeiling)
+        // A row that reserves its last token follows the serial route's
+        // step exactly (#2505), so an operator step is its chunk either way.
+        let promptChunkTokens = serialPrefillReservesLastToken
+            ? max(1, prefillStepSize ?? promptChunkCeiling)
+            : min(max(1, prefillStepSize ?? promptChunkCeiling), promptChunkCeiling)
         return ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
             tuple: tuple,
@@ -62,6 +67,7 @@ extension ModelRuntime {
             idlePrefillCohortChunkTokens: idlePrefillCohortChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
             serialPrefillStride: serialPrefillStride,
+            serialPrefillReservesLastToken: serialPrefillReservesLastToken,
             // At most two chunks per forward, so a lowered `prefill_step_size` also
             // lowers the wide forward's activation peak instead of packing more slices.
             widePrefillChunkTokens: widePrefillChunkTokens.map { min($0, 2 * promptChunkTokens) },
@@ -168,7 +174,18 @@ extension ModelRuntime {
     nonisolated static func schedulerFollowsSerialPrefillStride(
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Bool {
-        (backend as? PagedKVSharedForwardBackend)?.cacheKinds.contains(where: \.isPagedIndexedKV) ?? false
+        guard let backend = backend as? PagedKVSharedForwardBackend else { return false }
+        return backend.cacheKinds.contains(where: \.isPagedIndexedKV)
+            || schedulerSerialPrefillReservesLastToken(backend: backend)
+    }
+
+    /// Inkling 2 (#2505): its serial `prepare` strides `prompt[..<n-1]` at
+    /// the serve step and runs the last token as the first decode step, and
+    /// its greedy tokens depend on that partition, so CB rows prefill on it.
+    nonisolated static func schedulerSerialPrefillReservesLastToken(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Bool {
+        (backend as? PagedKVSharedForwardBackend)?.recurrentStateLayout == .inkling2ConvTailFourSlot
     }
 
     /// Decode steps per hop while a prompt prefills, scaled with the chunk so
@@ -332,6 +349,7 @@ extension ModelRuntime {
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
                 referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.prefillChunkTokens : nil,
                 serialPrefillStride: schedulerFollowsSerialPrefillStride(backend: backend),
+                serialPrefillReservesLastToken: schedulerSerialPrefillReservesLastToken(backend: backend),
                 widePrefillChunkTokens: schedulerWidePrefillChunkTokens(backend: backend)
             ),
             allocator: allocator,

@@ -956,7 +956,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
-                serialPrefillStride: cacheKinds.contains(where: \.isPagedIndexedKV),
+                serialPrefillStride: cacheKinds.contains(where: \.isPagedIndexedKV)
+                    || recurrentStateLayout == .inkling2ConvTailFourSlot,
+                serialPrefillReservesLastToken: recurrentStateLayout == .inkling2ConvTailFourSlot,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
@@ -1156,6 +1158,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         return ids
     }
 
+    /// The serial leg's prefill step: serve's for a model whose own default
+    /// differs from it. Inkling 2 defaults to 2048 in `prepare`, but serve
+    /// strides it at the global 512 (`ModelRuntime.serialPrefillStepSize`),
+    /// the partition its CB rows follow (#2505). Other models keep nil, the
+    /// leg every earlier record used.
+    static func servePathSerialPrefillStep(model: any LanguageModel) -> Int? {
+        model is Inkling2Model ? ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens : nil
+    }
+
     private func runProductionSerialOnce(
         container: ModelContainer,
         promptTokens: [Int],
@@ -1169,7 +1180,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             let lmInput = LMInput(tokens: MLXArray(promptTokens.map { Int32($0) }))
             let parameters = GenerateParameters(
                 maxTokens: timedDecodeTokens + 1, temperature: 0.0, topP: 1.0,
-                prefill: .legacyRemainder(stepSize: nil))
+                prefill: .legacyRemainder(stepSize: Self.servePathSerialPrefillStep(model: context.model)))
             let result: GenerateResult = try generate(
                 input: lmInput, parameters: parameters, context: context
             ) { tokens in

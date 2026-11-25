@@ -308,6 +308,14 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// its QSA `indexer_budget`), so where a chunk starts changes the row's
     /// numerics; the serial stride keeps its partition the serial one.
     let serialPrefillStride: Bool
+    /// With `serialPrefillStride`: the stride covers every prompt token but
+    /// the last, which prefills alone, as a model that reserves the logits
+    /// position in its serial `prepare` does (Inkling 2: 512-token strides
+    /// over `prompt[..<n-1]`, then the last token as the first decode step).
+    /// Chunk boundaries change the row's floating-point result, so a CB row
+    /// matches the serial run token for token only on the serial partition
+    /// (#2505: a 1500-token row on balanced 3 x 500 chunks diverged at token 3).
+    let serialPrefillReservesLastToken: Bool
     /// Wide prefill (#2451): with no row decoding, a prompt row's forward may
     /// cover up to this many tokens of its consecutive balanced chunks, which
     /// the backend then runs as one forward with each chunk an exact slice
@@ -393,6 +401,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         idlePrefillCohortChunkTokens: Int? = nil,
         referencePrefillStepSize: Int? = nil,
         serialPrefillStride: Bool = false,
+        serialPrefillReservesLastToken: Bool = false,
         widePrefillChunkTokens: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
@@ -434,6 +443,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.referencePrefillStepSize = referencePrefillStepSize.map { max(1, $0) }
         self.serialPrefillStride = serialPrefillStride
+        self.serialPrefillReservesLastToken = serialPrefillStride && serialPrefillReservesLastToken
         // The balanced partition is the one wide prefill keeps; the serial
         // stride and the reference partition keep their own.
         self.widePrefillChunkTokens = serialPrefillStride || referencePrefillStepSize != nil
@@ -7372,6 +7382,9 @@ actor ContinuousBatchScheduler {
     /// before crossing one.
     private func prefillSpanEnd(for row: Row) -> Int {
         var boundaries = pendingRecurrentCheckpointPositions(for: row) + row.request.promptResumeBoundaries
+        if configuration.serialPrefillReservesLastToken, row.request.promptTokens.count > 1 {
+            boundaries.append(row.request.promptTokens.count - 1)
+        }
         if promptSnapshotIsPending(for: row), let snapshot = row.request.promptSnapshotTokenCount {
             boundaries.append(snapshot)
         }
