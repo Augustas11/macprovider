@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.89` | `10584fc0d79cf75b49115f0f42fd7b8c8f30c637` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.90` | `ad1c742daeafa213cc2ee573a8812b9125cf0733` | `3.33.0` (`ca661dc6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
@@ -46,6 +46,18 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-25 the LM row is `3.33.0-macprovider.90` (`ad1c742`), on
+`3.33.0-macprovider.89` (#2487): 3.33.0-macprovider.89 plus the Inkling 2
+DSpark draft (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound
+to the loaded target), staged and rewound rounds over the target's attention
+rings and convolution tails (ConvolutionTailCache, CacheListRoundStrategy),
+target hidden-state taps and exact one-dispatch verify rows; the shared
+MLXLMCommon changes are opt-in (MTPExactVerifyLimitModel and
+MTPChunkedPromptHiddenModel target protocols, and round staging of an
+attention plus convolution-tail CacheList, which it refused before), so no
+other model's decode path changes; the tag is cut from this revision at merge.
+No Swift, core or C pin changes.
 
 As of 2026-11-24 the LM row is `3.33.0-macprovider.89` (`10584fc`), on
 `3.33.0-macprovider.88` (#2467): 3.33.0-macprovider.88 plus the Inkling 2 Mini

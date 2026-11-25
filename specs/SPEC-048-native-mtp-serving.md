@@ -719,12 +719,25 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.89` | `10584fc0d79cf75b49115f0f42fd7b8c8f30c637` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.90` | `ad1c742daeafa213cc2ee573a8812b9125cf0733` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `ml-explore/mlx-swift` `0.33.0` (`7ede4fd6d05f63305c1c0ebf4f8c1909a637c574`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `ml-explore/mlx-c` `v0.8.0` (`a26f2d584a14ec619ae8db9a09be03becd47598a`) |
 
-The mlx-swift-lm row `3.33.0-macprovider.89` is on `3.33.0-macprovider.88`
+The mlx-swift-lm row `3.33.0-macprovider.90` is on `3.33.0-macprovider.89`
+(`10584fc0d79cf75b49115f0f42fd7b8c8f30c637`) (#2487), at
+`ad1c742daeafa213cc2ee573a8812b9125cf0733`: 3.33.0-macprovider.89 plus the
+Inkling 2 DSpark draft (Inkling2DSparkDraftModel, loaded from mtp.safetensors
+and bound to the loaded target), staged and rewound rounds over the target's
+attention rings and convolution tails (ConvolutionTailCache,
+CacheListRoundStrategy), target hidden-state taps and exact one-dispatch
+verify rows; the shared MLXLMCommon changes are opt-in
+(MTPExactVerifyLimitModel and MTPChunkedPromptHiddenModel target protocols,
+and round staging of an attention plus convolution-tail CacheList, which it
+refused before), so no other model's decode path changes; the tag is cut from
+this revision at merge. The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.33.0-macprovider.89` is on `3.33.0-macprovider.88`
 (`73eb9cf7663df03476c568f907bcadd829488c45`) (#2467), at
 `10584fc0d79cf75b49115f0f42fd7b8c8f30c637`: 3.33.0-macprovider.88 plus the
 Inkling 2 Mini text model (inkling2_loop: model file, registry entry, tests
@@ -3325,17 +3338,27 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.130 (2026-11-25, Related: #2487)** — MTP-2: the
-  `(inkling2_dspark_v1, checkpoint_mtp)` pair, its embedded layout (DSpark
-  draft in `mtp.safetensors`, 3 prediction layers, block 8, depth 1 to 7,
+- **0.1.130 (2026-11-25, Related: #2487)** — MTP-2: the `(inkling2_dspark_v1,
+  checkpoint_mtp)` pair, its embedded layout (DSpark draft in
+  `mtp.safetensors`, 3 prediction layers, block 8, depth 1 to 7,
   `hybrid_stageable_rewindable`) and its artifact observation (oQ4e target
   kind `mlx_oq4e`, bf16 draft). MTP-7: serial native tuples (`serial_native`,
   one qualified slot, one native row) for adapters that serve only serially;
   R007's multi-slot rules and R014 item 5 do not apply to them. A serial-only
   process MAY load a serial native tuple's drafter. R015 cells and the R016
   self-check reference for a serial tuple are serial ordinary decode at one
-  row in the same process.
-
+  row in the same process. R003 names mlx-swift-lm `3.33.0-macprovider.90`
+  (`ad1c742daeafa213cc2ee573a8812b9125cf0733`) on `3.33.0-macprovider.89`
+  (#2487): 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
+  (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to the
+  loaded target), staged and rewound rounds over the target's attention rings
+  and convolution tails (ConvolutionTailCache, CacheListRoundStrategy), target
+  hidden-state taps and exact one-dispatch verify rows; the shared MLXLMCommon
+  changes are opt-in (MTPExactVerifyLimitModel and MTPChunkedPromptHiddenModel
+  target protocols, and round staging of an attention plus convolution-tail
+  CacheList, which it refused before), so no other model's decode path
+  changes; the tag is cut from this revision at merge. Other model sources and
+  the Swift, core and C rows are unchanged.
 - **0.1.128 (2026-11-25, Related: #2496)** — R016: a self-check whose only
   failing point is the longest one, failed on speed with equal tokens, admits
   native MTP under a local prompt ceiling (the 1.03 crossing between the last

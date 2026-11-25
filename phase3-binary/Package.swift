@@ -17,6 +17,17 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.90 (#2487) on 3.33.0-macprovider.89:
+        // 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
+        // (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to
+        // the loaded target), staged and rewound rounds over the target's
+        // attention rings and convolution tails (ConvolutionTailCache,
+        // CacheListRoundStrategy), target hidden-state taps and exact
+        // one-dispatch verify rows; the shared MLXLMCommon changes are opt-in
+        // (MTPExactVerifyLimitModel and MTPChunkedPromptHiddenModel target
+        // protocols, and round staging of an attention plus convolution-tail
+        // CacheList, which it refused before), so no other model's decode
+        // path changes; the tag is cut from this revision at merge.
         // Tag 3.33.0-macprovider.89 (#2467) on 3.33.0-macprovider.88:
         // 3.33.0-macprovider.88 plus the Inkling 2 Mini text model
         // (inkling2_loop: model file, registry entry, tests and a tiny test
@@ -281,7 +292,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "10584fc0d79cf75b49115f0f42fd7b8c8f30c637"
+            revision: "ad1c742daeafa213cc2ee573a8812b9125cf0733"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
