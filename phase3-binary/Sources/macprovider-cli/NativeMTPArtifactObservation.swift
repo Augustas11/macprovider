@@ -445,6 +445,9 @@ enum NativeMTPArtifactObserver {
     static func affineRepresentation(
         for observation: NativeMTPArtifactPairObservation
     ) throws -> NativeMTPAffineRepresentation {
+        if case .mlxOQ4e = observation.target.format {
+            return try inkling2DSparkRepresentation(for: observation)
+        }
         if observation.embedded, observation.mtp.format == .unquantized(dtype: "bf16") {
             return try embeddedAssistantRepresentation(for: observation)
         }
@@ -2394,7 +2397,7 @@ extension NativeMTPArtifactObserver {
         config: [String: Any],
         fileManager: FileManager = .default
     ) throws -> NativeMTPArtifactPairObservation {
-        let layerCount = try inkling2DraftLayerCount(in: config)
+        let layerCount = try inkling2ConfigDraftLayerCount(in: config)
         let headers = try loadSafetensorsHeaders(directory: targetDirectory, fileManager: fileManager)
         let draftURL = targetDirectory.appendingPathComponent(inkling2DraftWeightFileName).standardizedFileURL
         let isDraft = { (header: SafetensorsHeader) in header.url.standardizedFileURL.path == draftURL.path }
@@ -2436,7 +2439,7 @@ extension NativeMTPArtifactObserver {
 
     /// The exact Inkling 2 config identity SPEC-048-R002 admits, returning
     /// `mtp_config.num_hidden_layers` (3 on the admitted artifact, block 8).
-    private static func inkling2DraftLayerCount(in config: [String: Any]) throws -> Int {
+    private static func inkling2ConfigDraftLayerCount(in config: [String: Any]) throws -> Int {
         guard config["model_type"] as? String == "inkling2_loop",
               let architectures = config["architectures"] as? [Any],
               architectures.count == 1,
