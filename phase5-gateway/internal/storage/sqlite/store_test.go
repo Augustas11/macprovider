@@ -1947,6 +1947,20 @@ func TestValidDemandModelIDKnowsDaisyRoseIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2466: the stored allowlist matches the router's for Sage S2.1 Flash.
+func TestValidDemandModelIDKnowsSageIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"hygaard/sage-s2.1-flash-oq4e-mtp", "Hygaard/Sage-S2.1-Flash-oQ4e-mtp"} {
+		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
+			t.Errorf("%q must be a known demand model id", model)
+		}
+	}
+	for _, model := range []string{"hygaard/sage-s2.1-flash-oq4e-mtpx", "sage-s2.1-flash-oq4e-mtp", "Hygaard/sage-s2.1-flash-oq4e-mtp"} {
+		if validDemandModelID(model) {
+			t.Errorf("%q must not be a known demand model id", model)
+		}
+	}
+}
+
 // #2236: the stored allowlist matches the router's for Nemotron 3.5 Lightning.
 func TestValidDemandModelIDKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {
 	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit"} {
