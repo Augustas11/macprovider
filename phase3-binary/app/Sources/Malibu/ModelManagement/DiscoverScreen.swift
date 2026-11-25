@@ -185,6 +185,9 @@ enum DiscoverPresentation {
     /// this Mac is earning it (SPEC-044-R014 item 2).
     static func rowRate(_ row: MalibuModelRow) -> String? {
         guard row.providerCompletionPayoutUSDPerMillionTokens != nil else { return nil }
+        guard row.nonEarningDisclosure != nil else {
+            return ModelsPresentation.rateText(row) + " / 1M out"
+        }
         return String(localized: "network rate \(ModelsPresentation.rateText(row)) / 1M out", comment: "Discover row rate")
     }
 
@@ -376,9 +379,15 @@ struct DiscoverScreen: View {
 
     private var hostMemoryGB: Int { ModelsPresentation.hostMemoryGB }
 
-    /// Recommended only; a store recommendation naming a candidate wins.
+    /// Recommended only. When the autotune recommendation callout is shown it
+    /// is this Mac's pick (with its Adopt action), so the card stays hidden
+    /// and the screen never shows two competing "best" models.
     private var bestPick: MalibuModelRow? {
         guard mode == .recommended else { return nil }
+        if let recommendation = store.recommendation,
+           DiscoverPresentation.showsRecommendation(recommendation.displayModelID, rows: store.rows) {
+            return nil
+        }
         let recommended = store.recommendation.flatMap { $0.isRecommendationResult ? $0.displayModelID : nil }
         return DiscoverPresentation.bestPick(store.rows, hostMemoryGB: hostMemoryGB, recommendedID: recommended)
     }

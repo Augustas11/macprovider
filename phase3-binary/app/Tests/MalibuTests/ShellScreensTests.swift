@@ -267,7 +267,7 @@ final class ShellScreensTests: XCTestCase {
     func testDiscoverRowsAreTwoLinesWithBadges() throws {
         let local = try Self.row(key: "local", weightsLocal: true, estimatedGB: 4, demandRank: 34, switchable: true)
         XCTAssertEqual(DiscoverPresentation.rowBadge(local, hostMemoryGB: 32), "On this Mac")
-        XCTAssertEqual(DiscoverPresentation.rowMeta(local, hostMemoryGB: 32), d("uses 4§0 GB of 32 GB · network rate $0§36 / 1M out"),
+        XCTAssertEqual(DiscoverPresentation.rowMeta(local, hostMemoryGB: 32), d("uses 4§0 GB of 32 GB · $0§36 / 1M out"),
                        "rank 34 shows no demand label in a row")
         XCTAssertEqual(DiscoverPresentation.rowBadge(try Self.row(key: "c", isCurrent: true), hostMemoryGB: 32), "Serving")
         let tight = try Self.catalogOnlyRow(key: "tight", modelID: "vendor/tight")
