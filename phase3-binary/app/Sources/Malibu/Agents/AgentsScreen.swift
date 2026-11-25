@@ -124,8 +124,16 @@ private struct AgentEditor: View {
     @State private var loading = false
     @State private var serverName = ""
     @State private var serverCommand = ""
+    @State private var serverURL = ""
     @State private var serverArguments = ""
     @State private var serverEnvironment = ""
+    private var canAddMCPServer: Bool {
+        guard !serverName.isEmpty, agent.servers.count < 8 else { return false }
+        let url = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandOK = serverCommand.hasPrefix("/") && url.isEmpty
+        let urlOK = serverCommand.isEmpty && MCPServerConfiguration.acceptedURL(url) != nil
+        return commandOK || urlOK
+    }
 
     private var stopText: Binding<String> {
         Binding(get: { agent.sampling.stop.joined(separator: ", ") },
@@ -179,13 +187,17 @@ private struct AgentEditor: View {
                     Section("MCP servers") {
                         ForEach(agent.servers) { server in
                             HStack {
-                                VStack(alignment: .leading) { Text(server.name); Text(server.command).font(.caption) }
+                                VStack(alignment: .leading) {
+                                    Text(server.name)
+                                    Text(server.command.isEmpty ? server.url : server.command).font(.caption).lineLimit(1)
+                                }
                                 Spacer()
                                 Button("Remove") { agent.servers.removeAll { $0.id == server.id } }
                             }
                         }
                         TextField("Server name", text: $serverName)
                         TextField("Command (absolute path)", text: $serverCommand)
+                        TextField("URL", text: $serverURL)
                         VStack(alignment: .leading) {
                             Text("Arguments · one per line").font(.caption)
                             TextEditor(text: $serverArguments).frame(height: 55)
@@ -193,7 +205,7 @@ private struct AgentEditor: View {
                             TextEditor(text: $serverEnvironment).frame(height: 55)
                         }
                         Button("Add server") { addServer() }
-                            .disabled(serverName.isEmpty || !serverCommand.hasPrefix("/") || agent.servers.count >= 8)
+                            .disabled(!canAddMCPServer)
                         Text("Each MCP tool call needs approval. Tool results cannot grant permission.").font(.caption)
                     }
                 }.formStyle(.grouped)
@@ -232,6 +244,14 @@ private struct AgentEditor: View {
     }
 
     private func addServer() {
+        let url = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if serverCommand.isEmpty, MCPServerConfiguration.acceptedURL(url) != nil {
+            let server = MCPServerConfiguration(id: UUID(), name: serverName, url: url)
+            guard server.isAcceptable else { status = "Check the MCP server command or URL."; return }
+            agent.servers.append(server)
+            serverName = ""; serverCommand = ""; serverURL = ""; serverArguments = ""; serverEnvironment = ""; status = nil
+            return
+        }
         var environment: [String: String] = [:]
         for line in serverEnvironment.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
@@ -240,9 +260,11 @@ private struct AgentEditor: View {
         }
         do { _ = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: environment) }
         catch { status = "Check the server environment values."; return }
-        agent.servers.append(MCPServerConfiguration(id: UUID(), name: serverName, command: serverCommand,
-                                                   arguments: serverArguments.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty },
-                                                   environment: environment))
-        serverName = ""; serverCommand = ""; serverArguments = ""; serverEnvironment = ""; status = nil
+        let server = MCPServerConfiguration(id: UUID(), name: serverName, command: serverCommand,
+                                            arguments: serverArguments.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty },
+                                            environment: environment)
+        guard server.isAcceptable else { status = "Check the MCP server command or URL."; return }
+        agent.servers.append(server)
+        serverName = ""; serverCommand = ""; serverURL = ""; serverArguments = ""; serverEnvironment = ""; status = nil
     }
 }

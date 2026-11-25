@@ -219,6 +219,11 @@ struct ChatScreen: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let approval = store.pendingApproval {
+                AgentToolApprovalView(server: approval.server, tool: approval.tool, arguments: approval.arguments,
+                                      decide: store.resolveApproval)
+                    .accessibilityIdentifier("malibu.chat.mcp-approval")
+            }
             if let notice = store.notice {
                 Label(notice, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

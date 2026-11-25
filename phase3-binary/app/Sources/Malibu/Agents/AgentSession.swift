@@ -62,16 +62,16 @@ final class AgentSession: ObservableObject {
     private var approvalContinuation: CheckedContinuation<MCPApprovalDecision, Never>?
     private var operation: Task<String, Error>?
     private var sender: Task<Void, Never>?
-    private var clients: [MCPClient] = []
-    private var registeredTools: [String: (MCPClient, MCPTool)] = [:]
+    private var clients: [any MCPServing] = []
+    private var registeredTools: [String: (any MCPServing, MCPTool)] = [:]
     private var conversationAgent: AgentDefinition?
     private var history: [[String: Any]] = []
     private let transport: AgentModelTransport
-    private let makeClient: (MCPServerConfiguration) -> MCPClient
+    private let makeClient: (MCPServerConfiguration) -> any MCPServing
     private static var active: [UUID: AgentSession] = [:]
     private let id = UUID()
     init(transport: AgentModelTransport? = nil,
-         makeClient: @escaping (MCPServerConfiguration) -> MCPClient = { MCPClient(configuration: $0) }) {
+         makeClient: @escaping (MCPServerConfiguration) -> any MCPServing = MCPServingFactory.make) {
         self.transport = transport ?? AgentModelTransport()
         self.makeClient = makeClient
     }

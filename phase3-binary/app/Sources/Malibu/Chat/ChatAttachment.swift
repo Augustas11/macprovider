@@ -65,6 +65,7 @@ enum ChatAttachmentIntake {
     static let documentHint = "This document is too long to attach."
     static let unreadableHint = "This file could not be read as text or PDF."
     static let agentImageHint = "Turn Agent mode off to send an image."
+    static let mcpImageHint = "Remove MCP servers to send an image."
 
     struct Payload: Sendable {
         var name: String

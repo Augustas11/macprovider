@@ -18,6 +18,8 @@ struct ChatSettings: Codable, Equatable {
     var systemPrompt = ""
     var presetID: String?
     var sampling = ChatSettings.defaultSampling
+    /// Absent in settings saved before MCP. Nil and empty mean no servers.
+    var servers: [MCPServerConfiguration]? = nil
 
     static var defaultSampling: AgentSampling {
         var sampling = AgentSampling()
@@ -25,8 +27,15 @@ struct ChatSettings: Codable, Equatable {
         return sampling
     }
 
+    var promptIsValid: Bool {
+        systemPrompt.utf8.count <= 16_384 && !systemPrompt.contains("\0")
+    }
+
     var isValid: Bool {
-        systemPrompt.utf8.count <= 16_384 && !systemPrompt.contains("\0") && sampling.isValid
+        let listed = servers ?? []
+        return promptIsValid && sampling.isValid && listed.count <= 8
+            && listed.allSatisfy(\.isAcceptable)
+            && Set(listed.map(\.id)).count == listed.count
     }
 
     /// The system text sent with a request. Empty means no system message.
@@ -93,6 +102,8 @@ final class ChatSettingsStore {
 struct ChatSettingsForm: View {
     @Binding var settings: ChatSettings
     let save: () -> Void
+    @State private var serverName = ""
+    @State private var serverTarget = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -111,8 +122,29 @@ struct ChatSettingsForm: View {
             TextField("Seed", value: $settings.sampling.seed, format: .number)
             TextField("Stop sequences, comma separated", text: stopText)
             Stepper("Output tokens: \(settings.sampling.maxTokens)", value: $settings.sampling.maxTokens, in: 256...ChatStore.maxTokens)
+            ForEach(settings.servers ?? []) { server in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(server.name)
+                        Text(server.command.isEmpty ? server.url : server.command).font(.caption).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Remove") {
+                        let remaining = (settings.servers ?? []).filter { $0.id != server.id }
+                        settings.servers = remaining.isEmpty ? nil : remaining
+                    }
+                }
+            }
+            TextField("Server name", text: $serverName)
+            TextField("Absolute command or URL", text: $serverTarget)
+                .accessibilityIdentifier("malibu.chat.mcp-target")
+            Button("Add server") { addServer() }
+                .disabled(!canAddServer)
+                .accessibilityIdentifier("malibu.chat.mcp-add")
             if !settings.isValid {
-                Text("Check temperature, top-p, top-k, seed and stop.")
+                Text(settings.promptIsValid && settings.sampling.isValid
+                     ? "Check the MCP server command or URL."
+                     : "Check temperature, top-p, top-k, seed and stop.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -131,5 +163,25 @@ struct ChatSettingsForm: View {
     private var stopText: Binding<String> {
         Binding(get: { settings.sampling.stop.joined(separator: ", ") },
                 set: { settings.sampling.stop = AgentSampling.stops(from: $0) })
+    }
+
+    private var canAddServer: Bool {
+        let name = serverName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, (settings.servers ?? []).count < 8 else { return false }
+        if serverTarget.hasPrefix("/") { return MCPServerConfiguration.acceptedURL(serverTarget) == nil }
+        return MCPServerConfiguration.acceptedURL(serverTarget) != nil
+    }
+
+    private func addServer() {
+        let name = serverName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var server = MCPServerConfiguration(id: UUID(), name: name)
+        if serverTarget.hasPrefix("/") { server.command = serverTarget }
+        else { server.url = serverTarget.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard server.isAcceptable else { return }
+        var listed = settings.servers ?? []
+        listed.append(server)
+        settings.servers = listed
+        serverName = ""
+        serverTarget = ""
     }
 }

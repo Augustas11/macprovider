@@ -86,6 +86,7 @@ struct AgentDefinition: Codable, Identifiable, Equatable {
               name.utf8.count <= 200, instructions.utf8.count <= 16_384,
               model.utf8.count <= 512, sampling.isValid, servers.count <= 8,
               Set(servers.map(\.id)).count == servers.count,
+              servers.allSatisfy(\.isAcceptable),
               workspacePath.map({ $0.utf8.count <= 4096 && !$0.contains("\0") }) ?? true
         else { throw AgentStoreFailure.invalid }
     }

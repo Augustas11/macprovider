@@ -156,7 +156,7 @@ final class MCPClientTests: XCTestCase {
         let (template, directory) = try server()
         var created: [MCPClient] = []
         let transport = MCPExpiryTransport()
-        let session = AgentSession(transport: AgentModelTransport(local: transport, port: { 9042 }), makeClient: { configuration in
+        let session = AgentSession(transport: AgentModelTransport(local: transport, port: { 9042 }), makeClient: { configuration -> any MCPServing in
             let client = MCPClient(configuration: configuration, lifetime: created.isEmpty ? 1 : 30)
             created.append(client)
             return client

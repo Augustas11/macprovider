@@ -639,6 +639,78 @@ final class ChatStoreTests: XCTestCase {
         store.stop()
     }
 
+    func testMCPToolCallAsksAndSendsTheResult() async throws {
+        let transport = ControlledChatTransport()
+        let fake = FakeMCPServer()
+        let store = ChatStore(transport: transport, makeMCP: { configuration in
+            fake.configuration = configuration
+            return fake
+        })
+        await store.refresh(port: 9042)
+        store.settings.servers = [MCPServerConfiguration(name: "Docs", url: "http://127.0.0.1:9/mcp")]
+        store.send("use the tool")
+        try await waitUntil { transport.pending.count == 1 }
+        let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        XCTAssertEqual(first["tool_choice"] as? String, "auto")
+        let messages = try XCTUnwrap(first["messages"] as? [[String: Any]])
+        XCTAssertTrue(messages.contains { ($0["content"] as? String)?.contains("untrusted data") == true })
+        transport.resolve(0, calls: [ChatToolCall(id: "c1", name: fake.toolName, arguments: "{\"q\":\"hi\"}")])
+        try await waitUntil { store.pendingApproval != nil }
+        XCTAssertEqual(store.pendingApproval?.tool, "echo")
+        store.resolveApproval(.allowOnce)
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertEqual(fake.executed, 1)
+        let second = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[1]) as? [String: Any])
+        let follow = try XCTUnwrap(second["messages"] as? [[String: Any]])
+        XCTAssertTrue(follow.contains { $0["role"] as? String == "tool" && ($0["content"] as? String)?.contains("untrusted-data") == true })
+        transport.resolve(1, text: "done")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.first?.answer, "done")
+        XCTAssertEqual(store.turns.first?.complete, true)
+        XCTAssertEqual(store.turns.first?.tools, ["MCP Docs · echo"])
+        let screen = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Chat/ChatScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("malibu.chat.mcp-approval"))
+        XCTAssertTrue(screen.contains("AgentToolApprovalView"))
+        let settings = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Chat/ChatSettings.swift"), encoding: .utf8)
+        XCTAssertTrue(settings.contains("malibu.chat.mcp-target"))
+    }
+
+    func testMCPDenyDoesNotSendTheToolResult() async throws {
+        let transport = ControlledChatTransport()
+        let fake = FakeMCPServer()
+        let store = ChatStore(transport: transport, makeMCP: { configuration in
+            fake.configuration = configuration
+            return fake
+        })
+        await store.refresh(port: 9042)
+        store.settings.servers = [MCPServerConfiguration(name: "Docs", url: "http://127.0.0.1:9/mcp")]
+        store.send("use the tool")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, calls: [ChatToolCall(id: "c1", name: fake.toolName, arguments: "{\"q\":\"hi\"}")])
+        try await waitUntil { store.pendingApproval != nil }
+        store.resolveApproval(.deny)
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(fake.executed, 0)
+        XCTAssertEqual(transport.bodies.count, 1)
+        XCTAssertEqual(store.notice, "The MCP tool was denied.")
+        XCTAssertNotEqual(store.turns.first?.complete, true)
+    }
+
+    func testMCPBlocksAnImageAttachment() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        store.settings.servers = [MCPServerConfiguration(name: "Docs", url: "http://127.0.0.1:9/mcp")]
+        store.stageForEdit([ChatAttachment(id: UUID(), name: "a.png", imageDataURL: "data:image/png;base64,aaaa")])
+        store.send("")
+        XCTAssertEqual(store.notice, ChatAttachmentIntake.mcpImageHint)
+        XCTAssertTrue(store.turns.isEmpty)
+        XCTAssertTrue(transport.bodies.isEmpty)
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while ContinuousClock.now < deadline {
@@ -660,6 +732,30 @@ private final class FakeChatGateway: ChatGateway {
         bodies.append(body)
         return ChatCompletion(text: text)
     }
+}
+
+@MainActor
+private final class FakeMCPServer: MCPServing {
+    var configuration: MCPServerConfiguration
+    var isRunning = false
+    var executed = 0
+    let toolName = "mcp_fake_echo"
+    init(configuration: MCPServerConfiguration = MCPServerConfiguration(name: "Docs", url: "http://127.0.0.1:9/mcp")) {
+        self.configuration = configuration
+    }
+    func start() async throws -> [MCPTool] {
+        isRunning = true
+        let schema: [String: Any] = ["type": "object", "properties": ["q": ["type": "string"]], "required": ["q"], "additionalProperties": false]
+        return [MCPTool(name: toolName, serverName: configuration.name, originalName: "echo", schema: schema)]
+    }
+    func call(tool: MCPTool, arguments: String,
+              approval: @MainActor (MCPTool, String) async -> MCPApprovalDecision) async throws -> String {
+        let decision = await approval(tool, arguments)
+        guard decision != .deny else { throw MCPFailure.denied }
+        executed += 1
+        return "{\"ok\":\"untrusted-data\"}"
+    }
+    func stop() { isRunning = false }
 }
 
 @MainActor
