@@ -8,9 +8,9 @@
 # One window, one row, the production batching route, the #2451 grid (4k/16k = 3,673/14,126 prompt
 # tokens, scripts/lab/parity-grid/grid.json):
 #   base   = phase3-binary at COMMIT (origin/main: mlx-swift-lm 3.33.0-macprovider.89, 10584fc0);
-#   fused  = the same tree with mlx-swift-lm replaced by SRC/mlx-swift-lm (fork branch
-#            macprovider/2474-fused-gate-up-89, FORK_COMMIT, one commit on .89: routed gate and up
-#            as one gathered quantized matmul; on by default, MLX_GLM5_FUSED_GATE_UP=0 disables);
+#   fused  = the candidate (pass label kept from r1-r6): the same tree with mlx-swift-lm replaced
+#            by SRC/mlx-swift-lm (FORK_COMMIT, one commit on .89; r7: macprovider/2474-last-rows-
+#            logits-89, a sliced prefill projects only its last 64 rows to logits);
 #   omlx   = oMLX 0.8.0rc1 @ c74f1b18 (the #2451 reference: MTP, DFlash off, --no-cache), driven by
 #            parity-grid reference_omlx.py on the same grid prompts.
 # Steps:
@@ -21,8 +21,8 @@
 #     OMLX_COMMIT and the venv imports; else installed (docs/runbooks/runtime-agnostic-m9-engines-
 #     e2e-evidence-2026-09-25.md recipe: clone, python3.12 venv, pip install -e, uninstall
 #     setproctitle). Versions must match the #2451 reference (mlx 0.32.4, mlx-lm g0d4d3d04f);
-#  3. fork test: `swift test --filter GLM5NextTests/testFusedGateUp` in a copy of SRC/mlx-swift-lm
-#     (full Xcode, metallib beside the test binary): fused against unfused bitwise at GLM-5.3-Flash
+#  3. fork test: `swift test --filter "GLM5NextTests/($FORK_TESTS)"` in a copy of SRC/mlx-swift-lm
+#     (full Xcode, metallib beside the test binary): the candidate's bitwise tests (every matching test in the file must pass), at GLM-5.3-Flash
 #     expert shapes. A failure is recorded (FORK_TEST FAIL, JOB_FAIL at the end); the TTFT passes
 #     still run so the window yields the oMLX gap;
 #  4. release lab-harness builds: base on its pins (.build-lab-main), fused in its own copy with
@@ -74,7 +74,10 @@ OMLX_DIR=${OMLX_DIR:-$LAB/omlx}
 OMLX_REPO=https://github.com/jundot/omlx
 OMLX_COMMIT=c74f1b18558842e6b10fcfa6e2e901bb382129d4
 OMLX_PY=/opt/homebrew/bin/python3.12
-FORK_TEST_FILTER=GLM5NextTests/testFusedGateUp
+# The candidate's fork tests (swift test --filter regex) and a symbol its source must contain.
+FORK_TESTS=${FORK_TESTS:-testWidePrefillSlices|testPrefillLogitRows}
+FORK_TEST_FILTER="GLM5NextTests/($FORK_TESTS)"
+CAND_MARKER=${CAND_MARKER:-glm5NextPrefillLogitRows}
 FORK_COPY=$LAB/fork-mlx-swift-lm
 FORK_BUILD=$LAB/fork-mlx-swift-lm-build
 # Swift tests need full Xcode (XCTest); the release builds keep the default toolchain.
@@ -158,8 +161,8 @@ log "DISK free_gb=$fg min=$MIN_FREE_GB"
 [ -f "$GATE" ] && [ -f "$GRID/run-grid.sh" ] && [ -f "$PKG/Package.swift" ] || die "source tree incomplete at $SRC" 11
 grep -q "^commit=$FORK_COMMIT$" "$FORK/LAB_2474_FORK" 2>/dev/null \
   || die "the shipped mlx-swift-lm tree is not $FORK_COMMIT: $(tr '\n' ' ' < "$FORK/LAB_2474_FORK" 2>/dev/null)" 11
-grep -q MLX_GLM5_FUSED_GATE_UP "$FORK/Libraries/MLXLLM/Models/GLM5Next.swift" 2>/dev/null \
-  || die "the shipped mlx-swift-lm tree has no fused gate/up path (MLX_GLM5_FUSED_GATE_UP)" 11
+grep -q "$CAND_MARKER" "$FORK/Libraries/MLXLLM/Models/GLM5Next.swift" 2>/dev/null \
+  || die "the shipped mlx-swift-lm tree has no candidate marker ($CAND_MARKER)" 11
 grep -q "$FORK_BASE" "$PKG/Package.swift" || die "phase3-binary/Package.swift does not pin mlx-swift-lm $FORK_BASE" 11
 [ -n "${MLX_GLM5_FUSED_GATE_UP:-}" ] && die "MLX_GLM5_FUSED_GATE_UP is set in the job environment" 11
 [ -f "$METALLIB" ] || die "no metallib at $METALLIB" 14
@@ -226,12 +229,15 @@ if [ "$SKIP_FORK_TEST" = 0 ]; then
     rc=$?
     grep -q "Failed to load the default metallib" "$RES/fork-test.log" \
       && die "the fork test could not load the metallib (no test ran): $RES/fork-test.log" 15
-    p=$(grep -cE "Test Case '-\[MLXLMTests\.GLM5NextTests testFusedGateUp[A-Za-z0-9_]*\]' passed" "$RES/fork-test.log")
-    f=$(grep -cE "Test Case '-\[MLXLMTests\.GLM5NextTests testFusedGateUp[A-Za-z0-9_]*\]' failed" "$RES/fork-test.log")
-    sk=$(grep -cE "Test Case '-\[MLXLMTests\.GLM5NextTests testFusedGateUp[A-Za-z0-9_]*\]' skipped" "$RES/fork-test.log")
-    log "FORK_TEST_DONE rc=$rc passed=$p failed=$f skipped=$sk"
+    case_re="Test Case '-\[MLXLMTests\.GLM5NextTests ($FORK_TESTS)[A-Za-z0-9_]*\]'"
+    p=$(grep -cE "$case_re passed" "$RES/fork-test.log")
+    f=$(grep -cE "$case_re failed" "$RES/fork-test.log")
+    sk=$(grep -cE "$case_re skipped" "$RES/fork-test.log")
+    # Every matching test in the shipped test file must pass (r4-r6 hardcoded 2 of 3: FORK_TEST FAIL).
+    want=$(grep -cE "func ($FORK_TESTS)[A-Za-z0-9_]*\(" "$FORK/Tests/MLXLMTests/GLM5NextTests.swift")
+    log "FORK_TEST_DONE rc=$rc passed=$p want=$want failed=$f skipped=$sk"
     grep -E "XCTAssert|error:" "$RES/fork-test.log" | head -n 10 | sed 's/^/FORK_TEST_FAILURE /'
-    if [ "$rc" = 0 ] && [ "$p" = 2 ] && [ "$f" = 0 ] && [ "$sk" = 0 ]; then FORK_TEST=PASS; else FORK_TEST=FAIL; fi
+    if [ "$rc" = 0 ] && [ "$want" -ge 1 ] && [ "$p" = "$want" ] && [ "$f" = 0 ] && [ "$sk" = 0 ]; then FORK_TEST=PASS; else FORK_TEST=FAIL; fi
   else
     log "BLOCKER: fork test build failed: $(grep -m3 'error:' "$RES/fork-tests-build.log" | tr '\n' ' ' | cut -c1-400)"
     FORK_TEST=FAIL
