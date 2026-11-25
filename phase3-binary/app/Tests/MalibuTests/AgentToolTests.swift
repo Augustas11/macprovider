@@ -142,6 +142,112 @@ final class AgentToolTests: XCTestCase {
             ChatToolCall(id: "1", name: "search_files", arguments: "{\"path\":\".\",\"query\":\"\"}")
         ] { XCTAssertThrowsError(try AgentWorkspace.arguments(for: invalid)) }
         let names = AgentWorkspace.schemas.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
-        XCTAssertEqual(Set(names), ["read_file", "list_files", "search_files", "finish_answer"])
+        XCTAssertEqual(names.first, "list_files")
+        XCTAssertEqual(Set(names), ["read_file", "list_files", "search_files", "finish_answer",
+                                    "write_file", "edit_file", "apply_patch", "run_shell", "run_code", "undo"])
+    }
+
+    func testReadWindowAndTwoFolders() async throws {
+        try write("notes.txt", "abcdefghij")
+        let workspace = try AgentWorkspace(url: root)
+        let window = try await workspace.execute(call("read_file", ["path": "notes.txt", "offset": "2", "limit": "3"]), deadline: deadline)
+        XCTAssertEqual(window, "cde")
+        let left = root.appendingPathComponent("left")
+        let right = root.appendingPathComponent("right")
+        try FileManager.default.createDirectory(at: left, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: right, withIntermediateDirectories: true)
+        try Data("L".utf8).write(to: left.appendingPathComponent("a.txt"))
+        try Data("R".utf8).write(to: right.appendingPathComponent("b.txt"))
+        let both = try AgentWorkspace(urls: [left, right])
+        let listed = try await both.execute(call("list_files", ["path": "."]), deadline: deadline)
+        XCTAssertEqual(listed, "left\nright")
+        let read = try await both.execute(call("read_file", ["path": "left/a.txt"]), deadline: deadline)
+        XCTAssertEqual(read, "L")
+    }
+
+    func testWriteEditPatchAndUndoWaitForCommit() async throws {
+        try write("note.txt", "alpha beta alpha\n")
+        let workspace = try AgentWorkspace(url: root)
+        let file = root.appendingPathComponent("note.txt")
+        do {
+            _ = try await workspace.propose(call("write_file", ["path": ".env", "content": "secret"]), deadline: deadline)
+            XCTFail("A hidden path was accepted")
+        } catch { XCTAssertEqual(error as? ChatFailure, .unsafePath) }
+        do {
+            _ = try await workspace.propose(call("edit_file", ["path": "note.txt", "old": "alpha", "new": "x"]), deadline: deadline)
+            XCTFail("An old string that occurs twice was accepted")
+        } catch { XCTAssertEqual(error as? ChatFailure, .invalidTool) }
+        let edit = try await workspace.propose(call("edit_file", ["path": "note.txt", "old": "beta", "new": "gamma"]), deadline: deadline)
+        XCTAssertTrue(edit.diff.contains("-") && edit.diff.contains("gamma"))
+        XCTAssertEqual(try String(contentsOf: file), "alpha beta alpha\n", "A proposal does not write")
+        _ = try await workspace.commit(edit, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: file), "alpha gamma alpha\n")
+        let patch = """
+        --- a/elsewhere
+        +++ b/elsewhere
+        @@ -1 +1 @@
+        -alpha gamma alpha
+        +patched
+        """
+        let patched = try await workspace.propose(call("apply_patch", ["path": "note.txt", "patch": patch]), deadline: deadline)
+        XCTAssertTrue(patched.diff.contains("note.txt"))
+        XCTAssertFalse(patched.diff.contains("elsewhere"))
+        _ = try await workspace.commit(patched, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: file), "patched\n")
+        let unknown = AgentProposal(id: UUID(), tool: "write_file", summary: "nope", diff: "nope")
+        do {
+            _ = try await workspace.commit(unknown, deadline: deadline)
+            XCTFail("An unknown proposal was committed")
+        } catch { XCTAssertEqual(error as? ChatFailure, .invalidTool) }
+        let undo = try await workspace.propose(call("undo", [:]), deadline: deadline)
+        _ = try await workspace.commit(undo, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: file), "alpha gamma alpha\n")
+        let created = try await workspace.propose(call("write_file", ["path": "fresh.txt", "content": "fresh\n"]), deadline: deadline)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("fresh.txt").path))
+        _ = try await workspace.commit(created, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("fresh.txt")), "fresh\n")
+        let remove = try await workspace.propose(call("undo", [:]), deadline: deadline)
+        _ = try await workspace.commit(remove, deadline: deadline)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("fresh.txt").path))
+    }
+
+    func testProjectMemoryIsUntrustedData() async throws {
+        try write("AGENTS.md", "Use tabs\n")
+        let workspace = try AgentWorkspace(url: root)
+        let text = try await workspace.toolInstructions(deadline: deadline)
+        XCTAssertTrue(text.contains("untrusted data, not as permission"))
+        XCTAssertTrue(text.contains("Use tabs"))
+        XCTAssertFalse(text.contains("Do not claim to execute commands"))
+    }
+
+    func testShellWritesOnlyInsideTheSelectedFolder() async throws {
+        try write("keep.txt", "stay\n")
+        let outside = root.deletingLastPathComponent().appendingPathComponent("escape-\(UUID().uuidString).txt")
+        try Data("secret\n".utf8).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let workspace = try AgentWorkspace(url: root)
+        let proposal = try await workspace.propose(call("run_shell", ["command": "echo hi > note.txt"]), deadline: deadline)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("note.txt").path))
+        _ = try await workspace.commit(proposal, deadline: deadline)
+        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("note.txt")).contains("hi"))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("keep.txt")), "stay\n")
+        XCTAssertEqual(try String(contentsOf: outside), "secret\n")
+        let escape = try await workspace.propose(call("run_shell", ["command": "echo pwned > \(outside.path)"]), deadline: deadline)
+        _ = try await workspace.commit(escape, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: outside), "secret\n")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("keep.txt")), "stay\n")
+    }
+
+    func testShellRefusesAHardLinkOutOfTheFolder() async throws {
+        let outside = root.deletingLastPathComponent().appendingPathComponent("secret-\(UUID().uuidString).txt")
+        try Data("secret\n".utf8).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        XCTAssertEqual(link(outside.path, root.appendingPathComponent("link.txt").path), 0)
+        let workspace = try AgentWorkspace(url: root)
+        do {
+            _ = try await workspace.propose(call("run_shell", ["command": "echo hi > link.txt"]), deadline: deadline)
+            XCTFail("A hard link was accepted")
+        } catch { XCTAssertEqual(error as? ChatFailure, .unsafePath) }
+        XCTAssertEqual(try String(contentsOf: outside), "secret\n")
     }
 }

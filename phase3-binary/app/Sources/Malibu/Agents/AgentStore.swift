@@ -77,17 +77,31 @@ struct AgentDefinition: Codable, Identifiable, Equatable {
     var target: AgentModelTarget = .thisMac
     var model = ""
     var workspacePath: String?
+    /// More than one folder. Nil keeps agents saved before this field.
+    var workspacePaths: [String]? = nil
     var workspaceTools = false
     var servers: [MCPServerConfiguration] = []
     var sampling = AgentSampling()
 
+    var folderURLs: [URL] {
+        if let workspacePaths, !workspacePaths.isEmpty {
+            return workspacePaths.map { URL(fileURLWithPath: $0) }
+        }
+        if let workspacePath, !workspacePath.isEmpty { return [URL(fileURLWithPath: workspacePath)] }
+        return []
+    }
+
     func validate() throws {
+        let paths = workspacePaths ?? []
+        let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.utf8.count <= 200, instructions.utf8.count <= 16_384,
               model.utf8.count <= 512, sampling.isValid, servers.count <= 8,
               Set(servers.map(\.id)).count == servers.count,
               servers.allSatisfy(\.isAcceptable),
-              workspacePath.map({ $0.utf8.count <= 4096 && !$0.contains("\0") }) ?? true
+              workspacePath.map({ $0.utf8.count <= 4096 && !$0.contains("\0") }) ?? true,
+              paths.count <= 8, Set(names).count == names.count,
+              paths.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 4096 && !$0.contains("\0") })
         else { throw AgentStoreFailure.invalid }
     }
 }

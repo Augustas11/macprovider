@@ -79,6 +79,12 @@ struct ChatScreen: View {
                         .disabled(store.isRunning)
                         .lineLimit(1)
                         .accessibilityIdentifier("malibu.chat.choose-folder")
+                    if store.canUndo {
+                        Button("Undo") { store.undoLastChange() }
+                            .disabled(store.isRunning)
+                            .keyboardShortcut("z", modifiers: .command)
+                            .accessibilityIdentifier("malibu.chat.undo")
+                    }
                 }
                 Spacer()
             }
@@ -221,6 +227,7 @@ struct ChatScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             if let approval = store.pendingApproval {
                 AgentToolApprovalView(server: approval.server, tool: approval.tool, arguments: approval.arguments,
+                                      diff: approval.diff, allowsSession: approval.allowsSession,
                                       decide: store.resolveApproval)
                     .accessibilityIdentifier("malibu.chat.mcp-approval")
             }
@@ -296,7 +303,7 @@ struct ChatScreen: View {
             if draft.utf8.count > ChatStore.maxPromptBytes {
                 Text("Message is too long. Keep it under 8 KB.").font(.caption2).foregroundStyle(.secondary)
             } else if store.agentMode && store.folderName == nil {
-                Text("Choose a folder first: Agent mode reads only the folder you pick.")
+                Text("Choose a folder first.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(20)
@@ -376,10 +383,9 @@ struct ChatScreen: View {
     }
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        panel.prompt = "Allow read-only access"
-        panel.message = "Agent mode can read, list and search inside this folder during this session."
-        if panel.runModal() == .OK, let url = panel.url { store.selectFolder(url) }
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
+        panel.prompt = "Choose folder"
+        if panel.runModal() == .OK { store.selectFolders(panel.urls) }
     }
 }
 

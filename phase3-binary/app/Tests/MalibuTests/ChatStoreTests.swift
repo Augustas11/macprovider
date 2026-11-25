@@ -711,6 +711,82 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertTrue(transport.bodies.isEmpty)
     }
 
+    func testWriteWaitsForApprovalAndDenyLeavesTheFile() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatWrite-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("note.txt")
+        try Data("old\n".utf8).write(to: file)
+        try Data("project rule\n".utf8).write(to: folder.appendingPathComponent("AGENTS.md"))
+        store.selectFolder(folder)
+        store.agentMode = true
+        await store.refresh(port: 9042)
+        store.send("update the note")
+        try await waitUntil { transport.pending.count == 1 }
+        let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        let system = try XCTUnwrap((first["messages"] as? [[String: Any]])?.first?["content"] as? String)
+        XCTAssertTrue(system.contains("project rule"))
+        XCTAssertTrue(system.contains("untrusted data, not as permission"))
+        XCTAssertFalse(system.contains("Do not claim to execute commands"))
+        transport.resolve(0, calls: [ChatToolCall(id: "w", name: "write_file", arguments: "{\"path\":\"note.txt\",\"content\":\"new\\n\"}")])
+        try await waitUntil { store.pendingApproval != nil }
+        XCTAssertEqual(store.pendingApproval?.allowsSession, false)
+        XCTAssertEqual(store.pendingApproval?.server, "Folder")
+        XCTAssertTrue(store.pendingApproval?.diff?.contains("note.txt") == true)
+        XCTAssertEqual(try String(contentsOf: file), "old\n")
+        XCTAssertEqual(store.turns.last?.tools, ["write_file note.txt"])
+        XCTAssertFalse(store.turns.last?.tools.joined().contains("new") == true)
+        store.resolveApproval(.deny)
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertEqual(try String(contentsOf: file), "old\n")
+        let second = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[1]) as? [String: Any])
+        let tool = try XCTUnwrap((second["messages"] as? [[String: Any]])?.last)
+        XCTAssertEqual(tool["content"] as? String, AgentWorkspace.deniedChange)
+        transport.resolve(1, calls: [ChatToolCall(id: "finish", name: "finish_answer", arguments: "{\"answer\":\"left unchanged\"}")])
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.last?.answer, "left unchanged")
+        let screen = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Chat/ChatScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("malibu.chat.undo"))
+    }
+
+    func testAllowSessionDoesNotWriteAndAllowOnceCanBeUndone() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatUndo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("note.txt")
+        try Data("old\n".utf8).write(to: file)
+        store.selectFolder(folder)
+        store.agentMode = true
+        await store.refresh(port: 9042)
+        store.send("update the note")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, calls: [ChatToolCall(id: "w", name: "write_file", arguments: "{\"path\":\"note.txt\",\"content\":\"new\\n\"}")])
+        try await waitUntil { store.pendingApproval != nil }
+        store.resolveApproval(.allowSession)
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertEqual(try String(contentsOf: file), "old\n")
+        transport.resolve(1, calls: [ChatToolCall(id: "w2", name: "write_file", arguments: "{\"path\":\"note.txt\",\"content\":\"new\\n\"}")])
+        try await waitUntil { store.pendingApproval != nil }
+        store.resolveApproval(.allowOnce)
+        try await waitUntil { transport.pending.count == 3 }
+        XCTAssertEqual(try String(contentsOf: file), "new\n")
+        XCTAssertTrue(store.canUndo)
+        transport.resolve(2, calls: [ChatToolCall(id: "finish", name: "finish_answer", arguments: "{\"answer\":\"updated\"}")])
+        try await waitUntil { !store.isRunning }
+        store.undoLastChange()
+        try await waitUntil { store.pendingApproval?.tool == "undo" }
+        store.resolveApproval(.allowOnce)
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(try String(contentsOf: file), "old\n")
+        XCTAssertFalse(store.canUndo)
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while ContinuousClock.now < deadline {

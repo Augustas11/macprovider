@@ -44,6 +44,16 @@ final class AgentStoreTests: XCTestCase {
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("Authorization"))
     }
 
+    func testAgentSavedBeforeWorkspacePathsStillLoads() throws {
+        let root = try directory()
+        let raw = #"[{"id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","name":"Old","instructions":"Read","target":"thisMac","model":"m","workspacePath":"/tmp/one","workspaceTools":true,"servers":[],"sampling":{"temperature":0.7,"topP":0.9,"topK":0,"stop":[],"maxTokens":256}}]"#
+        try Data(raw.utf8).write(to: root.appendingPathComponent("agents.json"))
+        let agent = try XCTUnwrap(AgentStore(directory: root).agents.first)
+        XCTAssertEqual(agent.workspacePath, "/tmp/one")
+        XCTAssertNil(agent.workspacePaths)
+        XCTAssertEqual(agent.folderURLs.map(\.path), ["/tmp/one"])
+    }
+
     func testUnsafeSymlinkIsNotReadOrModified() throws {
         let root = try directory()
         let external = root.appendingPathComponent("external.json")

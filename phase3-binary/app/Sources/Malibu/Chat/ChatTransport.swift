@@ -25,7 +25,7 @@ enum ChatFailure: Error, LocalizedError, Equatable {
         case .limit: return "This turn reached its safety limit. Try a smaller request."
         case .timeout: return "This turn timed out. Try again."
         case .http(let status): return "The local provider could not complete this request (HTTP \(status))."
-        case .unsafePath: return "That file is unavailable within the selected folder. Symlinks and special files are not allowed."
+        case .unsafePath: return "That file is unavailable within the selected folder. Symlinks, hard links and special files are not allowed."
         case .invalidTool: return "The model requested an invalid or unsupported tool."
         case .contextTooLong: return "This chat is longer than the model's context; start a new chat or continue with fewer turns."
         }

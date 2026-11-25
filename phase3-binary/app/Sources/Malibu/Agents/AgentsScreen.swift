@@ -76,6 +76,7 @@ struct AgentsScreen: View {
             }
             if let approval = session.pendingApproval {
                 AgentToolApprovalView(server: approval.server, tool: approval.tool, arguments: approval.arguments,
+                                      diff: approval.diff, allowsSession: approval.allowsSession,
                                       decide: session.resolveApproval)
             }
             if let notice = session.notice { Text(notice).foregroundStyle(.secondary) }
@@ -99,14 +100,19 @@ struct AgentToolApprovalView: View {
     let server: String
     let tool: String
     let arguments: String
+    var diff: String? = nil
+    var allowsSession: Bool = true
     let decide: (MCPApprovalDecision) -> Void
     var body: some View {
         ShellPanel("Tool approval") {
             Text("\(server) · \(tool)").font(.headline)
+            if let diff {
+                ScrollView { Text(diff).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 220)
+            }
             ScrollView { Text(arguments).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 120)
             HStack {
                 Button("Allow once") { decide(.allowOnce) }
-                Button("Allow for this session") { decide(.allowSession) }
+                if allowsSession { Button("Allow for this session") { decide(.allowSession) } }
                 Button("Deny", role: .destructive) { decide(.deny) }
             }
         }
@@ -169,13 +175,14 @@ private struct AgentEditor: View {
                     }
                     Button(loading ? "Checking models…" : "Refresh models") { Task { await refreshModels() } }.disabled(loading)
                     if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
-                    Toggle("Read-only workspace tools", isOn: $agent.workspaceTools)
+                    Toggle("Workspace tools", isOn: $agent.workspaceTools)
                     HStack {
-                        Text(agent.workspacePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No workspace folder")
+                        Text(folderLabel)
                         Button("Choose folder…") { chooseFolder() }
-                        if agent.workspacePath != nil { Button("Remove") { agent.workspacePath = nil } }
+                        if !agent.folderURLs.isEmpty {
+                            Button("Remove") { agent.workspacePath = nil; agent.workspacePaths = nil }
+                        }
                     }
-                    Text("Workspace tools can read, list and search the selected folder.").font(.caption)
                     Section("Sampling defaults") {
                         TextField("Temperature", value: $agent.sampling.temperature, format: .number)
                         TextField("Top P", value: $agent.sampling.topP, format: .number)
@@ -236,11 +243,28 @@ private struct AgentEditor: View {
         } catch { status = error.localizedDescription }
     }
 
+    private var folderLabel: String {
+        let names = agent.folderURLs.map(\.lastPathComponent)
+        return names.isEmpty ? "No workspace folder" : names.joined(separator: ", ")
+    }
+
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-        panel.prompt = "Choose workspace"
-        if panel.runModal() == .OK, let url = panel.url { agent.workspacePath = url.path }
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = true
+        panel.prompt = "Choose folder"
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        guard (1...8).contains(urls.count) else { status = "Choose at most 8 folders."; return }
+        let names = urls.map(\.lastPathComponent)
+        guard Set(names).count == names.count else { status = "Choose folders with different names."; return }
+        if urls.count == 1 {
+            agent.workspacePath = urls[0].path
+            agent.workspacePaths = nil
+        } else {
+            agent.workspacePath = nil
+            agent.workspacePaths = urls.map(\.path)
+        }
+        status = nil
     }
 
     private func addServer() {
