@@ -1728,62 +1728,93 @@ enum NativeMTPArtifactObserver {
 
     private static func safetensorsURLs(directory: URL, fileManager: FileManager) throws -> [URL] {
         let root = directory.standardizedFileURL
-        let safetensors = try recursiveSafetensorsURLs(
-            directory: root,
-            root: root,
-            fileManager: fileManager
-        )
+        let safetensors = try loaderWeightSafetensorsURLs(root: root, fileManager: fileManager)
         guard safetensors.count <= maxSafetensorsFiles else {
             throw NativeMTPArtifactObservationError.malformedSafetensors("too many safetensors files")
         }
         return safetensors
     }
 
-    private static func recursiveSafetensorsURLs(
-        directory: URL,
-        root: URL,
-        fileManager: FileManager
-    ) throws -> [URL] {
+    /// The safetensors the pinned loader can read (`safetensorWeightURLs` in
+    /// mlx-swift-lm `Load.swift`): every top-level `*.safetensors`, plus any file
+    /// in a subdirectory that `model.safetensors.index.json` names. The loader
+    /// never descends into other subdirectories, so their files are not
+    /// observed: Sage ships per-modality `projectors/**/projector.safetensors`
+    /// whose bare `layers.N.*` names repeat from file to file.
+    private static func loaderWeightSafetensorsURLs(root: URL, fileManager: FileManager) throws -> [URL] {
         let rootPath = root.standardizedFileURL.path
-        let directoryPath = directory.standardizedFileURL.path
-        guard directoryPath == rootPath || directoryPath.hasPrefix(rootPath + "/") else {
-            throw NativeMTPArtifactObservationError.malformedSafetensors("containment")
-        }
-        let names = try fileManager.contentsOfDirectory(atPath: directory.path).sorted()
         var urls: [URL] = []
-        for name in names {
-            guard !name.isEmpty,
-                  name != ".",
-                  name != ".." else {
+        for name in try fileManager.contentsOfDirectory(atPath: root.path).sorted() {
+            guard !name.isEmpty, name != ".", name != ".." else {
                 throw NativeMTPArtifactObservationError.malformedSafetensors("invalid path")
             }
-            let url = directory.appendingPathComponent(name, isDirectory: false).standardizedFileURL
-            let path = url.path
-            guard path == rootPath || path.hasPrefix(rootPath + "/") else {
-                throw NativeMTPArtifactObservationError.malformedSafetensors("containment")
-            }
-            var statBuffer = stat()
-            guard Darwin.lstat(path, &statBuffer) == 0 else {
-                throw NativeMTPArtifactObservationError.malformedSafetensors("unreadable path")
-            }
-            let mode = statBuffer.st_mode & S_IFMT
-            if mode == S_IFLNK {
-                throw NativeMTPArtifactObservationError.malformedSafetensors("symlink path")
-            }
-            if mode == S_IFDIR {
-                urls.append(contentsOf: try recursiveSafetensorsURLs(
-                    directory: url,
-                    root: root,
-                    fileManager: fileManager
-                ))
-            } else if mode == S_IFREG, url.pathExtension == "safetensors" {
-                guard !name.hasPrefix(".") else {
-                    throw NativeMTPArtifactObservationError.malformedSafetensors("hidden safetensors")
-                }
-                urls.append(url)
-            }
+            let url = root.appendingPathComponent(name, isDirectory: false).standardizedFileURL
+            guard url.pathExtension == "safetensors" else { continue }
+            try appendSafetensorsURL(url, name: name, rootPath: rootPath, to: &urls)
+        }
+        for relative in try indexedSubdirectoryWeightFiles(root: root) {
+            let url = root.appendingPathComponent(relative, isDirectory: false).standardizedFileURL
+            guard !urls.contains(url) else { continue }
+            try appendSafetensorsURL(url, name: url.lastPathComponent, rootPath: rootPath, to: &urls)
         }
         return urls.sorted { $0.path < $1.path }
+    }
+
+    private static func appendSafetensorsURL(
+        _ url: URL,
+        name: String,
+        rootPath: String,
+        to urls: inout [URL]
+    ) throws {
+        let path = url.path
+        guard path.hasPrefix(rootPath + "/") else {
+            throw NativeMTPArtifactObservationError.malformedSafetensors("containment")
+        }
+        var statBuffer = stat()
+        guard Darwin.lstat(path, &statBuffer) == 0 else {
+            throw NativeMTPArtifactObservationError.malformedSafetensors("unreadable path")
+        }
+        let mode = statBuffer.st_mode & S_IFMT
+        if mode == S_IFLNK {
+            throw NativeMTPArtifactObservationError.malformedSafetensors("symlink path")
+        }
+        guard mode == S_IFREG else { return }
+        guard !name.hasPrefix(".") else {
+            throw NativeMTPArtifactObservationError.malformedSafetensors("hidden safetensors")
+        }
+        urls.append(url)
+    }
+
+    /// Weight-map files of `model.safetensors.index.json` that live below the
+    /// root. Top-level entries are already covered by the directory listing.
+    private static func indexedSubdirectoryWeightFiles(root: URL) throws -> [String] {
+        let indexURL = root.appendingPathComponent("model.safetensors.index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else { return [] }
+        guard let object = try JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any],
+              let weightMap = object["weight_map"] as? [String: Any] else {
+            throw NativeMTPArtifactObservationError.malformedSafetensors("model.safetensors.index.json weight_map")
+        }
+        var files = Set<String>()
+        for value in weightMap.values {
+            guard let file = value as? String else {
+                throw NativeMTPArtifactObservationError.malformedSafetensors("model.safetensors.index.json weight_map")
+            }
+            guard file.contains("/") else { continue }
+            let parts = file.split(separator: "/", omittingEmptySubsequences: false)
+            guard !file.hasPrefix("/"), !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+                throw NativeMTPArtifactObservationError.malformedSafetensors("containment")
+            }
+            for depth in 1..<parts.count {
+                var statBuffer = stat()
+                let prefix = parts.prefix(depth).joined(separator: "/")
+                if Darwin.lstat(root.appendingPathComponent(prefix).path, &statBuffer) == 0,
+                   statBuffer.st_mode & S_IFMT == S_IFLNK {
+                    throw NativeMTPArtifactObservationError.malformedSafetensors("symlink path")
+                }
+            }
+            files.insert(file)
+        }
+        return files.sorted()
     }
 
     private static func readSafetensorsHeader(_ url: URL) throws -> SafetensorsHeader {
