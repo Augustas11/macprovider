@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.92 (#2505) on 3.33.0-macprovider.91: Inkling
+        // 2 continuous batching: each batched row attends through the model's
+        // own one-row attention over its paged cache, and batched one-token
+        // rows route experts, take the one-row projection spans and the
+        // close-gap verify head as they do alone, so CB rows match serial
+        // greedy tokens; no other model's code changes.
         // Tag 3.33.0-macprovider.91 (#2474) on 3.33.0-macprovider.90: a
         // GLM-5.3-Flash sliced (wide) prefill projects only the last 64 rows of
         // its last slice to logits instead of every row (the batching route
@@ -298,7 +304,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "3c1871468024386933dd2c6a6324ec023db56404"
+            revision: "1ed7853d27698b037d582aa2f00fc827ae4cca84"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

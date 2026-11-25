@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.131
+**Version:** 0.1.132
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.131",
+  "version": "0.1.132",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -719,12 +719,21 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.91` | `3c1871468024386933dd2c6a6324ec023db56404` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.33.0-macprovider.92` | `1ed7853d27698b037d582aa2f00fc827ae4cca84` | `ml-explore/mlx-swift-lm` `3.33.0` (`ca661dc6885f8603e911746838b60d312439a368`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `ml-explore/mlx-swift` `0.33.0` (`7ede4fd6d05f63305c1c0ebf4f8c1909a637c574`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `ml-explore/mlx-c` `v0.8.0` (`a26f2d584a14ec619ae8db9a09be03becd47598a`) |
 
-The mlx-swift-lm row `3.33.0-macprovider.91` is on `3.33.0-macprovider.90`
+The mlx-swift-lm row `3.33.0-macprovider.92` is on `3.33.0-macprovider.91`
+(`3c1871468024386933dd2c6a6324ec023db56404`) (#2505), at
+`1ed7853d27698b037d582aa2f00fc827ae4cca84`: Inkling 2 continuous batching:
+each batched row attends through the model's own one-row attention over its
+paged cache, and batched one-token rows route experts, take the one-row
+projection spans and the close-gap verify head as they do alone, so CB rows
+match serial greedy tokens; no other model's code changes. The Swift, core and
+C rows are unchanged.
+
+The prior mlx-swift-lm row `3.33.0-macprovider.91` is on `3.33.0-macprovider.90`
 (`39f7e60d87e0dee5ee87c62e11db4d81afdf223f`) (#2474), at
 `3c1871468024386933dd2c6a6324ec023db56404`: 3.33.0-macprovider.90 plus a GLM-5.3-Flash change: a sliced (wide) prefill projects only the last 64 rows of its last slice to logits instead of every row (the batching route samples the last row); the rows kept stay on MLX qmm and equal the full-width projection bit for bit; no other model's code changes. The Swift, core
 and C rows are unchanged.
@@ -3355,6 +3364,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.132 (2026-11-26)** — R003 names mlx-swift-lm `3.33.0-macprovider.92`
+  (`1ed7853d27698b037d582aa2f00fc827ae4cca84`) on `3.33.0-macprovider.91`
+  (#2505): Inkling 2 continuous batching: each batched row attends through the
+  model's own one-row attention over its paged cache, and batched one-token
+  rows route experts, take the one-row projection spans and the close-gap
+  verify head as they do alone, so CB rows match serial greedy tokens; no
+  other model's code changes. Other model sources and the Swift, core and C
+  rows are unchanged.
 - **0.1.131 (2026-11-26, Related: #2474)** — R003 names mlx-swift-lm
   `3.33.0-macprovider.91` (`3c1871468024386933dd2c6a6324ec023db56404`) on
   `3.33.0-macprovider.90` (#2474): 3.33.0-macprovider.90 plus a GLM-5.3-Flash change: a sliced (wide) prefill projects only the last 64 rows of its last slice to logits instead of every row (the batching route samples the last row); the rows kept stay on MLX qmm and equal the full-width projection bit for bit; no other model's code changes. Measured A/B/A on the M3 Ultra
