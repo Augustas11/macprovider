@@ -190,11 +190,41 @@ need=$((MODEL_GB + E2E_EXTRA_GB))
 [ "$fg" -ge "$need" ] || die "glm needs ${need} GB free (model ${MODEL_GB} GB plus ${E2E_EXTRA_GB} GB); ${fg} GB free" 13
 [ "$SKIP_FORK_TEST" = 1 ] || [ -d "$TEST_DEV" ] || die "no Xcode developer dir at $TEST_DEV (TEST_DEV): the fork test cannot build" 14
 
+# 2. oMLX, before any build: a reference that cannot be installed fails the window early.
+omlx_versions() {
+  "$OMLX_DIR/omlx-venv/bin/python" -I -c 'import importlib.metadata as m
+for p in ("omlx", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm", "transformers"):
+    try: print(p, m.version(p))
+    except m.PackageNotFoundError: print(p, "missing")' 2>/dev/null
+}
+if [ "$SKIP_OMLX" = 0 ]; then
+  have=$(git -C "$OMLX_DIR/omlx-src" rev-parse HEAD 2>/dev/null)
+  if [ "$have" = "$OMLX_COMMIT" ] && [ -x "$OMLX_DIR/omlx-venv/bin/omlx" ] && omlx_versions | grep -q '^omlx [0-9]'; then
+    log "OMLX_REUSE $OMLX_DIR commit=$have"
+  else
+    [ -x "$OMLX_PY" ] || die "no $OMLX_PY for the oMLX venv" 11
+    log "OMLX_INSTALL $OMLX_REPO@$OMLX_COMMIT -> $OMLX_DIR"
+    rm -rf "$OMLX_DIR" && mkdir -p "$OMLX_DIR" || die "cannot create $OMLX_DIR" 11
+    { git clone -q "$OMLX_REPO" "$OMLX_DIR/omlx-src" \
+        && git -C "$OMLX_DIR/omlx-src" checkout -q --detach "$OMLX_COMMIT" \
+        && "$OMLX_PY" -m venv "$OMLX_DIR/omlx-venv" \
+        && "$OMLX_DIR/omlx-venv/bin/pip" install -q -e "$OMLX_DIR/omlx-src" \
+        && "$OMLX_DIR/omlx-venv/bin/pip" uninstall -q -y setproctitle; } > "$RES/omlx-install.log" 2>&1 \
+      || die "oMLX install failed: $(tail -n 3 "$RES/omlx-install.log" | tr '\n' ' ' | cut -c1-400)" 11
+  fi
+  vers=$(omlx_versions)
+  log "OMLX_VERSIONS commit=$(git -C "$OMLX_DIR/omlx-src" rev-parse HEAD) $(echo "$vers" | tr '\n' ' ')"
+  # The #2451 reference: oMLX 0.8.0rc1 @ c74f1b18, mlx 0.32.4, mlx-lm 0.32.3.dev8+g0d4d3d04f, mlx-vlm 0.7.11.
+  echo "$vers" | grep -qx 'mlx 0.32.4' || die "oMLX venv mlx is not 0.32.4: not the #2451 reference" 11
+  echo "$vers" | grep -q '^mlx-lm .*g0d4d3d04f' || die "oMLX venv mlx-lm is not g0d4d3d04f: not the #2451 reference" 11
+fi
+
 # JOB_MODE=profile (#2474 r8): where a 3,673-token prefill goes, by section, on the shipped fork
 # tree (the candidate plus the lab section timer). One section-timing build, the matmul peak from
 # the oMLX venv's MLX, `prefill-profile` at PROFILE_PROMPTS and PROFILE_STEPS (the first step size
 # is the synced and sections pass's: 1837 is the batching route's balanced chunk), then
-# prefill_profile_report.py against the r7 TTFTs. No A/B/A, no oMLX run.
+# prefill_profile_report.py against the r7 TTFTs. No A/B/A, no oMLX run. It runs after the oMLX
+# step (#2524), so a lab dir without the venv gets the MLX the matmul peak needs.
 if [ "$JOB_MODE" = profile ]; then
   PROF=$RES/profile
   PROF_PKG=$LAB/prof-$RUN_ID/phase3-binary
@@ -237,35 +267,6 @@ if [ "$JOB_MODE" = profile ]; then
   rm -rf "$LAB"/prof-*
   log "JOB_PASS"
   exit 0
-fi
-
-# 2. oMLX, before any build: a reference that cannot be installed fails the window early.
-omlx_versions() {
-  "$OMLX_DIR/omlx-venv/bin/python" -I -c 'import importlib.metadata as m
-for p in ("omlx", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm", "transformers"):
-    try: print(p, m.version(p))
-    except m.PackageNotFoundError: print(p, "missing")' 2>/dev/null
-}
-if [ "$SKIP_OMLX" = 0 ]; then
-  have=$(git -C "$OMLX_DIR/omlx-src" rev-parse HEAD 2>/dev/null)
-  if [ "$have" = "$OMLX_COMMIT" ] && [ -x "$OMLX_DIR/omlx-venv/bin/omlx" ] && omlx_versions | grep -q '^omlx [0-9]'; then
-    log "OMLX_REUSE $OMLX_DIR commit=$have"
-  else
-    [ -x "$OMLX_PY" ] || die "no $OMLX_PY for the oMLX venv" 11
-    log "OMLX_INSTALL $OMLX_REPO@$OMLX_COMMIT -> $OMLX_DIR"
-    rm -rf "$OMLX_DIR" && mkdir -p "$OMLX_DIR" || die "cannot create $OMLX_DIR" 11
-    { git clone -q "$OMLX_REPO" "$OMLX_DIR/omlx-src" \
-        && git -C "$OMLX_DIR/omlx-src" checkout -q --detach "$OMLX_COMMIT" \
-        && "$OMLX_PY" -m venv "$OMLX_DIR/omlx-venv" \
-        && "$OMLX_DIR/omlx-venv/bin/pip" install -q -e "$OMLX_DIR/omlx-src" \
-        && "$OMLX_DIR/omlx-venv/bin/pip" uninstall -q -y setproctitle; } > "$RES/omlx-install.log" 2>&1 \
-      || die "oMLX install failed: $(tail -n 3 "$RES/omlx-install.log" | tr '\n' ' ' | cut -c1-400)" 11
-  fi
-  vers=$(omlx_versions)
-  log "OMLX_VERSIONS commit=$(git -C "$OMLX_DIR/omlx-src" rev-parse HEAD) $(echo "$vers" | tr '\n' ' ')"
-  # The #2451 reference: oMLX 0.8.0rc1 @ c74f1b18, mlx 0.32.4, mlx-lm 0.32.3.dev8+g0d4d3d04f, mlx-vlm 0.7.11.
-  echo "$vers" | grep -qx 'mlx 0.32.4' || die "oMLX venv mlx is not 0.32.4: not the #2451 reference" 11
-  echo "$vers" | grep -q '^mlx-lm .*g0d4d3d04f' || die "oMLX venv mlx-lm is not g0d4d3d04f: not the #2451 reference" 11
 fi
 
 # 3. Fork test: fused against unfused, bitwise, on the Studio GPU.
