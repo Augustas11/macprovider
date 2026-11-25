@@ -9,8 +9,8 @@
 # tokens, scripts/lab/parity-grid/grid.json):
 #   base   = phase3-binary at COMMIT (origin/main: mlx-swift-lm 3.33.0-macprovider.89, 10584fc0);
 #   fused  = the candidate (pass label kept from r1-r6): the same tree with mlx-swift-lm replaced
-#            by SRC/mlx-swift-lm (FORK_COMMIT, one commit on .89; r7: macprovider/2474-last-rows-
-#            logits-89, a sliced prefill projects only its last 64 rows to logits);
+#            by SRC/mlx-swift-lm (FORK_COMMIT, one commit on .89; r9: macprovider/2474-hc-expand-89,
+#            r7's last-rows logits plus an elementwise mHC expand in prefill);
 #   omlx   = oMLX 0.8.0rc1 @ c74f1b18 (the #2451 reference: MTP, DFlash off, --no-cache), driven by
 #            parity-grid reference_omlx.py on the same grid prompts.
 # Steps:
@@ -83,9 +83,9 @@ OMLX_REPO=https://github.com/jundot/omlx
 OMLX_COMMIT=c74f1b18558842e6b10fcfa6e2e901bb382129d4
 OMLX_PY=/opt/homebrew/bin/python3.12
 # The candidate's fork tests (swift test --filter regex) and a symbol its source must contain.
-FORK_TESTS=${FORK_TESTS:-testWidePrefillSlices|testPrefillLogitRows}
+FORK_TESTS=${FORK_TESTS:-testWidePrefillSlices|testPrefillLogitRows|testPrefillHCExpand|testDeferredHyperConnection|testFusedHyperConnection}
 FORK_TEST_FILTER="GLM5NextTests/($FORK_TESTS)"
-CAND_MARKER=${CAND_MARKER:-glm5NextPrefillLogitRows}
+CAND_MARKER=${CAND_MARKER:-glm5NextHCExpandPrefill}
 FORK_COPY=$LAB/fork-mlx-swift-lm
 FORK_BUILD=$LAB/fork-mlx-swift-lm-build
 # Swift tests need full Xcode (XCTest); the release builds keep the default toolchain.
