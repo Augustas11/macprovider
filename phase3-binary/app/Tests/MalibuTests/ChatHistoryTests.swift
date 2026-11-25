@@ -63,7 +63,7 @@ final class ChatHistoryTests: XCTestCase {
         XCTAssertEqual(reloaded.summaries.map(\.id), store.summaries.map(\.id))
     }
 
-    func testCorruptAndForeignFilesAreSkipped() throws {
+    func testCorruptAndForeignFilesAreSkippedWhenTheIndexIsRebuilt() async throws {
         let root = try directory()
         let good = chat("Good", updated: Date())
         try ChatHistoryStore(directory: root).save(good)
@@ -74,9 +74,41 @@ final class ChatHistoryTests: XCTestCase {
         let data = try JSONEncoder().encode(mismatched)
         mismatched = chat("Other", updated: Date())
         try data.write(to: root.appendingPathComponent("\(mismatched.id.uuidString).json"))
+        try FileManager.default.removeItem(at: root.appendingPathComponent(ChatHistoryStore.indexName))
         let store = ChatHistoryStore(directory: root)
+        await store.rebuild?.value
         XCTAssertEqual(store.summaries.map(\.id), [good.id])
         XCTAssertNil(store.load(mismatched.id))
+    }
+
+    func testLaunchReadsOnlyTheIndexAndLoadsAChatWhenOpened() throws {
+        let root = try directory()
+        let saved = chat("Indexed", updated: Date())
+        try ChatHistoryStore(directory: root).save(saved)
+        // Launch must not decode chat files: a damaged chat still lists from the index.
+        try Data("{damaged".utf8).write(to: root.appendingPathComponent("\(saved.id.uuidString).json"))
+        let store = ChatHistoryStore(directory: root)
+        XCTAssertNil(store.rebuild)
+        XCTAssertEqual(store.summaries.map(\.id), [saved.id])
+        XCTAssertNil(store.load(saved.id), "Opening reads the file and drops a damaged chat")
+        XCTAssertTrue(store.summaries.isEmpty)
+        XCTAssertTrue(ChatHistoryStore(directory: root).summaries.isEmpty)
+    }
+
+    func testCorruptIndexIsRebuiltOffTheMainActor() async throws {
+        let root = try directory()
+        let first = chat("First", updated: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = chat("Second", updated: Date(timeIntervalSince1970: 1_800_000_100))
+        let writer = ChatHistoryStore(directory: root)
+        try writer.save(first); try writer.save(second)
+        try Data("{corrupt".utf8).write(to: root.appendingPathComponent(ChatHistoryStore.indexName))
+        let store = ChatHistoryStore(directory: root)
+        var notified = false
+        store.onChange = { notified = true }
+        await store.rebuild?.value
+        XCTAssertTrue(notified)
+        XCTAssertEqual(store.summaries.map(\.id), [second.id, first.id])
+        XCTAssertEqual(ChatHistoryStore.readIndex(root)?.map(\.id), [second.id, first.id], "The rebuilt index is written back")
     }
 
     func testDeleteRemovesTheFile() throws {

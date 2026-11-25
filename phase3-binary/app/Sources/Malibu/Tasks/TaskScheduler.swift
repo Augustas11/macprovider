@@ -6,7 +6,11 @@ final class TaskScheduler: ObservableObject {
     typealias Execute = @MainActor (ScheduledTask) async throws -> String
     @Published private(set) var runningTaskID: UUID?
     static let maximumRounds = ChatStore.maxRounds
-    static let maximumOutputTokens = 8192
+    static let maximumRoundTokens = 2048
+    /// Tokens one round may generate: the agent's setting, at most 2,048.
+    static func roundTokens(_ agentMaxTokens: Int) -> Int { min(max(1, agentMaxTokens), maximumRoundTokens) }
+    /// Every round can use its full allowance, so the round cap is reachable.
+    static func runTokenBudget(_ agentMaxTokens: Int) -> Int { ChatStore.maxRounds * roundTokens(agentMaxTokens) }
     private let store: TaskStore
     private let clock: () -> Date
     private let timezone: () -> TimeZone

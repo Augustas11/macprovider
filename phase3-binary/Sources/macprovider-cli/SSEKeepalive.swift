@@ -3,18 +3,24 @@ import Foundation
 /// Sends an SSE comment while a stream is quiet. A model that buffers a tool
 /// call can emit nothing for a minute; without bytes on the wire, clients'
 /// idle timeouts drop the stream. Clients ignore lines that do not start with
-/// `data:`, so the comment never changes the reply.
+/// `data:`, so the comment never changes the reply. After `quietLimit`
+/// without a data event the comments stop, so a wedged runtime is not held
+/// open: the client's own stall guard then ends the request.
 final class SSEKeepalive: @unchecked Sendable {
     static let comment = ": keepalive\n\n"
     private let lock = NSLock()
     private let interval: Duration
+    private let quietLimit: Duration
     private let emit: @Sendable () -> Void
     private var lastOutput = ContinuousClock.now
+    private var lastData = ContinuousClock.now
     private var stopped = false
     private var task: Task<Void, Never>?
 
-    init(interval: Duration = .seconds(10), emit: @escaping @Sendable () -> Void) {
+    init(interval: Duration = .seconds(10), quietLimit: Duration = .seconds(300),
+         emit: @escaping @Sendable () -> Void) {
         self.interval = interval
+        self.quietLimit = quietLimit
         self.emit = emit
     }
 
@@ -26,9 +32,11 @@ final class SSEKeepalive: @unchecked Sendable {
         return try await body()
     }
 
-    func noteOutput() {
+    /// A data event was written; it resets both the keepalive and quiet clocks.
+    func noteOutput(at now: ContinuousClock.Instant = ContinuousClock.now) {
         lock.lock()
-        lastOutput = ContinuousClock.now
+        lastOutput = now
+        lastData = now
         lock.unlock()
     }
 
@@ -51,7 +59,7 @@ final class SSEKeepalive: @unchecked Sendable {
     func tick(now: ContinuousClock.Instant = ContinuousClock.now) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !stopped, now - lastOutput >= interval else { return false }
+        guard !stopped, now - lastData < quietLimit, now - lastOutput >= interval else { return false }
         lastOutput = now
         emit()
         return true

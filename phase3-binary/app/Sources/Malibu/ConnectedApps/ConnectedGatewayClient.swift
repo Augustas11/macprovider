@@ -173,7 +173,7 @@ struct ConnectedGatewayClient {
               reason == "stop" || reason == "tool_calls",
               let message = choice["message"] as? [String: Any] else { throw ChatFailure.malformed }
         let raw = message["tool_calls"] as? [[String: Any]] ?? []
-        guard raw.count <= ChatStore.maxCalls else { throw ChatFailure.limit }
+        guard raw.count <= ChatStreamAccumulator.maxCallsPerResponse else { throw ChatFailure.limit }
         let calls = try raw.map { item -> ChatToolCall in
             guard let id = item["id"] as? String, !id.isEmpty, id.utf8.count <= 128,
                   let function = item["function"] as? [String: Any],
@@ -185,7 +185,8 @@ struct ConnectedGatewayClient {
         guard Set(calls.map(\.id)).count == calls.count else { throw ChatFailure.malformed }
         let text = message["content"] as? String ?? ""
         guard text.utf8.count <= 65536 else { throw ChatFailure.limit }
-        return ChatCompletion(text: text, calls: calls)
+        let tokens = (root["usage"] as? [String: Any])?["completion_tokens"] as? Int
+        return ChatCompletion(text: text, calls: calls, completionTokens: tokens.flatMap { $0 >= 0 ? $0 : nil })
     }
 
     private func request(path: String, key: String, body: [String: Any]?) async throws -> Data {

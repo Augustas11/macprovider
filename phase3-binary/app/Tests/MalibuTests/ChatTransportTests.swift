@@ -127,6 +127,51 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertEqual(config.timeoutIntervalForRequest, 300)
         XCTAssertEqual(config.timeoutIntervalForResource, 3600)
     }
+    func testAFullLengthReplyOfSmallChunksFitsTheStreamAndEndsWithLength() throws {
+        var decoder = ChatSSEDecoder(); var stream = ChatStreamAccumulator()
+        var wire = ""
+        for _ in 0..<8192 { wire += "data: " + Self.chunk(content: "a") + "\n\n" }
+        wire += "data: " + Self.chunk(reason: "length") + "\n\n"
+        wire += "data: {\"choices\":[],\"usage\":{\"completion_tokens\":8192}}\n\n"
+        wire += "data: [DONE]\n\n"
+        XCTAssertGreaterThan(wire.utf8.count, 512 * 1024, "The old 512 KB cap would have cut this reply off")
+        for byte in wire.utf8 { if let event = try decoder.feed(byte) { _ = try stream.accept(event) } }
+        let result = try stream.result()
+        XCTAssertEqual(result.text.count, 8192)
+        XCTAssertTrue(result.truncated)
+        XCTAssertEqual(result.completionTokens, 8192)
+    }
+    func testStallGuardCountsOnlyDataEventsNotKeepalives() throws {
+        let start = ContinuousClock.now
+        var guardrail = ChatDataStallGuard(limit: .seconds(300), now: start)
+        var decoder = ChatSSEDecoder()
+        // Keepalives for six minutes: bytes arrive, but no data event.
+        for _ in 0..<36 {
+            for byte in ": keepalive\n\n".utf8 { if let event = try decoder.feed(byte) { XCTFail("unexpected \(event)") } }
+        }
+        XCTAssertNoThrow(try guardrail.check(at: start.advanced(by: .seconds(299))))
+        XCTAssertThrowsError(try guardrail.check(at: start.advanced(by: .seconds(301)))) {
+            XCTAssertEqual($0 as? ChatFailure, .timeout)
+        }
+        guardrail.noteData(at: start.advanced(by: .seconds(301)))
+        XCTAssertNoThrow(try guardrail.check(at: start.advanced(by: .seconds(400))))
+    }
+    func testContextOverflowGetsItsOwnMessage() throws {
+        var stream = ChatStreamAccumulator()
+        XCTAssertThrowsError(try stream.accept("{\"error\":{\"code\":\"context_length_exceeded\"}}")) {
+            XCTAssertEqual($0 as? ChatFailure, .contextTooLong)
+        }
+        XCTAssertEqual(ChatFailure.contextTooLong.localizedDescription,
+                       "This chat is longer than the model's context; start a new chat or continue with fewer turns.")
+    }
+    func testCapabilityReadsTheModelContextSize() throws {
+        var status = try XCTUnwrap(try JSONSerialization.jsonObject(with: Self.status()) as? [String: Any])
+        status["capacity"] = ["max_context_tokens": 32768]
+        let parsed = try ChatCapability.parse(capabilities: Self.capability(),
+                                              status: try JSONSerialization.data(withJSONObject: status))
+        XCTAssertEqual(parsed.maxContextTokens, 32768)
+        XCTAssertNil(try ChatCapability.parse(capabilities: Self.capability(), status: Self.status()).maxContextTokens)
+    }
     func testKeepaliveCommentIsIgnoredByTheDecoder() throws {
         var decoder = ChatSSEDecoder(); var events: [String] = []
         for byte in ": keepalive\n\ndata: {}\n\n".utf8 { if let event = try decoder.feed(byte) { events.append(event) } }

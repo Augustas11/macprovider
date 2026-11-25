@@ -13,7 +13,7 @@ struct ChatEndpoint: Equatable, Sendable {
 
 enum ChatFailure: Error, LocalizedError, Equatable {
     case unavailable, upgradeRequired, modelChanged, unsupportedTools, preempted
-    case malformed, limit, timeout, http(Int), unsafePath, invalidTool
+    case malformed, limit, timeout, http(Int), unsafePath, invalidTool, contextTooLong
     var errorDescription: String? {
         switch self {
         case .unavailable: return "Start a provider and load a model to chat on this Mac."
@@ -27,6 +27,7 @@ enum ChatFailure: Error, LocalizedError, Equatable {
         case .http(let status): return "The local provider could not complete this request (HTTP \(status))."
         case .unsafePath: return "That file is unavailable within the selected folder. Symlinks and special files are not allowed."
         case .invalidTool: return "The model requested an invalid or unsupported tool."
+        case .contextTooLong: return "This chat is longer than the model's context; start a new chat or continue with fewer turns."
         }
     }
 }
@@ -35,6 +36,8 @@ struct ChatCapability: Equatable, Sendable {
     let model: String
     let generation: Int?
     let guaranteedTools: Bool
+    /// From `/v1/status` `capacity.max_context_tokens`, when reported.
+    var maxContextTokens: Int?
     static func parse(capabilities: Data, status: Data) throws -> Self {
         guard let cap = try JSONSerialization.jsonObject(with: capabilities) as? [String: Any],
               let state = try JSONSerialization.jsonObject(with: status) as? [String: Any],
@@ -58,8 +61,10 @@ struct ChatCapability: Equatable, Sendable {
               state["model"] as? String == model
         else { throw ChatFailure.unavailable }
         let modes = responses["tool_choice_modes"] as? [String] ?? []
+        let context = (state["capacity"] as? [String: Any])?["max_context_tokens"] as? Int
         return Self(model: model, generation: responses["generation"] as? Int,
-                    guaranteedTools: modes.contains("required"))
+                    guaranteedTools: modes.contains("required"),
+                    maxContextTokens: context.flatMap { $0 > 0 ? $0 : nil })
     }
 }
 
@@ -78,6 +83,8 @@ struct ChatCompletion: Sendable {
     var reasoning = ""
     /// The reply stopped early (finish_reason `length`, or the text cap); `text` holds what arrived.
     var truncated = false
+    /// `usage.completion_tokens`, when the server reported it.
+    var completionTokens: Int?
 }
 
 /// Byte framing preserves split UTF-8 scalars and CRLF. Limits apply before
@@ -87,9 +94,11 @@ struct ChatSSEDecoder {
     private var eventLines: [Data] = []
     private var eventBytes = 0
     private var total = 0
+    /// A whole stream: 8192 tokens plus reasoning, one small JSON event each.
+    static let streamByteLimit = 8 * 1024 * 1024
     mutating func feed(_ byte: UInt8) throws -> String? {
         total += 1
-        guard total <= 512 * 1024, line.count < 64 * 1024 else { throw ChatFailure.limit }
+        guard total <= Self.streamByteLimit, line.count < 64 * 1024 else { throw ChatFailure.limit }
         if byte != 10 { line.append(byte); return nil }
         if line.last == 13 { line.removeLast() }
         defer { line.removeAll(keepingCapacity: true) }
@@ -116,11 +125,14 @@ struct ChatSSEDecoder {
 
 struct ChatStreamAccumulator {
     static let textByteLimit = 64 * 1024
+    /// Tool calls one response may carry, for every transport.
+    static let maxCallsPerResponse = 12
     private(set) var text = ""
     private(set) var reasoning = ""
     /// The reasoning fragment from the most recent accepted event, if any.
     private(set) var lastReasoning: String?
     private(set) var truncated = false
+    private(set) var completionTokens: Int?
     private var calls: [Int: ChatToolCall] = [:]
     private(set) var done = false
     private var finished = false
@@ -135,7 +147,14 @@ struct ChatStreamAccumulator {
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw ChatFailure.malformed }
         if let error = object["error"] as? [String: Any] {
-            throw error["code"] as? String == "local_preempted" ? ChatFailure.preempted : ChatFailure.malformed
+            switch error["code"] as? String {
+            case "local_preempted": throw ChatFailure.preempted
+            case "context_length_exceeded": throw ChatFailure.contextTooLong
+            default: throw ChatFailure.malformed
+            }
+        }
+        if let usage = object["usage"] as? [String: Any], let tokens = usage["completion_tokens"] as? Int, tokens >= 0 {
+            completionTokens = tokens
         }
         guard let choices = object["choices"] as? [[String: Any]] else { throw ChatFailure.malformed }
         // Usage-only events are permitted, but may not substitute for a finish.
@@ -160,7 +179,7 @@ struct ChatStreamAccumulator {
         }
         text += fragment
         for part in delta["tool_calls"] as? [[String: Any]] ?? [] {
-            guard let index = part["index"] as? Int, (0..<12).contains(index) else { throw ChatFailure.limit }
+            guard let index = part["index"] as? Int, (0..<Self.maxCallsPerResponse).contains(index) else { throw ChatFailure.limit }
             var call = calls[index] ?? ChatToolCall()
             call.id += part["id"] as? String ?? ""
             let function = part["function"] as? [String: Any] ?? [:]
@@ -177,7 +196,21 @@ struct ChatStreamAccumulator {
         let ordered = calls.keys.sorted().compactMap { calls[$0] }
         guard ordered.allSatisfy({ !$0.id.isEmpty && !$0.name.isEmpty }),
               Set(ordered.map(\.id)).count == ordered.count else { throw ChatFailure.malformed }
-        return ChatCompletion(text: text, calls: ordered, reasoning: reasoning, truncated: truncated)
+        return ChatCompletion(text: text, calls: ordered, reasoning: reasoning, truncated: truncated,
+                              completionTokens: completionTokens)
+    }
+}
+
+/// The provider sends `: keepalive` comments while a stream is quiet, and
+/// they reset URLSession's idle timer. This guard counts only `data:` events,
+/// so a stream that sends nothing but keepalives still times out.
+struct ChatDataStallGuard {
+    let limit: Duration
+    private(set) var lastData: ContinuousClock.Instant
+    init(limit: Duration, now: ContinuousClock.Instant = .now) { self.limit = limit; lastData = now }
+    mutating func noteData(at now: ContinuousClock.Instant = .now) { lastData = now }
+    func check(at now: ContinuousClock.Instant = .now) throws {
+        guard now - lastData <= limit else { throw ChatFailure.timeout }
     }
 }
 
@@ -263,17 +296,20 @@ final class LocalChatTransport: ChatTransport {
                 data.append(byte)
             }
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            if (object?["error"] as? [String: Any])?["code"] as? String == "local_preempted" {
-                throw ChatFailure.preempted
-            }
+            let code = (object?["error"] as? [String: Any])?["code"] as? String
+            if code == "local_preempted" { throw ChatFailure.preempted }
+            if code == "context_length_exceeded" { throw ChatFailure.contextTooLong }
             throw ChatFailure.http(http.statusCode)
         }
         guard http.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("text/event-stream") == true
         else { throw ChatFailure.malformed }
         var decoder = ChatSSEDecoder(); var accumulator = ChatStreamAccumulator()
+        var stall = ChatDataStallGuard(limit: .seconds(Self.idleTimeout))
         for try await byte in bytes {
             try Task.checkCancellation()
+            if byte == 10 { try stall.check() }
             if let event = try decoder.feed(byte) {
+                stall.noteData()
                 if let fragment = try accumulator.accept(event) { onText(fragment) }
                 if let thought = accumulator.lastReasoning { onReasoning(thought) }
                 if accumulator.done { return try accumulator.result() }

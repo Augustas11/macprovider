@@ -206,7 +206,7 @@ final class ChatStoreTests: XCTestCase {
     }
     private func jsonFiles(_ directory: URL) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
-            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }
+            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") && $0 != ChatHistoryStore.indexName }
     }
     private func answer(_ store: ChatStore, _ transport: ControlledChatTransport, _ prompt: String, _ text: String) async throws {
         let index = transport.pending.count
@@ -357,6 +357,49 @@ final class ChatStoreTests: XCTestCase {
         try await waitUntil { !store.isRunning }
         store.continueAnswer()
         XCTAssertEqual(transport.pending.count, 2, "Continue only follows a cut-off reply")
+    }
+
+    func testHistoryIsSizedToTheModelContext() async throws {
+        let unknown = ChatCapability(model: "fixture", generation: 1, guaranteedTools: false)
+        XCTAssertEqual(ChatStore.contextBytes(for: unknown), ChatStore.defaultContextBytes)
+        XCTAssertEqual(ChatStore.outputTokens(for: unknown), ChatStore.maxTokens)
+        let large = ChatCapability(model: "fixture", generation: 1, guaranteedTools: false, maxContextTokens: 32768)
+        XCTAssertEqual(ChatStore.outputTokens(for: large), 8192)
+        XCTAssertEqual(ChatStore.contextBytes(for: large), (32768 - 8192) * 3)
+        let small = ChatCapability(model: "fixture", generation: 1, guaranteedTools: false, maxContextTokens: 4096)
+        XCTAssertEqual(ChatStore.outputTokens(for: small), 2048)
+        XCTAssertEqual(ChatStore.contextBytes(for: small), 2048 * 3)
+
+        let transport = ControlledChatTransport()
+        transport.current = small
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        let long = String(repeating: "x", count: 7000)
+        try await answer(store, transport, "first", long)
+        try await answer(store, transport, "second", "short")
+        store.send("third")
+        try await waitUntil { transport.pending.count == 3 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[2]) as? [String: Any])
+        XCTAssertEqual(request["max_tokens"] as? Int, 2048)
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String },
+                       ["second", "short", "third"], "The turn that no longer fits the context is left out")
+        transport.pending[2].continuation.resume(throwing: ChatFailure.contextTooLong)
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.notice, ChatFailure.contextTooLong.localizedDescription)
+        XCTAssertEqual(store.turns.count, 3, "The conversation itself is kept")
+    }
+
+    func testContinueIsNotOfferedInAgentMode() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        store.send("Write a long story")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, text: "Once upon", truncated: true)
+        try await waitUntil { !store.isRunning }
+        store.agentMode = true
+        store.continueAnswer()
+        XCTAssertEqual(transport.pending.count, 1)
     }
 
     func testReasoningOnlyReplyIsShownSavedAndNeverSentBack() async throws {

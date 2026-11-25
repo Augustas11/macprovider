@@ -54,7 +54,19 @@ final class ChatStore: ObservableObject {
     /// Only the most recent exchanges go to the model; the conversation shown
     /// and saved keeps every turn.
     static let contextMessages = 16
-    static let contextBytes = 96 * 1024
+    /// History budget when the provider does not report its context size.
+    static let defaultContextBytes = 32 * 1024
+
+    /// Output tokens to request: at most half of a reported context.
+    static func outputTokens(for capability: ChatCapability) -> Int {
+        guard let context = capability.maxContextTokens else { return maxTokens }
+        return max(256, min(maxTokens, context / 2))
+    }
+    /// About 3 bytes per token of the context left after the reply.
+    static func contextBytes(for capability: ChatCapability) -> Int {
+        guard let context = capability.maxContextTokens else { return defaultContextBytes }
+        return max(0, context - outputTokens(for: capability)) * 3
+    }
     static let continuePrompt = "Continue your previous answer exactly where it stopped, without repeating it."
 
     /// `historyStore` nil keeps conversations in memory only (tests and previews).
@@ -62,6 +74,11 @@ final class ChatStore: ObservableObject {
         self.transport = transport ?? LocalChatTransport()
         self.historyStore = historyStore
         history = historyStore?.summaries ?? []
+        // A missing index is rebuilt in the background; show the list when ready.
+        historyStore?.onChange = { [weak self] in
+            guard let self, let store = self.historyStore else { return }
+            self.history = store.summaries
+        }
     }
 
     func refresh(port: Int?) async {
@@ -127,11 +144,15 @@ final class ChatStore: ObservableObject {
         }
         conversationID = chat.id; conversationCreated = chat.createdAt
         conversationTitle = chat.title; conversationModel = chat.model
+        // Like a new folder selection: a saved chat never runs against a
+        // folder chosen for another conversation.
+        workspace = nil; folderName = nil
         turns = chat.turns.map {
             ChatTurn(id: UUID(), prompt: $0.prompt, answer: $0.answer, complete: $0.complete,
                      reasoning: $0.reasoning ?? "", truncated: $0.truncated ?? false, note: $0.note,
                      tools: $0.tools ?? [])
         }
+        unsaved = false
         notice = modelNotice()
     }
 
@@ -163,7 +184,7 @@ final class ChatStore: ObservableObject {
 
     /// Asks the model to carry on from a reply that hit its length limit.
     func continueAnswer() {
-        guard !isRunning, turns.last?.truncated == true else { return }
+        guard !isRunning, !agentMode, turns.last?.truncated == true else { return }
         send(Self.continuePrompt)
     }
 
@@ -180,13 +201,15 @@ final class ChatStore: ObservableObject {
         }
         // Copy only complete exchanges into a bounded request. Interrupted tool
         // turns never become dangling tool messages in a later request.
-        // Reasoning is never sent back. The budget fits one maximum-length
-        // reply, so Continue always carries the answer it continues.
+        // Reasoning is never sent back. History is sized to the model's
+        // context; a cut-off reply being continued is always carried.
         var previous: [[String: Any]] = []
         var bytes = 0
+        let budget = Self.contextBytes(for: expected) - text.utf8.count
         for turn in turns.reversed() where turn.complete {
             let size = turn.prompt.utf8.count + turn.answer.utf8.count
-            guard bytes + size <= Self.contextBytes, previous.count < Self.contextMessages else { break }
+            let continued = previous.isEmpty && turn.truncated
+            guard continued || bytes + size <= budget, previous.count < Self.contextMessages else { break }
             bytes += size
             previous.insert(contentsOf: [["role": "user", "content": turn.prompt],
                                          ["role": "assistant", "content": turn.answer]], at: 0)
@@ -239,7 +262,8 @@ final class ChatStore: ObservableObject {
             guard fresh.model == expected.model, fresh.generation == expected.generation else { throw ChatFailure.modelChanged }
             guard workspace == nil || fresh.guaranteedTools else { throw ChatFailure.unsupportedTools }
             activity = workspace == nil ? "Replying on this Mac…" : "Working within the selected folder…"
-            var body: [String: Any] = ["model": fresh.model, "messages": messages, "stream": true, "max_tokens": Self.maxTokens]
+            var body: [String: Any] = ["model": fresh.model, "messages": messages, "stream": true,
+                                       "max_tokens": Self.outputTokens(for: fresh)]
             if workspace != nil { body["tools"] = AgentWorkspace.schemas; body["tool_choice"] = "required" }
             let data = try JSONSerialization.data(withJSONObject: body)
             // Room for the full Agent tool-output budget, JSON-escaped.
