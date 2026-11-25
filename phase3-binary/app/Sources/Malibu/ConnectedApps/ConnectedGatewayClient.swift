@@ -192,8 +192,10 @@ struct ConnectedGatewayClient {
         // Production metadata uses the fixed HTTPS gateway. Inference tests use
         // only the fixed loopback consumer and its local token.
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
+        // Same stall guard as local Chat: a non-streaming agent round can take
+        // minutes. There is no 90 s run limit; the resource limit is a backstop.
+        configuration.timeoutIntervalForRequest = LocalChatTransport.idleTimeout
+        configuration.timeoutIntervalForResource = LocalChatTransport.resourceTimeout
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil

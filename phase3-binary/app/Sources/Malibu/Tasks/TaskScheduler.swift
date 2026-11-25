@@ -5,15 +5,16 @@ import Foundation
 final class TaskScheduler: ObservableObject {
     typealias Execute = @MainActor (ScheduledTask) async throws -> String
     @Published private(set) var runningTaskID: UUID?
-    static let maximumRounds = 6
+    static let maximumRounds = ChatStore.maxRounds
     static let maximumOutputTokens = 8192
-    static let maximumWallTime: TimeInterval = 90
     private let store: TaskStore
     private let clock: () -> Date
     private let timezone: () -> TimeZone
     private let execute: Execute
     private let cancelExecution: @MainActor () -> Void
-    private let wallTime: TimeInterval
+    /// nil in production: a run is bounded by its rounds, calls and the stall
+    /// guard, not by a wall clock. Tests inject one to exercise cancellation.
+    private let wallTime: TimeInterval?
     private let partialTranscript: @MainActor () -> String
     private var timer: Task<Void, Never>?
     private var execution: Task<Void, Never>?
@@ -25,10 +26,10 @@ final class TaskScheduler: ObservableObject {
 
     init(store: TaskStore, clock: @escaping () -> Date = Date.init,
          timezone: @escaping () -> TimeZone = { .current },
-         wallTime: TimeInterval = TaskScheduler.maximumWallTime,
+         wallTime: TimeInterval? = nil,
          execute: @escaping Execute, partialTranscript: @escaping @MainActor () -> String = { "" }, cancel: @escaping @MainActor () -> Void = {}) {
         self.store = store; self.clock = clock; self.timezone = timezone
-        self.wallTime = min(max(0.01, wallTime), Self.maximumWallTime)
+        self.wallTime = wallTime.map { max(0.01, $0) }
         self.execute = execute; self.cancelExecution = cancel; self.partialTranscript = partialTranscript
     }
 
@@ -111,9 +112,10 @@ final class TaskScheduler: ObservableObject {
             self.runID = nil; self.runningTaskID = nil; self.currentTask = nil; self.startedAt = nil
             self.execution = nil
         }
+        guard let wallTime else { return }
         watchdog = Task { [weak self] in
             guard let self else { return }
-            do { try await Task.sleep(for: .seconds(self.wallTime)) } catch { return }
+            do { try await Task.sleep(for: .seconds(wallTime)) } catch { return }
             guard self.runID == id else { return }
             self.timedOut = true
             self.execution?.cancel(); self.cancelExecution()

@@ -151,7 +151,7 @@ private struct TaskEditor: View {
                      ? "Malibu network runs are billed to your saved buyer key."
                      : "This Mac runs are local work and never earnings.")
                     .font(.caption)
-                Text("Each run is limited to 6 rounds, 90 seconds and 8,192 output tokens.").font(.caption).foregroundStyle(.secondary)
+                Text("Each run is limited to 50 rounds, 200 tool calls and 8,192 output tokens.").font(.caption).foregroundStyle(.secondary)
             }
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {

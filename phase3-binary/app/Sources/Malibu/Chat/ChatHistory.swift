@@ -48,7 +48,7 @@ enum ChatHistoryFailure: Error {
 @MainActor
 final class ChatHistoryStore {
     static let limit = 200
-    static let byteLimit = 4 * 1_048_576
+    static let byteLimit = 16 * 1_048_576
     let directory: URL
     private(set) var summaries: [ChatSummary] = []
 

@@ -248,7 +248,8 @@ final class TaskSchedulerTests: XCTestCase {
     }
 
     func testActualSessionEnforcesRoundAndOutputTokenBudgets() async throws {
-        for (tokens, expectedCalls) in [(1024, 6), (2048, 4)] {
+        // 50 rounds allowed; the 8,192-token run budget ends these loops first.
+        for (tokens, expectedCalls) in [(1024, 8), (2048, 4)] {
             let path = try directory()
             var agent = AgentDefinition(); agent.workspaceTools = true; agent.workspacePath = path.path
             agent.sampling.maxTokens = tokens

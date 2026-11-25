@@ -43,16 +43,18 @@ final class ChatStore: ObservableObject {
     private var runID: UUID?
     private var discoveryID = UUID()
     static let maxPromptBytes = 8 * 1024
-    /// Shared with the Agents and Tasks runtimes, which keep their own limits.
-    static let maxRounds = 6
-    static let maxCalls = 12
-    /// Chat's Agent mode has no total time limit: Stop ends a run, and a
-    /// stream that sends nothing for `stallSeconds` fails.
-    static let agentMaxRounds = 50
-    static let agentMaxCalls = 200
-    static let agentOutputByteLimit = 1_048_576
+    /// Run bounds shared by Chat's Agent mode, the Agents screen and Tasks.
+    /// There is no total time limit: Stop ends a run, and a stream or tool
+    /// call that makes no progress for `stallSeconds` fails.
+    static let maxRounds = 50
+    static let maxCalls = 200
+    static let maxToolOutputBytes = 1_048_576
     static let maxTokens = 8192
-    static let stallSeconds: TimeInterval = 120
+    static let stallSeconds: TimeInterval = LocalChatTransport.idleTimeout
+    /// Only the most recent exchanges go to the model; the conversation shown
+    /// and saved keeps every turn.
+    static let contextMessages = 16
+    static let contextBytes = 96 * 1024
     static let continuePrompt = "Continue your previous answer exactly where it stopped, without repeating it."
 
     /// `historyStore` nil keeps conversations in memory only (tests and previews).
@@ -130,7 +132,6 @@ final class ChatStore: ObservableObject {
                      reasoning: $0.reasoning ?? "", truncated: $0.truncated ?? false, note: $0.note,
                      tools: $0.tools ?? [])
         }
-        trimHistory()
         notice = modelNotice()
     }
 
@@ -185,7 +186,7 @@ final class ChatStore: ObservableObject {
         var bytes = 0
         for turn in turns.reversed() where turn.complete {
             let size = turn.prompt.utf8.count + turn.answer.utf8.count
-            guard bytes + size <= 96 * 1024, previous.count < 16 else { break }
+            guard bytes + size <= Self.contextBytes, previous.count < Self.contextMessages else { break }
             bytes += size
             previous.insert(contentsOf: [["role": "user", "content": turn.prompt],
                                          ["role": "assistant", "content": turn.answer]], at: 0)
@@ -198,7 +199,6 @@ final class ChatStore: ObservableObject {
         conversationModel = expected.model; runUsesAgent = useAgent
         turns.append(ChatTurn(id: id, prompt: text, answer: "", complete: false))
         unsaved = true
-        trimHistory()
         isRunning = true; notice = nil; activity = "Checking local provider…"
         task = Task { [weak self] in
             guard let self else { return }
@@ -232,7 +232,7 @@ final class ChatStore: ObservableObject {
         messages += previous
         messages.append(["role": "user", "content": prompt])
         var callCount = 0; var toolBytes = 0
-        for _ in 0..<Self.agentMaxRounds {
+        for _ in 0..<Self.maxRounds {
             try Task.checkCancellation()
             let fresh = try await transport.capability(at: endpoint)
             guard runID == id else { throw CancellationError() }
@@ -243,7 +243,7 @@ final class ChatStore: ObservableObject {
             if workspace != nil { body["tools"] = AgentWorkspace.schemas; body["tool_choice"] = "required" }
             let data = try JSONSerialization.data(withJSONObject: body)
             // Room for the full Agent tool-output budget, JSON-escaped.
-            guard data.count <= 4 * Self.agentOutputByteLimit else { throw ChatFailure.limit }
+            guard data.count <= 4 * Self.maxToolOutputBytes else { throw ChatFailure.limit }
             let response = try await transport.complete(at: endpoint, body: data, onText: { [weak self] fragment in
                 guard workspace == nil, let self, self.runID == id,
                       let index = self.turns.firstIndex(where: { $0.id == id }) else { return }
@@ -270,29 +270,37 @@ final class ChatStore: ObservableObject {
             guard !response.truncated else { throw ChatFailure.limit }
             guard !response.calls.isEmpty else { throw ChatFailure.invalidTool }
             callCount += response.calls.count
-            guard callCount <= Self.agentMaxCalls else { throw ChatFailure.limit }
-            // Validate the whole batch before any file is touched.
-            let arguments = try response.calls.map { try AgentWorkspace.arguments(for: $0) }
+            guard callCount <= Self.maxCalls else { throw ChatFailure.limit }
+            // Parse the whole batch before any file is touched. A call with bad
+            // arguments is answered with an error, not fatal to the turn.
+            let arguments = response.calls.map { try? AgentWorkspace.arguments(for: $0) }
             let finishes = response.calls.enumerated().filter { $0.element.name == "finish_answer" }
             if let finish = finishes.first {
-                guard response.calls.count == 1, let answer = arguments[finish.offset]["answer"],
+                guard response.calls.count == 1, let answer = arguments[finish.offset]?["answer"],
                       !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatFailure.invalidTool }
                 if let index = turns.firstIndex(where: { $0.id == id }) { turns[index].answer = answer }
                 return
             }
             messages.append(["role": "assistant", "content": response.text, "tool_calls": response.calls.map(\.json)])
             for (offset, call) in response.calls.enumerated() {
-                activity = "Reading selected folder · \(callCount)/\(Self.agentMaxCalls) tool calls"
-                if let index = turns.firstIndex(where: { $0.id == id }) {
-                    turns[index].tools.append(Self.toolLine(call.name, arguments[offset]))
-                }
+                let line = Self.toolLine(call.name, arguments[offset] ?? [:])
+                activity = line
+                if let index = turns.firstIndex(where: { $0.id == id }) { turns[index].tools.append(line) }
                 // Per-call stall guard; a run as a whole has no time limit.
                 let deadline = ContinuousClock.now.advanced(by: .seconds(Self.stallSeconds))
-                let result = try await workspace.execute(call, deadline: deadline)
+                let result: String
+                do {
+                    guard arguments[offset] != nil else { throw ChatFailure.invalidTool }
+                    result = try await workspace.execute(call, deadline: deadline)
+                } catch let failure as ChatFailure where Self.recoverableToolFailures.contains(failure) {
+                    // The model can narrow the request and try again; timeouts
+                    // and cancellation still end the turn.
+                    result = Self.toolError(failure)
+                }
                 try Task.checkCancellation()
                 guard runID == id else { throw CancellationError() }
                 toolBytes += result.utf8.count
-                guard toolBytes <= Self.agentOutputByteLimit else { throw ChatFailure.limit }
+                guard toolBytes <= Self.maxToolOutputBytes else { throw ChatFailure.limit }
                 messages.append(["role": "tool", "tool_call_id": call.id, "content": result])
             }
         }
@@ -301,7 +309,7 @@ final class ChatStore: ObservableObject {
     private func finish(_ id: UUID) {
         guard runID == id else { return }
         runID = nil; task = nil
-        isRunning = false; activity = nil; trimHistory()
+        isRunning = false; activity = nil
     }
     private func resetConversation() {
         turns.removeAll(); unsaved = false
@@ -325,6 +333,15 @@ final class ChatStore: ObservableObject {
         catch { notice = "This chat could not be saved on this Mac." }
         history = historyStore.summaries
     }
+    static let recoverableToolFailures: [ChatFailure] = [.limit, .unsafePath, .invalidTool]
+    /// The tool message a failed call returns to the model.
+    static func toolError(_ failure: ChatFailure) -> String {
+        switch failure {
+        case .limit: return "error: limit reached (\(AgentWorkspace.entryLimit) entries or \(AgentWorkspace.fileByteLimit / 1024) KB per file); narrow the path or query"
+        case .unsafePath: return "error: path unavailable; use a relative path to a regular file or folder inside the selected folder (no symlinks or special files)"
+        default: return "error: invalid tool call; use list_files, read_file or search_files with the documented arguments"
+        }
+    }
     /// "search_files src \"query\"": the tool and its path, never file contents.
     static func toolLine(_ name: String, _ arguments: [String: String]) -> String {
         var line = name
@@ -336,11 +353,6 @@ final class ChatStore: ObservableObject {
         guard !turns.isEmpty, let saved = conversationModel, !saved.isEmpty,
               let loaded = capability?.model, loaded != saved else { return nil }
         return "This chat used \(saved). Replies now come from \(loaded)."
-    }
-    private func trimHistory() {
-        while turns.count > 8 || turns.reduce(0, { $0 + $1.prompt.utf8.count + $1.answer.utf8.count }) > 128 * 1024 {
-            turns.removeFirst()
-        }
     }
     private func display(_ error: Error) -> String {
         if let failure = error as? ChatFailure { return failure.localizedDescription }

@@ -212,17 +212,21 @@ private final class ChatNoRedirect: NSObject, URLSessionTaskDelegate, @unchecked
 final class LocalChatTransport: ChatTransport {
     private let session: URLSession
     private let redirect = ChatNoRedirect()
-    init() {
+    init() { session = URLSession(configuration: Self.sessionConfiguration()) }
+    /// Idle (stall) timeout per request: a provider buffering a tool call can
+    /// send nothing for over a minute. The resource limit is a backstop only;
+    /// Stop is how the user ends a long reply or Agent run.
+    nonisolated static let idleTimeout: TimeInterval = 300
+    nonisolated static let resourceTimeout: TimeInterval = 3600
+    nonisolated static func sessionConfiguration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = [:]
         config.httpShouldSetCookies = false
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        // Stall guard only: a request fails when no bytes arrive for this long.
-        // There is no total limit; Stop ends a long reply or Agent run.
-        config.timeoutIntervalForRequest = ChatStore.stallSeconds
-        config.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        session = URLSession(configuration: config)
+        config.timeoutIntervalForRequest = idleTimeout
+        config.timeoutIntervalForResource = resourceTimeout
+        return config
     }
     deinit { session.invalidateAndCancel() }
     func capability(at endpoint: ChatEndpoint) async throws -> ChatCapability {

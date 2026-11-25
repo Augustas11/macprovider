@@ -121,6 +121,17 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertFalse(second?.isEmpty ?? true)
         XCTAssertNotEqual(first, second)
     }
+    func testSessionWaitsOutAQuietToolCallAndHasNoShortTotalLimit() {
+        // A provider buffering a tool call sends nothing for 39-79 s.
+        let config = LocalChatTransport.sessionConfiguration()
+        XCTAssertEqual(config.timeoutIntervalForRequest, 300)
+        XCTAssertEqual(config.timeoutIntervalForResource, 3600)
+    }
+    func testKeepaliveCommentIsIgnoredByTheDecoder() throws {
+        var decoder = ChatSSEDecoder(); var events: [String] = []
+        for byte in ": keepalive\n\ndata: {}\n\n".utf8 { if let event = try decoder.feed(byte) { events.append(event) } }
+        XCTAssertEqual(events, ["{}"])
+    }
     func testEndpointCannotBecomeRemoteOrInventDefaultPort() throws {
         XCTAssertEqual(try ChatEndpoint(port: 9042).url("/v1/capabilities").absoluteString,
                        "http://127.0.0.1:9042/v1/capabilities")

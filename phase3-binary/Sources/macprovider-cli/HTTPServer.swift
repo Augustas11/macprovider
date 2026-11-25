@@ -1737,11 +1737,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // A buyer that disconnects mid-stream cancels generation
                 // (the runtime stops; a loopback runtime cancels upstream).
                 let requestTimeline = timeline
-                var completion = try await RequestTimeline.$current.withValue(requestTimeline) {
+                // A quiet stream (a tool call being buffered, a long prefill)
+                // still sends a comment every 10 s so clients do not time out.
+                let keepalive = SSEKeepalive { writer.writeRawSSE(SSEKeepalive.comment) }
+                var completion = try await keepalive.during {
+                  try await RequestTimeline.$current.withValue(requestTimeline) {
                     try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true }) { chunk in
                         // SPEC-001-R015: progress is a relay-only signal; the
                         // direct HTTP stream's bytes are unchanged.
                         if chunk.isProgress { return }
+                        keepalive.noteOutput()
                         requestTimeline.noteEmitted(chunk)
                         emittedBuyerToken.set()
                         switch chunk {
@@ -1784,6 +1789,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             break
                         }
                     }
+                  }
                 }
                 completion.timeline = requestTimeline
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease, warmMember: warmMember)

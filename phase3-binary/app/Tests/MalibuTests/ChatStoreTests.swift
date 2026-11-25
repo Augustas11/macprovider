@@ -51,7 +51,7 @@ final class ChatStoreTests: XCTestCase {
         let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.count, 1, "Stopped exchanges must not enter model context")
     }
-    func testPreemptedTurnIsIncompleteAndHistoryRemainsBounded() async throws {
+    func testPreemptedTurnIsIncompleteAndModelContextRemainsBounded() async throws {
         let transport = ControlledChatTransport()
         let store = ChatStore(transport: transport)
         await store.refresh(port: 9042)
@@ -68,8 +68,12 @@ final class ChatStoreTests: XCTestCase {
             transport.resolve(index, text: "answer")
             try await waitUntil { !store.isRunning }
         }
-        XCTAssertEqual(store.turns.count, 8)
-        XCTAssertTrue(store.turns.allSatisfy(\.complete))
+        // Every turn stays visible; only the request to the model is bounded.
+        XCTAssertEqual(store.turns.count, 11)
+        XCTAssertFalse(store.turns[0].complete)
+        XCTAssertTrue(store.turns.dropFirst().allSatisfy(\.complete))
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies.last!) as? [String: Any])
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.count, ChatStore.contextMessages + 1)
     }
     func testFreshCapabilityChangeStopsBeforeInference() async throws {
         let transport = ControlledChatTransport()
@@ -122,6 +126,58 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(store.turns.last?.tools, ["read_file note.txt"])
         XCTAssertEqual(transport.ports, [9042, 9042, 9042])
     }
+    func testToolErrorIsReturnedToTheModelAndTheTurnContinues() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatToolError-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data(String(repeating: "x", count: AgentWorkspace.fileByteLimit + 1).utf8).write(to: folder.appendingPathComponent("big.txt"))
+        store.selectFolder(folder)
+        store.agentMode = true
+        await store.refresh(port: 9042)
+        store.send("Read everything")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, calls: [
+            ChatToolCall(id: "big", name: "read_file", arguments: "{\"path\":\"big.txt\"}"),
+            ChatToolCall(id: "escape", name: "read_file", arguments: "{\"path\":\"../outside\"}"),
+            ChatToolCall(id: "bad", name: "read_file", arguments: "{\"file\":\"x\"}")
+        ])
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertTrue(store.isRunning, "Tool errors must not end the turn")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[1]) as? [String: Any])
+        let tools = try XCTUnwrap(body["messages"] as? [[String: Any]]).filter { $0["role"] as? String == "tool" }
+        XCTAssertEqual(tools.compactMap { $0["tool_call_id"] as? String }, ["big", "escape", "bad"])
+        XCTAssertEqual(tools.compactMap { $0["content"] as? String },
+                       [ChatStore.toolError(.limit), ChatStore.toolError(.unsafePath), ChatStore.toolError(.invalidTool)])
+        XCTAssertTrue(tools.allSatisfy { ($0["content"] as? String)?.hasPrefix("error: ") == true })
+        XCTAssertEqual(store.turns.last?.tools, ["read_file big.txt", "read_file ../outside", "read_file"])
+        transport.resolve(1, calls: [ChatToolCall(id: "done", name: "finish_answer", arguments: "{\"answer\":\"Could not read big.txt\"}")])
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.last?.answer, "Could not read big.txt")
+        XCTAssertEqual(store.turns.last?.complete, true)
+    }
+
+    func testEachToolCallIsListedByNameAndPath() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatActivity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        store.selectFolder(folder)
+        store.agentMode = true
+        await store.refresh(port: 9042)
+        store.send("List")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, calls: [ChatToolCall(id: "list", name: "list_files", arguments: "{\"path\":\".\"}")])
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertEqual(ChatStore.toolLine("list_files", ["path": "."]), "list_files .")
+        XCTAssertEqual(ChatStore.toolLine("read_file", ["path": "README.md"]), "read_file README.md")
+        XCTAssertEqual(store.turns.last?.tools, ["list_files ."])
+        store.stop()
+        transport.resolve(1, text: "ignored")
+    }
+
     func testAgentRoundLimitStopsRepeatedToolLoop() async throws {
         let transport = ControlledChatTransport()
         let store = ChatStore(transport: transport)
@@ -133,7 +189,7 @@ final class ChatStoreTests: XCTestCase {
         store.agentMode = true
         await store.refresh(port: 9042)
         store.send("keep listing")
-        for index in 0..<ChatStore.agentMaxRounds {
+        for index in 0..<ChatStore.maxRounds {
             try await waitUntil { transport.pending.count == index + 1 }
             transport.resolve(index, calls: [ChatToolCall(id: "list\(index)", name: "list_files", arguments: "{\"path\":\".\"}")])
         }
@@ -192,6 +248,23 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(messages.compactMap { $0["content"] as? String },
                        ["What is MLX?", "An array framework.", "And Metal?"])
         XCTAssertEqual(jsonFiles(directory).count, 1)
+    }
+
+    func testLongConversationIsSavedAndReloadedWithEveryTurn() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        for index in 1...20 { try await answer(store, transport, "question \(index)", "answer \(index)") }
+        XCTAssertEqual(store.turns.count, 20)
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies.last!) as? [String: Any])
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.count, ChatStore.contextMessages + 1)
+        let id = store.conversationID
+        store.newConversation()
+        let reopened = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        reopened.openConversation(id)
+        XCTAssertEqual(reopened.turns.map(\.prompt), (1...20).map { "question \($0)" })
+        XCTAssertEqual(reopened.turns.map(\.answer), (1...20).map { "answer \($0)" })
     }
 
     func testEmptyConversationIsNotSaved() async throws {

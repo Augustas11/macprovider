@@ -47,11 +47,26 @@ final class AgentToolTests: XCTestCase {
         try write("small.txt", "needle\n")
         let workspace = try AgentWorkspace(url: root)
         let matches = try await workspace.execute(call("search_files", ["path": ".", "query": "needle"]), deadline: deadline)
-        XCTAssertEqual(matches, "small.txt:1: needle")
-        do {
-            _ = try await workspace.execute(call("list_files", ["path": "big"]), deadline: deadline)
-            XCTFail("an oversized requested directory still reports the limit")
-        } catch { XCTAssertEqual(error as? ChatFailure, .limit) }
+        XCTAssertEqual(matches, "small.txt:1: needle\n" + AgentWorkspace.searchTruncatedNote)
+        // An oversized requested directory is listed in part, with a note, not refused.
+        let listed = try await workspace.execute(call("list_files", ["path": "big"]), deadline: deadline)
+        let lines = listed.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, AgentWorkspace.entryLimit + 1)
+        XCTAssertEqual(lines.last, AgentWorkspace.listTruncatedNote)
+    }
+    func testListAndSearchSkipHiddenAndBuildFolders() async throws {
+        try write("main.swift", "needle\n")
+        try write(".env", "needle\n")
+        for folder in [".git", ".build", "node_modules", "DerivedData", "Pods", "Sources"] {
+            let directory = root.appendingPathComponent(folder)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("needle\n".utf8).write(to: directory.appendingPathComponent("inside.txt"))
+        }
+        let workspace = try AgentWorkspace(url: root)
+        let listed = try await workspace.execute(call("list_files", ["path": "."]), deadline: deadline)
+        XCTAssertEqual(listed, "Sources\nmain.swift")
+        let matches = try await workspace.execute(call("search_files", ["path": ".", "query": "needle"]), deadline: deadline)
+        XCTAssertEqual(matches, "Sources/inside.txt:1: needle\nmain.swift:1: needle")
     }
     func testSelectedRootAliasResolvesBeforeNoFollowTraversal() async throws {
         let selected = root.appendingPathComponent("selected")
