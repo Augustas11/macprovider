@@ -21,6 +21,7 @@
 #   throughput  msb-throughput --engine scheduler at --rows 1, 2, 4 (1024-token prompts) and 4
 #               (8192-token prompts), 256 timed decode tokens, 3 runs: aggregate decode tok/s
 #               against the same build's one-row engine and the production serial path;
+#   split       one-row cost split: scheduler row, ring copy skipped (lab switch), paged engine;
 #   diag        one-row parity bisection, each cell its own process: the 1500-token ragged row
 #               alone; the ragged cohort reordered (the 1500-token row first); the ragged cohort
 #               with the hybrid decode pipeline off; the ragged cohort with MACPROVIDER_CB_TRACE.
@@ -143,7 +144,7 @@ msb() {  # msb LABEL ARGS...
   [ $rc = 0 ] || blocker "$label rc=$rc: $(tail -n 3 "$OUT/$label.err" | tr '\n' ' ' | cut -c1-400)"
 }
 
-if has parity || has throughput || has diag; then
+if has parity || has throughput || has diag || has split; then
   [ -x "$BIN/macprovider-cli" ] || die "no lab-harness binary at $BIN (run the provider step)" 14
 fi
 if has parity; then
@@ -176,6 +177,18 @@ PY2
   msb diag-reordered --scenario parity --rows 4 --prompt-token-file "$OUT/diag-reordered.json" --parity-tokens 256
   MACPROVIDER_LAB_HYBRID_PIPELINE=off msb diag-pipeline-off --scenario parity --rows 4 --prompt-token-file "$OUT/diag-ragged.json" --parity-tokens 256
   MACPROVIDER_CB_TRACE=1 msb diag-trace --scenario parity --rows 4 --prompt-token-file "$OUT/diag-ragged.json" --parity-tokens 256
+fi
+if has split; then
+  # One-row cost split (#2505): the scheduler row as served, the same with the sliding-window
+  # ring copy skipped (lab switch; tokens may differ), and the paged engine without the scheduler.
+  for i in 1 2; do
+    msb split-r1-base-$i --scenario throughput --rows 1 --prompt-tokens 1024 --decode-tokens 256 --runs 3
+    MACPROVIDER_LAB_RING_COPY=off msb split-r1-noring-$i --scenario throughput --rows 1 --prompt-tokens 1024 --decode-tokens 256 --runs 3
+  done
+  (cd "$BIN" && ./macprovider-cli msb-throughput --model "$MODEL" --engine paged --scenario throughput --rows 1 \
+      --prompt-tokens 1024 --decode-tokens 256 --runs 3 --output "$OUT/split-r1-engine-paged.json") \
+    > "$OUT/split-r1-engine-paged.out" 2> "$OUT/split-r1-engine-paged.err"
+  say "CELL_DONE split-r1-engine-paged rc=$? $(/usr/bin/python3 -I "$HERE/summarize.py" "$OUT/split-r1-engine-paged.json" 2>&1 | tr '\n' ' ' | cut -c1-600)"
 fi
 if has throughput; then
   for r in 1 2 4; do

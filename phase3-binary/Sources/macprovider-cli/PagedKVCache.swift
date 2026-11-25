@@ -815,6 +815,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let shift = incomingTokens == 1
             ? Self.slidingRingShift(postUpdateOffset: offset, anchor: slidingRingAnchor, windowSize: attentionWindowTokens)
             : 0
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab A/B only (#2505): the window in temporal order, without the
+        // ring copy. Tokens may leave the serial ones; the cost is the point.
+        if Self.labSkipRingCopy {
+            return (keys[.ellipsis, start..., 0...], values[.ellipsis, start..., 0...])
+        }
+        #endif
         // `ringOrdered` moves the oldest key to column `shift`.
         presentedRingRotation = shift > 0 && shift < end - start ? shift : 0
         return (
@@ -843,6 +850,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     /// `window` rotated right by `shift` along the sequence axis.
+    #if MACPROVIDER_LAB_HARNESS
+    static let labSkipRingCopy =
+        ProcessInfo.processInfo.environment["MACPROVIDER_LAB_RING_COPY"] == "off"
+    #endif
+
     static func ringOrdered(_ window: MLXArray, shift: Int) -> MLXArray {
         let length = window.dim(2)
         guard shift > 0, shift < length else { return window }
