@@ -156,6 +156,13 @@ The exploratory goal matrix does not constitute admission qualification.
 
 - [PR 2479](https://github.com/Augustas11/macprovider/pull/2479) (Related: #2478), merged 2026-11-25 as `851ba7f7c`: held native-MTP rows get their own prefill schedule at 4 slots, removing the +6% TTFT on the SPEC-048 gated cells (s2 TTFT +3.4% remains, deterministic). Live = after the cut, a provider serving native MTP at 4 slots through the Malibu gateway.
 
+- [PR 2495](https://github.com/Augustas11/macprovider/pull/2495), merged 2026-11-25 as `8ad3eb5b2`. Four provider fixes, one CI run:
+  - #2494: in an upgrade run a failed challenger is skipped instead of aborting, and vision rows probe through the VLM loader. Live = after the cut, a fleet model-upgrade run completes and records a winner.
+  - #2485: every unselected or failed candidate download is removed and a disk floor is kept. Live = after the cut, an upgrade run leaves no stray candidate weights on disk.
+  - #2497: an unconfirmed buyer-serving readiness check defers the reconnect while requests are in flight, for up to 900 s, so no request dies with `ws_dead_mid_request`. Live = after the cut, a multi-agent run through the gateway on the Studio canary has no `ws_dead_mid_request`.
+  - #2496: native MTP serves under a measured prompt ceiling when only the long self-check point misses (SPEC-048 0.1.128 R016). Live = after the cut, the Studio GLM logs `native_mtp_self_check result=passed_prompt_ceiling`, `/v1/status` shows `native_mtp.enabled=true`, and a short-prompt buyer request is served natively.
+  - The PR also carries signed catalog release `published-2026-11-25-inkling-2-mini-32gb-v296`, which sets Inkling 2 Mini `min_ram_gb` to 28. It is activated through `scripts/ops/catalog-activate.sh`; see the catalog train.
+
 ## CLI release — 1.8.299 (published 2026-11-25 06:09 local; tracked from 2026-11-22)
 
 `v1.8.299` was published from `a10a94344` (`a10a943447d2b90710d3a491ece943b8a8c60549`). The first candidate (run 45452310371 on `b28da49df`) failed the acceptance signer because main moved after dispatch; the recut, acceptance run 45476788980, passed. Studio canary served 1.8.299 (model loaded after 603 s, 120 s crash hold clean); its CB re-check stayed `prior_grant_pending_recheck` until the buyer runner's Studio target was paused (12 admission holds ended in `drain_timeout`), then granted with 4 served slots. Promotion run 45497664695, recommendation bump to 1.8.299, rollout verification run 45499956726 and mirror latest.json all passed; `cli-release.sh status` reports the train complete.
