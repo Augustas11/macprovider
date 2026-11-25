@@ -134,7 +134,9 @@ struct ChatScreen: View {
                     .lineLimit(2...6).textFieldStyle(.plain).padding(12)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                     .focused($composerFocused)
-                    .disabled(store.isRunning)
+                    // Typing stays possible while a reply streams (Return waits on canSend), so focus is
+                    // never dropped; the composer takes focus as soon as the chat opens.
+                    .onAppear { composerFocused = true }
                     // Return sends, as in every chat app; Shift-Return keeps a newline.
                     .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) { return .ignored }
