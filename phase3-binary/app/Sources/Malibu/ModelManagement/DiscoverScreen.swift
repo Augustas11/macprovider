@@ -54,18 +54,39 @@ enum DiscoverPresentation {
         _ rows: [MalibuModelRow],
         search: String,
         fitsOnly: Bool,
-        sort: Sort
+        sort: Sort,
+        capability: MalibuModelCapability? = nil
     ) -> [MalibuModelRow] {
-        sorted(filteredRows(rows, search: search, fitsOnly: fitsOnly), by: sort)
+        sorted(filteredRows(rows, search: search, fitsOnly: fitsOnly, capability: capability), by: sort)
     }
 
-    /// Signed catalog rows matching the search and fit filter, in R005 order.
-    static func filteredRows(_ rows: [MalibuModelRow], search: String, fitsOnly: Bool) -> [MalibuModelRow] {
+    /// Signed catalog rows matching the search, fit and capability filters,
+    /// in R005 order.
+    static func filteredRows(
+        _ rows: [MalibuModelRow],
+        search: String,
+        fitsOnly: Bool,
+        capability: MalibuModelCapability? = nil
+    ) -> [MalibuModelRow] {
         let needle = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return catalogRows(rows).filter { row in
             (!fitsOnly || row.fit == "fits")
+                && (capability.map { row.capabilities.contains($0) } ?? true)
                 && (needle.isEmpty || ModelsPresentation.matches(row, needle))
         }
+    }
+
+    /// SPEC-044-R015: the capability filter is offered only when the
+    /// projection carries capabilities for at least one catalog row.
+    static func offersCapabilityFilter(_ rows: [MalibuModelRow]) -> Bool {
+        catalogRows(rows).contains { !$0.capabilities.isEmpty }
+    }
+
+    /// The capability filter in effect: none while the filter is not offered,
+    /// so a choice made before a refresh without facts cannot hide every row
+    /// behind a control that is no longer on screen.
+    static func activeCapability(_ capability: MalibuModelCapability?, rows: [MalibuModelRow]) -> MalibuModelCapability? {
+        offersCapabilityFilter(rows) ? capability : nil
     }
 
     /// Reorders rows that arrive in R005 order; ties keep that order.
@@ -191,9 +212,10 @@ enum DiscoverPresentation {
         return String(localized: "network rate \(ModelsPresentation.rateText(row)) / 1M out", comment: "Discover row rate")
     }
 
-    /// A row's second line: memory use, rate and demand.
+    /// A row's second line: memory use, rate, demand and context window.
     static func rowMeta(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
-        [memoryUse(row, hostMemoryGB: hostMemoryGB), rowRate(row), demandLabel(row.demandRank)]
+        [memoryUse(row, hostMemoryGB: hostMemoryGB), rowRate(row), demandLabel(row.demandRank),
+         MalibuModelFacts.contextLabel(row)]
             .compactMap { $0 }
             .joined(separator: " · ")
     }
@@ -205,7 +227,9 @@ enum DiscoverPresentation {
 
     /// A row's accessibility label: both lines and the caveat beside the rate.
     static func rowAccessibilityLabel(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
-        [ModelsPresentation.title(row), rowBadge(row, hostMemoryGB: hostMemoryGB),
+        let capabilities = MalibuModelFacts.badgeTitles(row)
+        return [ModelsPresentation.title(row), rowBadge(row, hostMemoryGB: hostMemoryGB),
+         capabilities.isEmpty ? nil : capabilities.joined(separator: ", "),
          rowMeta(row, hostMemoryGB: hostMemoryGB), listCaveat(row)]
             .compactMap { $0 }
             .joined(separator: ". ")
@@ -245,6 +269,15 @@ enum DiscoverPresentation {
             memory += " · " + String(localized: "fit unknown", comment: "Discover detail fit")
         }
         facts.append(Fact(label: String(localized: "Memory", comment: "Discover detail label"), value: memory))
+        // SPEC-044-R015: from the signed catalog's model facts only.
+        if let tokens = row.contextLength {
+            facts.append(Fact(label: String(localized: "Context", comment: "Discover detail label"),
+                              value: MalibuModelFacts.contextDetail(tokens)))
+        }
+        if !row.capabilities.isEmpty {
+            facts.append(Fact(label: String(localized: "Capabilities", comment: "Discover detail label"),
+                              value: MalibuModelFacts.badgeTitles(row).joined(separator: " · ")))
+        }
         if let share = row.providerShareBPS {
             let percent = (Double(share) / 100).formatted(.number.precision(.fractionLength(0...2)))
             facts.append(Fact(label: String(localized: "Your share", comment: "Discover detail label"),
@@ -309,6 +342,7 @@ enum DiscoverPresentation {
     static func bestPickLines(_ row: MalibuModelRow, hostMemoryGB: Int) -> [String] {
         var lines = [bestPickTitle, ModelsPresentation.title(row)]
         if let badge = rowBadge(row, hostMemoryGB: hostMemoryGB) { lines.append(badge) }
+        lines.append(contentsOf: MalibuModelFacts.badgeTitles(row))
         lines.append(rowMeta(row, hostMemoryGB: hostMemoryGB))
         return lines
     }
@@ -319,10 +353,13 @@ enum DiscoverPresentation {
         search: String = "",
         fitsOnly: Bool = true,
         sort: Sort = .bestMatch,
+        capability: MalibuModelCapability? = nil,
         hostMemoryGB: Int
     ) -> [String] {
         var strings = [String(localized: "Discover", comment: "Discover title")]
-        let visible = ModelsHubPresentation.discoveryRows(for: mode, rows: rows, search: search, fitsOnly: fitsOnly, sort: sort)
+        let visible = ModelsHubPresentation.discoveryRows(
+            for: mode, rows: rows, search: search, fitsOnly: fitsOnly, sort: sort, capability: capability
+        )
         if catalogRows(rows).isEmpty {
             strings.append(emptyCatalog)
         } else if visible.isEmpty {
@@ -334,8 +371,10 @@ enum DiscoverPresentation {
             strings.append(contentsOf: bestPickLines(pick, hostMemoryGB: hostMemoryGB))
         }
         for row in visible {
-            let badge = rowBadge(row, hostMemoryGB: hostMemoryGB).map { " [\($0)]" } ?? ""
-            strings.append(ModelsPresentation.title(row) + badge + " — " + rowMeta(row, hostMemoryGB: hostMemoryGB))
+            let badges = ([rowBadge(row, hostMemoryGB: hostMemoryGB)].compactMap { $0 } + MalibuModelFacts.badgeTitles(row))
+                .map { " [\($0)]" }
+                .joined()
+            strings.append(ModelsPresentation.title(row) + badges + " — " + rowMeta(row, hostMemoryGB: hostMemoryGB))
         }
         if let first = visible.first {
             strings.append("[\(ModelsPresentation.title(first))]")
@@ -355,6 +394,7 @@ struct DiscoverScreen: View {
     private let mode: ModelsHubTab
     let browseModels: (() -> Void)?
     @State private var sort: DiscoverPresentation.Sort = .bestMatch
+    @State private var capability: MalibuModelCapability?
     @State private var selectedID: String?
     @State private var switchRow: MalibuModelRow?
     @State private var pendingDownload: MalibuModelRow?
@@ -370,7 +410,10 @@ struct DiscoverScreen: View {
     }
 
     private var visible: [MalibuModelRow] {
-        ModelsHubPresentation.discoveryRows(for: mode, rows: store.rows, search: search, fitsOnly: fitsOnly, sort: sort)
+        ModelsHubPresentation.discoveryRows(
+            for: mode, rows: store.rows, search: search, fitsOnly: fitsOnly, sort: sort,
+            capability: DiscoverPresentation.activeCapability(capability, rows: store.rows)
+        )
     }
 
     private var selected: MalibuModelRow? {
@@ -460,6 +503,14 @@ struct DiscoverScreen: View {
                 ForEach(DiscoverPresentation.Sort.allCases) { Text($0.title).tag($0) }
             }
             .frame(maxWidth: 200)
+            if DiscoverPresentation.offersCapabilityFilter(store.rows) {
+                Picker(String(localized: "Can do", comment: "Discover capability filter label"), selection: $capability) {
+                    Text(String(localized: "Anything", comment: "Discover capability filter: no filter")).tag(MalibuModelCapability?.none)
+                    ForEach(MalibuModelCapability.allCases) { Text($0.title).tag(MalibuModelCapability?.some($0)) }
+                }
+                .frame(maxWidth: 180)
+                .accessibilityIdentifier("malibu.discover.capabilityFilter")
+            }
             if mode == .browse {
                 Toggle(String(localized: "Fits this Mac", comment: "Discover fit filter"), isOn: $fitsOnly)
             }
@@ -523,6 +574,7 @@ struct DiscoverScreen: View {
                                     if let badge = DiscoverPresentation.rowBadge(row, hostMemoryGB: hostMemoryGB) {
                                         badgeView(badge)
                                     }
+                                    ForEach(row.capabilities) { MalibuCapabilityBadge(capability: $0) }
                                 }
                                 Text(DiscoverPresentation.rowMeta(row, hostMemoryGB: hostMemoryGB))
                                     .font(.caption)
@@ -655,6 +707,7 @@ struct DiscoverScreen: View {
                 if let badge = DiscoverPresentation.rowBadge(row, hostMemoryGB: hostMemoryGB) {
                     badgeView(badge)
                 }
+                ForEach(row.capabilities) { MalibuCapabilityBadge(capability: $0) }
             }
             Text(DiscoverPresentation.rowMeta(row, hostMemoryGB: hostMemoryGB))
                 .font(.caption)

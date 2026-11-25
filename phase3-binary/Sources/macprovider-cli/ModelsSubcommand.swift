@@ -847,6 +847,9 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Flag(help: "Do not read coordinator admission status; emit local/default admission gates only.")
     var skipCoordinatorStatus = false
 
+    @Flag(help: "Add each row's context_length and capabilities from the signed catalog's model facts (SPEC-044-R015).")
+    var modelFacts = false
+
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
     var config: String?
 
@@ -975,7 +978,9 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         for warning in document.warnings.sorted() {
             writeStderr("models catalog-economics warning: \(warning)")
         }
-        try ModelSwitchingWireCodec.printJSON(document)
+        try ModelSwitchingWireCodec.printJSON(
+            modelFacts ? document.withModelFacts(.baked, catalog: inputs.candidate.value) : document
+        )
     }
 
     private static func readCurrentModelID(config: AppConfig?) async -> String? {

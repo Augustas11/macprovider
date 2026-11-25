@@ -253,6 +253,7 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertFalse(capabilities.contains("model_catalog_economics.v2"))
         XCTAssertTrue(capabilities.contains("models catalog-economics.v1"))
         XCTAssertFalse(capabilities.contains("models catalog-economics.v2"))
+        XCTAssertTrue(capabilities.contains("model_catalog_model_facts_v1"))
         XCTAssertTrue(capabilities.contains("model_recommendation_check_v1"))
         XCTAssertTrue(capabilities.contains("model_recommendation_apply_switch_v1"))
         XCTAssertTrue(capabilities.contains("autotune_recommend.v1"))

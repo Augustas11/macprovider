@@ -290,6 +290,7 @@ enum ModelsPresentation {
             for row in section.rows {
                 var line = [title(row), name(row), sizeText(row), fitText(row), statusText(row), rateText(row)]
                     .joined(separator: " | ")
+                if let facts = MalibuModelFacts.summary(row) { line += " | " + facts }
                 if let reason = reason(row) { line += " — " + reason }
                 strings.append(line)
             }
@@ -516,8 +517,9 @@ struct ModelsScreen: View {
                         .font(.body.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
                         .help(ShellText.display(row.displayID))
+                    ForEach(row.capabilities) { MalibuCapabilityBadge(capability: $0) }
                 }
-                Text(ModelsPresentation.name(row))
+                Text([ModelsPresentation.name(row), MalibuModelFacts.contextLabel(row)].compactMap { $0 }.joined(separator: " · "))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.14
+**Version:** 0.2.15
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1635,6 +1635,63 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    download runs at a time, including its post-download refresh. The R008 `Needs preparation` section MAY be titled **Not
    downloaded**.
 
+**SPEC-044-R015 - Model facts: capabilities and context length (v1).** This
+requirement adds two optional row keys to the `model_catalog_economics.v1`
+envelope. It does not change the v2 envelope or any other v1 key.
+
+1. *Source.* Model facts come only from
+   `phase3-binary/catalog/autotune/model-facts.json`
+   (`schema_version: "macprovider.model-facts.v1"`), reviewed with the
+   signed candidate catalog and compiled into the CLI. Each fact row is keyed
+   by the signed catalog key and carries `model_id`, `model_revision`,
+   `context_length`, `context_length_source` and `capabilities`. The facts
+   are not added to signed candidate-catalog rows, because the CLI,
+   coordinator and release tooling validate those rows as closed objects and
+   a new key would make deployed readers refuse the catalog.
+2. *Binding.* The CLI applies a fact row to a projection row only when the
+   row's `model_key` resolves to a signed candidate-catalog row (exactly, or
+   by a unique case-insensitive match) whose `model_id` and `model_revision`
+   equal the fact row's. Otherwise the row carries `context_length: null` and
+   `capabilities: []`. A local row the CLI matched to a catalog key (R014)
+   shows that catalog model's facts. A catalog row without facts is allowed,
+   so a catalog change never waits on the facts file; facts reach providers
+   with the next CLI release. The CLI never reads a fact from a local file or
+   a runtime probe.
+3. *Values.* `context_length` is the model's declared context window in
+   tokens, read from the pinned revision's `config.json` field named by
+   `context_length_source` (`max_position_embeddings` or a
+   `text_config.` field), or from the repository's current revision when the
+   pinned revision is no longer published. It is an integer in 1,024 to 16,777,216. It is not a
+   promise that a provider serves that window. `capabilities` is a sorted,
+   unique list from the closed set `reasoning`, `tools`, `vision`. A
+   capability is listed only when the coordinator's serving predicates route
+   it for that model (a model still owed buyer-UX evidence may not yet
+   advertise it on `/v1/models`):
+   `tools` for a model with a tool grammar, `reasoning` for a reasoning or
+   on-request reasoning family, both narrowed by a buyer-UX conformance
+   record when one exists, and `vision` for the vision route's model. The
+   coordinator test `TestModelFactsCapabilitiesMatchServingPredicates` holds
+   the file to those predicates.
+4. *Negotiation.* The keys are emitted only by
+   `models catalog-economics --json --model-facts`. Without the flag the v1
+   envelope is byte-identical to R002, so an older Malibu that rejects unknown
+   row keys keeps working with a newer CLI. A CLI that supports the flag
+   advertises the local status capability `model_catalog_model_facts_v1`;
+   Malibu passes the flag only when its checked-in capability manifest tier
+   `model_catalog_model_facts_v1` is satisfied by the fresh peer.
+5. *Wire.* With the flag, every row carries both keys: `context_length`
+   (integer or null) and `capabilities` (array of strings). Malibu MUST
+   reject a row that carries only one of the two keys or a `context_length`
+   outside the range, and MUST drop, not reject, a capability value it does
+   not know.
+6. *Malibu display.* Malibu shows a row's capabilities as badges and its
+   context as a short label (binary units, e.g. "256K context") in Discover
+   and On this Mac rows, and as "Context" and "Capabilities" facts in the
+   Discover detail pane. Discover offers a capability filter only when at
+   least one catalog row carries a capability. A row with no facts shows
+   neither badges nor a context label. Facts are display only: they never
+   change fit, ordering, actions, admission or economics.
+
 ## 4. Implementation, tests, and journeys
 
 The intended implementation is a CLI-first projection, then an app-only presentation layer:
@@ -1688,6 +1745,12 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.15 - Adds R015 (Related: #2504): optional v1 row keys
+  `context_length` and `capabilities` from the reviewed model-facts file,
+  bound to the signed catalog row's model id and revision, emitted only with
+  `--model-facts` and negotiated by `model_catalog_model_facts_v1`; Malibu
+  shows capability badges, a context label, detail facts and a capability
+  filter.
 - 0.2.14 - R013: Discover may pin a client-computed "Best for this Mac"
   pick that never starts an action itself; Recommended may be the top five
   fitting rows while Browse lists every signed catalog model; a new

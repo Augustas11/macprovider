@@ -69,9 +69,18 @@ struct ModelRowView: View {
                     if let demandRank = row.demandRank {
                         Text(String(localized: "Network demand signal: rank \(demandRank)", comment: "Network demand signal"))
                     }
+                    if let context = MalibuModelFacts.contextLabel(row) {
+                        Text(context)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if !row.capabilities.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(row.capabilities) { MalibuCapabilityBadge(capability: $0) }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
                 if let admissionStateMeaning = row.admissionStateMeaning {
                     Text(admissionStateMeaning)
                         .font(.caption)
