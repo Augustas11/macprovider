@@ -1,7 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.39
-Status: draft (normative design). v0.1.39 adds the `inkling2` paged family:
+Version: v0.1.40
+Status: draft (normative design). v0.1.40 adds the FR-PKV12
+`hygaard/sage-s2.1-flash-oq4e-mtp` identity (`glm5_next`). v0.1.39 adds the `inkling2` paged family:
 the flat per-visit layout (each layer visit's attention cache, then its
 four-slot convolution tails as row-local recurrent state), row attention
 through the model, and a provisional FR-PKV12 entry for the exact
@@ -118,6 +119,17 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.40 (2026-11-26): FR-PKV12 gains the catalog key
+`hygaard/sage-s2.1-flash-oq4e-mtp` with `Glm5NextForConditionalGeneration`
+(Related: #2466). Its artifact `Hygaard/Sage-S2.1-Flash-oQ4e-mtp` @ `a972e256`
+is a GLM-5.3-Flash fine-tune (`internlm/Sage-S2.1-Flash`) with the same
+`glm5_next` architecture fields and layer layout as the `zai-org/glm-5.3-flash`
+entry. Lab msb-throughput batched-versus-serial parity passed on that artifact
+(Studio run `20261124T104526Z`, 4 rows, every batched row matching). The same
+config checks apply and the entry fails closed the same way; the attach parity
+and isolation probes still gate every attach, and no signed CB policy entry
+exists. No other code change. Refines SPEC-039-R012.
+
 Change log v0.1.39 (2026-11-25): FR-PKV12 gains the `inkling2` class and
 the provisional catalog key `thinkingmachines/inkling-2-mini` with
 `Inkling2LoopForConditionalGeneration` (Related: #2505). Inkling 2 builds one
@@ -1212,6 +1224,15 @@ parity label, ring order and fail-closed cases are the `gpt_oss` class's.
   and the same keying. Evidence: `docs/evidence/solstice-cb-283-2026-11-10/`
   (attach proof, MoE expert-dispatch isolation, scheduler leftovers and
   msb-throughput on the signed CLI 1.8.283). A signed CB policy entry names it.
+- (v0.1.40) the Sage S2.1 Flash identity `hygaard/sage-s2.1-flash-oq4e-mtp`,
+  the catalog model whose verified artifact is
+  `Hygaard/Sage-S2.1-Flash-oQ4e-mtp` @
+  `a972e256db2553562bd718e677d100089aca5fce` (snapshot-manifest `d59ecd85…`),
+  with the same `architectures[0]` (`Glm5NextForConditionalGeneration`),
+  `model_type` and `text_config.model_type` requirements and the same keying.
+  Evidence: `docs/evidence/sage-s2.1-flash-intake-2026-11-26/`
+  (batched-versus-serial parity PASS, Studio run `20261124T104526Z`). No signed
+  CB policy entry names it yet.
 - (v0.1.28, provisional, SPEC-first) the MiniMax M3.1 Flash identity
   `minimaxai/minimax-m3.1-flash`, with
   `architectures == ["MiniMaxM3SparseForConditionalGeneration"]` and top-level

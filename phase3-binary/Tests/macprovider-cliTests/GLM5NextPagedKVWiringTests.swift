@@ -177,6 +177,28 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         ).hybridDecoderArchitectureVerified)
     }
 
+    func testSageCatalogIdentityCarriesTheSameSparseLayout() throws {
+        // The catalog key equals the served id lowercased, so both resolve to the entry.
+        for modelID in ["hygaard/sage-s2.1-flash-oq4e-mtp", "Hygaard/Sage-S2.1-Flash-oQ4e-mtp"] {
+            let capabilities = ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID,
+                configJSONData: Self.config()
+            )
+            XCTAssertEqual(capabilities.modelFamily, "glm5_next", modelID)
+            XCTAssertTrue(capabilities.requiresMoEDispatch, modelID)
+            XCTAssertTrue(capabilities.hybridDecoderArchitectureVerified, modelID)
+            XCTAssertEqual(try XCTUnwrap(capabilities.sparseAttention).expectedCacheKinds.count, 45, modelID)
+        }
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "hygaard/sage-s2.1-flash-oq4e-mtp",
+            configJSONData: Self.config(modelType: "glm5")
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "sage-s2.1-flash-oq4e-mtp",
+            configJSONData: Self.config()
+        ).hybridDecoderArchitectureVerified)
+    }
+
     func testOtherGLM5NextConfigsFailClosed() {
         func verified(_ modelID: String, _ data: Data) -> Bool {
             ModelRuntime.pagedKVModelCapabilities(modelID: modelID, configJSONData: data).hybridDecoderArchitectureVerified
