@@ -480,6 +480,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
+    /// A keyed Inkling row keeps the serial partition: prompt checkpoint
+    /// positions would end a chunk early (512, 512, 176, 299, 1), and serial
+    /// Inkling takes no prompt checkpoints.
+    func testSerialPrefillReservingTheLastTokenIgnoresPromptCheckpoints() async throws {
+        let backend = ScriptedBackend(scripts: ["inkling-keyed": [101]])
+        let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let scheduler = try await makeScheduler(
+            descriptor: descriptor,
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 512,
+            serialPrefillStride: true,
+            serialPrefillReservesLastToken: true,
+            backend: backend,
+            allocator: allocator
+        )
+        let result = try await scheduler.submit(.init(
+            id: "inkling-keyed",
+            conversationKey: "conversation",
+            promptTokens: Array(1...1500),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0,
+            recurrentCheckpointPositions: [1200]
+        ))
+        let prefillTokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertEqual(result.outputTokens, [101])
+        XCTAssertEqual(prefillTokenCounts, [512, 512, 475, 1])
+    }
+
     func testReservingTheLastTokenNeedsTheSerialStride() throws {
         let config = ContinuousBatchSchedulerConfiguration(
             descriptor: Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128),

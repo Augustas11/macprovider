@@ -1316,8 +1316,13 @@ the model's one-row path attends. Projections and the tails stay batched;
 a batch of one-token rows takes the one-row projection spans, and each row
 routes its experts as it does alone (the multi-row score product reduces in
 a different order and can swap a near-tie expert); the global visits'
-log-scaling positions are per row. A batch of one row decodes on that
-row's own caches with no batch layer cache, as serial decode does. The
+log-scaling positions are per row. The head is one batched product, with
+every row whose two largest logits are closer than the verify margin
+recomputed by the one-row product (SPEC-048's verify head). A batch of one
+row decodes on that row's own caches with no batch layer cache, as serial
+decode does. Rows prefill one row per forward on the serial partition
+(SPEC-038 v0.3.67) and take no prompt checkpoints, as serial Inkling takes
+none. The
 batch keeps no padded K/V; a model that asks the batch for padded K/V marks
 the forward as attended outside the cache and fails it (SPEC-038 FR-CB2).
 Rows prefill at equal offsets only. Native-MTP batches over this class fail

@@ -8054,7 +8054,11 @@ actor ContinuousBatchScheduler {
     /// prefilled prompt, at most two. The reply-end checkpoint is captured at
     /// terminal separately.
     private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
-        guard row.recurrentCheckpoints.count < 2,
+        // A row on the serial partition (Inkling 2, #2505) takes no prompt
+        // checkpoints, as its serial route takes none: a checkpoint ends a
+        // chunk, and a moved chunk boundary changes the row's tokens.
+        guard !configuration.serialPrefillReservesLastToken,
+              row.recurrentCheckpoints.count < 2,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return [] }
         let prefixTokenCount = row.request.promptTokens.count

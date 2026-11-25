@@ -326,6 +326,21 @@ final class PagedKVSlidingWindowTests: XCTestCase {
             let keys = Self.positions(position - 4, 1)
             let presented = paged.update(keys: keys, values: keys).0
             XCTAssertNotEqual(ObjectIdentifier(presented), previous, "a trim starts a new ring")
+            // A trim, copy or block export with tokens still pending in the ring
+            // sees the full history (each flushes first).
+            func rolled() -> PagedKVCache {
+                let cache = makeCache(offset: 0, windowTokens: window, rollsSlidingRing: true)
+                _ = cache.update(keys: Self.positions(0, window), values: Self.positions(0, window))
+                for p in window ..< window + 5 {
+                    _ = cache.update(keys: Self.positions(p, 1), values: Self.positions(p, 1))
+                }
+                return cache
+            }
+            let trimmed = rolled()
+            XCTAssertEqual(trimmed.trim(2), 2)
+            XCTAssertEqual(trimmed.state[0].asArray(Float.self), (0 ..< window + 3).map(Float.init))
+            let copied = rolled().concreteCopy()
+            XCTAssertEqual(copied.state[0].asArray(Float.self), (0 ..< window + 5).map(Float.init))
             // Other sliding families (no `rollsSlidingRing`) rebuild every step.
             let plain = makeCache(offset: 0, windowTokens: window)
             _ = plain.update(keys: Self.positions(0, window), values: Self.positions(0, window))
