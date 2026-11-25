@@ -1297,15 +1297,27 @@ sliding_window_size)` at a `local_layer_ids` layer or `pagedAttention`
 otherwise, then a recurrent entry (40 sliding, 8 full and 48 recurrent
 entries for the admitted artifact). The recurrent entry is the visit's
 convolution tails: four floating-point `[1, 3, C]` slots (key, value,
-attention-output and MLP-output convolutions) in a plain `ArraysCache(4)`,
+attention-output and MLP-output convolutions) in an `ArraysCache(4)` (the
+model builds the fork's `ConvolutionTailCache` subclass, which is a plain
+`ArraysCache` outside a speculative round; both are accepted),
 packed and synced by row like other recurrent state and carried by the
 hybrid checkpoints; a joining row's absent tails pack as zeros, a fresh
 row's start. Both attention kinds page on the row's one block table; a
 sliding visit stores full history and presents the rotating-equivalent
-suffix in serial ring order (FR-PKV4). Batched rows attend one row at a
+suffix in serial ring order (FR-PKV4). A row outside a batch slot that
+appends one token to a full window writes it into its presented ring in
+place and MAY defer the history write: at most `window - 1` such tokens
+wait in the ring, and they are written to the history before anything
+else reads or writes it (a multi-token update, batch attach or detach,
+staging, trim, state export or import, block export), so the history a
+reader sees is always complete. Batched rows attend one row at a
 time over exactly that row's presented keys, with the ring's rotation, as
-the model's one-row path attends; projections, experts and the tails stay
-batched, and the global visits' log-scaling positions are per row. The
+the model's one-row path attends. Projections and the tails stay batched;
+a batch of one-token rows takes the one-row projection spans, and each row
+routes its experts as it does alone (the multi-row score product reduces in
+a different order and can swap a near-tie expert); the global visits'
+log-scaling positions are per row. A batch of one row decodes on that
+row's own caches with no batch layer cache, as serial decode does. The
 batch keeps no padded K/V; a model that asks the batch for padded K/V marks
 the forward as attended outside the cache and fails it (SPEC-038 FR-CB2).
 Rows prefill at equal offsets only. Native-MTP batches over this class fail

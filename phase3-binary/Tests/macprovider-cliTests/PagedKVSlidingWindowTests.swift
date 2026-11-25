@@ -299,7 +299,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         let window = 8
         Device.withDefaultDevice(.cpu) {
             let rotating = RotatingKVCache(maxSize: window, keep: 0)
-            let paged = makeCache(offset: 0, windowTokens: window)
+            let paged = makeCache(offset: 0, windowTokens: window, rollsSlidingRing: true)
             var position = 0
             var previous: ObjectIdentifier?
             let updates = [10, 5] + Array(repeating: 1, count: 2 * window + 3) + [3]
@@ -326,6 +326,13 @@ final class PagedKVSlidingWindowTests: XCTestCase {
             let keys = Self.positions(position - 4, 1)
             let presented = paged.update(keys: keys, values: keys).0
             XCTAssertNotEqual(ObjectIdentifier(presented), previous, "a trim starts a new ring")
+            // Other sliding families (no `rollsSlidingRing`) rebuild every step.
+            let plain = makeCache(offset: 0, windowTokens: window)
+            _ = plain.update(keys: Self.positions(0, window), values: Self.positions(0, window))
+            let first = plain.update(keys: Self.positions(window, 1), values: Self.positions(window, 1)).0
+            let second = plain.update(keys: Self.positions(window + 1, 1), values: Self.positions(window + 1, 1)).0
+            XCTAssertNotEqual(ObjectIdentifier(first), ObjectIdentifier(second))
+            XCTAssertEqual(plain.state[0].asArray(Float.self), (0 ..< window + 2).map(Float.init))
         }
     }
 
@@ -339,7 +346,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
-    private func makeCache(offset: Int, windowTokens: Int? = nil) -> PagedKVCache {
+    private func makeCache(offset: Int, windowTokens: Int? = nil, rollsSlidingRing: Bool = false) -> PagedKVCache {
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "sliding-window-test", poolEpoch: 1)
         return PagedKVCache(
             blockSizeTokens: 4,
@@ -361,7 +368,8 @@ final class PagedKVSlidingWindowTests: XCTestCase {
             ),
             initialOffset: offset,
             reconstructViaGather: false,
-            attentionWindowTokens: windowTokens
+            attentionWindowTokens: windowTokens,
+            rollsSlidingRing: rollsSlidingRing
         )
     }
 }

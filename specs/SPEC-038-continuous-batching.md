@@ -1,11 +1,20 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.66
+Version: v0.3.67
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.67 (2026-11-26, FR-CB2: an Inkling 2 row prefills on the serial route's step, Related: #2505):**
+FR-CB2: a family whose rows reserve their last prompt token for a one-token
+forward (`inkling2`, SPEC-039 v0.1.39) prefills on the serial route's exact
+partition: the operator's `prefill_step_size`, when set, is the chunk even
+above the family ceiling, and the serial stride takes the whole chunk. This
+keeps the CB row's tokens equal to serial decode; the row's prefill peak is
+the serial route's own peak at the same setting. Every other family keeps the
+ceiling and the per-iteration budget.
+
 **Change log v0.3.66 (2026-11-24, FR-CB2: with no row decoding, a ragged peer joins the head only when it finishes with it, Related: #2478):**
 On a backend that shares a prefill group in one forward (no
 flattened-token cap), while no row decodes, a prompt row at another offset
@@ -1461,7 +1470,12 @@ chunk (`maxPrefillRowsPerIteration` x 512), so one shared prefill forward
 carries at most the larger of that and the per-iteration budget; a row's
 chunk partition is unchanged.
 An operator-set `prefill_step_size` MAY lower the limit and MUST NOT raise it
-above the ceiling; when it is unset the limit is the ceiling. The
+above the ceiling; when it is unset the limit is the ceiling. The one
+exception (v0.3.67) is a family whose rows reserve their last prompt token
+(`inkling2`): its rows prefill on the serial route's partition, so an
+operator step is the chunk at any size, bounded by the same peak the serial
+route reaches at that setting, and the serial stride is not split by the
+per-iteration budget. The
 per-iteration budget still bounds every chunk. The prefill decode window MUST
 scale with the limit, keeping active rows' decode steps per prefilled token:
 the default (8) at a 512-token chunk, proportionally more at a larger chunk,

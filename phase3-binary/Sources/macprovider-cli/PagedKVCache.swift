@@ -156,6 +156,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// forward sets this false: gather is a lossless identity, and running it every
     /// decode step is the ~3× single-stream tax measured on 2026-09-20.
     let reconstructViaGather: Bool
+    /// Whether a full one-token sliding window keeps its presented ring and
+    /// rolls it forward in place, deferring the history write (#2505). Only
+    /// row-attention families (Inkling 2) set it; every other sliding family
+    /// keeps the full update and ring rebuild its CB parity evidence covers.
+    let rollsSlidingRing: Bool
     /// Lazily-registered Metal gather kernel. Created on first `update()` so mere
     /// construction of the seam (the SPEC-038-facing metadata surface) still runs no
     /// Metal — only driving the cache through a real forward pass executes the kernel.
@@ -251,8 +256,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
         initialOffset: Int? = nil,
         reconstructViaGather: Bool = true,
-        attentionWindowTokens: Int? = nil
+        attentionWindowTokens: Int? = nil,
+        rollsSlidingRing: Bool = false
     ) {
+        self.rollsSlidingRing = rollsSlidingRing
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
@@ -429,11 +436,16 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         // capacity) is unchanged. NOTE: KERNEL-SIDE (Metal) index/bounds validation is a
         // SEPARATE, still-REQUIRED before-runtime-enable gate item — these Swift-side guards
         // do not substitute for in-shader bounds checks (see pagedGather()).
-        guard keys.ndim == 4, values.ndim == 4 else { return (keys, values) }
+        // A rejected update presents its own keys unrotated (a row reader must not
+        // pair them with the previous step's ring rotation).
+        guard keys.ndim == 4, values.ndim == 4 else { presentedRingRotation = 0; return (keys, values) }
         let incomingTokens = keys.dim(2)
-        guard incomingTokens == values.dim(2) else { return (keys, values) }
+        guard incomingTokens == values.dim(2) else { presentedRingRotation = 0; return (keys, values) }
         let (projectedOffset, offsetOverflow) = offset.addingReportingOverflow(incomingTokens)
-        guard !offsetOverflow, projectedOffset <= maxResidentTokens else { return (keys, values) }
+        guard !offsetOverflow, projectedOffset <= maxResidentTokens else {
+            presentedRingRotation = 0
+            return (keys, values)
+        }
         if let rolled = rollRingForward(keys: keys, values: values) { return rolled }
         detachFromBatch()
         flushPendingRing()
@@ -663,7 +675,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             binding: binding,
             gatherKernel: gatherKernel,
             reconstructViaGather: reconstructViaGather,
-            attentionWindowTokens: attentionWindowTokens
+            attentionWindowTokens: attentionWindowTokens,
+            rollsSlidingRing: rollsSlidingRing
         )
         copied.state = state
         copied.slidingRingAnchor = slidingRingAnchor
@@ -850,7 +863,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         presentedRingRotation = shift > 0 && shift < end - start ? shift : 0
         // The ring is kept only for a full one-token window, the only update
         // whose presentation the next one-token update can roll forward.
-        let keepsRing = incomingTokens == 1 && !reconstructViaGather && end - start == attentionWindowTokens
+        let keepsRing = rollsSlidingRing && incomingTokens == 1 && !reconstructViaGather
+            && end - start == attentionWindowTokens
         guard keepsRing else {
             slidingRing = nil
             return (
@@ -888,7 +902,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         #if MACPROVIDER_LAB_HARNESS
         if Self.labDeferredHistoryOff { return nil }
         #endif
-        guard keys.dim(2) == 1,
+        guard rollsSlidingRing,
+              keys.dim(2) == 1,
               batchSlot == nil,
               !reconstructViaGather,
               let window = attentionWindowTokens, window > 1,

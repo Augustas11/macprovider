@@ -675,17 +675,25 @@ struct PagedKVInkling2Layout: Equatable, Sendable {
         return Int(exactly: double)
     }
 
+    /// Whether `cache` is a visit's convolution tails: a plain `ArraysCache`,
+    /// or the fork's `ConvolutionTailCache` (an `ArraysCache` that can also
+    /// record a speculative round; outside a round it is a plain one).
+    static func isPlainConvolutionTails(_ cache: KVCache) -> Bool {
+        type(of: cache) == ArraysCache.self || type(of: cache) == ConvolutionTailCache.self
+    }
+
     /// `caches` with every Inkling visit `CacheList(attention, ArraysCache)`
     /// unwrapped into its two children; every other cache unchanged. Only a
     /// keep-0 `RotatingKVCache` or a `KVCacheSimple` beside a plain
-    /// `ArraysCache` is a visit (DeepSeek's pool lists are not).
+    /// `ArraysCache` or `ConvolutionTailCache` is a visit (DeepSeek's pool
+    /// lists are not).
     static func flattened(_ caches: [KVCache]) -> [KVCache] {
         caches.flatMap { cache -> [KVCache] in
             guard let list = cache as? CacheList else { return [cache] }
             var leaves: [KVCache] = []
             list.mapChildren { leaves.append($0); return $0 }
             guard leaves.count == 2,
-                  type(of: leaves[1]) == ArraysCache.self,
+                  isPlainConvolutionTails(leaves[1]),
                   leaves[0] is KVCacheSimple
                     || ((leaves[0] as? RotatingKVCache).map { $0.metaState.first == "0" } ?? false)
             else { return [cache] }
@@ -835,7 +843,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             if cache is MambaCache { return .recurrentMamba }
             // Qwen4-Exp PLE layers keep a plain four-slot `ArraysCache`; the
             // model's verified recurrent layout carries its slot count.
-            if type(of: cache) == ArraysCache.self { return .recurrentMamba }
+            // Inkling 2's convolution tails are a `ConvolutionTailCache`.
+            if PagedKVInkling2Layout.isPlainConvolutionTails(cache) { return .recurrentMamba }
             if cache is RotatingKVCache {
                 guard let window = cache.maxSize, window > 0 else { return nil }
                 // RotatingKVCache.metaState is [keep, maxSize, step, offset, idx].
@@ -1299,7 +1308,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                self.sharedForwardFits(
                    rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count, cap: self.prefillForwardTokenCap
                ),
-               !raggedOffsets || self.supportsRaggedPrefillOffsets {
+               !raggedOffsets || self.supportsRaggedPrefillOffsets,
+               !self.prefillsRowsAlone {
                 gpuTurn?.begin(.prefillChunk(tokens: inputs.reduce(0) { $0 + $1.promptTokens.count }))
                 let rowStates = inputs.map {
                     self.rowState(
@@ -1789,6 +1799,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         return true
     }
+
+    /// Whether every prompt chunk runs as its own one-row forward (#2505). An
+    /// Inkling 2 row's prefill routes experts and projects over the chunk's
+    /// rows; a shared `[B, L]` forward would run those products over `B * L`
+    /// rows, whose kernel and reduction order can differ from serial prefill.
+    var prefillsRowsAlone: Bool { recurrentStateLayout == .inkling2ConvTailFourSlot }
 
     static func hasRaggedPromptOffsets(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
         Set(inputs.map(\.promptTokenOffset)).count > 1
@@ -3092,7 +3108,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         binding: binding,
                         initialOffset: initialOffset,
                         reconstructViaGather: false,
-                        attentionWindowTokens: windowTokens
+                        attentionWindowTokens: windowTokens,
+                        rollsSlidingRing: recurrentStateLayout == .inkling2ConvTailFourSlot
                     )
                 case .pagedMLA(let kpool):
                     PagedMLALatentCache(
@@ -7810,7 +7827,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
 
     func copy() -> any KVCache {
         flushDeferredRows()
-        return PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0.concreteCopy() })
+        return PagedKVBatchLayerCache(
+            rowCaches: rowCaches.map { $0.concreteCopy() }, rowAttention: attendsRowsThroughModel)
     }
 
     fileprivate var preUpdateOffsets: [Int] {

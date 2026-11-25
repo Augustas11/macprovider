@@ -73,6 +73,28 @@ final class PagedKVInkling2Tests: XCTestCase {
         )
     }
 
+    /// The model builds its tails as the fork's `ConvolutionTailCache` (an
+    /// `ArraysCache` subclass); a visit holding one flattens and pages like one
+    /// holding a plain `ArraysCache`, so CB attaches instead of serving serial.
+    func testFlatteningAcceptsTheModelsConvolutionTailCache() {
+        let ring = RotatingKVCache(maxSize: 8, keep: 0)
+        let tails = ConvolutionTailCache(size: 4)
+        let caches: [KVCache] = [
+            CacheList(KVCacheSimple(), ConvolutionTailCache(size: 4)),
+            CacheList(ring, tails),
+            CacheList(KVCacheSimple(), MambaCache()),
+        ]
+        let flat = PagedKVInkling2Layout.flattened(caches)
+        XCTAssertEqual(flat.count, 5)
+        XCTAssertTrue((flat[2] as AnyObject) === ring)
+        XCTAssertTrue((flat[3] as AnyObject) === tails)
+        XCTAssertTrue(flat[4] is CacheList, "a Mamba cache is not a visit's tails")
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.CacheKind.kinds(from: Array(flat.prefix(4))),
+            [.pagedAttention, .recurrentMamba, .slidingWindow(windowTokens: 8), .recurrentMamba]
+        )
+    }
+
     func testAllowlistedIdentityIsAVerifiedPagedFamily() throws {
         let data = Data(Self.miniConfig.utf8)
         let capabilities = ModelRuntime.pagedKVModelCapabilities(
@@ -232,7 +254,8 @@ final class PagedKVInkling2Tests: XCTestCase {
             ),
             initialOffset: 0,
             reconstructViaGather: false,
-            attentionWindowTokens: windowTokens
+            attentionWindowTokens: windowTokens,
+            rollsSlidingRing: true
         )
     }
 }
