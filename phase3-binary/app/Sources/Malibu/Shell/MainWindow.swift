@@ -174,6 +174,7 @@ struct MainShellView: View {
     @ObservedObject private var modelStore = ModelManagementStore.shared
     @StateObject private var terminalWorkspace = TerminalWorkspace()
     @StateObject private var createStore = CreateStore()
+    @StateObject private var chatStore = ChatStore(historyStore: ChatHistoryStore())
 
     var body: some View {
         NavigationSplitView {
@@ -276,7 +277,7 @@ struct MainShellView: View {
                 onResetProvider: onResetProvider
             )
         case .chat:
-            ChatScreen(agent: agent)
+            ChatScreen(agent: agent, store: chatStore)
         case .terminal:
             TerminalScreen(workspace: terminalWorkspace)
         case .create:

@@ -28,15 +28,59 @@ final class ChatTransportTests: XCTestCase {
         var unfinished = ChatStreamAccumulator()
         XCTAssertThrowsError(try unfinished.accept("[DONE]"))
     }
-    func testPreemptionAndTruncationNeverBecomeSuccess() throws {
+    func testPreemptionFailsAndOtherEarlyStopsStillFail() throws {
         var stream = ChatStreamAccumulator()
         _ = try stream.accept(Self.chunk(content: "Partial"))
         XCTAssertThrowsError(try stream.accept("{\"error\":{\"code\":\"local_preempted\"}}")) {
             XCTAssertEqual($0 as? ChatFailure, .preempted)
         }
-        XCTAssertThrowsError(try stream.accept(Self.chunk(reason: "length"))) {
+        var filtered = ChatStreamAccumulator()
+        XCTAssertThrowsError(try filtered.accept(Self.chunk(reason: "content_filter"))) {
             XCTAssertEqual($0 as? ChatFailure, .limit)
         }
+    }
+    func testLengthFinishKeepsPartialText() throws {
+        var stream = ChatStreamAccumulator()
+        XCTAssertEqual(try stream.accept(Self.chunk(content: "Partial")), "Partial")
+        _ = try stream.accept(Self.chunk(content: " reply", reason: "length"))
+        _ = try stream.accept("[DONE]")
+        let result = try stream.result()
+        XCTAssertEqual(result.text, "Partial reply")
+        XCTAssertTrue(result.truncated)
+    }
+    func testTextPastTheCapIsKeptNotDiscarded() throws {
+        var stream = ChatStreamAccumulator()
+        let block = String(repeating: "a", count: 40 * 1024)
+        XCTAssertEqual(try stream.accept(Self.chunk(content: block)), block)
+        XCTAssertNil(try stream.accept(Self.chunk(content: block)))
+        _ = try stream.accept(Self.chunk(reason: "stop"))
+        _ = try stream.accept("[DONE]")
+        let result = try stream.result()
+        XCTAssertEqual(result.text, block)
+        XCTAssertTrue(result.truncated)
+    }
+    func testReasoningAccumulatesSeparatelyFromTheAnswer() throws {
+        var stream = ChatStreamAccumulator()
+        XCTAssertNil(try stream.accept(Self.chunk(reasoning: "Let me ")))
+        XCTAssertEqual(stream.lastReasoning, "Let me ")
+        XCTAssertNil(try stream.accept(Self.chunk(reasoning: "think.")))
+        XCTAssertEqual(try stream.accept(Self.chunk(content: "Answer")), "Answer")
+        XCTAssertNil(stream.lastReasoning)
+        _ = try stream.accept(Self.chunk(reason: "stop"))
+        _ = try stream.accept("[DONE]")
+        let result = try stream.result()
+        XCTAssertEqual(result.reasoning, "Let me think.")
+        XCTAssertEqual(result.text, "Answer")
+        XCTAssertFalse(result.truncated)
+    }
+    func testReasoningOnlyReplyCompletes() throws {
+        var stream = ChatStreamAccumulator()
+        _ = try stream.accept(Self.chunk(reasoning: "Only thoughts"))
+        _ = try stream.accept(Self.chunk(reason: "stop"))
+        _ = try stream.accept("[DONE]")
+        let result = try stream.result()
+        XCTAssertEqual(result.text, "")
+        XCTAssertEqual(result.reasoning, "Only thoughts")
     }
     func testToolArgumentsAccumulateAndRequireUniqueCompleteCalls() throws {
         var stream = ChatStreamAccumulator()
@@ -83,8 +127,10 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertThrowsError(try ChatEndpoint(port: 0))
         XCTAssertThrowsError(try ChatEndpoint(port: 65536))
     }
-    static func chunk(content: String = "", reason: String? = nil) -> String {
-        let value: [String: Any] = ["choices": [["index": 0, "delta": ["content": content], "finish_reason": reason as Any? ?? NSNull()]]]
+    static func chunk(content: String = "", reasoning: String? = nil, reason: String? = nil) -> String {
+        var delta: [String: Any] = ["content": content]
+        if let reasoning { delta["reasoning_content"] = reasoning }
+        let value: [String: Any] = ["choices": [["index": 0, "delta": delta, "finish_reason": reason as Any? ?? NSNull()]]]
         return String(data: try! JSONSerialization.data(withJSONObject: value), encoding: .utf8)!
     }
     static func capability(modes: [String] = ["auto", "none", "required", "named"]) -> Data {

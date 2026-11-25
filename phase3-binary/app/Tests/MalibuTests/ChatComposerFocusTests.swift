@@ -11,7 +11,12 @@ final class ChatComposerFocusTests: XCTestCase {
     }
 
     func testComposerIsNotDisabledWhileAReplyStreams() throws {
-        XCTAssertFalse(try chatScreenSource().contains(".disabled(store.isRunning)"))
+        // Scoped to the composer's modifier chain: the Agent folder button may still
+        // be disabled while a reply runs.
+        let source = try chatScreenSource()
+        let start = try XCTUnwrap(source.range(of: "TextField(\"Message the model on this Mac…\""))
+        let end = try XCTUnwrap(source.range(of: ".accessibilityIdentifier(\"malibu.chat.composer\")"))
+        XCTAssertFalse(source[start.lowerBound..<end.upperBound].contains(".disabled("))
     }
 
     func testComposerTakesFocusWhenTheChatOpens() throws {

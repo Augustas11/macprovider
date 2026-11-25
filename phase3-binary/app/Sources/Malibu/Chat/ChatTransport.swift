@@ -23,7 +23,7 @@ enum ChatFailure: Error, LocalizedError, Equatable {
         case .preempted: return "Paused for a paying customer. Send a new message when this Mac is available."
         case .malformed: return "The local provider returned an incomplete or invalid response."
         case .limit: return "This turn reached its safety limit. Try a smaller request."
-        case .timeout: return "This turn reached its time limit. Try again."
+        case .timeout: return "This turn timed out. Try again."
         case .http(let status): return "The local provider could not complete this request (HTTP \(status))."
         case .unsafePath: return "That file is unavailable within the selected folder. Symlinks and special files are not allowed."
         case .invalidTool: return "The model requested an invalid or unsupported tool."
@@ -74,6 +74,10 @@ struct ChatToolCall: Equatable, Sendable {
 struct ChatCompletion: Sendable {
     let text: String
     let calls: [ChatToolCall]
+    /// Model reasoning (`reasoning_content`) is shown and saved, never sent back to the model.
+    var reasoning = ""
+    /// The reply stopped early (finish_reason `length`, or the text cap); `text` holds what arrived.
+    var truncated = false
 }
 
 /// Byte framing preserves split UTF-8 scalars and CRLF. Limits apply before
@@ -111,11 +115,17 @@ struct ChatSSEDecoder {
 }
 
 struct ChatStreamAccumulator {
+    static let textByteLimit = 64 * 1024
     private(set) var text = ""
+    private(set) var reasoning = ""
+    /// The reasoning fragment from the most recent accepted event, if any.
+    private(set) var lastReasoning: String?
+    private(set) var truncated = false
     private var calls: [Int: ChatToolCall] = [:]
     private(set) var done = false
     private var finished = false
     mutating func accept(_ payload: String) throws -> String? {
+        lastReasoning = nil
         guard !done else { throw ChatFailure.malformed }
         if payload == "[DONE]" {
             guard finished else { throw ChatFailure.malformed }
@@ -133,13 +143,22 @@ struct ChatStreamAccumulator {
         guard !finished, choices.count == 1, let choice = choices.first,
               (choice["index"] as? Int ?? 0) == 0 else { throw ChatFailure.malformed }
         if let reason = choice["finish_reason"] as? String {
-            guard reason == "stop" || reason == "tool_calls" else { throw ChatFailure.limit }
+            // `length` keeps the partial reply; any other early stop is still a failure.
+            guard reason == "stop" || reason == "tool_calls" || reason == "length" else { throw ChatFailure.limit }
+            if reason == "length" { truncated = true }
             finished = true
         }
         let delta = choice["delta"] as? [String: Any] ?? [:]
-        let fragment = delta["content"] as? String ?? ""
+        let thought = delta["reasoning_content"] as? String ?? delta["reasoning"] as? String ?? ""
+        if !thought.isEmpty, reasoning.utf8.count + thought.utf8.count <= Self.textByteLimit {
+            reasoning += thought; lastReasoning = thought
+        }
+        var fragment = delta["content"] as? String ?? ""
+        // Past the cap the text already received is kept and the rest is dropped.
+        if text.utf8.count + fragment.utf8.count > Self.textByteLimit {
+            truncated = true; fragment = ""
+        }
         text += fragment
-        guard text.utf8.count <= 64 * 1024 else { throw ChatFailure.limit }
         for part in delta["tool_calls"] as? [[String: Any]] ?? [] {
             guard let index = part["index"] as? Int, (0..<12).contains(index) else { throw ChatFailure.limit }
             var call = calls[index] ?? ChatToolCall()
@@ -158,7 +177,7 @@ struct ChatStreamAccumulator {
         let ordered = calls.keys.sorted().compactMap { calls[$0] }
         guard ordered.allSatisfy({ !$0.id.isEmpty && !$0.name.isEmpty }),
               Set(ordered.map(\.id)).count == ordered.count else { throw ChatFailure.malformed }
-        return ChatCompletion(text: text, calls: ordered)
+        return ChatCompletion(text: text, calls: ordered, reasoning: reasoning, truncated: truncated)
     }
 }
 
@@ -167,6 +186,19 @@ protocol ChatTransport {
     func capability(at endpoint: ChatEndpoint) async throws -> ChatCapability
     func complete(at endpoint: ChatEndpoint, body: Data,
                   onText: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion
+    /// Streams reasoning fragments too. Transports without live reasoning
+    /// still return it in `ChatCompletion.reasoning`.
+    func complete(at endpoint: ChatEndpoint, body: Data,
+                  onText: @escaping @MainActor (String) -> Void,
+                  onReasoning: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion
+}
+
+extension ChatTransport {
+    func complete(at endpoint: ChatEndpoint, body: Data,
+                  onText: @escaping @MainActor (String) -> Void,
+                  onReasoning: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
+        try await complete(at: endpoint, body: body, onText: onText)
+    }
 }
 
 private final class ChatNoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
@@ -186,8 +218,10 @@ final class LocalChatTransport: ChatTransport {
         config.httpShouldSetCookies = false
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 90
+        // Stall guard only: a request fails when no bytes arrive for this long.
+        // There is no total limit; Stop ends a long reply or Agent run.
+        config.timeoutIntervalForRequest = ChatStore.stallSeconds
+        config.timeoutIntervalForResource = 7 * 24 * 60 * 60
         session = URLSession(configuration: config)
     }
     deinit { session.invalidateAndCancel() }
@@ -209,6 +243,11 @@ final class LocalChatTransport: ChatTransport {
     }
     func complete(at endpoint: ChatEndpoint, body: Data,
                   onText: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
+        try await complete(at: endpoint, body: body, onText: onText, onReasoning: { _ in })
+    }
+    func complete(at endpoint: ChatEndpoint, body: Data,
+                  onText: @escaping @MainActor (String) -> Void,
+                  onReasoning: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
         let request = Self.completionRequest(at: endpoint, body: body)
         let (bytes, response) = try await session.bytes(for: request, delegate: redirect)
         guard let http = response as? HTTPURLResponse else { throw ChatFailure.malformed }
@@ -232,6 +271,7 @@ final class LocalChatTransport: ChatTransport {
             try Task.checkCancellation()
             if let event = try decoder.feed(byte) {
                 if let fragment = try accumulator.accept(event) { onText(fragment) }
+                if let thought = accumulator.lastReasoning { onReasoning(thought) }
                 if accumulator.done { return try accumulator.result() }
             }
         }

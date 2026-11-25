@@ -43,7 +43,10 @@ final class AgentModelTransport {
             let fresh = try await local.capability(at: endpoint)
             guard fresh.model == expected.model, fresh.generation == expected.generation else { throw ChatFailure.modelChanged }
             guard fresh.guaranteedTools else { throw ChatFailure.unsupportedTools }
-            return try await local.complete(at: endpoint, body: JSONSerialization.data(withJSONObject: body), onText: { _ in })
+            let response = try await local.complete(at: endpoint, body: JSONSerialization.data(withJSONObject: body), onText: { _ in })
+            // Agents keep failing closed on a cut-off reply, as before Chat learned to keep partial text.
+            guard !response.truncated else { throw ChatFailure.limit }
+            return response
         case .network:
             return try await gateway.complete(body: body, key: buyerKey())
         }

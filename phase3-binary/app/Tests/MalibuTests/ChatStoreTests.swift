@@ -119,6 +119,7 @@ final class ChatStoreTests: XCTestCase {
         try await waitUntil { !store.isRunning }
         XCTAssertEqual(store.turns.last?.answer, "Summary of selected content")
         XCTAssertEqual(store.turns.last?.complete, true)
+        XCTAssertEqual(store.turns.last?.tools, ["read_file note.txt"])
         XCTAssertEqual(transport.ports, [9042, 9042, 9042])
     }
     func testAgentRoundLimitStopsRepeatedToolLoop() async throws {
@@ -132,7 +133,7 @@ final class ChatStoreTests: XCTestCase {
         store.agentMode = true
         await store.refresh(port: 9042)
         store.send("keep listing")
-        for index in 0..<ChatStore.maxRounds {
+        for index in 0..<ChatStore.agentMaxRounds {
             try await waitUntil { transport.pending.count == index + 1 }
             transport.resolve(index, calls: [ChatToolCall(id: "list\(index)", name: "list_files", arguments: "{\"path\":\".\"}")])
         }
@@ -140,6 +141,170 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(store.notice, ChatFailure.limit.localizedDescription)
         XCTAssertFalse(store.turns.last?.complete ?? true)
     }
+    // MARK: Saved history
+
+    private func historyDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("chat-history-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return directory
+    }
+    private func jsonFiles(_ directory: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }
+    }
+    private func answer(_ store: ChatStore, _ transport: ControlledChatTransport, _ prompt: String, _ text: String) async throws {
+        let index = transport.pending.count
+        store.send(prompt)
+        try await waitUntil { transport.pending.count == index + 1 }
+        transport.pending[index].onText(text)
+        transport.resolve(index, text: text)
+        try await waitUntil { !store.isRunning }
+    }
+
+    func testNewChatSavesConversationAndAFreshStoreReloadsIt() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "  What is MLX?\n", "An array framework.")
+        let savedID = store.conversationID
+        store.newConversation()
+        XCTAssertTrue(store.turns.isEmpty)
+        XCTAssertNotEqual(store.conversationID, savedID)
+        XCTAssertEqual(store.history.map(\.id), [savedID])
+        XCTAssertEqual(store.history.first?.title, "What is MLX?")
+        XCTAssertEqual(store.history.first?.model, "fixture")
+        let file = directory.appendingPathComponent("\(savedID.uuidString).json")
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+        let reopened = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        XCTAssertEqual(reopened.history.map(\.id), [savedID])
+        await reopened.refresh(port: 9042)
+        reopened.openConversation(savedID)
+        XCTAssertEqual(reopened.turns.map(\.prompt), ["What is MLX?"])
+        XCTAssertEqual(reopened.turns.map(\.answer), ["An array framework."])
+        XCTAssertNil(reopened.notice)
+        // Continuing sends the saved history to the model and updates the same file.
+        try await answer(reopened, transport, "And Metal?", "A GPU API.")
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies.last!) as? [String: Any])
+        let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["content"] as? String },
+                       ["What is MLX?", "An array framework.", "And Metal?"])
+        XCTAssertEqual(jsonFiles(directory).count, 1)
+    }
+
+    func testEmptyConversationIsNotSaved() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        store.newConversation()
+        store.newConversation()
+        XCTAssertTrue(store.history.isEmpty)
+        XCTAssertTrue(jsonFiles(directory).isEmpty)
+    }
+
+    func testDeleteRemovesSavedChat() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "first chat", "ok")
+        let first = store.conversationID
+        store.newConversation()
+        try await answer(store, transport, "second chat", "ok")
+        let second = store.conversationID
+        store.deleteConversation(first)
+        XCTAssertEqual(store.history.map(\.id), [second])
+        XCTAssertEqual(store.turns.count, 1, "Deleting another chat keeps the open one")
+        store.deleteConversation(second)
+        XCTAssertTrue(store.history.isEmpty)
+        XCTAssertTrue(store.turns.isEmpty)
+        XCTAssertTrue(jsonFiles(directory).isEmpty)
+        XCTAssertTrue(ChatHistoryStore(directory: directory).summaries.isEmpty)
+    }
+
+    func testReopenedChatFromAnotherModelNamesBothModelsAndContinuesOnLoadedModel() async throws {
+        let directory = try historyDirectory()
+        let history = ChatHistoryStore(directory: directory)
+        let id = UUID()
+        try history.save(SavedChat(id: id, title: "Old", model: "old-model", createdAt: Date(), updatedAt: Date(),
+                                   turns: [SavedChatTurn(prompt: "Old question", answer: "Old answer", complete: true)]))
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: history)
+        await store.refresh(port: 9042)
+        store.openConversation(id)
+        XCTAssertEqual(store.notice, "This chat used old-model. Replies now come from fixture.")
+        try await answer(store, transport, "New question", "New answer")
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies.last!) as? [String: Any])
+        XCTAssertEqual(request["model"] as? String, "fixture")
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual(history.load(id)?.model, "fixture")
+    }
+
+    func testLeavingAndReenteringTheScreenKeepsTheConversation() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        var snapshot = AgentSnapshot.empty
+        snapshot.currentModelID = "fixture"; snapshot.currentModelLoaded = true
+        store.providerChanged(to: ChatProviderIdentity(snapshot))
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "keep me", "kept")
+        store.close()
+        store.providerChanged(to: ChatProviderIdentity(snapshot))
+        XCTAssertEqual(store.turns.map(\.prompt), ["keep me"])
+    }
+
+    // MARK: Long replies and reasoning
+
+    func testLengthFinishKeepsPartialAnswerAndContinueSendsIt() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        store.send("Write a long story")
+        try await waitUntil { transport.pending.count == 1 }
+        let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        XCTAssertEqual(first["max_tokens"] as? Int, ChatStore.maxTokens)
+        transport.pending[0].onText("Once upon")
+        transport.resolve(0, text: "Once upon", truncated: true)
+        try await waitUntil { !store.isRunning }
+        let turn = try XCTUnwrap(store.turns.last)
+        XCTAssertEqual(turn.answer, "Once upon")
+        XCTAssertTrue(turn.truncated)
+        XCTAssertTrue(turn.complete)
+        store.continueAnswer()
+        try await waitUntil { transport.pending.count == 2 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[1]) as? [String: Any])
+        let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["user", "assistant", "user"])
+        XCTAssertEqual(messages.compactMap { $0["content"] as? String },
+                       ["Write a long story", "Once upon", ChatStore.continuePrompt])
+        transport.resolve(1, text: " a time.")
+        try await waitUntil { !store.isRunning }
+        store.continueAnswer()
+        XCTAssertEqual(transport.pending.count, 2, "Continue only follows a cut-off reply")
+    }
+
+    func testReasoningOnlyReplyIsShownSavedAndNeverSentBack() async throws {
+        let directory = try historyDirectory()
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: ChatHistoryStore(directory: directory))
+        await store.refresh(port: 9042)
+        store.send("Think about it")
+        try await waitUntil { transport.pending.count == 1 }
+        transport.resolve(0, text: "", reasoning: "private chain of thought")
+        try await waitUntil { !store.isRunning }
+        XCTAssertNil(store.notice, "A reasoning-only reply is not an error")
+        XCTAssertEqual(store.turns.last?.reasoning, "private chain of thought")
+        XCTAssertEqual(store.turns.last?.complete, true)
+        let saved = try XCTUnwrap(ChatHistoryStore(directory: directory).load(store.conversationID))
+        XCTAssertEqual(saved.turns.first?.reasoning, "private chain of thought")
+        store.send("Next")
+        try await waitUntil { transport.pending.count == 2 }
+        XCTAssertFalse(String(decoding: transport.bodies[1], as: UTF8.self).contains("private chain of thought"))
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while ContinuousClock.now < deadline {
@@ -169,7 +334,8 @@ private final class ControlledChatTransport: ChatTransport {
         bodies.append(body)
         return try await withCheckedThrowingContinuation { pending.append(Pending(onText: onText, continuation: $0)) }
     }
-    func resolve(_ index: Int, text: String = "", calls: [ChatToolCall] = []) {
-        pending[index].continuation.resume(returning: ChatCompletion(text: text, calls: calls))
+    func resolve(_ index: Int, text: String = "", calls: [ChatToolCall] = [], reasoning: String = "", truncated: Bool = false) {
+        pending[index].continuation.resume(returning: ChatCompletion(text: text, calls: calls,
+                                                                     reasoning: reasoning, truncated: truncated))
     }
 }
