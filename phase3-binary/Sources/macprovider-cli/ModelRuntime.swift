@@ -2308,6 +2308,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
     private var currentContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane?
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
+    /// SPEC-048 (0.1.130): a serial native tuple passed its in-process
+    /// self-check on this load, so its requests may decode native serially.
+    private var currentNativeMTPSerialSelfCheckPassed = false
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer? {
         didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
     }
@@ -4160,6 +4163,11 @@ maxTokens: 1,
         runtimeCacheClass: String,
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String? {
+        // SPEC-048 (0.1.130): Inkling 2 is not a paged-KV family; its only
+        // native tuple (`inkling2_dspark_v1`) is a serial one-row tuple.
+        if modelCapabilities.modelFamily == "inkling2" {
+            return NativeMTPAdmissionSidecar.serialNativeCacheClass
+        }
         guard !modelCapabilities.ordinaryHybridOnly else { return nil }
         if runtimeCacheClass == "KVCacheSimple" {
             return "paged_kv"
@@ -5391,7 +5399,13 @@ maxTokens: 1,
     }
 
     private func currentServedSchedulerSupportsNativeMTP() -> Bool {
-        currentNativeMTPDrafterContainer != nil && continuousBatchScheduler != nil
+        guard currentNativeMTPDrafterContainer != nil else { return false }
+        // SPEC-048 (0.1.130): a serial native tuple needs no scheduler, only
+        // its passed serial self-check; it never rides a scheduler.
+        if Self.nativeMTPSerialAdmitted(familyAdapter: currentNativeMTPAdmissionCapability?.familyAdapter) {
+            return currentNativeMTPSerialSelfCheckPassed
+        }
+        return continuousBatchScheduler != nil
     }
 
     func swapSignals() -> AsyncStream<SwapSignal> {
@@ -7911,9 +7925,24 @@ maxTokens: 1,
         #else
         let injectedReceipt: NativeMTPSelfTestReceipt? = nil
         #endif
+        let serialAdmitted = Self.nativeMTPSerialAdmitted(familyAdapter: nativeMTPLoad.admissionCapability.familyAdapter)
+        currentNativeMTPSerialSelfCheckPassed = false
         if let injectedReceipt {
             selfTestReceipt = injectedReceipt.actualDecodePath == .nativeMTP && !injectedReceipt.fallbackUsed
                 ? injectedReceipt : nil
+        } else if serialAdmitted {
+            // SPEC-048 (0.1.130): a serial native tuple qualifies against
+            // serial ordinary decode in this process, never on a scheduler.
+            do {
+                let qualified = try await qualifySerialNativeMTP(nativeMTPLoad)
+                selfTestReceipt = qualified.receipt
+                promptCeiling = qualified.promptCeiling
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_self_check route=serial result=execution_failed error=\(String(describing: error))\n".utf8
+                ))
+                selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
+            }
         } else if let scheduler = self.continuousBatchScheduler {
             do {
                 // SPEC-048-R016 (v0.1.32): qualify native MTP on this Mac.
@@ -7996,6 +8025,7 @@ maxTokens: 1,
             selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_scheduler_unavailable")
         }
         if let receipt = selfTestReceipt {
+            currentNativeMTPSerialSelfCheckPassed = serialAdmitted
             let servedCapability = promptCeiling.map { nativeMTPLoad.capability.cappingPromptTokens(at: $0) }
                 ?? nativeMTPLoad.capability
             self.currentNativeMTPCapability = servedCapability
@@ -11491,6 +11521,9 @@ maxTokens: boundedMaxTokens,
         // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
         // row-invariant in flight from now, so an ordinary request that
         // reaches admission first still joins row-invariant.
+        // SPEC-048 (0.1.130): a serial native tuple serves its admitted
+        // requests on the serial path below, with no scheduler.
+        let serialNativeMTP = serialNativeMTPRoute(for: nativeMTPAdmission)
         let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
             ? SmallMRouteRequestCounter.shared.reserveNative() : nil
         defer { smallMRouteReservation?.end() }
@@ -11748,6 +11781,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             eligible: coldContext?.eligible == true,
                             conversationKey: request.conversationKey,
                             containsImage: request.containsNonTextMessageContentPart))
+                    let serialNativeDrafter: (any MTPDrafterModel)?
+                    if let serialNativeMTP {
+                        serialNativeDrafter = await serialNativeMTP.drafterContainer.perform(nonSendable: ()) { drafterContext, _ in
+                            drafterContext.model
+                        }
+                    } else {
+                        serialNativeDrafter = nil
+                    }
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
@@ -11878,11 +11919,55 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // step run in the turn taken here.
                             generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
                             gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
-                            let iterator = try TokenIterator(
-                                input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
-                                parameters: generation.parameters, components: grammarConstraint.map { constraint in
-                                    generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
-                                } ?? generation.components)
+                            // SPEC-048 (0.1.130): an eligible request of a serial native tuple
+                            // decodes through the native iterator; it emits exactly ordinary
+                            // greedy tokens. Anything else, or a native iterator that cannot
+                            // start, takes ordinary decode on a fresh cache.
+                            var serialNativeIterator: MTPSpeculativeTokenIterator?
+                            if let serialNativeMTP, let serialNativeDrafter,
+                               nativeMTPAdmission.resolvingTokenBounds(
+                                   promptTokenCount: promptTokenIds.count,
+                                   maxOutputTokens: generation.parameters.maxTokens ?? maxContextTokens
+                               ).usesNativeMTP,
+                               Self.serialNativeMTPEligible(
+                                   hasLease: lease != nil,
+                                   resumedPrefix: iteratorInput.text.tokens.size != promptTokenIds.count,
+                                   hasInitialState: iteratorState != nil,
+                                   grammarConstrained: grammarConstraint != nil,
+                                   labHooks: labSerialHooks != nil,
+                                   containsNonText: request.containsNonTextMessageContentPart,
+                                   greedy: generation.parameters.temperature == 0
+                               ) {
+                                do {
+                                    serialNativeIterator = try MTPSpeculativeTokenIterator(
+                                        input: iteratorInput, mainModel: generationContext.model, drafter: serialNativeDrafter,
+                                        mainCache: kvCache, parameters: generation.parameters,
+                                        blockSize: serialNativeMTP.blockSize, components: generation.components)
+                                    serialNativeMTP.statusSink.recordNativeMTPAdmission()
+                                } catch let error as CancellationError {
+                                    throw error
+                                } catch let error as DrainCancelledError {
+                                    throw error
+                                } catch {
+                                    serialNativeMTP.statusSink.recordPreoutputFallback(.runtimeFailure)
+                                    FileHandle.standardError.write(Data("event=native_mtp_serial_fallback reason=iterator_start_failed\n".utf8))
+                                    kvCache = try Self.serveCache(
+                                        model: generationContext.model, baseParameters: parameters, forceSimpleKV: forceSimpleKV)
+                                }
+                            } else if let serialNativeMTP {
+                                // Admitted native, served ordinary: count it as a pre-output fallback.
+                                serialNativeMTP.statusSink.recordPreoutputFallback(.requestIneligible)
+                            }
+                            let iterator: SerialDecodeIterator
+                            if let serialNativeIterator {
+                                iterator = .nativeMTP(serialNativeIterator, statusSink: serialNativeMTP?.statusSink)
+                            } else {
+                                iterator = .ordinary(try TokenIterator(
+                                    input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
+                                    parameters: generation.parameters, components: grammarConstraint.map { constraint in
+                                        generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
+                                    } ?? generation.components))
+                            }
                             gpuTurn.end()
                             Self.clearMLXBufferCacheAfterPrefill()
                             try prefillScope.markPrefillDone()
@@ -11934,7 +12019,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 gpuTurn.isCancelled = { inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 gpuTurn.begin(.decodeStep(rows: 1))
                                 defer { gpuTurn.end() }
-                                return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                return BlockingGenerateResult(Self.runSerialDecode(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     gpuTurn.end()
                                     var disposition: GenerateDisposition = {
                                         if !tokens.isEmpty {
@@ -12499,6 +12584,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
         // row-invariant in flight from now, so an ordinary request that
         // reaches admission first still joins row-invariant.
+        // SPEC-048 (0.1.130): a serial native tuple serves its admitted
+        // requests on the serial path below, with no scheduler.
+        let serialNativeMTP = serialNativeMTPRoute(for: nativeMTPAdmission)
         let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
             ? SmallMRouteRequestCounter.shared.reserveNative() : nil
         defer { smallMRouteReservation?.end() }
@@ -12882,6 +12970,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             eligible: coldContext?.eligible == true,
                             conversationKey: request.conversationKey,
                             containsImage: request.containsNonTextMessageContentPart))
+                    let serialNativeDrafter: (any MTPDrafterModel)?
+                    if let serialNativeMTP {
+                        serialNativeDrafter = await serialNativeMTP.drafterContainer.perform(nonSendable: ()) { drafterContext, _ in
+                            drafterContext.model
+                        }
+                    } else {
+                        serialNativeDrafter = nil
+                    }
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
@@ -13042,11 +13138,55 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // step run in the turn taken here.
                         generation.parameters.prefill.progress = gpuTurn.prefillProgress(stepSize: iteratorPrefillStep)
                         gpuTurn.yield(.prefillChunk(tokens: min(iteratorPrefillStep, iteratorInput.text.tokens.size)))
-                        let iterator = try TokenIterator(
-                            input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
-                            parameters: generation.parameters, components: grammarConstraint.map { constraint in
-                                        generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
-                                    } ?? generation.components)
+                        // SPEC-048 (0.1.130): an eligible request of a serial native tuple
+                        // decodes through the native iterator; it emits exactly ordinary
+                        // greedy tokens. Anything else, or a native iterator that cannot
+                        // start, takes ordinary decode on a fresh cache.
+                        var serialNativeIterator: MTPSpeculativeTokenIterator?
+                        if let serialNativeMTP, let serialNativeDrafter,
+                           nativeMTPAdmission.resolvingTokenBounds(
+                               promptTokenCount: promptTokenIds.count,
+                               maxOutputTokens: generation.parameters.maxTokens ?? maxContextTokens
+                           ).usesNativeMTP,
+                           Self.serialNativeMTPEligible(
+                               hasLease: lease != nil,
+                               resumedPrefix: iteratorInput.text.tokens.size != promptTokenIds.count,
+                               hasInitialState: iteratorState != nil,
+                               grammarConstrained: grammarConstraint != nil,
+                               labHooks: labSerialHooks != nil,
+                               containsNonText: request.containsNonTextMessageContentPart,
+                               greedy: generation.parameters.temperature == 0
+                           ) {
+                            do {
+                                serialNativeIterator = try MTPSpeculativeTokenIterator(
+                                    input: iteratorInput, mainModel: generationContext.model, drafter: serialNativeDrafter,
+                                    mainCache: kvCache, parameters: generation.parameters,
+                                    blockSize: serialNativeMTP.blockSize, components: generation.components)
+                                serialNativeMTP.statusSink.recordNativeMTPAdmission()
+                            } catch let error as CancellationError {
+                                throw error
+                            } catch let error as DrainCancelledError {
+                                throw error
+                            } catch {
+                                serialNativeMTP.statusSink.recordPreoutputFallback(.runtimeFailure)
+                                FileHandle.standardError.write(Data("event=native_mtp_serial_fallback reason=iterator_start_failed\n".utf8))
+                                kvCache = try Self.serveCache(
+                                    model: generationContext.model, baseParameters: parameters, forceSimpleKV: forceSimpleKV)
+                            }
+                        } else if let serialNativeMTP {
+                            // Admitted native, served ordinary: count it as a pre-output fallback.
+                            serialNativeMTP.statusSink.recordPreoutputFallback(.requestIneligible)
+                        }
+                        let iterator: SerialDecodeIterator
+                        if let serialNativeIterator {
+                            iterator = .nativeMTP(serialNativeIterator, statusSink: serialNativeMTP?.statusSink)
+                        } else {
+                            iterator = .ordinary(try TokenIterator(
+                                input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
+                                parameters: generation.parameters, components: grammarConstraint.map { constraint in
+                                    generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
+                                } ?? generation.components))
+                        }
                         gpuTurn.end()
                         Self.clearMLXBufferCacheAfterPrefill()
                         try prefillScope.markPrefillDone()
@@ -13073,7 +13213,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             gpuTurn.begin(.decodeStep(rows: 1))
                             defer { gpuTurn.end() }
-                            return BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                            return BlockingGenerateResult(Self.runSerialDecode(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 gpuTurn.end()
                                 var disposition: GenerateDisposition = {
                                     EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
@@ -14348,17 +14488,30 @@ maxTokens: maxTokens,
     /// so this is reached only if an admission set appears after startup. A
     /// `mixed` process (v0.3.61) allows it: each native-admitted request
     /// runs the row-invariant route.
+    /// SPEC-048 (0.1.130): a serial-only process may load the drafter of a
+    /// serial-admitted adapter (`serialAdmitted`), whose rounds never batch
+    /// target rows; every other adapter is still refused there.
     nonisolated static func nativeMTPActivationRefusal(
         mode: NativeMTPMode,
         route: SmallMRoute,
-        mixed: Bool = SmallMRoute.processMixed
+        mixed: Bool = SmallMRoute.processMixed,
+        serialAdmitted: Bool = false
     ) -> String? {
         guard mode == .auto else { return "mode_not_auto" }
         switch route {
         case .rowInvariant: return nil
-        case .serialOnly: return "small_m_route_serial_only"
+        case .serialOnly: return serialAdmitted ? nil : "small_m_route_serial_only"
         case .stockOrder: return mixed ? nil : "small_m_route_stock_order"
         }
+    }
+
+    /// Whether the target's architecture has a serial native adapter: only
+    /// Inkling 2 (`inkling2_loop`, adapter `inkling2_dspark_v1`) today.
+    nonisolated static func nativeMTPTargetMayRunSerial(targetDirectory: URL) -> Bool {
+        guard let data = try? Data(contentsOf: targetDirectory.appendingPathComponent("config.json")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["model_type"] as? String == "inkling2_loop"
     }
 
     private static func loadNativeMTPDrafterIfAdmitted(
@@ -14387,7 +14540,14 @@ maxTokens: maxTokens,
             rejectionObserver(reasonCode)
             return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole, modelID: eventModelID)
         }
-        if let reasonCode = nativeMTPActivationRefusal(mode: mode, route: route) {
+        // A serial-only refusal waits for the signed adapter only for a target a
+        // serial adapter can serve (SPEC-048 0.1.130); every other target keeps
+        // the immediate refusal, before any sidecar is read.
+        if let reasonCode = nativeMTPActivationRefusal(
+            mode: mode,
+            route: route,
+            serialAdmitted: nativeMTPTargetMayRunSerial(targetDirectory: targetDirectory)
+        ) {
             return reject(reasonCode: reasonCode, artifactRole: "runtime")
         }
         guard let targetModelRevision else {
@@ -14462,6 +14622,13 @@ maxTokens: maxTokens,
                 resolvedArtifactAuthority: resolvedArtifactAuthority,
                 captureArtifacts: true
             )
+            if let reasonCode = nativeMTPActivationRefusal(
+                mode: mode,
+                route: route,
+                serialAdmitted: nativeMTPSerialAdmitted(familyAdapter: admissionCapability.familyAdapter)
+            ) {
+                return reject(reasonCode: reasonCode, artifactRole: "runtime")
+            }
             guard nativeMTPAdmissionMatchesRunningBuild(
                 admissionCapability,
                 targetModelRevision: targetModelRevision,
@@ -14544,11 +14711,21 @@ maxTokens: maxTokens,
                 targetDirectory: capturedArtifacts.targetURL,
                 drafterDirectory: drafterDirectory,
                 tokenizerLoader: capturedTokenizerLoader,
-                maximumProposalDepth: admissionCapability.maxProposalDepth
+                maximumProposalDepth: admissionCapability.maxProposalDepth,
+                targetContainer: capturedTargetContainer
             )
             try capturedArtifacts.revalidateAfterLoad()
+            // A serial native drafter is stateful but not packed (it never
+            // drafts batched rows); every other adapter keeps the packed cast.
+            let serialAdmitted = nativeMTPSerialAdmitted(familyAdapter: admissionCapability.familyAdapter)
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
-                let stateLayerCount = (context.model as? any MTPPackedStatefulDrafterModel)?
+                let stateful: (any StatefulMTPDrafterModel)?
+                if serialAdmitted {
+                    stateful = context.model as? any StatefulMTPDrafterModel
+                } else {
+                    stateful = context.model as? any MTPPackedStatefulDrafterModel
+                }
+                let stateLayerCount = stateful?
                     .makeState(parameters: nil)
                     .cache
                     .count
@@ -15072,6 +15249,15 @@ maxTokens: maxTokens,
                 && representation.manifestSHA256 == quantization.representationManifestSHA256
                 && quantization.perLayerExceptions.isEmpty
                 && quantization.unquantizedExceptions.isEmpty
+        case ("mlx_oq4e", "bf16"):
+            // SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: oQ4e target, bf16 draft.
+            guard admissionCapability.familyAdapter == NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter,
+                  let representation = try? NativeMTPArtifactObserver.inkling2DSparkRepresentation(for: observation)
+            else { return false }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && quantization.perLayerExceptions.isEmpty
+                && quantization.unquantizedExceptions.isEmpty
         case ("bf16", "bf16"):
             guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
                 return false
@@ -15123,12 +15309,13 @@ maxTokens: maxTokens,
         NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
         NativeMTPAdapterLayout(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
         NativeMTPAdapterLayout(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        NativeMTPAdapterLayout(familyAdapter: "inkling2_dspark_v1", sourceLayout: "checkpoint_mtp"),
     ]
 
     static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
         switch familyAdapter {
         case "qwen3_5_mtp_v1": .separateArtifact
-        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1": .targetEmbedded
+        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1", "inkling2_dspark_v1": .targetEmbedded
         case "gemma4_mtp_v1": .targetEmbeddedAssistant
         default: nil
         }
@@ -15137,6 +15324,17 @@ maxTokens: maxTokens,
     /// Gemma 4 assistant `block_size` 4: one bonus token plus at most three
     /// drafts from one position (SPEC-048 0.1.110, `gemma4_mtp_v1`).
     static let gemma4NativeMTPMaximumProposalDepth = 3
+
+    /// Inkling 2 DSpark `block_size` 8: one bonus token plus at most seven
+    /// drafts per round from its three draft layers (SPEC-048 0.1.130,
+    /// `inkling2_dspark_v1`).
+    static let inkling2NativeMTPMaximumProposalDepth = 7
+
+    /// SPEC-048 (0.1.130): adapters whose native tuple serves one row on the
+    /// serial path. Every other adapter needs the continuous-batch scheduler.
+    nonisolated static func nativeMTPSerialAdmitted(familyAdapter: String?) -> Bool {
+        familyAdapter.map(NativeMTPAdmissionSidecar.isSerialNativeFamilyAdapter) ?? false
+    }
 
     /// Whether the signed proposal depth fits the adapter. Qwen and GLM draft
     /// one token per prediction layer; DeepSeek DSpark has exactly three
@@ -15149,6 +15347,9 @@ maxTokens: maxTokens,
         maxProposalDepth: Int
     ) -> Bool {
         if familyAdapter == "deepseek_v4_dspark_v1" { return predictionLayerCount == 3 }
+        if familyAdapter == "inkling2_dspark_v1" {
+            return predictionLayerCount == 3 && (1...inkling2NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
+        }
         return switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .targetEmbeddedAssistant:
             (1...gemma4NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
@@ -15191,6 +15392,12 @@ maxTokens: maxTokens,
         else { return false }
         switch nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) {
         case .targetEmbedded:
+            if layout.familyAdapter == "inkling2_dspark_v1" {
+                // Serial native tuple: no paged K/V topology; the draft binds
+                // to the loaded Inkling 2 target and the serial self-check
+                // proves exactness in this process (SPEC-048 0.1.130).
+                return modelCapabilities.modelFamily == "inkling2"
+            }
             if layout.familyAdapter == "deepseek_v4_dspark_v1" {
                 return deepseekV4NativeMTPTopologySupported(
                     maxProposalDepth: admissionCapability.maxProposalDepth,
@@ -15288,6 +15495,12 @@ maxTokens: maxTokens,
         familyAdapter: String,
         targetContainer: ModelContainer
     ) async -> Bool {
+        if familyAdapter == "inkling2_dspark_v1" {
+            guard let directory = try? await targetContainer.modelDirectory else { return false }
+            let isInkling2 = await targetContainer.perform { context in context.model is Inkling2Model }
+            return isInkling2 && FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(Inkling2DSparkDraftModel.embeddedWeightFileName).path)
+        }
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact: return true
         case nil: return false
@@ -15318,8 +15531,23 @@ maxTokens: maxTokens,
         targetDirectory: URL,
         drafterDirectory: URL,
         tokenizerLoader: any TokenizerLoader,
-        maximumProposalDepth: Int? = nil
+        maximumProposalDepth: Int? = nil,
+        targetContainer: ModelContainer? = nil
     ) async throws -> MTPDrafterContainer {
+        if familyAdapter == "inkling2_dspark_v1" {
+            // `inkling2_dspark_v1`: the draft's own `mtp.safetensors` beside the
+            // target shards, bound to the loaded target (its folded Markov
+            // projection reads the target's LM head).
+            guard let targetContainer else {
+                throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+            }
+            return try await targetContainer.perform { context -> MTPDrafterContainer in
+                guard let target = context.model as? Inkling2Model else {
+                    throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+                }
+                return try Inkling2DSparkDraftModel.loadEmbeddedContainer(targetDirectory: targetDirectory, target: target)
+            }
+        }
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact:
             await Qwen35TextMTPRegistration.register()
@@ -15365,7 +15593,10 @@ maxTokens: maxTokens,
     private static func nativeMTPExpectedStateClass(
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String {
-        modelCapabilities.hybridDecoderArchitectureVerified && modelCapabilities.slidingWindowAttention == nil
+        // Inkling 2 (SPEC-048 0.1.130): attention rings plus short-convolution
+        // tails, which the fork stages and rewinds per round.
+        if modelCapabilities.modelFamily == "inkling2" { return "hybrid_stageable_rewindable" }
+        return modelCapabilities.hybridDecoderArchitectureVerified && modelCapabilities.slidingWindowAttention == nil
             ? "hybrid_stageable_rewindable"
             : "stageable_rewindable"
     }
@@ -19581,6 +19812,375 @@ extension ModelRuntime {
             parityProbe: parityProbe,
             moeProbe: moeProbe
         )
+    }
+}
+
+// MARK: - SPEC-048 (0.1.130) serial one-row native MTP
+
+extension ModelRuntime {
+    /// What a request admitted to a serial native tuple needs on the serial
+    /// path: the drafter, the round size and the status sink its rounds are
+    /// counted in.
+    struct SerialNativeMTPRoute: Sendable {
+        let drafterContainer: MTPDrafterContainer
+        /// Proposal depth + 1 (one bonus token plus the drafts).
+        let blockSize: Int
+        let statusSink: NativeMTPStatusSink
+    }
+
+    /// The serial decode loop's iterator: ordinary `TokenIterator` or, for an
+    /// eligible request of a serial native tuple, the native iterator. Both
+    /// feed the same per-token callback (`runSerialDecode`).
+    enum SerialDecodeIterator {
+        case ordinary(TokenIterator)
+        case nativeMTP(MTPSpeculativeTokenIterator, statusSink: NativeMTPStatusSink?)
+
+        var maxTokens: Int? {
+            switch self {
+            case .ordinary(let iterator): iterator.maxTokens
+            case .nativeMTP(let iterator, _): iterator.maxTokens
+            }
+        }
+    }
+
+    /// The serial route for a request admitted native, or nil: only a serial
+    /// native tuple whose in-process self-check passed has one.
+    func serialNativeMTPRoute(for admission: NativeMTPRuntimeAdmission) -> SerialNativeMTPRoute? {
+        guard admission.usesNativeMTP,
+              Self.nativeMTPSerialAdmitted(familyAdapter: admission.familyAdapter),
+              currentNativeMTPSerialSelfCheckPassed,
+              let drafterContainer = currentNativeMTPDrafterContainer,
+              admission.initialProposalDepth > 0
+        else { return nil }
+        return SerialNativeMTPRoute(
+            drafterContainer: drafterContainer,
+            blockSize: admission.initialProposalDepth + 1,
+            statusSink: currentNativeMTPStatusSink
+        )
+    }
+
+    /// SPEC-048-R004 on the serial path: the native iterator starts from an
+    /// empty cache with the whole prompt (its drafter prefills the prompt
+    /// too), samples greedily and takes no logit processor beyond the
+    /// request's own components. A conversation lease, a resumed prefix, a
+    /// carried model state, a grammar, a lab hook or non-text content
+    /// selects ordinary decode.
+    nonisolated static func serialNativeMTPEligible(
+        hasLease: Bool,
+        resumedPrefix: Bool,
+        hasInitialState: Bool,
+        grammarConstrained: Bool,
+        labHooks: Bool,
+        containsNonText: Bool,
+        greedy: Bool
+    ) -> Bool {
+        !hasLease && !resumedPrefix && !hasInitialState && !grammarConstrained
+            && !labHooks && !containsNonText && greedy
+    }
+
+    /// Runs the serial decode loop. Ordinary decode keeps the engine's own
+    /// loop unchanged; native decode runs the same loop over the native
+    /// iterator and records its rounds in the status sink.
+    nonisolated static func runSerialDecode(
+        input: LMInput,
+        context: ModelContext,
+        iterator: SerialDecodeIterator,
+        didGenerate: ([Int]) -> GenerateDisposition
+    ) -> GenerateResult {
+        switch iterator {
+        case .ordinary(let ordinary):
+            return MLXLMCommon.generate(input: input, context: context, iterator: ordinary, didGenerate: didGenerate)
+        case .nativeMTP(var native, let statusSink):
+            let result = serialGenerationLoop(input: input, context: context, iterator: &native, didGenerate: didGenerate)
+            if let statusSink {
+                recordSerialNativeMTPRounds(
+                    draftCounts: native.roundDraftCounts,
+                    acceptedCounts: native.roundAcceptedCounts,
+                    sink: statusSink
+                )
+            }
+            if let reason = native.passthroughReason {
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_serial_passthrough accepted=\(native.acceptedCount) proposed=\(native.proposedCount) reason=\(reason.replacingOccurrences(of: " ", with: "_"))\n".utf8
+                ))
+            }
+            return result
+        }
+    }
+
+    /// The engine's synchronous generation loop for any token iterator: stop
+    /// on an end token or the unknown token, report every generated token to
+    /// `didGenerate`, stop when it says so or the iterator ends.
+    nonisolated static func serialGenerationLoop<Iterator: TokenIteratorProtocol>(
+        input: LMInput,
+        context: ModelContext,
+        iterator: inout Iterator,
+        didGenerate: ([Int]) -> GenerateDisposition
+    ) -> GenerateResult {
+        let stopTokenIDs = generationStopTokenIDs(for: context)
+        let unknownTokenID = context.tokenizer.unknownTokenId
+        var start = Date.timeIntervalSinceReferenceDate
+        var promptTime: TimeInterval = 0
+        var tokens: [Int] = []
+        while let token = autoreleasepool(invoking: { iterator.next() }) {
+            if promptTime == 0 {
+                let now = Date.timeIntervalSinceReferenceDate
+                promptTime = now - start
+                start = now
+            }
+            if token == unknownTokenID || stopTokenIDs.contains(token) { break }
+            tokens.append(token)
+            if didGenerate(tokens) == .stop { break }
+        }
+        let generateTime = Date.timeIntervalSinceReferenceDate - start
+        Stream().synchronize()
+        return GenerateResult(
+            inputText: input.text,
+            tokenIds: tokens,
+            output: context.tokenizer.decode(tokenIds: tokens),
+            promptTime: promptTime + iterator.promptPrefillTime,
+            generateTime: generateTime
+        )
+    }
+
+    /// One status round per native round: its drafts, the accepted prefix
+    /// and the bonus token every verify commits.
+    nonisolated static func recordSerialNativeMTPRounds(
+        draftCounts: [Int],
+        acceptedCounts: [Int],
+        sink: NativeMTPStatusSink
+    ) {
+        for (drafts, accepted) in zip(draftCounts, acceptedCounts) {
+            sink.recordRound(NativeMTPStatusSink.Round(
+                requestedDepths: [drafts],
+                proposedTokens: drafts,
+                acceptedTokens: accepted,
+                bonusTokens: 1,
+                committedTokens: accepted + 1,
+                acceptedProposalTokensByRow: [accepted],
+                verificationOverheadMS: 0
+            ))
+        }
+    }
+
+    /// One timed self-check decode on the serial path: native when `drafter`
+    /// is set, ordinary otherwise, each from a fresh serve cache, best of
+    /// `repetitions` wall-clock runs (prefill included, as a buyer request).
+    struct SerialNativeMTPSelfCheckRun: Sendable {
+        let tokens: [Int]
+        let seconds: Double
+        let acceptedTokens: Int
+        let proposedTokens: Int
+        let rounds: Int
+    }
+
+    nonisolated static func runSerialNativeMTPSelfCheckDecode(
+        container: ModelContainer,
+        drafterContainer: MTPDrafterContainer?,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        blockSize: Int,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int,
+        repetitions: Int
+    ) async throws -> SerialNativeMTPSelfCheckRun {
+        let drafter: (any MTPDrafterModel)?
+        if let drafterContainer {
+            drafter = await drafterContainer.perform(nonSendable: ()) { drafterContext, _ in
+                drafterContext.model
+            }
+        } else {
+            drafter = nil
+        }
+        return try await container.perform(nonSendable: drafter) { context, drafter -> SerialNativeMTPSelfCheckRun in
+            let parameters = try Self.makeServeGenerateParameters(
+                model: context.model,
+                maxTokens: maxOutputTokens,
+                promptTokens: promptTokens.count,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize,
+                temperature: 0,
+                topP: 1
+            )
+            let stopTokenIDs = Self.generationStopTokenIDs(for: context)
+            var best = SerialNativeMTPSelfCheckRun(
+                tokens: [], seconds: .infinity, acceptedTokens: 0, proposedTokens: 0, rounds: 0)
+            for _ in 0..<max(1, repetitions) {
+                let cache = try Self.serveCache(model: context.model, baseParameters: parameters, forceSimpleKV: false)
+                let input = LMInput(tokens: MLXArray(promptTokens.map { Int32($0) }))
+                let start = Date()
+                var tokens: [Int] = []
+                var accepted = 0
+                var proposed = 0
+                var rounds = 0
+                if let drafter {
+                    var iterator = try MTPSpeculativeTokenIterator(
+                        input: input, mainModel: context.model, drafter: drafter,
+                        mainCache: cache, parameters: parameters, blockSize: blockSize)
+                    while let token = iterator.next() {
+                        if stopTokenIDs.contains(token) { break }
+                        tokens.append(token)
+                    }
+                    accepted = iterator.acceptedCount
+                    proposed = iterator.proposedCount
+                    rounds = iterator.roundDraftCounts.count
+                } else {
+                    var iterator = try TokenIterator(input: input, model: context.model, cache: cache, parameters: parameters)
+                    while let token = iterator.next() {
+                        if stopTokenIDs.contains(token) { break }
+                        tokens.append(token)
+                    }
+                }
+                Stream().synchronize()
+                let seconds = Date().timeIntervalSince(start)
+                // Every repetition must give the same tokens; the fastest one is timed.
+                if best.seconds.isFinite, tokens != best.tokens {
+                    throw NativeMTPSelfTestError.failed("selftest_nondeterministic")
+                }
+                if seconds < best.seconds {
+                    best = SerialNativeMTPSelfCheckRun(
+                        tokens: tokens, seconds: seconds,
+                        acceptedTokens: accepted, proposedTokens: proposed, rounds: rounds)
+                }
+            }
+            return best
+        }
+    }
+
+    /// SPEC-048-R016 (0.1.130) for a serial native tuple: the reference is
+    /// serial ordinary decode in this process. The signed challenge and the
+    /// workload points must give identical tokens and beat ordinary decode by
+    /// `NativeMTPOnDeviceSelfCheck.minimumSpeedup`, with the #2496 prompt
+    /// ceiling as on the paged path. Returns the receipt when native serves.
+    func qualifySerialNativeMTP(
+        _ load: NativeMTPRuntimeLoadResult
+    ) async throws -> (receipt: NativeMTPSelfTestReceipt?, promptCeiling: Int?) {
+        guard let challenge = load.selfTestInput.selectedChallenge,
+              let servedSnapshot = load.selfTestInput.servedSnapshot else {
+            throw NativeMTPSelfTestError.failed("missing_challenge_record")
+        }
+        guard challenge.maxCompletionTokens <= 64 else {
+            throw NativeMTPSelfTestError.failed("max_completion_tokens_exceeds_probe_bound")
+        }
+        let servedDepth = load.admissionCapability.maxProposalDepth
+        guard challenge.fixedProposalDepth > 0, servedDepth > 0 else {
+            throw NativeMTPSelfTestError.failed("selftest_no_proposal_depth")
+        }
+        let maxContextTokens = self.maxContextTokens
+        let kvBitsOverride = self.serialKVBits
+        let prefillStepSize = self.prefillStepSize
+        func run(_ prompt: [Int], _ maxOutput: Int, drafter: MTPDrafterContainer?, depth: Int) async throws -> SerialNativeMTPSelfCheckRun {
+            try await Self.runSerialNativeMTPSelfCheckDecode(
+                container: load.targetContainer,
+                drafterContainer: drafter,
+                promptTokens: prompt,
+                maxOutputTokens: maxOutput,
+                blockSize: depth + 1,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize,
+                repetitions: NativeMTPOnDeviceSelfCheck.repetitions
+            )
+        }
+        let native = try await run(
+            challenge.promptTokenIDs, challenge.maxCompletionTokens,
+            drafter: load.drafterContainer, depth: challenge.fixedProposalDepth)
+        let ordinary = try await run(
+            challenge.promptTokenIDs, challenge.maxCompletionTokens, drafter: nil, depth: challenge.fixedProposalDepth)
+        let challengePoint = NativeMTPOnDeviceSelfCheck.PointMeasurement(
+            name: "challenge",
+            mtpTokens: native.tokens,
+            mtpSeconds: native.seconds,
+            referenceTokens: ordinary.tokens,
+            ordinarySeconds: ordinary.seconds,
+            promptTokens: challenge.promptTokenIDs.count
+        )
+        Self.logNativeMTPSelfCheckPoint(challengePoint, promptTokens: challenge.promptTokenIDs.count)
+        var points = [challengePoint]
+        if NativeMTPOnDeviceSelfCheck.admit(points).passed {
+            for configured in NativeMTPOnDeviceSelfCheck.workloadPoints {
+                guard let point = NativeMTPOnDeviceSelfCheck.boundedPoint(
+                    configured,
+                    maxPromptTokens: load.admissionCapability.maxPromptTokens,
+                    maxCompletionTokens: load.admissionCapability.maxCompletionTokens
+                ), let prompt = try await Self.nativeMTPSelfCheckWorkloadPrompt(
+                    container: load.targetContainer,
+                    contextTokens: point.contextTokens,
+                    maxPromptTokens: load.admissionCapability.maxPromptTokens
+                ) else {
+                    FileHandle.standardError.write(Data(
+                        "event=native_mtp_self_check_point point=\(configured.name) result=skipped_outside_signed_bounds\n".utf8
+                    ))
+                    continue
+                }
+                let pointNative = try await run(prompt, point.outputTokens, drafter: load.drafterContainer, depth: servedDepth)
+                let pointOrdinary = try await run(prompt, point.outputTokens, drafter: nil, depth: servedDepth)
+                let measurement = NativeMTPOnDeviceSelfCheck.PointMeasurement(
+                    name: point.name,
+                    mtpTokens: pointNative.tokens,
+                    mtpSeconds: pointNative.seconds,
+                    referenceTokens: pointOrdinary.tokens,
+                    ordinarySeconds: pointOrdinary.seconds,
+                    promptTokens: prompt.count
+                )
+                Self.logNativeMTPSelfCheckPoint(measurement, promptTokens: prompt.count)
+                points.append(measurement)
+                guard NativeMTPOnDeviceSelfCheck.admit([measurement]).passed else { break }
+            }
+        }
+        var verdict = NativeMTPOnDeviceSelfCheck.admit(points)
+        var promptCeiling: Int?
+        FileHandle.standardError.write(Data(
+            "event=native_mtp_self_check route=serial result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count) point=\(verdict.point ?? "none") points=\(points.count)\n".utf8
+        ))
+        if !verdict.passed, let ceiling = NativeMTPOnDeviceSelfCheck.promptCeiling(points) {
+            promptCeiling = ceiling
+            verdict = NativeMTPOnDeviceSelfCheck.Verdict(
+                passed: true, reason: "passed_prompt_ceiling", speedup: verdict.speedup, point: verdict.point
+            )
+            FileHandle.standardError.write(Data(
+                "event=native_mtp_self_check route=serial result=passed_prompt_ceiling max_prompt_tokens=\(ceiling) failing_point=\(verdict.point ?? "none")\n".utf8
+            ))
+        }
+        let terminal: ContinuousBatchSchedulerTerminalStatus = native.tokens.count >= challenge.maxCompletionTokens
+            ? .length : .stop
+        let rejected = max(0, native.proposedTokens - native.acceptedTokens)
+        let receipt = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability,
+            tupleSHA256: load.selfTestInput.tupleSHA256,
+            challengeID: challenge.challengeID,
+            challengeBankSHA256: load.selfTestInput.challengeBank.challengeBankSHA256,
+            servedSnapshotGeneration: servedSnapshot.generation,
+            proposalDepth: challenge.fixedProposalDepth,
+            maxCompletionTokens: challenge.maxCompletionTokens,
+            promptTokenIDs: challenge.promptTokenIDs,
+            generatedTokenIDs: native.tokens,
+            terminalReason: terminal,
+            acceptedTokens: native.acceptedTokens,
+            rejectedTokens: rejected,
+            bonusTokens: native.rounds,
+            committedTokens: native.tokens.count,
+            committedStateDigestSHA256: NativeMTPSelfTestDigest.committedStateDigest(
+                promptTokenIDs: challenge.promptTokenIDs,
+                generatedTokenIDs: native.tokens,
+                acceptedTokens: native.acceptedTokens,
+                rejectedTokens: rejected,
+                bonusTokens: native.rounds,
+                committedTokens: native.tokens.count,
+                terminalReason: terminal
+            ),
+            actualDecodePath: .nativeMTP,
+            fallbackUsed: false
+        )
+        guard Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) else {
+            return (Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)"), nil)
+        }
+        if let line = Self.nativeMTPSelfCheckRecordLogLine(receipt) {
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+        return (receipt, promptCeiling)
     }
 }
 

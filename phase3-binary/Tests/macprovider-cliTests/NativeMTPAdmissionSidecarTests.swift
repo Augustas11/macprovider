@@ -2021,6 +2021,160 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.quantization.representationManifestSHA256, digest)
     }
 
+    /// SPEC-048 (0.1.130) `inkling2_dspark_v1`: a serial native tuple. The
+    /// release `mlx_oq4e` kind names the oQ4e target and the bf16 draft; the
+    /// entry signs one qualified slot, one native row, the greedy profile and
+    /// three draft layers, and the capability's cache class is
+    /// `serial_native`.
+    private static func inkling2Quantization(_ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
+        var value: [String: Any] = [
+            "kind": "mlx_oq4e",
+            "packed_data_dtype": "uint32",
+            "packed_layout": "mlx_array_native_v1",
+            "scale_dtype": "bfloat16",
+            "scale_layout": "per_block",
+            "block_size_elements": 64,
+            "alignment_bytes": NSNull(),
+            "padding_rule": "none",
+            "unquantized_exceptions": [],
+            "per_layer_exceptions": [],
+            "representation_manifest_sha256": String(repeating: "b", count: 64),
+        ]
+        edit(&value)
+        return value
+    }
+
+    private static func inkling2Entry(_ entry: inout [String: Any]) {
+        entry["mtp_family_adapter"] = "inkling2_dspark_v1"
+        entry["mtp_head_count"] = 3
+        entry["mtp_state_class"] = "hybrid_stageable_rewindable"
+        entry["cache_state_classes"] = ["hybrid_stageable_rewindable"]
+        entry["qualified_slots"] = 1
+        entry["max_native_active_rows"] = 1
+        entry["request_feature_profile"] = "native_mtp_greedy_text_v1"
+        entry["quantization"] = inkling2Quantization()
+        var baseline = entry["ordinary_baseline"] as! [String: Any]
+        baseline["qualified_slots"] = 1
+        entry["ordinary_baseline"] = baseline
+    }
+
+    func testReleaseEnvelopeAdmitsTheInkling2SerialNativeTuple() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { Self.inkling2Entry(&$0) }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        )
+        XCTAssertEqual(capability.familyAdapter, "inkling2_dspark_v1")
+        XCTAssertEqual(capability.sourceLayout, "checkpoint_mtp")
+        XCTAssertEqual(capability.cacheClass, NativeMTPAdmissionSidecar.serialNativeCacheClass)
+        XCTAssertEqual(capability.stateClass, "hybrid_stageable_rewindable")
+        XCTAssertEqual(capability.predictionLayerCount, 3)
+        XCTAssertEqual(capability.maxNativeActiveRows, 1)
+        XCTAssertEqual(capability.quantization.target, "mlx_oq4e")
+        XCTAssertEqual(capability.quantization.mtp, "bf16")
+        XCTAssertEqual(capability.quantization.blockSizeElements, 64)
+        XCTAssertEqual(capability.quantization.representationManifestSHA256, String(repeating: "b", count: 64))
+        XCTAssertTrue(NativeMTPAdmissionSidecar.isSerialNativeFamilyAdapter("inkling2_dspark_v1"))
+        for adapter in ["glm5_next_mtp_v1", "deepseek_v4_dspark_v1", "gemma4_mtp_v1", "qwen3_5_mtp_v1"] {
+            XCTAssertFalse(NativeMTPAdmissionSidecar.isSerialNativeFamilyAdapter(adapter), adapter)
+        }
+        XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "inkling2_dspark_v1"), 1)
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "inkling2_dspark_v1"), "checkpoint_mtp")
+        XCTAssertEqual(
+            NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: "inkling2_dspark_v1"),
+            [NativeMTPAdmissionSidecar.greedyRequestFeatureProfile]
+        )
+    }
+
+    func testReleaseEnvelopeRejectsInkling2TuplesOutsideTheSerialShape() throws {
+        let cases: [(String, (inout [String: Any]) -> Void)] = [
+            ("two slots", { entry in
+                entry["qualified_slots"] = 2
+                var baseline = entry["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 2
+                entry["ordinary_baseline"] = baseline
+            }),
+            ("two native rows", { $0["max_native_active_rows"] = 2 }),
+            ("baseline slots differ", { entry in
+                var baseline = entry["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 2
+                entry["ordinary_baseline"] = baseline
+            }),
+            ("sampled profile", { $0["request_feature_profile"] = "native_mtp_sampled_text_v1" }),
+            ("four draft layers", { $0["mtp_head_count"] = 4 }),
+            ("base quantization", { entry in
+                entry["quantization"] = Self.inkling2Quantization {
+                    $0["kind"] = "base"
+                    $0["packed_data_dtype"] = "none"
+                    $0["packed_layout"] = "none"
+                    $0["scale_dtype"] = "none"
+                    $0["scale_layout"] = "none"
+                    $0["block_size_elements"] = NSNull()
+                }
+            }),
+            ("oq4e block 32", { $0["quantization"] = Self.inkling2Quantization { $0["block_size_elements"] = 32 } }),
+            ("oq4e f16 scales", { $0["quantization"] = Self.inkling2Quantization { $0["scale_dtype"] = "float16" } }),
+            ("oq4e exceptions", { $0["quantization"] = Self.inkling2Quantization {
+                $0["per_layer_exceptions"] = ["target/model.layers.0.mlp.gate"]
+            } }),
+        ]
+        for (label, edit) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(
+                prepareSnapshot: { base in try Self.embeddedLayout(base) },
+                entryEdit: { entry in
+                    Self.inkling2Entry(&entry)
+                    edit(&entry)
+                }
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertThrowsError(try NativeMTPAdmissionSidecar.load(
+                sidecarData: fixture.sidecarData,
+                signatureData: fixture.signatureData,
+                snapshotRoot: fixture.base.snapshot,
+                context: fixture.context,
+                trustedKeyring: fixture.base.trustedKeyring,
+                resolvedArtifactAuthority: fixture.authority
+            ), label)
+        }
+    }
+
+    /// SPEC-048 (0.1.130): the `mlx_oq4e` kind and a one-slot tuple stay
+    /// Inkling-only; every other adapter keeps two to eight slots.
+    func testReleaseEnvelopeKeepsOQ4eAndOneSlotInklingOnly() throws {
+        let oq4e = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { entry in
+                entry["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                entry["max_native_active_rows"] = 1
+                entry["quantization"] = Self.inkling2Quantization()
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: oq4e.base.root) }
+        XCTAssertEqual(try rejectedReleaseEnvelopeError(oq4e), .invalidValue("$.entries[0].quantization"))
+
+        let oneSlot = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { entry in
+                entry["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                entry["max_native_active_rows"] = 1
+                entry["qualified_slots"] = 1
+                var baseline = entry["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 1
+                entry["ordinary_baseline"] = baseline
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: oneSlot.base.root) }
+        XCTAssertEqual(try rejectedReleaseEnvelopeError(oneSlot), .invalidValue("$.entries[0].qualified_slots"))
+    }
+
     func testReleaseEnvelopeRejectsInvalidMLXAffineExceptionsAndRepresentationFields() throws {
         func affine(_ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
             var value: [String: Any] = [

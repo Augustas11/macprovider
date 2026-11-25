@@ -208,5 +208,44 @@ acquire_live_lock_for_step() { echo LOCK_REACHED >&2; exit 90; }
         self.assertLess(gate, gather.index('if [ "$live_rid" = "$R" ]; then'))
 
 
+
+class LiveProbeServingPathTests(unittest.TestCase):
+    """SPEC-048 MTP-7 (0.1.130): a serial native tuple goes live without CB."""
+
+    def probe(self, cb, enabled, mode, family, require=None):
+        code = 'set -eu\n'
+        code += 'SERIAL_NATIVE_MTP_FAMILIES="inkling2_dspark_v1"\n'
+        code += function(OPS, 'live_probe_serving_path_ok')
+        code += '\nif live_probe_serving_path_ok "$@"; then echo OK; else echo NO; fi\n'
+        env = {k: v for k, v in os.environ.items() if k != 'CATALOG_REQUIRE_NATIVE_MTP_FORWARD'}
+        if require is not None:
+            env['CATALOG_REQUIRE_NATIVE_MTP_FORWARD'] = require
+        result = subprocess.run(['bash', '-c', code, 'probe', cb, enabled, mode, family],
+                                env=env, text=True, capture_output=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_script_lists_only_the_inkling_adapter_as_serial(self):
+        self.assertIn('SERIAL_NATIVE_MTP_FAMILIES="inkling2_dspark_v1"\n', OPS.read_text())
+
+    def test_cb_paths_are_unchanged(self):
+        self.assertEqual(self.probe('true', 'true', 'active', 'glm5_next_mtp_v1'), 'OK')
+        self.assertEqual(self.probe('true', 'true', 'eligible', 'glm5_next_mtp_v1'), 'OK')
+        self.assertEqual(self.probe('true', 'false', 'off', ''), 'NO')
+        self.assertEqual(self.probe('true', 'false', 'off', '', require='false'), 'OK')
+
+    def test_serial_native_tuple_needs_native_mtp_but_not_cb(self):
+        self.assertEqual(self.probe('false', 'true', 'active', 'inkling2_dspark_v1'), 'OK')
+        self.assertEqual(self.probe('false', 'true', 'eligible', 'inkling2_dspark_v1'), 'OK')
+        self.assertEqual(self.probe('false', 'false', 'off', 'inkling2_dspark_v1'), 'NO')
+        self.assertEqual(self.probe('false', 'true', 'off', 'inkling2_dspark_v1'), 'NO')
+        self.assertEqual(self.probe('false', 'true', 'active', 'inkling2_dspark_v1', require='false'), 'NO')
+
+    def test_other_adapters_still_need_cb(self):
+        for family in ('glm5_next_mtp_v1', 'qwen3_next_mtp_v1', 'gemma4_mtp_v1', ''):
+            self.assertEqual(self.probe('false', 'true', 'active', family), 'NO')
+        self.assertEqual(self.probe('', 'true', 'active', 'glm5_next_mtp_v1'), 'NO')
+
+
 if __name__ == '__main__':
     unittest.main()

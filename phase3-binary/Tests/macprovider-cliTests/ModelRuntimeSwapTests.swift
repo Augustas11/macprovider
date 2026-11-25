@@ -327,12 +327,14 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "glm5_next_mtp_v1"), .targetEmbedded)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "deepseek_v4_dspark_v1"), .targetEmbedded)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "gemma4_mtp_v1"), .targetEmbeddedAssistant)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "inkling2_dspark_v1"), .targetEmbedded)
         XCTAssertNil(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_mtp_v1"))
         XCTAssertEqual(ModelRuntime.nativeMTPSupportedAdapterLayouts, [
             .init(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
             .init(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
             .init(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
             .init(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
+            .init(familyAdapter: "inkling2_dspark_v1", sourceLayout: "checkpoint_mtp"),
         ])
         // Each adapter's admitted layout is the one the sidecar derives from it.
         for layout in ModelRuntime.nativeMTPSupportedAdapterLayouts {
@@ -341,6 +343,197 @@ final class ModelRuntimeSwapTests: XCTestCase {
                 layout.sourceLayout
             )
         }
+    }
+
+    /// SPEC-048 0.1.130: `inkling2_dspark_v1` pairs only with
+    /// `checkpoint_mtp`, has exactly three draft layers, drafts 1...7 tokens
+    /// per round (block 8), owns one drafter cache per draft layer, signs the
+    /// `serial_native` cache class and admits only a loaded Inkling 2 target.
+    func testInkling2SerialNativeMTPAdmissionGate() throws {
+        let inkling2 = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+            configJSONData: try JSONSerialization.data(withJSONObject: [
+                "model_type": "inkling2_loop",
+                "architectures": ["Inkling2LoopForConditionalGeneration"],
+            ])
+        )
+        XCTAssertEqual(inkling2.modelFamily, "inkling2")
+        func capability(
+            sourceLayout: String = "checkpoint_mtp",
+            predictionLayerCount: Int = 3,
+            maxProposalDepth: Int = 4,
+            cacheClass: String = NativeMTPAdmissionSidecar.serialNativeCacheClass,
+            stateClass: String = "hybrid_stageable_rewindable"
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                familyAdapter: "inkling2_dspark_v1",
+                sourceLayout: sourceLayout,
+                predictionLayerCount: predictionLayerCount,
+                maxProposalDepth: maxProposalDepth,
+                completeWindowBytesByDepth: Array(repeating: 8, count: maxProposalDepth + 1),
+                cacheClass: cacheClass,
+                stateClass: stateClass,
+                maxNativeActiveRows: 1
+            )
+        }
+        func supported(
+            _ capability: NativeMTPAdmissionCapability,
+            modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+            drafterPresent: Bool = true
+        ) -> Bool {
+            let model = modelCapabilities ?? inkling2
+            guard let canonical = ModelRuntime.nativeMTPAdmissionCacheClass(
+                runtimeCacheClass: "mixed", modelCapabilities: model
+            ) else { return false }
+            return ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                capability,
+                canonicalCacheClass: canonical,
+                modelCapabilities: model,
+                drafterPresent: drafterPresent
+            )
+        }
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPAdmissionCacheClass(runtimeCacheClass: "mixed", modelCapabilities: inkling2),
+            "serial_native"
+        )
+        for depth in 1...7 {
+            XCTAssertTrue(supported(capability(maxProposalDepth: depth)), "depth \(depth)")
+        }
+        XCTAssertFalse(supported(capability(maxProposalDepth: 8)))
+        XCTAssertFalse(supported(capability(), drafterPresent: false))
+        XCTAssertFalse(supported(capability(predictionLayerCount: 4)))
+        XCTAssertFalse(supported(capability(sourceLayout: "separate_artifact")))
+        XCTAssertFalse(supported(capability(cacheClass: "paged_kv")))
+        XCTAssertFalse(supported(capability(stateClass: "stageable_rewindable")))
+        // Another target never admits the Inkling tuple.
+        XCTAssertFalse(supported(capability(), modelCapabilities: PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: false
+        )))
+
+        XCTAssertEqual(ModelRuntime.inkling2NativeMTPMaximumProposalDepth, 7)
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "inkling2_dspark_v1", predictionLayerCount: 3, maxProposalDepth: 0
+        ))
+        XCTAssertTrue(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "inkling2_dspark_v1", predictionLayerCount: 3, maxProposalDepth: 7
+        ))
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "inkling2_dspark_v1", predictionLayerCount: 3
+        ), 3)
+    }
+
+    /// SPEC-048 0.1.130: only a serial native adapter may load its drafter in
+    /// a serial-only process; every other adapter keeps the refusal.
+    func testSerialOnlyRefusalAppliesToEveryAdapterButSerialNativeTuples() {
+        XCTAssertTrue(ModelRuntime.nativeMTPSerialAdmitted(familyAdapter: "inkling2_dspark_v1"))
+        for adapter in ["glm5_next_mtp_v1", "deepseek_v4_dspark_v1", "gemma4_mtp_v1", "qwen3_5_mtp_v1"] {
+            XCTAssertFalse(ModelRuntime.nativeMTPSerialAdmitted(familyAdapter: adapter), adapter)
+        }
+        XCTAssertFalse(ModelRuntime.nativeMTPSerialAdmitted(familyAdapter: nil))
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .serialOnly, mixed: false, serialAdmitted: false),
+            "small_m_route_serial_only"
+        )
+        XCTAssertNil(ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .serialOnly, mixed: false, serialAdmitted: true))
+        // A serial adapter does not lift any other refusal.
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPActivationRefusal(mode: .off, route: .serialOnly, mixed: false, serialAdmitted: true),
+            "mode_not_auto"
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPActivationRefusal(mode: .auto, route: .stockOrder, mixed: false, serialAdmitted: true),
+            "small_m_route_stock_order"
+        )
+    }
+
+    /// The serial-only refusal waits for the signed adapter only for an
+    /// Inkling 2 target; any other target is refused before its sidecar is read.
+    func testSerialOnlyRefusalWaitsForTheAdapterOnlyForInklingTargets() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("serial-target-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (modelType, expected) in [("inkling2_loop", true), ("glm_moe_dsa", false), ("qwen3_5_moe", false)] {
+            let directory = root.appendingPathComponent(modelType)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: ["model_type": modelType])
+                .write(to: directory.appendingPathComponent("config.json"))
+            XCTAssertEqual(ModelRuntime.nativeMTPTargetMayRunSerial(targetDirectory: directory), expected, modelType)
+        }
+        XCTAssertFalse(ModelRuntime.nativeMTPTargetMayRunSerial(targetDirectory: root.appendingPathComponent("missing")))
+    }
+
+    /// SPEC-048-R004 on the serial path: only a plain greedy text request
+    /// with no carried state takes the native iterator.
+    func testSerialNativeMTPEligibility() {
+        func eligible(
+            hasLease: Bool = false, resumedPrefix: Bool = false, hasInitialState: Bool = false,
+            grammarConstrained: Bool = false, labHooks: Bool = false, containsNonText: Bool = false,
+            greedy: Bool = true
+        ) -> Bool {
+            ModelRuntime.serialNativeMTPEligible(
+                hasLease: hasLease, resumedPrefix: resumedPrefix, hasInitialState: hasInitialState,
+                grammarConstrained: grammarConstrained, labHooks: labHooks, containsNonText: containsNonText,
+                greedy: greedy
+            )
+        }
+        XCTAssertTrue(eligible())
+        XCTAssertFalse(eligible(hasLease: true))
+        XCTAssertFalse(eligible(resumedPrefix: true))
+        XCTAssertFalse(eligible(hasInitialState: true))
+        XCTAssertFalse(eligible(grammarConstrained: true))
+        XCTAssertFalse(eligible(labHooks: true))
+        XCTAssertFalse(eligible(containsNonText: true))
+        XCTAssertFalse(eligible(greedy: false))
+    }
+
+    /// SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: the oQ4e target and bf16
+    /// draft pair is recomputed from the observed artifact; the kind admits
+    /// only the Inkling adapter and no exceptions.
+    func testInkling2ObservationMustMatchSignedCapability() throws {
+        func observation(
+            target: NativeMTPObservedArtifactFormat = .mlxOQ4e(groupSize: 64, quantizationManifest: #"{"bits":4}"#),
+            mtp: NativeMTPObservedArtifactFormat = .unquantized(dtype: "bf16"),
+            layers: Int = 3
+        ) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(format: target, mtpPredictionLayerCount: layers, tensorPairs: []),
+                mtp: NativeMTPArtifactObservation(format: mtp, mtpPredictionLayerCount: layers, tensorPairs: []),
+                embedded: true
+            )
+        }
+        let representation = try NativeMTPArtifactObserver.inkling2DSparkRepresentation(for: observation())
+        func capability(
+            familyAdapter: String = "inkling2_dspark_v1",
+            manifest: String? = nil, groupSize: Int? = 64, perLayer: [String] = []
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                familyAdapter: familyAdapter,
+                sourceLayout: "checkpoint_mtp",
+                predictionLayerCount: 3,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_oq4e",
+                    mtp: "bf16",
+                    blockSizeElements: groupSize,
+                    representationManifestSHA256: manifest ?? representation.manifestSHA256,
+                    unquantizedExceptions: [],
+                    perLayerExceptions: perLayer
+                )
+            )
+        }
+        func matches(_ observation: NativeMTPArtifactPairObservation, _ capability: NativeMTPAdmissionCapability) -> Bool {
+            ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(observation, admissionCapability: capability)
+        }
+        XCTAssertTrue(matches(observation(), capability()))
+        XCTAssertFalse(matches(observation(), capability(familyAdapter: "glm5_next_mtp_v1")))
+        XCTAssertFalse(matches(observation(), capability(manifest: String(repeating: "f", count: 64))))
+        XCTAssertFalse(matches(observation(), capability(groupSize: 32)))
+        XCTAssertFalse(matches(observation(), capability(perLayer: ["target/model.layers.0.mlp.down_proj"])))
+        // A different quantization object is a different signed digest.
+        XCTAssertFalse(matches(
+            observation(target: .mlxOQ4e(groupSize: 64, quantizationManifest: #"{"bits":8}"#)), capability()
+        ))
+        XCTAssertFalse(matches(observation(mtp: .unquantized(dtype: "f16")), capability()))
+        XCTAssertFalse(matches(observation(layers: 2), capability()))
     }
 
     func testEmbeddedDrafterLoadRejectsAnUnknownAdapter() async {
@@ -1645,9 +1838,11 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
     func testServingDecodeRunsThroughBlockingInferenceExecutor() throws {
         let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
-        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+(?:(?!blockingInferenceExecutor)[\s\S]){0,1200}?BlockingGenerateResult\(generate\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
+        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+(?:(?!blockingInferenceExecutor)[\s\S]){0,1200}?BlockingGenerateResult\((?:Self\.runSerialDecode|generate)\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
         // The closure may bracket the decode in a GPU turn (SPEC-001-R018) before
-        // it calls `generate`; the call must still sit inside the executor closure.
+        // it calls `generate` (or `runSerialDecode`, which runs the same loop over
+        // an ordinary or serial native iterator); the call must still sit inside
+        // the executor closure.
         let matches = try NSRegularExpression(pattern: pattern).numberOfMatches(
             in: source,
             range: NSRange(source.startIndex..., in: source)

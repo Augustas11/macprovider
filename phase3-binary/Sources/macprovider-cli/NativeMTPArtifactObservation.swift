@@ -48,6 +48,11 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
     case mlxAffine4(bits: Int, groupSize: Int)
     case mlxMXFP8(bits: Int, groupSize: Int)
     case mlxMXFP4MXFP8
+    /// SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: the oMLX oQ4e mixed
+    /// target (global affine 4-bit, per-module affine 8-bit and NVFP4
+    /// overrides). `quantizationManifest` is the RFC 8785 form of the
+    /// config's `quantization` object the loader reads.
+    case mlxOQ4e(groupSize: Int, quantizationManifest: String)
 
     var sidecarQuantizationLabel: String {
         switch self {
@@ -60,6 +65,8 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
             return "mlx_mxfp8"
         case .mlxMXFP4MXFP8:
             return "mlx_mxfp4_mxfp8"
+        case .mlxOQ4e:
+            return "mlx_oq4e"
         }
     }
 }
@@ -207,6 +214,9 @@ enum NativeMTPArtifactObserver {
         let config = try loadConfig(directory: targetDirectory)
         if config["model_type"] as? String == "gemma4_unified" {
             return try observeGemma4Embedded(targetDirectory: targetDirectory, config: config, fileManager: fileManager)
+        }
+        if config["model_type"] as? String == "inkling2_loop" {
+            return try observeInkling2Embedded(targetDirectory: targetDirectory, config: config, fileManager: fileManager)
         }
         let isDSpark = config["model_type"] as? String == "deepseek_v4"
         let hiddenLayers = try isDSpark ? deepseekV4HiddenLayerCount(in: config) : glm5NextHiddenLayerCount(in: config)
@@ -435,6 +445,9 @@ enum NativeMTPArtifactObserver {
     static func affineRepresentation(
         for observation: NativeMTPArtifactPairObservation
     ) throws -> NativeMTPAffineRepresentation {
+        if case .mlxOQ4e = observation.target.format {
+            return try inkling2DSparkRepresentation(for: observation)
+        }
         if observation.embedded, observation.mtp.format == .unquantized(dtype: "bf16") {
             return try embeddedAssistantRepresentation(for: observation)
         }
@@ -2360,5 +2373,207 @@ enum NativeMTPArtifactObserver {
                 isAtEnd ? nil : scalars[index]
             }
         }
+    }
+}
+
+// MARK: - Inkling 2 DSpark (SPEC-048-R002 0.1.130, `inkling2_dspark_v1`)
+
+extension NativeMTPArtifactObserver {
+    /// The file `Inkling2DSparkDraftModel.loadEmbedded` reads the draft from,
+    /// beside the target's own shards.
+    static let inkling2DraftWeightFileName = "mtp.safetensors"
+    /// The draft's prediction layers and block (`mtp_config`) on the admitted
+    /// artifact.
+    static let inkling2DraftLayerCount = 3
+    static let inkling2DraftBlockSize = 8
+
+    /// SPEC-048-R002 (0.1.130) `inkling2_dspark_v1` / `checkpoint_mtp`: one
+    /// target directory holds the oQ4e mixed target and the unquantized
+    /// bfloat16 DSpark draft in `mtp.safetensors`. The target is observed
+    /// through its `quantization` object and every packed module's tensors;
+    /// the draft through its own header.
+    static func observeInkling2Embedded(
+        targetDirectory: URL,
+        config: [String: Any],
+        fileManager: FileManager = .default
+    ) throws -> NativeMTPArtifactPairObservation {
+        let layerCount = try inkling2ConfigDraftLayerCount(in: config)
+        let headers = try loadSafetensorsHeaders(directory: targetDirectory, fileManager: fileManager)
+        let draftURL = targetDirectory.appendingPathComponent(inkling2DraftWeightFileName).standardizedFileURL
+        let isDraft = { (header: SafetensorsHeader) in header.url.standardizedFileURL.path == draftURL.path }
+        let draftHeaders = headers.filter(isDraft)
+        let targetHeaders = headers.filter { !isDraft($0) }
+        guard draftHeaders.count == 1, !targetHeaders.isEmpty else {
+            throw NativeMTPArtifactObservationError.missingSafetensors
+        }
+
+        // Target: the oQ4e quantization object and the packed modules it names.
+        guard let quantization = try quantizationMetadata(in: config) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("inkling2 target requires oQ4e quantization")
+        }
+        let targetTensors = targetHeaders.flatMap(\.tensors)
+        let groupSize = try validateInkling2Quantization(quantization, tensors: targetTensors)
+
+        // Draft: unquantized bfloat16 under the DSpark roots, every layer present.
+        let draftTensors = draftHeaders.flatMap(\.tensors)
+        for tensor in draftTensors where !isInkling2DraftTensorName(tensor.name, layerCount: layerCount) {
+            throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("inkling2 draft tensor namespace \(tensor.name)")
+        }
+        let draftNames = Set(draftTensors.map(\.name))
+        for layer in 0..<layerCount where !draftNames.contains("layers.\(layer).input_layernorm.weight") {
+            throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("inkling2 draft layer \(layer) missing")
+        }
+        try validateUnquantizedHeaders(dtype: "bf16", tensors: draftTensors)
+
+        let manifest = try RFC8785JCS.canonicalStringRawStrings(inkling2QuantizationValue(quantization))
+        return NativeMTPArtifactPairObservation(
+            target: NativeMTPArtifactObservation(
+                format: .mlxOQ4e(groupSize: groupSize, quantizationManifest: manifest),
+                mtpPredictionLayerCount: layerCount,
+                tensorPairs: []
+            ),
+            mtp: NativeMTPArtifactObservation(format: .unquantized(dtype: "bf16"), mtpPredictionLayerCount: layerCount, tensorPairs: []),
+            embedded: true
+        )
+    }
+
+    /// The exact Inkling 2 config identity SPEC-048-R002 admits, returning
+    /// `mtp_config.num_hidden_layers` (3 on the admitted artifact, block 8).
+    private static func inkling2ConfigDraftLayerCount(in config: [String: Any]) throws -> Int {
+        guard config["model_type"] as? String == "inkling2_loop",
+              let architectures = config["architectures"] as? [Any],
+              architectures.count == 1,
+              architectures.first as? String == "Inkling2LoopForConditionalGeneration",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "inkling2_loop_text",
+              let draft = config["mtp_config"] as? [String: Any],
+              intValue(draft["block_size"]) == inkling2DraftBlockSize,
+              intValue(draft["markov_rank"]).map({ $0 > 0 }) == true,
+              intValue(draft["hidden_size"]) == intValue(text["hidden_size"]) else {
+            throw NativeMTPArtifactObservationError.malformedConfig("inkling2_loop identity")
+        }
+        guard let count = intValue(draft["num_hidden_layers"]) else {
+            throw NativeMTPArtifactObservationError.missingMTPPredictionLayerCount
+        }
+        guard count == inkling2DraftLayerCount else {
+            throw NativeMTPArtifactObservationError.invalidMTPPredictionLayerCount
+        }
+        return count
+    }
+
+    private static func isInkling2DraftTensorName(_ name: String, layerCount: Int) -> Bool {
+        if name == "fuse_weight" || name == "mask_embed" || name.hasPrefix("markov_head.") || name.hasPrefix("norm.") {
+            return true
+        }
+        let parts = name.split(separator: ".", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "layers", let index = Int(parts[1]) else { return false }
+        return (0..<layerCount).contains(index) && String(index) == parts[1]
+    }
+
+    /// The oQ4e grammar: a global affine 4-bit, group-64 default and
+    /// per-module overrides that are affine (4- or 8-bit, group 64) or NVFP4
+    /// (4-bit, group 16). Every packed module in the target shards resolves to
+    /// one of them, with the scale dtype and zero points that mode loads, and
+    /// every override names a packed module. Returns the global group size.
+    private static func validateInkling2Quantization(
+        _ quantization: [String: Any],
+        tensors: [SafetensorsTensor]
+    ) throws -> Int {
+        func reject(_ reason: String) -> NativeMTPArtifactObservationError {
+            .unsupportedQuantization("inkling2 oQ4e \(reason)")
+        }
+        guard intValue(quantization["bits"]) == 4,
+              intValue(quantization["group_size"]) == 64,
+              quantization["mode"] as? String == "affine" else {
+            throw reject("global format")
+        }
+        var overrides: [String: (bits: Int, groupSize: Int, mode: String)] = [:]
+        for (module, value) in quantization where !["bits", "group_size", "mode"].contains(module) {
+            guard isAdmissionModuleName(module),
+                  let object = value as? [String: Any],
+                  Set(object.keys) == ["bits", "group_size", "mode"],
+                  let bits = intValue(object["bits"]),
+                  let groupSize = intValue(object["group_size"]),
+                  let mode = object["mode"] as? String else {
+                throw reject("override \(module)")
+            }
+            switch (mode, bits, groupSize) {
+            case ("affine", 4, 64), ("affine", 8, 64), ("nvfp4", 4, 16): break
+            default: throw reject("override \(module)")
+            }
+            overrides[module] = (bits, groupSize, mode)
+        }
+        let byName = Dictionary(tensors.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        var packedModules: Set<String> = []
+        for tensor in tensors where isScaleTensorName(tensor.name) {
+            let module = String(tensor.name.dropLast(".scales".count))
+            let mode = overrides[module]?.mode ?? "affine"
+            guard byName["\(module).weight"]?.dtype == "U32",
+                  tensor.dtype == (mode == "nvfp4" ? "U8" : "BF16"),
+                  (byName["\(module).biases"] != nil) == (mode == "affine") else {
+                throw reject("module \(module)")
+            }
+            packedModules.insert(module)
+        }
+        for tensor in tensors where !["BF16", "F32", "U32", "U8"].contains(tensor.dtype) {
+            throw NativeMTPArtifactObservationError.unsupportedDType(tensor.dtype)
+        }
+        guard !packedModules.isEmpty, Set(overrides.keys).isSubset(of: packedModules) else {
+            throw reject("overrides name no packed module")
+        }
+        return 64
+    }
+
+    private static func inkling2QuantizationValue(_ quantization: [String: Any]) throws -> RFC8785JCS.Value {
+        var overrides: [String: RFC8785JCS.Value] = [:]
+        for (module, value) in quantization where !["bits", "group_size", "mode"].contains(module) {
+            guard let object = value as? [String: Any],
+                  let bits = intValue(object["bits"]),
+                  let groupSize = intValue(object["group_size"]),
+                  let mode = object["mode"] as? String else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("inkling2 oQ4e override \(module)")
+            }
+            overrides[module] = .object(["bits": .int(bits), "group_size": .int(groupSize), "mode": .rawString(mode)])
+        }
+        return .object([
+            "bits": .int(4),
+            "group_size": .int(64),
+            "mode": .rawString("affine"),
+            "overrides": .object(overrides),
+        ])
+    }
+
+    /// SPEC-048-R002 (0.1.130) `inkling2_dspark_v1` representation: the oQ4e
+    /// target's quantization object and the unquantized bfloat16 draft. The
+    /// manifest's `target` object is the oQ4e form and its `mtp` object the
+    /// `base` form.
+    static func inkling2DSparkRepresentation(
+        for observation: NativeMTPArtifactPairObservation
+    ) throws -> NativeMTPAffineRepresentation {
+        guard observation.embedded,
+              case .mlxOQ4e(let groupSize, let quantizationManifest) = observation.target.format,
+              groupSize == 64,
+              observation.target.mtpPredictionLayerCount == inkling2DraftLayerCount,
+              observation.mtp.format == .unquantized(dtype: "bf16"),
+              observation.mtp.mtpPredictionLayerCount == inkling2DraftLayerCount else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("inkling2 representation requires the oQ4e target and a bf16 draft")
+        }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema": .rawString("macprovider.native-mtp-representation.v1"),
+            "target": .object([
+                "kind": .rawString("mlx_oq4e"),
+                "quantization_sha256": .rawString(
+                    SHA256.hash(data: Data(quantizationManifest.utf8)).map { String(format: "%02x", $0) }.joined()),
+            ]),
+            "mtp": .object(["dtype": .rawString("bfloat16")]),
+        ]))
+        let bytes = Data(canonical.utf8)
+        return NativeMTPAffineRepresentation(
+            manifestBytes: bytes,
+            manifestSHA256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            perLayerExceptions: [],
+            unquantizedExceptions: [],
+            groupSize: groupSize
+        )
     }
 }

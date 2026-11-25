@@ -520,9 +520,24 @@ enum NativeMTPAdmissionSidecar {
     /// SPEC-048-R002 `gemma4_mtp_v1`: the Gemma 4 assistant ships inside the
     /// target artifact (`model-mtp.safetensors`), so it is `checkpoint_mtp` too.
     static let gemma4MTPFamilyAdapter = "gemma4_mtp_v1"
+    /// SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: Inkling 2's DSpark draft
+    /// ships inside the target artifact (`mtp.safetensors`), so it is
+    /// `checkpoint_mtp` too.
+    static let inkling2DSparkFamilyAdapter = "inkling2_dspark_v1"
     static let embeddedMTPFamilyAdapters: Set<String> = [
         embeddedMTPFamilyAdapter, deepseekDSparkFamilyAdapter, gemma4MTPFamilyAdapter,
+        inkling2DSparkFamilyAdapter,
     ]
+    /// SPEC-048 (0.1.130) serial native tuples: adapters whose layout serves
+    /// native MTP one row at a time on the serial path, never through a
+    /// continuous-batch scheduler. Their signed `qualified_slots` is 1 and
+    /// their cache class is `serialNativeCacheClass`.
+    static let serialNativeFamilyAdapters: Set<String> = [inkling2DSparkFamilyAdapter]
+    static let serialNativeCacheClass = "serial_native"
+
+    static func isSerialNativeFamilyAdapter(_ familyAdapter: String) -> Bool {
+        serialNativeFamilyAdapters.contains(familyAdapter)
+    }
 
     /// Implementation ceiling, not a qualification: an increased signed bound
     /// still needs exact parity and R015 qualification at that bound. Existing
@@ -532,7 +547,7 @@ enum NativeMTPAdmissionSidecar {
     static func maxNativeActiveRowsBound(familyAdapter: String) -> Int? {
         switch familyAdapter {
         case embeddedMTPFamilyAdapter: 4
-        case gemma4MTPFamilyAdapter: 1
+        case gemma4MTPFamilyAdapter, inkling2DSparkFamilyAdapter: 1
         default: nil
         }
     }
@@ -540,7 +555,8 @@ enum NativeMTPAdmissionSidecar {
     /// DSpark is qualified for greedy requests only. GLM and Qwen preserve
     /// their signed sampled profiles independently of their artifact layout.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
-        familyAdapter == deepseekDSparkFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+        familyAdapter == deepseekDSparkFamilyAdapter || familyAdapter == inkling2DSparkFamilyAdapter
+            ? [greedyRequestFeatureProfile] : requestFeatureProfiles
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
@@ -1484,7 +1500,7 @@ enum NativeMTPAdmissionSidecar {
             adaptationEnabled: true,
             adaptationMaxDepth: selected.entry.proposalDepth,
             quantization: selected.entry.quantization,
-            cacheClass: "paged_kv",
+            cacheClass: isSerialNativeFamilyAdapter(selected.entry.familyAdapter) ? serialNativeCacheClass : "paged_kv",
             stateClass: selected.entry.mtpStateClass,
             providerRevision: selected.entry.providerRevision,
             upstreamMLXSwiftLMRevision: selected.entry.runtimeRevision,
@@ -1639,7 +1655,13 @@ enum NativeMTPAdmissionSidecar {
               cacheStateClasses.contains(mtpStateClass) else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
         }
-        let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
+        // SPEC-048 (0.1.130): a serial native tuple serves one row.
+        var serialNativeAdapter = false
+        if case .string(let adapter)? = object["mtp_family_adapter"] {
+            serialNativeAdapter = isSerialNativeFamilyAdapter(adapter)
+        }
+        let qualifiedSlots = try requireInt(
+            object, "qualified_slots", path: path, range: serialNativeAdapter ? 1...1 : 2...8)
         let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
         // The adapter ceiling only establishes implementation support. A signed
         // policy still binds the separately qualified native active-row count.
@@ -1669,6 +1691,12 @@ enum NativeMTPAdmissionSidecar {
         if case .string(let adapter)? = object["mtp_family_adapter"], adapter == deepseekDSparkFamilyAdapter {
             guard try requireInt(object, "mtp_head_count", path: path, range: 1...16) == 3,
                   proposalDepth <= 5, quantization.target == "mlx_mxfp4_mxfp8" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).mtp_family_adapter")
+            }
+        }
+        if case .string(let adapter)? = object["mtp_family_adapter"], adapter == inkling2DSparkFamilyAdapter {
+            guard try requireInt(object, "mtp_head_count", path: path, range: 1...16) == 3,
+                  quantization.target == "mlx_oq4e", quantization.mtp == "bf16" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue("\(path).mtp_family_adapter")
             }
         }
@@ -1745,7 +1773,7 @@ enum NativeMTPAdmissionSidecar {
             "padding_rule", "unquantized_exceptions", "per_layer_exceptions",
             "representation_manifest_sha256",
         ], path: path)
-        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8"])
+        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8", "mlx_oq4e"])
         let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8", "uint32"])
         let packedLayout = try requireString(object, "packed_layout", path: path, allowed: ["none", "mlx_array_native_v1"])
         let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "bfloat16", "float16", "float32", "uint8"])
@@ -1808,6 +1836,23 @@ enum NativeMTPAdmissionSidecar {
                 unquantizedExceptions: unquantizedExceptions,
                 perLayerExceptions: perLayerExceptions
             )
+        case "mlx_oq4e":
+            // SPEC-048-R002 (0.1.130) `inkling2_dspark_v1`: the oMLX oQ4e mixed
+            // target (global affine 4-bit group 64 with affine 8-bit and NVFP4
+            // per-module overrides) and the unquantized bfloat16 draft. The
+            // representation digest binds the target's quantization object.
+            guard familyAdapter == inkling2DSparkFamilyAdapter,
+                  packedDataDType == "uint32", packedLayout == "mlx_array_native_v1",
+                  scaleDType == "bfloat16", scaleLayout == "per_block", blockSize == 64,
+                  alignmentBytes == nil, paddingRule == "none",
+                  unquantizedExceptions.isEmpty, perLayerExceptions.isEmpty else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(
+                target: "mlx_oq4e", mtp: "bf16",
+                blockSizeElements: blockSize, representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions, perLayerExceptions: perLayerExceptions
+            )
         case "mlx_mxfp4_mxfp8":
             guard packedDataDType == "uint32", packedLayout == "mlx_array_native_v1",
                   scaleDType == "uint8", scaleLayout == "per_block", blockSize == 32,
@@ -1864,7 +1909,7 @@ enum NativeMTPAdmissionSidecar {
         guard try requireSHA256(object, "artifact_hash", path: path) == artifactHash else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).artifact_hash")
         }
-        guard try requireInt(object, "qualified_slots", path: path, range: 2...8) == entrySlots else {
+        guard try requireInt(object, "qualified_slots", path: path, range: 1...8) == entrySlots else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).qualified_slots")
         }
         _ = try requireSHA256(object, "measurement_sha256", path: path)

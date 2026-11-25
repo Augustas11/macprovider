@@ -42,19 +42,18 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.33.0-macprovider.89 (#2467) on 3.33.0-macprovider.88:
-# 3.33.0-macprovider.88 plus the Inkling 2 Mini text model (inkling2_loop:
-# model file, registry entry, tests and a tiny test fixture) and its
-# Ollama-ported decode kernels (fused attention inputs, residual mix, message
-# controllers, short convolutions, router top-k, ring attention; new
-# MLXLMCommon kernel files and a read-only RotatingKVCache.ringRotation),
-# rebased unchanged from macprovider/2467-ollama-kernels (ea6f545c); no other
-# model's code changes. Measured on this revision (Studio run 20261124T073707Z):
-# 64/64 greedy parity against mlx-vlm on both layouts at 1K and 8K; on the oQ4e
-# weights 45.3/43.9/40.2 decode tok/s at 1K/8K/32K, 156-163% of mlx-vlm, prefill
-# 99-107%.
-SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.89"
-SPEC048_MLX_SWIFT_LM_REVISION = "10584fc0d79cf75b49115f0f42fd7b8c8f30c637"
+# 3.33.0-macprovider.90 (#2487) on 3.33.0-macprovider.89:
+# 3.33.0-macprovider.89 plus the Inkling 2 DSpark draft
+# (Inkling2DSparkDraftModel, loaded from mtp.safetensors and bound to the
+# loaded target), staged and rewound rounds over the target's attention rings
+# and convolution tails (ConvolutionTailCache, CacheListRoundStrategy), target
+# hidden-state taps and exact one-dispatch verify rows; the shared MLXLMCommon
+# changes are opt-in (MTPExactVerifyLimitModel and MTPChunkedPromptHiddenModel
+# target protocols, and round staging of an attention plus convolution-tail
+# CacheList, which it refused before), so no other model's decode path
+# changes; the tag is cut from this revision at merge.
+SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.90"
+SPEC048_MLX_SWIFT_LM_REVISION = "39f7e60d87e0dee5ee87c62e11db4d81afdf223f"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"
