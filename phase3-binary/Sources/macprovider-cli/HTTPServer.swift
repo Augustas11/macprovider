@@ -508,6 +508,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "model_catalog_json_v1",
         "model_catalog_economics_v1",
         "model_catalog_economics.v1",
+        // SPEC-044-R015: `models catalog-economics --model-facts`.
+        "model_catalog_model_facts_v1",
         "model_ready_switch_v1",
         "model_recommendation_check_v1",
         "model_recommendation_apply_switch_v1",

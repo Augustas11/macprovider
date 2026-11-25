@@ -28,6 +28,8 @@ struct MalibuModelCapabilityManifest: Decodable, Sendable {
     static let schemaVersion = "malibu_model_capabilities.v1"
     static let catalogJSON = "model_catalog_json_v1"
     static let catalogEconomics = "model_catalog_economics_v1"
+    /// SPEC-044-R015: `models catalog-economics --model-facts`.
+    static let catalogModelFacts = "model_catalog_model_facts_v1"
     static let readySwitch = "model_ready_switch_v1"
     static let recommendationCheck = "model_recommendation_check_v1"
     static let recommendationAdoption = "model_recommendation_apply_switch_v1"
@@ -475,6 +477,17 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let evaluateAction: Action
         let adoptRecommendationAction: Action
         let cleanupStagingAction: Action
+        /// SPEC-044-R015: present only when Malibu asked for model facts.
+        /// The declared context window in tokens, or nil.
+        let contextLength: Int?
+        /// SPEC-044-R015 capabilities Malibu knows, sorted; values it does
+        /// not know are dropped (display only).
+        let capabilities: [String]
+
+        enum ModelFactsKeys: String, CodingKey, CaseIterable {
+            case contextLength = "context_length"
+            case capabilities
+        }
 
         enum CodingKeys: String, CodingKey, CaseIterable {
             case modelKey = "model_key"
@@ -512,7 +525,26 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         }
 
         init(from decoder: Decoder) throws {
-            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            try rejectUnknownKeys(
+                decoder,
+                allowed: CodingKeys.allCases.map(\.stringValue) + ModelFactsKeys.allCases.map(\.stringValue)
+            )
+            let facts = try decoder.container(keyedBy: ModelFactsKeys.self)
+            switch (facts.contains(.contextLength), facts.contains(.capabilities)) {
+            case (false, false):
+                contextLength = nil
+                capabilities = []
+            case (true, true):
+                let length = try facts.decodeIfPresent(Int.self, forKey: .contextLength)
+                if let length, !MalibuModelFacts.contextLengthRange.contains(length) {
+                    throw DecodingError.dataCorruptedError(forKey: .contextLength, in: facts, debugDescription: "context_length out of range")
+                }
+                contextLength = length
+                capabilities = MalibuModelFacts.knownCapabilities(try facts.decode([String].self, forKey: .capabilities))
+            default:
+                // R015 carries both keys or neither.
+                throw DecodingError.dataCorruptedError(forKey: .capabilities, in: facts, debugDescription: "model facts keys come in pairs")
+            }
             let container = try decoder.container(keyedBy: CodingKeys.self)
             modelKey = try container.decode(String.self, forKey: .modelKey)
             servedModelID = try container.decode(String.self, forKey: .servedModelID)
@@ -2733,6 +2765,13 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    var catalogModelFactsCapabilityAvailable: Bool {
+        MalibuModelCapabilityManifest.checkedIn.supports(
+            MalibuModelCapabilityManifest.catalogModelFacts,
+            peer: peerEvidence
+        )
+    }
+
     /// Retry is offered whenever switching is unavailable, and after a failed
     /// refresh that left the last good projection on screen.
     var catalogProjectionRetryAvailable: Bool {
@@ -3034,6 +3073,14 @@ final class ModelManagementStore: ObservableObject {
         catalogProjectionAcceptedGeneratedAt = nil
     }
 
+    /// SPEC-044-R015: `--model-facts` only when the provider advertises
+    /// it, so an older CLI never sees an option it does not know.
+    nonisolated static func catalogEconomicsArguments(configPath: String, controlSocketPath: String, modelFacts: Bool) -> [String] {
+        ["models", "catalog-economics", "--json"]
+            + (modelFacts ? ["--model-facts"] : [])
+            + ["--config", configPath, "--ctl-socket-path", controlSocketPath]
+    }
+
     private func refreshCatalogEconomics(configuredModel: String?) async {
         // Keep the last good projection on screen while the refresh runs;
         // "Checking…" is only for a first read or after expiry.
@@ -3042,11 +3089,11 @@ final class ModelManagementStore: ObservableObject {
         }
         operation = .loadingList
         do {
-            let result = try await runBoundedListCommand(arguments: [
-                "models", "catalog-economics", "--json",
-                "--config", paths.configFile.path,
-                "--ctl-socket-path", paths.controlSocket.path,
-            ] + byomAdapterSettings.cliArguments)
+            let result = try await runBoundedListCommand(arguments: Self.catalogEconomicsArguments(
+                configPath: paths.configFile.path,
+                controlSocketPath: paths.controlSocket.path,
+                modelFacts: catalogModelFactsCapabilityAvailable
+            ) + byomAdapterSettings.cliArguments)
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             let document = try decodeCatalogEconomics(result.stdout).validated()
             guard acceptCatalogProjection(document) else {
@@ -4338,6 +4385,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     /// its unsigned 32-bit big-endian UTF-8 byte length.
     let canonicalIdentity: [UInt8]
     let warningCodes: [String]
+    /// SPEC-044-R015: the declared context window, from the projection only.
+    let contextLength: Int?
+    /// SPEC-044-R015: capability badges, from the projection only.
+    let capabilities: [MalibuModelCapability]
     var action: Action
     var blockReason: String?
 
@@ -4373,6 +4424,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandWeight = nil
         canonicalIdentity = Self.canonicalIdentity(tag: "catalog", value: row.actionModelID)
         warningCodes = []
+        contextLength = nil
+        capabilities = []
         if row.modelID == currentModelID || (row.state == "warm" && !loadedBesideCurrent) {
             category = .current
             action = .none
@@ -4451,6 +4504,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         )
         evaluateTransaction = Self.evaluateTransaction(from: row.evaluateAction)
         warningCodes = row.warningCodes
+        contextLength = row.contextLength
+        capabilities = MalibuModelFacts.capabilities(row.capabilities)
         demandRank = showsRates ? row.demandRank : nil
         providerShareBPS = showsRates ? row.providerShareBPS : nil
         readyProviderCount = showsRates ? row.readyProviderCount : nil
@@ -4569,6 +4624,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandWeight = nil
         canonicalIdentity = Self.canonicalIdentity(row)
         warningCodes = ["projection_unsupported"]
+        contextLength = nil
+        capabilities = []
         action = .none
         if currentModelID.map({ modelIdentityKey($0) == modelIdentityKey(projectedID) }) == true || row.isCurrent {
             category = .current

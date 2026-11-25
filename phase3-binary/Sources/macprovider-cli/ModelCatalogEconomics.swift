@@ -176,6 +176,9 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let evaluate: Action
         let adoptRecommendation: Action
         let cleanupStaging: Action
+        /// SPEC-044-R015: set only under `--model-facts`; nil leaves both
+        /// keys out, so the default envelope is unchanged.
+        var modelFacts: ModelFactsWire? = nil
 
         enum CodingKeys: String, CodingKey {
             case modelKey = "model_key"
@@ -246,6 +249,16 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try container.encode(evaluate, forKey: .evaluate)
             try container.encode(adoptRecommendation, forKey: .adoptRecommendation)
             try container.encode(cleanupStaging, forKey: .cleanupStaging)
+            if let modelFacts {
+                var facts = encoder.container(keyedBy: ModelFactsCodingKeys.self)
+                try encodeNullable(modelFacts.contextLength, forKey: .contextLength, into: &facts)
+                try facts.encode(modelFacts.capabilities, forKey: .capabilities)
+            }
+        }
+
+        enum ModelFactsCodingKeys: String, CodingKey {
+            case contextLength = "context_length"
+            case capabilities
         }
     }
 

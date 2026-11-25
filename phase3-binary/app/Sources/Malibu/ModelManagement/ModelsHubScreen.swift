@@ -35,11 +35,12 @@ enum ModelsHubPresentation {
     /// Browse lists every signed catalog model; Recommended lists the first
     /// `recommendedLimit` fitting rows in R005 order, then applies the sort.
     static func discoveryRows(for tab: ModelsHubTab, rows: [MalibuModelRow], search: String,
-                              fitsOnly: Bool, sort: DiscoverPresentation.Sort) -> [MalibuModelRow] {
+                              fitsOnly: Bool, sort: DiscoverPresentation.Sort,
+                              capability: MalibuModelCapability? = nil) -> [MalibuModelRow] {
         guard tab == .recommended else {
-            return DiscoverPresentation.visibleRows(rows, search: search, fitsOnly: fitsOnly, sort: sort)
+            return DiscoverPresentation.visibleRows(rows, search: search, fitsOnly: fitsOnly, sort: sort, capability: capability)
         }
-        let top = DiscoverPresentation.filteredRows(rows, search: search, fitsOnly: true)
+        let top = DiscoverPresentation.filteredRows(rows, search: search, fitsOnly: true, capability: capability)
             .prefix(DiscoverPresentation.recommendedLimit)
         return DiscoverPresentation.sorted(Array(top), by: sort)
     }
