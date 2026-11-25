@@ -33,7 +33,7 @@
 #                `serve --no-join` (native MTP off, CB off); if the candidate's serve does not come
 #                up, both models run the mlx-vlm reference instead;
 #  7. scripts/lab/2465/intake_verdict.py: `T2466_VERDICT PASS|FAIL ...` in results/<run>/verdict.md.
-# Knobs: CELLS EXTRA_GB (60) SKIP_BUILD PORT (18466) MTP_BLOCKS (10)
+# Knobs: CELLS PRIOR_RES EXTRA_GB (60) SKIP_BUILD PORT (18466) MTP_BLOCKS (10)
 #        DECODE_CTX (1024,8192,32768) REF_CTX (1024,8192,32768) REF_VENV STALL_S (1800).
 # Every failure prints `BLOCKER:`; the job ends with JOB_PASS (every step ran; the verdict is in
 # T2466_VERDICT) or JOB_FAIL. Watchdogs are stall detectors only, never wall-clock cuts.
@@ -134,6 +134,10 @@ have=$(present_bytes "$SAGE_DIR")
 files=$(find "$SAGE_DIR" -path "$SAGE_DIR/.cache" -prune -o -type f -print | grep -c .)
 log "SNAPSHOT_VERIFIED bytes=$have files=$files (pinned $SAGE_BYTES / $SAGE_FILES)"
 [ "$have" = "$SAGE_BYTES" ] && [ "$files" = "$SAGE_FILES" ] || die "Sage snapshot is not the pinned tree: $have bytes, $files files" 12
+# `hf download --local-dir` leaves .cache/huggingface/ metadata in the snapshot. snapshot_id.py
+# skips it, but the provider's artifact hash (ModelArtifactVerifier.inspectCanonicalArtifact)
+# counts every file, so a serve of this directory failed preflight_hash. Drop it.
+rm -rf -- "${SAGE_DIR:?}/.cache"
 
 # 3. Disk gate for the window itself.
 fg=$(free_gb)
@@ -373,7 +377,17 @@ for c in $CELLS; do
   esac
 done
 
-# 7. Verdict.
+# 7. Verdict. PRIOR_RES names an earlier run's results directory on this Studio; a cell this run
+# skipped is taken from it (AGENTS.md rule 2: reuse evidence when no decode-path line changed;
+# the job's BUILD_DONE decode_path_digest of both runs must match, which the log records).
+if [ -n "${PRIOR_RES:-}" ]; then
+  [ -d "$PRIOR_RES" ] || blocker "PRIOR_RES $PRIOR_RES is not a directory"
+  for c in decode aggregate parity ref mtp quality; do
+    if [ ! -d "$RES/$c" ] && [ -d "$PRIOR_RES/$c" ]; then
+      /bin/cp -R "$PRIOR_RES/$c" "$RES/$c" && log "REUSED $c from $PRIOR_RES"
+    fi
+  done
+fi
 /usr/bin/python3 -I "$TOOLS/intake_verdict.py" --issue 2466 --res "$RES" --incumbent "$INC" --candidate "$CAND" \
   --json "$RES/verdict.json" > "$RES/verdict.md" 2>&1
 vrc=$?
