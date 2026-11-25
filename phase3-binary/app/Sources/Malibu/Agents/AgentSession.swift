@@ -177,9 +177,11 @@ final class AgentSession: ObservableObject {
             try Task.checkCancellation()
             guard remainingTokens > 0 else { throw ChatFailure.limit }
             let budget = min(roundTokens, remainingTokens)
+            var sampling = agent.sampling
+            sampling.maxTokens = budget
             var body: [String: Any] = ["model": capability.model, "messages": messages,
-                "stream": agent.target == .thisMac, "max_tokens": budget,
-                "temperature": min(2, max(0, agent.sampling.temperature)), "top_p": min(1, max(0.01, agent.sampling.topP))]
+                "stream": agent.target == .thisMac]
+            body.merge(sampling.requestFields(maxOutput: budget)) { _, new in new }
             if !tools.isEmpty { body["tools"] = tools; body["tool_choice"] = "auto" }
             guard try JSONSerialization.data(withJSONObject: body).count <= 4 * ChatStore.maxToolOutputBytes else { throw ChatFailure.limit }
             let completion = try await transport.complete(agent, expected: capability, body: body)

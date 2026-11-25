@@ -174,7 +174,7 @@ struct MainShellView: View {
     @ObservedObject private var modelStore = ModelManagementStore.shared
     @StateObject private var terminalWorkspace = TerminalWorkspace()
     @StateObject private var createStore = CreateStore()
-    @StateObject private var chatStore = ChatStore(historyStore: ChatHistoryStore())
+    @StateObject private var chatStore = ChatStore(historyStore: ChatHistoryStore(), settingsStore: ChatSettingsStore())
 
     var body: some View {
         NavigationSplitView {

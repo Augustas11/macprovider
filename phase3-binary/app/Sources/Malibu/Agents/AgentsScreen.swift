@@ -127,6 +127,10 @@ private struct AgentEditor: View {
     @State private var serverArguments = ""
     @State private var serverEnvironment = ""
 
+    private var stopText: Binding<String> {
+        Binding(get: { agent.sampling.stop.joined(separator: ", ") },
+                set: { agent.sampling.stop = AgentSampling.stops(from: $0) })
+    }
     private var canSave: Bool {
         !agent.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && agent.sampling.isValid
             && (agent.target == .thisMac ? localCapability?.guaranteedTools == true : models.contains { $0.id == agent.model })
@@ -167,6 +171,9 @@ private struct AgentEditor: View {
                     Section("Sampling defaults") {
                         TextField("Temperature", value: $agent.sampling.temperature, format: .number)
                         TextField("Top P", value: $agent.sampling.topP, format: .number)
+                        Stepper("Top K: \(agent.sampling.topK)", value: $agent.sampling.topK, in: 0...100)
+                        TextField("Seed", value: $agent.sampling.seed, format: .number)
+                        TextField("Stop sequences, comma separated", text: stopText)
                         Stepper("Output tokens: \(agent.sampling.maxTokens)", value: $agent.sampling.maxTokens, in: 1...2048)
                     }
                     Section("MCP servers") {

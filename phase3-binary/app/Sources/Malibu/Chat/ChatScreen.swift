@@ -8,6 +8,7 @@ struct ChatScreen: View {
     @ObservedObject var store: ChatStore
     @State private var draft = ""
     @State private var showingHistory = false
+    @State private var showingSettings = false
     @State private var pendingDelete: ChatSummary?
     @FocusState private var composerFocused: Bool
 
@@ -42,6 +43,11 @@ struct ChatScreen: View {
                         .accessibilityIdentifier("malibu.chat.model")
                 }
                 Spacer()
+                Button("Settings", systemImage: "slider.horizontal.3") { showingSettings.toggle() }
+                    .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
+                        ChatSettingsForm(settings: $store.settings, save: store.saveSettings)
+                    }
+                    .accessibilityIdentifier("malibu.chat.settings")
                 Button("History", systemImage: "clock.arrow.circlepath") { showingHistory.toggle() }
                     .popover(isPresented: $showingHistory, arrowEdge: .bottom) { historyList }
                     .accessibilityIdentifier("malibu.chat.history")

@@ -412,6 +412,55 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(saved.turns.last?.tokensPerSecond, 30)
     }
 
+    func testSettingsReachTheRequestAndRoundTrip() async throws {
+        let directory = try historyDirectory()
+        var settings = ChatSettings()
+        settings.systemPrompt = "Be brief."
+        settings.presetID = "precise"
+        settings.sampling.temperature = 0.5
+        settings.sampling.topP = 0.25
+        settings.sampling.topK = 40
+        settings.sampling.seed = 7
+        settings.sampling.stop = ["END"]
+        settings.sampling.maxTokens = 1000
+        let stored = ChatSettingsStore(directory: directory)
+        try stored.save(settings)
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, settingsStore: ChatSettingsStore(directory: directory))
+        XCTAssertEqual(store.settings.systemPrompt, "Be brief.")
+        XCTAssertEqual(store.settings.sampling.seed, 7)
+        await store.refresh(port: 9042)
+        store.send("hi")
+        try await waitUntil { transport.pending.count == 1 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        XCTAssertEqual(request["temperature"] as? Double, 0.5)
+        XCTAssertEqual(request["top_p"] as? Double, 0.25)
+        XCTAssertEqual(request["top_k"] as? Int, 40)
+        XCTAssertEqual(request["seed"] as? Int, 7)
+        XCTAssertEqual(request["stop"] as? [String], ["END"])
+        XCTAssertEqual(request["max_tokens"] as? Int, 1000)
+        let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        XCTAssertEqual(messages.first?["content"] as? String, "Be brief.")
+        let permissions = try FileManager.default.attributesOfItem(atPath: stored.file.path)[.posixPermissions] as? Int
+        XCTAssertEqual(permissions, 0o600)
+        let old = try JSONDecoder().decode(AgentSampling.self, from: Data(#"{"temperature":0.5,"topP":0.25,"maxTokens":512}"#.utf8))
+        XCTAssertEqual(old.topK, 0)
+        XCTAssertNil(old.seed)
+        XCTAssertTrue(old.stop.isEmpty)
+        XCTAssertTrue(old.isValid)
+    }
+
+    func testInvalidSamplingDoesNotSend() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        store.settings.sampling.temperature = 9
+        store.send("hi")
+        XCTAssertTrue(transport.bodies.isEmpty)
+        XCTAssertEqual(store.notice, "Check temperature, top-p, top-k, seed and stop.")
+    }
+
     func testContinueIsNotOfferedInAgentMode() async throws {
         let transport = ControlledChatTransport()
         let store = ChatStore(transport: transport)
