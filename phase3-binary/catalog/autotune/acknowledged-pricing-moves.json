@@ -141,6 +141,16 @@
       "model": "hygaard/sage-s2.1-flash-oq4e-mtp",
       "from_row": "default",
       "to_row": "hygaard/sage-s2.1-flash-oq4e-mtp"
+    },
+    {
+      "model": "mlx-community/sage-s2.1-flash-oq4e-mtp",
+      "from_row": "default",
+      "to_row": "hygaard/sage-s2.1-flash-oq4e-mtp"
+    },
+    {
+      "model": "sage-s2.1-flash-oq4e-mtp",
+      "from_row": "default",
+      "to_row": "hygaard/sage-s2.1-flash-oq4e-mtp"
     }
   ]
 }

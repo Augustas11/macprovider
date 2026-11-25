@@ -457,6 +457,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("radixark/daisyrose-27b", "default", "radixark/daisyrose-27b"),
                 ("Hygaard/Sage-S2.1-Flash-oQ4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
                 ("hygaard/sage-s2.1-flash-oq4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
+                ("mlx-community/sage-s2.1-flash-oq4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
+                ("sage-s2.1-flash-oq4e-mtp", "default", "hygaard/sage-s2.1-flash-oq4e-mtp"),
             },
         )
         for bad in (
