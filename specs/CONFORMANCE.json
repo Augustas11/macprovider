@@ -11921,7 +11921,9 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:struct NativeMTPCapability",
         "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:static func sourceLayout"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:static func sourceLayout",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:static func observeInkling2Embedded",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:static func isSerialNativeFamilyAdapter"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPCapabilityRejectsSignedFieldMismatches",
@@ -12077,7 +12079,9 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func runNativeMTPDecodeStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func updateNativeMTPLoadGate",
-        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:func resolvingActiveRows"
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:func resolvingActiveRows",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func serialNativeMTPRoute",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func serialNativeMTPEligible"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows",
@@ -12311,7 +12315,8 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:enum NativeMTPOnDeviceSelfCheck",
         "phase3-binary/Sources/macprovider-cli/NativeMTPTupleReoffer.swift:struct NativeMTPTupleReofferGate",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func restoreParkedNativeMTPTuple",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func parkNativeMTPTupleForReoffer"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func parkNativeMTPTupleForReoffer",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func qualifySerialNativeMTP"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testChallengeBankParsesExactRecordAndPassingExecutionEvaluatesTupleOnlyPass",

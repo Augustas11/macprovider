@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.128
+**Version:** 0.1.130
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.128",
+  "version": "0.1.130",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -430,8 +430,9 @@ do not apply to this adapter; these do:
   target's `mtp[0]` layer, embeddings, and lm_head at each call. It never
   loads the target's weight files a second time. The allowed (adapter,
   `source_layout`) pairs are exactly `(qwen3_5_mtp_v1, separate_artifact)`,
-  `(glm5_next_mtp_v1, checkpoint_mtp)`, and (0.1.110)
-  `(gemma4_mtp_v1, checkpoint_mtp)`. A `glm5_next_mtp_v1` capability is
+  `(glm5_next_mtp_v1, checkpoint_mtp)`, (0.1.110)
+  `(gemma4_mtp_v1, checkpoint_mtp)`, and (0.1.130)
+  `(inkling2_dspark_v1, checkpoint_mtp)`. A `glm5_next_mtp_v1` capability is
   admitted only when all of these hold, else it fails closed with
   `admission_capability_unsupported` and the target serves ordinary decode:
   the loaded target carries its next-N weights; its runtime cache topology
@@ -563,6 +564,71 @@ reads the target and the assistant as one embedded pair with two formats:
    Admission requires the signed `block_size_elements` to equal `G`, the
    signed digest to equal the recomputed one, and both exception arrays to
    be empty (SPEC-023 v0.22.45).
+
+**Inkling 2 DSpark embedded layout (0.1.130, Related: #2487).** A target whose
+`config.json` has top-level `model_type` `inkling2_loop` and
+`architectures == ["Inkling2LoopForConditionalGeneration"]` uses the
+`inkling2_dspark_v1` adapter with `source_layout` `checkpoint_mtp`. The DSpark
+draft ships inside the target artifact as the exact regular file
+`mtp.safetensors` beside the target shards; the signed `mtp` artifact is the
+captured target directory, as for `glm5_next_mtp_v1`. The draft has 3
+prediction layers (`mtp_config.num_hidden_layers`), block size 8
+(`mtp_config.block_size`), Markov rank 256 and target layer taps
+`[5, 23, 41, 48]` on the admitted artifact
+(`mlx-community/Inkling-2-Mini-oQ4e-mtp` @ `3eea0427…`). The drafter source is
+target-embedded: `Inkling2DSparkDraftModel.loadEmbedded` reads
+`mtp.safetensors`, quantizes the draft layers' projections to 8-bit affine
+(group 64) in memory and binds the draft to the loaded target (its Markov
+projection folds the target's LM head), so the target loads once. The draft is
+stateful: its `MTPDrafterState` holds one cache per prediction layer, and the
+provider requires a drafter state layer count of 3. Proposal depth MAY be 1 to
+7 (block size 8) and need not equal the prediction layer count; the signed
+depth stays inside the SPEC-023-R024 `proposal_depth` bound. The signed
+`state_class` is `hybrid_stageable_rewindable` (attention rings plus
+short-convolution tails, staged and rewound per round), the signed
+`cache_class` is `serial_native`, `qualified_slots` is 1 and
+`max_native_active_rows` is 1: this is a serial native tuple (MTP-7, 0.1.130).
+The request profile is greedy only (`native_mtp_greedy_text_v1`). A
+`inkling2_dspark_v1` capability is admitted only when the loaded target is the
+Inkling 2 model (paged-KV family `inkling2`) and `mtp.safetensors` exists in
+the target directory; otherwise admission fails closed with
+`admission_capability_unsupported` and the target serves ordinary decode.
+R004 and R012 apply unchanged; R014 and R015 apply as amended for serial
+native tuples.
+
+**Inkling 2 artifact observation (0.1.130).** For `inkling2_dspark_v1` the
+observer reads the target and the draft as one embedded pair with two formats:
+
+1. *Identity.* `config.json` MUST have top-level `model_type`
+   `inkling2_loop`, `architectures == ["Inkling2LoopForConditionalGeneration"]`,
+   `text_config.model_type` `inkling2_loop_text`, and an `mtp_config` object
+   with `block_size` 8, a positive `markov_rank` and `hidden_size` equal to
+   `text_config.hidden_size`. `mtp_config.num_hidden_layers` is the
+   prediction layer count and MUST be 3.
+2. *Target.* Every `.safetensors` file in the target directory except
+   `mtp.safetensors` is a target shard. The config `quantization` object MUST
+   be the oMLX oQ4e form: global `bits` 4, `group_size` 64, `mode` `affine`,
+   and per-module overrides each exactly `{bits, group_size, mode}` with
+   (`affine`, 4, 64), (`affine`, 8, 64) or (`nvfp4`, 4, 16); no `false`
+   entries. Every packed module (a `.scales` tensor) MUST have a `U32`
+   `.weight`; an affine module MUST have bfloat16 scales and `.biases`, an
+   NVFP4 module `U8` scales and no `.biases`. Every override MUST name a
+   packed module. Target tensors MUST be `BF16`, `F32`, `U32` or `U8`.
+3. *Draft.* `mtp.safetensors` MUST exist exactly once. Every tensor in it MUST
+   be bfloat16 and MUST be `fuse_weight`, `mask_embed`, under `markov_head.`
+   or `norm.`, or under `layers.N.` with `0 <= N < 3`; every layer MUST carry
+   `layers.N.input_layernorm.weight`.
+4. *Representation.* The pair is `mlx_oq4e` (target) and `bf16` (MTP). Its
+   representation manifest is the SPEC-023-R024 canonical JCS form
+   `{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"kind":"mlx_oq4e","quantization_sha256":Q}}`,
+   where `Q` is the SHA-256 of the canonical JCS form
+   `{"bits":4,"group_size":64,"mode":"affine","overrides":{...}}` of the
+   config `quantization` object. The signed release quantization is kind
+   `mlx_oq4e` with `packed_data_dtype` `uint32`, `packed_layout`
+   `mlx_array_native_v1`, `scale_dtype` `bfloat16`, `scale_layout`
+   `per_block`, `block_size_elements` 64, no alignment, padding `none` and
+   empty exception arrays; admission requires the signed digest to equal the
+   recomputed one. The kind is admitted for `inkling2_dspark_v1` only.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
@@ -888,7 +954,9 @@ whose serial baseline is faster. Every other state keeps the row-invariant
 default, including a process whose CB is awaiting its self-check or a canary.
 Such a process builds no continuous-batch scheduler, runs no self-check and
 refuses the native-MTP drafter load, so no batched row, self-check or
-native-MTP round can run in it; the lab commands that batch
+native-MTP round can run in it, except (0.1.130) the drafter of a serial
+native tuple (MTP-7), whose rounds verify one row and never batch target rows:
+a serial-only process MAY load it and run its serial self-check (MTP-16); the lab commands that batch
 (`msb-throughput`, `native-mtp-bench`, `native-mtp-hardware-e2e`,
 `relay-blind-fixture`) exit 2 on a serial-only process. Disk KV and prompt
 snapshots written on one route are a clean miss on the other (SPEC-037
@@ -1688,7 +1756,25 @@ unsupported and the request routes to ordinary decode before output.
 
 Production native MTP MUST integrate through SPEC-038 scheduling and SPEC-039
 paged-KV primitives; it MUST NOT serialize the provider around the serial MTP
-iterator. One scheduler round MAY contain ordinary and native-MTP rows, with
+iterator, except for a serial native tuple (below).
+
+**(0.1.130) Serial native tuples (Related: #2487).** An adapter whose layout
+serves only serially MAY sign a serial native tuple: `cache_class`
+`serial_native`, `qualified_slots` 1 and `max_native_active_rows` 1. Today
+only `inkling2_dspark_v1` (MTP-2) does; its target is not a SPEC-039 paged-KV
+family and serves without continuous batching. For a serial native tuple the
+multi-slot scheduling, packing and window-reservation rules of this section
+and R014 item 5 (SPEC-038 FR-CB15/Gate A5, SPEC-039 FR-PKV13) do not apply.
+The provider serves native and ordinary requests one at a time, as its serial
+path already does: an admitted request whose other active rows reach the
+signed bound of 1 takes ordinary decode (the R007 load gate), and a native
+request runs the native iterator on the serial path from an empty cache with
+the whole prompt. A request that R004 makes ineligible (sampling, tools or a
+grammar, non-text content), or that carries a conversation-cache lease, a
+resumed prefix or carried model state, takes ordinary serial decode. A native
+iterator that cannot start falls back to ordinary decode on a fresh cache
+before any output. Native rounds are counted in the R010 status counters.
+Every other adapter keeps the rules above unchanged. One scheduler round MAY contain ordinary and native-MTP rows, with
 different row offsets, proposal depths, accepted-prefix lengths, and terminal
 outcomes. Packing and unpacking MUST use explicit row/position maps and MUST
 NOT assume lockstep offsets or equal spans.
@@ -2426,7 +2512,8 @@ For each qualified tuple, production enablement requires all of the following:
 3. Capability/manifest negatives, exact greedy parity, cache/state rollback,
    termination, mixed-row, capacity, fairness, and accounting fixtures pass.
 4. Independent MXFP8 qualification passes when the tuple uses MXFP8.
-5. SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 pass for the same tuple, and
+5. SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 pass for the same tuple
+   (not for a serial native tuple, MTP-7 0.1.130), and
    SPEC-048-R015 passes on every advertised RAM/slot tuple. A
    same-architecture variant inherits its donor's R015 by the MTP-13 variant
    rule (0.1.81) and needs only its MTP-16 on-device pass.
@@ -2521,6 +2608,13 @@ benchmark policy. R015 reruns require the named changed decode-path line and
 existing evidence specified by MTP-13.
 
 ### MTP-15 — preregistered Studio and tier benchmark gate (SPEC-048-R015)
+
+**(0.1.130) Serial native tuples.** For a serial native tuple (MTP-7) the R015
+cells are native versus serial ordinary decode at one row on the same build,
+weights and prompts: output tokens/s, acceptance, TTFT and exact token parity.
+No multi-row or continuous-batching cell applies. For `inkling2_dspark_v1`
+the lab measurement on the M3 Ultra oQ4e artifact was 8/8 prompts token
+identical at 2.08x decode tokens/s (fork `macprovider/2487-inkling2-dspark`).
 
 For DeepSeek V4 DSpark, the next hardware proof includes the campaign's
 existing fidelity Window 1/2 cells, CB throughput and exact parity at 1/2/4/8
@@ -2967,6 +3061,14 @@ credentials, private paths, and operator secrets MUST NOT be committed.
 
 ### MTP-16 — native-path self-test and coordinator canary (SPEC-048-R016)
 
+**(0.1.130) Serial native tuples.** For a serial native tuple (MTP-7) the
+self-check reference is serial ordinary decode in the same process: the
+challenge and the workload probe points run through the native iterator and
+through ordinary serial decode from fresh serve caches at greedy, best of two
+runs each, and the same identical-token, speedup and prompt-ceiling rules
+below decide. No scheduler runs; the verdict publishes the tuple exactly as
+the paged path does.
+
 Before locally enabling a tuple, and after artifact/sidecar/runtime/cache-adapter
 change, served-generation reset, or restart without continuity proof, the
 provider MUST run `native_mtp_selftest_v1` in isolated no-join mode. It forces
@@ -3222,6 +3324,17 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.130 (2026-11-25, Related: #2487)** — MTP-2: the
+  `(inkling2_dspark_v1, checkpoint_mtp)` pair, its embedded layout (DSpark
+  draft in `mtp.safetensors`, 3 prediction layers, block 8, depth 1 to 7,
+  `hybrid_stageable_rewindable`) and its artifact observation (oQ4e target
+  kind `mlx_oq4e`, bf16 draft). MTP-7: serial native tuples (`serial_native`,
+  one qualified slot, one native row) for adapters that serve only serially;
+  R007's multi-slot rules and R014 item 5 do not apply to them. A serial-only
+  process MAY load a serial native tuple's drafter. R015 cells and the R016
+  self-check reference for a serial tuple are serial ordinary decode at one
+  row in the same process.
 
 - **0.1.128 (2026-11-25, Related: #2496)** — R016: a self-check whose only
   failing point is the longest one, failed on speed with equal tokens, admits
