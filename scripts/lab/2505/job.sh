@@ -75,7 +75,10 @@ if has fork; then
   if [ ! -d "$R/.git" ]; then
     git clone -q https://github.com/Augustas11/mlx-swift-lm.git "$R" || die "fork clone failed" 93
   fi
-  git -C "$R" fetch -q origin macprovider/2505-inkling2-cb || die "fork fetch failed" 93
+  # The exact commit (GitHub serves any pushed full SHA), then the campaign branch.
+  git -C "$R" fetch -q origin "$FORK_REF" 2>/dev/null \
+    || git -C "$R" fetch -q origin macprovider/2505-inkling2-cb-rebase \
+    || die "fork fetch failed" 93
   git -C "$R" checkout -q --detach "$FORK_REF" || die "cannot check out $FORK_REF" 93
   say "FORK $(git -C "$R" rev-parse --short HEAD): $(git -C "$R" log -1 --format=%s)"
   for f in tiny-oq tiny-source; do

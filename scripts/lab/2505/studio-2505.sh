@@ -12,7 +12,7 @@
 #
 # Usage: studio-2505.sh [--dry-run]   env: STEPS (job default "fork provider parity throughput"),
 #   BIN (Studio path of an earlier lab-harness release directory, for steps without a rebuild),
-#   FORK_REF (default: the head of the fork branch macprovider/2505-inkling2-cb).
+#   FORK_REF (default: the head of the fork branch macprovider/2505-inkling2-cb-rebase).
 # Estimated length (estimate, not measured): cold fork build ~15 min, provider debug + release
 # builds ~30 min, parity 2 cells and throughput 4 cells ~20 min.
 set -u
@@ -41,7 +41,7 @@ done
 # The job ships `git archive` of the committed HEAD; nothing needs to be pushed.
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 [ -z "$(git -C "$REPO" status --porcelain -- "${SHIP[@]}")" ] || { blocker "uncommitted changes under ${SHIP[*]}; commit and push first"; final; exit 2; }
-FORK_REF=${FORK_REF:-$(git ls-remote https://github.com/Augustas11/mlx-swift-lm.git refs/heads/macprovider/2505-inkling2-cb | cut -f1)}
+FORK_REF=${FORK_REF:-$(git ls-remote https://github.com/Augustas11/mlx-swift-lm.git refs/heads/macprovider/2505-inkling2-cb-rebase | cut -f1)}
 echo "$FORK_REF" | grep -Eq '^[0-9a-f]{7,40}$' || { blocker "no fork ref"; final; exit 2; }
 STEPS=${STEPS:-fork provider parity throughput}
 # BIN: an earlier run's lab-harness release directory on the Studio (steps without a rebuild).
