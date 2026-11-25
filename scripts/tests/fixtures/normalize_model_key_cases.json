@@ -130,6 +130,9 @@
     {"input": "daisyrose-27b", "expected": "radixark/daisyrose-27b"},
     {"input": "radixark/daisyrose-27b", "expected": "radixark/daisyrose-27b"},
     {"input": "RadixArk/DaisyRose-27B", "expected": "radixark/daisyrose-27b"},
+    {"input": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp", "expected": "hygaard/sage-s2.1-flash-oq4e-mtp"},
+    {"input": "sage-s2.1-flash-oq4e-mtp", "expected": "hygaard/sage-s2.1-flash-oq4e-mtp"},
+    {"input": "hygaard/sage-s2.1-flash-oq4e-mtp", "expected": "hygaard/sage-s2.1-flash-oq4e-mtp"},
     {"input": "google/glm-5.3-flash", "expected": "glm-5.3-flash"},
     {"input": "z-ai/glm-4.7-flash", "expected": "z-ai/glm-4.7-flash"},
     {"input": "", "expected": ""}
