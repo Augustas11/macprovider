@@ -11946,7 +11946,11 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testDeepseekDSparkMixedMXObservationAndManifest",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDeepseekDSparkFamilyUsesEmbeddedGreedyBlockDrafter",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsDeepseekThreeStagesAtIndependentProposalDepth"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsDeepseekThreeStagesAtIndependentProposalDepth",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPInkling2ObservationTests.swift:testEmbeddedObservationAcceptsTheOQ4eTargetAndABF16Draft",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPInkling2ObservationTests.swift:testEmbeddedObservationRejectsTensorsOutsideTheAdmittedLayout",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testInkling2ObservationMustMatchSignedCapability",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAdmitsTheInkling2SerialNativeTuple"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -12087,7 +12091,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRuntimeAdmissionDowngradesAtSignedActiveRowBound"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRuntimeAdmissionDowngradesAtSignedActiveRowBound",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testInkling2SerialNativeMTPAdmissionGate",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testSerialNativeMTPEligibility",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testSerialOnlyRefusalAppliesToEveryAdapterButSerialNativeTuples",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsInkling2TuplesOutsideTheSerialShape"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
