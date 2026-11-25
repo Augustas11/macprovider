@@ -155,7 +155,9 @@ struct ChatScreen: View {
                         .accessibilityIdentifier("malibu.chat.send")
                 }
             }
-            Text(draft.utf8.count > ChatStore.maxPromptBytes ? "Message is too long. Keep it under 8 KB." : "Return to send · Shift-Return for a new line · Ephemeral conversation")
+            Text(draft.utf8.count > ChatStore.maxPromptBytes ? "Message is too long. Keep it under 8 KB."
+                 : store.agentMode && store.folderName == nil ? "Choose a folder first: Agent mode reads only the folder you pick."
+                 : "Return to send · Shift-Return for a new line · Ephemeral conversation")
                 .font(.caption2).foregroundStyle(.secondary)
         }.padding(20)
     }
@@ -164,7 +166,6 @@ struct ChatScreen: View {
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && draft.utf8.count <= ChatStore.maxPromptBytes
             && store.capability != nil && !store.isChecking
-            && !(store.agentMode && store.folderName == nil)
     }
     private func send() { store.send(draft); if store.isRunning { draft = "" }; composerFocused = true }
     private func chooseFolder() {
