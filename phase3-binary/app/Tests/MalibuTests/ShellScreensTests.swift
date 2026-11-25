@@ -213,10 +213,10 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertFalse(DiscoverPresentation.showsRecommendation(nil, rows: [catalog]))
 
         // The callout follows the list's search and fit filter (SPEC-025-R006).
-        let searchedAway = DiscoverPresentation.visibleRows([catalog], search: "zzz", fitsOnly: false, sort: .catalog)
+        let searchedAway = DiscoverPresentation.visibleRows([catalog], search: "zzz", fitsOnly: false, sort: .bestMatch)
         XCTAssertFalse(DiscoverPresentation.showsRecommendation("catalog-model", rows: searchedAway))
         let tooBig = try Self.row(key: "too-big", fit: "does_not_fit", weightsLocal: true, estimatedGB: 400)
-        let fitting = DiscoverPresentation.visibleRows([catalog, tooBig], search: "", fitsOnly: true, sort: .catalog)
+        let fitting = DiscoverPresentation.visibleRows([catalog, tooBig], search: "", fitsOnly: true, sort: .bestMatch)
         XCTAssertFalse(DiscoverPresentation.showsRecommendation("too-big", rows: fitting))
     }
 
@@ -229,23 +229,114 @@ final class ShellScreensTests: XCTestCase {
         func ids(_ fitsOnly: Bool, _ sort: DiscoverPresentation.Sort, _ search: String = "") -> [String] {
             DiscoverPresentation.visibleRows(rows, search: search, fitsOnly: fitsOnly, sort: sort).map(\.id)
         }
-        XCTAssertEqual(ids(true, .catalog), ["a", "b"])
-        XCTAssertEqual(ids(false, .catalog), ["a", "b", "c"])
+        XCTAssertEqual(ids(true, .bestMatch), ["a", "b"])
+        XCTAssertEqual(ids(false, .bestMatch), ["a", "b", "c"])
         XCTAssertEqual(ids(false, .demand), ["c", "a", "b"], "equal ranks keep catalog order")
         XCTAssertEqual(ids(false, .rate), ["c", "b", "a"])
-        XCTAssertEqual(ids(false, .size), ["b", "a", "c"])
-        XCTAssertEqual(ids(false, .catalog, "B"), ["b"])
+        XCTAssertEqual(ids(false, .largestFits), ["a", "b", "c"], "the largest fitting row first; a row that does not fit last")
+        XCTAssertEqual(ids(true, .largestFits), ["a", "b"])
+        XCTAssertEqual(ids(false, .bestMatch, "B"), ["b"])
+    }
+
+    func testDiscoverSortOptionsAreOwnerWordsAndStableOverR005() throws {
+        XCTAssertEqual(DiscoverPresentation.Sort.allCases.map(\.title), ["Best match", "Demand", "Rate", "Largest that fits"])
+        let rows = try [
+            Self.row(key: "big-no-fit", fit: "does_not_fit", weightsLocal: true, estimatedGB: 90, completion: 0.2, demandRank: 2),
+            Self.row(key: "small-1", weightsLocal: true, estimatedGB: 4, completion: 0.3, demandRank: 2),
+            Self.row(key: "mid", weightsLocal: true, estimatedGB: 12, completion: 0.3, demandRank: 2),
+            Self.row(key: "small-2", weightsLocal: true, estimatedGB: 4, completion: 0.3, demandRank: 2),
+        ]
+        XCTAssertEqual(DiscoverPresentation.sorted(rows, by: .bestMatch).map(\.id), rows.map(\.id))
+        XCTAssertEqual(DiscoverPresentation.sorted(rows, by: .largestFits).map(\.id), ["mid", "small-1", "small-2", "big-no-fit"],
+                       "estimated_gb descending among fitting rows, ties in R005 order, non-fitting last")
+        XCTAssertEqual(DiscoverPresentation.sorted(rows, by: .rate).map(\.id), ["small-1", "mid", "small-2", "big-no-fit"])
+        XCTAssertEqual(DiscoverPresentation.sorted(rows, by: .demand).map(\.id), rows.map(\.id), "equal ranks keep R005 order")
+    }
+
+    func testDiscoverRowDemandLabels() {
+        XCTAssertEqual(DiscoverPresentation.demandLabel(1), "High demand")
+        XCTAssertEqual(DiscoverPresentation.demandLabel(5), "High demand")
+        XCTAssertEqual(DiscoverPresentation.demandLabel(6), "Steady demand")
+        XCTAssertEqual(DiscoverPresentation.demandLabel(20), "Steady demand")
+        XCTAssertNil(DiscoverPresentation.demandLabel(21))
+        XCTAssertNil(DiscoverPresentation.demandLabel(34))
+        XCTAssertNil(DiscoverPresentation.demandLabel(0))
+        XCTAssertNil(DiscoverPresentation.demandLabel(nil))
+    }
+
+    func testDiscoverRowsAreTwoLinesWithBadges() throws {
+        let local = try Self.row(key: "local", weightsLocal: true, estimatedGB: 4, demandRank: 34, switchable: true)
+        XCTAssertEqual(DiscoverPresentation.rowBadge(local, hostMemoryGB: 32), "On this Mac")
+        XCTAssertEqual(DiscoverPresentation.rowMeta(local, hostMemoryGB: 32), d("uses 4§0 GB of 32 GB · network rate $0§36 / 1M out"),
+                       "rank 34 shows no demand label in a row")
+        XCTAssertEqual(DiscoverPresentation.rowBadge(try Self.row(key: "c", isCurrent: true), hostMemoryGB: 32), "Serving")
+        let tight = try Self.catalogOnlyRow(key: "tight", modelID: "vendor/tight")
+        XCTAssertEqual(DiscoverPresentation.rowBadge(tight, hostMemoryGB: 16), "Tight", "16 GB of weights on a 16 GB Mac")
+        XCTAssertNil(DiscoverPresentation.rowBadge(tight, hostMemoryGB: 32))
+        let tooBig = try Self.catalogOnlyRow(key: "big", modelID: "vendor/big", fit: "does_not_fit")
+        XCTAssertEqual(DiscoverPresentation.rowMeta(tooBig, hostMemoryGB: 32), d("won't fit · network rate $0§36 / 1M out · High demand"))
+        XCTAssertFalse(DiscoverPresentation.rowMeta(local, hostMemoryGB: 32).contains("Fits"))
+        XCTAssertFalse(DiscoverPresentation.rowMeta(local, hostMemoryGB: 32).contains(ModelsPresentation.name(local)), "the repo id is not a row line")
+        XCTAssertEqual(DiscoverPresentation.rowAccessibilityLabel(tooBig, hostMemoryGB: 32).contains("This Mac is not earning it yet."), true,
+                       "SPEC-044-R014: the caveat travels in the row's accessibility label")
+    }
+
+    func testBestPickPrefersLocalWithinTenPercentAndCapsMemory() throws {
+        // Local: 0.33 × 0.65 = 0.2145. Download: 0.38 × 0.6 = 0.228; the local row is within 10%.
+        let local = try Self.row(key: "local", weightsLocal: true, estimatedGB: 4, completion: 0.33, switchable: true)
+        let close = try Self.catalogOnlyRow(key: "close", modelID: "vendor/close", downloadBytes: 4_600_000_000, completion: 0.38)
+        XCTAssertEqual(DiscoverPresentation.bestPick([close, local], hostMemoryGB: 32)?.id, "local")
+        // Download: 0.50 × 0.6 = 0.30; the local row is 72% of it, so the download wins.
+        let better = try Self.catalogOnlyRow(key: "better", modelID: "vendor/better", downloadBytes: 4_600_000_000, completion: 0.50)
+        XCTAssertEqual(DiscoverPresentation.bestPick([better, local], hostMemoryGB: 32)?.id, "better")
+        XCTAssertEqual(DiscoverPresentation.bestPick([better, local], hostMemoryGB: 32, recommendedID: "LOCAL")?.id, "local",
+                       "a store recommendation that names a candidate wins")
+        XCTAssertEqual(DiscoverPresentation.bestPick([better, local], hostMemoryGB: 32, recommendedID: "elsewhere")?.id, "better")
+
+        // 30 GB on a 32 GB Mac is above 0.8 × RAM; on a 40 GB Mac it is not.
+        let big = try Self.row(key: "big", weightsLocal: true, estimatedGB: 30, completion: 0.9, switchable: true)
+        let small = try Self.row(key: "small", weightsLocal: true, estimatedGB: 4, completion: 0.1, switchable: true)
+        XCTAssertEqual(DiscoverPresentation.bestPick([big, small], hostMemoryGB: 32)?.id, "small")
+        XCTAssertEqual(DiscoverPresentation.bestPick([big, small], hostMemoryGB: 40)?.id, "big")
+        XCTAssertEqual(DiscoverPresentation.bestPick([big, small], hostMemoryGB: 32, recommendedID: "big")?.id, "small",
+                       "a recommendation outside the candidates is ignored")
+    }
+
+    func testBestPickIsNilWithoutACandidate() throws {
+        XCTAssertNil(DiscoverPresentation.bestPick([], hostMemoryGB: 32))
+        let noAction = try Self.row(key: "catalog", weightsLocal: true)
+        XCTAssertEqual(noAction.action, MalibuModelRow.Action.none)
+        let noFit = try Self.row(key: "big", fit: "does_not_fit", weightsLocal: true, switchable: true)
+        let noRate = try Self.catalogOnlyRow(key: "x/y", modelID: "x/y", downloadBytes: 4_600_000_000, catalogReference: false)
+        XCTAssertEqual(noRate.action, .download)
+        XCTAssertNil(noRate.providerCompletionPayoutUSDPerMillionTokens)
+        let byom = try Self.row(key: "local-candidate", switchable: true, economicsState: "blocked", catalogPermitted: false)
+        XCTAssertNil(DiscoverPresentation.bestPick([noAction, noFit, noRate, byom], hostMemoryGB: 32))
+    }
+
+    func testBestPickCardCopyMakesNoIncomeClaim() throws {
+        let pick = try Self.catalogOnlyRow(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000)
+        let lines = DiscoverPresentation.bestPickLines(pick, hostMemoryGB: 32)
+        XCTAssertEqual(lines, ["Best for this Mac", "Qwen3 8B · 4-bit", d("uses 4§6 GB of 32 GB · network rate $0§36 / 1M out · High demand")])
+        let text = lines.joined(separator: " ").lowercased()
+        for word in ["earns", "higher-paying", "income"] { XCTAssertFalse(text.contains(word), word) }
+        assertNoForbiddenCopy(lines)
+        XCTAssertEqual(DiscoverPresentation.primaryAction(pick), .download, "the card reuses the row's gated action")
     }
 
     func testDiscoverDetailShowsRatesShareDemandAndProvidersOnly() throws {
         let row = try Self.row(key: "qwen3-8b", weightsLocal: false, runtimeState: "needs_preparation", estimatedGB: 4)
-        let lines = DiscoverPresentation.detailLines(row, hostMemoryGB: 32)
-        XCTAssertEqual(lines[0], d("About 4§0 GB of weights · fits this Mac's 32 GB"))
-        XCTAssertTrue(lines.contains("Provider share: 90% of the catalog rate."))
-        XCTAssertTrue(lines.contains("Network demand rank 7."))
-        XCTAssertTrue(lines.contains("4 providers are ready to serve it."))
-        XCTAssertTrue(lines.contains("Weights are not on this Mac."))
-        XCTAssertTrue(lines.contains { $0.hasPrefix(d("Provider share rate: completion $0§36 per 1M tokens")) })
+        let facts = DiscoverPresentation.detailFacts(row, hostMemoryGB: 32)
+        let lines = facts.map(DiscoverPresentation.factLine)
+        XCTAssertEqual(Array(facts.filter { !$0.label.isEmpty }.map(\.label)), ["Memory", "Your share", "Rate", "Demand", "Status"])
+        XCTAssertEqual(lines[0], d("Memory: 4§0 GB of 32 GB"))
+        XCTAssertTrue(lines.contains("Your share: 90% of the catalog rate"))
+        XCTAssertTrue(lines.contains(d("Rate: $0§36 out · $0§18 in per 1M tokens")))
+        XCTAssertTrue(lines.contains("Demand: rank 7 · 4 providers ready"), "R013 keeps the exact demand rank in the detail pane")
+        XCTAssertTrue(lines.contains("Status: Not on this Mac"))
+        let rate = try XCTUnwrap(facts.firstIndex { $0.label == "Rate" })
+        XCTAssertEqual(facts[rate + 1], .init(label: "", value: try XCTUnwrap(row.nonEarningDisclosure), secondary: true),
+                       "the caveat sits next to the rate, in secondary colour")
         assertNoForbiddenCopy(lines)
         XCTAssertEqual(DiscoverPresentation.primaryAction(row), DiscoverPresentation.PrimaryAction.none,
                        "SPEC-044-R006: no Download without a typed CLI transaction")
@@ -291,12 +382,12 @@ final class ShellScreensTests: XCTestCase {
         let rows = [download, noDownload, tooBig, byom]
 
         XCTAssertEqual(DiscoverPresentation.catalogRows(rows).map(\.id), ["qwen/qwen3-8b", "meta/llama-3.2-3b", "meta/llama-3.3-70b"])
-        let visible = DiscoverPresentation.visibleRows(rows, search: "", fitsOnly: true, sort: .catalog)
+        let visible = DiscoverPresentation.visibleRows(rows, search: "", fitsOnly: true, sort: .bestMatch)
         XCTAssertEqual(visible.map(\.id), ["qwen/qwen3-8b", "meta/llama-3.2-3b"])
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: nil)?.id, "qwen/qwen3-8b", "the first row is selected")
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "meta/llama-3.2-3b")?.id, "meta/llama-3.2-3b")
         XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "gone")?.id, "qwen/qwen3-8b")
-        XCTAssertEqual(DiscoverPresentation.listSubtitle(download), d("4§6 GB · Fits · not downloaded · network rate $0§36 / 1M out · demand #3"))
+        XCTAssertEqual(DiscoverPresentation.rowMeta(download, hostMemoryGB: 32), d("uses 4§6 GB of 32 GB · network rate $0§36 / 1M out · High demand"))
 
         XCTAssertEqual(download.action, .download)
         XCTAssertEqual(download.category, .needsPreparation)
@@ -309,10 +400,13 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertEqual(ModelsPresentation.name(download), "mlx-community/Qwen3-8B-4bit")
 
         // The catalog rate is shown with the not-earning caveat, never as earning.
-        let lines = DiscoverPresentation.detailLines(download, hostMemoryGB: 32)
-        XCTAssertTrue(lines.contains { $0.hasPrefix(d("Provider share rate: completion $0§36 per 1M tokens")) })
+        let lines = DiscoverPresentation.detailFacts(download, hostMemoryGB: 32).map(DiscoverPresentation.factLine)
+        XCTAssertTrue(lines.contains(d("Rate: $0§36 out · $0§18 in per 1M tokens")))
         XCTAssertTrue(lines.contains("Network catalog rate. This Mac is not earning it yet."))
-        XCTAssertTrue(lines.contains("Not earning on this Mac — the model isn't downloaded"))
+        XCTAssertTrue(lines.contains("Status: Not on this Mac · not earning yet"))
+        XCTAssertFalse(lines.contains("Not earning on this Mac — the model isn't downloaded"), "the status line already says it")
+        XCTAssertFalse(lines.contains { $0.contains("Weights are") || $0.contains("Download it to serve it here") }, "no repeated local-state lines")
+        XCTAssertFalse(lines.contains(ModelsPresentation.downloadConfirmationMessage(download)), "the confirmation dialog carries the download explainer")
         XCTAssertFalse(lines.contains { $0.contains("Eligible to earn") })
         XCTAssertEqual(download.economicsAccessibilityLabel?.contains("This Mac is not earning it yet."), true)
         XCTAssertFalse(download.canProposeToPool)
@@ -714,9 +808,12 @@ final class ShellScreensTests: XCTestCase {
         modelID: String,
         fit: String = "fits",
         downloadBytes: Int64? = nil,
-        catalogReference: Bool = true
+        catalogReference: Bool = true,
+        completion: Double = 0.36,
+        demandRank: Int = 3
     ) throws -> MalibuModelRow {
-        let json = catalogOnlyRowJSON(key: key, modelID: modelID, fit: fit, downloadBytes: downloadBytes, catalogReference: catalogReference)
+        let json = catalogOnlyRowJSON(key: key, modelID: modelID, fit: fit, downloadBytes: downloadBytes, catalogReference: catalogReference,
+                                      completion: completion, demandRank: demandRank)
         let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(projectionJSON(rows: [json]).utf8))
         let rows = try document.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true)
         let row = try XCTUnwrap(rows.first)

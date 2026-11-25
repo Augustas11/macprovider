@@ -25,12 +25,27 @@ final class ModelsHubTests: XCTestCase {
         let large = try ShellScreensTests.catalogOnlyRow(key: "large", modelID: "vendor/large", fit: "does_not_fit")
         for filter in [false, true] {
             XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .recommended, rows: [fitting, large],
-                search: "", fitsOnly: filter, sort: .catalog).map(\.id), [fitting.id])
+                search: "", fitsOnly: filter, sort: .bestMatch).map(\.id), [fitting.id])
         }
         XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .browse, rows: [fitting, large],
-            search: "", fitsOnly: false, sort: .catalog).map(\.id), [fitting.id, large.id])
+            search: "", fitsOnly: false, sort: .bestMatch).map(\.id), [fitting.id, large.id])
         XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .browse, rows: [fitting, large],
-            search: "", fitsOnly: true, sort: .catalog).map(\.id), [fitting.id])
+            search: "", fitsOnly: true, sort: .bestMatch).map(\.id), [fitting.id])
+    }
+
+    func testRecommendedShowsTheTopFiveFittingRowsAndBrowseShowsAll() throws {
+        let rows = try (1...7).map { index in
+            try ShellScreensTests.row(key: "model-\(index)", weightsLocal: true, completion: Double(index) / 10)
+        }
+        let large = try ShellScreensTests.row(key: "large", fit: "does_not_fit", weightsLocal: true)
+        let all = rows + [large]
+        XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .recommended, rows: all, search: "", fitsOnly: false, sort: .bestMatch).map(\.id),
+                       ["model-1", "model-2", "model-3", "model-4", "model-5"], "the first five fitting rows in R005 order")
+        XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .recommended, rows: all, search: "", fitsOnly: false, sort: .rate).map(\.id),
+                       ["model-5", "model-4", "model-3", "model-2", "model-1"], "a sort reorders the same five rows")
+        XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .browse, rows: all, search: "", fitsOnly: false, sort: .bestMatch).count, 8,
+                       "Browse still lists every signed catalog model")
+        XCTAssertEqual(DiscoverPresentation.recommendedLimit, 5)
     }
 
     func testRecentDownloadsExcludeSwitchesAndKeepNewestFirst() {

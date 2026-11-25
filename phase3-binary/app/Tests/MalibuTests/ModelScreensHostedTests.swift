@@ -50,7 +50,7 @@ final class ModelScreensHostedTests: XCTestCase {
             ModelsPresentation.sections(store.rows).map(\.title),
             ["Current", "Ready to switch", "Not downloaded"]
         )
-        XCTAssertEqual(DiscoverPresentation.visibleRows(store.rows, search: "", fitsOnly: true, sort: .catalog).count, 5)
+        XCTAssertEqual(DiscoverPresentation.visibleRows(store.rows, search: "", fitsOnly: true, sort: .bestMatch).count, 5)
 
         let agent = MalibuAgent(initialSnapshot: .empty)
         let artifacts = URL(fileURLWithPath: "/tmp/malibu-dashboard-e2e", isDirectory: true)
