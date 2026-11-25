@@ -1838,9 +1838,11 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
     func testServingDecodeRunsThroughBlockingInferenceExecutor() throws {
         let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
-        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+(?:(?!blockingInferenceExecutor)[\s\S]){0,1200}?BlockingGenerateResult\(generate\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
+        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+(?:(?!blockingInferenceExecutor)[\s\S]){0,1200}?BlockingGenerateResult\((?:Self\.runSerialDecode|generate)\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
         // The closure may bracket the decode in a GPU turn (SPEC-001-R018) before
-        // it calls `generate`; the call must still sit inside the executor closure.
+        // it calls `generate` (or `runSerialDecode`, which runs the same loop over
+        // an ordinary or serial native iterator); the call must still sit inside
+        // the executor closure.
         let matches = try NSRegularExpression(pattern: pattern).numberOfMatches(
             in: source,
             range: NSRange(source.startIndex..., in: source)

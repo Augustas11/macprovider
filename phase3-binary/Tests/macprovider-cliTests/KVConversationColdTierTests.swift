@@ -888,8 +888,10 @@ final class KVConversationColdTierTests: XCTestCase {
         // retaining the VLM position state produced by serial prefill. A leased
         // cache's iterator never quantizes it (#965). The site may adjust the
         // configuration's prefill step and take a GPU turn (SPEC-001-R018)
-        // before it builds the iterator; no other iterator may sit in between.
-        let wired = #"(?:let|var) generation = Self\.serveGenerationConfiguration\(\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil,\s+cache: kvCache, leasedConversationCache: lease != nil\),\s+completePromptTokenIDs: parameters\.repetitionPenalty == nil \? \[\] : promptTokenIds\.map\(Int\.init\)\)\s+(?:(?!TokenIterator\()[\s\S]){0,1600}?let iterator = try TokenIterator\(\s+input: iteratorInput, model: generationContext\.model, cache: kvCache, state: iteratorState,\s+parameters: generation\.parameters, components: grammarConstraint\.map \{ constraint in\s+generation\.components\.appendingLogitProcessor \{ GrammarLogitProcessor\(constraint: constraint\) \}\s+\} \?\? generation\.components\)"#
+        // before it builds the iterator; no other iterator may sit in between,
+        // except (SPEC-048 0.1.130) the serial native MTP iterator, which takes
+        // the same `generation.parameters` and cache.
+        let wired = #"(?:let|var) generation = Self\.serveGenerationConfiguration\(\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil,\s+cache: kvCache, leasedConversationCache: lease != nil\),\s+completePromptTokenIDs: parameters\.repetitionPenalty == nil \? \[\] : promptTokenIds\.map\(Int\.init\)\)\s+(?:(?!(?<!Speculative)TokenIterator\()[\s\S]){0,6000}?(?:let iterator = try |iterator = \.ordinary\(try )TokenIterator\(\s+input: iteratorInput, model: generationContext\.model, cache: kvCache, state: iteratorState,\s+parameters: generation\.parameters, components: grammarConstraint\.map \{ constraint in\s+generation\.components\.appendingLogitProcessor \{ GrammarLogitProcessor\(constraint: constraint\) \}\s+\} \?\? generation\.components\)"#
         let matches = try NSRegularExpression(pattern: wired).numberOfMatches(
             in: source, range: NSRange(source.startIndex..., in: source))
         XCTAssertEqual(matches, 2, "non-streaming and streaming serial serve must use serveIteratorParameters")
