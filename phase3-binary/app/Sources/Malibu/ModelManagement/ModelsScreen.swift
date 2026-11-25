@@ -35,6 +35,14 @@ enum ModelsPresentation {
         }
     }
 
+    /// The "On this Mac" tab lists the models whose weights are on this Mac,
+    /// plus the one it serves. Catalog-only rows belong to Recommended and
+    /// Browse; listing them here buried the local models under "Not
+    /// downloaded" (and under "Blocked" while the provider status is stale).
+    static func onThisMacRows(_ rows: [MalibuModelRow]) -> [MalibuModelRow] {
+        rows.filter { $0.weightsPresentLocally || $0.category == .current }
+    }
+
     static func matches(_ row: MalibuModelRow, _ needle: String) -> Bool {
         [row.displayID, row.catalogVerifiedModelKey, row.id, title(row)]
             .compactMap { $0 }
@@ -431,12 +439,13 @@ struct ModelsScreen: View {
 
     @ViewBuilder
     private var content: some View {
-        let sections = ModelsPresentation.sections(store.rows, filter: filter)
-        if store.rows.isEmpty {
+        let localRows = ModelsPresentation.onThisMacRows(store.rows)
+        let sections = ModelsPresentation.sections(localRows, filter: filter)
+        if localRows.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text(store.listState == .checking
                      ? String(localized: "Loading models…", comment: "Models empty while loading")
-                     : String(localized: "No models are listed yet. The model this Mac serves stays visible in the sidebar.", comment: "Models empty"))
+                     : String(localized: "No models are on this Mac yet. Download one from Recommended or Browse.", comment: "Models empty"))
                     .foregroundStyle(.secondary)
                 Spacer()
             }

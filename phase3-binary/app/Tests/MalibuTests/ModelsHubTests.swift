@@ -13,7 +13,9 @@ final class ModelsHubTests: XCTestCase {
         let rows = [current, fitting, tooLarge]
         XCTAssertEqual(ModelsHubPresentation.rows(for: .recommended, rows: rows).map(\.id), [current, fitting].map(\.id))
         XCTAssertEqual(ModelsHubPresentation.rows(for: .browse, rows: rows).map(\.id), rows.map(\.id))
-        XCTAssertEqual(ModelsHubPresentation.rows(for: .onThisMac, rows: rows).map(\.id), ModelsPresentation.sections(rows).flatMap(\.rows).map(\.id))
+        XCTAssertEqual(ModelsHubPresentation.rows(for: .onThisMac, rows: rows).map(\.id), ModelsPresentation.sections(ModelsPresentation.onThisMacRows(rows)).flatMap(\.rows).map(\.id))
+        // Catalog-only rows are not on this Mac: that tab lists the served model only.
+        XCTAssertEqual(ModelsHubPresentation.rows(for: .onThisMac, rows: rows).map(\.id), [current.id])
         XCTAssertTrue(ModelsHubPresentation.rows(for: .downloads, rows: rows).isEmpty)
         XCTAssertTrue(ModelsHubPresentation.emptyDownloads.contains("No downloads yet"))
     }

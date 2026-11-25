@@ -4945,15 +4945,49 @@ final class HFAssetRedirectGuard: NSObject, URLSessionTaskDelegate {
     }
 }
 
+/// Bytes this process's in-flight Hugging Face transfers have written so far.
+/// A transfer writes to a CFNetwork temporary file until it completes, so a
+/// progress report that only counts staged files shows nothing while a
+/// multi-GB shard downloads (the Malibu bar sat at 35 KB of 16.87 GB).
+final class HFDownloadInFlightBytes: @unchecked Sendable {
+    static let shared = HFDownloadInFlightBytes()
+    private let lock = NSLock()
+    private var bytes: [ObjectIdentifier: Int64] = [:]
+
+    func record(_ key: ObjectIdentifier, totalBytesWritten: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes[key] = max(0, totalBytesWritten)
+    }
+
+    func clear(_ key: ObjectIdentifier) {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes[key] = nil
+    }
+
+    var total: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes.values.reduce(0) { $0.addingReportingOverflow($1).overflow ? Int64.max : $0 + $1 }
+    }
+}
+
 /// Cancels an untrusted mirror transfer as soon as either the declared or
 /// observed byte count exceeds the size authorized by the signed manifest.
 final class BoundedHFAssetDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let maximumBytes: Int64
     private let lock = NSLock()
     private var limitExceeded = false
+    private let inFlight: HFDownloadInFlightBytes
 
-    init(maximumBytes: UInt64) {
+    init(maximumBytes: UInt64, inFlight: HFDownloadInFlightBytes = .shared) {
         self.maximumBytes = maximumBytes > UInt64(Int64.max) ? Int64.max : Int64(maximumBytes)
+        self.inFlight = inFlight
+    }
+
+    deinit {
+        inFlight.clear(ObjectIdentifier(self))
     }
 
     var exceededLimit: Bool {
@@ -4999,6 +5033,7 @@ final class BoundedHFAssetDownloadDelegate: NSObject, URLSessionDownloadDelegate
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
+        inFlight.record(ObjectIdentifier(self), totalBytesWritten: min(totalBytesWritten, maximumBytes))
         guard totalBytesWritten > maximumBytes
             || (totalBytesExpectedToWrite >= 0 && totalBytesExpectedToWrite > maximumBytes)
         else { return }

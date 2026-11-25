@@ -27,7 +27,7 @@ enum ModelsHubPresentation {
         switch tab {
         case .recommended, .browse:
             return discoveryRows(for: tab, rows: rows, search: "", fitsOnly: false, sort: .catalog)
-        case .onThisMac: return ModelsPresentation.sections(rows).flatMap(\.rows)
+        case .onThisMac: return ModelsPresentation.sections(ModelsPresentation.onThisMacRows(rows)).flatMap(\.rows)
         case .downloads: return []
         }
     }
