@@ -592,9 +592,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private static func msbCacheTopology(
         model: any LanguageModel
     ) throws -> (cacheKinds: [PagedKVSharedForwardBackend.CacheKind], recurrentStateLayout: PagedKVRecurrentStateLayout)? {
-        let caches = try model.newCache(parameters: nil)
+        let caches = PagedKVInkling2Layout.flattened(try model.newCache(parameters: nil))
         guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(from: caches), !cacheKinds.isEmpty else {
             return nil
+        }
+        // Inkling 2 (#2505): flat visit layout, four-slot convolution tails.
+        if model is Inkling2Model {
+            return (cacheKinds, .inkling2ConvTailFourSlot)
         }
         // Qwen4-Exp: the PLE layers are the ones the loaded model gives a
         // four-slot `ArraysCache` (every other recurrent layer a `MambaCache`).

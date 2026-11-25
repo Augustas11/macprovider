@@ -195,6 +195,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// A sliding-window row presents its decode window in the ring layout
     /// `RotatingKVCache` holds at the same point (`slidingRingShift`).
     var slidingRingAnchor = 0
+    /// The column of the oldest key in the K/V the last `update` returned:
+    /// nonzero only for a one-token sliding-window update whose window
+    /// `ringOrdered` rotated into `RotatingKVCache`'s slot order (the
+    /// rotation `RotatingKVCache.ringRotation` reports for the same update).
+    private(set) var presentedRingRotation = 0
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
     /// parity fixtures, that logical K/V was reconstructed through the real gather rather
@@ -796,6 +801,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         priorTokens: Int,
         incomingTokens: Int
     ) -> (MLXArray, MLXArray) {
+        presentedRingRotation = 0
         guard let attentionWindowTokens, attentionWindowTokens > 0 else {
             return (keys, values)
         }
@@ -809,6 +815,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let shift = incomingTokens == 1
             ? Self.slidingRingShift(postUpdateOffset: offset, anchor: slidingRingAnchor, windowSize: attentionWindowTokens)
             : 0
+        // `ringOrdered` moves the oldest key to column `shift`.
+        presentedRingRotation = shift > 0 && shift < end - start ? shift : 0
         return (
             Self.ringOrdered(keys[.ellipsis, start..., 0...], shift: shift),
             Self.ringOrdered(values[.ellipsis, start..., 0...], shift: shift)
@@ -1057,3 +1065,21 @@ extension PagedKVCache {
     }
 }
 #endif
+
+/// A one-row paged cache attends its row through the model's own attention
+/// (Inkling 2, #2505): the model sees the K/V this cache returns, in the
+/// sliding ring's slot order with its rotation, exactly what the serial
+/// `RotatingKVCache` would hand it.
+extension PagedKVCache: KVCacheRowAttentionProtocol {
+    var rowOffsets: [Int] { [offset] }
+
+    func updateAndAttendRows(
+        keys: MLXArray, values: MLXArray,
+        attend: (_ row: Int, _ view: KVCacheRowAttentionView) -> MLXArray
+    ) -> MLXArray {
+        let (presentedKeys, presentedValues) = update(keys: keys, values: values)
+        return attend(0, KVCacheRowAttentionView(
+            keys: presentedKeys, values: presentedValues, ringRotation: presentedRingRotation
+        ))
+    }
+}
