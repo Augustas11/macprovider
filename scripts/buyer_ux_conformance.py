@@ -648,6 +648,9 @@ def tool_grammar_family(model: str) -> str:
     if m in ("radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit"):
         # DaisyRose-27B (#2465) ships the Qwen3.8-27B template; exact ids only.
         return "qwen"
+    if m in ("hygaard/sage-s2.1-flash-oq4e-mtp", "sage-s2.1-flash-oq4e-mtp"):
+        # Sage S2.1 Flash (#2466) ships the GLM-5.3 template; exact ids only.
+        return "glm"
     if "deepseek-v4" in m or "deepseek_v4" in m:
         return "dsml"
     if "lfm2.5-24b-a2b" in m:

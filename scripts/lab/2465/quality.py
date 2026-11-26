@@ -61,9 +61,18 @@ def cmd_serve(a):
         out.write(json.dumps({"kind": "meta", "path": "serve", "label": a.label, "model": a.model, "workload": ident}) + "\n")
         failed = 0
         for r in rows:
-            req = urllib.request.Request(f"http://127.0.0.1:{a.port}{r['path']}", data=json.dumps(r["body"]).encode(),
+            body = dict(r["body"])
+            # The reference renders with enable_thinking=False; `none` is the serve-side match
+            # (SPEC-018-R010 turns GLM thinking off for it), so both paths answer the same prompt.
+            if a.reasoning_effort:
+                body["reasoning_effort"] = a.reasoning_effort
+            # Code answers outgrow the corpus budgets (r11: 5/9 GLM cases ended on length with
+            # thinking off). Both models get the same scaled budget, so the comparison stays fair.
+            if a.budget_scale != 1:
+                body["max_tokens"] = int(body["max_tokens"] * a.budget_scale)
+            req = urllib.request.Request(f"http://127.0.0.1:{a.port}{r['path']}", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", **r["headers"]}, method="POST")
-            rec = {"kind": "case", "case_id": r["case_id"], "request_id": r["request_id"], "max_tokens": r["body"]["max_tokens"]}
+            rec = {"kind": "case", "case_id": r["case_id"], "request_id": r["request_id"], "max_tokens": body["max_tokens"]}
             t0 = time.time()
             try:
                 with urllib.request.urlopen(req, timeout=a.timeout) as resp:
@@ -89,8 +98,10 @@ def eos_ids(model_dir, tokenizer):
     e = getattr(tokenizer, "eos_token_id", None)
     if isinstance(e, int):
         ids.add(e)
-    for extra in getattr(tokenizer, "eos_token_ids", None) or []:
-        ids.add(int(extra))
+    extra = getattr(tokenizer, "eos_token_ids", None) or []
+    # mlx-vlm's tokenizer wrapper exposes a single int here; mlx-lm exposes a set/list.
+    for x in ([extra] if isinstance(extra, int) else extra):
+        ids.add(int(x))
     gc = os.path.join(model_dir, "generation_config.json")
     if os.path.exists(gc):
         v = json.load(open(gc)).get("eos_token_id")
@@ -197,6 +208,8 @@ def main():
     s.add_argument("--port", type=int, required=True)
     s.add_argument("--model", required=True)
     s.add_argument("--timeout", type=float, default=1800)
+    s.add_argument("--reasoning-effort", default=None, help="sent as reasoning_effort on every case (default: not sent)")
+    s.add_argument("--budget-scale", type=float, default=1, help="multiply every case max_tokens (default 1)")
     r = sub.add_parser("reference")
     r.add_argument("--model-dir", required=True)
     r.add_argument("--loader", choices=("mlx-lm", "mlx-vlm"), required=True)

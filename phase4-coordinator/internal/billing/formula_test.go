@@ -159,6 +159,7 @@ func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 		"aug11/inkling-2-mini-oq4e-mtp-uncensored":              "openuncensored/inkling-2-mini-uncensored",
 		"inkling-2-mini-uncensored":                             "openuncensored/inkling-2-mini-uncensored",
 		"daisyrose-27b":                                         "radixark/daisyrose-27b",
+		"sage-s2.1-flash-oq4e-mtp":                              "hygaard/sage-s2.1-flash-oq4e-mtp",
 	}
 	if len(exactModelKeyAliases) != len(want) {
 		t.Fatalf("exactModelKeyAliases = %v, want %v", exactModelKeyAliases, want)

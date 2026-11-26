@@ -75,6 +75,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
     },
+    "hygaard/sage-s2.1-flash-oq4e-mtp": {
+      "artifacts": {
+        "mlx-oq4e-mtp": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "d59ecd8525692c53ea9dd36d5e690d4c3218713f0b0a81fec77637e1f588c261",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 235,
+          "notes": "Sage S2.1 Flash (#2466): oQ4e mixed-precision MLX conversion of internlm/Sage-S2.1-Flash at 76f4513d (oMLX 0.8.0rc1; 4-bit g64 routed experts, 8-bit g64 attention, shared experts, dense MLP, embeddings and output head; BF16 vision encoder; embedded MTP layer), published by Hygaard. Same glm5_next architecture (Glm5NextForConditionalGeneration, one next-N layer) and tokenizer.json (LFS 19e77364) as zai-org/glm-5.3-flash. 71 files: 35 model shards (186,402,463,963 bytes, 475,791,676 more than the zai-org/glm-5.3-flash shards) plus nine FP32 scientific projector safetensors the text engine does not load. min_ram_gb = the zai-org/glm-5.3-flash 234 (200 GB measured native peak at 64k + 4 GB for 4 CB slots of 64k paged state + 26 GB SPEC-048-R012 10% free-memory floor on 256 GB + 4 GB safety margin) + 1 GB for the larger weights = 235. Snapshot-manifest hash recomputed from the Hugging Face API at the pinned revision with scripts/catalog-hash-sweep.py's algorithm; it equals the target_sha256 of the Studio intake runs, whose fetch step verified every file's LFS SHA-256 or git blob SHA-1. License: MIT (Hygaard/Sage-S2.1-Flash-oQ4e-mtp model card and LICENSE; base internlm/Sage-S2.1-Flash at 76f4513d by Shanghai AI Laboratory / InternLM).",
+          "quantization": "oq4e-mixed-4-8bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 186593494737,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp",
+            "revision": "a972e256db2553562bd718e677d100089aca5fce"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-24"
+        }
+      },
+      "primary_artifact_id": "mlx-oq4e-mtp",
+      "rate_class": "class-120b-moe"
+    },
     "liquidai/lfm3-1.7b": {
       "artifacts": {
         "mlx-4bit": {

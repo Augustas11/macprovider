@@ -488,6 +488,9 @@ func openRouterToolFamilyModel(modelID string) bool {
 	case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit":
 		// DaisyRose-27B (#2465) ships the Qwen3.8-27B template; exact ids only.
 		return true
+	case "hygaard/sage-s2.1-flash-oq4e-mtp", "sage-s2.1-flash-oq4e-mtp":
+		// Sage S2.1 Flash (#2466) ships the GLM-5.3 template; exact ids only.
+		return true
 	}
 	for _, family := range []string{"gpt-oss", "glm-4.5", "glm-4.6", "glm-4.7", "glm-5", "llama-3.1", "llama-3.2", "llama-3.3",
 		"llama3.1", "llama3.2", "llama3.3", "gemma-4", "gemma4", "nemotron-3", "nemotron3", "qwen2.5", "qwen3",

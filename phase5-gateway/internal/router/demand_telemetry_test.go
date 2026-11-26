@@ -605,6 +605,21 @@ func TestDemandTelemetryKnowsDaisyRoseIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2466: the Sage S2.1 Flash catalog key and served artifact id are recorded
+// as themselves, never folded into GLM-5.3-Flash.
+func TestDemandTelemetryKnowsSageIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"hygaard/sage-s2.1-flash-oq4e-mtp", "Hygaard/Sage-S2.1-Flash-oQ4e-mtp"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"hygaard/sage-s2.1-flash-oq4e-mtpx", "sage-s2.1-flash-oq4e-mtp", "Hygaard/sage-s2.1-flash-oq4e-mtp"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2236: the Nemotron 3.5 Lightning catalog key and served artifact id are
 // recorded as themselves, never folded into Nemotron 3 Nano.
 func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {

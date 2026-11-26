@@ -29,6 +29,16 @@
       "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
       "model_revision": "0d77464eeb233a2da68ebf9d7dc4edaac7db956d"
     },
+    "hygaard/sage-s2.1-flash-oq4e-mtp": {
+      "capabilities": [
+        "reasoning",
+        "tools"
+      ],
+      "context_length": 1048576,
+      "context_length_source": "text_config.max_position_embeddings",
+      "model_id": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp",
+      "model_revision": "a972e256db2553562bd718e677d100089aca5fce"
+    },
     "liquidai/lfm3-1.7b": {
       "capabilities": [],
       "context_length": 262144,

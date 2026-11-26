@@ -68,6 +68,11 @@ func providerParsesToolGrammar(p pool.Provider) bool {
 		// reasoning history.
 		return false
 	}
+	if isSageS21Flash(p.ModelID) && !providerAtLeast(p, sageProviderMinVersion) {
+		// A released CLI before the Sage cut maps no Sage id to the GLM
+		// grammar, so it would not parse its tool calls.
+		return false
+	}
 	if family := toolGrammarFamily(p.ModelID); family == toolGrammarLFM2 || splitsFamilyReasoning(family) {
 		// LFM, MiniMax and Inkling 2 shipped after the generic grammar floor.
 		// Require the exact loaded-model declaration, which old providers
@@ -166,13 +171,14 @@ func providerServesToolGrammars(p pool.Provider) bool {
 
 // reasoningFamily reports families whose chat template always reasons before
 // answering (GLM-5 opens `<think>`; gpt-oss Harmony has an analysis channel;
-// the DeepSeek-V4 encoder opens `<think>` unless reasoning_effort is none).
+// the DeepSeek-V4 encoder opens `<think>` unless reasoning_effort is none;
+// Sage S2.1 Flash, #2466, ships the GLM-5.3 template, exact ids only).
 func reasoningFamily(model string) bool {
 	id := strings.ToLower(model)
 	// Inkling 2 (#2467) thinks by default (template effort 0.9) in
 	// <|content_thinking|> frames the provider splits into reasoning_content.
 	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4") ||
-		strings.Contains(id, "inkling-2") || strings.Contains(id, "inkling2")
+		strings.Contains(id, "inkling-2") || strings.Contains(id, "inkling2") || isSageS21Flash(id)
 }
 
 // onRequestReasoningProviderMinVersion is the floor for provider CLIs that
@@ -186,6 +192,11 @@ const onRequestReasoningProviderMinVersion = "1.8.285"
 // DaisyRose-27B ids to the Qwen3.8 template rules (tool grammar, reasoning
 // history, effort levels; #2465): the next cut after 1.8.296.
 const daisyRoseProviderMinVersion = "1.8.297"
+
+// sageProviderMinVersion is the first provider CLI that maps the Sage S2.1
+// Flash ids to the GLM template rules (tool grammar, reasoning_effort none
+// turns thinking off; #2466): the next cut after 1.8.300.
+const sageProviderMinVersion = "1.8.301"
 
 func providerAtLeast(p pool.Provider, floor string) bool {
 	cmp, ok := versionfloor.Compare(p.BinaryVersion, floor)
@@ -236,7 +247,8 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 			}
 		}
 	}
-	if reasoningFamily(p.ModelID) && (strings.Contains(strings.ToLower(p.ModelID), "gpt-oss") || providerServesToolGrammars(p)) {
+	if reasoningFamily(p.ModelID) && (strings.Contains(strings.ToLower(p.ModelID), "gpt-oss") || providerServesToolGrammars(p)) &&
+		(!isSageS21Flash(p.ModelID) || providerAtLeast(p, sageProviderMinVersion)) {
 		caps.Reasoning = true
 	}
 	if providerServesOnRequestReasoning(p) {

@@ -48,6 +48,11 @@
     {"model": "daisyrose-27b", "family": "qwen"},
     {"model": "radixark/daisyrose-27b-v2", "family": ""},
     {"model": "other/daisyrose", "family": ""},
+    {"model": "hygaard/sage-s2.1-flash-oq4e-mtp", "family": "glm"},
+    {"model": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp", "family": "glm"},
+    {"model": "sage-s2.1-flash-oq4e-mtp", "family": "glm"},
+    {"model": "hygaard/sage-s2.1-flash-oq4e-mtp-v2", "family": ""},
+    {"model": "other/sage-s2.1-flash", "family": ""},
     {"model": "mistralai/Mistral-Small-3.2-24B-Instruct", "family": ""}
   ]
 }

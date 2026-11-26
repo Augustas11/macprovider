@@ -39,6 +39,10 @@ func toolGrammarFamily(model string) string {
 		return toolGrammarHarmony
 	case strings.Contains(id, "glm-4.5"), strings.Contains(id, "glm-4.6"), strings.Contains(id, "glm-4.7"), strings.Contains(id, "glm-5"):
 		return toolGrammarGLM
+	case isSageS21Flash(id):
+		// Sage S2.1 Flash (#2466) is a GLM-5.3-Flash fine-tune with the GLM
+		// template; exact ids only.
+		return toolGrammarGLM
 	case strings.Contains(id, "llama-3.1"), strings.Contains(id, "llama-3.2"), strings.Contains(id, "llama-3.3"),
 		strings.Contains(id, "llama3.1"), strings.Contains(id, "llama3.2"), strings.Contains(id, "llama3.3"):
 		return toolGrammarLlama3
@@ -68,6 +72,16 @@ func toolGrammarFamily(model string) string {
 func isDaisyRose27B(model string) bool {
 	switch strings.ToLower(model) {
 	case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit":
+		return true
+	}
+	return false
+}
+
+// isSageS21Flash reports the exact Sage S2.1 Flash catalog identities (#2466).
+// The served id Hygaard/Sage-S2.1-Flash-oQ4e-mtp lowercases to the catalog key.
+func isSageS21Flash(model string) bool {
+	switch strings.ToLower(model) {
+	case "hygaard/sage-s2.1-flash-oq4e-mtp", "sage-s2.1-flash-oq4e-mtp":
 		return true
 	}
 	return false

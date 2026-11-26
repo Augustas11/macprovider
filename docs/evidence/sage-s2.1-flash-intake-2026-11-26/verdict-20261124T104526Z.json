@@ -1,0 +1,388 @@
+{
+  "issue": "2466",
+  "incumbent": "glm53",
+  "candidate": "sage",
+  "models": {
+    "glm53": {
+      "decode": {
+        "1024": {
+          "decode_tps_p50": 41.987998734986945,
+          "decode_tps_min": 41.86914011669525,
+          "decode_tps_max": 42.16447720747419,
+          "prefill_tps_p50": 352.05039812230865,
+          "ttft_p50_s": 2.945600986480713,
+          "decode_tokens_actual": [
+            247,
+            247,
+            247,
+            247,
+            247
+          ]
+        },
+        "32768": {
+          "decode_tps_p50": 38.48505150801115,
+          "decode_tps_min": 38.48275993323696,
+          "decode_tps_max": 38.6394829942906,
+          "prefill_tps_p50": 367.48943231417076,
+          "ttft_p50_s": 89.20256507396698,
+          "decode_tokens_actual": [
+            149,
+            149,
+            149,
+            149,
+            149
+          ]
+        },
+        "8192": {
+          "decode_tps_p50": 39.70857676848055,
+          "decode_tps_min": 39.68696081274164,
+          "decode_tps_max": 39.72755092758999,
+          "prefill_tps_p50": 371.5184401449461,
+          "ttft_p50_s": 22.085041046142578,
+          "decode_tokens_actual": [
+            146,
+            146,
+            146,
+            146,
+            146
+          ]
+        }
+      },
+      "aggregate": {
+        "1024": {
+          "aggregateTPSp50": 73.64302428672845,
+          "aggregateVsProductionSerial": 1.7394076734146537,
+          "perRowTPSp50": 18.410756071682112,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        },
+        "8192": {
+          "aggregateTPSp50": 68.2799635269345,
+          "aggregateVsProductionSerial": 1.707648278978889,
+          "perRowTPSp50": 17.069990881733624,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        },
+        "msb03": {
+          "aggregateTPSp50": 35.98069501635557,
+          "aggregateVsProductionSerial": 0.8447782296221416,
+          "perRowTPSp50": 8.995173754088892,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        }
+      },
+      "parity": {
+        "pass": true,
+        "oneRowMatch": true,
+        "firstDivergenceIndex": null
+      },
+      "ref": {
+        "1024": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 1.1875,
+          "decode_tps": 42.638640085948026,
+          "top1_ok": true
+        },
+        "32768": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 2.1875,
+          "decode_tps": 39.291986554251395,
+          "top1_ok": true
+        },
+        "8192": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 2.125,
+          "decode_tps": 40.168094598701664,
+          "top1_ok": true
+        }
+      },
+      "mtp": {
+        "overall_status": "EXPLORATORY_NO_VERDICT",
+        "cells": {
+          "s1-p1536-o128": {
+            "proposed": 700,
+            "accepted": 564,
+            "acceptance": 0.8057142857142857,
+            "status": "PASS",
+            "throughput_median": 0.1326257160644605
+          },
+          "s1-p1536-o512": {
+            "proposed": 2862,
+            "accepted": 2244,
+            "acceptance": 0.7840670859538784,
+            "status": "PASS",
+            "throughput_median": 0.13565022086559786
+          },
+          "s1-p4096-o128": {
+            "proposed": 696,
+            "accepted": 568,
+            "acceptance": 0.8160919540229885,
+            "status": "PASS",
+            "throughput_median": 0.15197067239926942
+          },
+          "s1-p4096-o512": {
+            "proposed": 2839,
+            "accepted": 2267,
+            "acceptance": 0.7985206058471293,
+            "status": "PASS",
+            "throughput_median": 0.13559278866857416
+          }
+        }
+      },
+      "quality": {
+        "label": "glm53",
+        "path": "serve",
+        "passed": 0,
+        "cases": 9,
+        "workload": {
+          "workload_id": "coding-agent-revenue",
+          "version": 1,
+          "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+        },
+        "rubric": "macprovider.lab.coding-quality-rubric.v1",
+        "results": [
+          {
+            "case_id": "debug-python-pagination-off-by-one",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "debug-go-data-race-worker-pool",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "write-tests-token-bucket-limiter",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 1536
+          },
+          {
+            "case_id": "implement-ttl-lru-cache-typescript",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 1536
+          },
+          {
+            "case_id": "harden-bash-release-script",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "review-sql-migration-backfill",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 768
+          },
+          {
+            "case_id": "explain-swift-actor-reentrancy-crash",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 512
+          },
+          {
+            "case_id": "fix-failing-ci-node-stream-parser",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 1024
+          },
+          {
+            "case_id": "agent-loop-multi-file-inventory-fix",
+            "pass": false,
+            "reasons": [
+              "finish_length",
+              "empty_answer"
+            ],
+            "completion_tokens": 2048
+          }
+        ]
+      }
+    },
+    "sage": {
+      "decode": {
+        "1024": {
+          "decode_tps_p50": 41.16472192818604,
+          "decode_tps_min": 41.11500845084928,
+          "decode_tps_max": 41.19403211822755,
+          "prefill_tps_p50": 352.1556051689511,
+          "ttft_p50_s": 2.944720983505249,
+          "decode_tokens_actual": [
+            159,
+            159,
+            159,
+            159,
+            159
+          ]
+        },
+        "32768": {
+          "decode_tps_p50": 37.95906978542364,
+          "decode_tps_min": 37.88876468958382,
+          "decode_tps_max": 38.152203703175466,
+          "prefill_tps_p50": 368.0926453079423,
+          "ttft_p50_s": 89.05638408660889,
+          "decode_tokens_actual": [
+            207,
+            207,
+            207,
+            207,
+            207
+          ]
+        },
+        "8192": {
+          "decode_tps_p50": 39.204218175032025,
+          "decode_tps_min": 39.16555499470891,
+          "decode_tps_max": 39.25563226833587,
+          "prefill_tps_p50": 370.9319215163922,
+          "ttft_p50_s": 22.119961977005005,
+          "decode_tokens_actual": [
+            234,
+            234,
+            234,
+            234,
+            234
+          ]
+        }
+      },
+      "aggregate": {
+        "1024": {
+          "aggregateTPSp50": 75.87742524294211,
+          "aggregateVsProductionSerial": 1.825672805571053,
+          "perRowTPSp50": 18.969356310735527,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        },
+        "8192": {
+          "aggregateTPSp50": 70.27863639589755,
+          "aggregateVsProductionSerial": 1.787282096217422,
+          "perRowTPSp50": 17.569659098974387,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        },
+        "msb03": {
+          "aggregateTPSp50": 36.57885145449522,
+          "aggregateVsProductionSerial": 0.8742414110158796,
+          "perRowTPSp50": 9.144712863623806,
+          "makespanAggregateTokensPerSecond": null,
+          "makespanVsSerial": null
+        }
+      },
+      "parity": {
+        "pass": true,
+        "oneRowMatch": true,
+        "firstDivergenceIndex": null
+      },
+      "ref": {
+        "1024": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 1.3125,
+          "decode_tps": 41.99284516113935,
+          "top1_ok": true
+        },
+        "32768": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 2.625,
+          "decode_tps": 38.759413235735224,
+          "top1_ok": true
+        },
+        "8192": {
+          "first_divergence": null,
+          "matching": 256,
+          "compared": 256,
+          "forced_matching": null,
+          "top1": 16,
+          "top1_compared": 16,
+          "max_abs_logit_diff": 0.625,
+          "decode_tps": 39.646866096184915,
+          "top1_ok": true
+        }
+      },
+      "mtp": {
+        "overall_status": "EXPLORATORY_NO_VERDICT",
+        "cells": {
+          "s1-p1536-o128": {
+            "status": "FAIL",
+            "throughput_median": null
+          },
+          "s1-p1536-o512": {
+            "status": "FAIL",
+            "throughput_median": null
+          },
+          "s1-p4096-o128": {
+            "status": "FAIL",
+            "throughput_median": null
+          },
+          "s1-p4096-o512": {
+            "status": "FAIL",
+            "throughput_median": null
+          }
+        }
+      },
+      "quality": null
+    }
+  },
+  "verdict": "FAIL",
+  "reasons": [
+    "candidate native MTP analyzer EXPLORATORY_NO_VERDICT",
+    "quality MISSING"
+  ],
+  "ref_notes": [],
+  "acceptance_common_cells": {},
+  "acceptance_pooled": {
+    "glm53": 0.7951247005777089,
+    "sage": null
+  },
+  "quality_state": "MISSING",
+  "line": "T2466_VERDICT FAIL parity=PASS msb_parity=True ref_top1[1024:16/16m256,32768:16/16m256,8192:16/16m256] mtp=EXPLORATORY_NO_VERDICT acceptance=na(0/0) vs glm53=0.795(5643/7097) quality=MISSING sage=na/na glm53=0/9 reasons=\"candidate native MTP analyzer EXPLORATORY_NO_VERDICT; quality MISSING\""
+}

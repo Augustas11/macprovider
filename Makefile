@@ -119,7 +119,8 @@ pr-fast:
 		scripts.tests.test_native_mtp_lab_flag_guard \
 		scripts.tests.test_bump_mlx_swift_lm_pin \
 		scripts.tests.test_native_mtp_admission_sidecar \
-		scripts.tests.test_dsv4_cb_dspark_harness
+		scripts.tests.test_dsv4_cb_dspark_harness \
+		scripts.tests.test_lab_2465_quality_eos
 
 # Catalog and autotune content release (the single slowest suite).
 test-dist-catalog:

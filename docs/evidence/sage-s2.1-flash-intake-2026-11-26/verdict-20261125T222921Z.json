@@ -1,0 +1,252 @@
+{
+  "issue": "2466",
+  "incumbent": "glm53",
+  "candidate": "sage",
+  "models": {
+    "glm53": {
+      "decode": {},
+      "aggregate": {},
+      "parity": null,
+      "ref": null,
+      "mtp": {
+        "overall_status": "EXPLORATORY_NO_VERDICT",
+        "cells": {
+          "s1-p1536-o128": {
+            "proposed": 700,
+            "accepted": 564,
+            "acceptance": 0.8057142857142857,
+            "status": "PASS",
+            "throughput_median": 0.1290158643903474
+          },
+          "s1-p1536-o512": {
+            "proposed": 2862,
+            "accepted": 2244,
+            "acceptance": 0.7840670859538784,
+            "status": "PASS",
+            "throughput_median": 0.12795148996058436
+          },
+          "s1-p4096-o128": {
+            "proposed": 696,
+            "accepted": 568,
+            "acceptance": 0.8160919540229885,
+            "status": "PASS",
+            "throughput_median": 0.15106680438215747
+          },
+          "s1-p4096-o512": {
+            "proposed": 2839,
+            "accepted": 2267,
+            "acceptance": 0.7985206058471293,
+            "status": "PASS",
+            "throughput_median": 0.13604839941175773
+          }
+        }
+      },
+      "quality": {
+        "label": "glm53",
+        "path": "serve",
+        "passed": 9,
+        "cases": 9,
+        "workload": {
+          "workload_id": "coding-agent-revenue",
+          "version": 1,
+          "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+        },
+        "rubric": "macprovider.lab.coding-quality-rubric.v1",
+        "results": [
+          {
+            "case_id": "debug-python-pagination-off-by-one",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 415
+          },
+          {
+            "case_id": "debug-go-data-race-worker-pool",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 2193
+          },
+          {
+            "case_id": "write-tests-token-bucket-limiter",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 2465
+          },
+          {
+            "case_id": "implement-ttl-lru-cache-typescript",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 3760
+          },
+          {
+            "case_id": "harden-bash-release-script",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 845
+          },
+          {
+            "case_id": "review-sql-migration-backfill",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1871
+          },
+          {
+            "case_id": "explain-swift-actor-reentrancy-crash",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 809
+          },
+          {
+            "case_id": "fix-failing-ci-node-stream-parser",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 879
+          },
+          {
+            "case_id": "agent-loop-multi-file-inventory-fix",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1795
+          }
+        ]
+      }
+    },
+    "sage": {
+      "decode": {},
+      "aggregate": {},
+      "parity": null,
+      "ref": null,
+      "mtp": {
+        "overall_status": "EXPLORATORY_NO_VERDICT",
+        "cells": {
+          "s1-p1536-o128": {
+            "proposed": 686,
+            "accepted": 577,
+            "acceptance": 0.8411078717201166,
+            "status": "PASS",
+            "throughput_median": 0.18948592971920142
+          },
+          "s1-p1536-o512": {
+            "proposed": 2839,
+            "accepted": 2265,
+            "acceptance": 0.7978161324410004,
+            "status": "PASS",
+            "throughput_median": 0.16037546162438876
+          },
+          "s1-p4096-o128": {
+            "proposed": 680,
+            "accepted": 588,
+            "acceptance": 0.8647058823529412,
+            "status": "PASS",
+            "throughput_median": 0.19692984431346272
+          },
+          "s1-p4096-o512": {
+            "proposed": 2656,
+            "accepted": 2193,
+            "acceptance": 0.8256777108433735,
+            "status": "PASS",
+            "throughput_median": 0.1878254271551859
+          }
+        }
+      },
+      "quality": {
+        "label": "sage",
+        "path": "serve",
+        "passed": 9,
+        "cases": 9,
+        "workload": {
+          "workload_id": "coding-agent-revenue",
+          "version": 1,
+          "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+        },
+        "rubric": "macprovider.lab.coding-quality-rubric.v1",
+        "results": [
+          {
+            "case_id": "debug-python-pagination-off-by-one",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 600
+          },
+          {
+            "case_id": "debug-go-data-race-worker-pool",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1624
+          },
+          {
+            "case_id": "write-tests-token-bucket-limiter",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 3605
+          },
+          {
+            "case_id": "implement-ttl-lru-cache-typescript",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 5492
+          },
+          {
+            "case_id": "harden-bash-release-script",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1037
+          },
+          {
+            "case_id": "review-sql-migration-backfill",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1629
+          },
+          {
+            "case_id": "explain-swift-actor-reentrancy-crash",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1567
+          },
+          {
+            "case_id": "fix-failing-ci-node-stream-parser",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 832
+          },
+          {
+            "case_id": "agent-loop-multi-file-inventory-fix",
+            "pass": true,
+            "reasons": [],
+            "completion_tokens": 1936
+          }
+        ]
+      }
+    }
+  },
+  "verdict": "FAIL",
+  "reasons": [
+    "candidate batched-vs-serial parity not PASS",
+    "candidate reference parity missing",
+    "candidate native MTP analyzer EXPLORATORY_NO_VERDICT"
+  ],
+  "ref_notes": [],
+  "acceptance_common_cells": {
+    "s1-p1536-o128": [
+      0.8057142857142857,
+      0.8411078717201166
+    ],
+    "s1-p1536-o512": [
+      0.7840670859538784,
+      0.7978161324410004
+    ],
+    "s1-p4096-o128": [
+      0.8160919540229885,
+      0.8647058823529412
+    ],
+    "s1-p4096-o512": [
+      0.7985206058471293,
+      0.8256777108433735
+    ]
+  },
+  "acceptance_pooled": {
+    "glm53": 0.7951247005777089,
+    "sage": 0.8195598309284361
+  },
+  "quality_state": "PASS",
+  "line": "T2466_VERDICT FAIL parity=FAIL msb_parity=na ref_top1[] mtp=EXPLORATORY_NO_VERDICT acceptance=0.820(5623/6861) vs glm53=0.795(5643/7097) quality=PASS sage=9/9 glm53=9/9 reasons=\"candidate batched-vs-serial parity not PASS; candidate reference parity missing; candidate native MTP analyzer EXPLORATORY_NO_VERDICT\""
+}

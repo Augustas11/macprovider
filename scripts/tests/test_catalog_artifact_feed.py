@@ -688,6 +688,9 @@ class RateCardSourceTest(unittest.TestCase):
             # #2465: DaisyRose-27B, class-32b, priced by explicit rows at the
             # qwen3.8-27b rates.
             "radixark/daisyrose-27b",
+            # #2466: Sage S2.1 Flash, class-120b-moe, priced by an explicit row
+            # at the zai-org/glm-5.3-flash rates.
+            "hygaard/sage-s2.1-flash-oq4e-mtp",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")

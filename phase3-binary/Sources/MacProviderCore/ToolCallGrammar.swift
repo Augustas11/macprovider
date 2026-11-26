@@ -49,7 +49,7 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         if id.contains("qwen2.5") || id.contains("qwen3") { return .qwen }
         if id.contains("gpt-oss") { return .harmony }
         if id.contains("glm-4.5") || id.contains("glm-4.6") || id.contains("glm-4.7")
-            || id.contains("glm-5") { return .glm }
+            || id.contains("glm-5") || isSageS21Flash(id) { return .glm }
         if id.contains("llama-3.1") || id.contains("llama-3.2") || id.contains("llama-3.3")
             || id.contains("llama3.1") || id.contains("llama3.2") || id.contains("llama3.3") { return .llama3 }
         if id.contains("gemma-4") || id.contains("gemma4") { return .gemma4 }
@@ -73,6 +73,15 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     static func isDaisyRose27B(_ lowercasedID: String) -> Bool {
         switch lowercasedID {
         case "radixark/daisyrose-27b", "daisyrose-27b", "mlx-community/daisyrose-27b-4bit": return true
+        default: return false
+        }
+    }
+
+    /// Sage S2.1 Flash (#2466) is a GLM-5.3-Flash fine-tune with the GLM
+    /// chat template and tool grammar. Exact catalog identities only.
+    public static func isSageS21Flash(_ lowercasedID: String) -> Bool {
+        switch lowercasedID {
+        case "hygaard/sage-s2.1-flash-oq4e-mtp", "sage-s2.1-flash-oq4e-mtp": return true
         default: return false
         }
     }

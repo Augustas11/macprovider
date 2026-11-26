@@ -139,6 +139,9 @@ var exactModelKeyAliases = map[string]string{
 	// DaisyRose-27B's served mlx-community artifact normalizes to the bare
 	// name, which bills as its catalog key (#2465).
 	"daisyrose-27b": "radixark/daisyrose-27b",
+	// The bare Sage S2.1 Flash name bills as its catalog key (#2466); the
+	// served Hygaard id lowercases to the key itself.
+	"sage-s2.1-flash-oq4e-mtp": "hygaard/sage-s2.1-flash-oq4e-mtp",
 }
 
 func normalizeServedAlias(namespace, key string) string {

@@ -103,3 +103,45 @@ func TestDaisyRoseReasoningAndToolsNeedTheDaisyRoseCLI(t *testing.T) {
 		}
 	}
 }
+
+// Sage S2.1 Flash (#2466) ships the GLM-5.3 template, but only a CLI from the
+// Sage cut on maps its exact ids to it: 1.8.300 advertises neither reasoning
+// nor tools for it, and look-alike ids never inherit the family.
+func TestSageReasoningAndToolsNeedTheSageCLI(t *testing.T) {
+	for _, model := range []string{"hygaard/sage-s2.1-flash-oq4e-mtp", "Hygaard/Sage-S2.1-Flash-oQ4e-mtp", "sage-s2.1-flash-oq4e-mtp"} {
+		if got := toolGrammarFamily(model); got != toolGrammarGLM {
+			t.Fatalf("%s: tool grammar family %q, want glm", model, got)
+		}
+		for version, want := range map[string]bool{"1.8.262": false, "1.8.300": false, sageProviderMinVersion: true, "1.8.310": true} {
+			p := pool.Provider{ModelID: model, BinaryVersion: version, MaxContextTokens: 32768}
+			caps := mergeModelCapabilities(nil, p, false)
+			if caps.Reasoning != want || caps.Tools != want {
+				t.Fatalf("%s at %s: reasoning=%v tools=%v, want %v", model, version, caps.Reasoning, caps.Tools, want)
+			}
+			if providerParsesToolGrammar(p) != want || providerToolGrammarEligible(p) != want {
+				t.Fatalf("%s at %s: tool grammar eligibility must be %v", model, version, want)
+			}
+			if onRequestReasoningFamily(model) {
+				t.Fatalf("%s: GLM reasons by default; it is not an on-request family", model)
+			}
+			if !want {
+				continue
+			}
+			head := p
+			head.ShardGroupHeadV1 = true
+			if caps := mergeModelCapabilities(nil, head, false); caps.Tools {
+				t.Fatalf("%s on a shard group head: %+v", model, caps)
+			}
+		}
+	}
+	for _, lookalike := range []string{"hygaard/sage-s2.1-flash-oq4e-mtp-v2", "other/sage-s2.1-flash", "sage-s2.1-flash"} {
+		p := pool.Provider{ModelID: lookalike, BinaryVersion: "1.8.310"}
+		if toolGrammarFamily(lookalike) != "" || reasoningFamily(lookalike) || mergeModelCapabilities(nil, p, false).Reasoning {
+			t.Fatalf("%s must not inherit the Sage family", lookalike)
+		}
+	}
+	// The GLM-5.3-Flash rows keep their family on every CLI the generic floor admits.
+	if p := (pool.Provider{ModelID: "zai-org/glm-5.3-flash", BinaryVersion: "1.8.300"}); !mergeModelCapabilities(nil, p, false).Tools {
+		t.Fatal("GLM-5.3-Flash keeps tools on 1.8.300")
+	}
+}

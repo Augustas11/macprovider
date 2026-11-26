@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-11-24T23:33:00Z",
+  "generated_at": "2026-11-25T23:35:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
@@ -50,6 +50,11 @@
       "completion_rate_per_mtok": 240000,
       "prompt_cache_hit_rate_per_mtok": 15000,
       "prompt_rate_per_mtok": 60000
+    },
+    "hygaard/sage-s2.1-flash-oq4e-mtp": {
+      "completion_rate_per_mtok": 88000,
+      "prompt_cache_hit_rate_per_mtok": 5500,
+      "prompt_rate_per_mtok": 18500
     },
     "meta-llama/llama-3.1-8b-instruct": {
       "completion_rate_per_mtok": 27000,

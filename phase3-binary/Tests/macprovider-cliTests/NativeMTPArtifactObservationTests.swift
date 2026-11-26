@@ -1223,26 +1223,58 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
     }
 
-    func testRecursiveSafetensorsTraversalMirrorsMLXAndRejectsHiddenWeightsOrSymlinkPaths() throws {
+    func testSafetensorsTraversalMirrorsTheLoaderAndRejectsHiddenWeightsOrSymlinkPaths() throws {
         let config = #"{"torch_dtype":"bfloat16","text_config":{"mtp_num_hidden_layers":2}}"#
+        // Sage layout: the loader reads the top-level shards only, so the
+        // per-modality projector files below `projectors/` are not observed
+        // even though their bare tensor names repeat from file to file.
         try withRawFixture(configData: Data(config.utf8), safetensors: []) { directory in
             try Data().write(to: directory.appendingPathComponent(".gitattributes"))
+            try safetensorsBytes(tensors: [
+                tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16"),
+            ]).write(to: directory.appendingPathComponent("model-00001-of-00001.safetensors"))
+            for modality in ["dna/splice", "ecg/phu01"] {
+                let projector = directory.appendingPathComponent("projectors/\(modality)", isDirectory: true)
+                try FileManager.default.createDirectory(at: projector, withIntermediateDirectories: true)
+                try safetensorsBytes(tensors: [
+                    tensor("layers.0.weight", dtype: "F32"),
+                ]).write(to: projector.appendingPathComponent("projector.safetensors"))
+            }
+
+            let observation = try NativeMTPArtifactObserver.observe(directory: directory)
+            XCTAssertEqual(observation.format, .unquantized(dtype: "bf16"))
+        }
+
+        // A subdirectory shard is loaded only when the index names it.
+        try withRawFixture(configData: Data(config.utf8), safetensors: []) { directory in
             let nested = directory.appendingPathComponent("nested", isDirectory: true)
             try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
             try safetensorsBytes(tensors: [
                 tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16"),
             ]).write(to: nested.appendingPathComponent("part.safetensors"))
 
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(error as? NativeMTPArtifactObservationError, .missingSafetensors)
+            }
+
+            try Data(#"{"weight_map":{"model.layers.0.mlp.down_proj.weight":"nested/part.safetensors"}}"#.utf8)
+                .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
             let observation = try NativeMTPArtifactObserver.observe(directory: directory)
             XCTAssertEqual(observation.format, .unquantized(dtype: "bf16"))
         }
 
         try withRawFixture(configData: Data(config.utf8), safetensors: []) { directory in
-            let hidden = directory.appendingPathComponent(".cache", isDirectory: true)
-            try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+            try Data(#"{"weight_map":{"model.layers.0.mlp.down_proj.weight":"../outside.safetensors"}}"#.utf8)
+                .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(error as? NativeMTPArtifactObservationError, .malformedSafetensors("containment"))
+            }
+        }
+
+        try withRawFixture(configData: Data(config.utf8), safetensors: []) { directory in
             try safetensorsBytes(tensors: [
                 tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16"),
-            ]).write(to: hidden.appendingPathComponent(".model.safetensors"))
+            ]).write(to: directory.appendingPathComponent(".model.safetensors"))
 
             XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
                 XCTAssertEqual(

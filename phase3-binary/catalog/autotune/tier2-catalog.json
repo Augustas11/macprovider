@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-25-inkling-2-mini-32gb-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-26-sage-s21-flash-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-24T23:33:00Z",
+  "issued_at": "2026-11-25T23:35:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -281,12 +281,21 @@
       "notes": "Buyer-serving candidate radixark/daisyrose-27b; identity from signed SPEC-023 row.",
       "sha256": "996b96eef24ee8f7923fabc4fb1b9da5772c0d6bc3234536d1cdace81b7ba23f",
       "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "Hygaard/Sage-S2.1-Flash-oQ4e-mtp",
+      "min_ram_gb": 235,
+      "notes": "Buyer-serving candidate hygaard/sage-s2.1-flash-oq4e-mtp (#2466 Sage S2.1 Flash, GLM-5.3-Flash fine-tune, native glm5_next engine); identity from signed SPEC-023 row.",
+      "sha256": "d59ecd8525692c53ea9dd36d5e690d4c3218713f0b0a81fec77637e1f588c261",
+      "source": "operator-curated"
     }
   ],
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "bmFWZI0JZxPMvfaAm82vb8p9d4hJCeNrXqnC63Wti26oPTYm_h7ot2RmlET1pdTSHtPWWVsffA6HJHL8Dws7Dg"
+    "sig": "8NitDKagXojar2vxIkwgoUan0dCnBkI4HAERCnWOgAKFjoRKIUyzVIIWw_h5X1kTue3s_EfhgRBUpCR_7y9rCw"
   },
   "version": 1
 }

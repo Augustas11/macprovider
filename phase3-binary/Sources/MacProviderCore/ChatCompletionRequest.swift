@@ -131,7 +131,7 @@ public struct ChatCompletionRequest: Sendable {
             if reasoningEffort == "none" || reasoningEffort == "minimal" {
                 let id = modelID.lowercased()
                 if id.contains("glm-5.3") || id.contains("gpt-oss") || id.contains("qwen3.8")
-                    || Self.usesQwen38Template(modelID: modelID) {
+                    || Self.usesQwen38Template(modelID: modelID) || ToolCallGrammar.isSageS21Flash(id) {
                     return "low"
                 }
             }
