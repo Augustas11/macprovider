@@ -1130,8 +1130,8 @@ final class ChatStore: ObservableObject {
             title: conversationTitle ?? SavedChat.title(from: turns.first?.prompt ?? ""),
             model: conversationModel ?? capability?.model ?? "",
             createdAt: conversationCreated, updatedAt: Date(),
-            webSearch: webSearch ? true : nil,
-            turns: turns.map(savedTurn))
+            turns: turns.map(savedTurn),
+            webSearch: webSearch ? true : nil)
     }
 
     private func savedTurn(_ turn: ChatTurn) -> SavedChatTurn {
