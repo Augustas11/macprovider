@@ -47,7 +47,7 @@ struct ChatScreen: View {
             let announcement = "Answer. " + String(turn.answer.prefix(400))
             guard announcement != announcedAnswer else { return }
             announcedAnswer = announcement
-            AccessibilityNotification.Announcement(Text(verbatim: announcement)).post()
+            AccessibilityNotification.Announcement(announcement).post()
         }
         .task(id: speaker.speakingID) {
             guard speaker.speakingID != nil else { return }
