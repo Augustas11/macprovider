@@ -86,6 +86,8 @@ targets:
         LSUIElement: true                # menu bar only, no Dock icon
         MalibuBundledReferralBootstrapV1: true
         NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
+        NSMicrophoneUsageDescription: "Malibu uses the microphone so you can dictate a message on this Mac."
+        NSSpeechRecognitionUsageDescription: "Malibu turns speech into text on this Mac."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:

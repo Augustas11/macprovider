@@ -8,13 +8,65 @@ enum AgentModelTarget: String, Codable, CaseIterable, Identifiable {
     var title: String { self == .thisMac ? "This Mac" : "Malibu network" }
 }
 
-struct AgentSampling: Codable, Equatable {
+struct AgentSampling: Equatable {
     var temperature: Double = 0.7
     var topP: Double = 0.9
+    /// 0 omits `top_k` so the provider keeps its own default.
+    var topK: Int = 0
+    var seed: Int?
+    var stop: [String] = []
     var maxTokens: Int = 1024
     var isValid: Bool {
         temperature.isFinite && (0...2).contains(temperature)
-            && topP.isFinite && (0.01...1).contains(topP) && (1...2048).contains(maxTokens)
+            && topP.isFinite && (0.01...1).contains(topP)
+            && (0...100).contains(topK)
+            && (seed.map { (0...Int(Int32.max)).contains($0) } ?? true)
+            && stop.count <= 4
+            && stop.allSatisfy { !$0.isEmpty && $0.utf8.count <= 64 && !$0.contains("\0") }
+            && (1...8192).contains(maxTokens)
+    }
+
+    /// Fields both Chat and Agents send. `maxOutput` is the context cap.
+    func requestFields(maxOutput: Int) -> [String: Any] {
+        var fields: [String: Any] = [
+            "temperature": min(2, max(0, temperature)),
+            "top_p": min(1, max(0.01, topP)),
+            "max_tokens": min(max(1, maxOutput), max(1, maxTokens)),
+        ]
+        if (1...100).contains(topK) { fields["top_k"] = topK }
+        if let seed, (0...Int(Int32.max)).contains(seed) { fields["seed"] = seed }
+        let stops = stop.filter { !$0.isEmpty }.prefix(4)
+        if !stops.isEmpty { fields["stop"] = Array(stops) }
+        return fields
+    }
+
+    static func stops(from text: String) -> [String] {
+        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }.prefix(4).map { String($0.prefix(64)) }
+    }
+}
+
+extension AgentSampling: Codable {
+    enum CodingKeys: String, CodingKey {
+        case temperature, topP, topK, seed, stop, maxTokens
+    }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.7
+        topP = try container.decodeIfPresent(Double.self, forKey: .topP) ?? 0.9
+        topK = try container.decodeIfPresent(Int.self, forKey: .topK) ?? 0
+        seed = try container.decodeIfPresent(Int.self, forKey: .seed)
+        stop = try container.decodeIfPresent([String].self, forKey: .stop) ?? []
+        maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens) ?? 1024
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(temperature, forKey: .temperature)
+        try container.encode(topP, forKey: .topP)
+        try container.encode(topK, forKey: .topK)
+        try container.encodeIfPresent(seed, forKey: .seed)
+        try container.encode(stop, forKey: .stop)
+        try container.encode(maxTokens, forKey: .maxTokens)
     }
 }
 
@@ -25,16 +77,31 @@ struct AgentDefinition: Codable, Identifiable, Equatable {
     var target: AgentModelTarget = .thisMac
     var model = ""
     var workspacePath: String?
+    /// More than one folder. Nil keeps agents saved before this field.
+    var workspacePaths: [String]? = nil
     var workspaceTools = false
     var servers: [MCPServerConfiguration] = []
     var sampling = AgentSampling()
 
+    var folderURLs: [URL] {
+        if let workspacePaths, !workspacePaths.isEmpty {
+            return workspacePaths.map { URL(fileURLWithPath: $0) }
+        }
+        if let workspacePath, !workspacePath.isEmpty { return [URL(fileURLWithPath: workspacePath)] }
+        return []
+    }
+
     func validate() throws {
+        let paths = workspacePaths ?? []
+        let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.utf8.count <= 200, instructions.utf8.count <= 16_384,
               model.utf8.count <= 512, sampling.isValid, servers.count <= 8,
               Set(servers.map(\.id)).count == servers.count,
-              workspacePath.map({ $0.utf8.count <= 4096 && !$0.contains("\0") }) ?? true
+              servers.allSatisfy(\.isAcceptable),
+              workspacePath.map({ $0.utf8.count <= 4096 && !$0.contains("\0") }) ?? true,
+              paths.count <= 8, Set(names).count == names.count,
+              paths.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 4096 && !$0.contains("\0") })
         else { throw AgentStoreFailure.invalid }
     }
 }

@@ -705,6 +705,25 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertThrowsError(try ConnectedGatewayClient.validateCompletion(Data(#"{"status":"incomplete","output":[]}"#.utf8), api: .responses))
     }
 
+    func testChatCompletionKeepsALengthCappedReplyAndItsUsage() throws {
+        let length = Data(#"{"choices":[{"finish_reason":"length","message":{"content":"Once upon"}}],"usage":{"prompt_tokens":3,"completion_tokens":12,"macprovider_decode_ms":500}}"#.utf8)
+        let capped = try ConnectedGatewayClient.chatCompletion(from: length)
+        XCTAssertEqual(capped.text, "Once upon")
+        XCTAssertTrue(capped.truncated)
+        XCTAssertEqual(capped.promptTokens, 3)
+        XCTAssertEqual(capped.completionTokens, 12)
+        XCTAssertEqual(capped.decodeMilliseconds, 500)
+        XCTAssertEqual(capped.tokensPerSecond, 24)
+        let generation = Data(#"{"choices":[{"finish_reason":"length","message":{"content":"Once upon"}}],"usage":{"completion_tokens":12,"macprovider_generation_ms":1000}}"#.utf8)
+        let fallback = try ConnectedGatewayClient.chatCompletion(from: generation)
+        XCTAssertEqual(fallback.tokensPerSecond, 12)
+        XCTAssertThrowsError(try ConnectedGatewayClient.chatCompletion(from: Data(#"{"error":{"message":"secret"}}"#.utf8))) { error in
+            let connected = error as? ConnectedAppsError
+            XCTAssertEqual(connected?.errorDescription, "The gateway returned an unsupported or incomplete response.")
+            XCTAssertFalse(connected?.errorDescription?.contains("local provider") ?? true)
+        }
+    }
+
     func testChatCompletionRequiresStoppedNonemptyAnswer() {
         for fixture in [
             #"{"choices":[{"message":{"content":"OK"}}]}"#,

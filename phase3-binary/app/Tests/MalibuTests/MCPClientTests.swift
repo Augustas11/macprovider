@@ -98,6 +98,31 @@ final class MCPClientTests: XCTestCase {
     func testMalformedJSONStopsServer() async throws {
         try await assertStartFailure("malformed", expected: .malformed)
     }
+
+    func testToolErrorContentIsDataNotABrokenSession() throws {
+        let text = try MCPExchange.resultText(["isError": true, "content": [["type": "text", "text": "not found"]]])
+        XCTAssertTrue(text.contains("not found"))
+        let empty: [[String: Any]] = []
+        XCTAssertThrowsError(try MCPExchange.resultText(["isError": true, "content": empty])) { error in
+            XCTAssertEqual(error as? MCPFailure, .malformed)
+        }
+        XCTAssertThrowsError(try MCPExchange.resultText(["isError": true])) { error in
+            XCTAssertEqual(error as? MCPFailure, .malformed)
+        }
+    }
+
+    func testToolErrorKeepsTheServerRunning() async throws {
+        let (client, _) = try server("tool_error")
+        let tools = try await client.start()
+        let tool = try XCTUnwrap(tools.first)
+        let first = try await client.call(tool: tool, arguments: "{\"text\":\"a\"}") { _, _ in .allowOnce }
+        XCTAssertTrue(first.contains("not found"))
+        let second = try await client.call(tool: tool, arguments: "{\"text\":\"b\"}") { _, _ in .allowOnce }
+        XCTAssertTrue(second.contains("not found"))
+        XCTAssertNotEqual(client.processIdentifier, 0)
+        XCTAssertTrue(client.isRunning)
+        client.stop()
+    }
     func testMalformedJSONRPCStopsServer() async throws {
         try await assertStartFailure("bad_rpc", expected: .malformed)
     }
@@ -156,7 +181,7 @@ final class MCPClientTests: XCTestCase {
         let (template, directory) = try server()
         var created: [MCPClient] = []
         let transport = MCPExpiryTransport()
-        let session = AgentSession(transport: AgentModelTransport(local: transport, port: { 9042 }), makeClient: { configuration in
+        let session = AgentSession(transport: AgentModelTransport(local: transport, port: { 9042 }), makeClient: { configuration -> any MCPServing in
             let client = MCPClient(configuration: configuration, lifetime: created.isEmpty ? 1 : 30)
             created.append(client)
             return client
@@ -249,7 +274,10 @@ for line in sys.stdin:
         assert 'MACPROVIDER_PROVIDER_TOKEN' not in os.environ
         if mode == 'call_timeout': time.sleep(20)
         with open(os.environ['MCP_TEST_MARKER'], 'a') as f: f.write('call\n')
-        result = {'content': [{'type': 'text', 'text': request['params']['arguments']['text']}]}
+        if mode == 'tool_error':
+            result = {'content': [{'type': 'text', 'text': 'not found'}], 'isError': True}
+        else:
+            result = {'content': [{'type': 'text', 'text': request['params']['arguments']['text']}]}
     else: raise Exception('Unexpected method')
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
 """#

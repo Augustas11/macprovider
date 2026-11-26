@@ -67,11 +67,16 @@ struct AgentsScreen: View {
             }
             Divider()
             ScrollView {
-                Text(session.transcript.isEmpty ? "Send a message to start a conversation." : session.transcript)
-                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                if session.transcript.isEmpty {
+                    Text("Send a message to start a conversation.")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ChatAnswerView(text: session.transcript)
+                }
             }
             if let approval = session.pendingApproval {
                 AgentToolApprovalView(server: approval.server, tool: approval.tool, arguments: approval.arguments,
+                                      diff: approval.diff, allowsSession: approval.allowsSession,
                                       decide: session.resolveApproval)
             }
             if let notice = session.notice { Text(notice).foregroundStyle(.secondary) }
@@ -95,14 +100,19 @@ struct AgentToolApprovalView: View {
     let server: String
     let tool: String
     let arguments: String
+    var diff: String? = nil
+    var allowsSession: Bool = true
     let decide: (MCPApprovalDecision) -> Void
     var body: some View {
         ShellPanel("Tool approval") {
             Text("\(server) · \(tool)").font(.headline)
+            if let diff {
+                ScrollView { Text(diff).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 220)
+            }
             ScrollView { Text(arguments).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 120)
             HStack {
                 Button("Allow once") { decide(.allowOnce) }
-                Button("Allow for this session") { decide(.allowSession) }
+                if allowsSession { Button("Allow for this session") { decide(.allowSession) } }
                 Button("Deny", role: .destructive) { decide(.deny) }
             }
         }
@@ -120,9 +130,21 @@ private struct AgentEditor: View {
     @State private var loading = false
     @State private var serverName = ""
     @State private var serverCommand = ""
+    @State private var serverURL = ""
     @State private var serverArguments = ""
     @State private var serverEnvironment = ""
+    private var canAddMCPServer: Bool {
+        guard !serverName.isEmpty, agent.servers.count < 8 else { return false }
+        let url = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandOK = serverCommand.hasPrefix("/") && url.isEmpty
+        let urlOK = serverCommand.isEmpty && MCPServerConfiguration.acceptedURL(url) != nil
+        return commandOK || urlOK
+    }
 
+    private var stopText: Binding<String> {
+        Binding(get: { agent.sampling.stop.joined(separator: ", ") },
+                set: { agent.sampling.stop = AgentSampling.stops(from: $0) })
+    }
     private var canSave: Bool {
         !agent.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && agent.sampling.isValid
             && (agent.target == .thisMac ? localCapability?.guaranteedTools == true : models.contains { $0.id == agent.model })
@@ -153,28 +175,36 @@ private struct AgentEditor: View {
                     }
                     Button(loading ? "Checking models…" : "Refresh models") { Task { await refreshModels() } }.disabled(loading)
                     if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
-                    Toggle("Read-only workspace tools", isOn: $agent.workspaceTools)
+                    Toggle("Workspace tools", isOn: $agent.workspaceTools)
                     HStack {
-                        Text(agent.workspacePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No workspace folder")
+                        Text(folderLabel)
                         Button("Choose folder…") { chooseFolder() }
-                        if agent.workspacePath != nil { Button("Remove") { agent.workspacePath = nil } }
+                        if !agent.folderURLs.isEmpty {
+                            Button("Remove") { agent.workspacePath = nil; agent.workspacePaths = nil }
+                        }
                     }
-                    Text("Workspace tools can read, list and search the selected folder.").font(.caption)
                     Section("Sampling defaults") {
                         TextField("Temperature", value: $agent.sampling.temperature, format: .number)
                         TextField("Top P", value: $agent.sampling.topP, format: .number)
+                        Stepper("Top K: \(agent.sampling.topK)", value: $agent.sampling.topK, in: 0...100)
+                        TextField("Seed", value: $agent.sampling.seed, format: .number)
+                        TextField("Stop sequences, comma separated", text: stopText)
                         Stepper("Output tokens: \(agent.sampling.maxTokens)", value: $agent.sampling.maxTokens, in: 1...2048)
                     }
                     Section("MCP servers") {
                         ForEach(agent.servers) { server in
                             HStack {
-                                VStack(alignment: .leading) { Text(server.name); Text(server.command).font(.caption) }
+                                VStack(alignment: .leading) {
+                                    Text(server.name)
+                                    Text(server.command.isEmpty ? server.url : server.command).font(.caption).lineLimit(1)
+                                }
                                 Spacer()
                                 Button("Remove") { agent.servers.removeAll { $0.id == server.id } }
                             }
                         }
                         TextField("Server name", text: $serverName)
                         TextField("Command (absolute path)", text: $serverCommand)
+                        TextField("URL", text: $serverURL)
                         VStack(alignment: .leading) {
                             Text("Arguments · one per line").font(.caption)
                             TextEditor(text: $serverArguments).frame(height: 55)
@@ -182,7 +212,7 @@ private struct AgentEditor: View {
                             TextEditor(text: $serverEnvironment).frame(height: 55)
                         }
                         Button("Add server") { addServer() }
-                            .disabled(serverName.isEmpty || !serverCommand.hasPrefix("/") || agent.servers.count >= 8)
+                            .disabled(!canAddMCPServer)
                         Text("Each MCP tool call needs approval. Tool results cannot grant permission.").font(.caption)
                     }
                 }.formStyle(.grouped)
@@ -213,14 +243,39 @@ private struct AgentEditor: View {
         } catch { status = error.localizedDescription }
     }
 
+    private var folderLabel: String {
+        let names = agent.folderURLs.map(\.lastPathComponent)
+        return names.isEmpty ? "No workspace folder" : names.joined(separator: ", ")
+    }
+
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-        panel.prompt = "Choose workspace"
-        if panel.runModal() == .OK, let url = panel.url { agent.workspacePath = url.path }
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = true
+        panel.prompt = "Choose folder"
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        guard (1...8).contains(urls.count) else { status = "Choose at most 8 folders."; return }
+        let names = urls.map(\.lastPathComponent)
+        guard Set(names).count == names.count else { status = "Choose folders with different names."; return }
+        if urls.count == 1 {
+            agent.workspacePath = urls[0].path
+            agent.workspacePaths = nil
+        } else {
+            agent.workspacePath = nil
+            agent.workspacePaths = urls.map(\.path)
+        }
+        status = nil
     }
 
     private func addServer() {
+        let url = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if serverCommand.isEmpty, MCPServerConfiguration.acceptedURL(url) != nil {
+            let server = MCPServerConfiguration(id: UUID(), name: serverName, url: url)
+            guard server.isAcceptable else { status = "Check the MCP server command or URL."; return }
+            agent.servers.append(server)
+            serverName = ""; serverCommand = ""; serverURL = ""; serverArguments = ""; serverEnvironment = ""; status = nil
+            return
+        }
         var environment: [String: String] = [:]
         for line in serverEnvironment.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
@@ -229,9 +284,11 @@ private struct AgentEditor: View {
         }
         do { _ = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: environment) }
         catch { status = "Check the server environment values."; return }
-        agent.servers.append(MCPServerConfiguration(id: UUID(), name: serverName, command: serverCommand,
-                                                   arguments: serverArguments.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty },
-                                                   environment: environment))
-        serverName = ""; serverCommand = ""; serverArguments = ""; serverEnvironment = ""; status = nil
+        let server = MCPServerConfiguration(id: UUID(), name: serverName, command: serverCommand,
+                                            arguments: serverArguments.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty },
+                                            environment: environment)
+        guard server.isAcceptable else { status = "Check the MCP server command or URL."; return }
+        agent.servers.append(server)
+        serverName = ""; serverCommand = ""; serverURL = ""; serverArguments = ""; serverEnvironment = ""; status = nil
     }
 }

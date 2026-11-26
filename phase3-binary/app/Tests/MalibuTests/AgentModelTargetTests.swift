@@ -59,6 +59,31 @@ final class AgentModelTargetTests: XCTestCase {
         XCTAssertEqual(fake.completions, ChatStore.maxRounds)
         XCTAssertEqual(fake.budgets.reduce(0,+), ChatStore.maxRounds * 2048)
     }
+
+    func testFinishAnswerCannotShareABatchWithAWrite() async throws {
+        let fake = AgentTestTransport()
+        fake.batches = [[
+            ChatToolCall(id: "w", name: "write_file", arguments: #"{"path":"new.txt","content":"x\n"}"#),
+            ChatToolCall(id: "f", name: "finish_answer", arguments: #"{"answer":"done"}"#)
+        ]]
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AgentFinish-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data("keep\n".utf8).write(to: folder.appendingPathComponent("keep.txt"))
+        var agent = AgentDefinition()
+        agent.workspacePath = folder.path
+        agent.workspaceTools = true
+        let session = AgentSession(transport: AgentModelTransport(local: fake, port: { 9042 }))
+        do {
+            _ = try await session.run(agent: agent, prompt: "write and finish")
+            XCTFail("A mixed finish_answer batch ran")
+        } catch {
+            XCTAssertEqual(error as? ChatFailure, .invalidTool)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("new.txt").path))
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("keep.txt")), "keep\n")
+        XCTAssertNil(session.pendingApproval)
+    }
 }
 
 @MainActor
@@ -69,6 +94,7 @@ private final class AgentTestTransport: ChatTransport {
     var completions = 0
     var budgets: [Int] = []
     var messageCounts: [Int] = []
+    var batches: [[ChatToolCall]] = []
     func capability(at endpoint: ChatEndpoint) async throws -> ChatCapability {
         ChatCapability(model: "fixture", generation: 1, guaranteedTools: guaranteed)
     }
@@ -78,6 +104,10 @@ private final class AgentTestTransport: ChatTransport {
         budgets.append(object?["max_tokens"] as? Int ?? 0)
         messageCounts.append((object?["messages"] as? [[String: Any]])?.count ?? 0)
         if preempt { throw ChatFailure.preempted }
+        if !batches.isEmpty {
+            let calls = batches[min(completions - 1, batches.count - 1)]
+            return ChatCompletion(text: calls.isEmpty ? "hello" : "", calls: calls)
+        }
         return ChatCompletion(text: repeatTools ? "" : "hello", calls: repeatTools ? [ChatToolCall(id: "call\(completions)", name: "list_files", arguments: #"{"path":"."}"#)] : [])
     }
 }

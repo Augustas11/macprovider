@@ -11,6 +11,30 @@ struct SavedChatTurn: Codable, Equatable {
     var truncated: Bool?
     var note: String?
     var tools: [String]?
+    var promptTokens: Int? = nil
+    var completionTokens: Int? = nil
+    var tokensPerSecond: Double? = nil
+    var versions: [ChatVersion]? = nil
+    var activeVersion: Int? = nil
+    var attachments: [ChatAttachment]? = nil
+    /// File names inserted for this answer. Absent on chats saved before knowledge.
+    var citations: [String]? = nil
+}
+
+/// One answer for a turn. A regenerate or edit keeps the previous one here.
+struct ChatVersion: Codable, Equatable {
+    var prompt: String
+    var answer: String
+    var reasoning: String = ""
+    var complete: Bool = false
+    var truncated: Bool = false
+    var note: String?
+    var tools: [String] = []
+    var promptTokens: Int?
+    var completionTokens: Int?
+    var tokensPerSecond: Double?
+    var attachments: [ChatAttachment]? = nil
+    var citations: [String]? = nil
 }
 
 struct SavedChat: Codable, Identifiable, Equatable {
@@ -20,6 +44,8 @@ struct SavedChat: Codable, Identifiable, Equatable {
     var createdAt: Date
     var updatedAt: Date
     var turns: [SavedChatTurn]
+    /// Absent or nil means this chat does not search the web.
+    var webSearch: Bool? = nil
 
     static let titleLimit = 60
     /// The first user message on one line, cut to about 60 characters.

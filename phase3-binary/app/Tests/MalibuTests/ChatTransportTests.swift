@@ -141,6 +141,22 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertTrue(result.truncated)
         XCTAssertEqual(result.completionTokens, 8192)
     }
+    func testUsageReportsPromptTokensAndDecodeRate() throws {
+        var stream = ChatStreamAccumulator()
+        let wire = "data: " + Self.chunk(content: "hi") + "\n\n"
+            + "data: " + Self.chunk(reason: "stop") + "\n\n"
+            + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":40,\"macprovider_decode_ms\":500}}\n\n"
+            + "data: [DONE]\n\n"
+        var decoder = ChatSSEDecoder()
+        for byte in wire.utf8 { if let event = try decoder.feed(byte) { _ = try stream.accept(event) } }
+        let result = try stream.result()
+        XCTAssertEqual(result.promptTokens, 1200)
+        XCTAssertEqual(result.completionTokens, 40)
+        XCTAssertEqual(result.tokensPerSecond, 80)
+        XCTAssertEqual(ChatStats.line(completionTokens: 40, tokensPerSecond: 80), "40 tokens · 80.0 tok/s")
+        XCTAssertEqual(ChatStats.line(completionTokens: 40, tokensPerSecond: nil), "40 tokens")
+        XCTAssertNil(ChatStats.line(completionTokens: nil, tokensPerSecond: nil))
+    }
     func testStallGuardCountsOnlyDataEventsNotKeepalives() throws {
         let start = ContinuousClock.now
         var guardrail = ChatDataStallGuard(limit: .seconds(300), now: start)

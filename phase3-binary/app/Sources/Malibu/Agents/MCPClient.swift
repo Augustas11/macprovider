@@ -2,12 +2,76 @@ import Darwin
 import CoreFoundation
 import Foundation
 
-struct MCPServerConfiguration: Codable, Identifiable, Equatable {
+struct MCPServerConfiguration: Identifiable, Equatable {
     var id = UUID()
     var name = ""
     var command = ""
     var arguments: [String] = []
     var environment: [String: String] = [:]
+    /// Streamable HTTP endpoint. Empty when this server is a local command.
+    var url = ""
+
+    /// Exactly one of an absolute command or an accepted HTTP(S) URL.
+    var isAcceptable: Bool {
+        let hasCommand = !command.isEmpty
+        let hasURL = !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasCommand != hasURL else { return false }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.utf8.count <= 200, !name.contains("\0") else { return false }
+        if hasCommand {
+            return command.hasPrefix("/") && command.utf8.count <= 4096 && !command.contains("\0")
+                && arguments.count <= 32
+                && arguments.allSatisfy { $0.utf8.count <= 4096 && !$0.contains("\0") }
+                && environment.count <= 32
+                && environment.keys.allSatisfy { !$0.isEmpty && !$0.contains("=") && !$0.contains("\0") && $0.utf8.count <= 128 }
+                && environment.values.allSatisfy { $0.utf8.count <= 4096 && !$0.contains("\0") }
+        }
+        return command.isEmpty && arguments.isEmpty && environment.isEmpty
+            && Self.acceptedURL(url) != nil
+    }
+
+    /// http only for loopback. https elsewhere. No file URLs, userinfo, or missing host.
+    static func acceptedURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\\"), !trimmed.contains("\0"),
+              let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              components.user == nil, components.password == nil,
+              let host = components.host?.lowercased(), !host.isEmpty,
+              let url = components.url
+        else { return nil }
+        let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+        switch scheme {
+        case "http": guard loopback else { return nil }
+        case "https": guard !loopback else { return nil }
+        default: return nil
+        }
+        return url
+    }
+}
+
+extension MCPServerConfiguration: Codable {
+    enum CodingKeys: String, CodingKey {
+        case id, name, command, arguments, environment, url
+    }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        arguments = try container.decodeIfPresent([String].self, forKey: .arguments) ?? []
+        environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+        url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(command, forKey: .command)
+        try container.encode(arguments, forKey: .arguments)
+        try container.encode(environment, forKey: .environment)
+        if !url.isEmpty { try container.encode(url, forKey: .url) }
+    }
 }
 
 struct MCPTool {
@@ -36,10 +100,68 @@ enum MCPFailure: Error, LocalizedError, Equatable {
     }
 }
 
+/// Shared JSON-RPC checks for stdio and streamable HTTP. Server text stays data.
+enum MCPExchange {
+    static func checkInitialize(_ result: [String: Any]) throws -> String {
+        guard let protocolVersion = result["protocolVersion"] as? String,
+              ["2024-11-05", "2025-03-26", "2025-06-18"].contains(protocolVersion),
+              result["capabilities"] is [String: Any], result["serverInfo"] is [String: Any]
+        else { throw MCPFailure.malformed }
+        return protocolVersion
+    }
+
+    static func tools(from result: [String: Any], configuration: MCPServerConfiguration) throws -> [MCPTool] {
+        guard let entries = result["tools"] as? [[String: Any]], entries.count <= 32,
+              result["nextCursor"] == nil else { throw MCPFailure.malformed }
+        var names: Set<String> = []
+        return try entries.map { entry in
+            guard let original = entry["name"] as? String, !original.isEmpty,
+                  original.utf8.count <= 27,
+                  original.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
+                  names.insert(original).inserted,
+                  let schema = entry["inputSchema"] as? [String: Any]
+            else { throw MCPFailure.malformed }
+            try MCPArgumentSchema.check(schema)
+            let prefix = configuration.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            return MCPTool(name: "mcp_\(prefix)_\(original)", serverName: configuration.name,
+                           originalName: original, schema: schema)
+        }
+    }
+
+    static func arguments(_ arguments: String, tool: MCPTool, limit: Int) throws -> [String: Any] {
+        guard arguments.utf8.count <= limit,
+              let data = arguments.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw MCPFailure.invalidArguments }
+        do { try MalibuStrictJSON.rejectDuplicateKeys(data) } catch { throw MCPFailure.invalidArguments }
+        try MCPArgumentSchema.validate(object, schema: tool.schema)
+        return object
+    }
+
+    static func resultText(_ result: [String: Any]) throws -> String {
+        // isError is a tool failure the model must see. It is not a broken session.
+        guard let content = result["content"] as? [[String: Any]], !content.isEmpty else { throw MCPFailure.malformed }
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// Stdio and streamable HTTP share this surface. Identity stays a class so a
+/// session can tell one server from another with `===`.
+@MainActor
+protocol MCPServing: AnyObject {
+    var configuration: MCPServerConfiguration { get }
+    var isRunning: Bool { get }
+    func start() async throws -> [MCPTool]
+    func call(tool: MCPTool, arguments: String,
+              approval: @MainActor (MCPTool, String) async -> MCPApprovalDecision) async throws -> String
+    func stop()
+}
+
 /// Line-framed stdio only. posix_spawn creates the process group atomically,
 /// before server code can run or fork. Server output never enters app logs.
 @MainActor
-final class MCPClient {
+final class MCPClient: MCPServing {
     let configuration: MCPServerConfiguration
     private let timeout: TimeInterval
     private let lifetime: TimeInterval
@@ -77,27 +199,10 @@ final class MCPClient {
             }
             let initialized = try await request("initialize", params: ["protocolVersion": "2024-11-05", "capabilities": [:],
                 "clientInfo": ["name": "Malibu", "version": "1"]])
-            guard let protocolVersion = initialized["protocolVersion"] as? String,
-                  ["2024-11-05", "2025-03-26", "2025-06-18"].contains(protocolVersion),
-                  initialized["capabilities"] is [String: Any], initialized["serverInfo"] is [String: Any]
-            else { throw MCPFailure.malformed }
+            _ = try MCPExchange.checkInitialize(initialized)
             try await write(["jsonrpc": "2.0", "method": "notifications/initialized"])
             let result = try await request("tools/list", params: [:])
-            guard let entries = result["tools"] as? [[String: Any]], entries.count <= 32,
-                  result["nextCursor"] == nil else { throw MCPFailure.malformed }
-            var names: Set<String> = []
-            tools = try entries.map { entry in
-                guard let original = entry["name"] as? String, !original.isEmpty,
-                      original.utf8.count <= 27,
-                      original.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
-                      names.insert(original).inserted,
-                      let schema = entry["inputSchema"] as? [String: Any]
-                else { throw MCPFailure.malformed }
-                try MCPArgumentSchema.check(schema)
-                let prefix = configuration.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-                return MCPTool(name: "mcp_\(prefix)_\(original)", serverName: configuration.name,
-                               originalName: original, schema: schema)
-            }
+            tools = try MCPExchange.tools(from: result, configuration: configuration)
             return tools
         } catch { stop(); throw error }
     }
@@ -105,12 +210,7 @@ final class MCPClient {
     func call(tool: MCPTool, arguments: String,
               approval: @MainActor (MCPTool, String) async -> MCPApprovalDecision) async throws -> String {
         guard !terminal, !busy, let known = tools.first(where: { $0.name == tool.name }) else { throw MCPFailure.unavailable }
-        guard arguments.utf8.count <= messageLimit,
-              let data = arguments.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data), object is [String: Any]
-        else { throw MCPFailure.invalidArguments }
-        do { try MalibuStrictJSON.rejectDuplicateKeys(data) } catch { throw MCPFailure.invalidArguments }
-        try MCPArgumentSchema.validate(object, schema: known.schema)
+        let object = try MCPExchange.arguments(arguments, tool: known, limit: messageLimit)
         if !allowed.contains(known.name) {
             let decision = await approval(known, arguments)
             try Task.checkCancellation()
@@ -123,9 +223,7 @@ final class MCPClient {
         }
         do {
             let result = try await request("tools/call", params: ["name": known.originalName, "arguments": object])
-            guard result["content"] is [[String: Any]], (result["isError"] as? Bool) != true else { throw MCPFailure.malformed }
-            let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
-            return String(decoding: data, as: UTF8.self)
+            return try MCPExchange.resultText(result)
         } catch { stop(); throw error }
     }
 

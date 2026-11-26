@@ -111,6 +111,46 @@ final class ChatHistoryTests: XCTestCase {
         XCTAssertEqual(ChatHistoryStore.readIndex(root)?.map(\.id), [second.id, first.id], "The rebuilt index is written back")
     }
 
+    func testChatSavedBeforeWebSearchStillLoads() throws {
+        let saved = chat("Before search", updated: Date(timeIntervalSince1970: 1_800_000_000))
+        let data = try JSONEncoder().encode(saved)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "webSearch")
+        let decoded = try JSONDecoder().decode(SavedChat.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNotEqual(decoded.webSearch, true)
+        XCTAssertEqual(decoded.turns.map(\.prompt), ["Before search"])
+        var enabled = saved
+        enabled.webSearch = true
+        let root = try directory()
+        try ChatHistoryStore(directory: root).save(enabled)
+        XCTAssertEqual(ChatHistoryStore(directory: root).load(enabled.id)?.webSearch, true)
+    }
+
+    func testChatSavedBeforeCitationsStillLoads() throws {
+        let saved = chat("Before citations", updated: Date(timeIntervalSince1970: 1_800_000_000))
+        var versioned = saved
+        versioned.turns[0].versions = [ChatVersion(prompt: "Before citations", answer: "answer")]
+        versioned.turns[0].activeVersion = 0
+        let data = try JSONEncoder().encode(versioned)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var turns = try XCTUnwrap(object["turns"] as? [[String: Any]])
+        XCTAssertNil(turns[0]["citations"])
+        var versions = try XCTUnwrap(turns[0]["versions"] as? [[String: Any]])
+        XCTAssertNil(versions[0]["citations"])
+        versions[0].removeValue(forKey: "citations")
+        turns[0]["versions"] = versions
+        turns[0].removeValue(forKey: "citations")
+        object["turns"] = turns
+        let decoded = try JSONDecoder().decode(SavedChat.self, from: try JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(decoded.turns[0].citations)
+        XCTAssertNil(decoded.turns[0].versions?.first?.citations)
+        let root = try directory()
+        var cited = saved
+        cited.turns[0].citations = ["notes.txt"]
+        try ChatHistoryStore(directory: root).save(cited)
+        XCTAssertEqual(ChatHistoryStore(directory: root).load(cited.id)?.turns.first?.citations, ["notes.txt"])
+    }
+
     func testDeleteRemovesTheFile() throws {
         let root = try directory()
         let store = ChatHistoryStore(directory: root)
