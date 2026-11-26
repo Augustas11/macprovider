@@ -1181,7 +1181,7 @@ private final class FakeChatGateway: ChatGateway {
     func chatModels(key: String) async throws -> [ConnectedModel] { models }
     func complete(body: [String: Any], key: String) async throws -> ChatCompletion {
         bodies.append(body)
-        return ChatCompletion(text: text)
+        return ChatCompletion(text: text, calls: [])
     }
 }
 
