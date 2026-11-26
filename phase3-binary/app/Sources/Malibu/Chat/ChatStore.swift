@@ -132,6 +132,27 @@ final class ChatStore: ObservableObject {
     @Published var settings = ChatSettings()
     @Published var route: ChatRoute = .thisMac
     @Published private(set) var networkModels: [ConnectedModel] = []
+
+    /// Send and regenerate follow the route. A network model does not need a local provider.
+    var canAddressModel: Bool {
+        switch route {
+        case .thisMac:
+            return capability != nil
+        case .network(let id):
+            return networkModels.contains { $0.id == id }
+        }
+    }
+
+    /// Agent mode follows the same gate as the Agents screen.
+    var agentToolsAvailable: Bool {
+        switch route {
+        case .thisMac:
+            return capability?.guaranteedTools == true
+        case .network(let id):
+            guard let model = networkModels.first(where: { $0.id == id }) else { return false }
+            return !ConnectedGatewayClient.agentReady([model]).isEmpty
+        }
+    }
     @Published private(set) var pendingAttachments: [ChatAttachment] = []
     @Published private(set) var pendingApproval: AgentToolApproval?
     private let transport: any ChatTransport
@@ -388,7 +409,7 @@ final class ChatStore: ObservableObject {
             notice = text
             if let running, let index = turns.firstIndex(where: { $0.id == running }) {
                 turns[index].note = text
-                turns[index].storeActiveVersion()
+                restorePreviousAnswer(at: index)
             }
             saveCurrent()
         }
@@ -449,6 +470,7 @@ final class ChatStore: ObservableObject {
         guard imagesAllowed(attachments) else { return false }
         guard let index = turns.firstIndex(where: { $0.id == id }), turns[index].complete else { return false }
         guard let (endpoint, expected, workspace) = readyToRun() else { return false }
+        guard anotherVersionFits(index: index, prompt: text, attachments: attachments) else { return false }
         if turns.count > index + 1 { turns.removeSubrange((index + 1)...) }
         turns[index].beginAnotherVersion(prompt: text, attachments: attachments)
         conversationModel = expected.model
@@ -484,6 +506,10 @@ final class ChatStore: ObservableObject {
             notice = KnowledgeFailure.localOnly.localizedDescription
             return nil
         }
+        if webSearch, case .network = route {
+            notice = WebSearchFailure.localOnly.localizedDescription
+            return nil
+        }
         switch route {
         case .thisMac:
             guard let endpoint, let expected = capability else {
@@ -508,7 +534,7 @@ final class ChatStore: ObservableObject {
                 notice = "Choose a folder first."
                 return nil
             }
-            guard !agentMode || model.supportsTools else {
+            guard !agentMode || !ConnectedGatewayClient.agentReady([model]).isEmpty else {
                 notice = ChatFailure.unsupportedTools.localizedDescription
                 return nil
             }
@@ -580,7 +606,7 @@ final class ChatStore: ObservableObject {
                 let message = self.display(error)
                 if let index = self.turns.firstIndex(where: { $0.id == id }) {
                     self.turns[index].note = message
-                    self.turns[index].storeActiveVersion()
+                    self.restorePreviousAnswer(at: index)
                 }
                 self.saveCurrent()
                 self.notice = message
@@ -625,17 +651,20 @@ final class ChatStore: ObservableObject {
             let response: ChatCompletion
             let round: ChatCapability
             if case .network(let modelID) = route {
+                if web { throw WebSearchFailure.localOnly }
                 if !knowledgeText.isEmpty { throw KnowledgeFailure.localOnly }
                 guard runID == id else { throw CancellationError() }
                 guard workspace == nil || expected.guaranteedTools else { throw ChatFailure.unsupportedTools }
                 activity = workspace == nil ? "Replying on the Malibu network…" : "Working within the selected folder…"
                 round = expected
+                let listed = networkModels.first { $0.id == modelID }
+                let cap = outputCap(for: expected, model: listed)
                 var sampling = settings.sampling
-                sampling.maxTokens = min(sampling.maxTokens, Self.outputTokens(for: expected))
+                sampling.maxTokens = min(sampling.maxTokens, cap)
                 let body = try requestBody(model: modelID, messages: messages, stream: false, sampling: sampling,
-                                           output: Self.outputTokens(for: expected), workspace: workspace, mcpSchemas: mcpSchemas, web: web)
-                noteCitations(knowledgeCitations, on: id)
+                                           output: cap, workspace: workspace, mcpSchemas: mcpSchemas, web: false)
                 response = try await gateway.complete(body: body, key: try buyerKey())
+                noteCitations(knowledgeCitations, on: id)
             } else {
                 guard let endpoint else { throw ChatFailure.unavailable }
                 let fresh = try await transport.capability(at: endpoint)
@@ -649,7 +678,6 @@ final class ChatStore: ObservableObject {
                 let body = try requestBody(model: fresh.model, messages: messages, stream: true, sampling: sampling,
                                            output: Self.outputTokens(for: fresh), workspace: workspace, mcpSchemas: mcpSchemas, web: web)
                 let data = try JSONSerialization.data(withJSONObject: body)
-                noteCitations(knowledgeCitations, on: id)
                 response = try await transport.complete(at: endpoint, body: data, onText: { [weak self] fragment in
                     guard !toolsOffered, let self, self.runID == id,
                           let index = self.turns.firstIndex(where: { $0.id == id }) else { return }
@@ -659,6 +687,7 @@ final class ChatStore: ObservableObject {
                           let index = self.turns.firstIndex(where: { $0.id == id }) else { return }
                     self.turns[index].reasoning += fragment
                 })
+                noteCitations(knowledgeCitations, on: id)
             }
             try Task.checkCancellation()
             guard runID == id else { throw CancellationError() }
@@ -677,8 +706,8 @@ final class ChatStore: ObservableObject {
             }
             guard !response.truncated else { throw ChatFailure.limit }
             if response.calls.isEmpty {
-                // A folder with no MCP still requires a tool call. Web search and MCP can end on text.
-                if workspace != nil && mcp.isEmpty { throw ChatFailure.invalidTool }
+                // Required only when this Mac can honor finish_answer. Auto may end on text.
+                if folderFinishRequired(workspace: workspace, mcpEmpty: mcp.isEmpty) { throw ChatFailure.invalidTool }
                 guard !response.text.isEmpty || !response.reasoning.isEmpty else { throw ChatFailure.malformed }
                 if let index = turns.firstIndex(where: { $0.id == id }) {
                     turns[index].answer = response.text
@@ -741,6 +770,7 @@ final class ChatStore: ObservableObject {
                             if allowed {
                                 result = try await workspace.commit(proposal, deadline: deadline)
                             } else {
+                                await workspace.discard(proposal)
                                 result = AgentWorkspace.deniedChange
                             }
                         } else {
@@ -786,7 +816,7 @@ final class ChatStore: ObservableObject {
         return (built.system, built.citations)
     }
 
-    /// Recorded only once the request that contains those excerpts is sent.
+    /// Recorded only after the reply request that carried those excerpts returns.
     private func noteCitations(_ citations: [String], on id: UUID) {
         guard !citations.isEmpty, let index = turns.firstIndex(where: { $0.id == id }),
               turns[index].citations.isEmpty else { return }
@@ -802,9 +832,14 @@ final class ChatStore: ObservableObject {
         if web { schemas.append(contentsOf: WebSearch.schemas) }
         schemas.append(contentsOf: mcpSchemas)
         if !schemas.isEmpty {
-            // A folder alone still requires finish_answer. Web search and MCP can end on plain text.
+            // required only for a local folder, no MCP, and no custom stop. Otherwise auto.
+            let requireFinish = folderFinishRequired(workspace: workspace, mcpEmpty: mcpSchemas.isEmpty)
             body["tools"] = schemas
-            body["tool_choice"] = (workspace != nil && mcpSchemas.isEmpty) ? "required" : "auto"
+            body["tool_choice"] = requireFinish ? "required" : "auto"
+            if requireFinish {
+                body["parallel_tool_calls"] = true
+                body.removeValue(forKey: "stop")
+            }
         }
         let data = try JSONSerialization.data(withJSONObject: body)
         guard data.count <= 4 * Self.maxToolOutputBytes else { throw ChatFailure.limit }
@@ -897,24 +932,7 @@ final class ChatStore: ObservableObject {
     }
     private func saveCurrent() {
         guard let historyStore, unsaved, !turns.isEmpty else { return }
-        let chat = SavedChat(
-            id: conversationID,
-            title: conversationTitle ?? SavedChat.title(from: turns[0].prompt),
-            model: conversationModel ?? capability?.model ?? "",
-            createdAt: conversationCreated, updatedAt: Date(),
-            webSearch: webSearch ? true : nil,
-            turns: turns.map {
-                SavedChatTurn(prompt: $0.prompt, answer: $0.answer, complete: $0.complete,
-                              reasoning: $0.reasoning.isEmpty ? nil : $0.reasoning,
-                              truncated: $0.truncated ? true : nil, note: $0.note,
-                              tools: $0.tools.isEmpty ? nil : $0.tools,
-                              promptTokens: $0.promptTokens, completionTokens: $0.completionTokens,
-                              tokensPerSecond: $0.tokensPerSecond,
-                              versions: $0.versions.isEmpty ? nil : $0.versions,
-                              activeVersion: $0.versions.isEmpty ? nil : $0.activeVersion,
-                              attachments: $0.attachments.isEmpty ? nil : $0.attachments,
-                              citations: $0.citations.isEmpty ? nil : $0.citations)
-            })
+        let chat = persistedChat(from: turns)
         do { try historyStore.save(chat); unsaved = false }
         catch { notice = "This chat could not be saved on this Mac." }
         history = historyStore.summaries
@@ -1061,9 +1079,78 @@ final class ChatStore: ObservableObject {
               let loaded = capability?.model, loaded != saved else { return nil }
         return "This chat used \(saved). Replies now come from \(loaded)."
     }
+    /// A folder forces finish_answer only when the local provider can honor it.
+    private func folderFinishRequired(workspace: AgentWorkspace?, mcpEmpty: Bool) -> Bool {
+        guard workspace != nil, mcpEmpty, settings.sampling.stop.isEmpty else { return false }
+        if case .network = route { return false }
+        return true
+    }
+
+    /// The published output cap, when the gateway lists one, bounds the request.
+    private func outputCap(for expected: ChatCapability, model: ConnectedModel?) -> Int {
+        let room = Self.outputTokens(for: expected)
+        guard let published = model?.maxOutputTokens else { return room }
+        return max(1, min(room, published))
+    }
+
+    /// A failed regenerate keeps the failed attempt and shows the previous answer.
+    private func restorePreviousAnswer(at index: Int) {
+        guard turns[index].versions.count > 1 else {
+            turns[index].storeActiveVersion()
+            return
+        }
+        let previous = turns[index].activeVersion - 1
+        guard turns[index].versions.indices.contains(previous), turns[index].versions[previous].complete else {
+            turns[index].storeActiveVersion()
+            return
+        }
+        turns[index].storeActiveVersion()
+        turns[index].selectVersion(previous)
+    }
+
+    private func anotherVersionFits(index: Int, prompt: String, attachments: [ChatAttachment]) -> Bool {
+        guard historyStore != nil else { return true }
+        var preview = turns
+        preview[index].beginAnotherVersion(prompt: prompt, attachments: attachments)
+        guard Self.savedChatFits(persistedChat(from: preview)) else {
+            notice = "This chat could not be saved on this Mac."
+            return false
+        }
+        return true
+    }
+
+    static func savedChatFits(_ chat: SavedChat) -> Bool {
+        guard let data = try? JSONEncoder().encode(chat) else { return false }
+        return data.count <= ChatHistoryStore.byteLimit
+    }
+
+    private func persistedChat(from turns: [ChatTurn]) -> SavedChat {
+        SavedChat(
+            id: conversationID,
+            title: conversationTitle ?? SavedChat.title(from: turns.first?.prompt ?? ""),
+            model: conversationModel ?? capability?.model ?? "",
+            createdAt: conversationCreated, updatedAt: Date(),
+            webSearch: webSearch ? true : nil,
+            turns: turns.map(savedTurn))
+    }
+
+    private func savedTurn(_ turn: ChatTurn) -> SavedChatTurn {
+        SavedChatTurn(prompt: turn.prompt, answer: turn.answer, complete: turn.complete,
+                      reasoning: turn.reasoning.isEmpty ? nil : turn.reasoning,
+                      truncated: turn.truncated ? true : nil, note: turn.note,
+                      tools: turn.tools.isEmpty ? nil : turn.tools,
+                      promptTokens: turn.promptTokens, completionTokens: turn.completionTokens,
+                      tokensPerSecond: turn.tokensPerSecond,
+                      versions: turn.versions.isEmpty ? nil : turn.versions,
+                      activeVersion: turn.versions.isEmpty ? nil : turn.activeVersion,
+                      attachments: turn.attachments.isEmpty ? nil : turn.attachments,
+                      citations: turn.citations.isEmpty ? nil : turn.citations)
+    }
+
     private func display(_ error: Error) -> String {
         if let failure = error as? ChatFailure { return failure.localizedDescription }
         if let failure = error as? KnowledgeFailure { return failure.localizedDescription }
+        if let failure = error as? WebSearchFailure { return failure.localizedDescription }
         if let failure = error as? MCPFailure { return failure.localizedDescription }
         if let connected = error as? ConnectedAppsError, let text = connected.errorDescription { return text }
         if error is CancellationError || (error as? URLError)?.code == .cancelled { return "Stopped." }

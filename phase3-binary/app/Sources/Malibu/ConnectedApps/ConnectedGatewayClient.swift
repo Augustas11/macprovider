@@ -170,14 +170,21 @@ struct ConnectedGatewayClient {
     /// Agents share the same fixed-origin, redirect-blocked, bounded gateway path.
     func complete(body: [String: Any], key: String) async throws -> ChatCompletion {
         let data = try await request(path: "chat/completions", key: key, body: body)
-        try MalibuStrictJSON.rejectDuplicateKeys(data)
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        return try Self.chatCompletion(from: data)
+    }
+
+    /// A length-capped reply is kept. Usage includes prompt tokens and decode time
+    /// when the gateway sends them. A gateway error is not a local-provider failure.
+    static func chatCompletion(from data: Data) throws -> ChatCompletion {
+        guard data.count <= maximumResponseBytes else { throw ConnectedAppsError.invalidResponse }
+        do { try MalibuStrictJSON.rejectDuplicateKeys(data) } catch { throw ConnectedAppsError.invalidResponse }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["error"] == nil,
               let choices = root["choices"] as? [[String: Any]], choices.count == 1,
               let choice = choices.first,
               let reason = choice["finish_reason"] as? String,
-              reason == "stop" || reason == "tool_calls",
-              let message = choice["message"] as? [String: Any] else { throw ChatFailure.malformed }
+              reason == "stop" || reason == "tool_calls" || reason == "length",
+              let message = choice["message"] as? [String: Any] else { throw ConnectedAppsError.invalidResponse }
         let raw = message["tool_calls"] as? [[String: Any]] ?? []
         guard raw.count <= ChatStreamAccumulator.maxCallsPerResponse else { throw ChatFailure.limit }
         let calls = try raw.map { item -> ChatToolCall in
@@ -185,14 +192,19 @@ struct ConnectedGatewayClient {
                   let function = item["function"] as? [String: Any],
                   let name = function["name"] as? String, !name.isEmpty, name.utf8.count <= 64,
                   let arguments = function["arguments"] as? String, arguments.utf8.count <= 32768
-            else { throw ChatFailure.malformed }
+            else { throw ConnectedAppsError.invalidResponse }
             return ChatToolCall(id: id, name: name, arguments: arguments)
         }
-        guard Set(calls.map(\.id)).count == calls.count else { throw ChatFailure.malformed }
+        guard Set(calls.map(\.id)).count == calls.count else { throw ConnectedAppsError.invalidResponse }
         let text = message["content"] as? String ?? ""
         guard text.utf8.count <= 65536 else { throw ChatFailure.limit }
-        let tokens = (root["usage"] as? [String: Any])?["completion_tokens"] as? Int
-        return ChatCompletion(text: text, calls: calls, completionTokens: tokens.flatMap { $0 >= 0 ? $0 : nil })
+        let usage = root["usage"] as? [String: Any]
+        let decode = ChatStreamAccumulator.usageInt(usage?["macprovider_decode_ms"])
+            ?? ChatStreamAccumulator.usageInt(usage?["macprovider_generation_ms"])
+        return ChatCompletion(text: text, calls: calls, truncated: reason == "length",
+                              completionTokens: ChatStreamAccumulator.usageInt(usage?["completion_tokens"]),
+                              promptTokens: ChatStreamAccumulator.usageInt(usage?["prompt_tokens"]),
+                              decodeMilliseconds: (decode ?? 0) > 0 ? decode : nil)
     }
 
     private func request(path: String, key: String, body: [String: Any]?) async throws -> Data {

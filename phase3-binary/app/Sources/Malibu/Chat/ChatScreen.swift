@@ -107,7 +107,7 @@ struct ChatScreen: View {
             HStack(spacing: 14) {
                 Toggle("Agent mode", isOn: $store.agentMode)
                     .toggleStyle(.switch)
-                    .disabled(store.isRunning || store.capability?.guaranteedTools != true)
+                    .disabled(store.isRunning || !store.agentToolsAvailable)
                     .accessibilityIdentifier("malibu.chat.agent-mode")
                 if store.agentMode {
                     Button(store.folderName.map { "Folder: \($0)" } ?? "Choose folder…", systemImage: "folder") { chooseFolder() }
@@ -145,7 +145,7 @@ struct ChatScreen: View {
                 Text(contextNote).font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("malibu.chat.context-note")
             }
-            if store.capability != nil && store.capability?.guaranteedTools != true {
+            if case .thisMac = store.route, store.capability != nil, store.capability?.guaranteedTools != true {
                 Text("Agent mode needs a model with guaranteed tool selection.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -195,7 +195,7 @@ struct ChatScreen: View {
                                             editingTurn = nil
                                             store.regenerate(turn.id)
                                         }
-                                        .disabled(store.capability == nil || store.isChecking)
+                                        .disabled(!store.canAddressModel)
                                         .accessibilityIdentifier("malibu.chat.regenerate")
                                         if turn.versions.count > 1 {
                                             Button { store.selectVersion(turn.id, index: turn.activeVersion - 1) } label: {
@@ -250,7 +250,7 @@ struct ChatScreen: View {
                                 }
                                 if turn.truncated && turn.id == store.turns.last?.id && !store.isRunning {
                                     Button("Continue", systemImage: "arrow.down.forward") { store.continueAnswer() }
-                                        .disabled(store.capability == nil || store.isChecking)
+                                        .disabled(!store.canAddressModel)
                                         .accessibilityIdentifier("malibu.chat.continue")
                                 }
                             }.id(turn.id)
@@ -453,11 +453,13 @@ struct ChatScreen: View {
         }
     }
     private var canSend: Bool {
-        let typed = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return !store.isRunning
-            && (typed || !store.pendingAttachments.isEmpty)
+        !store.isRunning
+            && hasDraft
             && draft.utf8.count <= ChatStore.maxPromptBytes
-            && store.capability != nil && !store.isChecking
+            && store.canAddressModel
+    }
+    private var hasDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingAttachments.isEmpty
     }
     private func send() {
         dictation.stop()

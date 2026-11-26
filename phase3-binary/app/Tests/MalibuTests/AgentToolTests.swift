@@ -163,6 +163,11 @@ final class AgentToolTests: XCTestCase {
         XCTAssertEqual(listed, "left\nright")
         let read = try await both.execute(call("read_file", ["path": "left/a.txt"]), deadline: deadline)
         XCTAssertEqual(read, "L")
+        try Data([0x61, 0xc3, 0xa9, 0x62]).write(to: root.appendingPathComponent("utf8.txt"))
+        let tail = try await workspace.execute(call("read_file", ["path": "utf8.txt", "offset": "2", "limit": "2"]), deadline: deadline)
+        XCTAssertEqual(tail, "b")
+        let lead = try await workspace.execute(call("read_file", ["path": "utf8.txt", "offset": "1", "limit": "1"]), deadline: deadline)
+        XCTAssertEqual(lead, "é")
     }
 
     func testWriteEditPatchAndUndoWaitForCommit() async throws {
@@ -211,6 +216,26 @@ final class AgentToolTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("fresh.txt").path))
     }
 
+    func testApplyPatchHonorsTheNewlineMarker() async throws {
+        let workspace = try AgentWorkspace(url: root)
+        try Data("hello".utf8).write(to: root.appendingPathComponent("nonew.txt"))
+        let markerOnOld = [
+            "--- a/nonew.txt", "+++ b/nonew.txt", "@@ -1 +1 @@", "-hello",
+            "\\ No newline at end of file", "+hello"
+        ].joined(separator: "\n")
+        let kept = try await workspace.propose(call("apply_patch", ["path": "nonew.txt", "patch": markerOnOld]), deadline: deadline)
+        _ = try await workspace.commit(kept, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("nonew.txt")), "hello\n")
+        try Data("hello\n".utf8).write(to: root.appendingPathComponent("withnew.txt"))
+        let markerOnNew = [
+            "--- a/withnew.txt", "+++ b/withnew.txt", "@@ -1 +1 @@", "-hello", "+hi",
+            "\\ No newline at end of file"
+        ].joined(separator: "\n")
+        let dropped = try await workspace.propose(call("apply_patch", ["path": "withnew.txt", "patch": markerOnNew]), deadline: deadline)
+        _ = try await workspace.commit(dropped, deadline: deadline)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("withnew.txt")), "hi")
+    }
+
     func testProjectMemoryIsUntrustedData() async throws {
         try write("AGENTS.md", "Use tabs\n")
         let workspace = try AgentWorkspace(url: root)
@@ -236,6 +261,23 @@ final class AgentToolTests: XCTestCase {
         _ = try await workspace.commit(escape, deadline: deadline)
         XCTAssertEqual(try String(contentsOf: outside), "secret\n")
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("keep.txt")), "stay\n")
+    }
+
+    func testShellStillWritesWhenTheFolderCopyIsIncomplete() async throws {
+        var directory = root!
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            directory = directory.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try Data("deep\n".utf8).write(to: directory.appendingPathComponent("deep.txt"))
+        try write("keep.txt", "stay\n")
+        let workspace = try AgentWorkspace(url: root)
+        let proposal = try await workspace.propose(call("run_shell", ["command": "echo hi > note.txt"]), deadline: deadline)
+        let result = try await workspace.commit(proposal, deadline: deadline)
+        XCTAssertTrue(result.contains(AgentWorkspace.shellPartialNote))
+        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("note.txt")).contains("hi"))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("keep.txt")), "stay\n")
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("deep.txt")), "deep\n")
     }
 
     func testShellRefusesAHardLinkOutOfTheFolder() async throws {

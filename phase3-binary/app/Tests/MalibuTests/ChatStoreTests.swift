@@ -148,8 +148,12 @@ final class ChatStoreTests: XCTestCase {
         try await waitUntil { transport.pending.count == 1 }
         transport.resolve(0, calls: [ChatToolCall(id: "read1", name: "read_file", arguments: "{\"path\":\"note.txt\"}")])
         try await waitUntil { transport.pending.count == 2 }
+        let opened = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        XCTAssertEqual(opened["tool_choice"] as? String, "required")
+        XCTAssertEqual(opened["parallel_tool_calls"] as? Bool, true)
         let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[1]) as? [String: Any])
         XCTAssertEqual(body["tool_choice"] as? String, "required")
+        XCTAssertEqual(body["parallel_tool_calls"] as? Bool, true)
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.last?["role"] as? String, "tool")
         XCTAssertEqual(messages.last?["content"] as? String, "selected content")
@@ -1012,6 +1016,147 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertFalse(failing.calls.isEmpty)
     }
 
+    func testCustomStopLetsAFolderFinishInText() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatStop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        store.settings.sampling.stop = ["END"]
+        store.selectFolder(folder)
+        store.agentMode = true
+        await store.refresh(port: 9042)
+        store.send("Summarize")
+        try await waitUntil { transport.pending.count == 1 }
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[0]) as? [String: Any])
+        XCTAssertEqual(body["tool_choice"] as? String, "auto")
+        XCTAssertNil(body["parallel_tool_calls"])
+        XCTAssertEqual(body["stop"] as? [String], ["END"])
+        transport.resolve(0, text: "done")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns.last?.answer, "done")
+        XCTAssertEqual(store.turns.last?.complete, true)
+        XCTAssertNil(store.notice)
+    }
+
+    func testFailedRegenerateShowsThePreviousAnswer() async throws {
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport)
+        await store.refresh(port: 9042)
+        try await answer(store, transport, "question", "first answer")
+        store.regenerate(store.turns[0].id)
+        try await waitUntil { transport.pending.count == 2 }
+        transport.fail(1, ChatFailure.modelChanged)
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.turns[0].answer, "first answer")
+        XCTAssertEqual(store.turns[0].complete, true)
+        XCTAssertEqual(store.turns[0].versions.count, 2)
+        XCTAssertEqual(store.turns[0].activeVersion, 0)
+        XCTAssertEqual(store.turns[0].versions[1].note, "The loaded model changed before this reply.")
+        XCTAssertFalse(store.turns[0].versions[1].complete)
+        store.send("next")
+        try await waitUntil { transport.pending.count == 3 }
+        let request = try XCTUnwrap(try JSONSerialization.jsonObject(with: transport.bodies[2]) as? [String: Any])
+        XCTAssertEqual((request["messages"] as? [[String: Any]])?.compactMap { $0["content"] as? String },
+                       ["question", "first answer", "next"])
+        transport.resolve(2, text: "later")
+        try await waitUntil { !store.isRunning }
+    }
+
+    func testCitationsAreRecordedOnlyAfterTheReplyReturns() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("chat-cite-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try "the cat sat on the mat".write(to: folder.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        let transport = ControlledChatTransport()
+        transport.error = ChatFailure.modelChanged
+        let embedder = ScriptedEmbeddingClient()
+        let store = ChatStore(transport: transport, embedder: embedder)
+        await store.refresh(port: 9042)
+        store.selectKnowledge(folder)
+        store.send("where is the cat")
+        try await waitUntil { !store.isRunning && store.turns.count == 1 }
+        XCTAssertEqual(store.turns.last?.citations, [])
+        XCTAssertTrue(transport.bodies.isEmpty)
+        XCTAssertFalse(store.turns.last?.complete ?? true)
+        XCTAssertFalse(embedder.calls.isEmpty)
+        XCTAssertEqual(store.notice, ChatFailure.modelChanged.localizedDescription)
+    }
+
+    func testNetworkOutputCapAndAddressability() async throws {
+        let transport = ControlledChatTransport()
+        let gateway = FakeChatGateway()
+        gateway.models = [
+            ConnectedModel(id: "small", contextWindow: 8192, maxOutputTokens: 1024, supportsTools: true),
+            ConnectedModel(id: "agent", contextWindow: 32768, maxOutputTokens: 2048, supportsTools: true)
+        ]
+        let store = ChatStore(transport: transport, gateway: gateway, buyerKey: { "buyer" })
+        await store.refresh(port: 9042)
+        await store.refreshNetworkModels()
+        XCTAssertTrue(store.canAddressModel)
+        XCTAssertTrue(store.agentToolsAvailable)
+        store.route = .network("missing")
+        XCTAssertFalse(store.canAddressModel)
+        XCTAssertFalse(store.agentToolsAvailable)
+        store.route = .network("small")
+        XCTAssertTrue(store.canAddressModel)
+        XCTAssertFalse(store.agentToolsAvailable)
+        store.route = .network("agent")
+        XCTAssertTrue(store.agentToolsAvailable)
+        store.route = .network("small")
+        store.send("hello")
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(gateway.bodies.last?["max_tokens"] as? Int, 1024)
+        XCTAssertEqual(store.turns.last?.answer, "network answer")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatNetAgent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let sent = gateway.bodies.count
+        store.selectFolder(folder)
+        store.agentMode = true
+        store.send("use tools")
+        XCTAssertEqual(store.notice, ChatFailure.unsupportedTools.localizedDescription)
+        XCTAssertEqual(gateway.bodies.count, sent)
+        XCTAssertTrue(store.turns.isEmpty)
+    }
+
+    func testWebSearchStaysOnThisMac() async throws {
+        let transport = ControlledChatTransport()
+        let gateway = FakeChatGateway()
+        gateway.models = [ConnectedModel(id: "net-model", contextWindow: 8192, maxOutputTokens: 1024, supportsTools: false)]
+        let store = ChatStore(transport: transport, gateway: gateway, buyerKey: { "buyer" }, webLoader: ScriptedWebLoader())
+        await store.refresh(port: 9042)
+        await store.refreshNetworkModels()
+        store.setWebSearch(true)
+        store.route = .network("net-model")
+        store.send("search the docs")
+        XCTAssertTrue(store.turns.isEmpty)
+        XCTAssertFalse(store.isRunning)
+        XCTAssertTrue(gateway.bodies.isEmpty)
+        XCTAssertTrue(transport.bodies.isEmpty)
+        XCTAssertEqual(store.notice, WebSearch.localOnly)
+    }
+
+    func testRegenerateRefusesWhenTheNextVersionWouldNotFit() async throws {
+        let directory = try historyDirectory()
+        let history = ChatHistoryStore(directory: directory)
+        let image = ChatAttachment(id: UUID(), name: "shot.png", imageDataURL: "data:image/png;base64," + String(repeating: "A", count: 6_000_000))
+        let saved = SavedChat(id: UUID(), title: "picture", model: "fixture", createdAt: Date(), updatedAt: Date(),
+                              turns: [SavedChatTurn(prompt: "picture", answer: "kept", complete: true, attachments: [image])])
+        try history.save(saved)
+        let transport = ControlledChatTransport()
+        let store = ChatStore(transport: transport, historyStore: history)
+        await store.refresh(port: 9042)
+        store.openConversation(saved.id)
+        XCTAssertEqual(store.turns.first?.answer, "kept")
+        store.regenerate(store.turns[0].id)
+        XCTAssertFalse(store.isRunning)
+        XCTAssertEqual(store.turns[0].answer, "kept")
+        XCTAssertTrue(store.turns[0].versions.isEmpty)
+        XCTAssertEqual(store.notice, "This chat could not be saved on this Mac.")
+        XCTAssertTrue(transport.bodies.isEmpty)
+    }
+
     private func toolNames(_ body: [String: Any]) -> [String] {
         let tools = body["tools"] as? [[String: Any]] ?? []
         return tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
@@ -1074,13 +1219,23 @@ private final class ControlledChatTransport: ChatTransport {
     var ports: [Int] = []
     var bodies: [Data] = []
     var pending: [Pending] = []
+    /// Thrown before the request is recorded, so a failed embed or reply leaves no body.
+    var error: Error?
     func capability(at endpoint: ChatEndpoint) async throws -> ChatCapability {
         ports.append(endpoint.port); return current
     }
     func complete(at endpoint: ChatEndpoint, body: Data,
                   onText: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
+        if let error {
+            let thrown = error
+            self.error = nil
+            throw thrown
+        }
         bodies.append(body)
         return try await withCheckedThrowingContinuation { pending.append(Pending(onText: onText, continuation: $0)) }
+    }
+    func fail(_ index: Int, _ thrown: Error) {
+        pending[index].continuation.resume(throwing: thrown)
     }
     func resolve(_ index: Int, text: String = "", calls: [ChatToolCall] = [], reasoning: String = "",
                  truncated: Bool = false, promptTokens: Int? = nil, completionTokens: Int? = nil,

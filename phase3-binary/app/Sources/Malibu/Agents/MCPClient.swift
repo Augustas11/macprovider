@@ -139,7 +139,8 @@ enum MCPExchange {
     }
 
     static func resultText(_ result: [String: Any]) throws -> String {
-        guard result["content"] is [[String: Any]], (result["isError"] as? Bool) != true else { throw MCPFailure.malformed }
+        // isError is a tool failure the model must see. It is not a broken session.
+        guard let content = result["content"] as? [[String: Any]], !content.isEmpty else { throw MCPFailure.malformed }
         let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
         return String(decoding: data, as: UTF8.self)
     }

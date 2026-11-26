@@ -231,6 +231,15 @@ final class AgentSession: ObservableObject {
                 transcript = String((priorTranscript + runTranscript).suffix(131072))
                 return runTranscript
             }
+            if completion.calls.contains(where: { $0.name == "finish_answer" }) {
+                guard completion.calls.count == 1,
+                      let answer = try AgentWorkspace.arguments(for: completion.calls[0])["answer"],
+                      !answer.isEmpty else { throw ChatFailure.invalidTool }
+                runTranscript += "Agent: \(answer)\n"
+                remember(prompt: prompt, answer: answer, unattended: preapproved != nil)
+                transcript = String((priorTranscript + runTranscript).suffix(131072))
+                return runTranscript
+            }
             calls += completion.calls.count
             guard calls <= ChatStore.maxCalls else { throw ChatFailure.limit }
             // Validate authority for the complete batch before executing any call.
@@ -252,12 +261,6 @@ final class AgentSession: ObservableObject {
                         if let preapproved { return preapproved.contains(tool.name) ? .allowOnce : .deny }
                         return await self.approve(tool, arguments)
                     }
-                } else if call.name == "finish_answer" {
-                    guard completion.calls.count == 1,
-                          let answer = try AgentWorkspace.arguments(for: call)["answer"], !answer.isEmpty else { throw ChatFailure.invalidTool }
-                    runTranscript += "Agent: \(answer)\n"
-                    remember(prompt: prompt, answer: answer, unattended: preapproved != nil)
-                    transcript = String((priorTranscript + runTranscript).suffix(131072)); return runTranscript
                 } else {
                     guard let workspace else { throw ChatFailure.invalidTool }
                     let deadline = ContinuousClock.now.advanced(by: .seconds(ChatStore.stallSeconds))
@@ -268,6 +271,7 @@ final class AgentSession: ObservableObject {
                         if await approveChange(proposal) == .allowOnce {
                             result = try await workspace.commit(proposal, deadline: deadline)
                         } else {
+                            await workspace.discard(proposal)
                             result = AgentWorkspace.deniedChange
                         }
                     } else {
