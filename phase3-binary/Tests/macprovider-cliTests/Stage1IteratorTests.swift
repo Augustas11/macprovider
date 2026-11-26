@@ -675,6 +675,43 @@ final class Stage1IteratorTests: XCTestCase {
             "throughput must equal the provider-reported decode rate (40 tokens / 2000ms = 20 tok/s)")
     }
 
+    /// SPEC-023-R029 step 4: a reasoning model that streams its thinking as
+    /// `reasoning_content` and spends the whole completion there (Inkling 2
+    /// Mini on the padded probe prompt, 512 tokens, no visible content) has
+    /// its TTFT end at the first reasoning delta, not at the end of the
+    /// request. The fixture streams one reasoning delta, then spends 2 s
+    /// decoding.
+    func testStage1ProberReasoningContentDeltaEndsTTFT() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try reasoningOnlyUsageScript(generatedTokens: 40, streamsReasoning: true).path,
+            logDirectory: try temporaryDirectory(name: "stage1-reasoning-content-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 10, stopGraceSeconds: 1).probe(
+            model: "inkling-2-mini",
+            port: port,
+            runner: runner,
+            targetContext: 4_000,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, let p95TTFTMS) = result else {
+            return XCTFail("reasoning stream must be feasible, got \(result)")
+        }
+        XCTAssertLessThan(p95TTFTMS, 1_500, "TTFT must end at the first reasoning delta, not after the 2 s decode")
+        XCTAssertEqual(medianTPS, 20.0, accuracy: 0.5)
+    }
+
+    func testReasoningDeltaParsesOnlyReasoningContent() {
+        XCTAssertEqual(Stage1Prober.reasoningDelta(from: #"{"choices":[{"delta":{"reasoning_content":"why"}}]}"#), "why")
+        XCTAssertNil(Stage1Prober.reasoningDelta(from: #"{"choices":[{"delta":{"content":"hi"}}]}"#))
+        XCTAssertNil(Stage1Prober.reasoningDelta(from: #"{"choices":[],"usage":{"completion_tokens":0}}"#))
+        XCTAssertNil(Stage1Prober.reasoningDelta(from: "[DONE]"))
+        XCTAssertNil(Stage1Prober.contentDelta(from: #"{"choices":[{"delta":{"reasoning_content":"why"}}]}"#))
+    }
+
     /// Unit: reasoning-only finalization. No content deltas
     /// (`firstTokenAt == nil`) but a decode-token count → throughput
     /// derived from it over the full request window, TTFT finite.
@@ -1705,7 +1742,7 @@ final class Stage1IteratorTests: XCTestCase {
     /// `macprovider_generated_completion_tokens` carrying the honest total
     /// decode count. The prober must derive throughput from the generated
     /// field, not the (zero) content deltas or the (zero) completion_tokens.
-    private func reasoningOnlyUsageScript(generatedTokens: Int) throws -> URL {
+    private func reasoningOnlyUsageScript(generatedTokens: Int, streamsReasoning: Bool = false) throws -> URL {
         let directory = try temporaryDirectory(name: "stage1-reasoning-only-provider")
         let scriptURL = directory.appendingPathComponent("reasoning-only-provider")
         let script = """
@@ -1754,6 +1791,11 @@ final class Stage1IteratorTests: XCTestCase {
                 # skips them) while generating suppressed analysis tokens.
                 for _ in range(3):
                     chunk = json.dumps({"choices":[{"delta":{"content":""}}]})
+                    client.sendall(f"data: {chunk}\\n\\n".encode())
+                # A model that streams its thinking (Inkling 2) sends it as
+                # `reasoning_content` deltas from the first decoded token.
+                if \(streamsReasoning ? "True" : "False"):
+                    chunk = json.dumps({"choices":[{"delta":{"reasoning_content":"thinking"}}]})
                     client.sendall(f"data: {chunk}\\n\\n".encode())
                 # Spend real wall-time equal to the decode window we report,
                 # so the observed request duration contains it (the probe

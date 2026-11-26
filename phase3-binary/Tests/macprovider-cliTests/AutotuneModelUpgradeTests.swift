@@ -549,6 +549,10 @@ final class AutotuneModelUpgradeTests: XCTestCase {
         pool.poolModelID = "pool-model"
         XCTAssertEqual(AutotuneModelUpgrade.pinReason(config: pool), "pool_model_id")
 
+        var pinned = config
+        pinned.modelPinned = true
+        XCTAssertEqual(AutotuneModelUpgrade.pinReason(config: pinned), "model_pinned")
+
         var unsigned = config
         unsigned.modelCatalogKey = nil
         unsigned.modelCatalogModelID = nil
@@ -1118,11 +1122,11 @@ extension AutotuneModelUpgradeTests {
 
     func testUnattendedTriggerIsSuppressedForPinnedPausedNoJoinAndCandidateServes() {
         func suppression(
-            donor: Bool = false, pool: String? = nil, candidate: Bool = false, noJoin: Bool = false,
+            donor: Bool = false, pinned: Bool = false, pool: String? = nil, candidate: Bool = false, noJoin: Bool = false,
             isolated: Bool = false, paused: Bool = false
         ) -> String? {
             AutotuneModelUpgrade.unattendedTriggerSuppression(
-                donorMode: donor, poolModelID: pool, autotuneCandidate: candidate, noJoin: noJoin,
+                donorMode: donor, modelPinned: pinned, poolModelID: pool, autotuneCandidate: candidate, noJoin: noJoin,
                 isolateLifecycle: isolated, operatorPaused: paused
             )
         }
@@ -1131,6 +1135,7 @@ extension AutotuneModelUpgradeTests {
         XCTAssertEqual(suppression(noJoin: true), "no_join")
         XCTAssertEqual(suppression(isolated: true), "isolate_lifecycle")
         XCTAssertEqual(suppression(donor: true), "donor_mode")
+        XCTAssertEqual(suppression(pinned: true), "model_pinned")
         XCTAssertEqual(suppression(pool: "pool/model"), "pool_model_id")
         XCTAssertNil(suppression(pool: "  "))
         XCTAssertEqual(suppression(paused: true), "operator_paused")

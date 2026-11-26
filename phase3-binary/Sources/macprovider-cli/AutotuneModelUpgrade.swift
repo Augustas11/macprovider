@@ -31,6 +31,7 @@ enum AutotuneModelUpgrade {
     static func pinReason(config: AppConfig?) -> String? {
         guard let config else { return "config_unreadable" }
         if config.donorMode { return "donor_mode" }
+        if config.modelPinned { return "model_pinned" }
         if let pool = config.poolModelID, !pool.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "pool_model_id"
         }
@@ -1082,6 +1083,7 @@ enum AutotuneModelUpgrade {
     /// Why a serving provider must not start an unattended upgrade check.
     static func unattendedTriggerSuppression(
         donorMode: Bool,
+        modelPinned: Bool = false,
         poolModelID: String?,
         autotuneCandidate: Bool,
         noJoin: Bool,
@@ -1094,6 +1096,7 @@ enum AutotuneModelUpgrade {
         if noJoin { return "no_join" }
         if isolateLifecycle { return "isolate_lifecycle" }
         if donorMode { return "donor_mode" }
+        if modelPinned { return "model_pinned" }
         if let poolModelID, !poolModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "pool_model_id"
         }

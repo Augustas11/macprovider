@@ -313,6 +313,11 @@ public struct AppConfig: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var donorMode: Bool
+    /// SPEC-023-R029 step 7 operator pin: `model_pinned: true` keeps the
+    /// configured model; the stale-recommendation upgrade never moves it and
+    /// a serving provider starts no unattended check. Older CLIs ignore the
+    /// unknown key.
+    public var modelPinned: Bool = false
     /// SPEC-036 FR-26 scorer-only mode: the session advertises
     /// `compute_score_reference`, runs scoring jobs for its loaded catalog
     /// model and refuses every buyer request.
@@ -977,6 +982,7 @@ public enum ConfigLoader {
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         try assign(&config.donorMode, from: dict, key: "donor_mode", expected: "boolean")
+        try assign(&config.modelPinned, from: dict, key: "model_pinned", expected: "boolean")
         try assign(&config.computeScoreReference, from: dict, key: "compute_score_reference", expected: "boolean")
         if let nested = dict["idle_prewarm"] as? [String: Any] {
             try assign(&config.idlePrewarmEnabled, from: nested, key: "enabled", expected: "boolean")

@@ -4755,6 +4755,7 @@ struct ServeCommand: AsyncParsableCommand {
                 let suppression = AutotuneModelUpgrade.unattendedTickSuppression(
                     triggerSuppression: AutotuneModelUpgrade.unattendedTriggerSuppression(
                         donorMode: resolved.donorMode,
+                        modelPinned: resolved.modelPinned,
                         poolModelID: resolved.poolModelID,
                         autotuneCandidate: upgradeTriggerCandidate,
                         noJoin: upgradeTriggerNoJoin,

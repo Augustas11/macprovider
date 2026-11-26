@@ -594,7 +594,11 @@ struct Stage2Prober: Stage2Probing {
             if let generationMS = Stage1Prober.usageGenerationMS(from: payload) {
                 usageGenerationMS = generationMS
             }
-            guard let content = Self.contentDelta(from: payload), !content.isEmpty else {
+            // TTFT ends at the first streamed delta of either channel, as in
+            // Stage 1; the word-count fallback stays on visible text.
+            let content = Self.contentDelta(from: payload) ?? ""
+            let reasoning = Stage1Prober.reasoningDelta(from: payload) ?? ""
+            guard !content.isEmpty || !reasoning.isEmpty else {
                 continue
             }
             if firstTokenAt == nil {

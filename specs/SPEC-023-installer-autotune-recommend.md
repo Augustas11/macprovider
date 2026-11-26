@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.46
+version: v0.22.47
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.47 (2026-11-26)** — §9.4 `SPEC-023-R029`: a probe's TTFT ends at
+  the first streamed delta of either channel, `content` or
+  `reasoning_content` (step 4). A reasoning model that spent the whole probe
+  completion thinking had its whole request counted as TTFT: Inkling 2 Mini
+  measured 59,776 ms on an M5 32 GB, where its first reasoning token came
+  after about 20 s. New operator pin `model_pinned: true` (step 7): the
+  upgrade keeps the configured model, and a serving provider starts no
+  unattended check (step 9). AC-52 is amended.
 - **v0.22.46 (2026-11-24, Related: #2485, #2494)** — §9.4 `SPEC-023-R029`: the
   upgrade no longer leaves candidate weights on disk. Cleanup removes a
   removed row's hash-qualified prefetch snapshot in the Hugging Face cache
@@ -3344,7 +3352,10 @@ use it.
    with its row's signed `model_id` as `model_catalog_model_id` (and no
    `model_catalog_key`), beside the verified artifact path and SHA-256, so
    it selects the loader serving selects for that row: the native-vision
-   profile for Qwen2-VL, whose per-file pins stay the gate.
+   profile for Qwen2-VL, whose per-file pins stay the gate. A probe
+   request's TTFT is request start to its first streamed delta, either
+   `delta.content` or `delta.reasoning_content`, as in the R009
+   calibration; a request with neither counts its whole duration.
 5. **Decision.** The catalog bench gate is hard for the automatic switch:
    a row whose measured sustained TPS is below its `bench_gate.min_sustained_tps`
    (or not finite), or whose 4k TTFT exceeds `bench_gate.max_4k_ttft_ms`,
@@ -3395,9 +3406,12 @@ use it.
    or above a path the config serves from (`model_artifact_path` or an
    absolute `model`) is removed, nor a blob such a path links.
 7. **Pins.** The upgrade never moves a provider whose config has
-   `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
-   (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
-   provider keeps its model. These are the only model pins the CLI has;
+   `donor_mode: true`, `model_pinned: true`, a `pool_model_id`, or no
+   signed catalog identity (`model_catalog_key` and
+   `model_catalog_model_id` both absent). Such a provider keeps its model.
+   `model_pinned` is the operator's own choice of model; older CLIs ignore
+   the key, and a recommendation apply keeps it. These are the only model
+   pins the CLI has;
    `draft_model` is not one (step 6). In every other case the upgrade is on
    by default.
 8. **Entry points.** `--upgrade --apply` without a receipt runs steps 1–6 in
@@ -3420,8 +3434,8 @@ use it.
    (so the step 3 stop of the provider's launchd job does not end it), with
    output appended to `~/Library/Logs/macprovider/model-upgrade.log`. No
    check starts for an autotune candidate serve, a `--no-join` serve, an
-   `--isolate-lifecycle` serve, `donor_mode`, a `pool_model_id` or an
-   operator-paused provider, nor from a serve that is not the provider
+   `--isolate-lifecycle` serve, `donor_mode`, `model_pinned`, a
+   `pool_model_id` or an operator-paused provider, nor from a serve that is not the provider
    `ProviderConflictDetector` would stop (the `live.malibu.provider` job,
    else the first foreground serve), compared by pid. The serve passes its
    pid (`--upgrade-parent-pid`, required with `--unattended`); the child
@@ -3609,8 +3623,9 @@ admitted row (higher unrounded ordering score, or the incumbent demoted by a
 still the selected row, keeps the incumbent. A better row whose prefetch
 failed or whose benchmark failed admission keeps the incumbent, and its own
 row is the only config target. A failed incumbent prefetch fails the run.
-`donor_mode`, `pool_model_id` and a config without signed catalog identity
-keep the model. The installer stale re-tune passes `--upgrade` to both the
+`donor_mode`, `model_pinned`, `pool_model_id` and a config without signed
+catalog identity keep the model. A probe stream whose first delta is
+`reasoning_content` ends its TTFT there. The installer stale re-tune passes `--upgrade` to both the
 prefetch and the apply calls, with no `--candidate-models` allowlist. A
 challenger measured below its `min_sustained_tps` or above its
 `max_4k_ttft_ms` is never switched to, while manual `--recommend` still
