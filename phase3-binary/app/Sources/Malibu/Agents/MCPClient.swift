@@ -40,7 +40,7 @@ struct MCPServerConfiguration: Identifiable, Equatable {
               let host = components.host?.lowercased(), !host.isEmpty,
               let url = components.url
         else { return nil }
-        let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
         switch scheme {
         case "http": guard loopback else { return nil }
         case "https": guard !loopback else { return nil }

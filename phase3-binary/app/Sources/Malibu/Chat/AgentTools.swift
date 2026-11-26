@@ -1086,6 +1086,8 @@ actor AgentWorkspace {
         for path in deny {
             rules += "(deny file-read* (subpath \"\(path)\"))\n(deny file-write* (subpath \"\(path)\"))\n"
         }
+        // /bin/sh reads the root directory node before a command. literal "/"
+        // is that node, not the files under it.
         return """
         (version 1)
         (deny default)
@@ -1096,6 +1098,7 @@ actor AgentWorkspace {
         (allow file-map-executable)
         (allow file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (literal "/dev/urandom") (literal "/dev/random"))
         (allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/System") (subpath "/Library") (subpath "/Applications/Xcode.app") (subpath "/private/var/db") (subpath "/private/var/select") (subpath "/opt/homebrew") (subpath "/usr/local") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (literal "/dev/urandom") (literal "/dev/random"))
+        (allow file-read-data (literal "/"))
         (allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.bsd.dirhelper") (global-name "com.apple.system.DirectoryService.libinfo_v1") (global-name "com.apple.system.DirectoryService.membership_v1"))
         (allow file-read* \(allows))
         (allow file-write* \(allows))
