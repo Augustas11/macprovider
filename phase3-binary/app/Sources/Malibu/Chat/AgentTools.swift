@@ -1076,11 +1076,15 @@ actor AgentWorkspace {
         var rules = ""
         for root in roots {
             guard let pattern = regexPath(root) else { return nil }
-            let dot = "^\(pattern)(/[^/]+)*(/\\.[^/]+)"
-            rules += "(deny file-read* (regex #\"\(dot)\"#))\n(deny file-write* (regex #\"\(dot)\"#))\n"
+            // Seatbelt strings are Scheme strings. #"..."# is rejected
+            // ("undefined sharp expression") and the command never starts.
+            // One \. is eaten by that parser, so "." matches every name and
+            // this later deny blocks note.txt. Two backslashes leave one.
+            let dot = "^\(pattern)(/[^/]+)*(/\\\\.[^/]+)"
+            rules += "(deny file-read* (regex \"\(dot)\"))\n(deny file-write* (regex \"\(dot)\"))\n"
             for name in ["node_modules", "DerivedData", "Pods"] {
                 let nested = "^\(pattern)(/[^/]+)*/\(name)(/|$)"
-                rules += "(deny file-read* (regex #\"\(nested)\"#))\n(deny file-write* (regex #\"\(nested)\"#))\n"
+                rules += "(deny file-read* (regex \"\(nested)\"))\n(deny file-write* (regex \"\(nested)\"))\n"
             }
         }
         for path in deny {
