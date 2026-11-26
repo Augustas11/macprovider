@@ -388,8 +388,14 @@ def run(args):
     os.makedirs(eff, exist_ok=True)
     log_path = os.path.join(out_dir, "omlx-server.log")
     cmd = serve_command(paths["omlx"], state, args.port)
+    server_env = dict(env)
+    for kv in args.server_env or []:
+        key, sep, value = kv.partition("=")
+        if not sep or not key:
+            raise OmlxReferenceError(f"--server-env {kv!r} is not KEY=VALUE")
+        server_env[key] = value
     t = time.perf_counter()
-    server = Server(cmd, env, os.path.join(state, "run"), log_path, args.port)
+    server = Server(cmd, server_env, os.path.join(state, "run"), log_path, args.port)
     try:
         server.wait_ready(args.load_timeout, poll=args.poll_seconds)
         load_s = round(time.perf_counter() - t, 2)
@@ -493,6 +499,8 @@ def main(argv=None):
     ap.add_argument("--chat-template-kwargs", help="JSON object sent as chat_template_kwargs (default: none)")
     ap.add_argument("--first-chunk-tokens", type=int, default=1)
     ap.add_argument("--expect-commit", help="fail unless the oMLX source is at this commit")
+    ap.add_argument("--server-env", action="append", metavar="KEY=VALUE",
+                    help="extra environment for the oMLX server only (repeatable), e.g. a profiling hook")
     ap.add_argument("--live-port", type=int, default=8080, help=argparse.SUPPRESS)  # tests only
     ap.add_argument("--poll-seconds", type=float, default=5.0, help=argparse.SUPPRESS)  # tests only
     args = ap.parse_args(argv)

@@ -43,7 +43,7 @@
 #       T2474_VERDICT fork_test=.. tokens=.. fused=KEEP|REVERT omlx=ok|missing
 #     then JOB_PASS (every step ran, the oMLX rows exist, fork test passed, tokens identical) or JOB_FAIL.
 # Knobs: CONTEXTS (4k,16k) OUTPUTS (128,512) TRIALS (3) MIN_FREE_GB (60) E2E_EXTRA_GB (40) LIVE_SET (~/macprovider/compatibility-set.json: the lab binaries take its provider_cli version)
-#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR; JOB_MODE (abab|profile) PROFILE_PROMPTS (3673)
+#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR; JOB_MODE (abab|profile|omlx-profile) PROFILE_PROMPTS (3673)
 #   PROFILE_STEPS (1837,2048) PROFILE_RUNS (3) PROFILE_REF_TTFT PROFILE_GRID_TTFT.
 #   JOB_CHECK=1: validate the knobs, print the grid argvs and exit 0 before touching anything.
 # Every failure prints `BLOCKER:`.
@@ -108,7 +108,8 @@ case "$MIN_FREE_GB" in ""|*[!0-9]*) die "MIN_FREE_GB=$MIN_FREE_GB must be a numb
 case "$E2E_EXTRA_GB" in ""|*[!0-9]*) die "E2E_EXTRA_GB=$E2E_EXTRA_GB must be a number" 64 ;; esac
 case "$SKIP_OMLX" in 0|1) ;; *) die "SKIP_OMLX=$SKIP_OMLX must be 0 or 1" 64 ;; esac
 case "$SKIP_FORK_TEST" in 0|1) ;; *) die "SKIP_FORK_TEST=$SKIP_FORK_TEST must be 0 or 1" 64 ;; esac
-case "$JOB_MODE" in abab|profile) ;; *) die "JOB_MODE=$JOB_MODE must be abab or profile" 64 ;; esac
+case "$JOB_MODE" in abab|profile|omlx-profile) ;; *) die "JOB_MODE=$JOB_MODE must be abab, profile or omlx-profile" 64 ;; esac
+[ "$JOB_MODE" = omlx-profile ] && [ "$SKIP_OMLX" = 1 ] && die "JOB_MODE=omlx-profile needs SKIP_OMLX=0" 64
 case "$PROFILE_PROMPTS" in ""|*[!0-9,]*) die "PROFILE_PROMPTS=$PROFILE_PROMPTS must be a comma list" 64 ;; esac
 case "$PROFILE_STEPS" in ""|*[!0-9,]*) die "PROFILE_STEPS=$PROFILE_STEPS must be a comma list" 64 ;; esac
 case "$PROFILE_RUNS" in [1-9]) ;; *) die "PROFILE_RUNS=$PROFILE_RUNS must be 1..9" 64 ;; esac
@@ -265,6 +266,43 @@ if [ "$JOB_MODE" = profile ]; then
     > "$PROF/report.stdout" 2> "$PROF/report.stderr" || die "report: $(tail -n 2 "$PROF/report.stderr" | tr '\n' ' ')" 16
   sed 's/^/PROFILE_MD /' "$PROF/profile.md"
   rm -rf "$LAB"/prof-*
+  log "JOB_PASS"
+  exit 0
+fi
+
+# JOB_MODE=omlx-profile (#2524): where oMLX's own 3,673-token prefill goes, by section. Two oMLX
+# servers on the 4k grid context, one row, OMLX_PROFILE_TRIALS requests each: plain (the
+# unsynchronized TTFT), then with scripts/lab/2524/omlx_hook on the server's PYTHONPATH (each
+# decoder layer, child and grandchild module timed synchronized), then omlx_section_report.py scales
+# the section split to the plain TTFT. No build, no fork test, no A/B/A.
+if [ "$JOB_MODE" = omlx-profile ]; then
+  OP=$RES/omlx-profile
+  OTRIALS=${OMLX_PROFILE_TRIALS:-4}
+  case "$OTRIALS" in [1-9]) ;; *) die "OMLX_PROFILE_TRIALS=$OTRIALS must be 1..9" 64 ;; esac
+  HOOK=$SRC/scripts/lab/2524/omlx_hook
+  [ -f "$HOOK/sitecustomize.py" ] || die "no section hook at $HOOK" 11
+  mkdir -p "$OP/plain" "$OP/hooked" "$OP/sections"
+  printf '{"schema": "parity-grid.v1", "models": [], "outputs": [128], "contexts": [{"name": "4k", "tokens": 4000}], "rows": [1], "trials": %s, "warmup_tokens": 32, "noise_floor": 0.03}\n' \
+    "$OTRIALS" > "$OP/grid.json"
+  for pass in plain hooked; do
+    extra=()
+    [ "$pass" = hooked ] && extra=(--server-env "PYTHONPATH=$HOOK" --server-env "OMLX_SECTION_PROFILE=$OP/sections")
+    log "OMLX_PROFILE_START $pass"
+    /usr/bin/python3 -I "$GRID/reference_omlx.py" --omlx-dir "$OMLX_DIR" --model-path "$GLM_MODEL" \
+      --model-name "$GLM_NAME" --out "$OP/$pass/reference.jsonl" --grid "$OP/grid.json" --rows 1 \
+      --state-root "$LAB/omlx-state" --expect-commit "$OMLX_COMMIT" ${extra[@]+"${extra[@]}"} \
+      > "$OP/$pass/run.log" 2>&1
+    rc=$?
+    grep -E '^(ref |OmlxReferenceError)' "$OP/$pass/run.log" | sed "s/^/OMLX_PROFILE_$pass /"
+    [ "$rc" = 0 ] || die "oMLX $pass pass rc=$rc: $(tail -n 3 "$OP/$pass/run.log" | tr '\n' ' ' | cut -c1-400)" 15
+    log "OMLX_PROFILE_DONE $pass"
+  done
+  grep -h 'OMLX_SECTION_HOOK' "$OP/hooked/omlx-server.log" | head -n 5 | sed 's/^/OMLX_PROFILE_HOOK /'
+  /usr/bin/python3 -I "$SRC/scripts/lab/2524/omlx_section_report.py" --plain "$OP/plain/reference.jsonl" \
+    --hooked "$OP/hooked/reference.jsonl" --sections "$OP/sections" \
+    --out-md "$OP/profile.md" --out-json "$OP/profile.json" 2>&1 | tee "$OP/report.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || die "omlx_section_report failed: $(tail -n 2 "$OP/report.log" | tr '\n' ' ')" 15
+  sed 's/^/OMLX_PROFILE_MD /' "$OP/profile.md"
   log "JOB_PASS"
   exit 0
 fi
