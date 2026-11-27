@@ -10344,6 +10344,33 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    /// #2530 item 2.1: a serial native family's packed proposal cannot run.
+    /// The row continues on ordinary decode instead of failing the request.
+    func testSerialNativeMTPProposalFailureDowngradesToOrdinaryDecode() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["serial-fallback": [11, 12]],
+            prefillTokens: ["serial-fallback": 6],
+            nativeTargetTopTokens: ["serial-fallback": [7]],
+            nativeProposalError: BackendFailure()
+        )
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "serial-fallback",
+            promptTokens: [1],
+            maxOutputTokens: 2,
+            proposals: [7],
+            maximumDepth: 1,
+            familyAdapter: "inkling2_dspark_v1"
+        ))
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertNil(result.errorCode)
+        XCTAssertEqual(result.generatedTokens.count, 2)
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertGreaterThanOrEqual(decodeCalls, 1)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+    }
+
     func testNativeMTPFirstRoundFailureBeforeVisibleOutputDoesNotIncrementPostoutputFailures() async throws {
         let sink = NativeMTPStatusSink(
             supported: true,

@@ -678,6 +678,15 @@ extension ModelRuntime {
                 code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode
             )
         }
+        // SPEC-048 (0.1.134): a serial native family has no packed drafter.
+        // Submitting it as native MTP fails the buyer request
+        // (`native_mtp_unsupported_recurrent_layout`). The idle request takes
+        // the serial iterator; anything that still reaches this mapping
+        // decodes ordinary. A non-serial family is unchanged.
+        let stripsSerialNativeMTP = nativeMTPAdmission?.effectivePath == .nativeMTP
+            && nativeMTPSerialAdmitted(familyAdapter: nativeMTPAdmission?.familyAdapter)
+        let schedulerAdmission = stripsSerialNativeMTP ? nil : nativeMTPAdmission
+        let schedulerSmallMRoute = stripsSerialNativeMTP ? nil : smallMRoute
         return ContinuousBatchSubmission(
             requestID: requestID,
             schedulerRequest: ContinuousBatchSchedulerRequest(
@@ -705,15 +714,15 @@ extension ModelRuntime {
                 promptResumeBoundaries: promptResumeBoundaries,
                 grammarConstraint: grammarConstraint,
                 serialToolStopObserver: serialToolStopObserver,
-                decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
-                nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
-                nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
-                nativeMTPFamilyAdapter: nativeMTPAdmission?.familyAdapter,
-                nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
-                nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
-                nativeMTPAdaptationConfig: nativeMTPAdmission?.adaptationConfig,
+                decodePath: schedulerAdmission?.effectivePath ?? .ordinary,
+                nativeMTPMaximumProposalDepth: schedulerAdmission?.initialProposalDepth ?? 0,
+                nativeMTPCompleteWindowBytesByDepth: schedulerAdmission?.completeWindowBytesByDepth ?? [],
+                nativeMTPFamilyAdapter: schedulerAdmission?.familyAdapter,
+                nativeMTPMaximumActiveRows: schedulerAdmission?.maximumNativeActiveRows ?? 0,
+                nativeMTPTupleFence: schedulerAdmission?.tupleFence,
+                nativeMTPAdaptationConfig: schedulerAdmission?.adaptationConfig,
                 ingestProvenance: request.ingestProvenance,
-                smallMRoute: smallMRoute
+                smallMRoute: schedulerSmallMRoute
             )
         )
     }

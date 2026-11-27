@@ -4813,13 +4813,21 @@ actor ContinuousBatchScheduler {
             CBTrace.log(nil, "native_round phase=propose rows=\(proposalInputs.map(\.requestID).joined(separator: ","))")
             backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
         } catch {
+            await abortPreReservedNativeMTPRows(preReserved)
+            // SPEC-048 (0.1.134): a serial native family has no packed drafter.
+            // Abort restores the committed prefix, then the row continues on
+            // ordinary decode. A round that contains any other family still
+            // fails, and a failed abort still fails closed.
+            if downgradeSerialNativeMTPProposalFailure(preReserved) {
+                ContinuousBatchingPolicy.logForwardFailed(error)
+                return
+            }
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
                 rows: preReserved.map(\.row)
             )
             record(.batchForwardFailed)
             ContinuousBatchingPolicy.logForwardFailed(error)
-            await abortPreReservedNativeMTPRows(preReserved)
             for item in preReserved {
                 let row = item.row
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
@@ -5444,6 +5452,33 @@ actor ContinuousBatchScheduler {
                 if cleanupFailedClosed { return }
             }
         }
+    }
+
+    /// After a native proposal throws and its staged round has been aborted,
+    /// keep a serial-native row on ordinary decode. Returns false when the
+    /// round is not entirely a serial native family, or the abort failed closed.
+    private func downgradeSerialNativeMTPProposalFailure(
+        _ reserved: [PreReservedNativeMTPRow]
+    ) -> Bool {
+        guard !cleanupFailedClosed, !reserved.isEmpty,
+              reserved.allSatisfy({
+                  ModelRuntime.nativeMTPSerialAdmitted(
+                      familyAdapter: $0.row.request.nativeMTPFamilyAdapter
+                  )
+              })
+        else { return false }
+        for item in reserved {
+            guard var row = activeDecode[item.row.request.id] else { continue }
+            row.decodePath = .ordinary
+            row.nativeMTPAdaptation = nil
+            row.nativeMTPDirective = nil
+            activeDecode[item.row.request.id] = row
+        }
+        let ids = reserved.map { $0.row.request.id }.joined(separator: ",")
+        try? FileHandle.standardError.write(contentsOf: Data(
+            "event=native_mtp_serial_proposal_fallback rows=\(ids)\n".utf8
+        ))
+        return true
     }
 
     private func recordNativeMTPPostoutputFailureIfVisible(

@@ -11556,8 +11556,10 @@ maxTokens: boundedMaxTokens,
         // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
         // row-invariant in flight from now, so an ordinary request that
         // reaches admission first still joins row-invariant.
-        // SPEC-048 (0.1.130): a serial native tuple serves its admitted
-        // requests on the serial path below, with no scheduler.
+        // SPEC-048 (0.1.134): an idle serial native tuple takes the serial
+        // iterator below. It must not enter the scheduler as native MTP.
+        // When other rows are active the load gate has already selected
+        // ordinary decode, so the route is nil and continuous batching runs.
         let serialNativeMTP = serialNativeMTPRoute(for: nativeMTPAdmission)
         let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
             ? SmallMRouteRequestCounter.shared.reserveNative() : nil
@@ -11567,7 +11569,8 @@ maxTokens: boundedMaxTokens,
         }
         try drainCancelled.check()
         CBTrace.log(request.requestID, "rt_complete_enter")
-        if !request.containsNonTextMessageContentPart,
+        if serialNativeMTP == nil,
+           !request.containsNonTextMessageContentPart,
            let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
@@ -12619,8 +12622,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // SPEC-038 FR-CB9 (v0.3.63): a request decided native here counts as
         // row-invariant in flight from now, so an ordinary request that
         // reaches admission first still joins row-invariant.
-        // SPEC-048 (0.1.130): a serial native tuple serves its admitted
-        // requests on the serial path below, with no scheduler.
+        // SPEC-048 (0.1.134): an idle serial native tuple takes the serial
+        // iterator below. It must not enter the scheduler as native MTP.
+        // When other rows are active the load gate has already selected
+        // ordinary decode, so the route is nil and continuous batching runs.
         let serialNativeMTP = serialNativeMTPRoute(for: nativeMTPAdmission)
         let smallMRouteReservation = nativeMTPAdmission.usesNativeMTP
             ? SmallMRouteRequestCounter.shared.reserveNative() : nil
@@ -12637,7 +12642,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // stream's timeout armed.
         let batchedIdleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let batchedCompletionStartedAt = Date()
-        let batchedCompletion = try await Self.withStructuredStreamingIdleTimeout(
+        let batchedCompletion: CompletionResult?
+        if serialNativeMTP != nil {
+            batchedCompletion = nil
+        } else {
+            batchedCompletion = try await Self.withStructuredStreamingIdleTimeout(
             idleState: batchedIdleState,
             onIdleTimeout: { () throws -> CompletionResult? in
                 var synthetic = try Self.synthesizeIdleTimeoutResultOrThrow(
@@ -12665,6 +12674,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 idleCancellation: idleCancellation,
                 onChunk: onChunk
             )
+        }
         }
         if let completion = batchedCompletion {
             return completion

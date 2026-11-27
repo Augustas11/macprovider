@@ -1043,6 +1043,59 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(submission.schedulerRequest.nativeMTPTupleFence, fence)
     }
 
+    /// #2530 item 2.1: Inkling's serial native tuple plus a CB submission must
+    /// not reach the scheduler as native MTP. A packed family still does.
+    func testSerialNativeFamilySubmitsOrdinaryDecodeToTheScheduler() throws {
+        let fence = NativeMTPTupleFence(
+            admissionTupleSHA256: String(repeating: "b", count: 64),
+            servedSnapshotID: "snapshot",
+            targetGeneration: 1
+        )
+        let inkling = NativeMTPRuntimeAdmission.resolve(
+            selection: DecodePathSelection(path: .nativeMTP, nativeMTPReason: .eligible),
+            capability: admittedCapability(
+                maximumProposalDepth: 7,
+                maximumNativeActiveRows: 1,
+                family: "inkling2_dspark_v1"
+            ),
+            schedulerSupportsNativeMTP: true
+        ).binding(to: fence)
+        let request = try makeRequest().withRequestID("inkling-serial-cb")
+        let submission = try ModelRuntime.continuousBatchSubmission(
+            for: request,
+            promptTokens: [1],
+            maxOutputTokens: 128,
+            nativeMTPAdmission: inkling,
+            smallMRoute: .rowInvariant
+        )
+        XCTAssertEqual(inkling.effectivePath, .nativeMTP)
+        XCTAssertTrue(ModelRuntime.nativeMTPSerialAdmitted(familyAdapter: inkling.familyAdapter))
+        XCTAssertEqual(submission.schedulerRequest.decodePath, .ordinary)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPMaximumProposalDepth, 0)
+        XCTAssertNil(submission.schedulerRequest.nativeMTPTupleFence)
+        XCTAssertNil(submission.schedulerRequest.nativeMTPAdaptationConfig)
+        XCTAssertNotEqual(submission.schedulerRequest.smallMRoute, .rowInvariant)
+
+        let packed = NativeMTPRuntimeAdmission.resolve(
+            selection: DecodePathSelection(path: .nativeMTP, nativeMTPReason: .eligible),
+            capability: admittedCapability(
+                maximumProposalDepth: 4,
+                maximumNativeActiveRows: 4,
+                family: "glm5_next_mtp_v1"
+            ),
+            schedulerSupportsNativeMTP: true
+        ).binding(to: fence)
+        let packedSubmission = try ModelRuntime.continuousBatchSubmission(
+            for: request,
+            promptTokens: [1],
+            maxOutputTokens: 128,
+            nativeMTPAdmission: packed
+        )
+        XCTAssertEqual(packedSubmission.schedulerRequest.decodePath, .nativeMTP)
+        XCTAssertEqual(packedSubmission.schedulerRequest.nativeMTPMaximumProposalDepth, 4)
+        XCTAssertEqual(packedSubmission.schedulerRequest.nativeMTPFamilyAdapter, "glm5_next_mtp_v1")
+    }
+
     private func admittedCapability(
         supportsStreaming: Bool = true,
         supportsNonStreaming: Bool = true,
