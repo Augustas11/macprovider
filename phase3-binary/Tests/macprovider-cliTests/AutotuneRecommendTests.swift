@@ -1475,9 +1475,11 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: nested), 2 * 2 * 128 * 2 * 2)
     }
 
-    /// #2530 item 3.1: Inkling Mini grows by its 8 global visits (32,768 bytes
-    /// per token at 8 KV heads × 128) and holds 40 fixed 1,024-token windows.
-    /// Counting all 24 layers priced the cache at 98,304 bytes per token.
+    /// #2530 item 3.1: continuous batching stores every Inkling visit's full
+    /// history (48 × 4,096 bytes per token). The serial rotating cache still
+    /// prices 8 growing visits and 40 fixed 1,024-token windows, and that
+    /// price must not size a continuous-batching row. Unreadable head geometry
+    /// stays unknown.
     func testInklingKVBytesFollowThePagedLayout() throws {
         let priced = Data(#"""
         {"model_type": "inkling2_loop",
@@ -1488,24 +1490,38 @@ final class AutotuneRecommendTests: XCTestCase {
           "loop_config": {"core_start": 6, "core_end": 18, "num_passes": 3, "is_varloop": false}}}
         """#.utf8)
         let perVisit = 8 * 128 * 2 * 2
-        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: priced), 8 * perVisit)
-        XCTAssertEqual(
-            AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: priced),
-            40 * 1024 * perVisit
-        )
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: priced), 48 * perVisit)
+        XCTAssertEqual(AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: priced), 0)
+        let serial = try XCTUnwrap(AutotuneModelContextCap.inklingSerialRotatingKVPricing(configData: priced))
+        XCTAssertEqual(serial.perToken, 8 * perVisit)
+        XCTAssertEqual(serial.fixed, 40 * 1024 * perVisit)
         let bare = Data(PagedKVInkling2Tests.miniConfig.utf8)
         XCTAssertNil(AutotuneModelContextCap.kvCacheBytesPerToken(configData: bare))
         XCTAssertEqual(AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: bare), 0)
+        XCTAssertNil(AutotuneModelContextCap.inklingSerialRotatingKVPricing(configData: bare))
+        let barePlan = AutotuneModelContextCap.pagedServePlan(
+            context: 120_000,
+            tierConstant: 1,
+            fullContextFit: nil,
+            pagedFit: nil,
+            verifiedConfigJSONData: bare,
+            verifiedConfigSHA256: Self.sha256Hex(bare),
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28
+        )
+        XCTAssertEqual(barePlan.context, 120_000)
+        XCTAssertEqual(barePlan.slots, 1)
     }
 
-    /// #2530 item 3.2: a tier constant of 1 only lowered, so a 32 GB Mac stayed
-    /// at one row after the KV price was corrected. The paged reservation keeps
-    /// one row at the tier context and prices every other row at 4,000 tokens.
+    /// #2530: a 32 GB Mac cannot store two full 120k Inkling histories. The
+    /// paged reservation still serves two rows, at the longest context where
+    /// one row holds that context and the other holds 4,000 tokens.
     func testPagedRowCountRaisesA32GBMacAboveOneSerialRow() throws {
         let artifactSizes = try Self.signedCandidateArtifactSizeBytes()
         let inklingBytes = try XCTUnwrap(artifactSizes["thinkingmachines/inkling-2-mini"])
         let hardware = Self.hardware(chip: "Apple M5", memoryGB: 32, bandwidthTier: .c)
         XCTAssertEqual(hardware.recommendedMaxBatch, 1)
+        XCTAssertEqual(hardware.recommendedMaxContext, 120_000)
         let config = Data(Self.inklingPagedLayoutJSON.utf8)
         let sha = Self.sha256Hex(config)
         let context = hardware.recommendedMaxContext(
@@ -1516,54 +1532,105 @@ final class AutotuneRecommendTests: XCTestCase {
             catalogMinRAMGB: 28,
             draftModel: nil
         )
-        XCTAssertEqual(context, 120_000, "one full row still fits the 32 GB tier context")
-        let fullFit = try XCTUnwrap(AutotuneModelContextCap.memoryFitBatchDepth(
+        XCTAssertLessThan(context, 120_000, "one full 120k continuous-batching row does not fit")
+        let fullFitAtTier = try XCTUnwrap(AutotuneModelContextCap.memoryFitBatchDepth(
+            configData: config,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28,
+            calibrationContextTokens: 120_000,
+            verifiedArtifactSizeBytes: inklingBytes
+        ))
+        XCTAssertEqual(fullFitAtTier, 1)
+        let pagedAtTier = try XCTUnwrap(AutotuneModelContextCap.pagedFitBatchDepth(
+            configData: config,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28,
+            contextTokens: 120_000,
+            verifiedArtifactSizeBytes: inklingBytes
+        ))
+        XCTAssertEqual(pagedAtTier, 1)
+        let fullFit = AutotuneModelContextCap.memoryFitBatchDepth(
             configData: config,
             verifiedConfigSHA256: sha,
             hardwareMemoryGB: 32,
             catalogMinRAMGB: 28,
             calibrationContextTokens: context,
             verifiedArtifactSizeBytes: inklingBytes
-        ))
-        XCTAssertGreaterThanOrEqual(fullFit, 2, "item 3.1 already fits two full rows; the tier clamp was the block")
-        XCTAssertEqual(AutotuneModelContextCap.memoryBoundedSlots(
-            hardware.recommendedMaxBatch,
-            context: context,
-            verifiedConfigJSONData: config,
-            verifiedConfigSHA256: sha,
-            hardwareMemoryGB: 32,
-            catalogMinRAMGB: 28,
-            verifiedArtifactSizeBytes: inklingBytes
-        ), 1, "the old clamp only lowers a tier of 1")
-        let paged = try XCTUnwrap(AutotuneModelContextCap.pagedFitBatchDepth(
+        )
+        let paged = AutotuneModelContextCap.pagedFitBatchDepth(
             configData: config,
             verifiedConfigSHA256: sha,
             hardwareMemoryGB: 32,
             catalogMinRAMGB: 28,
             contextTokens: context,
             verifiedArtifactSizeBytes: inklingBytes
-        ))
-        let slots = AutotuneModelContextCap.plannedRowCount(tierConstant: 1, pagedFit: paged)
-        XCTAssertGreaterThanOrEqual(slots, 2)
-        XCTAssertEqual(slots, paged)
-        let kept = AutotuneModelContextCap.pagedBoundedServePair(
+        )
+        let plan = AutotuneModelContextCap.pagedServePlan(
             context: context,
-            slots: slots,
+            tierConstant: 1,
+            fullContextFit: fullFit,
+            pagedFit: paged,
             verifiedConfigJSONData: config,
             verifiedConfigSHA256: sha,
             hardwareMemoryGB: 32,
             catalogMinRAMGB: 28,
             verifiedArtifactSizeBytes: inklingBytes
         )
-        XCTAssertEqual(kept.context, context)
-        XCTAssertEqual(kept.slots, slots)
+        XCTAssertGreaterThanOrEqual(plan.slots, 2)
+        XCTAssertGreaterThanOrEqual(plan.context, AutotuneModelContextCap.minimumServeContext)
+        XCTAssertLessThan(plan.context, context)
+        let fits = AutotuneModelContextCap.pagedBoundedServePair(
+            context: plan.context,
+            slots: 2,
+            verifiedConfigJSONData: config,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28,
+            verifiedArtifactSizeBytes: inklingBytes
+        )
+        XCTAssertEqual(fits.context, plan.context)
+        XCTAssertEqual(fits.slots, 2)
+        let oneMore = AutotuneModelContextCap.pagedBoundedServePair(
+            context: plan.context + 1,
+            slots: 2,
+            verifiedConfigJSONData: config,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28,
+            verifiedArtifactSizeBytes: inklingBytes
+        )
+        XCTAssertEqual(oneMore.context, plan.context, "one more token does not fit two rows")
+        let withheld = AutotuneModelContextCap.pagedServePlan(
+            context: 120_000,
+            tierConstant: 1,
+            fullContextFit: 1,
+            pagedFit: 1,
+            withheld: true,
+            verifiedConfigJSONData: config,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 28,
+            verifiedArtifactSizeBytes: inklingBytes
+        )
+        XCTAssertEqual(withheld.slots, 1)
+        XCTAssertLessThan(withheld.context, 120_000, "one withheld row is still a context the cache can store")
+        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 8, pagedFit: 12), 12)
+        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 8, pagedFit: 3), 8)
+        XCTAssertEqual(
+            AutotuneModelContextCap.plannedRowCount(tierConstant: 8, pagedFit: 3, fullContextFit: 8),
+            8
+        )
+        XCTAssertEqual(
+            AutotuneModelContextCap.plannedRowCount(tierConstant: 2, pagedFit: 1, fullContextFit: 32),
+            32
+        )
+        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 1, pagedFit: nil), 1)
         XCTAssertEqual(
             AutotuneModelContextCap.plannedRowCount(tierConstant: 1, pagedFit: paged, withheld: true),
             1
         )
-        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 8, pagedFit: 12), 8)
-        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 8, pagedFit: 3), 3)
-        XCTAssertEqual(AutotuneModelContextCap.plannedRowCount(tierConstant: 1, pagedFit: nil), 1)
 
         let llamaJSON = try XCTUnwrap(Self.signedCandidateConfigGeometry["meta-llama/llama-3.1-8b-instruct"]).json
         let llamaConfig = Data(llamaJSON.utf8)
@@ -1610,6 +1677,17 @@ final class AutotuneRecommendTests: XCTestCase {
         )
         XCTAssertEqual(llamaPagedPair.context, 120_000)
         XCTAssertEqual(llamaPagedPair.slots, 4)
+        let llamaOneRow = AutotuneModelContextCap.pagedBoundedServePair(
+            context: llamaContext,
+            slots: 1,
+            verifiedConfigJSONData: llamaConfig,
+            verifiedConfigSHA256: llamaSHA,
+            hardwareMemoryGB: 32,
+            catalogMinRAMGB: 12,
+            verifiedArtifactSizeBytes: llamaBytes
+        )
+        XCTAssertEqual(llamaOneRow.context, llamaContext)
+        XCTAssertEqual(llamaOneRow.slots, 1)
         let llamaFullPair = AutotuneModelContextCap.memoryBoundedServePair(
             context: llamaContext,
             slots: 4,
@@ -1633,8 +1711,9 @@ final class AutotuneRecommendTests: XCTestCase {
             policyCeiling: nil,
             withheld: false
         )
-        XCTAssertEqual(switched.context, 120_000)
         XCTAssertGreaterThanOrEqual(switched.slots, 2)
+        XCTAssertLessThan(switched.context, 120_000)
+        XCTAssertEqual(switched.context, plan.context)
         let draftedSwitch = ModelSwitchContext.pagedSwitchKnobs(
             chip: "Apple M5",
             memoryGB: 32,
@@ -1674,10 +1753,12 @@ final class AutotuneRecommendTests: XCTestCase {
             )
         }
         let raised = core(draftModel: nil)
-        XCTAssertEqual(raised.knobs.maxContext, 120_000)
         XCTAssertGreaterThanOrEqual(raised.knobs.maxBatch, 2)
+        XCTAssertLessThan(raised.knobs.maxContext, 120_000)
+        let calibrated = core(draftModel: nil, maxBatchOverride: 1)
+        XCTAssertEqual(calibrated.knobs.maxBatch, 1)
+        XCTAssertGreaterThan(calibrated.knobs.maxContext, raised.knobs.maxContext)
         XCTAssertEqual(core(draftModel: "mlx-community/Qwen3-0.6B-4bit").knobs.maxBatch, 1)
-        XCTAssertEqual(core(draftModel: nil, maxBatchOverride: 1).knobs.maxBatch, 1)
     }
 
     func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {

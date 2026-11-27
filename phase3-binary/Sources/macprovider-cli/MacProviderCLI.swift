@@ -763,7 +763,11 @@ struct ServeCommand: AsyncParsableCommand {
             maxContextTokensOverride: capacity.maxContextOverride,
             kvBitsOverride: config.kvBitsOverride,
             familyKVQuantDefault: true,
-            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(contextTokens: context),
+            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(
+                contextTokens: AutotuneModelContextCap.pagedPoolTokens(
+                    contextTokens: context, rows: capacity.maxBatch
+                )
+            ),
             prefillStepSize: config.prefillStepSize,
             prefillStepSizeExplicitlyConfigured: config.prefillStepSizeExplicitlyConfigured,
             maxBatch: capacity.maxBatch,
@@ -3289,6 +3293,9 @@ struct ServeCommand: AsyncParsableCommand {
         // swap applies only the target model's own ceiling (SPEC-038 FR-CB11).
         var rowsBeforePolicyCeiling: Int?
         var configuredSlotsForProvisional: Int?
+        var allowInklingContextRaise = false
+        let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+        let startupMetallibSHA256 = ModelRuntime.nativeMTPRuntimeMetallibSHA256()
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
             let configuredSlots = resolved.maxConcurrencyOverride
@@ -3298,10 +3305,17 @@ struct ServeCommand: AsyncParsableCommand {
                 maxConcurrencyOverride: nil
             ).maxContextTokens
             let chip = MachineFingerprinter().sample().chip
-            // One row keeps the served context. Further rows reserve the
-            // 4,000-token floor, so a tier of 1 can rise when that fits.
-            // A higher tier is only lowered. The policy ceiling is applied
-            // by `plan`, so the no-ceiling call still reports rows before it.
+            // The full-context fit is the baseline. The paged reservation may
+            // only raise it. `plan` applies the policy ceiling and the M1/M2
+            // cap, so the no-ceiling call still reports rows before it.
+            let fullContextFit = AutoServedSlots.memoryFitSlots(
+                configJSONData: servedConfigJSONData,
+                memoryGB: memoryGB,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                contextTokens: servedContextTokens,
+                weightsBytes: servedWeightsBytes,
+                verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
+            )
             let pagedFit = AutoServedSlots.pagedFitSlots(
                 configJSONData: servedConfigJSONData,
                 memoryGB: memoryGB,
@@ -3310,11 +3324,20 @@ struct ServeCommand: AsyncParsableCommand {
                 weightsBytes: servedWeightsBytes,
                 verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
             )
+            let startupFamily = ModelRuntime.pagedKVModelCapabilities(
+                modelID: resolved.model,
+                configJSONData: servedConfigJSONData
+            ).modelFamily
             let withheld = continuousBatchingPolicy.status == .liveVerified
-                && continuousBatchingPolicy.selection.revocations.contains { currentPolicyKeys.contains($0.modelKey) }
+                && continuousBatchingPolicy.selection.revokesRunningBuild(
+                    modelSHA256: startupLoadSHA256,
+                    modelFamily: startupFamily,
+                    metallibSHA256: startupMetallibSHA256
+                )
             let plannedRows = AutotuneModelContextCap.plannedRowCount(
                 tierConstant: AutotuneRecommendHardware.tierBatch(chip: chip, memoryGB: memoryGB),
                 pagedFit: pagedFit,
+                fullContextFit: fullContextFit,
                 withheld: withheld
             )
             let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
@@ -3345,6 +3368,11 @@ struct ServeCommand: AsyncParsableCommand {
             rowsBeforePolicyCeiling = policyCeiling == nil ? plan.rows : planInputs(nil).rows
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
+            allowInklingContextRaise = !withheld
+                && policyCeiling != 1
+                && plan.ownerPinned == nil
+                && plan.reason != "draft_model"
+                && plan.reason != "emergency_off"
             FileHandle.standardError.write(Data(
                 "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune") policy_ceiling=\(policyCeiling.map(String.init) ?? "none")\n".utf8
             ))
@@ -3390,6 +3418,36 @@ struct ServeCommand: AsyncParsableCommand {
                 }
                 guard resolved.maxContextSource == .recommendationApply else { return }
                 let targetKeys = Set(ids)
+                let targetCeiling = AutoServedSlots.policyServedSlotCeiling(
+                    continuousBatchingPolicy,
+                    modelKeys: targetKeys
+                )
+                let weights = artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
+                let draft = ProviderCapacity.servedDraftModel(configured: resolved.draftModel)
+                if resolved.maxConcurrencySource == .owner {
+                    let pin = max(
+                        1,
+                        autoServedSlots?.ownerPinned
+                            ?? ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlotsForProvisional)
+                    )
+                    let slots = min(pin, ProviderCapacity.boundedServingRows(targetCeiling ?? Int.max))
+                    let knobs = ModelSwitchContext.recomputedServeKnobs(
+                        memoryGB: switchMemoryGB,
+                        modelID: row.modelID,
+                        catalogMinRAMGB: row.minRAMGB,
+                        configJSONData: artifact.configJSONData,
+                        configSHA256: artifact.configSHA256,
+                        draftModel: draft,
+                        slots: slots,
+                        modelWeightSizeBytes: weights
+                    )
+                    switchTargets.append((ids, knobs.context, knobs.slots))
+                    return
+                }
+                let targetFamily = ModelRuntime.pagedKVModelCapabilities(
+                    modelID: row.modelID,
+                    configJSONData: artifact.configJSONData
+                ).modelFamily
                 let knobs = ModelSwitchContext.pagedSwitchKnobs(
                     chip: switchChip,
                     memoryGB: switchMemoryGB,
@@ -3397,14 +3455,15 @@ struct ServeCommand: AsyncParsableCommand {
                     catalogMinRAMGB: row.minRAMGB,
                     configJSONData: artifact.configJSONData,
                     configSHA256: artifact.configSHA256,
-                    draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
-                    modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil,
-                    policyCeiling: AutoServedSlots.policyServedSlotCeiling(
-                        continuousBatchingPolicy,
-                        modelKeys: targetKeys
-                    ),
+                    draftModel: draft,
+                    modelWeightSizeBytes: weights,
+                    policyCeiling: targetCeiling,
                     withheld: continuousBatchingPolicy.status == .liveVerified
-                        && continuousBatchingPolicy.selection.revocations.contains { targetKeys.contains($0.modelKey) }
+                        && continuousBatchingPolicy.selection.revokesRunningBuild(
+                            modelSHA256: artifact.sha256,
+                            modelFamily: targetFamily,
+                            metallibSHA256: startupMetallibSHA256
+                        )
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
             }
@@ -3431,7 +3490,8 @@ struct ServeCommand: AsyncParsableCommand {
                 memoryGB: switchMemoryGB,
                 configJSONData: servedConfigJSONData,
                 catalogMinRAMGB: servedCatalogMinRAMGB,
-                modelWeightSizeBytes: servedWeightsBytes
+                modelWeightSizeBytes: servedWeightsBytes,
+                allowInklingRaise: allowInklingContextRaise
             )
         let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
             config: resolved,
@@ -3451,14 +3511,20 @@ struct ServeCommand: AsyncParsableCommand {
             targets: switchTargets.map { ($0.ids, $0.recomputed) }
         )
         if let startupBound, let configured = resolved.maxContextOverride {
-            if startupBound.slots < servedSlots {
+            if startupBound.slots != servedSlots {
+                resolved.maxConcurrencyOverride = startupBound.slots
+            }
+            if startupBound.slots > servedSlots {
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; serving \(startupBound.context) tokens with \(startupBound.slots) slots so the paged reservation fits\n".utf8
+                ))
+            } else if startupBound.slots < servedSlots {
                 // SPEC-023-R018 item 9: even the minimum context does not fit
                 // the configured slots, so serve runs fewer rather than an
                 // over-envelope pair.
                 FileHandle.standardError.write(Data(
                     "max_context_override \(configured) was generated by a recommendation; even the \(AutotuneModelContextCap.minimumServeContext)-token minimum context does not fit \(servedSlots) slots in memory, so serving \(startupBound.context) tokens with \(startupBound.slots) slots\n".utf8
                 ))
-                resolved.maxConcurrencyOverride = startupBound.slots
             } else {
                 FileHandle.standardError.write(Data(
                     "max_context_override \(configured) was generated by a recommendation; lowered to \(startupBound.context) tokens so \(servedSlots) slots fit in memory\n".utf8
@@ -3476,12 +3542,27 @@ struct ServeCommand: AsyncParsableCommand {
         let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
         let smallMRouteVerdictStore = SmallMRouteVerdictStore(selfCheckStore: cbSelfCheckStore)
         let startupLoadPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model
-        let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
         // The paged-KV pool the MLX runtime is built with; it bounds the
-        // FR-CB10 exactness probe, so the startup identity keys it.
+        // FR-CB10 exactness probe, so the startup identity keys it. The cap
+        // covers the rows this process promises, including each warm-switch
+        // target, so a row cannot fail after output has started.
         let localModelFamily = startupLoadPath.flatMap(ModelRuntime.localModelFamily)
+        let finalContextTokens = ProviderCapacity(
+            maxContextOverride: resolved.maxContextOverride,
+            maxConcurrencyOverride: nil
+        ).maxContextTokens
+        let finalRows = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+        var poolTokens = AutotuneModelContextCap.pagedPoolTokens(
+            contextTokens: finalContextTokens, rows: finalRows
+        )
+        for target in switchTargets {
+            poolTokens = max(
+                poolTokens,
+                AutotuneModelContextCap.pagedPoolTokens(contextTokens: target.recomputed, rows: target.slots)
+            )
+        }
         let startupPagedKVConfig = resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
-            contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+            contextTokens: poolTokens
         )
         let smallMRouteStartupIdentity: String? = startupLoadSHA256.flatMap { sha in
             guard !sha.isEmpty, autoServedSlots != nil else { return nil }

@@ -8233,6 +8233,220 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
     }
 
+    /// A lone greedy Inkling request stays on the serial iterator. The
+    /// attached scheduler would prefill if that guard missed.
+    func testLoneInklingNativeMTPRequestStaysOnTheSerialIterator() async throws {
+        try requireMetal()
+        let modelID = "mlx-community/Inkling-2-Mini-oQ4e-mtp"
+        let hash = String(repeating: "a", count: 64)
+        let admission = Self.inklingAdmission(modelID: modelID, hash: hash)
+        let capability = Self.inklingCapability(admission: admission)
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let drafter = MTPDrafterContainer(context: MTPDrafterContext(
+            configuration: ModelConfiguration(id: "inkling-drafter"),
+            model: RuntimeBridgeRecordingMTPDrafter()))
+        let runtime = Self.inklingRuntime(
+            modelID: modelID, hash: hash, admission: admission, capability: capability,
+            drafter: drafter, backend: backend,
+            testCompletion: { _, _ in
+                CompletionResult(
+                    content: "serial", finishReason: "stop",
+                    promptTokens: 1, completionTokens: 1,
+                    settlementDisposition: .eligibleOwner
+                )
+            }
+        )
+        let before = await runtime.currentSnapshot()
+        XCTAssertEqual(before.continuousBatching?.active, true)
+        XCTAssertTrue(before.schedulerSupportsNativeMTP)
+        let request = try ChatCompletionRequest.parse(data: Data("""
+        {"model":"\(modelID)","messages":[{"role":"user","content":"hi"}],"temperature":0,"max_tokens":8}
+        """.utf8))
+        let result = try await runtime.complete(request)
+        XCTAssertEqual(result.content, "serial")
+        XCTAssertEqual(await backend.prefillCallCount(), 0)
+    }
+
+    /// A warm swap to Inkling runs the real swap. A passing self-check publishes
+    /// the capability after one scheduler rebuild that still has the drafter.
+    /// A failing self-check rebuilds again with the drafter already cleared.
+    func testCompleteSwapToInklingPublishesCapabilityAndDropsTheDrafterAfterAFailedSelfCheck() async throws {
+        try requireMetal()
+        let modelID = "mlx-community/Inkling-2-Mini-oQ4e-mtp"
+        let hash = String(repeating: "a", count: 64)
+        let fixture = Self.inklingSwapFixture(modelID: modelID, hash: hash)
+        await fixture.runtime.setNativeMTPRevocationPollerForTest { _, _ in
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch {}
+        }
+        await fixture.runtime.completeSwapAtomicallyForTest(
+            modelID: modelID, modelHash: hash, nativeMTPLoad: fixture.load, receipt: fixture.passing
+        )
+        XCTAssertEqual(
+            await fixture.runtime.nativeMTPCapabilityFamilyForTest(),
+            NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter
+        )
+        XCTAssertEqual(await fixture.runtime.continuousBatchSchedulerRebuildCountForTest(), 1)
+        XCTAssertTrue(await fixture.runtime.lastSchedulerRebuildHadDrafterForTest())
+
+        let failed = Self.inklingSwapFixture(modelID: modelID, hash: hash)
+        await failed.runtime.completeSwapAtomicallyForTest(
+            modelID: modelID, modelHash: hash, nativeMTPLoad: failed.load, receipt: failed.failing
+        )
+        XCTAssertNil(await failed.runtime.nativeMTPCapabilityFamilyForTest())
+        XCTAssertEqual(await failed.runtime.continuousBatchSchedulerRebuildCountForTest(), 2)
+        XCTAssertFalse(await failed.runtime.lastSchedulerRebuildHadDrafterForTest())
+    }
+
+    private static func inklingCapability(admission: NativeMTPAdmissionCapability) -> NativeMTPCapability {
+        NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 256,
+            completeWindowBytesByDepth: [8, 32], family: admission.familyAdapter,
+            maximumNativeActiveRows: 1
+        )
+    }
+
+    private static func inklingRuntime(
+        modelID: String,
+        hash: String,
+        admission: NativeMTPAdmissionCapability,
+        capability: NativeMTPCapability,
+        drafter: MTPDrafterContainer,
+        backend: RuntimeBridgeScriptedBackend,
+        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
+    ) -> ModelRuntime {
+        let proof = sizingProof(modelID: modelID, modelSHA: hash)
+        return ModelRuntime(
+            modelID: modelID, modelHash: hash,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2, continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
+            nativeMTPMode: .auto, nativeMTPCapability: capability, nativeMTPSchedulerSupported: true,
+            nativeMTPDrafterContainer: drafter, labNativeMTPAdmissionCapability: admission,
+            nativeMTPSerialSelfCheckPassed: true,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity(from: proof),
+            pagedKVHardwareSizingProof: proof, pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: RuntimeBridgePromptProcessor(tokens: [3]),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            continuousBatchingBackend: backend,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected },
+            testCompletion: testCompletion
+        )
+    }
+
+    private static func inklingSwapFixture(modelID: String, hash: String) -> (
+        runtime: ModelRuntime,
+        load: ModelRuntime.NativeMTPRuntimeLoadResult,
+        passing: NativeMTPSelfTestReceipt,
+        failing: NativeMTPSelfTestReceipt
+    ) {
+        let admission = inklingAdmission(modelID: modelID, hash: hash)
+        let capability = inklingCapability(admission: admission)
+        let drafter = MTPDrafterContainer(context: MTPDrafterContext(
+            configuration: ModelConfiguration(id: "inkling-drafter"),
+            model: RuntimeBridgeRecordingMTPDrafter()))
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: modelID),
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+            processor: RuntimeBridgePromptProcessor(tokens: [3]),
+            tokenizer: RuntimeBridgeFakeTokenizer()))
+        let runtime = inklingRuntime(
+            modelID: modelID, hash: hash, admission: admission, capability: capability,
+            drafter: drafter, backend: RuntimeBridgeScriptedBackend(scripts: [:])
+        )
+        let offer = NativeMTPTupleReofferTests.offer()
+        let tuple = NativeMTPSelfTestRuntimeTuple(
+            modelID: modelID, modelHash: hash, modelHashAlgorithm: "sha256",
+            tokenizerDigest: offer.runtimeTuple.tokenizerDigest, artifactDigest: offer.runtimeTuple.artifactDigest,
+            manifestDigest: offer.runtimeTuple.manifestDigest, sidecarDigest: offer.runtimeTuple.sidecarDigest,
+            providerBinarySHA256: offer.runtimeTuple.providerBinarySHA256, runtimeCDHash: offer.runtimeTuple.runtimeCDHash,
+            cacheNamespace: offer.runtimeTuple.cacheNamespace, stateDigest: offer.runtimeTuple.stateDigest, proposalDepth: 1)
+        let input = NativeMTPSelfTestInput(
+            tupleSHA256: admission.tupleSHA256, modelID: modelID, modelRevision: hash,
+            familyAdapter: admission.familyAdapter, proposalDepth: 1, challengeBank: admission.selfTestChallengeBank,
+            servedSnapshot: NativeMTPSelfTestServedSnapshot(
+                tupleSHA256: admission.tupleSHA256, runtimeTuple: tuple,
+                generation: 1, proposalDepth: 1))
+        let passing = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 1, rejectedTokens: 0, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64),
+            actualDecodePath: .nativeMTP, fallbackUsed: false)
+        let failing = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 0, rejectedTokens: 1, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64),
+            actualDecodePath: .ordinary, fallbackUsed: true)
+        let load = ModelRuntime.NativeMTPRuntimeLoadResult(
+            targetContainer: container, targetDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+            drafterContainer: drafter, capability: capability, admissionCapability: admission,
+            selfTestInput: input, selfTestRuntimeTuple: tuple, runtimeTuple: offer.runtimeTuple,
+            servedSnapshotID: "swap-snapshot", runtimeCacheClass: "KVCacheSimple",
+            modelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil),
+            revocationSignerKeyID: "test-signer",
+            revocationTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(
+                publicKeysByKeyID: [:], requiredKeyID: "test-signer"),
+            revocationExpiresAt: nil)
+        return (runtime, load, passing, failing)
+    }
+
+    private static func inklingAdmission(modelID: String, hash: String) -> NativeMTPAdmissionCapability {
+        NativeMTPAdmissionCapability(
+            tupleSHA256: String(repeating: "7", count: 64),
+            sidecarSHA256: String(repeating: "0", count: 64),
+            modelID: modelID,
+            modelRevision: hash,
+            targetArtifactSHA256: hash,
+            mtpArtifactSHA256: String(repeating: "2", count: 64),
+            tokenizerSHA256: String(repeating: "3", count: 64),
+            mtpManifestSHA256: String(repeating: "4", count: 64),
+            familyAdapter: NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter,
+            sourceLayout: "separate_artifact",
+            predictionLayerCount: 3,
+            maxProposalDepth: 1,
+            completeWindowBytesByDepth: [8, 32],
+            throughputDeltaPPM: 0,
+            maxPromptTokens: 4096,
+            maxCompletionTokens: 256,
+            cacheClass: "serial_native",
+            stateClass: "hybrid_stageable_rewindable",
+            quantization: NativeMTPAdmissionSidecar.Quantization(target: "mlx_affine_4bit", mtp: "mlx_affine_4bit"),
+            providerRevision: String(repeating: "a", count: 40),
+            upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
+            qualifiedSlots: 1,
+            maxNativeActiveRows: 1,
+            spec023ReleaseID: "native-mtp-test",
+            spec023SourceCommit: String(repeating: "a", count: 40),
+            spec023BuildDigestSHA256: String(repeating: "b", count: 64),
+            spec023LiveExecutableCDHash: String(repeating: "1", count: 40),
+            evidenceArtifactSHA256: [String(repeating: "5", count: 64)],
+            challengeBankSignerKeyID: "native-mtp-selftest-test",
+            revocationSignerKeyID: "native-mtp-revocation-test",
+            selfTestChallengeBank: NativeMTPSelfTestChallengeBank(
+                releaseID: "native-mtp-test",
+                challengeBankPath: "native-mtp-selftest-bank.json",
+                challengeBankSHA256: String(repeating: "6", count: 64),
+                signaturePath: "native-mtp-selftest-bank.json.sig",
+                signerKeyID: "native-mtp-selftest-test",
+                signatureSHA256: String(repeating: "7", count: 64)
+            ),
+            capturedArtifacts: nil
+        )
+    }
+
     private static func creativeAdmission(modelID: String, hash: String) -> NativeMTPAdmissionCapability {
         NativeMTPAdmissionCapability(
             tupleSHA256: String(repeating: "7", count: 64),

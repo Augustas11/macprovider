@@ -2404,6 +2404,44 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(revoked.shouldUseSerialPath)
     }
 
+    /// A withheld row count matches the running build, not the catalog key.
+    /// A stale revocation of another Metal library must not force one row.
+    func testRevocationWithholdsOnlyTheRunningBuild() {
+        let sha = String(repeating: "a", count: 64)
+        let metallib = String(repeating: "b", count: 64)
+        let other = String(repeating: "c", count: 64)
+        let selection = ContinuousBatchingPolicySelection(
+            releaseID: "r",
+            policyVersion: "v",
+            generatedAt: .distantPast,
+            expiresAt: .distantFuture,
+            candidateCatalogSHA256: "",
+            signerKeyID: "k",
+            source: "test",
+            entries: [],
+            revocations: [
+                ContinuousBatchingRevocation(
+                    modelKey: "thinkingmachines/inkling-2-mini",
+                    modelSHA256: sha,
+                    metallibSHA256: metallib,
+                    kernelIdentifier: PagedKVGatherKernel.registeredKernelName
+                ),
+            ]
+        )
+        XCTAssertTrue(selection.revokesRunningBuild(
+            modelSHA256: sha, modelFamily: "inkling2", metallibSHA256: metallib
+        ))
+        XCTAssertFalse(selection.revokesRunningBuild(
+            modelSHA256: sha, modelFamily: "inkling2", metallibSHA256: other
+        ))
+        XCTAssertFalse(selection.revokesRunningBuild(
+            modelSHA256: nil, modelFamily: "inkling2", metallibSHA256: metallib
+        ))
+        XCTAssertFalse(selection.revokesRunningBuild(
+            modelSHA256: sha, modelFamily: "deepseek_v4", metallibSHA256: metallib
+        ))
+    }
+
     func testStrictOnFailsClosedOnUncoveredTuple() {
         let capability = ContinuousBatchingPolicy.capability(
             mode: .on,

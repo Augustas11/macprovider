@@ -1994,6 +1994,52 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRevocationPoller = poller
     }
 
+    func setNativeMTPQualificationReceiptForTest(_ receipt: NativeMTPSelfTestReceipt?) {
+        nativeMTPQualificationReceiptForTest = receipt
+    }
+
+    func continuousBatchSchedulerRebuildCountForTest() -> Int {
+        schedulerRebuildCountForTest
+    }
+
+    func lastSchedulerRebuildHadDrafterForTest() -> Bool {
+        schedulerRebuildHadDrafterForTest
+    }
+
+    func nativeMTPCapabilityFamilyForTest() -> String? {
+        currentNativeMTPCapability?.family
+    }
+
+    /// The real swap, with the qualification receipt injected so the test
+    /// does not run a model. `container` stays nil: the load result carries
+    /// its own target container, and a nil swap container skips MLX.
+    func completeSwapAtomicallyForTest(
+        modelID: String,
+        modelHash: String?,
+        nativeMTPLoad: NativeMTPRuntimeLoadResult?,
+        receipt: NativeMTPSelfTestReceipt?
+    ) async {
+        nativeMTPQualificationReceiptForTest = receipt
+        await completeSwapAtomically(
+            container: nil,
+            modelID: modelID,
+            modelHash: modelHash,
+            modelHashAlgorithm: modelHash == nil ? nil : "sha256",
+            weightsManifestSHA256: nil,
+            tokenizerConfigSHA256: nil,
+            chatTemplateSHA256: nil,
+            nativeVisionProfile: nil,
+            draftModelID: nil,
+            draftContainer: nil,
+            draftFailureReason: nil,
+            modelCapabilities: nativeMTPLoad?.modelCapabilities
+                ?? Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil),
+            adoptionKnobs: nil,
+            nativeMTPLoad: nativeMTPLoad,
+            nativeMTPSwapReload: .loadAndQualify
+        )
+    }
+
     func setNativeMTPRevokedSetReaderForTest(_ reader: @escaping NativeMTPRevokedSetReader) {
         nativeMTPRevokedSetReader = reader
     }
@@ -2354,6 +2400,9 @@ actor ModelRuntime: ModelRuntimeServing {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var creativeNativeReloadForTest: (@Sendable () async throws -> NativeMTPRuntimeLoadResult)?
     private var creativeNativeSelfCheckForTest: NativeMTPSelfTestReceipt?
+    private var nativeMTPQualificationReceiptForTest: NativeMTPSelfTestReceipt?
+    private var schedulerRebuildCountForTest = 0
+    private var schedulerRebuildHadDrafterForTest = false
 
     func setCreativeNativeReloadForTest(
         _ reload: @escaping @Sendable () async throws -> NativeMTPRuntimeLoadResult,
@@ -4913,6 +4962,7 @@ maxTokens: 1,
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
         labNativeMTPAdmissionCapability: NativeMTPAdmissionCapability? = nil,
+        nativeMTPSerialSelfCheckPassed: Bool = false,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
@@ -4960,6 +5010,9 @@ maxTokens: 1,
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
         self.currentNativeMTPDrafterContainer = NativeMTPQualificationScope.permitsFixtureHooks ? nativeMTPDrafterContainer : nil
+        self.currentNativeMTPSerialSelfCheckPassed = NativeMTPQualificationScope.permitsFixtureHooks
+            && nativeMTPDrafterContainer != nil
+            && nativeMTPSerialSelfCheckPassed
         self.currentNativeMTPCapability = NativeMTPQualificationScope.permitsFixtureHooks && nativeMTPDrafterContainer != nil ? nativeMTPCapability : nil
         self.currentNativeMTPAdmissionCapability = !NativeMTPQualificationScope.permitsFixtureHooks || nativeMTPDrafterContainer == nil
             ? nil
@@ -7991,7 +8044,8 @@ maxTokens: 1,
         let selfTestReceipt: NativeMTPSelfTestReceipt?
         var promptCeiling: Int?
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        let injectedReceipt = creativeRestoreTarget == nil ? nil : creativeNativeSelfCheckForTest
+        let injectedReceipt = nativeMTPQualificationReceiptForTest
+            ?? (creativeRestoreTarget == nil ? nil : creativeNativeSelfCheckForTest)
         #else
         let injectedReceipt: NativeMTPSelfTestReceipt? = nil
         #endif
@@ -8128,6 +8182,10 @@ maxTokens: 1,
     }
 
     private func rebuildContinuousBatchScheduler(container: ModelContainer?) async {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        schedulerRebuildCountForTest += 1
+        schedulerRebuildHadDrafterForTest = currentNativeMTPDrafterContainer != nil
+        #endif
         publishNativeMTPStatusSink(
             capability: currentNativeMTPCapability,
             admissionCapability: currentNativeMTPAdmissionCapability

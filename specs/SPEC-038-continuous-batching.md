@@ -1,11 +1,30 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.67
+Version: v0.3.68
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.68 (2026-11-27, FR-CB11 item 3: paged reservation raises above full-context fit, running-build revocation, owner-pin warm swap, and full-completion reservation, Related: #2530):**
+FR-CB11 item 3: scheduler row capacity for an autotune-derived provider is the
+larger of the full-context `memory_fit_cap` at the served context (or the
+chip/RAM tier constant when that fit is unknown) and the SPEC-023-R018
+paged-reservation fit, so the paged plan only raises and never serves fewer
+rows than the full-context fit. A 1-row result keeps the served context, except
+an Inkling continuous-batching cache priced at full history across every visit
+(SPEC-023 v0.22.50), which serves the largest context fitting two
+paged-reservation rows (or one honest row when two do not, or when withheld or
+capped at 1). Rollout-off revocation withholds one row only when the loaded
+model SHA-256, Metal library SHA-256, and kernel identifier all match (a
+missing digest does not withhold). An owner-pinned warm swap keeps the owner
+pin (bounded by the target model's signed ceiling and physical memory cap) and
+its full-context memory bound; an autotune-derived warm swap uses the target's
+planned row count and paged-context rule. Every admitted scheduler row reserves
+its full `prompt + maxOutputTokens` completion against a paged-KV pool sized to
+cover the promised rows (maxed across warm-switch targets) so a second row
+cannot fail mid-decode when extending its blocks.
+
 **Change log v0.3.67 (2026-11-26, FR-CB2: an Inkling 2 row prefills on the serial route's step, Related: #2505):**
 FR-CB2: a family whose rows reserve their last prompt token for a one-token
 forward (`inkling2`, SPEC-039 v0.1.39) prefills on the serial route's exact
@@ -2893,12 +2912,27 @@ NOT change `slots_total`.
    or with `autotune`, is autotune-derived.
 2. Otherwise, with a draft model configured or the emergency off set, the
    count MUST be 1 (FR-CB12).
-3. Otherwise the scheduler is built with the SPEC-023-R009 recommendation for
-   this Mac as its row capacity: `memory_fit_cap` at the served context when
-   the model geometry is readable, else the chip/RAM tier constant; at most 5
-   on Apple M1/M2 GPUs other than Ultra (MLX quantized matmul switches from
-   the vector to the matrix kernel above 5 rows); and at most
-   `max_concurrency_override_limit`. `slots_total` starts at 1 (or the
+3. Otherwise the scheduler is built with the SPEC-023-R009 / SPEC-023-R018
+   planned row count for this Mac as its row capacity: the larger of the
+   full-context `memory_fit_cap` at the served context (or the chip/RAM tier
+   constant when that fit is unknown) and the paged-reservation fit (one row
+   at the served context plus `N − 1` rows at 4,000 tokens, with Inkling CB
+   priced at full history across every visit), so the paged plan only raises
+   and never serves fewer rows than the full-context fit; at most 5 on Apple
+   M1/M2 GPUs other than Ultra (MLX quantized matmul switches from the vector
+   to the matrix kernel above 5 rows); at most a positive signed
+   `max_served_slots` (item 5); and at most `max_concurrency_override_limit`
+   (32). A rollout-off revocation withholds one row only when the loaded model
+   SHA-256, Metal library SHA-256, and paged-KV kernel identifier all match
+   the revocation (a missing digest does not withhold). A 1-row result keeps
+   the served context, except an Inkling continuous-batching row whose honest
+   full-history cost exceeds the KV budget, which serves the largest context
+   fitting two paged-reservation rows (or one honest row when two do not, or
+   when withheld or capped at 1). Every admitted scheduler row reserves its
+   full `prompt + maxOutputTokens` completion, and the serve paged-KV pool is
+   sized to cover the planned rows (`context + (rows − 1) × min(context,
+   4000)`, maxed across warm-switch targets) unless the operator explicitly
+   pins `maxPhysicalBlocks`. `slots_total` starts at 1 (or the
    provisional grant's configured count) and becomes the FR-CB10 self-check's
    k, applied live: the serial-path gate and the advertised capacity change;
    the scheduler is not rebuilt, and the relay admits at most `slots_total`
@@ -2917,9 +2951,13 @@ NOT change `slots_total`.
    older-runtime grant is never widened by a pin before re-verification. A capacity change is published at once. A
    stored self-check result for the loaded tuple applies at startup before
    the first advertisement, clamped to the rows after the startup memory
-   bound; a provisional grant never exceeds a computable memory fit. A warm
-   swap or adoption serves the owner pin or one slot until the new model's
-   stored result, prior grant or self-check applies.
+   bound; a provisional grant never exceeds a computable memory fit. On a warm
+   swap or adoption, an owner-pinned provider keeps its pin (bounded by the
+   target model's signed ceiling, physical memory bound, and full-context
+   memory bound), while an autotune-derived provider uses the target model's
+   planned row count and paged-context rule; served capacity stays at the
+   owner pin or one slot until the new model's stored result, prior grant or
+   self-check applies.
 4. A tuple that cannot batch at all (no attached engine, revoked) serves 1.
 5. **(v0.3.22)** When the verified signed policy carries `max_served_slots`
    on a positive entry for the served model (by catalog key before load, by

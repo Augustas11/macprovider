@@ -1076,16 +1076,20 @@ enum ModelSwitchContext: Equatable {
         return bounded.context < configured || bounded.slots < slots ? bounded : nil
     }
 
-    /// Serve start for an autotune-derived slot count. The reservation is one
-    /// full context plus the other rows at 4,000 tokens. Nil when nothing
-    /// changes, including unknown geometry and an operator-owned value.
+    /// Serve start for an autotune-derived slot count. Two or more rows may
+    /// lower the context until the paged reservation fits. One row keeps the
+    /// context, except an Inkling cache whose full history does not fit, and
+    /// except an Inkling row that can rise to two at a shorter context when
+    /// `allowInklingRaise` is set. Nil when nothing changes, including unknown
+    /// geometry and an operator-owned value.
     static func pagedStartupBound(
         config: AppConfig,
         slots: Int,
         memoryGB: Int,
         configJSONData: Data?,
         catalogMinRAMGB: Int?,
-        modelWeightSizeBytes: UInt64? = nil
+        modelWeightSizeBytes: UInt64? = nil,
+        allowInklingRaise: Bool = false
     ) -> (context: Int, slots: Int)? {
         guard config.maxContextSource == .recommendationApply,
               let configured = config.maxContextOverride,
@@ -1093,16 +1097,17 @@ enum ModelSwitchContext: Equatable {
               let catalogMinRAMGB else {
             return nil
         }
-        let bounded = AutotuneModelContextCap.pagedBoundedServePair(
+        let bounded = AutotuneModelContextCap.pagedServedContext(
             context: configured,
             slots: slots,
+            allowInklingRaise: allowInklingRaise,
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: SHA256.hash(data: configJSONData).map { String(format: "%02x", $0) }.joined(),
             hardwareMemoryGB: memoryGB,
             catalogMinRAMGB: catalogMinRAMGB,
             verifiedArtifactSizeBytes: intByteCount(modelWeightSizeBytes)
         )
-        return bounded.context < configured || bounded.slots < slots ? bounded : nil
+        return bounded.context != configured || bounded.slots != slots ? bounded : nil
     }
 
     /// A warm switch of a generated context: that target's own planned rows,
@@ -1132,6 +1137,18 @@ enum ModelSwitchContext: Equatable {
         if draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return (context, 1)
         }
+        let artifactBytes = intByteCount(modelWeightSizeBytes)
+        let fullFit: Int? = {
+            guard let configJSONData, let configSHA256 else { return nil }
+            return AutotuneModelContextCap.memoryFitBatchDepth(
+                configData: configJSONData,
+                verifiedConfigSHA256: configSHA256,
+                hardwareMemoryGB: memoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                calibrationContextTokens: context,
+                verifiedArtifactSizeBytes: artifactBytes
+            )
+        }()
         let paged = AutoServedSlots.pagedFitSlots(
             configJSONData: configJSONData,
             memoryGB: memoryGB,
@@ -1143,20 +1160,22 @@ enum ModelSwitchContext: Equatable {
         let planned = AutotuneModelContextCap.plannedRowCount(
             tierConstant: AutotuneRecommendHardware.tierBatch(chip: chip, memoryGB: memoryGB),
             pagedFit: paged,
+            fullContextFit: fullFit,
             policyCeiling: policyCeiling,
             withheld: withheld
         )
         let slots = AutoServedSlots.recommendedSlots(
             chip: chip, memoryGB: memoryGB, memoryFitCap: planned
         )
-        return AutotuneModelContextCap.pagedBoundedServePair(
+        return AutotuneModelContextCap.pagedServedContext(
             context: context,
             slots: slots,
+            allowInklingRaise: !withheld && policyCeiling != 1,
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: configSHA256,
             hardwareMemoryGB: memoryGB,
             catalogMinRAMGB: catalogMinRAMGB,
-            verifiedArtifactSizeBytes: intByteCount(modelWeightSizeBytes)
+            verifiedArtifactSizeBytes: artifactBytes
         )
     }
 

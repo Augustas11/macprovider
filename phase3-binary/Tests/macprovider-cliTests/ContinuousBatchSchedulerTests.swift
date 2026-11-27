@@ -3994,10 +3994,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
     // The production row cap is the served context: a 200k provider batches
     // a prompt + max_tokens between the old 131,072 default and 200k.
-    // Multi-row reserves prompt + headroom, so the small test pool suffices.
+    // Every row reserves that whole completion, so the pool has to cover it.
     func testRequestTokenCapAboveLegacyDefaultAdmitsLongRows() async throws {
         let backend = ScriptedBackend(scripts: ["long": [7]])
-        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 50_000)
         let scheduler = ContinuousBatchScheduler(
             configuration: ContinuousBatchSchedulerConfiguration(
                 descriptor: Self.descriptor(),
@@ -10813,8 +10813,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testMLXMemoryLimitDefersRowWhileOtherRowsRun() async throws {
         let decodeGate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["blocker": [4, 5, 7], "big": [6]], decodeGate: decodeGate)
-        // Initial footprints: blocker 1 + 2 headroom tokens, big 2 + 1 output
-        // tokens; 3 x 10 bytes each, and 100 active + 30 > 125.
+        // Initial footprints are the whole completion: blocker 1 + 3 output
+        // tokens (40 bytes) and big 2 + 1 (30 bytes). 100 active + 40 > 125.
         let scheduler = try await makeScheduler(
             maxActiveRows: 2,
             mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 125, activeBytes: 100, kvBytesPerToken: 10),

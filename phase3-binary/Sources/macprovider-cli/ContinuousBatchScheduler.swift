@@ -8295,15 +8295,14 @@ actor ContinuousBatchScheduler {
         maxLogicalTokens: Int
     ) {
         let prompt = request.promptTokens.count
-        let (promptPlusHeadroom, headroomOverflow) = prompt.addingReportingOverflow(configuration.decodeHeadroomTokens)
         let (promptPlusOutput, outputOverflow) = prompt.addingReportingOverflow(request.maxOutputTokens)
-        guard !headroomOverflow, !outputOverflow else {
+        guard !outputOverflow else {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_reservation_overflow")
         }
-        let initialCapacity = configuration.maxActiveRows == 1
-            ? promptPlusOutput
-            : min(promptPlusHeadroom, promptPlusOutput)
-        return (initialCapacity, promptPlusOutput)
+        // Every row reserves the completion it was admitted to finish. A
+        // headroom-only reservation let a second row start and then fail
+        // when the pool could not extend it.
+        return (promptPlusOutput, promptPlusOutput)
     }
 
     private func validateDecodeOutputStructure(

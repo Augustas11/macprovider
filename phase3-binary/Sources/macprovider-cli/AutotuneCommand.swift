@@ -2516,9 +2516,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         // A draft pin and a calibration override are only lowered. A tier
         // above 1 is only lowered by the full-context fit, which is what the
-        // signed-row fleet check locks. A tier of 1 with known geometry rises
-        // to the paged fit (one full context, other rows at the 4,000-token
-        // floor) so a 32 GB Mac is not left serial.
+        // signed-row fleet check locks. A tier of 1 follows the serve plan:
+        // the paged reservation may raise the row count, and an Inkling
+        // context one row cannot store becomes the context where two rows fit.
         if draftCap != nil || maxBatchOverride != nil || hardware.recommendedMaxBatch > 1 {
             maxBatch = AutotuneModelContextCap.memoryBoundedSlots(
                 maxBatch,
@@ -2530,11 +2530,25 @@ struct AutotuneCommand: AsyncParsableCommand {
                 verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
             )
         } else {
-            let pagedFit = selectedBenchmark.modelConfigJSONData.flatMap { configData in
-                selectedBenchmark.modelConfigSHA256.flatMap { configSHA in
+            let configData = selectedBenchmark.modelConfigJSONData
+            let configSHA = selectedBenchmark.modelConfigSHA256
+            let fullFit = configData.flatMap { data in
+                configSHA.flatMap { sha in
+                    AutotuneModelContextCap.memoryFitBatchDepth(
+                        configData: data,
+                        verifiedConfigSHA256: sha,
+                        hardwareMemoryGB: hardware.memoryGB,
+                        catalogMinRAMGB: selectedRow.minRAMGB,
+                        calibrationContextTokens: maxContext,
+                        verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
+                    )
+                }
+            }
+            let pagedFit = configData.flatMap { data in
+                configSHA.flatMap { sha in
                     AutotuneModelContextCap.pagedFitBatchDepth(
-                        configData: configData,
-                        verifiedConfigSHA256: configSHA,
+                        configData: data,
+                        verifiedConfigSHA256: sha,
                         hardwareMemoryGB: hardware.memoryGB,
                         catalogMinRAMGB: selectedRow.minRAMGB,
                         contextTokens: maxContext,
@@ -2542,10 +2556,27 @@ struct AutotuneCommand: AsyncParsableCommand {
                     )
                 }
             }
-            maxBatch = AutotuneModelContextCap.plannedRowCount(
-                tierConstant: hardware.recommendedMaxBatch,
-                pagedFit: pagedFit
-            )
+            if maxContextOverride == nil {
+                let plan = AutotuneModelContextCap.pagedServePlan(
+                    context: maxContext,
+                    tierConstant: hardware.recommendedMaxBatch,
+                    fullContextFit: fullFit,
+                    pagedFit: pagedFit,
+                    verifiedConfigJSONData: configData,
+                    verifiedConfigSHA256: configSHA,
+                    hardwareMemoryGB: hardware.memoryGB,
+                    catalogMinRAMGB: selectedRow.minRAMGB,
+                    verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
+                )
+                maxBatch = plan.slots
+                maxContext = plan.context
+            } else {
+                maxBatch = AutotuneModelContextCap.plannedRowCount(
+                    tierConstant: hardware.recommendedMaxBatch,
+                    pagedFit: pagedFit,
+                    fullContextFit: fullFit
+                )
+            }
         }
         return RecommendationCore(
             model: selected.model,
