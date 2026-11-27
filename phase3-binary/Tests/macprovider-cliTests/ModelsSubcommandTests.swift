@@ -1528,9 +1528,11 @@ final class ModelsSubcommandTests: XCTestCase {
         )
         let row = fixture.catalogRow(modelID: "mlx-community/Inkling-2-Mini-oQ4e-mtp", minRAMGB: 28)
         let hardware = AutotuneRecommendHardware(
+            machine: nil,
             chip: "Apple M5",
             memoryGB: 32,
             bandwidthTier: .c,
+            osVersion: "15.0",
             binaryVersion: "1.8.90",
             diversificationID: "",
             hardwareIdentityHash: ""
@@ -1541,7 +1543,7 @@ final class ModelsSubcommandTests: XCTestCase {
             verifiedConfigSHA256: artifact.configSHA256,
             verifiedArtifactSizeBytes: artifact.sizeBytes,
             catalogMinRAMGB: row.minRAMGB,
-            draftModel: nil
+            draftModel: nil as String?
         )
         XCTAssertEqual(expectedContext, 46_319)
 
