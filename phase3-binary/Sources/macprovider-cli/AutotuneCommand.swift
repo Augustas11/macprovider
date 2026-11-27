@@ -2499,7 +2499,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             draftModel: draftModel
         )
         var maxBatch = maxBatchOverride ?? (draftCap != nil ? 1 : hardware.recommendedMaxBatch)
-        var maxContext = maxContextOverride ?? hardware.recommendedMaxContext(
+        var maxContext = maxContextOverride ?? hardware.recommendedServeContext(
             modelID: selectedRow.modelID,
             verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
             verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
@@ -2516,9 +2516,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         // A draft pin and a calibration override are only lowered. A tier
         // above 1 is only lowered by the full-context fit, which is what the
-        // signed-row fleet check locks. A tier of 1 follows the serve plan:
-        // the paged reservation may raise the row count, and an Inkling
-        // context one row cannot store becomes the context where two rows fit.
+        // signed-row fleet check locks. A tier of 1 raises to the paged fit at
+        // `maxContext` (already the paged-plan context when uncalibrated).
         if draftCap != nil || maxBatchOverride != nil || hardware.recommendedMaxBatch > 1 {
             maxBatch = AutotuneModelContextCap.memoryBoundedSlots(
                 maxBatch,
@@ -2556,27 +2555,11 @@ struct AutotuneCommand: AsyncParsableCommand {
                     )
                 }
             }
-            if maxContextOverride == nil {
-                let plan = AutotuneModelContextCap.pagedServePlan(
-                    context: maxContext,
-                    tierConstant: hardware.recommendedMaxBatch,
-                    fullContextFit: fullFit,
-                    pagedFit: pagedFit,
-                    verifiedConfigJSONData: configData,
-                    verifiedConfigSHA256: configSHA,
-                    hardwareMemoryGB: hardware.memoryGB,
-                    catalogMinRAMGB: selectedRow.minRAMGB,
-                    verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
-                )
-                maxBatch = plan.slots
-                maxContext = plan.context
-            } else {
-                maxBatch = AutotuneModelContextCap.plannedRowCount(
-                    tierConstant: hardware.recommendedMaxBatch,
-                    pagedFit: pagedFit,
-                    fullContextFit: fullFit
-                )
-            }
+            maxBatch = AutotuneModelContextCap.plannedRowCount(
+                tierConstant: hardware.recommendedMaxBatch,
+                pagedFit: pagedFit,
+                fullContextFit: fullFit
+            )
         }
         return RecommendationCore(
             model: selected.model,

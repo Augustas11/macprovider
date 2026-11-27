@@ -231,6 +231,73 @@ extension AutotuneRecommendHardware {
         return min(hardwareCap, modelCap, draftCap ?? .max)
     }
 
+    /// The uncalibrated serve context for a recommendation on this hardware
+    /// (SPEC-023-R018 item 9). Tier 1 without a draft model follows the paged
+    /// serve plan so Inkling emits its honest two-row paged context for plain
+    /// recommendations, `--calibrate-concurrency`, and `--calibrate-context`
+    /// bounds alike; higher tiers and draft-pinned configs keep
+    /// `recommendedMaxContext`. Both the recommend writer and
+    /// `models adopt-recommendation` call this single function.
+    func recommendedServeContext(
+        modelID: String,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        verifiedArtifactSizeBytes: Int? = nil,
+        catalogMinRAMGB: Int,
+        draftModel: String?
+    ) -> Int {
+        let baseContext = recommendedMaxContext(
+            modelID: modelID,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes,
+            catalogMinRAMGB: catalogMinRAMGB,
+            draftModel: draftModel
+        )
+        let hasDraft = ProviderCapacity.draftModelContextLimit(
+            physicalMemoryGB: memoryGB,
+            draftModel: draftModel
+        ) != nil
+        guard !hasDraft, recommendedMaxBatch <= 1 else {
+            return baseContext
+        }
+        let fullFit = verifiedConfigJSONData.flatMap { data in
+            verifiedConfigSHA256.flatMap { sha in
+                AutotuneModelContextCap.memoryFitBatchDepth(
+                    configData: data,
+                    verifiedConfigSHA256: sha,
+                    hardwareMemoryGB: memoryGB,
+                    catalogMinRAMGB: catalogMinRAMGB,
+                    calibrationContextTokens: baseContext,
+                    verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+                )
+            }
+        }
+        let pagedFit = verifiedConfigJSONData.flatMap { data in
+            verifiedConfigSHA256.flatMap { sha in
+                AutotuneModelContextCap.pagedFitBatchDepth(
+                    configData: data,
+                    verifiedConfigSHA256: sha,
+                    hardwareMemoryGB: memoryGB,
+                    catalogMinRAMGB: catalogMinRAMGB,
+                    contextTokens: baseContext,
+                    verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+                )
+            }
+        }
+        return AutotuneModelContextCap.pagedServePlan(
+            context: baseContext,
+            tierConstant: recommendedMaxBatch,
+            fullContextFit: fullFit,
+            pagedFit: pagedFit,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: memoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        ).context
+    }
+
     var recommendedMaxBatch: Int {
         let normalizedChip = chip.lowercased()
         if normalizedChip.contains("ultra") {

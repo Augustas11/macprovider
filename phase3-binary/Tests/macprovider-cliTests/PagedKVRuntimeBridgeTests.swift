@@ -8264,7 +8264,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         """.utf8))
         let result = try await runtime.complete(request)
         XCTAssertEqual(result.content, "serial")
-        XCTAssertEqual(await backend.prefillCallCount(), 0)
+        let prefillCalls = await backend.prefillCallCount()
+        XCTAssertEqual(prefillCalls, 0)
     }
 
     /// A warm swap to Inkling runs the real swap. A passing self-check publishes
@@ -8281,20 +8282,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         await fixture.runtime.completeSwapAtomicallyForTest(
             modelID: modelID, modelHash: hash, nativeMTPLoad: fixture.load, receipt: fixture.passing
         )
-        XCTAssertEqual(
-            await fixture.runtime.nativeMTPCapabilityFamilyForTest(),
-            NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter
-        )
-        XCTAssertEqual(await fixture.runtime.continuousBatchSchedulerRebuildCountForTest(), 1)
-        XCTAssertTrue(await fixture.runtime.lastSchedulerRebuildHadDrafterForTest())
+        let passedFamily = await fixture.runtime.nativeMTPCapabilityFamilyForTest()
+        let passedRebuilds = await fixture.runtime.continuousBatchSchedulerRebuildCountForTest()
+        let passedHadDrafter = await fixture.runtime.lastSchedulerRebuildHadDrafterForTest()
+        XCTAssertEqual(passedFamily, NativeMTPAdmissionSidecar.inkling2DSparkFamilyAdapter)
+        XCTAssertEqual(passedRebuilds, 1)
+        XCTAssertTrue(passedHadDrafter)
 
         let failed = Self.inklingSwapFixture(modelID: modelID, hash: hash)
         await failed.runtime.completeSwapAtomicallyForTest(
             modelID: modelID, modelHash: hash, nativeMTPLoad: failed.load, receipt: failed.failing
         )
-        XCTAssertNil(await failed.runtime.nativeMTPCapabilityFamilyForTest())
-        XCTAssertEqual(await failed.runtime.continuousBatchSchedulerRebuildCountForTest(), 2)
-        XCTAssertFalse(await failed.runtime.lastSchedulerRebuildHadDrafterForTest())
+        let failedFamily = await failed.runtime.nativeMTPCapabilityFamilyForTest()
+        let failedRebuilds = await failed.runtime.continuousBatchSchedulerRebuildCountForTest()
+        let failedHadDrafter = await failed.runtime.lastSchedulerRebuildHadDrafterForTest()
+        XCTAssertNil(failedFamily)
+        XCTAssertEqual(failedRebuilds, 2)
+        XCTAssertFalse(failedHadDrafter)
     }
 
     private static func inklingCapability(admission: NativeMTPAdmissionCapability) -> NativeMTPCapability {

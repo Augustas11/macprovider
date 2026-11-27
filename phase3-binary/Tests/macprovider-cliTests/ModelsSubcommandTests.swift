@@ -1503,6 +1503,111 @@ final class ModelsSubcommandTests: XCTestCase {
         }
     }
 
+    /// SPEC-023-R018 item 9 (v0.22.50): tier-1 Inkling writer (plain and
+    /// `--calibrate-concurrency`) and `adopt-recommendation` share one
+    /// paged-plan context rule (46,319 on 32 GB), rejecting the unpaged
+    /// item 1–8 value (54,319) and oversized slot counts.
+    func testAdoptRecommendationAcceptsTierOneInklingPagedContextForPlainAndCalibratedConcurrency() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "thinkingmachines/inkling-2-mini",
+            catalogModelID: "mlx-community/Inkling-2-Mini-oQ4e-mtp"
+        )
+        try Data(AutotuneRecommendTests.inklingPagedLayoutJSON.utf8)
+            .write(to: fixture.artifact.appendingPathComponent("config.json"))
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let inklingBytes = try XCTUnwrap(
+            AutotuneRecommendTests.signedCandidateArtifactSizeBytes()["thinkingmachines/inkling-2-mini"]
+        )
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            sizeBytes: inklingBytes,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: "mlx-community/Inkling-2-Mini-oQ4e-mtp", minRAMGB: 28)
+        let hardware = AutotuneRecommendHardware(
+            chip: "Apple M5",
+            memoryGB: 32,
+            bandwidthTier: .c,
+            binaryVersion: "1.8.90",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        )
+        let expectedContext = hardware.recommendedServeContext(
+            modelID: row.modelID,
+            verifiedConfigJSONData: artifact.configJSONData,
+            verifiedConfigSHA256: artifact.configSHA256,
+            verifiedArtifactSizeBytes: artifact.sizeBytes,
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: nil
+        )
+        XCTAssertEqual(expectedContext, 46_319)
+
+        // Plain tier-1 Inkling recommendation (2 x 46,319).
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: Self.parsedAdoption(
+                fixture: fixture,
+                maxContext: expectedContext,
+                hardwareMemoryGB: 32,
+                maxBatch: 2,
+                hardwareChip: "Apple M5"
+            ),
+            row: row,
+            artifact: artifact,
+            draftModel: nil
+        ))
+
+        // `--calibrate-concurrency` on tier-1 Inkling (1 x 46,319).
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: Self.parsedAdoption(
+                fixture: fixture,
+                maxContext: expectedContext,
+                hardwareMemoryGB: 32,
+                maxBatch: 1,
+                hardwareChip: "Apple M5"
+            ),
+            row: row,
+            artifact: artifact,
+            draftModel: nil
+        ))
+
+        // Unpaged item 1-8 context (54,319) and inflated context are rejected.
+        for badContext in [54_319, 120_000] {
+            XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(
+                    fixture: fixture,
+                    maxContext: badContext,
+                    hardwareMemoryGB: 32,
+                    maxBatch: 1,
+                    hardwareChip: "Apple M5"
+                ),
+                row: row,
+                artifact: artifact,
+                draftModel: nil
+            )) { error in
+                XCTAssertTrue(String(describing: error).contains("context"), "\(error)")
+            }
+        }
+
+        // More than the 2 paged slots that fit 32 GB is rejected.
+        XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: Self.parsedAdoption(
+                fixture: fixture,
+                maxContext: expectedContext,
+                hardwareMemoryGB: 32,
+                maxBatch: 3,
+                hardwareChip: "Apple M5"
+            ),
+            row: row,
+            artifact: artifact,
+            draftModel: nil
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("memory-fit"), "\(error)")
+        }
+    }
+
     func testAdoptRecommendationSignedCatalogBindingAcceptsAliasModelID() throws {
         let fixture = try AdoptionFixture(
             current: "old-model",
@@ -2537,7 +2642,8 @@ final class ModelsSubcommandTests: XCTestCase {
         maxContext: Int,
         hardwareMemoryGB: Int,
         contextCalibration: AutotuneContextCalibrationResult? = nil,
-        maxBatch: Int = 1
+        maxBatch: Int = 1,
+        hardwareChip: String = "Apple M4 Max"
     ) -> ParsedRecommendationAdoption {
         ParsedRecommendationAdoption(
             targetModelID: fixture.targetModelID,
@@ -2566,7 +2672,7 @@ final class ModelsSubcommandTests: XCTestCase {
             rateCardVersion: "test-catalog",
             demandRankVersion: "test-catalog",
             candidateCatalogVersion: "test-catalog",
-            hardwareChip: "Apple M4 Max",
+            hardwareChip: hardwareChip,
             hardwareMemoryGB: hardwareMemoryGB,
             hardwareBinaryVersion: "1.8.90"
         )

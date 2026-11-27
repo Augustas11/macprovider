@@ -3424,13 +3424,23 @@ struct ServeCommand: AsyncParsableCommand {
                 )
                 let weights = artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
                 let draft = ProviderCapacity.servedDraftModel(configured: resolved.draftModel)
+                let targetFamily = ModelRuntime.pagedKVModelCapabilities(
+                    modelID: row.modelID,
+                    configJSONData: artifact.configJSONData
+                ).modelFamily
+                let targetWithheld = continuousBatchingPolicy.status == .liveVerified
+                    && continuousBatchingPolicy.selection.revokesRunningBuild(
+                        modelSHA256: artifact.sha256,
+                        modelFamily: targetFamily,
+                        metallibSHA256: startupMetallibSHA256
+                    )
                 if resolved.maxConcurrencySource == .owner {
                     let pin = max(
                         1,
                         autoServedSlots?.ownerPinned
                             ?? ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlotsForProvisional)
                     )
-                    let slots = min(pin, ProviderCapacity.boundedServingRows(targetCeiling ?? Int.max))
+                    let slots = targetWithheld ? 1 : min(pin, ProviderCapacity.boundedServingRows(targetCeiling ?? Int.max))
                     let knobs = ModelSwitchContext.recomputedServeKnobs(
                         memoryGB: switchMemoryGB,
                         modelID: row.modelID,
@@ -3444,10 +3454,6 @@ struct ServeCommand: AsyncParsableCommand {
                     switchTargets.append((ids, knobs.context, knobs.slots))
                     return
                 }
-                let targetFamily = ModelRuntime.pagedKVModelCapabilities(
-                    modelID: row.modelID,
-                    configJSONData: artifact.configJSONData
-                ).modelFamily
                 let knobs = ModelSwitchContext.pagedSwitchKnobs(
                     chip: switchChip,
                     memoryGB: switchMemoryGB,
@@ -3458,12 +3464,8 @@ struct ServeCommand: AsyncParsableCommand {
                     draftModel: draft,
                     modelWeightSizeBytes: weights,
                     policyCeiling: targetCeiling,
-                    withheld: continuousBatchingPolicy.status == .liveVerified
-                        && continuousBatchingPolicy.selection.revokesRunningBuild(
-                            modelSHA256: artifact.sha256,
-                            modelFamily: targetFamily,
-                            metallibSHA256: startupMetallibSHA256
-                        )
+                    withheld: targetWithheld,
+                    emergencyOff: emergencyOffOverride
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
             }
@@ -3906,12 +3908,16 @@ struct ServeCommand: AsyncParsableCommand {
                 )
             }
             // A startup memory bound below the planned rows still applies to
-            // the swap baseline; the startup model's ceiling does not.
+            // the swap baseline; a startup Inkling raise (1 -> 2) lifts the
+            // baseline too, while the startup model's ceiling never travels.
+            let effectiveRowsBeforeCeiling: Int? = rows < plan.rows
+                ? rows
+                : (rows > plan.rows ? rowsBeforePolicyCeiling.map { max($0, rows) } ?? rows : rowsBeforePolicyCeiling)
             await mlxRuntime.configureServedSlots(
                 managed: plan.selfChecked,
                 ownerPinned: ownerPinned,
                 resolver: plan.selfChecked ? resolver : nil,
-                rowsBeforePolicyCeiling: rows < plan.rows ? rows : rowsBeforePolicyCeiling
+                rowsBeforePolicyCeiling: effectiveRowsBeforeCeiling
             )
             if plan.selfChecked,
                let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),

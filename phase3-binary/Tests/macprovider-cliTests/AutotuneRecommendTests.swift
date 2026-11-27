@@ -1725,10 +1725,26 @@ final class AutotuneRecommendTests: XCTestCase {
             modelWeightSizeBytes: UInt64(inklingBytes)
         )
         XCTAssertEqual(draftedSwitch.slots, 1)
+        let emergencyOffSwitch = ModelSwitchContext.pagedSwitchKnobs(
+            chip: "Apple M5",
+            memoryGB: 32,
+            modelID: "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+            catalogMinRAMGB: 28,
+            configJSONData: config,
+            configSHA256: sha,
+            draftModel: nil,
+            modelWeightSizeBytes: UInt64(inklingBytes),
+            policyCeiling: nil,
+            withheld: false,
+            emergencyOff: true
+        )
+        XCTAssertEqual(emergencyOffSwitch.slots, 1)
     }
 
     /// The recommend writer raises a tier of 1 and does not raise a draft pin
-    /// or a calibration override.
+    /// or a calibration override. Both plain and `--calibrate-concurrency` emit
+    /// the same tier-1 paged-plan context so `models adopt-recommendation`
+    /// validates them under one rule.
     func testRecommendWriterRaisesTierOnePagedFitAndLeavesDraftAndCalibration() throws {
         var request = try makeRequest(modelKey: "qwen3-8b")
         request.hardware = Self.hardware(chip: "Apple M5", memoryGB: 32, bandwidthTier: .c)
@@ -1757,7 +1773,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertLessThan(raised.knobs.maxContext, 120_000)
         let calibrated = core(draftModel: nil, maxBatchOverride: 1)
         XCTAssertEqual(calibrated.knobs.maxBatch, 1)
-        XCTAssertGreaterThan(calibrated.knobs.maxContext, raised.knobs.maxContext)
+        XCTAssertEqual(calibrated.knobs.maxContext, raised.knobs.maxContext)
         XCTAssertEqual(core(draftModel: "mlx-community/Qwen3-0.6B-4bit").knobs.maxBatch, 1)
     }
 
@@ -6991,7 +7007,7 @@ final class AutotuneRecommendTests: XCTestCase {
     /// Production head geometry (8 KV heads × 128) plus the layout fields
     /// `PagedKVInkling2Layout` requires. The signed-candidate snippet omits
     /// those fields, so it does not build the layout.
-    private static let inklingPagedLayoutJSON = #"""
+    static let inklingPagedLayoutJSON = #"""
     {"model_type": "inkling2_loop",
      "text_config": {"model_type": "inkling2_loop_text", "num_hidden_layers": 24,
       "hidden_size": 2304, "num_attention_heads": 24, "num_key_value_heads": 8, "head_dim": 128,
@@ -7185,7 +7201,7 @@ final class AutotuneRecommendTests: XCTestCase {
         benchmark.modelConfigSHA256 = sha256Hex(data)
     }
 
-    private static func signedCandidateArtifactSizeBytes() throws -> [String: Int] {
+    static func signedCandidateArtifactSizeBytes() throws -> [String: Int] {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()

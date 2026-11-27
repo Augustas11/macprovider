@@ -2723,7 +2723,7 @@ extension ModelsAdoptRecommendationCommand {
             diversificationID: "",
             hardwareIdentityHash: ""
         )
-        let expectedMaxContext = hardware.recommendedMaxContext(
+        let expectedMaxContext = hardware.recommendedServeContext(
             modelID: row.modelID,
             verifiedConfigJSONData: artifact.configJSONData,
             verifiedConfigSHA256: artifact.configSHA256,
@@ -2741,51 +2741,7 @@ extension ModelsAdoptRecommendationCommand {
             )
             return
         }
-        let hasDraft = ProviderCapacity.draftModelContextLimit(
-            physicalMemoryGB: hardware.memoryGB,
-            draftModel: draftModel
-        ) != nil
-        let expectedServeContext: Int
-        if !hasDraft, hardware.recommendedMaxBatch <= 1 {
-            let fullFit = artifact.configJSONData.flatMap { data in
-                artifact.configSHA256.flatMap { sha in
-                    AutotuneModelContextCap.memoryFitBatchDepth(
-                        configData: data,
-                        verifiedConfigSHA256: sha,
-                        hardwareMemoryGB: hardware.memoryGB,
-                        catalogMinRAMGB: row.minRAMGB,
-                        calibrationContextTokens: expectedMaxContext,
-                        verifiedArtifactSizeBytes: artifact.sizeBytes
-                    )
-                }
-            }
-            let pagedFit = artifact.configJSONData.flatMap { data in
-                artifact.configSHA256.flatMap { sha in
-                    AutotuneModelContextCap.pagedFitBatchDepth(
-                        configData: data,
-                        verifiedConfigSHA256: sha,
-                        hardwareMemoryGB: hardware.memoryGB,
-                        catalogMinRAMGB: row.minRAMGB,
-                        contextTokens: expectedMaxContext,
-                        verifiedArtifactSizeBytes: artifact.sizeBytes
-                    )
-                }
-            }
-            expectedServeContext = AutotuneModelContextCap.pagedServePlan(
-                context: expectedMaxContext,
-                tierConstant: hardware.recommendedMaxBatch,
-                fullContextFit: fullFit,
-                pagedFit: pagedFit,
-                verifiedConfigJSONData: artifact.configJSONData,
-                verifiedConfigSHA256: artifact.configSHA256,
-                hardwareMemoryGB: hardware.memoryGB,
-                catalogMinRAMGB: row.minRAMGB,
-                verifiedArtifactSizeBytes: artifact.sizeBytes
-            ).context
-        } else {
-            expectedServeContext = expectedMaxContext
-        }
-        guard recommendation.core.knobs.maxContext == expectedServeContext else {
+        guard recommendation.core.knobs.maxContext == expectedMaxContext else {
             throw ValidationError("recommendation context authority does not match the verified model config")
         }
     }

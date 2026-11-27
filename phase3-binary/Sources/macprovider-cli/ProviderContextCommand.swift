@@ -1122,7 +1122,8 @@ enum ModelSwitchContext: Equatable {
         draftModel: String?,
         modelWeightSizeBytes: UInt64? = nil,
         policyCeiling: Int? = nil,
-        withheld: Bool = false
+        withheld: Bool = false,
+        emergencyOff: Bool = false
     ) -> (context: Int, slots: Int) {
         let context = recomputedContext(
             memoryGB: memoryGB,
@@ -1162,7 +1163,7 @@ enum ModelSwitchContext: Equatable {
             pagedFit: paged,
             fullContextFit: fullFit,
             policyCeiling: policyCeiling,
-            withheld: withheld
+            withheld: withheld || emergencyOff
         )
         let slots = AutoServedSlots.recommendedSlots(
             chip: chip, memoryGB: memoryGB, memoryFitCap: planned
@@ -1170,7 +1171,7 @@ enum ModelSwitchContext: Equatable {
         return AutotuneModelContextCap.pagedServedContext(
             context: context,
             slots: slots,
-            allowInklingRaise: !withheld && policyCeiling != 1,
+            allowInklingRaise: !withheld && !emergencyOff && policyCeiling != 1,
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: configSHA256,
             hardwareMemoryGB: memoryGB,
