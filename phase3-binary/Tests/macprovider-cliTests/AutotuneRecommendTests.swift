@@ -1475,6 +1475,29 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: nested), 2 * 2 * 128 * 2 * 2)
     }
 
+    /// #2530 item 3.1: Inkling Mini grows by its 8 global visits (32,768 bytes
+    /// per token at 8 KV heads × 128) and holds 40 fixed 1,024-token windows.
+    /// Counting all 24 layers priced the cache at 98,304 bytes per token.
+    func testInklingKVBytesFollowThePagedLayout() throws {
+        let priced = Data(#"""
+        {"model_type": "inkling2_loop",
+         "text_config": {"model_type": "inkling2_loop_text", "num_hidden_layers": 24,
+          "hidden_size": 2048, "num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 128,
+          "sliding_window_size": 1024,
+          "local_layer_ids": [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22],
+          "loop_config": {"core_start": 6, "core_end": 18, "num_passes": 3, "is_varloop": false}}}
+        """#.utf8)
+        let perVisit = 8 * 128 * 2 * 2
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: priced), 8 * perVisit)
+        XCTAssertEqual(
+            AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: priced),
+            40 * 1024 * perVisit
+        )
+        let bare = Data(PagedKVInkling2Tests.miniConfig.utf8)
+        XCTAssertNil(AutotuneModelContextCap.kvCacheBytesPerToken(configData: bare))
+        XCTAssertEqual(AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: bare), 0)
+    }
+
     func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {
         // SPEC-023-R018 item 5: a complete layer_types stack counts only its
         // full_attention layers. Zero of them means no per-token KV cache, so

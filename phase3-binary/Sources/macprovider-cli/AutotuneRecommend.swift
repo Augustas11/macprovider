@@ -664,6 +664,13 @@ enum AutotuneModelContextCap {
     }
 
     private static func recurrentStateBytesPerSequence(in root: [String: Any]) -> Int {
+        // Inkling's sliding windows are a fixed cost per row, the same channel
+        // as KDA recurrent state. A layout that builds but whose head geometry
+        // is unreadable contributes nothing here; the per-token term is then
+        // unreadable too, so the memory fit stays unknown.
+        if let pricing = inklingKVPricing(in: root) {
+            return pricing.fixed
+        }
         let text = root["text_config"] as? [String: Any] ?? root
         guard let linear = text["linear_attn_config"] as? [String: Any],
               let heads = firstInt(in: linear, paths: [["num_heads"]]),
@@ -725,7 +732,71 @@ enum AutotuneModelContextCap {
         return Int(bytes)
     }
 
+    /// Inkling 2 (`PagedKVInkling2Layout`): growth is one full-attention visit
+    /// per global layer, and each local visit holds a fixed window. Nil when
+    /// the config is not that layout, or when it is but the head geometry
+    /// cannot be read. Slot planning must not fall through to counting every
+    /// declared layer as full attention.
+    private static func inklingKVPricing(in root: [String: Any]) -> (perToken: Int, fixed: Int)? {
+        guard let layout = PagedKVInkling2Layout(config: root),
+              let perVisit = attentionKVBytesPerVisit(in: root)
+        else { return nil }
+        var fullVisits = 0
+        var fixed: UInt64 = 0
+        for kind in layout.expectedCacheKinds {
+            switch kind {
+            case .pagedAttention:
+                fullVisits += 1
+            case .slidingWindow(let windowTokens):
+                guard let windowBytes = checkedProduct([UInt64(windowTokens), UInt64(perVisit)]) else { return nil }
+                let sum = fixed.addingReportingOverflow(windowBytes)
+                guard !sum.overflow else { return nil }
+                fixed = sum.partialValue
+            case .recurrentMamba, .pagedMLA, .deepseekV4Pool, .pagedIndexedKV, .pagedQwen4ExpKV:
+                break
+            }
+        }
+        guard let growth = checkedProduct([UInt64(fullVisits), UInt64(perVisit)]),
+              growth <= UInt64(Int.max),
+              fixed <= UInt64(Int.max)
+        else { return nil }
+        return (Int(growth), Int(fixed))
+    }
+
+    /// Bytes of one full-attention visit for one token: `kv_heads × head_dim × 2 × 2`.
+    /// The same head geometry `kvCacheBytesPerToken` uses for every other family.
+    private static func attentionKVBytesPerVisit(in root: [String: Any]) -> Int? {
+        guard let hiddenSize = firstInt(in: root, paths: [
+                ["hidden_size"], ["n_embd"], ["d_model"],
+                ["text_config", "hidden_size"], ["text_config", "n_embd"], ["text_config", "d_model"]
+            ]),
+            let attentionHeads = firstInt(in: root, paths: [
+                ["num_attention_heads"], ["n_head"],
+                ["text_config", "num_attention_heads"], ["text_config", "n_head"]
+            ])
+        else { return nil }
+        let kvHeads = firstInt(in: root, paths: [
+            ["num_key_value_heads"], ["n_kv_head"],
+            ["text_config", "num_key_value_heads"], ["text_config", "n_kv_head"]
+        ]) ?? attentionHeads
+        let declaredHeadDim = firstInt(in: root, paths: [["head_dim"], ["text_config", "head_dim"]])
+        guard hiddenSize > 0, attentionHeads > 0, kvHeads > 0,
+              declaredHeadDim != nil || hiddenSize % attentionHeads == 0
+        else { return nil }
+        let headDim = declaredHeadDim ?? (hiddenSize / attentionHeads)
+        guard headDim > 0,
+              let bytes = checkedProduct([
+                  UInt64(kvHeads), UInt64(headDim), 2, UInt64(bytesPerKVElement)
+              ]),
+              bytes > 0, bytes <= UInt64(Int.max)
+        else { return nil }
+        return Int(bytes)
+    }
+
     private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
+        if PagedKVInkling2Layout(config: root) != nil {
+            return inklingKVPricing(in: root)?.perToken
+        }
         if let kvLoraRank = firstInt(in: root, paths: [["kv_lora_rank"], ["text_config", "kv_lora_rank"]]) {
             return latentKVCacheBytesPerToken(in: root, kvLoraRank: kvLoraRank)
         }

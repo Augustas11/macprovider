@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.47
+version: v0.22.48
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,10 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.48 (2026-11-27, Related: #2530)** — SPEC-023-R018 item 5: an
+  `inkling2_loop` config prices KV from `PagedKVInkling2Layout`. Growth is
+  the global paged-attention visits only. Each sliding-window visit is a
+  fixed per-row cost of its window, charged before the per-token division.
 - **v0.22.47 (2026-11-26)** — §9.4 `SPEC-023-R029`: a probe's TTFT ends at
   the first streamed delta of either channel, `content` or
   `reasoning_content` (step 4). A reasoning model that spent the whole probe
@@ -3194,7 +3198,19 @@ model maximum, memory-safe context, draft cap)`, where:
 5. When the config declares `layer_types` for every layer, `layers` counts only
    the `full_attention` entries. A complete stack with no `full_attention`
    entry has `kv_bytes_per_token = 0`: the memory-safe term binds nothing and
-   drops out of the minimum, like an unknown bound.
+   drops out of the minimum, like an unknown bound. An `inkling2_loop` config
+   that builds `PagedKVInkling2Layout` does not use `num_hidden_layers` as
+   `layers`. Growth is the layout's global paged-attention visits
+   (`kv_heads × head_dim × 2 × 2` each). Each sliding-window visit adds a
+   fixed per-row cost of `sliding_window_size × kv_heads × head_dim × 2 × 2`,
+   subtracted with the other fixed recurrent state before the per-token
+   division, and added once per slot in the memory-fit slot count. Convolution
+   tails are not priced. Head geometry that cannot be read makes the whole
+   memory term unknown; the planner MUST NOT count every declared layer as
+   full attention. Local visits are priced as that fixed window. SPEC-039's
+   note that a sliding visit stores full history and presents a rotating
+   suffix is the attention view; slot planning charges the window the layout
+   declares.
 6. An unknown bound (no declared maximum, unverified or duplicated config bytes,
    unreadable or overflowing geometry) drops out of the minimum. The
    4,000-token floor is emitted only when the memory-safe term itself is 4,000;
