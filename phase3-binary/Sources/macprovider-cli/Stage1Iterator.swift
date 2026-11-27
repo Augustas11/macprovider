@@ -1097,7 +1097,13 @@ struct Stage1Prober: Stage1Probing {
             if let generationMS = Self.usageGenerationMS(from: payload) {
                 usageGenerationMS = generationMS
             }
-            guard let content = Self.contentDelta(from: payload), !content.isEmpty else {
+            // SPEC-023 §9.4 R029 step 4: TTFT ends at the first streamed
+            // delta of either channel. A reasoning model streams its thinking
+            // as `reasoning_content`; timing only `content` counted a whole
+            // reasoning-only completion as TTFT (Inkling 2 Mini: 60 s).
+            let content = Self.contentDelta(from: payload) ?? ""
+            let reasoning = Self.reasoningDelta(from: payload) ?? ""
+            guard !content.isEmpty || !reasoning.isEmpty else {
                 continue
             }
             if firstTokenAt == nil {
@@ -1341,6 +1347,19 @@ struct Stage1Prober: Stage1Probing {
         let ms = generationMS.int64Value
         guard ms >= 0 else { return nil }
         return Int(ms)
+    }
+
+    /// The `delta.reasoning_content` text of a chat-completion chunk, the
+    /// channel a reasoning model streams its thinking on.
+    static func reasoningDelta(from payload: String) -> String? {
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any]
+        else {
+            return nil
+        }
+        return delta["reasoning_content"] as? String
     }
 
     static func contentDelta(from payload: String) -> String? {
