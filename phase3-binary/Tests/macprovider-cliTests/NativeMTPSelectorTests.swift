@@ -1061,12 +1061,17 @@ final class NativeMTPSelectorTests: XCTestCase {
             schedulerSupportsNativeMTP: true
         ).binding(to: fence)
         let request = try makeRequest().withRequestID("inkling-serial-cb")
+        // A nil route is filled by requestRoute(nativeAdmitted:), which is
+        // rowInvariant on a process that is not mixed. Pass a different route
+        // so the assertion sees the caller route dropped.
+        let ordinaryRoute = SmallMRoute.requestRoute(nativeAdmitted: false)
+        let callerRoute: SmallMRoute = ordinaryRoute == .stockOrder ? .rowInvariant : .stockOrder
         let submission = try ModelRuntime.continuousBatchSubmission(
             for: request,
             promptTokens: [1],
             maxOutputTokens: 128,
             nativeMTPAdmission: inkling,
-            smallMRoute: .rowInvariant
+            smallMRoute: callerRoute
         )
         XCTAssertEqual(inkling.effectivePath, .nativeMTP)
         XCTAssertTrue(ModelRuntime.nativeMTPSerialAdmitted(familyAdapter: inkling.familyAdapter))
@@ -1074,7 +1079,8 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(submission.schedulerRequest.nativeMTPMaximumProposalDepth, 0)
         XCTAssertNil(submission.schedulerRequest.nativeMTPTupleFence)
         XCTAssertNil(submission.schedulerRequest.nativeMTPAdaptationConfig)
-        XCTAssertNotEqual(submission.schedulerRequest.smallMRoute, .rowInvariant)
+        XCTAssertEqual(submission.schedulerRequest.smallMRoute, ordinaryRoute)
+        XCTAssertNotEqual(submission.schedulerRequest.smallMRoute, callerRoute)
 
         let packed = NativeMTPRuntimeAdmission.resolve(
             selection: DecodePathSelection(path: .nativeMTP, nativeMTPReason: .eligible),
