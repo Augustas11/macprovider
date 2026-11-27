@@ -1725,10 +1725,10 @@ final class NativeMTPJourneyRunner {
     }
 
     /// step-10: hold an old native request across a runtime-publication
-    /// boundary, then publish a fresh model identity with native-MTP disabled.
-    /// The old request's served snapshot and counters stay bound to the old
-    /// tuple; the first request against the new identity cannot inherit native
-    /// capability or native counters.
+    /// boundary, then publish an alias with native MTP disabled. The old
+    /// request's served snapshot stays on the old tuple, and a request against
+    /// the alias cannot inherit it. A second swap back to the admitted model
+    /// id republishes that qualification.
     private func warmSwapBoundary(
         ordinary: ModelRuntime,
         native: ModelRuntime,
@@ -1850,6 +1850,85 @@ final class NativeMTPJourneyRunner {
             "new_request_reasoning_chars": newResult.reasoningContent?.count ?? 0,
             "new_request_model_hash_observed": newResult.modelHashObserved ?? "",
             "new_request_native_admissions": newAdmissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
+        ]
+
+        // The alias must not inherit the tuple. Swap back to the admitted id,
+        // which is now a different identity than the one currently published.
+        let aliasHold = try makeRequest(
+            id: "journey-warm-swap-alias-hold",
+            model: swappedModelID,
+            prompt: "Describe how a warm lamp marks a rocky coast for passing ships.",
+            maxTokens: 256,
+            temperature: 0,
+            topP: 1,
+            stream: true
+        )
+        let aliasHandle = try await native.acquireRequestHandle(aliasHold)
+        let aliasStart = aliasHandle.snapshot
+        let aliasChunks = NativeMTPJourneyCounter()
+        let aliasTask = Task {
+            let result = try await native.stream(aliasHold, with: aliasHandle) { chunk in
+                if case .content(let piece) = chunk, !piece.isEmpty {
+                    aliasChunks.increment()
+                }
+            }
+            return (result, aliasHandle.snapshot)
+        }
+        var aliasInFlight = false
+        for _ in 0..<100 {
+            if aliasChunks.value >= 8 {
+                aliasInFlight = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard aliasInFlight else {
+            aliasTask.cancel()
+            await native.unregisterInFlight(aliasHandle.registrationID)
+            throw NativeMTPHardwareE2EError.assertionFailed("warm-swap alias hold did not reach in-flight streaming boundary")
+        }
+        let restoredSnapshot = try await native.labCompleteWarmSwapForNativeMTPJourney(
+            modelID: modelID,
+            artifactSHA256: fixture.targetIdentity.digest
+        )
+        let (aliasResult, aliasServed): (CompletionResult, RuntimeSnapshot)
+        do {
+            (aliasResult, aliasServed) = try await aliasTask.value
+        } catch {
+            await native.unregisterInFlight(aliasHandle.registrationID)
+            throw error
+        }
+        await native.unregisterInFlight(aliasHandle.registrationID)
+        let restoredRequest = try makeRequest(
+            id: "journey-warm-swap-restored-native",
+            prompt: "Name three constellations used by sailors and one fact about each.",
+            maxTokens: 96,
+            temperature: 0,
+            topP: 1
+        )
+        let expectedRestored = try await ordinary.complete(restoredRequest)
+        let restoredResult = try await native.complete(restoredRequest)
+        let restoredAdmissions = recorder.requestSnapshot().filter { $0.requestID == "journey-warm-swap-restored-native" }
+        step.check("alias_hold_started_on_alias", aliasStart.modelID == swappedModelID && !aliasStart.nativeMTPStatus.enabled)
+        step.check("alias_hold_observed_inflight", aliasInFlight)
+        step.check("alias_hold_served_alias", aliasServed.modelID == swappedModelID && aliasServed.modelHash == fixture.targetIdentity.digest)
+        step.check("alias_hold_completed", Self.warmSwapNewRequestCompleted(
+            content: aliasResult.content, reasoningContent: aliasResult.reasoningContent,
+            finishReason: aliasResult.finishReason, modelHashObserved: aliasResult.modelHashObserved,
+            expectedModelHash: fixture.targetIdentity.digest))
+        step.check("restored_identity_published", restoredSnapshot.modelID == modelID && restoredSnapshot.modelHash == fixture.targetIdentity.digest)
+        step.check("restored_native_enabled", restoredSnapshot.nativeMTPStatus.enabled
+            && restoredSnapshot.nativeMTPStatus.supported
+            && restoredSnapshot.nativeMTPStatus.lastReason == .active)
+        step.check("restored_request_parity", same(expectedRestored, restoredResult))
+        step.check("restored_request_native_admitted", !restoredAdmissions.isEmpty
+            && restoredAdmissions.allSatisfy { $0.admission.effectivePath == .nativeMTP })
+        step.details["restored_tuple"] = [
+            "model_id": modelID,
+            "native_enabled": restoredSnapshot.nativeMTPStatus.enabled,
+            "native_supported": restoredSnapshot.nativeMTPStatus.supported,
+            "native_reset_generation": restoredSnapshot.nativeMTPStatus.resetGeneration,
+            "restored_request_native_admissions": restoredAdmissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
         ]
         return step
     }
@@ -2470,6 +2549,8 @@ final class NativeMTPJourneyRunner {
         try plain("journey-cancel-follow", "Name three rivers in Europe.", 96)
         try plain("journey-warm-swap-old-native", "Write a compact but detailed explanation of how lighthouses use lenses to focus light.", 512, 0, 1, nil, true)
         try plain("journey-warm-swap-new-ordinary", "Name three ocean currents and give one fact about each.", 96, 0, 1, nil, false, nil, modelID + "-warm-swap-alias")
+        try plain("journey-warm-swap-alias-hold", "Describe how a warm lamp marks a rocky coast for passing ships.", 256, 0, 1, nil, true, nil, modelID + "-warm-swap-alias")
+        try plain("journey-warm-swap-restored-native", "Name three constellations used by sailors and one fact about each.", 96)
     }
 
     private func prompt(container: ModelContainer, minimumTokens: Int) async throws -> String {

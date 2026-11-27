@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.135
+**Version:** 0.1.136
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.135",
+  "version": "0.1.136",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -2169,6 +2169,12 @@ At SPEC-011 R-3.2.4 activation, the new snapshot publishes a fresh
 retain their old counter sink until termination and cannot write into the new
 generation. New requests cannot use the old capability after that boundary.
 
+A warm swap to a different model id clears native MTP. A warm swap onto a
+model with an admitted tuple loads that drafter and runs the same self-check
+as startup; a failed admission or self-check leaves native MTP off and does
+not fail the swap. A lab replay republishes the in-process qualification only
+when the published id is that admission's model id.
+
 The SPEC-001 v1.9.26 amendment admits this object only to local `/v1/status`.
 Heartbeat and state-update payloads MUST omit every native-MTP field until a
 later SPEC-001 wire revision defines them and passes encode/decode compatibility
@@ -3387,6 +3393,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.136 (2026-11-27, Related: #2530)** — MTP-10: a warm swap onto a
+  model with an admitted tuple loads that drafter and runs the startup
+  self-check. Failure leaves native MTP off and does not fail the swap. A
+  different model id does not inherit the previous tuple. A lab replay
+  republishes the in-process qualification only for that admission's model id.
 - **0.1.135 (2026-11-27, Related: #2530)** — MTP-7: `inkling2_dspark_v1` may
   serve ordinary decode through continuous batching. Native MTP stays on the
   serial path while the runtime is idle and MUST NOT be submitted to the

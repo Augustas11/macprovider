@@ -2316,6 +2316,18 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-048 (0.1.130): a serial native tuple passed its in-process
     /// self-check on this load, so its requests may decode native serially.
     private var currentNativeMTPSerialSelfCheckPassed = false
+    private struct RetainedNativeMTPQualification {
+        let drafter: MTPDrafterContainer?
+        let capability: NativeMTPCapability
+        let admission: NativeMTPAdmissionCapability
+        let selfTestInput: NativeMTPSelfTestInput?
+        let serialSelfCheckPassed: Bool
+    }
+
+    /// Lab replay keeps the last in-process qualification across an identity
+    /// that is not allowed to inherit it, so a later swap back to that
+    /// admission's model id can republish it. A serve swap does not pin it.
+    private var retainedNativeMTPQualification: RetainedNativeMTPQualification?
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer? {
         didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
     }
@@ -6420,7 +6432,9 @@ maxTokens: 1,
                         draftContainer: nil,
                         draftFailureReason: nil,
                         modelCapabilities: load.modelCapabilities,
-                        adoptionKnobs: nil
+                        adoptionKnobs: nil,
+                        // This caller installs and qualifies the drafter after the swap.
+                        nativeMTPSwapReload: .skip
                     )
                     restoreCreativeBatchingQualification(previous)
                     currentNativeMTPDrafterContainer = load.drafterContainer
@@ -6709,6 +6723,7 @@ maxTokens: 1,
                     let draftModelID: String?
                     let draftContainer: ModelContainer?
                     let draftFailureReason: String?
+                    var admittedNativeMTP: NativeMTPRuntimeLoadResult?
                     if let testLoader {
                         let loaded = try await testLoader(targetModelID)
                         container = nil
@@ -6743,36 +6758,55 @@ maxTokens: 1,
                         // Nil-model startup defers Metal setup until its first signed load.
                         await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
                         let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
-                        let loaded = try await Self.loadLocalContainer(
-                            from: targetAuthority.modelArgument,
-                            nativeVision: visionModelID != nil
+                        // Same admission load startup uses. A miss keeps the ordinary
+                        // container; it must not fail the swap.
+                        admittedNativeMTP = await self.loadAdmittedNativeMTPForSwap(
+                            modelID: targetModelID,
+                            artifactSHA256: targetAuthority.artifactSHA256,
+                            modelArgument: targetAuthority.modelArgument,
+                            draftConfigured: configuredDraftModelID != nil,
+                            visionSelected: visionModelID != nil
                         )
-                        container = loaded.0
+                        let loadedContainer: ModelContainer
+                        let loadedDirectory: URL
+                        if let admittedNativeMTP {
+                            loadedContainer = admittedNativeMTP.targetContainer
+                            loadedDirectory = admittedNativeMTP.targetDirectory
+                        } else {
+                            let loaded = try await Self.loadLocalContainer(
+                                from: targetAuthority.modelArgument,
+                                nativeVision: visionModelID != nil
+                            )
+                            loadedContainer = loaded.0
+                            loadedDirectory = loaded.1
+                        }
+                        container = loadedContainer
                         modelID = targetModelID
-                        guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
+                        guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loadedDirectory)) == targetAuthority.artifactSHA256
                         else {
                             throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                         }
                         modelHash = targetAuthority.artifactSHA256
                         modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
-                        weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
-                        let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
+                        weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loadedDirectory)
+                        let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loadedDirectory)
                         tokenizerConfigSHA256 = swapTokenizerHashes.config
                         chatTemplateSHA256 = swapTokenizerHashes.template
                         nativeVisionProfile = try NativeVisionProfile.load(
-                            modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
-                        modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
+                            modelID: visionModelID, directory: loadedDirectory, artifactSHA256: modelHash)
+                        modelCapabilities = admittedNativeMTP?.modelCapabilities
+                            ?? Self.pagedKVModelCapabilities(modelID: modelID, directory: loadedDirectory)
                         if let configuredDraftModelID {
                             do {
                                 let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
                                 try await Self.validateTokenizerCompatibility(
-                                    target: loaded.0,
-                                    targetDirectory: loaded.1,
+                                    target: loadedContainer,
+                                    targetDirectory: loadedDirectory,
                                     draft: draftLoaded.0,
                                     draftDirectory: draftLoaded.1
                                 )
                                 try await Self.runSpeculativeStartupProbe(
-                                    target: loaded.0,
+                                    target: loadedContainer,
                                     draft: draftLoaded.0,
                                     numDraftTokens: 1,
                                     maxContextTokens: maxContextTokens,
@@ -6781,7 +6815,7 @@ maxTokens: 1,
                                     blockingInferenceExecutor: self.blockingInferenceExecutor
                                 )
                                 try await Self.runSpeculativeEquivalenceCanary(
-                                    target: loaded.0,
+                                    target: loadedContainer,
                                     draft: draftLoaded.0,
                                     targetModelID: modelID,
                                     numDraftTokens: numDraftTokens,
@@ -6826,7 +6860,8 @@ maxTokens: 1,
                         draftContainer: draftContainer,
                         draftFailureReason: draftFailureReason,
                         modelCapabilities: modelCapabilities,
-                        adoptionKnobs: adoptionKnobs
+                        adoptionKnobs: adoptionKnobs,
+                        nativeMTPLoad: admittedNativeMTP
                     )
                     warmSetSwapHooks?.primarySwapped(to: modelID)
                 } catch {
@@ -8347,7 +8382,104 @@ maxTokens: 1,
             draftContainer: nil,
             draftFailureReason: nil,
             modelCapabilities: Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil),
-            adoptionKnobs: nil
+            adoptionKnobs: nil,
+            nativeMTPSwapReload: .loadAndQualify
+        )
+    }
+
+    /// What a warm swap does with native MTP. A different model id never
+    /// inherits the previous tuple (SPEC-048 MTP-10).
+    enum NativeMTPSwapReload: Equatable {
+        /// Creative restore qualifies the drafter it already loaded.
+        case skip
+        /// Serve swap: the caller already ran the startup admission load.
+        /// A nil load leaves MTP off and does not fail the swap.
+        case loadAndQualify
+        /// Lab replay: republish the in-process qualification only when the
+        /// swapped id is that admission's model id. Any other id stays off.
+        case republishMatchingAdmission
+    }
+
+    enum NativeMTPSwapAdmissionAction: Equatable {
+        case stayOff
+        case republish
+        case loadAndQualify
+    }
+
+    static func nativeMTPSwapAdmissionAction(
+        reload: NativeMTPSwapReload,
+        swappedModelID: String,
+        retainedAdmissionModelID: String?,
+        diskLoadAllowed: Bool
+    ) -> NativeMTPSwapAdmissionAction {
+        switch reload {
+        case .skip:
+            return .stayOff
+        case .republishMatchingAdmission:
+            if let retainedAdmissionModelID, retainedAdmissionModelID == swappedModelID {
+                return .republish
+            }
+            return .stayOff
+        case .loadAndQualify:
+            return diskLoadAllowed ? .loadAndQualify : .stayOff
+        }
+    }
+
+    /// Keeps a lab qualification across a swap to some other id. A serve swap
+    /// drops it so the previous drafter is not pinned.
+    private func rememberNativeMTPQualification(
+        for reload: NativeMTPSwapReload
+    ) -> RetainedNativeMTPQualification? {
+        guard reload == .republishMatchingAdmission else {
+            retainedNativeMTPQualification = nil
+            return nil
+        }
+        if let capability = currentNativeMTPCapability,
+           let admission = currentNativeMTPAdmissionCapability,
+           capability.admitted {
+            retainedNativeMTPQualification = RetainedNativeMTPQualification(
+                drafter: currentNativeMTPDrafterContainer,
+                capability: capability,
+                admission: admission,
+                selfTestInput: currentNativeMTPSelfTestInput,
+                serialSelfCheckPassed: currentNativeMTPSerialSelfCheckPassed
+            )
+        }
+        return retainedNativeMTPQualification
+    }
+
+    /// Startup's admitted-drafter load, used by a serve swap. Nil means MTP
+    /// stays off; the caller still installs the ordinary container.
+    private func loadAdmittedNativeMTPForSwap(
+        modelID: String,
+        artifactSHA256: String,
+        modelArgument: String,
+        draftConfigured: Bool,
+        visionSelected: Bool
+    ) async -> NativeMTPRuntimeLoadResult? {
+        guard nativeMTPMode == .auto, !draftConfigured, !visionSelected else { return nil }
+        guard let directory = try? Self.localModelDirectory(for: modelArgument) else { return nil }
+        let rejectionRecorder = NativeMTPServePathRejectionRecorder()
+        return await Self.loadNativeMTPDrafterIfAdmitted(
+            mode: nativeMTPMode,
+            targetModelID: modelID,
+            targetModelRevision: artifactSHA256,
+            targetDirectory: directory,
+            maxContextTokens: maxContextTokens,
+            kvBitsOverride: kvBitsOverride,
+            prefillStepSize: prefillStepSize,
+            slotCount: maxBatch,
+            sidecarPath: configuredNativeMTPAdmissionSidecarPath,
+            artifactRoot: configuredNativeMTPAdmissionArtifactRoot,
+            signaturePath: configuredNativeMTPAdmissionSignaturePath,
+            trustedKeyring: configuredNativeMTPTrustedKeyring,
+            runningBuildIdentity: configuredNativeMTPRunningBuildIdentity,
+            revokedTupleSHA256: configuredNativeMTPRevokedTupleSHA256,
+            resolvedArtifactAuthority: configuredNativeMTPResolvedArtifactAuthority,
+            targetGeneration: UInt64(max(1, currentSpecDecodeGeneration + 1)),
+            selfTestRunner: nativeMTPSelfTestRunner,
+            route: smallMRoute,
+            rejectionObserver: rejectionRecorder.record
         )
     }
 
@@ -8364,7 +8496,9 @@ maxTokens: 1,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
         modelCapabilities: PagedKVRuntimeModelCapabilities,
-        adoptionKnobs: ModelRuntimeAdoptionServeKnobs?
+        adoptionKnobs: ModelRuntimeAdoptionServeKnobs?,
+        nativeMTPLoad: NativeMTPRuntimeLoadResult? = nil,
+        nativeMTPSwapReload: NativeMTPSwapReload = .loadAndQualify
     ) async {
         let target = targetModelID ?? modelID
         // SPEC-038 v0.3.15: a new model or runtime is re-checked.
@@ -8501,6 +8635,7 @@ maxTokens: 1,
         if case .attached = pagedKVAttachDecision {
             pagedKVSchedulerBackendInstalled = true
         }
+        let retainedQualification = rememberNativeMTPQualification(for: nativeMTPSwapReload)
         stopNativeMTPRevocationRefresh()
         currentNativeMTPDrafterContainer = nil
         currentNativeMTPCapability = nil
@@ -8508,8 +8643,51 @@ maxTokens: 1,
         currentContinuousBatchTextPreparationLane = nil
         currentNativeMTPTupleOffer = nil
         parkedNativeMTPTuple = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPSerialSelfCheckPassed = false
         currentSpecDecodeGeneration += 1
+        let swapAdmission = Self.nativeMTPSwapAdmissionAction(
+            reload: nativeMTPSwapReload,
+            swappedModelID: modelID,
+            retainedAdmissionModelID: retainedQualification?.admission.modelID,
+            diskLoadAllowed: nativeMTPLoad != nil
+        )
+        var pendingNativeMTPLoad: NativeMTPRuntimeLoadResult?
+        switch swapAdmission {
+        case .stayOff:
+            break
+        case .republish:
+            if let retainedQualification {
+                currentNativeMTPDrafterContainer = retainedQualification.drafter
+                currentNativeMTPCapability = retainedQualification.capability
+                currentNativeMTPAdmissionCapability = retainedQualification.admission
+                currentNativeMTPSelfTestInput = retainedQualification.selfTestInput
+                // A lab fixture's admitted serial tuple is the passed self-check.
+                // The flag is not stored separately from that injected capability.
+                currentNativeMTPSerialSelfCheckPassed = retainedQualification.serialSelfCheckPassed
+                    || Self.nativeMTPSerialAdmitted(familyAdapter: retainedQualification.admission.familyAdapter)
+            }
+        case .loadAndQualify:
+            if let nativeMTPLoad {
+                currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
+                currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
+                currentNativeMTPSelfTestInput = nativeMTPLoad.selfTestInput
+                pendingNativeMTPLoad = nativeMTPLoad
+            }
+        }
         await rebuildContinuousBatchScheduler(container: container)
+        if let pendingNativeMTPLoad {
+            await qualifyAndPublishNativeMTP(pendingNativeMTPLoad)
+            // A failed self-check must not leave the drafter on the scheduler.
+            if currentNativeMTPCapability == nil {
+                await rebuildContinuousBatchScheduler(container: container)
+                publishNativeMTPStatusSink(
+                    capability: nil,
+                    admissionCapability: nil,
+                    reasonIfDisabled: .tupleNotAdmitted
+                )
+            }
+        }
         if continuousBatchScheduler == nil {
             pagedKVSchedulerBackendInstalled = false
             pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -10770,7 +10948,9 @@ maxTokens: 1,
             draftContainer: nil,
             draftFailureReason: nil,
             modelCapabilities: currentPagedKVModelCapabilities,
-            adoptionKnobs: nil
+            adoptionKnobs: nil,
+            // Same bytes, new id. Republish only when that id is the admission's.
+            nativeMTPSwapReload: .republishMatchingAdmission
         )
         let snapshot = await currentSnapshot()
         guard snapshot.modelID == trimmedModelID, snapshot.modelHash == artifactSHA256 else {

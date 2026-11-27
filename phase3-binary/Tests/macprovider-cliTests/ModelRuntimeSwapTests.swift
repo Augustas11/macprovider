@@ -2322,6 +2322,65 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(postSwapAdmission.selection.nativeMTPReason, .capabilityMismatch)
     }
 
+    func testNativeMTPSwapReloadsOnlyTheAdmittedModelID() {
+        let admitted = "mlx-community/Inkling-2-Mini-oQ4e-mtp"
+        let alias = admitted + "-warm-swap-alias"
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .republishMatchingAdmission,
+                swappedModelID: admitted,
+                retainedAdmissionModelID: admitted,
+                diskLoadAllowed: false
+            ),
+            .republish
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .republishMatchingAdmission,
+                swappedModelID: alias,
+                retainedAdmissionModelID: admitted,
+                diskLoadAllowed: true
+            ),
+            .stayOff
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .republishMatchingAdmission,
+                swappedModelID: admitted,
+                retainedAdmissionModelID: nil,
+                diskLoadAllowed: true
+            ),
+            .stayOff
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .loadAndQualify,
+                swappedModelID: admitted,
+                retainedAdmissionModelID: admitted,
+                diskLoadAllowed: true
+            ),
+            .loadAndQualify
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .loadAndQualify,
+                swappedModelID: alias,
+                retainedAdmissionModelID: admitted,
+                diskLoadAllowed: false
+            ),
+            .stayOff
+        )
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPSwapAdmissionAction(
+                reload: .skip,
+                swappedModelID: admitted,
+                retainedAdmissionModelID: admitted,
+                diskLoadAllowed: true
+            ),
+            .stayOff
+        )
+    }
+
     func testHandleAcquiredInReadyStateSurvivesSwapToLoading() async throws {
         let probe = InFlightProbe()
         let runtime = makeRuntime(
