@@ -49,7 +49,7 @@ from pathlib import Path
 GROUPS = (
     ("attention", lambda s: s.startswith("mla.") or s.startswith("indexer.")),
     ("moe_mlp", lambda s: s in ("moe", "mlp")),
-    ("kda", lambda s: s == "kda"),
+    ("kda", lambda s: s == "kda" or s.startswith("kda.")),
     ("hyper_connections", lambda s: s.startswith("hc.")),
     ("other", lambda s: s == "forward"),
 )

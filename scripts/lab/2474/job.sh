@@ -43,7 +43,7 @@
 #       T2474_VERDICT fork_test=.. tokens=.. fused=KEEP|REVERT omlx=ok|missing
 #     then JOB_PASS (every step ran, the oMLX rows exist, fork test passed, tokens identical) or JOB_FAIL.
 # Knobs: CONTEXTS (4k,16k) OUTPUTS (128,512) TRIALS (3) MIN_FREE_GB (60) E2E_EXTRA_GB (40) LIVE_SET (~/macprovider/compatibility-set.json: the lab binaries take its provider_cli version)
-#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR; JOB_MODE (abab|profile|omlx-profile) PROFILE_PROMPTS (3673)
+#   SKIP_BUILD SKIP_FORK_TEST SKIP_OMLX GLM_PATH OMLX_DIR; JOB_MODE (abab|profile|omlx-profile|kda-profile: profile then omlx-profile) PROFILE_PROMPTS (3673)
 #   PROFILE_STEPS (1837,2048) PROFILE_RUNS (3) PROFILE_REF_TTFT PROFILE_GRID_TTFT.
 #   JOB_CHECK=1: validate the knobs, print the grid argvs and exit 0 before touching anything.
 # Every failure prints `BLOCKER:`.
@@ -108,8 +108,8 @@ case "$MIN_FREE_GB" in ""|*[!0-9]*) die "MIN_FREE_GB=$MIN_FREE_GB must be a numb
 case "$E2E_EXTRA_GB" in ""|*[!0-9]*) die "E2E_EXTRA_GB=$E2E_EXTRA_GB must be a number" 64 ;; esac
 case "$SKIP_OMLX" in 0|1) ;; *) die "SKIP_OMLX=$SKIP_OMLX must be 0 or 1" 64 ;; esac
 case "$SKIP_FORK_TEST" in 0|1) ;; *) die "SKIP_FORK_TEST=$SKIP_FORK_TEST must be 0 or 1" 64 ;; esac
-case "$JOB_MODE" in abab|profile|omlx-profile) ;; *) die "JOB_MODE=$JOB_MODE must be abab, profile or omlx-profile" 64 ;; esac
-[ "$JOB_MODE" = omlx-profile ] && [ "$SKIP_OMLX" = 1 ] && die "JOB_MODE=omlx-profile needs SKIP_OMLX=0" 64
+case "$JOB_MODE" in abab|profile|omlx-profile|kda-profile) ;; *) die "JOB_MODE=$JOB_MODE must be abab, profile, omlx-profile or kda-profile" 64 ;; esac
+case "$JOB_MODE" in omlx-profile|kda-profile) [ "$SKIP_OMLX" = 1 ] && die "JOB_MODE=$JOB_MODE needs SKIP_OMLX=0" 64 ;; esac
 case "$PROFILE_PROMPTS" in ""|*[!0-9,]*) die "PROFILE_PROMPTS=$PROFILE_PROMPTS must be a comma list" 64 ;; esac
 case "$PROFILE_STEPS" in ""|*[!0-9,]*) die "PROFILE_STEPS=$PROFILE_STEPS must be a comma list" 64 ;; esac
 case "$PROFILE_RUNS" in [1-9]) ;; *) die "PROFILE_RUNS=$PROFILE_RUNS must be 1..9" 64 ;; esac
@@ -226,7 +226,7 @@ fi
 # is the synced and sections pass's: 1837 is the batching route's balanced chunk), then
 # prefill_profile_report.py against the r7 TTFTs. No A/B/A, no oMLX run. It runs after the oMLX
 # step (#2524), so a lab dir without the venv gets the MLX the matmul peak needs.
-if [ "$JOB_MODE" = profile ]; then
+if [ "$JOB_MODE" = profile ] || [ "$JOB_MODE" = kda-profile ]; then
   PROF=$RES/profile
   PROF_PKG=$LAB/prof-$RUN_ID/phase3-binary
   PROF_BIN=$PROF_PKG/.build-lab-profile/release
@@ -266,8 +266,7 @@ if [ "$JOB_MODE" = profile ]; then
     > "$PROF/report.stdout" 2> "$PROF/report.stderr" || die "report: $(tail -n 2 "$PROF/report.stderr" | tr '\n' ' ')" 16
   sed 's/^/PROFILE_MD /' "$PROF/profile.md"
   rm -rf "$LAB"/prof-*
-  log "JOB_PASS"
-  exit 0
+  [ "$JOB_MODE" = kda-profile ] || { log "JOB_PASS"; exit 0; }
 fi
 
 # JOB_MODE=omlx-profile (#2524): where oMLX's own 3,673-token prefill goes, by section. Two oMLX
@@ -275,7 +274,7 @@ fi
 # unsynchronized TTFT), then with scripts/lab/2524/omlx_hook on the server's PYTHONPATH (each
 # decoder layer, child and grandchild module timed synchronized), then omlx_section_report.py scales
 # the section split to the plain TTFT. No build, no fork test, no A/B/A.
-if [ "$JOB_MODE" = omlx-profile ]; then
+if [ "$JOB_MODE" = omlx-profile ] || [ "$JOB_MODE" = kda-profile ]; then
   OP=$RES/omlx-profile
   OTRIALS=${OMLX_PROFILE_TRIALS:-4}
   case "$OTRIALS" in [1-9]) ;; *) die "OMLX_PROFILE_TRIALS=$OTRIALS must be 1..9" 64 ;; esac

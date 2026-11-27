@@ -33,7 +33,20 @@ _LOADERS = ("mlx_vlm.utils", "mlx_lm.utils")
 _names = {}       # id(module) -> section name
 _patched = set()  # classes whose __call__ is wrapped
 _untimed = set()
-_state = {"active": False, "stack": [], "calls": [], "sections": None, "chunk_t0": 0.0}
+_state = {"active": False, "stack": [], "names": [], "calls": [], "sections": None, "chunk_t0": 0.0}
+
+# Functions timed as `<kind>.fn.<name>`, kind from the innermost registered module (kda/mla):
+# oMLX's GLM-5.3 KDA prefill pieces, looked up by module attribute at call time.
+_FUNCS = (
+    ("omlx.patches.glm53_kda_prework", "glm53_kda_prefill"),
+    ("omlx.patches.glm53_kda_prework", "kda_prework_fused"),
+    ("omlx.patches.glm53_kda_prework", "kda_norm_gate_fused"),
+    ("omlx.patches.glm53_kda_prework", "kda_recurrence"),
+    ("mlx_vlm.models.glm5_next.language", "gated_delta_update"),
+    ("mlx_vlm.models.glm5_next.language", "linear_forward"),
+)
+# Methods of the registered module named here, timed as `<kind>.fn.<method>`.
+_METHODS = (("kda.self_attn", "_fused_in_proj"),)
 
 
 def _log(msg):
@@ -86,15 +99,16 @@ def _flush():
     os.replace(tmp, path)
 
 
-def _timed(name, orig, self, args, kwargs):
+def _timed(name, orig, self, args, kwargs, sync_args=None):
     stack = _state["stack"]
     try:
-        _sync((args, kwargs))
+        _sync((args, kwargs) if sync_args is None else sync_args)
     except Exception:  # an mx.compile trace: leave this section untimed
         _untimed.add(name)
         return orig(self, *args, **kwargs)
     t0 = time.perf_counter()
     stack.append(0.0)
+    _state["names"].append(name)
     try:
         out = orig(self, *args, **kwargs)
         try:
@@ -103,6 +117,7 @@ def _timed(name, orig, self, args, kwargs):
             _untimed.add(name)
     finally:
         child = stack.pop()
+        _state["names"].pop()
     elapsed = time.perf_counter() - t0
     secs = _state["sections"]
     secs[name] = secs.get(name, 0.0) + (elapsed - child) * 1000.0
@@ -143,6 +158,53 @@ def _wrap(cls):
     _patched.add(cls)
 
 
+def _fn_name(short):
+    names = _state["names"]
+    kind = names[-1].split(".", 1)[0] if names else "model"
+    return f"{kind}.fn.{short}"
+
+
+def _wrap_fn(owner, attr, method=False):
+    orig = getattr(owner, attr, None)
+    if orig is None or getattr(orig, "_section_hook", False):
+        return False
+
+    def call(_self, *args, **kwargs):
+        return orig(*args, **kwargs)
+
+    def wrapper(*args, **kwargs):
+        if not _state["active"]:
+            return orig(*args, **kwargs)
+        name = _fn_name(attr)
+        if name in _untimed:
+            return orig(*args, **kwargs)
+        # A method's first argument is the module: its weights are already evaluated.
+        sync_args = (args[1:] if method else args, kwargs)
+        return _timed(name, call, None, args, kwargs, sync_args)
+
+    wrapper._section_hook = True
+    setattr(owner, attr, wrapper)
+    return True
+
+
+def _wrap_functions(by_name):
+    import importlib
+
+    done = []
+    for mod, attr in _FUNCS:
+        try:
+            m = importlib.import_module(mod)
+        except Exception:
+            continue
+        if _wrap_fn(m, attr):
+            done.append(f"{mod.rsplit('.', 1)[-1]}.{attr}")
+    for section, attr in _METHODS:
+        module = by_name.get(section)
+        if module is not None and _wrap_fn(type(module), attr, method=True):
+            done.append(f"{type(module).__name__}.{attr}")
+    _log(f"functions timed: {done or 'none'}")
+
+
 def _register(module, name):
     _names[id(module)] = name
     _wrap(type(module))
@@ -170,13 +232,16 @@ def _instrument(loaded):
         _log("no decoder layers found; nothing timed")
         return
     _register(text, "model")
+    first = {}
     for layer in text.layers:
         kind = "kda" if getattr(layer, "is_linear", False) else "mla"
         _register(layer, f"{kind}.layer")
         for key, child in _modules(layer):
             _register(child, f"{kind}.{key}")
+            first.setdefault(f"{kind}.{key}", child)
             for sub, grand in _modules(child):
                 _register(grand, f"{kind}.{key}.{sub}")
+    _wrap_functions(first)
     _log(f"active pid={os.getpid()} layers={len(text.layers)} registered={len(_names)} out={_OUT}")
 
 
