@@ -250,6 +250,20 @@ extension AutotuneRecommendHardware {
         }
         return 1
     }
+
+    /// The blind chip/RAM tier constant, with no memory-fit term.
+    static func tierBatch(chip: String, memoryGB: Int) -> Int {
+        AutotuneRecommendHardware(
+            machine: nil,
+            chip: chip,
+            memoryGB: memoryGB,
+            bandwidthTier: BandwidthTier.derive(chip: chip),
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxBatch
+    }
 }
 
 enum AutotuneModelContextCap {
@@ -408,6 +422,65 @@ enum AutotuneModelContextCap {
         return max(1, Int(min(slots, UInt64(Int.max))))
     }
 
+    /// Largest slot count at which one row may hold `contextTokens` and every
+    /// other row holds `minimumServeContext`, plus fixed window state once per
+    /// row. Rows are paged, so the planner does not reserve a full context for
+    /// every row. Nil when the geometry cannot be read. One when even a single
+    /// full row does not fit: the context was already sized for that row.
+    static func pagedFitBatchDepth(
+        configData: Data,
+        verifiedConfigSHA256: String,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        contextTokens: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> Int? {
+        guard contextTokens >= 1,
+              Data(SHA256.hash(data: configData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(configData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
+        else {
+            return nil
+        }
+        let fixedBytes = recurrentStateBytesPerSequence(in: root)
+        let budget = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+        guard let one = pagedReservationBytes(
+            context: contextTokens,
+            slots: 1,
+            bytesPerToken: bytesPerToken,
+            fixedBytesPerRow: fixedBytes
+        ) else {
+            return nil
+        }
+        if one > budget {
+            return 1
+        }
+        let limit = ProviderCapacity.maxConcurrencyOverrideLimit
+        var low = 1
+        var high = limit
+        var best = 1
+        while low <= high {
+            let middle = low + (high - low) / 2
+            guard let cost = pagedReservationBytes(
+                context: contextTokens,
+                slots: middle,
+                bytesPerToken: bytesPerToken,
+                fixedBytesPerRow: fixedBytes
+            ), cost <= budget else {
+                high = middle - 1
+                continue
+            }
+            best = middle
+            low = middle + 1
+        }
+        return best
+    }
+
     /// SPEC-023-R018 item 9: a generated slot count lowered so that many
     /// full-context KV caches at `context` fit the `memoryFitBatchDepth`
     /// envelope. Unknown geometry leaves `slots` unchanged; callers pass a
@@ -518,6 +591,146 @@ enum AutotuneModelContextCap {
             catalogMinRAMGB: catalogMinRAMGB,
             verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         ))
+    }
+
+    /// Slot count after the tier constant. A tier of 1 may rise to `pagedFit`
+    /// so a 32 GB Mac is not left serial when several short rows fit beside one
+    /// full context. A higher tier is only lowered, so an Ultra stays at its
+    /// tier constant. A positive policy ceiling only caps. `withheld` (a
+    /// rollout-off revocation for this model) forces 1. Unknown geometry
+    /// (`pagedFit == nil`) keeps the tier constant.
+    static func plannedRowCount(
+        tierConstant: Int,
+        pagedFit: Int?,
+        policyCeiling: Int? = nil,
+        withheld: Bool = false
+    ) -> Int {
+        if withheld {
+            return 1
+        }
+        let tier = max(1, tierConstant)
+        let raised: Int
+        if let pagedFit {
+            let fit = max(1, min(pagedFit, ProviderCapacity.maxConcurrencyOverrideLimit))
+            raised = tier <= 1 ? fit : max(1, min(tier, fit))
+        } else {
+            raised = tier
+        }
+        let capped = (policyCeiling ?? 0) > 0 ? min(raised, policyCeiling ?? raised) : raised
+        return max(1, min(capped, ProviderCapacity.maxConcurrencyOverrideLimit))
+    }
+
+    /// The served pair when rows are paged: one row at `context`, every other
+    /// row at `minimumServeContext`, plus fixed window bytes per row. The
+    /// context gives way only when that reservation does not fit, never below
+    /// `minimumServeContext`; then the slot count comes down. Unknown geometry
+    /// leaves the pair unchanged.
+    static func pagedBoundedServePair(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> (context: Int, slots: Int) {
+        let requested = max(1, slots)
+        guard let verifiedConfigJSONData,
+              let verifiedConfigSHA256,
+              Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(verifiedConfigJSONData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
+        else {
+            return (context, requested)
+        }
+        let fixedBytes = recurrentStateBytesPerSequence(in: root)
+        let budget = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+        func fits(_ candidateContext: Int, _ candidateSlots: Int) -> Bool {
+            guard candidateContext >= 1, candidateSlots >= 1,
+                  let cost = pagedReservationBytes(
+                    context: candidateContext,
+                    slots: candidateSlots,
+                    bytesPerToken: bytesPerToken,
+                    fixedBytesPerRow: fixedBytes
+                  )
+            else {
+                return false
+            }
+            return cost <= budget
+        }
+        if fits(context, requested) {
+            return (context, requested)
+        }
+        let floorContext = min(max(context, 1), minimumServeContext)
+        if context > minimumServeContext, fits(minimumServeContext, requested) {
+            var low = minimumServeContext
+            var high = context
+            while high - low > 1 {
+                let middle = low + (high - low) / 2
+                if fits(middle, requested) {
+                    low = middle
+                } else {
+                    high = middle
+                }
+            }
+            return (low, requested)
+        }
+        var best = 1
+        var low = 1
+        var high = requested
+        while low <= high {
+            let middle = low + (high - low) / 2
+            if fits(floorContext, middle) {
+                best = middle
+                low = middle + 1
+            } else {
+                high = middle - 1
+            }
+        }
+        return (floorContext, best)
+    }
+
+    /// Bytes for one full context plus `slots - 1` rows at the 4,000-token
+    /// floor, and the fixed window cost on every row.
+    private static func pagedReservationBytes(
+        context: Int,
+        slots: Int,
+        bytesPerToken: Int,
+        fixedBytesPerRow: Int
+    ) -> UInt64? {
+        guard slots >= 1, context >= 1, bytesPerToken > 0, fixedBytesPerRow >= 0 else {
+            return nil
+        }
+        let floorTokens = min(context, minimumServeContext)
+        guard let full = checkedProduct([UInt64(bytesPerToken), UInt64(context)]),
+              let eachFloor = checkedProduct([UInt64(bytesPerToken), UInt64(floorTokens)])
+        else {
+            return nil
+        }
+        let others: UInt64
+        if slots == 1 {
+            others = 0
+        } else if let product = checkedProduct([UInt64(slots - 1), eachFloor]) {
+            others = product
+        } else {
+            return nil
+        }
+        let tokenBytes = full.addingReportingOverflow(others)
+        guard !tokenBytes.overflow,
+              let fixedAll = checkedProduct([UInt64(slots), UInt64(fixedBytesPerRow)])
+        else {
+            return nil
+        }
+        let total = tokenBytes.partialValue.addingReportingOverflow(fixedAll)
+        guard !total.overflow else {
+            return nil
+        }
+        return total.partialValue
     }
 
     /// SPEC-051-R006: the SPEC-023 KV envelope of one shard stage, the same 3/4 of

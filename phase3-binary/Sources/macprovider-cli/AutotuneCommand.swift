@@ -2514,17 +2514,39 @@ struct AutotuneCommand: AsyncParsableCommand {
             maxBatch = 1
             maxContext = min(maxContext, draftCap)
         }
-        // SPEC-023-R018 item 9: the context is sized for one full-context KV
-        // cache; the slots come down until that many caches fit memory.
-        maxBatch = AutotuneModelContextCap.memoryBoundedSlots(
-            maxBatch,
-            context: maxContext,
-            verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
-            verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
-            hardwareMemoryGB: hardware.memoryGB,
-            catalogMinRAMGB: selectedRow.minRAMGB,
-            verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
-        )
+        // A draft pin and a calibration override are only lowered. A tier
+        // above 1 is only lowered by the full-context fit, which is what the
+        // signed-row fleet check locks. A tier of 1 with known geometry rises
+        // to the paged fit (one full context, other rows at the 4,000-token
+        // floor) so a 32 GB Mac is not left serial.
+        if draftCap != nil || maxBatchOverride != nil || hardware.recommendedMaxBatch > 1 {
+            maxBatch = AutotuneModelContextCap.memoryBoundedSlots(
+                maxBatch,
+                context: maxContext,
+                verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
+                verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
+                hardwareMemoryGB: hardware.memoryGB,
+                catalogMinRAMGB: selectedRow.minRAMGB,
+                verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
+            )
+        } else {
+            let pagedFit = selectedBenchmark.modelConfigJSONData.flatMap { configData in
+                selectedBenchmark.modelConfigSHA256.flatMap { configSHA in
+                    AutotuneModelContextCap.pagedFitBatchDepth(
+                        configData: configData,
+                        verifiedConfigSHA256: configSHA,
+                        hardwareMemoryGB: hardware.memoryGB,
+                        catalogMinRAMGB: selectedRow.minRAMGB,
+                        contextTokens: maxContext,
+                        verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
+                    )
+                }
+            }
+            maxBatch = AutotuneModelContextCap.plannedRowCount(
+                tierConstant: hardware.recommendedMaxBatch,
+                pagedFit: pagedFit
+            )
+        }
         return RecommendationCore(
             model: selected.model,
             targetContext: Self.spec023RecommendationProbeContext,

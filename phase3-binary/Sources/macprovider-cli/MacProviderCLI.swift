@@ -3297,13 +3297,25 @@ struct ServeCommand: AsyncParsableCommand {
                 maxContextOverride: resolved.maxContextOverride,
                 maxConcurrencyOverride: nil
             ).maxContextTokens
-            let memoryFitCap = AutoServedSlots.memoryFitSlots(
+            let chip = MachineFingerprinter().sample().chip
+            // One row keeps the served context. Further rows reserve the
+            // 4,000-token floor, so a tier of 1 can rise when that fits.
+            // A higher tier is only lowered. The policy ceiling is applied
+            // by `plan`, so the no-ceiling call still reports rows before it.
+            let pagedFit = AutoServedSlots.pagedFitSlots(
                 configJSONData: servedConfigJSONData,
                 memoryGB: memoryGB,
                 catalogMinRAMGB: servedCatalogMinRAMGB,
                 contextTokens: servedContextTokens,
                 weightsBytes: servedWeightsBytes,
                 verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
+            )
+            let withheld = continuousBatchingPolicy.status == .liveVerified
+                && continuousBatchingPolicy.selection.revocations.contains { currentPolicyKeys.contains($0.modelKey) }
+            let plannedRows = AutotuneModelContextCap.plannedRowCount(
+                tierConstant: AutotuneRecommendHardware.tierBatch(chip: chip, memoryGB: memoryGB),
+                pagedFit: pagedFit,
+                withheld: withheld
             )
             let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
                 continuousBatchingPolicy,
@@ -3321,12 +3333,12 @@ struct ServeCommand: AsyncParsableCommand {
                 ),
                 recommendedSlots: {
                     AutoServedSlots.recommendedSlots(
-                        chip: MachineFingerprinter().sample().chip,
+                        chip: chip,
                         memoryGB: memoryGB,
-                        memoryFitCap: memoryFitCap
+                        memoryFitCap: plannedRows
                     )
                 },
-                memoryFitKnown: memoryFitCap != nil,
+                memoryFitKnown: pagedFit != nil,
                 policyCeiling: ceiling
             ) }
             let plan = planInputs(policyCeiling)
@@ -3360,17 +3372,15 @@ struct ServeCommand: AsyncParsableCommand {
         // #1689 FR-20b: a recommendation-generated context is recomputed for
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+        let switchChip = MachineFingerprinter().sample().chip
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
         // SPEC-001-R019: each verified target's signed catalog key, for a
         // further warm member's own native-MTP admission.
         var memberCatalogKeys: [String: String] = [:]
-        // Switch targets start from the rows planned before the startup
-        // model's signed ceiling; each target's own memory fit and ceiling
-        // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
-        let switchBaselineSlots = max(
-            ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
-            rowsBeforePolicyCeiling ?? 0
-        )
+        // Each verified switch target gets its own planned rows. The startup
+        // model's signed ceiling does not travel with the switch (SPEC-038
+        // FR-CB11 v0.3.22). One row keeps that target's context; further rows
+        // reserve the 4,000-token floor.
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
@@ -3379,17 +3389,22 @@ struct ServeCommand: AsyncParsableCommand {
                     for id in ids { memberCatalogKeys[id] = key; memberCatalogKeys[id.lowercased(with: nil)] = key }
                 }
                 guard resolved.maxContextSource == .recommendationApply else { return }
-                let knobs = ModelSwitchContext.recomputedServeKnobs(
+                let targetKeys = Set(ids)
+                let knobs = ModelSwitchContext.pagedSwitchKnobs(
+                    chip: switchChip,
                     memoryGB: switchMemoryGB,
                     modelID: row.modelID,
                     catalogMinRAMGB: row.minRAMGB,
                     configJSONData: artifact.configJSONData,
                     configSHA256: artifact.configSHA256,
                     draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
-                    // The slot count this serve runs (`maxBatch` below), before
-                    // the startup model's policy ceiling.
-                    slots: switchBaselineSlots,
-                    modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
+                    modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil,
+                    policyCeiling: AutoServedSlots.policyServedSlotCeiling(
+                        continuousBatchingPolicy,
+                        modelKeys: targetKeys
+                    ),
+                    withheld: continuousBatchingPolicy.status == .liveVerified
+                        && continuousBatchingPolicy.selection.revocations.contains { targetKeys.contains($0.modelKey) }
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
             }
@@ -3398,14 +3413,26 @@ struct ServeCommand: AsyncParsableCommand {
         // count this serve runs (config, environment, or --max-batch) would
         // not fit memory at it; an operator value is kept (status warns).
         let servedSlots = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
-        let startupBound = ModelSwitchContext.startupBoundedContext(
-            config: resolved,
-            slots: servedSlots,
-            memoryGB: switchMemoryGB,
-            configJSONData: servedConfigJSONData,
-            catalogMinRAMGB: servedCatalogMinRAMGB,
-            modelWeightSizeBytes: servedWeightsBytes
-        )
+        // An owner pin still shrinks context so that many full contexts fit.
+        // An autotune-derived count uses the paged reservation, so raising
+        // the row count does not collapse the served context.
+        let startupBound = resolved.maxConcurrencySource == .owner
+            ? ModelSwitchContext.startupBoundedContext(
+                config: resolved,
+                slots: servedSlots,
+                memoryGB: switchMemoryGB,
+                configJSONData: servedConfigJSONData,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                modelWeightSizeBytes: servedWeightsBytes
+            )
+            : ModelSwitchContext.pagedStartupBound(
+                config: resolved,
+                slots: servedSlots,
+                memoryGB: switchMemoryGB,
+                configJSONData: servedConfigJSONData,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                modelWeightSizeBytes: servedWeightsBytes
+            )
         let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
             config: resolved,
             configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },

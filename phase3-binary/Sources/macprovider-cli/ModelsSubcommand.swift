@@ -2659,9 +2659,9 @@ extension ModelsAdoptRecommendationCommand {
 
     /// SPEC-023-R018 item 9: the signed slot count must fit memory at the
     /// signed context. A recommendation above the cap is refused, never
-    /// rewritten, so what is adopted is exactly what was signed. The cap is
-    /// `memoryFitBatchDepth` at that context from the verified config, or the
-    /// chip/RAM tier constant when the KV geometry is unknown.
+    /// rewritten, so what is adopted is exactly what was signed. A tier of 1
+    /// is capped by the paged fit; a higher tier by `memoryFitBatchDepth`.
+    /// Unknown geometry is capped by the chip/RAM tier constant.
     static func validateMemoryFitSlots(
         recommendation: ParsedRecommendationAdoption,
         row: CandidateCatalog.Row,
@@ -2669,16 +2669,36 @@ extension ModelsAdoptRecommendationCommand {
         hardware: AutotuneRecommendHardware
     ) throws {
         let knobs = recommendation.core.knobs
-        if let configData = artifact.configJSONData,
+        // A tier of 1 is capped by the paged reservation. A higher tier stays
+        // on the full-context fit the signed-row checks lock.
+        let fit: Int?
+        if hardware.recommendedMaxBatch <= 1,
+           let configData = artifact.configJSONData,
            let configSHA256 = artifact.configSHA256,
-           let fit = AutotuneModelContextCap.memoryFitBatchDepth(
+           let paged = AutotuneModelContextCap.pagedFitBatchDepth(
                configData: configData,
                verifiedConfigSHA256: configSHA256,
                hardwareMemoryGB: hardware.memoryGB,
                catalogMinRAMGB: row.minRAMGB,
-               calibrationContextTokens: knobs.maxContext,
+               contextTokens: knobs.maxContext,
                verifiedArtifactSizeBytes: artifact.sizeBytes
            ) {
+            fit = paged
+        } else if let configData = artifact.configJSONData,
+                  let configSHA256 = artifact.configSHA256,
+                  let full = AutotuneModelContextCap.memoryFitBatchDepth(
+                      configData: configData,
+                      verifiedConfigSHA256: configSHA256,
+                      hardwareMemoryGB: hardware.memoryGB,
+                      catalogMinRAMGB: row.minRAMGB,
+                      calibrationContextTokens: knobs.maxContext,
+                      verifiedArtifactSizeBytes: artifact.sizeBytes
+                  ) {
+            fit = full
+        } else {
+            fit = nil
+        }
+        if let fit {
             guard knobs.maxBatch <= fit else {
                 throw ValidationError("recommendation max_concurrency \(knobs.maxBatch) exceeds the memory-fit cap \(fit) at context \(knobs.maxContext)")
             }
