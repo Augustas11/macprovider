@@ -6005,7 +6005,8 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func mlxMemoryAdmissionRefusal",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func admitPreemptedRows",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func resolveCapacityDeadlockIfNeeded"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func resolveCapacityDeadlockIfNeeded",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func evictOldestIdleRetainedPagedKV"
       ],
       "tests": [
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testAdmissionAtTheLimit",
@@ -6013,9 +6014,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitDefersRowWhileOtherRowsRun",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitAdmitsRowsThatFitWithoutDiagnostics",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testExtensionCapacityDeadlockPreemptsDeterministicallyAndCompletesWithoutError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDeadlockWithAllRowsHavingOutputFailsNewestAtOnceWithoutParking",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testOmittedMaxTokensAdmitsConcurrentlyAgainstServePagedPool",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPreemptionBoundFailsClosedDeterministically",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testReattachedCachedTurnRowSuspendsAndPreemptsInsteadOfFailingExtension"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testReattachedCachedTurnRowSuspendsAndPreemptsInsteadOfFailingExtension",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testIdleRetainedCachedTurnReclaimedUnderPoolPressureForLoneGrowingRow"
       ],
       "journeys": [],
       "evidence": [],

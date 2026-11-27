@@ -2949,12 +2949,17 @@ actor ContinuousBatchScheduler {
     private var prefillCalls = 0
     private var maxObservedBatchDepth = 0
 
+    typealias IdleRetainedPagedKVReclaimer = @Sendable (Set<String>) async -> Bool
+
+    private let reclaimIdleRetainedPagedKV: IdleRetainedPagedKVReclaimer?
+
     init(
         configuration: ContinuousBatchSchedulerConfiguration,
         allocator: PagedKVBlockAllocator,
         backend: any ContinuousBatchSchedulerBackend,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
-        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
+        reclaimIdleRetainedPagedKV: IdleRetainedPagedKVReclaimer? = nil
     ) {
         // SPEC-038 FR-CB9: the one place every batching path passes through.
         // Serve and the lab commands refuse earlier with a clean error; this
@@ -2969,6 +2974,7 @@ actor ContinuousBatchScheduler {
         self.backend = backend
         self.replayAuthority = replayAuthority
         self.contiguousCacheBridge = contiguousCacheBridge
+        self.reclaimIdleRetainedPagedKV = reclaimIdleRetainedPagedKV
     }
 
     static func localCapabilityReason(
@@ -3170,7 +3176,9 @@ actor ContinuousBatchScheduler {
     /// exact point, so this only bounds wasted decode. A row that is not
     /// decoding (queued, prefilling, or already terminal) is left alone.
     func stopEarly(requestID: String) {
-        guard activeDecode[requestID] != nil else { return }
+        guard activeDecode[requestID] != nil
+                || activePrompt[requestID]?.isRecomputingDecodePrefix == true
+                || preemptedRows.contains(where: { $0.request.id == requestID }) else { return }
         earlyStopIDs.insert(requestID)
     }
 
@@ -3198,6 +3206,12 @@ actor ContinuousBatchScheduler {
             row.nativeMTPAdaptation = nil
             row.nativeMTPDirective = nil
             activePrompt[requestID] = row
+        }
+        for index in preemptedRows.indices where preemptedRows[index].request.nativeMTPTupleFence == fence {
+            preemptedRows[index].decodePath = .ordinary
+            preemptedRows[index].nativeMTPAdaptation = nil
+            preemptedRows[index].nativeMTPDirective = nil
+            preemptedRows[index].nativeMTPFusedOrdinaryDecode = false
         }
         await fenceDisabledActiveNativeMTPRows()
         ensurePump()
@@ -3478,8 +3492,9 @@ actor ContinuousBatchScheduler {
             slotsTotal: configuration.maxActiveRows,
             slotsFree: max(0, configuration.maxActiveRows - occupiedSlots),
             waitingCount: waiting.count + pendingBindingChecks,
-            activeDecodeRows: activeDecode.count,
-            activePromptRows: activePrompt.count + admittingRequests.count,
+            activeDecodeRows: activeDecode.count + preemptedRows.filter(\.isRecomputingDecodePrefix).count,
+            activePromptRows: activePrompt.count + admittingRequests.count
+                + preemptedRows.filter { !$0.isRecomputingDecodePrefix }.count,
             sharedForwardCalls: sharedForwardCalls,
             prefillCalls: prefillCalls,
             maxObservedBatchDepth: maxObservedBatchDepth,
@@ -3610,7 +3625,10 @@ actor ContinuousBatchScheduler {
                 continuation: continuation,
                 delivery: delivery
             ))
-            if let row = activeDecode[request.id], let token = row.outputTokens.last {
+            if let row = activeDecode[request.id]
+                ?? activePrompt[request.id]
+                ?? preemptedRows.first(where: { $0.request.id == request.id }),
+               let token = row.outputTokens.last {
                 let replay = ContinuousBatchSchedulerTokenEvent(
                     requestID: row.request.id,
                     tokenIndex: row.outputTokens.count - 1,
@@ -4538,11 +4556,13 @@ actor ContinuousBatchScheduler {
         for item in prepared {
             do {
                 _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 failure = failure ?? error
             }
             do {
                 try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 failure = failure ?? error
             }
@@ -4557,6 +4577,7 @@ actor ContinuousBatchScheduler {
     private func releaseNativeMTPScratch(_ reservation: PagedKVNativeMTPScratchReservation) async {
         do {
             try await allocator.releaseNativeMTPScratchReservation(reservation)
+            capacitySuspendedIDs.removeAll()
         } catch {
             cleanupFailedClosed = true
             record(.cleanupFailed)
@@ -4568,6 +4589,7 @@ actor ContinuousBatchScheduler {
         for item in reserved {
             do {
                 _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 cleanupFailedClosed = true
                 record(.cleanupFailed)
@@ -4583,6 +4605,7 @@ actor ContinuousBatchScheduler {
         for item in reserved {
             do {
                 _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 cleanupFailedClosed = true
                 record(.cleanupFailed)
@@ -4692,6 +4715,7 @@ actor ContinuousBatchScheduler {
         } catch {
             do {
                 _ = try await allocator.abortNativeMTPTransaction(transaction)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 throw error
             }
@@ -4820,11 +4844,15 @@ actor ContinuousBatchScheduler {
             guard let selectedReservation else {
                 await abortPreReservedNativeMTPRows(preReserved)
                 if let allocatorError = reservationFailure as? PagedKVAllocatorError,
-                   case .capacityExceeded = allocatorError,
-                   activeDecode.count + activePrompt.count > 1 {
-                    capacitySuspendedIDs.insert(row.request.id)
-                    record(.extensionSuspended)
-                    return
+                   case .capacityExceeded = allocatorError {
+                    if await reclaimIdleRetainedPagedKVForPressure(), !cleanupFailedClosed {
+                        return
+                    }
+                    if activeDecode.count + activePrompt.count > 1 {
+                        capacitySuspendedIDs.insert(row.request.id)
+                        record(.extensionSuspended)
+                        return
+                    }
                 }
                 if let reservationFailure {
                     ContinuousBatchingPolicy.logForwardFailed(reservationFailure)
@@ -5289,11 +5317,13 @@ actor ContinuousBatchScheduler {
             for item in prepared {
                 do {
                     _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     localAbortError = localAbortError ?? error
                 }
                 do {
                     try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     localAbortError = localAbortError ?? error
                 }
@@ -5336,11 +5366,13 @@ actor ContinuousBatchScheduler {
                 var cleanupError: (any Error)?
                 do {
                     _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     cleanupError = cleanupError ?? error
                 }
                 do {
                     try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     cleanupError = cleanupError ?? error
                 }
@@ -5369,11 +5401,13 @@ actor ContinuousBatchScheduler {
                 var cleanupError: (any Error)?
                 do {
                     _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     cleanupError = cleanupError ?? error
                 }
                 do {
                     try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                    capacitySuspendedIDs.removeAll()
                 } catch {
                     cleanupError = cleanupError ?? error
                 }
@@ -5396,12 +5430,14 @@ actor ContinuousBatchScheduler {
                     )
                 } else {
                     _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                    capacitySuspendedIDs.removeAll()
                 }
             } catch {
                 localFinalizeError = localFinalizeError ?? error
             }
             do {
                 try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                capacitySuspendedIDs.removeAll()
             } catch {
                 localFinalizeError = localFinalizeError ?? error
             }
@@ -5767,15 +5803,15 @@ actor ContinuousBatchScheduler {
         #endif
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
-        servedPathDecodeSteps &+= 1
-        servedPathActiveRowSum &+= UInt64(activeDecode.count + activePrompt.count)
-        noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
         let rows = activeDecode.values
             .filter { !capacitySuspendedIDs.contains($0.request.id) }
             .sorted {
                 admissionPrecedes($0.request.id, $1.request.id)
             }
         guard !rows.isEmpty else { return }
+        servedPathDecodeSteps &+= 1
+        servedPathActiveRowSum &+= UInt64(activeDecode.count + activePrompt.count)
+        noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
         let allNativeRows = rows.filter(\.usesNativeMTP)
         updateNativeMTPLoadGate(nativeRows: allNativeRows)
         // At load-gate or confidence depth zero, a native verify of one
@@ -5856,7 +5892,7 @@ actor ContinuousBatchScheduler {
         let windowSteps = forcedWindowSteps ?? lockstepDecodeWindowSteps(for: rows)
         var prepared: [(row: Row, input: ContinuousBatchDecodeInput)] = []
         prepared.reserveCapacity(rows.count)
-        var sawCapacitySuspension = false
+        var sawMultiStepCapacityMiss = false
         for row in rows {
             let committedKVTokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
             let (targetKVTokenCount, targetOverflow) = committedKVTokenCount.addingReportingOverflow(windowSteps)
@@ -5875,11 +5911,14 @@ actor ContinuousBatchScheduler {
                 continue
             }
             do {
-                _ = try await allocator.extend(row.handle, by: windowSteps)
+                _ = try await extendWithIdleReclaim(row.handle, by: windowSteps)
             } catch PagedKVAllocatorError.capacityExceeded {
-                if windowSteps > 1 || activeDecode.count + activePrompt.count > 1 {
+                if windowSteps > 1 {
+                    sawMultiStepCapacityMiss = true
+                    continue
+                }
+                if activeDecode.count + activePrompt.count > 1 {
                     capacitySuspendedIDs.insert(row.request.id)
-                    sawCapacitySuspension = true
                     record(.extensionSuspended)
                     continue
                 }
@@ -5969,10 +6008,7 @@ actor ContinuousBatchScheduler {
             }
         }
         if prepared.isEmpty {
-            if sawCapacitySuspension && windowSteps > 1 {
-                for row in rows {
-                    capacitySuspendedIDs.remove(row.request.id)
-                }
+            if sawMultiStepCapacityMiss && windowSteps > 1 {
                 await runOrdinaryDecodeStep(
                     rows: rows.compactMap { activeDecode[$0.request.id] },
                     forcedWindowSteps: 1
@@ -6708,19 +6744,75 @@ actor ContinuousBatchScheduler {
     }
 
     /// Resumes preempted rows (oldest admitted first) once blocks are free,
-    /// before admitting any new waiting request so resumed work cannot starve.
+    /// Evicts one idle retained paged-KV cache entry via `ConversationCache`
+    /// under pool pressure, excluding any conversation key currently queued,
+    /// admitting, active, or parked so no in-flight reattach is disturbed.
+    private func reclaimIdleRetainedPagedKVForPressure() async -> Bool {
+        guard let reclaimer = reclaimIdleRetainedPagedKV else { return false }
+        var protectedKeys: Set<String> = []
+        for req in waiting where !req.conversationKey.isEmpty { protectedKeys.insert(req.conversationKey) }
+        for req in admittingRequests.values where !req.conversationKey.isEmpty { protectedKeys.insert(req.conversationKey) }
+        for row in activePrompt.values where !row.request.conversationKey.isEmpty { protectedKeys.insert(row.request.conversationKey) }
+        for row in activeDecode.values where !row.request.conversationKey.isEmpty { protectedKeys.insert(row.request.conversationKey) }
+        for row in preemptedRows where !row.request.conversationKey.isEmpty { protectedKeys.insert(row.request.conversationKey) }
+        let reclaimed = await reclaimer(protectedKeys)
+        if reclaimed {
+            capacitySuspendedIDs.removeAll()
+            rowProgressEvents &+= 1
+        }
+        return reclaimed
+    }
+
+    private func extendWithIdleReclaim(
+        _ handle: PagedKVBlockTableHandle,
+        by tokens: Int
+    ) async throws -> PagedKVBlockTable {
+        while true {
+            do {
+                return try await allocator.extend(handle, by: tokens)
+            } catch PagedKVAllocatorError.capacityExceeded {
+                guard await reclaimIdleRetainedPagedKVForPressure(), !cleanupFailedClosed else {
+                    throw PagedKVAllocatorError.capacityExceeded
+                }
+            }
+        }
+    }
+
+    private func allocateWithIdleReclaim(
+        conversationKey: String,
+        initialCapacityTokens: Int,
+        maxLogicalTokens: Int,
+        initialTokens: Int
+    ) async throws -> PagedKVBlockTableHandle {
+        while true {
+            do {
+                return try await allocator.allocate(
+                    conversationKey: conversationKey,
+                    initialCapacityTokens: initialCapacityTokens,
+                    maxLogicalTokens: maxLogicalTokens,
+                    initialTokens: initialTokens
+                )
+            } catch PagedKVAllocatorError.capacityExceeded {
+                guard await reclaimIdleRetainedPagedKVForPressure(), !cleanupFailedClosed else {
+                    throw PagedKVAllocatorError.capacityExceeded
+                }
+            }
+        }
+    }
+
+    /// Resumes parked no-output preempted rows in admission order whenever
+    /// blocks fit (trying `desiredCapacity`, then `minCapacity` immediately
+    /// without waiting for scheduler idle). A parked row that cannot fit yet
+    /// is skipped rather than blocking smaller parked or waiting requests.
     private func admitPreemptedRows() async -> Bool {
-        guard occupiedSlots < configuration.maxActiveRows,
-              !preemptedRows.isEmpty,
-              capacitySuspendedIDs.isEmpty
-        else { return false }
+        guard !preemptedRows.isEmpty, capacitySuspendedIDs.isEmpty else { return false }
         var madeProgress = false
-        while occupiedSlots < configuration.maxActiveRows,
-              !preemptedRows.isEmpty,
-              capacitySuspendedIDs.isEmpty {
-            let candidate = preemptedRows[0]
-            if cancelledIDs.remove(candidate.request.id) != nil {
-                preemptedRows.removeFirst()
+        var index = 0
+        while index < preemptedRows.count, capacitySuspendedIDs.isEmpty {
+            let candidate = preemptedRows[index]
+            let candidateID = candidate.request.id
+            if cancelledIDs.remove(candidateID) != nil {
+                preemptedRows.remove(at: index)
                 finish(candidate, status: .cancelled, errorCode: "request_cancelled")
                 madeProgress = true
                 continue
@@ -6732,92 +6824,134 @@ actor ContinuousBatchScheduler {
                 maxLogical
             )
             let minCapacity = min(recomputeTokens.count + 1, maxLogical)
-            let schedulerIdle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
             let handle: PagedKVBlockTableHandle
             do {
-                handle = try await allocator.allocate(
+                handle = try await allocateWithIdleReclaim(
                     conversationKey: schedulerConversationKey(for: candidate.request),
                     initialCapacityTokens: desiredCapacity,
                     maxLogicalTokens: maxLogical,
                     initialTokens: 0
                 )
             } catch PagedKVAllocatorError.capacityExceeded {
-                if schedulerIdle, minCapacity < desiredCapacity {
+                if minCapacity < desiredCapacity {
                     do {
-                        handle = try await allocator.allocate(
+                        handle = try await allocateWithIdleReclaim(
                             conversationKey: schedulerConversationKey(for: candidate.request),
                             initialCapacityTokens: minCapacity,
                             maxLogicalTokens: maxLogical,
                             initialTokens: 0
                         )
+                    } catch PagedKVAllocatorError.capacityExceeded {
+                        let schedulerIdle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
+                        if schedulerIdle,
+                           let currentIndex = preemptedRows.firstIndex(where: { $0.request.id == candidateID }) {
+                            let failed = preemptedRows.remove(at: currentIndex)
+                            record(.localExtensionFailed)
+                            finish(
+                                failed,
+                                status: .requestFailed,
+                                errorCode: "continuous_batching_block_extension_failed"
+                            )
+                            madeProgress = true
+                            index = min(index, preemptedRows.count)
+                        } else {
+                            index += 1
+                        }
+                        continue
                     } catch {
-                        preemptedRows.removeFirst()
+                        if let currentIndex = preemptedRows.firstIndex(where: { $0.request.id == candidateID }) {
+                            let failed = preemptedRows.remove(at: currentIndex)
+                            record(.localExtensionFailed)
+                            finish(
+                                failed,
+                                status: .requestFailed,
+                                errorCode: "continuous_batching_block_extension_failed"
+                            )
+                            madeProgress = true
+                            index = min(index, preemptedRows.count)
+                        }
+                        continue
+                    }
+                } else {
+                    let schedulerIdle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
+                    if schedulerIdle,
+                       let currentIndex = preemptedRows.firstIndex(where: { $0.request.id == candidateID }) {
+                        let failed = preemptedRows.remove(at: currentIndex)
                         record(.localExtensionFailed)
                         finish(
-                            candidate,
+                            failed,
                             status: .requestFailed,
                             errorCode: "continuous_batching_block_extension_failed"
                         )
                         madeProgress = true
-                        continue
+                        index = min(index, preemptedRows.count)
+                    } else {
+                        index += 1
                     }
-                } else if schedulerIdle {
-                    preemptedRows.removeFirst()
+                    continue
+                }
+            } catch {
+                if let currentIndex = preemptedRows.firstIndex(where: { $0.request.id == candidateID }) {
+                    let failed = preemptedRows.remove(at: currentIndex)
                     record(.localExtensionFailed)
                     finish(
-                        candidate,
+                        failed,
                         status: .requestFailed,
                         errorCode: "continuous_batching_block_extension_failed"
                     )
                     madeProgress = true
-                    continue
-                } else {
-                    break
+                    index = min(index, preemptedRows.count)
                 }
-            } catch {
-                preemptedRows.removeFirst()
-                record(.localExtensionFailed)
-                finish(
-                    candidate,
-                    status: .requestFailed,
-                    errorCode: "continuous_batching_block_extension_failed"
-                )
-                madeProgress = true
                 continue
             }
-            if cancelledIDs.remove(candidate.request.id) != nil {
-                preemptedRows.removeFirst()
+            guard let currentIndex = preemptedRows.firstIndex(where: { $0.request.id == candidateID }) else {
+                _ = await release(handle)
+                continue
+            }
+            if cancelledIDs.remove(candidateID) != nil {
+                let cancelled = preemptedRows.remove(at: currentIndex)
                 let released = await release(handle)
                 finish(
-                    candidate,
+                    cancelled,
                     status: released ? .cancelled : .requestFailed,
                     errorCode: released ? "request_cancelled" : "continuous_batching_cleanup_failed"
                 )
                 if !released { return true }
                 madeProgress = true
+                index = min(index, preemptedRows.count)
                 continue
             }
-            var resumed = preemptedRows.removeFirst()
+            var resumed = preemptedRows.remove(at: currentIndex)
             resumed.handle = handle
             resumed.prefillCursor = 0
             activePrompt[resumed.request.id] = resumed
             promptOrder.append(resumed.request.id)
             madeProgress = true
+            index = min(index, preemptedRows.count)
         }
         return madeProgress
     }
 
     /// Resolves a paged-pool deadlock when every active row is suspended on
-    /// `capacityExceeded`: preempts the newest active row (preferring a
-    /// prefilling row with no emitted output) so its blocks free for the
-    /// oldest rows. Fails closed deterministically when a single lone row
-    /// exceeds the entire pool or every active row reached `maxPreemptionsPerRow`.
+    /// `capacityExceeded`:
+    /// 1. Reclaim any idle retained paged-KV entries first.
+    /// 2. Pick a victim with no buyer-visible output (`outputTokens.isEmpty`,
+    ///    preferring prefill rows newest-first, below `maxPreemptionsPerRow`)
+    ///    and park it in `preemptedRows`.
+    /// 3. If every active row already has buyer-visible output (or every
+    ///    no-output candidate exhausted `maxPreemptionsPerRow`), fail the newest
+    ///    row at once with `continuous_batching_pool_capacity_preempted` rather
+    ///    than parking it past the gateway's content-idle timeout.
     private func resolveCapacityDeadlockIfNeeded() async -> Bool {
         let totalActive = activeDecode.count + activePrompt.count
         guard totalActive > 0, !capacitySuspendedIDs.isEmpty else { return false }
         let allDecodeSuspended = activeDecode.keys.allSatisfy { capacitySuspendedIDs.contains($0) }
         let allPromptSuspended = activePrompt.keys.allSatisfy { capacitySuspendedIDs.contains($0) }
         guard allDecodeSuspended && allPromptSuspended else { return false }
+
+        if await reclaimIdleRetainedPagedKVForPressure() {
+            return true
+        }
 
         if totalActive == 1 {
             if let id = activeDecode.keys.first, let removed = activeDecode.removeValue(forKey: id) {
@@ -6856,8 +6990,8 @@ actor ContinuousBatchScheduler {
             + decodeVictims.map { ($0, false) }
 
         if let chosen = orderedVictims.first(where: { item in
-            let row = item.isPrompt ? activePrompt[item.id] : activeDecode[item.id]
-            return (row?.preemptionCount ?? Int.max) < configuration.maxPreemptionsPerRow
+            guard let row = item.isPrompt ? activePrompt[item.id] : activeDecode[item.id] else { return false }
+            return row.outputTokens.isEmpty && row.preemptionCount < configuration.maxPreemptionsPerRow
         }) {
             var victim: Row
             if chosen.isPrompt {
@@ -6893,8 +7027,9 @@ actor ContinuousBatchScheduler {
             return true
         }
 
-        // Every active row reached `maxPreemptionsPerRow`: fail the newest row
-        // deterministically so the remaining rows progress instead of livelocking.
+        // Every active row already streamed buyer-visible output, or every
+        // no-output candidate hit `maxPreemptionsPerRow`: fail the newest row
+        // at once with an explicit code so the remaining rows progress.
         guard let fallback = orderedVictims.first else { return false }
         capacitySuspendedIDs.remove(fallback.id)
         record(.localExtensionFailed)
@@ -6904,7 +7039,7 @@ actor ContinuousBatchScheduler {
                 removed,
                 status: .requestFailed,
                 errorCode: released
-                    ? "continuous_batching_prefill_extend_failed"
+                    ? "continuous_batching_pool_capacity_preempted"
                     : "continuous_batching_cleanup_failed"
             )
         } else if let removed = activeDecode.removeValue(forKey: fallback.id) {
@@ -6913,7 +7048,7 @@ actor ContinuousBatchScheduler {
                 removed,
                 status: .requestFailed,
                 errorCode: released
-                    ? "continuous_batching_block_extension_failed"
+                    ? "continuous_batching_pool_capacity_preempted"
                     : "continuous_batching_cleanup_failed"
             )
         }
@@ -6923,7 +7058,6 @@ actor ContinuousBatchScheduler {
     private func admitWaitingRows() async -> Bool {
         var madeProgress = await admitPreemptedRows()
         guard !draining,
-              preemptedRows.isEmpty,
               capacitySuspendedIDs.isEmpty,
               occupiedSlots < configuration.maxActiveRows,
               !waiting.isEmpty
@@ -7103,7 +7237,7 @@ actor ContinuousBatchScheduler {
                     // SPEC-024-R005: a fresh table already counting the snapshot
                     // tokens; the row's caches take the snapshot's arrays and
                     // prefill resumes on the snapshot boundary.
-                    handle = try await allocator.allocate(
+                    handle = try await allocateWithIdleReclaim(
                         conversationKey: schedulerConversationKey(for: request),
                         initialCapacityTokens: reservation.initialCapacityTokens,
                         maxLogicalTokens: reservation.maxLogicalTokens,
@@ -7121,7 +7255,7 @@ actor ContinuousBatchScheduler {
                     }
                     prefillCursor = request.cachedPromptTokens
                 } else {
-                    handle = try await allocator.allocate(
+                    handle = try await allocateWithIdleReclaim(
                         conversationKey: schedulerConversationKey(for: request),
                         initialCapacityTokens: reservation.initialCapacityTokens,
                         maxLogicalTokens: reservation.maxLogicalTokens,
@@ -7423,7 +7557,7 @@ actor ContinuousBatchScheduler {
                 : 0
             let nativePromptPrefill = !isRecompute && row.usesNativeMTP && end > nativeWindowStart
             do {
-                _ = try await allocator.extend(row.handle, by: chunk.count)
+                _ = try await extendWithIdleReclaim(row.handle, by: chunk.count)
             } catch PagedKVAllocatorError.capacityExceeded {
                 if activeDecode.count + activePrompt.count > 1 {
                     capacitySuspendedIDs.insert(id)
@@ -8321,7 +8455,7 @@ actor ContinuousBatchScheduler {
     }
 
     private var occupiedSlots: Int {
-        admittingRequests.count + activePrompt.count + activeDecode.count
+        admittingRequests.count + activePrompt.count + activeDecode.count + preemptedRows.count
     }
 
     /// SPEC-038-R011: buyer rows never exceed the served slot count (the
@@ -8332,6 +8466,7 @@ actor ContinuousBatchScheduler {
         admittingRequests.values.filter(\.selfCheckProbe).count
             + activePrompt.values.filter(\.request.selfCheckProbe).count
             + activeDecode.values.filter(\.request.selfCheckProbe).count
+            + preemptedRows.filter(\.request.selfCheckProbe).count
     }
 
     func setBuyerRowLimit(_ limit: Int) {
@@ -8393,6 +8528,7 @@ actor ContinuousBatchScheduler {
                 }
             } else if targetLogicalTokens < binding.currentTable.logicalTokenCount {
                 _ = try await allocator.trim(row.handle, toLogicalTokens: targetLogicalTokens)
+                capacitySuspendedIDs.removeAll()
             }
             guard let recurrentCheckpoints = await terminalRecurrentCheckpoints(
                 for: row,
@@ -8525,6 +8661,7 @@ actor ContinuousBatchScheduler {
     func discardRetainedCache(_ retained: PagedKVRetainedSequence, conversationKey: String) async {
         do {
             try await allocator.discardRetained(retained, conversationKey: conversationKey)
+            capacitySuspendedIDs.removeAll()
         } catch PagedKVAllocatorError.unknownHandle {
             return
         } catch {
@@ -8536,6 +8673,7 @@ actor ContinuousBatchScheduler {
     func discardRetainedCache(_ retained: PagedKVRetainedSequence) async {
         do {
             try await allocator.discardRetained(retained)
+            capacitySuspendedIDs.removeAll()
         } catch PagedKVAllocatorError.unknownHandle {
             return
         } catch {

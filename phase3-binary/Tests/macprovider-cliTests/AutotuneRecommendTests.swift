@@ -1774,6 +1774,11 @@ final class AutotuneRecommendTests: XCTestCase {
         let calibrated = core(draftModel: nil, maxBatchOverride: 1)
         XCTAssertEqual(calibrated.knobs.maxBatch, 1)
         XCTAssertEqual(calibrated.knobs.maxContext, raised.knobs.maxContext)
+        let calibratedTwo = core(draftModel: nil, maxBatchOverride: 2)
+        XCTAssertEqual(calibratedTwo.knobs.maxBatch, 2)
+        XCTAssertEqual(calibratedTwo.knobs.maxContext, raised.knobs.maxContext)
+        let calibratedOverCap = core(draftModel: nil, maxBatchOverride: 3)
+        XCTAssertEqual(calibratedOverCap.knobs.maxBatch, 2)
         XCTAssertEqual(core(draftModel: "mlx-community/Qwen3-0.6B-4bit").knobs.maxBatch, 1)
     }
 

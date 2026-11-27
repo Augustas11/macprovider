@@ -24,13 +24,23 @@ its full-context memory bound; an autotune-derived warm swap uses the target's
 planned row count and paged-context rule. FR-CB1 / FR-CB16 / FR-CB17 / AC-24:
 multi-row admission continues to reserve `prompt + decodeHeadroomTokens` against
 a paged-KV pool sized to `context + (rows − 1) × min(context, 4000)` (maxed
-across warm-switch targets) so omitted `max_tokens` never serializes CB. When a
-batched or reattached cached-turn row hits `capacityExceeded` on block
-extension, it suspends until blocks free; if every active row is suspended, the
-scheduler preempts the newest active row deterministically (bounded by
-`maxPreemptionsPerRow`), frees its blocks, and recomputes its committed KV
-prefix on resume without duplicating emitted output. Only an unresolvable lone
-row or a row that exhausts `maxPreemptionsPerRow` fails request-locally.
+across warm-switch targets) so omitted `max_tokens` never serializes CB. On
+`capacityExceeded`, the scheduler first evicts idle non-leased retained
+paged-KV entries from `ConversationCache` in LRU order and retries before
+suspending, preempting, or failing. When a batched or reattached cached-turn
+row still hits `capacityExceeded` on single-step block extension, it suspends
+until blocks free; if every active row is suspended, the scheduler preempts a
+victim with no buyer-visible output (`outputTokens.isEmpty`, newest prefill
+first, bounded by `maxPreemptionsPerRow`), parks it so it resumes at
+`minCapacity` as soon as blocks fit without blocking waiting requests that fit,
+and recomputes its committed KV prefix via prefill on resume (note: prefill
+recompute uses prefill numerics and skips the serial last-token boundary, so
+greedy output after a resume can differ from uninterrupted decode). If every
+deadlocked active row already has buyer-visible output (or no-output victims
+exhausted `maxPreemptionsPerRow`), the newest row fails at once with
+`continuous_batching_pool_capacity_preempted` instead of parking past the
+gateway idle timeout. Only an unresolvable lone row fails with
+`continuous_batching_block_extension_failed`.
 
 **Change log v0.3.67 (2026-11-26, FR-CB2: an Inkling 2 row prefills on the serial route's step, Related: #2505):**
 FR-CB2: a family whose rows reserve their last prompt token for a one-token
@@ -1309,14 +1319,19 @@ bound). A multi-row batch MUST NOT reserve each row's full worst-case generation
 ceiling — that would collapse effective concurrency toward depth 1 (especially
 when `max_tokens` is omitted and defaults to `context - prompt`) — so an
 admitted or reattached cached-turn row MAY still encounter pool pressure when
-extending its blocks. **(v0.3.68)** On `capacityExceeded` during block
-extension in a multi-row batch, the scheduler suspends the row until blocks
-free; if every active row is suspended, it preempts one row deterministically
-(newest prefill row first, else newest decode row, bounded by
-`maxPreemptionsPerRow`), releases its blocks, and recomputes its committed KV
-prefix on resume without duplicating emitted output. Only an unresolvable lone
-row or a deadlock after every active row exhausts `maxPreemptionsPerRow` falls
-back to the deterministic request-local failure path (FR-CB5). This
+extending its blocks. **(v0.3.68)** On `capacityExceeded`, the scheduler first
+evicts idle non-leased retained paged-KV entries from `ConversationCache` in
+LRU order and retries. If pressure persists in a multi-row batch, the row
+suspends until blocks free; if every active row is suspended, the scheduler
+preempts a victim with no buyer-visible output (`outputTokens.isEmpty`, newest
+prefill first, bounded by `maxPreemptionsPerRow`), parks it (resuming at
+`minCapacity` whenever blocks fit without blocking waiting requests that fit),
+and recomputes its KV prefix via prefill on resume. If every active row already
+has buyer-visible output (or every no-output candidate hit
+`maxPreemptionsPerRow`), the newest row fails at once with
+`continuous_batching_pool_capacity_preempted` rather than parking past the
+gateway idle timeout; an unresolvable lone row falls back to the deterministic
+request-local failure path (FR-CB5). This
 reconciles the Entry-110 active-row cap (FR-CB11) with real pool state: the cap
 is an upper bound on rows, and pool availability is the admission-time gate
 underneath it (FR-CB17).
@@ -3286,16 +3301,20 @@ storage, physical-block allocation, and paged-attention execution. The
 scheduler MUST NOT duplicate `SPEC-039` kernel/storage requirements in this
 spec or create an alternate engine authority path.
 
-**Bounded deadlock preemption (v0.3.68).** Under paged-pool pressure, the
-scheduler applies admission back-pressure (FR-CB1), suspends any multi-row
-prefill, reattached cached-turn, or decode row whose block extension hits
-`capacityExceeded` until another row frees blocks, and — only when every active
-row is simultaneously suspended — deterministically preempts the newest active
-row (preferring a prefill row with no emitted output, bounded by
-`maxPreemptionsPerRow`), releases its blocks, and recomputes its committed KV
-prefix on resume without emitting duplicate tokens (FR-CB17). An unresolvable
-lone row or a row that exhausts `maxPreemptionsPerRow` fails request-locally
-(FR-CB5).
+**Bounded no-output deadlock preemption (v0.3.68).** Under paged-pool pressure,
+the scheduler applies admission back-pressure (FR-CB1), evicts idle non-leased
+retained paged-KV entries from `ConversationCache` in LRU order before
+suspending or failing, suspends any multi-row prefill, reattached cached-turn,
+or decode row whose single-step block extension still hits `capacityExceeded`
+until another row frees blocks, and — only when every active row is
+simultaneously suspended — deterministically preempts a victim with no
+buyer-visible output (`outputTokens.isEmpty`, newest prefill first, bounded by
+`maxPreemptionsPerRow`), releases its blocks, resumes it at `minCapacity` when
+blocks fit without blocking waiting requests, and recomputes its KV prefix via
+prefill on resume (FR-CB17). If every deadlocked active row already has
+buyer-visible output (or no-output candidates hit `maxPreemptionsPerRow`), the
+newest row fails at once with `continuous_batching_pool_capacity_preempted`; an
+unresolvable lone row fails request-locally (FR-CB5).
 
 **MoE — scheduler obligation is per-row input isolation, not expert routing.**
 The scheduler does **NOT** select or route experts; expert selection is
@@ -3340,23 +3359,36 @@ only when unresolvable (v0.3.68)**:
   and idle admission is reason-coded (`memory_limit_deferred`,
   `memory_limit_idle_admitted`) and logged with the requested, active,
   pending and limit bytes. Unknown KV geometry counts as zero bytes per token.
-- **(v0.3.68) Suspend and bounded deterministic preemption (FR-CB16).** When
-  an active multi-row decode, native-MTP, prefill, or reattached cached-turn
-  row hits `capacityExceeded` on block extension, it MUST suspend
-  (`extension_suspended`) instead of failing while other active rows can
-  progress and release blocks; new waiting admissions pause until suspended and
-  preempted rows clear. If every active row is suspended simultaneously, the
-  scheduler MUST preempt one row deterministically (`row_preempted`: newest
-  active prefill row first, else newest active decode row, below
-  `maxPreemptionsPerRow`), release its blocks so the oldest rows complete, and
-  resume it in admission order by recomputing its committed KV prefix
-  (`prompt + generated.dropLast()` with `sampleFirstToken = false`, downgraded
-  to ordinary decode if tokens were emitted) without duplicating emitted output.
-- **Deterministic request-local failure (FR-CB5).** Only if a lone active row
-  exceeds the entire pool on block extension, or every deadlocked row has
-  exhausted `maxPreemptionsPerRow`, does that **row alone** fail
-  deterministically through the request-local terminal path and release its
-  blocks; healthy rows are undisturbed. This is not a whole-batch failure.
+- **(v0.3.68) Idle retained-cache reclamation, suspend, and bounded no-output
+  preemption (FR-CB16).** On `capacityExceeded` during allocation or block
+  extension, the scheduler MUST first evict idle (not currently leased or
+  reattaching) retained paged-KV entries from `ConversationCache` in LRU order
+  (`reason=paged_pool_pressure`) and retry before suspending, preempting, or
+  failing. When an active multi-row decode, native-MTP, prefill, or reattached
+  cached-turn row still hits `capacityExceeded` on single-step block extension,
+  it MUST suspend (`extension_suspended`) while other active rows progress and
+  free blocks (cleared on release, trim, retained discard, native scratch
+  release, and transaction abort). If every active row is suspended
+  simultaneously, the scheduler MUST prefer a victim with no buyer-visible
+  output (`outputTokens.isEmpty`, newest active prefill row first, below
+  `maxPreemptionsPerRow`), release its blocks, park it in `preemptedRows`
+  (counted in `occupiedSlots` and `slotsFree`), resume it at `minCapacity` as
+  soon as blocks fit without waiting for scheduler idle or blocking waiting
+  requests that fit, and recompute its committed KV prefix via prefill on
+  resume without duplicating emitted output. Because recompute rebuilds KV with
+  prefill numerics and skips the serial last-token boundary, greedy output
+  after a resume MAY differ from an uninterrupted decode. If every deadlocked
+  active row already has buyer-visible output, or every no-output candidate
+  exhausted `maxPreemptionsPerRow`, the scheduler MUST NOT park it; it MUST
+  fail the newest active row at once with
+  `continuous_batching_pool_capacity_preempted` and release its blocks so the
+  remaining rows finish without hitting the gateway content-idle deadline.
+- **Deterministic request-local failure (FR-CB5).** If a lone active row
+  exceeds the entire pool on block extension after idle retained-cache
+  reclamation, that **row alone** fails deterministically through the
+  request-local terminal path (`continuous_batching_block_extension_failed`)
+  and releases its blocks; healthy rows are undisturbed. This is not a
+  whole-batch failure.
 
 Both the admission-time and the mid-decode paths MUST be observable and
 reason-coded, and MUST NOT emit a settlement receipt for output stitched across
@@ -3761,19 +3793,25 @@ hardware-capability run or a static-review obligation. Every
   live model (FR-CB14). Until this fixture passes and MSB-04 is measured on the
   live MoE tuple, that tuple remains unsupported for continuous batching even
   though attention paging is separately proven orthogonal.
-- **AC-24 paged-pool pressure: back-pressure, suspend, bounded preemption, and
-  unresolvable request-local failure (FR-CB17, FR-CB1, FR-CB5, v0.3.68):** with
-  a batch actively decoding, admission of a further row whose initial
-  prompt-plus-headroom footprint the shared paged pool cannot fund is held or
-  rejected with the FR-CB1 client-visible backpressure signal, while N rows
-  with omitted `max_tokens` admit concurrently against the serve paged pool;
-  when concurrent or reattached cached-turn rows exhaust free blocks during
-  extension, rows suspend and on deadlock the newest active row is preempted
-  deterministically (up to `maxPreemptionsPerRow`) and recomputes its committed
-  KV prefix on resume so all rows complete without error or duplicated output;
-  only an unresolvable lone row or a row that hits `maxPreemptionsPerRow` fails
-  request-locally, releasing its blocks while healthy rows stay intact, and no
-  settlement receipt is emitted for stitched failed+retried output.
+- **AC-24 paged-pool pressure: back-pressure, idle-cache reclaim, suspend,
+  bounded no-output preemption, and immediate post-output failure (FR-CB17,
+  FR-CB1, FR-CB5, v0.3.68):** with a batch actively decoding, admission of a
+  further row whose initial prompt-plus-headroom footprint the shared paged
+  pool cannot fund is held or rejected with the FR-CB1 client-visible
+  backpressure signal, while N rows with omitted `max_tokens` admit
+  concurrently against the serve paged pool; on `capacityExceeded`, idle
+  retained paged-KV entries are evicted in LRU order before suspending,
+  preempting, or failing so a lone growing row completes past idle cached
+  turns; when concurrent or reattached cached-turn rows exhaust free blocks
+  during extension, rows suspend and on deadlock a no-output row is preempted
+  deterministically (up to `maxPreemptionsPerRow`) and resumes at `minCapacity`
+  without blocking waiting requests that fit; if every deadlocked row already
+  streamed buyer-visible output (or hit `maxPreemptionsPerRow`), the newest row
+  fails at once with `continuous_batching_pool_capacity_preempted` instead of
+  parking past the gateway idle timeout; and an unresolvable lone row fails
+  request-locally (`continuous_batching_block_extension_failed`), releasing its
+  blocks while healthy rows stay intact, with no settlement receipt emitted for
+  stitched failed+retried output.
 - **AC-24a MLX memory limit (FR-CB2, FR-CB17, FR-CB18, v0.3.36):** the limit
   computation never exceeds the working set or 90% of RAM, sits 10% below the
   working set, and keeps a resident model that fits the working set. A row

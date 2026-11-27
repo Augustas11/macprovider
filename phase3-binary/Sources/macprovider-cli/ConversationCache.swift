@@ -1335,6 +1335,36 @@ actor ConversationCache {
         }
     }
 
+    /// SPEC-038 FR-CB17 (v0.3.68): evicts one idle (not currently leased) hot
+    /// entry holding a retained paged-KV sequence in deterministic LRU order
+    /// and discards its retained blocks so the paged-KV pool can reclaim them
+    /// under capacity pressure. Returns `true` if a retained entry was evicted.
+    func evictOldestIdleRetainedPagedKV(excludingKeys: Set<String> = []) async -> Bool {
+        let candidates = entries.filter { key, entry in
+            !busyKeys.contains(key)
+                && !excludingKeys.contains(key)
+                && entry.kvCache.retainedPagedKVSequence != nil
+        }
+        guard let victim = candidates.min(by: { lhs, rhs in
+            if lhs.value.lastUsedAt != rhs.value.lastUsedAt {
+                return lhs.value.lastUsedAt < rhs.value.lastUsedAt
+            }
+            if lhs.value.tokenCount != rhs.value.tokenCount {
+                return lhs.value.tokenCount < rhs.value.tokenCount
+            }
+            return lhs.key < rhs.key
+        })?.key else {
+            return false
+        }
+        guard let evicted = entries.removeValue(forKey: victim) else {
+            return false
+        }
+        recordEviction(modelID: evicted.modelID, reason: "paged_pool_pressure")
+        await evicted.kvCache.discardRetainedPagedKV(conversationKey: victim)
+        log("event=conv_cache action=evict key_hash=\(Self.keyHash(victim)) reason=paged_pool_pressure")
+        return true
+    }
+
     private func residentBytes() -> Int {
         entries.values.reduce(0) { total, entry in
             let tensors = ConversationCacheMemoryBudget.tensorBytes(entry.kvCache)

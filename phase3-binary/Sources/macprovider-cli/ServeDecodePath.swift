@@ -292,7 +292,8 @@ extension ModelRuntime {
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
         maxDecodeRowsPerForward: Int = Int.max,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
-        contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
+        contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
+        reclaimIdleRetainedPagedKV: ContinuousBatchScheduler.IdleRetainedPagedKVReclaimer? = nil
     ) -> ContinuousBatchScheduler? {
         // SPEC-038 FR-CB9: a serial-only process runs no scheduler, so no
         // batched row, CB self-check or native-MTP round can start in it.
@@ -355,7 +356,8 @@ extension ModelRuntime {
             allocator: allocator,
             backend: backend,
             replayAuthority: replayAuthority,
-            contiguousCacheBridge: contiguousCacheBridge
+            contiguousCacheBridge: contiguousCacheBridge,
+            reclaimIdleRetainedPagedKV: reclaimIdleRetainedPagedKV
         )
     }
 
@@ -382,7 +384,8 @@ extension ModelRuntime {
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         cachedTurns: Bool,
-        gpuTurnParticipant: GPUTurnParticipant? = nil
+        gpuTurnParticipant: GPUTurnParticipant? = nil,
+        reclaimIdleRetainedPagedKV: ContinuousBatchScheduler.IdleRetainedPagedKVReclaimer? = nil
     ) async -> ContinuousBatchScheduler? {
         let nativeMTPRoundByteCapacity: Int?
         if nativeMTPDrafterContainer != nil {
@@ -412,7 +415,8 @@ extension ModelRuntime {
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 // Test backends run no MLX kernels.
                 prefillGrouping: .unconstrained,
-                replayAuthority: replayAuthority
+                replayAuthority: replayAuthority,
+                reclaimIdleRetainedPagedKV: reclaimIdleRetainedPagedKV
             )
         }
         guard case .attached(let descriptor) = decision,
@@ -434,7 +438,8 @@ extension ModelRuntime {
                 prefillStepSize: 2048, maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity, nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: .unconstrained, maxDecodeRowsPerForward: min(8, continuousBatchDecodeRowBound(cacheKinds: cacheKinds)),
-                replayAuthority: replayAuthority
+                replayAuthority: replayAuthority,
+                reclaimIdleRetainedPagedKV: reclaimIdleRetainedPagedKV
             )
         }
         // A hybrid (Qwen3.6) row retains its paged KV only when cached-turn
@@ -497,7 +502,8 @@ extension ModelRuntime {
             prefillGrouping: prefillGrouping,
             maxDecodeRowsPerForward: continuousBatchDecodeRowBound(cacheKinds: cacheKinds),
             replayAuthority: replayAuthority,
-            contiguousCacheBridge: contiguousCacheBridge
+            contiguousCacheBridge: contiguousCacheBridge,
+            reclaimIdleRetainedPagedKV: reclaimIdleRetainedPagedKV
         )
     }
 

@@ -4820,6 +4820,7 @@ maxTokens: 1,
             admissionCapability: nil,
             reasonIfDisabled: candidateNativeMTPDisabledReason
         )
+        let idleRetainedCache = self.conversationCache
         self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
             tuple: self.continuousBatchingRequestedTuple(),
@@ -4841,7 +4842,10 @@ maxTokens: 1,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
             cachedTurns: self.effectiveContinuousBatchingCachedTurns,
-            gpuTurnParticipant: self.gpuTurnParticipant
+            gpuTurnParticipant: self.gpuTurnParticipant,
+            reclaimIdleRetainedPagedKV: { excluded in
+                await idleRetainedCache.evictOldestIdleRetainedPagedKV(excludingKeys: excluded)
+            }
         )
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         PagedKVLabTrace.emit("config_route", [
@@ -5179,6 +5183,7 @@ maxTokens: 1,
         self.currentNativeVisionProfile = testNativeVisionProfile
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
+        let idleRetainedCache = self.conversationCache
         let continuousBatchScheduler = Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
             tuple: requestedTuple,
@@ -5201,7 +5206,10 @@ maxTokens: 1,
             prefillGrouping: continuousBatchPrefillGrouping
                 ?? (container == nil ? .unconstrained : .ungrouped),
             maxDecodeRowsPerForward: container == nil ? Int.max : Self.continuousBatchDecodeRowBound(),
-            replayAuthority: replayAuthority
+            replayAuthority: replayAuthority,
+            reclaimIdleRetainedPagedKV: { excluded in
+                await idleRetainedCache.evictOldestIdleRetainedPagedKV(excludingKeys: excluded)
+            }
         )
         self.continuousBatchScheduler = continuousBatchScheduler
         self.continuousBatchingDurableReplayAuthorityAvailable =
@@ -8211,7 +8219,10 @@ maxTokens: 1,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
             cachedTurns: effectiveContinuousBatchingCachedTurns,
-            gpuTurnParticipant: gpuTurnParticipant
+            gpuTurnParticipant: gpuTurnParticipant,
+            reclaimIdleRetainedPagedKV: { [conversationCache] excluded in
+                await conversationCache.evictOldestIdleRetainedPagedKV(excludingKeys: excluded)
+            }
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
