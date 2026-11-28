@@ -19,9 +19,19 @@ if [ "${JOB_CHECK:-0}" = 1 ]; then
 fi
 export DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}"
 free_gb() { echo $(( ( $(vm_stat | awk '/Pages free/ {gsub("\\.","",$3); f=$3} /Pages inactive/ {gsub("\\.","",$3); i=$3} /Pages purgeable/ {gsub("\\.","",$3); p=$3} END {print f+i+p}') * 16384 ) / 1073741824 )); }
+# Serve refuses to start when the installed signed compatibility set names another provider_cli
+# version, so both lab binaries carry the live install's version (read from the set, never pinned
+# here; the trees are this run's throwaway copies). --lab-fence needs the lab-harness define.
+LIVE_SET=${LIVE_SET:-$HOME/macprovider/compatibility-set.json}
+LIVE_VERSION=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["signed"]["components"]["provider_cli"]["version"])' "$LIVE_SET" 2>/dev/null)
+case "$LIVE_VERSION" in ""|*[!0-9.]*) echo "$(date +%T) BLOCKER: cannot read provider_cli version from $LIVE_SET"; echo "$(date +%T) JOB_FAIL"; exit 1 ;; esac
+echo "$(date +%T) LIVE_VERSION $LIVE_VERSION"
 build() {  # TREE NAME
   echo "$(date +%T) BUILD_START $2"
-  ( cd "$1/phase3-binary" && swift build -c release --product macprovider-cli ) > "$R/build-$2.log" 2>&1 \
+  local vsrc="$1/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+  sed -i '' "s/static let binaryVersion = \"[0-9.]*\"/static let binaryVersion = \"$LIVE_VERSION\"/" "$vsrc"
+  grep -q "static let binaryVersion = \"$LIVE_VERSION\"" "$vsrc" || { echo "$(date +%T) BUILD_FAIL $2 version pin"; return 1; }
+  ( cd "$1/phase3-binary" && swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS ) > "$R/build-$2.log" 2>&1 \
     && bash "$1/phase3-binary/scripts/build-mlx-metallib.sh" "$1/phase3-binary/.build/release" > "$R/metallib-$2.log" 2>&1 \
     || { echo "$(date +%T) BUILD_FAIL $2"; tail -25 "$R/build-$2.log" "$R/metallib-$2.log"; return 1; }
   echo "$(date +%T) BUILD_OK $2 $(shasum -a 256 "$1/phase3-binary/.build/release/mlx.metallib" | cut -c1-16)"
