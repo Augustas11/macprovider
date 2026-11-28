@@ -50,9 +50,9 @@ class InklingRehearsalReleaseTests(unittest.TestCase):
             "live_executable_cdhash": "c" * 40,
             "provider_cli_version": "1.8.301-lab",
             "metallib_sha256": "d" * 64,
-            "hardware_class": "apple-m5",
+            "hardware_class": "apple-silicon:Apple M5:ram-32gb",
             "ram_bytes": 32 * 1024 * 1024 * 1024,
-            "kernel_identifier": "paged_kv_v1_fp16",
+            "kernel_identifier": "macprovider_paged_kv_gather_v1",
             "cb_tokenizer_sha256": "e" * 64,
             "chat_template_sha256": "f" * 64,
         }
@@ -70,6 +70,8 @@ class InklingRehearsalReleaseTests(unittest.TestCase):
             "decode_path_digest": rehearsal.current_decode_path_digest(),
             "metallib_sha256": "d" * 64,
             "hardware_class": "apple-m5",
+            "cb_hardware_class": "apple-silicon:Apple M5:ram-32gb",
+            "cb_kernel_identifier": "macprovider_paged_kv_gather_v1",
             "ram_bytes": 32 * 1024 * 1024 * 1024,
             "quantization": {
                 "kind": "mlx_oq4e",
@@ -156,6 +158,7 @@ class InklingRehearsalReleaseTests(unittest.TestCase):
             self.assertEqual(entry["decode_path_digest"], rehearsal.current_decode_path_digest())
             self.assertEqual(entry["tokenizer_sha256"], identity["tokenizer_sha256"])
             self.assertEqual(entry["mtp_manifest_sha256"], identity["mtp_manifest_sha256"])
+            self.assertEqual(entry["hardware_class"], "apple-m5")
             self.assertEqual(
                 entry["quantization"]["representation_manifest_sha256"],
                 identity["quantization"]["representation_manifest_sha256"],
@@ -175,6 +178,11 @@ class InklingRehearsalReleaseTests(unittest.TestCase):
             cb = json.loads((catalog_dir / "continuous-batching-policy.json").read_text("utf-8"))
             self.assertEqual(cb["entries"][0]["model_key"], rehearsal.INKLING_MODEL_KEY)
             self.assertEqual(cb["entries"][0]["cache_class"], "mixed")
+            self.assertEqual(cb["entries"][0]["hardware_class"], "apple-silicon:Apple M5:ram-32gb")
+            self.assertEqual(cb["entries"][0]["kernel_identifier"], "macprovider_paged_kv_gather_v1")
+            self.assertEqual(cb["entries"][0]["max_served_slots"], 2)
+            self.assertEqual(summary["cb_policy_entry"]["max_served_slots"], 2)
+            self.assertEqual(summary["cb_policy_entry"]["hardware_class"], "apple-silicon:Apple M5:ram-32gb")
 
     def test_inkling_production_inputs_share_builder_and_build_valid_multi_entry_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,7 +228,12 @@ class InklingRehearsalReleaseTests(unittest.TestCase):
             self.assertIn(rehearsal.INKLING_MODEL_KEY, [e["model_id"] for e in bank["entries"]])
 
             cb_src = json.loads((out_dir / "continuous-batching-policy-source.json").read_text("utf-8"))
-            self.assertIn(rehearsal.INKLING_MODEL_KEY, [e["model_key"] for e in cb_src["entries"]])
+            inkling_cb_entries = [e for e in cb_src["entries"] if e["model_key"] == rehearsal.INKLING_MODEL_KEY]
+            self.assertEqual(len(inkling_cb_entries), 1)
+            self.assertEqual(inkling_cb_entries[0]["hardware_class"], "apple-silicon:Apple M5:ram-32gb")
+            self.assertEqual(inkling_cb_entries[0]["kernel_identifier"], "macprovider_paged_kv_gather_v1")
+            self.assertEqual(inkling_cb_entries[0]["max_served_slots"], 2)
+            self.assertEqual(summary["cb_policy_entry"]["max_served_slots"], 2)
 
 
 if __name__ == "__main__":

@@ -1262,6 +1262,8 @@ struct ModelsNativeMTPIdentity: Equatable {
     let decodePathDigest: String
     let metallibSHA256: String?
     let hardwareClass: String
+    let cbHardwareClass: String
+    let cbKernelIdentifier: String
     let ramBytes: Int64
     let quantizationKind: String
     let blockSizeElements: Int?
@@ -1324,7 +1326,9 @@ struct ModelsNativeMTPIdentity: Equatable {
         let artifactHash: String? = includeArtifactHash
             ? (try? ModelArtifactVerifier.inspectCanonicalArtifact(directory: targetURL).sha256)
             : nil
-        let chip = MachineFingerprinter().sample().chip
+        let fingerprint = MachineFingerprinter().sample()
+        let chip = fingerprint.chip.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cbHardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
         return ModelsNativeMTPIdentity(
             embedded: observation.embedded,
             mtpHeadCount: observation.target.mtpPredictionLayerCount,
@@ -1336,6 +1340,8 @@ struct ModelsNativeMTPIdentity: Equatable {
             decodePathDigest: DecodePathIdentity.digest,
             metallibSHA256: ModelRuntime.nativeMTPRuntimeMetallibSHA256(),
             hardwareClass: NativeMTPAdmissionSidecar.canonicalHardwareClass(chip),
+            cbHardwareClass: cbHardwareClass,
+            cbKernelIdentifier: PagedKVGatherKernel.registeredKernelName,
             ramBytes: Int64(ProcessInfo.processInfo.physicalMemory),
             quantizationKind: kind,
             blockSizeElements: kind == "base" ? nil : representation.groupSize,
@@ -1359,6 +1365,8 @@ struct ModelsNativeMTPIdentity: Equatable {
             "decode_path_digest": decodePathDigest,
             "metallib_sha256": nullable(metallibSHA256),
             "hardware_class": hardwareClass,
+            "cb_hardware_class": cbHardwareClass,
+            "cb_kernel_identifier": cbKernelIdentifier,
             "ram_bytes": ramBytes,
             "quantization": [
                 "kind": quantizationKind,
@@ -1382,6 +1390,8 @@ struct ModelsNativeMTPIdentity: Equatable {
             "decode_path_digest=\(decodePathDigest)",
             "metallib_sha256=\(metallibSHA256 ?? "unavailable")",
             "hardware_class=\(hardwareClass)",
+            "cb_hardware_class=\(cbHardwareClass)",
+            "cb_kernel_identifier=\(cbKernelIdentifier)",
             "ram_bytes=\(ramBytes)",
             "quantization.kind=\(quantizationKind)",
             "quantization.representation_manifest_sha256=\(representationManifestSHA256)",

@@ -155,9 +155,13 @@ final class NativeMTPInkling2ObservationTests: XCTestCase {
             XCTAssertNotNil(identity.chatTemplateSHA256)
             XCTAssertNotNil(identity.artifactHash)
             XCTAssertEqual(identity.decodePathDigest, DecodePathIdentity.digest)
+            XCTAssertTrue(identity.cbHardwareClass.hasPrefix("apple-silicon:"))
+            XCTAssertEqual(identity.cbKernelIdentifier, PagedKVGatherKernel.registeredKernelName)
 
             let json = identity.jsonObject
             XCTAssertEqual(json["schema"] as? String, ModelsNativeMTPIdentity.schemaVersion)
+            XCTAssertEqual(json["cb_hardware_class"] as? String, identity.cbHardwareClass)
+            XCTAssertEqual(json["cb_kernel_identifier"] as? String, PagedKVGatherKernel.registeredKernelName)
             let quant = try XCTUnwrap(json["quantization"] as? [String: Any])
             XCTAssertEqual(quant["kind"] as? String, "mlx_oq4e")
             XCTAssertEqual(quant["representation_manifest_sha256"] as? String, expectedRep.manifestSHA256)

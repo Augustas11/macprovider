@@ -68,6 +68,8 @@ INKLING_TARGET = (
     "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34",
 )
 INKLING_DEFAULT_PROMPT_TOKEN_IDS = [791, 6864, 315, 9822, 374, 220]
+INKLING_CB_DEFAULT_MAX_SERVED_SLOTS = 2
+INKLING_CB_DEFAULT_KERNEL_IDENTIFIER = "macprovider_paged_kv_gather_v1"
 TOKENIZER_SHA256 = "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
 MTP_MANIFEST_SHA256 = "7b38a336fa246a285ee23cc990351989bf2ee6c040506a2b793ee24e463f35a7"
 FACT_KEYS = {
@@ -76,7 +78,6 @@ FACT_KEYS = {
 }
 INKLING_FACT_KEYS = {
     "source_commit", "binary_sha256", "live_executable_cdhash", "provider_cli_version",
-    "metallib_sha256", "hardware_class", "kernel_identifier",
 }
 
 
@@ -524,6 +525,56 @@ def _resolve_inkling_artifact_hash(facts: dict, identity: dict) -> str:
     return str(identity.get("artifact_hash") or facts.get("artifact_hash") or INKLING_TARGET[2])
 
 
+def _canonical_native_hardware_class(raw: str) -> str:
+    """Normalizes either a CB hardware_class (`apple-silicon:Apple M3 Ultra:ram-256gb`)
+    or chip name into the native-MTP canonical form (`apple-m3-ultra`)."""
+    text = raw.strip()
+    if text.startswith("apple-silicon:"):
+        parts = text.split(":")
+        if len(parts) >= 2 and parts[1].strip():
+            text = parts[1].strip()
+    lowered = text.lower()
+    out: list[str] = []
+    prev_dash = False
+    for ch in lowered:
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    return "".join(out).strip("-")
+
+
+def _resolve_inkling_native_hardware_class(facts: dict, identity: dict) -> str:
+    explicit = facts.get("native_mtp_hardware_class")
+    if isinstance(explicit, str) and explicit.strip():
+        return _canonical_native_hardware_class(explicit)
+    observed = identity.get("hardware_class")
+    if isinstance(observed, str) and observed.strip():
+        return _canonical_native_hardware_class(observed)
+    fallback = facts.get("hardware_class")
+    if isinstance(fallback, str) and fallback.strip():
+        return _canonical_native_hardware_class(fallback)
+    raise SystemExit("inkling tuple requires hardware_class in facts or CLI identity")
+
+
+def _resolve_inkling_cb_hardware_class(facts: dict, identity: dict) -> str:
+    """Resolves the exact CB policy hardware_class (`apple-silicon:<chip>:ram-<N>gb`)
+    checked by `ModelRuntime.swift` (`PagedKVRuntimeMeasurement`)."""
+    for candidate in (
+        facts.get("cb_hardware_class"),
+        facts.get("hardware_class") if str(facts.get("hardware_class") or "").startswith("apple-silicon:") else None,
+        identity.get("cb_hardware_class"),
+    ):
+        if isinstance(candidate, str) and candidate.strip().startswith("apple-silicon:"):
+            return candidate.strip()
+    raise SystemExit(
+        "inkling CB policy entry requires cb_hardware_class (format `apple-silicon:<chip>:ram-<N>gb`) "
+        "from `models native-mtp-identity --json` or facts"
+    )
+
+
 def inkling_tuple_input(
     facts: dict,
     identity: dict,
@@ -549,9 +600,7 @@ def inkling_tuple_input(
     resolved_metallib = facts.get("metallib_sha256") or identity.get("metallib_sha256")
     if not isinstance(resolved_metallib, str) or len(resolved_metallib) != 64:
         raise SystemExit("inkling tuple requires a 64-hex metallib_sha256 in facts or CLI identity")
-    resolved_hw = str(facts.get("hardware_class") or identity.get("hardware_class") or "")
-    if not resolved_hw:
-        raise SystemExit("inkling tuple requires hardware_class in facts or CLI identity")
+    resolved_hw = _resolve_inkling_native_hardware_class(facts, identity)
     ram_bytes = int(facts.get("ram_bytes") or identity.get("ram_bytes") or (32 * 1024 * 1024 * 1024))
     quant_info = identity.get("quantization") or {}
     rep_sha = quant_info.get("representation_manifest_sha256")
@@ -710,6 +759,7 @@ def inkling_cb_policy_entry(
     *,
     evidence_id: str = "inkling2-native-mtp-cb-rehearsal-test-key",
     rollout: str = "canary",
+    max_served_slots: int | None = None,
 ) -> dict:
     artifact_hash = _resolve_inkling_artifact_hash(facts, identity)
     cb_tok = facts.get("cb_tokenizer_sha256") or identity.get("cb_tokenizer_sha256") or facts.get("tokenizer_sha256")
@@ -718,6 +768,30 @@ def inkling_cb_policy_entry(
         raise SystemExit("inkling CB entry requires 64-hex cb_tokenizer_sha256 / tokenizer_sha256")
     if not isinstance(chat_tmpl, str) or len(chat_tmpl) != 64:
         raise SystemExit("inkling CB entry requires 64-hex chat_template_sha256")
+    cb_hw = _resolve_inkling_cb_hardware_class(facts, identity)
+    metallib = facts.get("metallib_sha256") or identity.get("metallib_sha256")
+    if not isinstance(metallib, str) or len(metallib) != 64:
+        raise SystemExit("inkling CB entry requires 64-hex metallib_sha256")
+    kernel_id = str(
+        facts.get("kernel_identifier")
+        or identity.get("cb_kernel_identifier")
+        or INKLING_CB_DEFAULT_KERNEL_IDENTIFIER
+    )
+    resolved_slots = (
+        max_served_slots
+        if max_served_slots is not None
+        else (
+            facts["max_served_slots"]
+            if "max_served_slots" in facts and facts["max_served_slots"] is not None
+            else INKLING_CB_DEFAULT_MAX_SERVED_SLOTS
+        )
+    )
+    if not catalog_release.valid_max_served_slots(resolved_slots):
+        raise SystemExit(
+            f"inkling CB entry max_served_slots must be an integer in 1..{catalog_release.CB_MAX_SERVED_SLOTS_LIMIT}, "
+            f"got {resolved_slots!r}"
+        )
+    resolved_rollout = str(facts.get("cb_rollout") or rollout)
     return {
         "model_key": INKLING_MODEL_KEY,
         "model_id": INKLING_MODEL_KEY,
@@ -727,10 +801,11 @@ def inkling_cb_policy_entry(
         "cache_class": "mixed",
         "kv_dtype": "fp16",
         "requires_moe": True,
-        "hardware_class": str(facts.get("hardware_class") or identity.get("hardware_class")),
-        "metallib_sha256": str(facts.get("metallib_sha256") or identity.get("metallib_sha256")),
-        "kernel_identifier": str(facts["kernel_identifier"]),
-        "rollout": rollout,
+        "hardware_class": cb_hw,
+        "metallib_sha256": metallib,
+        "kernel_identifier": kernel_id,
+        "max_served_slots": resolved_slots,
+        "rollout": resolved_rollout,
         "cached_turns_accepted": False,
         "provenance": {
             "source": "operator_review",
@@ -776,11 +851,15 @@ def build_inkling(
     skip_artifact_hash: bool = False,
     decode_path_digest: str | None = None,
     prompt_token_ids: list[int] | None = None,
+    cb_max_served_slots: int | None = None,
+    cb_rollout: str = "canary",
     key_id: str = INKLING_KEY_ID,
     trusted_keys_path: pathlib.Path = TRUSTED_KEYS_PATH,
 ) -> dict:
     """Builds a throwaway-key static-feed release + 24h revocation slots for
-    `thinkingmachines/inkling-2-mini` (`inkling2_dspark_v1`)."""
+    `thinkingmachines/inkling-2-mini` carrying both the Inkling CB policy entry
+    (`max_served_slots` for the 32 GB tier by default) and the `inkling2_dspark_v1`
+    native-MTP admission tuple."""
     missing = INKLING_FACT_KEYS - facts.keys()
     if missing:
         raise SystemExit(f"facts file is missing {sorted(missing)}")
@@ -814,9 +893,15 @@ def build_inkling(
     manifest = sidecar_gen.build_projection({INKLING_MODEL_KEY: proj_entry})
     challenge = inkling_challenge_entry(facts, resolved_identity, prompt_token_ids=prompt_token_ids)
     bank = inkling_challenge_bank(release_id, now, key_id, [challenge])
+    cb_entry = inkling_cb_policy_entry(
+        facts,
+        resolved_identity,
+        rollout=cb_rollout,
+        max_served_slots=cb_max_served_slots,
+    )
     cb_source = {
         "schema_version": catalog_release.CB_POLICY_SOURCE_SCHEMA,
-        "entries": [inkling_cb_policy_entry(facts, resolved_identity)],
+        "entries": [cb_entry],
     }
 
     with RehearsalRelease(
@@ -877,6 +962,8 @@ def build_inkling(
                 setattr(catalog_release, name, value)
         sidecar = (out / "native-mtp-admission.json").read_bytes()
         sidecar_ident = catalog_release.NATIVE_MTP_SIDECAR_GENERATOR.identity(sidecar)
+        published_cb = json.loads((out / "continuous-batching-policy.json").read_text("utf-8"))
+        published_cb_entry = published_cb["entries"][0]
 
     slot_start = now.replace(minute=now.minute - now.minute % 10, second=0, microsecond=0)
     subprocess.run([
@@ -902,6 +989,14 @@ def build_inkling(
         "observed_identity": resolved_identity,
         "sidecar_sha256": sidecar_ident["sidecar_sha256"],
         "native_mtp_admission_tuple_sha256": sidecar_ident["native_mtp_admission_tuple_sha256"],
+        "cb_policy_entry": {
+            "model_key": published_cb_entry["model_key"],
+            "hardware_class": published_cb_entry["hardware_class"],
+            "kernel_identifier": published_cb_entry["kernel_identifier"],
+            "max_served_slots": published_cb_entry["max_served_slots"],
+            "rollout": published_cb_entry["rollout"],
+            "tuple_sha256": published_cb_entry["tuple_sha256"],
+        },
         "artifact_manifest_sha256": sha256(manifest),
         "challenge_bank_sha256": sha256(bank),
         "catalog_files": {p.name: sha256(p.read_bytes()) for p in sorted((work / "catalog").iterdir())},
@@ -922,6 +1017,8 @@ def build_inkling_production_inputs(
     skip_artifact_hash: bool = False,
     decode_path_digest: str | None = None,
     prompt_token_ids: list[int] | None = None,
+    cb_max_served_slots: int | None = None,
+    cb_rollout: str = "canary",
     catalog_dir: pathlib.Path = CATALOG,
     signer_key_id: str = "streamvc-autotune-static-v5",
     release_id: str | None = None,
@@ -1011,15 +1108,17 @@ def build_inkling_production_inputs(
 
     # 5. Merge continuous-batching-policy-source.json
     existing_cb = json.loads((catalog_dir / "continuous-batching-policy-source.json").read_text("utf-8"))
-    kept_cb = [
-        e for e in existing_cb.get("entries", [])
-        if not (e.get("model_key") == INKLING_MODEL_KEY and e.get("hardware_class") == facts["hardware_class"])
-    ]
     inkling_cb = inkling_cb_policy_entry(
         facts,
         resolved_identity,
         evidence_id=str(facts.get("cb_evidence_id") or "inkling2-native-mtp-cb-production"),
+        rollout=cb_rollout,
+        max_served_slots=cb_max_served_slots,
     )
+    kept_cb = [
+        e for e in existing_cb.get("entries", [])
+        if not (e.get("model_key") == INKLING_MODEL_KEY and e.get("hardware_class") == inkling_cb["hardware_class"])
+    ]
     merged_cb = {
         "schema_version": catalog_release.CB_POLICY_SOURCE_SCHEMA,
         "entries": kept_cb + [inkling_cb],
@@ -1054,6 +1153,13 @@ def build_inkling_production_inputs(
         "artifact_manifest_sha256": sha256(merged_manifest),
         "challenge_bank_sha256": sha256(merged_bank),
         "sidecar_identity": sidecar_ident,
+        "cb_policy_entry": {
+            "model_key": inkling_cb["model_key"],
+            "hardware_class": inkling_cb["hardware_class"],
+            "kernel_identifier": inkling_cb["kernel_identifier"],
+            "max_served_slots": inkling_cb["max_served_slots"],
+            "rollout": inkling_cb["rollout"],
+        },
         "pending_evidence_placeholders": has_placeholder,
         "out_dir": str(out_dir),
     }
@@ -1072,6 +1178,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--decode-path-digest", type=str, default=None)
     parser.add_argument("--prompt-token-ids", type=str, default=None,
                         help="Comma-separated prompt token IDs for the Inkling serial self-check challenge.")
+    parser.add_argument("--cb-max-served-slots", type=int, default=None,
+                        help="Signed CB max_served_slots for the Inkling policy entry (defaults to 2 for the 32 GB tier).")
+    parser.add_argument("--cb-rollout", choices=("canary", "on"), default="canary")
     parser.add_argument("--key-id", type=str, default=None)
     parser.add_argument("--release-id", type=str, default=None)
     args = parser.parse_args(argv)
@@ -1101,6 +1210,8 @@ def main(argv: list[str] | None = None) -> int:
             skip_artifact_hash=args.skip_artifact_hash,
             decode_path_digest=args.decode_path_digest,
             prompt_token_ids=prompt_tokens,
+            cb_max_served_slots=args.cb_max_served_slots,
+            cb_rollout=args.cb_rollout,
             signer_key_id=args.key_id or "streamvc-autotune-static-v5",
             release_id=args.release_id,
         )
@@ -1117,9 +1228,14 @@ def main(argv: list[str] | None = None) -> int:
         skip_artifact_hash=args.skip_artifact_hash,
         decode_path_digest=args.decode_path_digest,
         prompt_token_ids=prompt_tokens,
+        cb_max_served_slots=args.cb_max_served_slots,
+        cb_rollout=args.cb_rollout,
         key_id=args.key_id or INKLING_KEY_ID,
     )
-    print(json.dumps({k: summary[k] for k in ("release_id", "key_id", "sidecar_sha256", "revocation_slots")}))
+    print(json.dumps({
+        k: summary[k]
+        for k in ("release_id", "key_id", "decode_path_digest", "sidecar_sha256", "cb_policy_entry", "revocation_slots")
+    }))
     return 0
 
 
