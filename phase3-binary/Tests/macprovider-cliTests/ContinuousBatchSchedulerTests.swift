@@ -5382,8 +5382,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
         try await eventually { await backend.decodeCallCount() == 1 }
-        // Token `2` is buffered as a prefix of stop sequence `[2, 99]`, so
-        // `z-preempt` has no buyer-visible output yet when deadlock strikes.
+        // Tokens `[2, 3]` are buffered as a prefix of stop sequence `[2, 3, 99]`,
+        // so `z-preempt` has no buyer-visible output yet when its second decode
+        // step needs a second 8-token block and deadlock strikes.
         let preempted = Task {
             try await scheduler.submit(
                 .init(
@@ -5391,7 +5392,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                     conversationKey: "",
                     promptTokens: [2, 3, 4, 5, 6, 7, 8],
                     maxOutputTokens: 4,
-                    stopTokenSequences: [[2, 99]]
+                    stopTokenSequences: [[2, 3, 99]]
                 ),
                 tokenSink: { zRecorder.append($0) }
             )
@@ -5468,7 +5469,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(aResult.outputTokens, [8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
         XCTAssertEqual(zResult.terminalStatus, .requestFailed)
         XCTAssertEqual(zResult.errorCode, "continuous_batching_pool_capacity_preempted")
-        XCTAssertEqual(zRecorder.events().map(\.token), [2])
+        XCTAssertEqual(zRecorder.events().map(\.token), [2, 3])
         let freeBlocks = await allocator.freeBlockCount()
         XCTAssertEqual(freeBlocks, 2)
         let metrics = await scheduler.metrics()
@@ -5620,7 +5621,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 conversationKey: "",
                 promptTokens: [2, 3, 4, 5, 6, 7, 8],
                 maxOutputTokens: 4,
-                stopTokenSequences: [[2, 99]]
+                stopTokenSequences: [[2, 3, 99]]
             ))
         }
         try await eventually { await scheduler.metrics().waitingCount == 1 }
