@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.92` | `1ed7853d27698b037d582aa2f00fc827ae4cca84` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.93` | `e9146798dc4e0e73639e193113187752fdc8e322` | `3.33.0` (`ca661dc6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
@@ -46,6 +46,12 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-28 the LM row is `3.33.0-macprovider.93` (`e914679`), on
+`3.33.0-macprovider.92` (#2524): GLM-5.3-Flash KDA prefill runs the conv, SiLU
+and q/k L2 norm, and the gated RMSNorm, as two fused bit-exact Metal kernels
+(identical greedy tokens; TTFT -3.5% at 3,673 and -3.1 to -3.6% at 14,126
+prompt tokens against both controls). No Swift, core or C pin changes.
 
 As of 2026-11-26 the LM row is `3.33.0-macprovider.92` (`1ed7853`), on
 `3.33.0-macprovider.91` (#2505): Inkling 2 continuous batching: each batched
