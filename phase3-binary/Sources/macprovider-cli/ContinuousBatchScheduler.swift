@@ -6770,9 +6770,10 @@ actor ContinuousBatchScheduler {
         while true {
             do {
                 return try await allocator.extend(handle, by: tokens)
-            } catch PagedKVAllocatorError.capacityExceeded {
+            } catch let error as PagedKVAllocatorError {
+                guard case .capacityExceeded = error else { throw error }
                 guard await reclaimIdleRetainedPagedKVForPressure(), !cleanupFailedClosed else {
-                    throw PagedKVAllocatorError.capacityExceeded
+                    throw error
                 }
             }
         }
@@ -6792,9 +6793,10 @@ actor ContinuousBatchScheduler {
                     maxLogicalTokens: maxLogicalTokens,
                     initialTokens: initialTokens
                 )
-            } catch PagedKVAllocatorError.capacityExceeded {
+            } catch let error as PagedKVAllocatorError {
+                guard case .capacityExceeded = error else { throw error }
                 guard await reclaimIdleRetainedPagedKVForPressure(), !cleanupFailedClosed else {
-                    throw PagedKVAllocatorError.capacityExceeded
+                    throw error
                 }
             }
         }
