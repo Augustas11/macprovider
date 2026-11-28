@@ -28,6 +28,13 @@ build() {  # TREE NAME
 }
 build "$BASE_SRC" base || { echo "$(date +%T) BLOCKER: base build failed"; echo "$(date +%T) JOB_FAIL"; exit 1; }
 build "$SRC" new || { echo "$(date +%T) BLOCKER: new build failed"; echo "$(date +%T) JOB_FAIL"; exit 1; }
+# The required-kernel manifest names the core and mlx-swift revisions: re-derive it from the new build's
+# mlx-swift checkout and check the built metallib carries every kernel (copied into phase3-binary at merge).
+/usr/bin/python3 -I "$SRC/scripts/mlx-metallib-kernels.py" derive --mlx-swift-checkout "$SRC/phase3-binary/.build/checkouts/mlx-swift" \
+    --output "$R/mlx-metallib-required-kernels.json" > "$R/metallib-kernels.log" 2>&1 \
+  && /usr/bin/python3 -I "$SRC/scripts/mlx-metallib-kernels.py" check --manifest "$R/mlx-metallib-required-kernels.json" \
+    "$SRC/phase3-binary/.build/release/mlx.metallib" >> "$R/metallib-kernels.log" 2>&1
+echo "$(date +%T) METALLIB_KERNELS rc=$?"
 p=$(ls -d "$MODELS_ROOT/$GLM_DIR"/*/* 2>/dev/null | head -1)
 [ -n "$p" ] || { echo "$(date +%T) BLOCKER: MODEL_MISSING $GLM_DIR"; echo "$(date +%T) JOB_FAIL"; exit 1; }
 f=$(free_gb); echo "$(date +%T) MEMORY free_gb=$f floor=${MIN_FREE_GB:-200}"

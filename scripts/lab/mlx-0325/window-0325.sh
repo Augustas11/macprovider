@@ -32,8 +32,8 @@ RES_LOCAL=$POC/scratchpad/mlx-0325/results/$RUN_ID
 LOCKSH=$POC/scratchpad/studio-lock.sh
 OWNER=claude-upstream-mlx0325
 STALL_MIN=30
-SHIP_PATHS=(phase3-binary scripts/lab/mlx-0325 scripts/lab/parity-grid scripts/lab/engine-333)
-PROGRESS='^[0-9:]+ (BLOCKER|JOB_|STEP|BUILD_|GRID_|MODEL|MEMORY)|^(SUMMARY|GRID_LINE|MLX0325_)'
+SHIP_PATHS=(phase3-binary scripts/lab/mlx-0325 scripts/lab/parity-grid scripts/lab/engine-333 scripts/mlx-metallib-kernels.py)
+PROGRESS='^[0-9:]+ (BLOCKER|JOB_|STEP|BUILD_|GRID_|MODEL|MEMORY|METALLIB|REGEN)|^REGEN_DIFF|^(SUMMARY|GRID_LINE|MLX0325_)'
 SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 macstudio)
 mkdir -p "$(dirname "$LOG")"
 exec 3>&2

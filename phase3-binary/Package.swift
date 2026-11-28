@@ -302,9 +302,13 @@ let package = Package(
         // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
         // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
         // dd68f1d2d; mlx-c unchanged).
+        // mlx v0.32.5 fork sync: branch macprovider/v0.32.5 (0d9aaeeb) is
+        // 1ed7853d with only the mlx-swift pin moved to be16992 (core 4ff2db419:
+        // the fork stack merged with upstream mlx v0.32.5; mlx-c 715780d). Tags
+        // are cut at merge.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "1ed7853d27698b037d582aa2f00fc827ae4cca84"
+            revision: "0d9aaeeba002d8e814cdf0661d74dfbf3ef5294d"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

@@ -13,7 +13,7 @@
 #   swift_tests SmallMRouteTests, QmmTileTests and the quantization/fast suites
 # Ends with JOB_PASS or JOB_FAIL. JOB_CHECK=1 only validates the knobs.
 set -uo pipefail
-: "${RUN_ID:?}" "${MLX_REV:?}" "${MLXC_REV:?}" "${SWIFT_REV:?}"
+: "${RUN_ID:?}" "${SRC:?}" "${MLX_REV:?}" "${MLXC_REV:?}" "${SWIFT_REV:?}"
 [ "${JOB_CHECK:-0}" = 1 ] && { echo "JOB_CHECK ok MLX_REV=$MLX_REV MLXC_REV=$MLXC_REV SWIFT_REV=$SWIFT_REV"; exit 0; }
 L=${LAB:-$HOME/lab-mlx-0325}; R="$L/results/$RUN_ID"; mkdir -p "$R"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}"
@@ -41,7 +41,7 @@ regen() {
   fetch Source/Cmlx/mlx https://github.com/Augustas11/mlx.git "$MLX_REV" || return 1
   fetch Source/Cmlx/mlx-c https://github.com/Augustas11/mlx-c.git "$MLXC_REV" || return 1
   rm -rf build && zsh ./tools/update-mlx.sh || return 1
-  git status --short | head -50
+  echo "REGEN_DIFF_FILES $(git status --short -- Source | grep -v 'Source/Cmlx/mlx$\|Source/Cmlx/mlx-c$' | wc -l | tr -d ' ')"; git status --short | head -50
   # every file update-mlx.sh changed, added or deleted, for the Mac to commit
   git ls-files -d > "$R/regen-deleted.txt"
   git ls-files -m -o --exclude-standard -- Source | grep -v '^Source/Cmlx/mlx/\|^Source/Cmlx/mlx-c/' > "$R/regen-files.txt"
@@ -50,11 +50,16 @@ regen() {
 }
 swift_build() { cd "$L/mlx-swift" && swift build --build-tests; }
 swift_tests() {
+  # swift build ships no mlx.metallib: build it from this checkout next to the test binary (window 1
+  # of engine-333 hit the same "Failed to load the default metallib").
+  local bundle="$L/mlx-swift/.build/arm64-apple-macosx/debug/mlx-swiftPackageTests.xctest/Contents/MacOS"
+  MLX_SWIFT_CHECKOUT="$L/mlx-swift" bash "$SRC/phase3-binary/scripts/build-mlx-metallib.sh" "$bundle" || return 1
+  cp -f "$bundle/mlx.metallib" "$L/mlx-swift/.build/arm64-apple-macosx/debug/mlx.metallib"
   cd "$L/mlx-swift" && swift test --skip-build --filter 'SmallMRouteTests|QmmTileTests|QuantizationTests|MLXFastKernelTests|FP8Tests'
 }
 step core core && step core_small core_small || fail=1
 [ -x "$L/mlx/build/tests/tests" ] && { step core_all core_all || echo "$(date +%T) core_all failed: reported, not gating"; }
 step regen regen && step swift_build swift_build && step swift_tests swift_tests || fail=1
-grep -hE "test cases:|Executed .* tests|Test run with" "$R"/core_small.log "$R"/core_all.log "$R"/swift_tests.log 2>/dev/null | sed 's/^/SUMMARY /'
+grep -hE "test cases:|Executed .* tests|Test run with|REGEN_DIFF_FILES" "$R"/core_small.log "$R"/core_all.log "$R"/regen.log "$R"/swift_tests.log 2>/dev/null | sed 's/^/SUMMARY /'
 [ $fail = 0 ] && echo "$(date +%T) JOB_PASS" || echo "$(date +%T) JOB_FAIL"
 exit $fail
