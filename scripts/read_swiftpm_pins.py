@@ -42,13 +42,12 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.33.0-macprovider.92 (#2505) on 3.33.0-macprovider.91: Inkling 2 continuous
-# batching: each batched row attends through the model's own one-row attention
-# over its paged cache, and batched one-token rows route experts, take the
-# one-row projection spans and the close-gap verify head as they do alone, so
-# CB rows match serial greedy tokens; no other model's code changes.
-SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.92"
-SPEC048_MLX_SWIFT_LM_REVISION = "1ed7853d27698b037d582aa2f00fc827ae4cca84"
+# 3.33.0-macprovider.93 (#2524) on 3.33.0-macprovider.92: GLM-5.3-Flash KDA
+# prefill runs the conv, SiLU and q/k L2 norm, and the gated RMSNorm, as two
+# fused bit-exact Metal kernels (identical greedy tokens; TTFT -3.5% at 3,673
+# and -3.1 to -3.6% at 14,126 prompt tokens against both controls).
+SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.93"
+SPEC048_MLX_SWIFT_LM_REVISION = "e9146798dc4e0e73639e193113187752fdc8e322"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"

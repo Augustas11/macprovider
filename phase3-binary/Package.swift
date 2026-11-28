@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.93 (#2524) on 3.33.0-macprovider.92:
+        // GLM-5.3-Flash KDA prefill runs the conv, SiLU and q/k L2 norm, and
+        // the gated RMSNorm, as two fused bit-exact Metal kernels (identical
+        // greedy tokens; TTFT -3.5% at 3,673 and -3.1 to -3.6% at 14,126
+        // prompt tokens against both controls).
         // Tag 3.33.0-macprovider.92 (#2505) on 3.33.0-macprovider.91: Inkling
         // 2 continuous batching: each batched row attends through the model's
         // own one-row attention over its paged cache, and batched one-token
@@ -304,7 +309,7 @@ let package = Package(
         // dd68f1d2d; mlx-c unchanged).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "1ed7853d27698b037d582aa2f00fc827ae4cca84"
+            revision: "e9146798dc4e0e73639e193113187752fdc8e322"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
